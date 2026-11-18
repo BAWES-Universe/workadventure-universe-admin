@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { getBrickLimits } from '@/lib/bot-limits';
-import { CALL_ROOM_PREFIX, DISK_ROOM_PREFIX, diskRoomKey, releaseRoom, renewRoom, reserveDiskRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
+import { CALL_ROOM_PREFIX, DISK_ROOM_PREFIX, currentEnvelope, diskRoomKey, releaseRoom, renewRoom, reserveDiskRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { adoptEarlierStretches, computerCreditFor, creditCheck, giveBackJobCredit, holdForJob, prepareComputerCredit, reconcileComputerHolds, releaseCreditHold, releaseJobCredit, renewHoldKey, settleJobCredit } from '@/lib/computer-credit';
 import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
@@ -516,6 +516,17 @@ async function runIsTheirs(botId: string, personId: string, runId: string): Prom
 
 type Tried = 'running' | 'queued' | 'failed' | 'not_set' | 'gone' | { rule: string };
 
+/** Whether a paused job's next stretch and the step it was refused on both fit now: the person's credit for a job that was out of credit, the pool for one that was out of budget. */
+async function roomForResume(job: { personId: string; pausedFor: string | null }, stretchMicros: number, needMicros: number, now: Date): Promise<boolean> {
+  if (job.pausedFor === 'allowance') {
+    await prepareComputerCredit(job.personId, now);
+    return (await computerCreditFor(job.personId, now)).availableMicros >= stretchMicros + needMicros;
+  }
+  const settings = await getMeterSettings();
+  const envelope = await currentEnvelope(now);
+  return envelope.totalMicros + stretchMicros + needMicros <= (settings.poolCeilingMicros ?? 0);
+}
+
 /** One try to put a queued job on the machine. Safe to ask again: a job that is no longer queued is left as it is. */
 async function tryStart(jobId: string, now: Date): Promise<Tried> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
@@ -577,6 +588,12 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
   const settings = await getMeterSettings();
   const key = roomKey(job.id, now);
   const amountMicros = roomFor(settings.renewMinutes, provider.microsPerMinute());
+  // A paused job starts again when what stopped it has cleared: its next stretch and the step that was refused must fit, or it would be started
+  // only to be refused and paused again. Nothing is held for this look.
+  if (job.pausedAt && job.pausedNeedMicros && !(await roomForResume(job, amountMicros, Number(job.pausedNeedMicros), now))) {
+    await queue(job.pausedFor === 'allowance' ? 'allowance' : 'pool');
+    return 'queued';
+  }
   // The person's credit: what is due is issued first, then the room is asked of the pool with the credit's own check in its place in the
   // order (after what they said in chat, before jobs at once and the pool), then the credit itself is held, in the same lots Usage shows
   const prepared = await prepareComputerCredit(job.personId, now);
@@ -634,7 +651,7 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     const claimed = await prisma.computerJob.updateMany({
       where: { id: job.id, status: 'queued' },
       // A paused job that starts again is counted once: the pause is cleared by this very claim
-      data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: now, ...(job.pausedAt ? { pausedAt: null, pausedFor: null, resumeCount: { increment: 1 } } : {}) },
+      data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: now, ...(job.pausedAt ? { pausedAt: null, pausedFor: null, pausedNeedMicros: null, resumeCount: { increment: 1 } } : {}) },
     });
     if (claimed.count === 0) {
       // Two tries in the same millisecond share one room: it is given back only when the job that won did not take it
@@ -1095,7 +1112,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
  * Brick's hands on the machine (waiting for its person, or already over) is not touched: that is never "out".
  * Returns whether the job was paused by this call. Safe to say twice.
  */
-export async function pauseJob(jobId: string, reason: 'allowance' | 'budget' | 'funds', now: Date = new Date()): Promise<boolean> {
+export async function pauseJob(jobId: string, reason: 'allowance' | 'budget' | 'funds', now: Date = new Date(), needMicros: number | null = null): Promise<boolean> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (!job || job.status !== 'running' || !job.reservationKey) return false;
   const stretch = job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
@@ -1108,6 +1125,7 @@ export async function pauseJob(jobId: string, reason: 'allowance' | 'budget' | '
       queuedFor: reason === 'allowance' ? 'allowance' : 'pool',
       pausedAt: now,
       pausedFor: reason,
+      pausedNeedMicros: needMicros !== null && needMicros > 0 ? BigInt(needMicros) : null,
       stretchStarted: null,
       secondsRun: seconds,
       pausedSeconds: seconds,

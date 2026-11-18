@@ -3398,6 +3398,9 @@ model ComputerJob {
   resumeCount       Int       @default(0) @map("resume_count")
   // The seconds of the machine's time already written to the books as the time of earlier segments (a pause writes the segment that ran): the end writes the rest
   pausedSeconds     Int       @default(0) @map("paused_seconds")
+  // What the step that was refused needed (the member's amount when the credit ran out, the provider's most when the budget did): the job resumes
+  // only when that fits beside its next stretch, so it is not resumed into the same refusal
+  pausedNeedMicros  BigInt?   @map("paused_need_micros")
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]

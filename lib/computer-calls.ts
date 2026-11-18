@@ -529,7 +529,7 @@ export async function authorizeStep(ask: StepAsk, now: Date = new Date()): Promi
       room = held.reason === 'allowance' ? { ok: false, reason: 'allowance', leftMicros: 0 } : held.reason === 'not_set' ? { ok: false, reason: 'not_set', missing: ['rolloutBudgetMicros'] } : { ok: false, reason: 'closed' };
     }
   }
-  if (!room.ok) return refusedRoom(ask, base.jobId, room, amounts.providerMaxMicros, refuse);
+  if (!room.ok) return refusedRoom(ask, base.jobId, room, amounts, refuse, now);
   // The key must still be good after the room's lock (the person may have taken the machine meanwhile), or everything goes back
   const still = await verifyJobToken(ask.token, 'model', now);
   if (!still.ok || still.generation !== verified.generation) {
@@ -581,18 +581,19 @@ async function refusedRoom(
   ask: StepAsk,
   jobId: string,
   room: Exclude<Room, { ok: true }>,
-  providerMaxMicros: number,
+  amounts: { memberMicros: number; providerMaxMicros: number },
   refuse: (reason: StepRefusal, extra?: { retryAfterSeconds?: number; paused?: boolean; words?: string | null; canAskForMore?: boolean }) => StepAnswer,
+  now: Date,
 ): Promise<StepAnswer> {
   switch (room.reason) {
     case 'allowance': {
-      const paused = await pauseRunningJob(jobId, 'allowance');
+      const paused = await pauseRunningJob(jobId, 'allowance', now, amounts.memberMicros);
       return refuse('allowance', { paused, canAskForMore: true });
     }
     case 'pool': {
-      const why = await poolRefusal(providerMaxMicros);
+      const why = await poolRefusal(amounts.providerMaxMicros);
       if (why === 'holds') return refuse('holds', { retryAfterSeconds: RETRY_AFTER_SECONDS });
-      const paused = await pauseRunningJob(jobId, 'budget');
+      const paused = await pauseRunningJob(jobId, 'budget', now, amounts.providerMaxMicros);
       return refuse('budget', { paused });
     }
     case 'busy':
@@ -608,9 +609,9 @@ async function refusedRoom(
 }
 
 /** Saves and pauses the job a refused step belongs to (R2). Computer.ts imports this file, so it is loaded when needed. */
-async function pauseRunningJob(jobId: string, reason: 'allowance' | 'budget'): Promise<boolean> {
+async function pauseRunningJob(jobId: string, reason: 'allowance' | 'budget', now: Date, needMicros: number): Promise<boolean> {
   const { pauseJob } = await import('@/lib/computer');
-  return pauseJob(jobId, reason).catch((error) => {
+  return pauseJob(jobId, reason, now, needMicros).catch((error) => {
     console.error('[Computer] Could not pause a job:', error instanceof Error ? error.message : 'unknown');
     return false;
   });

@@ -27,10 +27,10 @@ Request (JSON). All amounts are whole **micros** of a dollar (1 micro = 0.000001
 | `modelFormat` | `"openai"`, `"gemini-compatible"` or `"other"` | no | The wire format of the route (for the check before a paid wake and for D3). Absent means `"openai"`. |
 | `stepKind` | `"reply"`, `"edit"`, `"tool"`, `"vision"` or `"other"` | no | The kind of step where the game knows it. Absent means `"other"`. |
 | `inputTokens` | integer 0 to 100,000,000 | yes | Input tokens of this call. |
-| `inputMicros` | integer 0 to 2,000,000,000 | yes | The input side of the cost at the route's price: what these input tokens can cost, in micros. |
-| `outputMicrosPerMillion` | integer 0 to 2,000,000,000 | yes | The price of one million output tokens, in micros. |
+| `inputMicros` | integer 0 to 2,000,000,000, or `null` | yes | The input side of the cost at the route's price: what these input tokens can cost, in micros. `null` means the relay has no price for this model: a Universe-paid step with no price is refused `unpriced` and nothing is held or sent. |
+| `outputMicrosPerMillion` | integer 0 to 2,000,000,000, or `null` | yes | The price of one million output tokens, in micros. `null` means no price is known (same as `inputMicros`). For `payer: "own-key"` send `null` or the numbers; they are not used. |
 | `maxOutputTokens` | integer 1 to 10,000,000 | yes | The answer limit this call is **really** allowed (the limit sent to the model). Orbit never lowers it and never asks the game to change it. |
-| `providerMaxMicros` | integer 0 to 2,000,000,000 | no | The game's own reading of the most the provider can bill for this call. Orbit recomputes it as `inputMicros + ceil(outputMicrosPerMillion * maxOutputTokens / 1,000,000)` and holds the **larger** of the two. A smaller figure is never trusted. |
+| `providerMaxMicros` | integer 0 to 2,000,000,000, or `null` | no | The game's own reading of the most the provider can bill for this call. Orbit recomputes it as `inputMicros + ceil(outputMicrosPerMillion * maxOutputTokens / 1,000,000)` and holds the **larger** of the two. A smaller figure is never trusted. |
 
 Orbit computes two amounts from these (R1, D1), and both are returned:
 
@@ -66,7 +66,7 @@ None of these numbers changes the model, the reasoning, the tools or the real an
 
 - `authorisation.payer` is `"owner"` (the owner's own job, riding on their disclosed standing rule), `"visitor"`, `"schedule"` or `"teammate"` (bounded by the limits recorded for that task). For `payer: "own-key"` the whole `authorisation` is `null` and `memberMicros` and `providerMaxMicros` are `0`.
 - `authorisation.limits`: a limit that does not apply is `null`. All amounts are micros.
-- **`limits`** are the computer Limits Orbit serves from its settings, read on every call and in effect at once: `maxOutputTokens` (the longest answer the relay may allow; 32,768 today) and `maxCallsInFlight` (calls at once for one job; 8 today), plus `maxWaitSeconds` (the longest total wait for `busy` and `holds`, below). The game uses these and no longer fixes them in code. If `limits` is absent (version 1 answer), the game keeps its own.
+- **`limits`** are the computer Limits Orbit serves from its saved settings (the AppSetting `computer-limits`, shown on the Limits screen), read on every call and in effect at once: `maxOutputTokens` (the longest answer the relay may allow; 32,768 today) and `maxCallsInFlight` (calls at once for one job; 8 today), plus `maxWaitSeconds` (the longest total wait for `busy` and `holds`, below). The game uses these and no longer fixes them in code. If `limits` is absent (version 1 answer), the game keeps its own.
 - Asked again with the same `operationId`: the same answer, nothing more held.
 
 ### 1.2 Answer: refused
@@ -82,12 +82,12 @@ None of these numbers changes the model, the reasoning, the tools or the real an
 | `refused` | The key is not good (wrong, expired, job over, taken over). | none | Stop the call. Never retry. |
 | `allowance` | The paying person's own credit is used up. | none | Stop the turn; see pause below. `canAskForMore` says whether "Ask for more" is offered. |
 | `budget` | Universe's monthly budget for new funded computer work is used up (version 1 calls this `pool`). | none | Stop the turn; see pause below. |
-| `funds` | A provider's funds are unavailable (only when Orbit knows). | none | Stop the turn; see pause below. |
+| `funds` | A provider's funds are unavailable (only when Orbit knows). **Orbit does not emit this today** (it has no way to read a provider's balance); it is in the contract so the game can already handle it. | none | Stop the turn; see pause below. |
 | `busy` | Jobs at once is full: waiting helps. | seconds | Wait and ask again with the **same `operationId`**, within the total wait (below). |
 | `holds` | Temporary holds (calls in flight, unknown costs not yet settled) fill what is free: waiting helps. | seconds | Same as `busy`. |
 | `rule` | A spending rule the person said in chat stops it. `words` is the rule's own sentence. | none | Stop the turn and show `words`. Never say "bad key". |
 | `unpriced` | A Universe-paid model with no price: nothing is sent. | none | Stop the turn. Named in readiness. |
-| `unsupported` | This computer cannot run on that route or format. | none | Stop. |
+| `unsupported` | This computer cannot run on that route or format. Also answered at job start (`POST /api/bots/:id/computer-jobs`), before a job is written, a room held or a machine woken, when the body's `modelFormat` (`openai`, `gemini-compatible` or `other`; absent means `openai`) names a route a computer cannot run on. | none | Stop. |
 | `paused` | The job is already paused (see below). | optional | Stop the turn. |
 
 - `words` is a short sentence in plain words for the person, or `null`. A visitor never gets a balance in it.
@@ -98,7 +98,8 @@ None of these numbers changes the model, the reasoning, the tools or the real an
 ### 1.3 Pause and resume (R2)
 
 - A running job that is truly out (`allowance`, `budget`, `funds`) is **saved and paused**, not stopped: Orbit marks the job `status: "queued"`, `queuedFor` the reason, `paused: true`, and the machine rests as it does between jobs. The job keeps its id, its task, its outside-action ledger and its history.
-- Orbit's sweep resumes it once, when the reason clears **and** all of these hold: the grant or budget applies to this task, the owner still permits it, the Brick still has control, the job was not cancelled, and no outside action was already done in the step. A job the person cancelled stays cancelled.
+- Orbit remembers what the refused step needed (the member's amount for `allowance`, the provider's most for `budget`). The sweep resumes the job once, when the next stretch **and** that step fit in the person's credit (or the pool), **and** all of these hold: the grant or budget applies to this task, the owner still permits it, the Brick still has control, the job was not cancelled, and no outside action was already done in the step. A job the person cancelled stays cancelled.
+- When a job is paused its model keys end with the pause: a step asked with an old key is answered `paused` (never `refused`, so the game does not end the job). The game gets a new key with the new turn after the job resumes.
 - When it resumes the job view shows `status: "running"`, `resumed: true`, `resumeCount` up by one. The game, which polls the job as today, then starts a new turn with a **new** `operationId` (never the one that was refused).
 
 ## 2. Settle, version 2
@@ -139,6 +140,6 @@ Answer `200`:
 
 ## 3. Names thread C may rely on
 
-`contract`, `token`, `operationId`, `payer`, `route`, `model`, `modelFormat`, `stepKind`, `inputTokens`, `inputMicros`, `outputMicrosPerMillion`, `maxOutputTokens`, `providerMaxMicros` (authorize); `contract`, `jobId`, `operationId`, `sent`, `costMicros`, `providerCostMicros`, `basis`, `payerPersonId`, `route`, `tokens.{input,output,cached,reasoning,cacheWrite,cacheWrite1h}`, `unexplained.{tokens,costMicros}`, `cutShort` (settle). Answers: `ok`, `contract`, `operationId`, `memberMicros`, `providerMaxMicros`, `authorisation`, `limits.{maxOutputTokens,maxCallsInFlight,maxWaitSeconds}`, `reason`, `retryAfterSeconds`, `paused`, `words`, `canAskForMore`, `state`, `chargedMicros`.
+`contract`, `token`, `operationId`, `payer`, `route`, `model`, `modelFormat`, `stepKind`, `inputTokens`, `inputMicros`, `outputMicrosPerMillion`, `maxOutputTokens`, `providerMaxMicros` (authorize); `contract`, `jobId`, `operationId`, `sent`, `costMicros`, `providerCostMicros`, `basis`, `payerPersonId`, `route`, `tokens.{input,output,cached,reasoning,cacheWrite,cacheWrite1h}`, `unexplained.{tokens,costMicros}`, `cutShort` (settle). Job start (`POST /api/bots/:id/computer-jobs`): the new optional body field `modelFormat`; an `unsupported` answer when a computer cannot run on it. Answers: `ok`, `contract`, `operationId`, `memberMicros`, `providerMaxMicros`, `authorisation`, `limits.{maxOutputTokens,maxCallsInFlight,maxWaitSeconds}`, `reason`, `retryAfterSeconds`, `paused`, `words`, `canAskForMore`, `state`, `chargedMicros`.
 
 Differences from what thread C asked about, in one place: `budget` replaces `pool` in version 2 answers; `holds` is separate from `busy`; `unpriced` and `paused` are added; the job's settle carries `operationId` and `contract`.

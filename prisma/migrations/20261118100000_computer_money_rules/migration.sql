@@ -1,6 +1,7 @@
 -- AlterTable
 ALTER TABLE "computer_jobs" ADD COLUMN     "paused_at" TIMESTAMP(3),
 ADD COLUMN     "paused_for" VARCHAR(10),
+ADD COLUMN     "paused_need_micros" BIGINT,
 ADD COLUMN     "paused_seconds" INTEGER NOT NULL DEFAULT 0,
 ADD COLUMN     "resume_count" INTEGER NOT NULL DEFAULT 0;
 
