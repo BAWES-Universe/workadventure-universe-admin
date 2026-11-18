@@ -41,6 +41,7 @@ const PURGE_BATCH = 50;
 export const DELETED_MAKER_NAME = 'A deleted Brick';
 /** What replaces the title of a task receipt (the same line a receipt without a title always had). */
 const DELETED_TASK_TITLE = 'A task';
+const DELETED_JOB_TITLE = 'A job';
 
 /** True when a purge note or marker for this Brick exists (the marker is never removed): the Brick was purged, and nothing may be saved for it any more. */
 export async function isPurged(botId: string): Promise<boolean> {
@@ -86,6 +87,11 @@ export async function purgeBrick(id: string, now: Date = new Date()): Promise<Pu
       await tx.voiceNoteTurn.updateMany({ where: botId, data: { buffer: null, bufferUntil: null, providerRefs: Prisma.DbNull } });
       // What it made belongs to its person: it stays, with a neutral name instead of the Brick's
       await tx.artifact.updateMany({ where: { makerBotId: id }, data: { makerName: DELETED_MAKER_NAME } });
+      // The same for the rows that keep a result for its owner (the file itself stays): neither the Brick's name nor its job's title stays in them,
+      // and what a code job printed is emptied (its files are the owner's and stay; the days-kept Limit would only empty it later, or never when empty)
+      await tx.computerJobFile.updateMany({ where: botId, data: { makerName: DELETED_MAKER_NAME, jobTitle: DELETED_JOB_TITLE } });
+      await tx.ownedResult.updateMany({ where: { makerBotId: id }, data: { makerName: DELETED_MAKER_NAME } });
+      await tx.codeJob.updateMany({ where: botId, data: { result: Prisma.DbNull } });
       // Files people sent it are taken out of the uploader by the bot server, from the list that already exists for it (a restart never forgets one)
       if (sent.length > 0) {
         await tx.botFileRemoval.createMany({ data: sent.map((file) => ({ botId: id, bucket: file.bucket as string, fileId: file.fileId as string })), skipDuplicates: true });

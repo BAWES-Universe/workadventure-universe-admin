@@ -39,6 +39,7 @@ import {
   PERSON_ONLY,
   costOfSeconds,
   givenBackJob,
+  type FinishCause,
   isOver,
   roomFor,
   silentEnding,
@@ -958,14 +959,15 @@ export async function renewJob(
 }
 
 /** The job finished: its machine is saved and rests, what it cost is counted, and the next job in line starts. Safe to say twice. */
-export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date(), why?: string | null): Promise<JobView | null> {
+export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date(), why?: string | null, cause?: FinishCause | null): Promise<JobView | null> {
   // A job that never started (still in line) did not finish: it is stopped by the person or starts, never "done"
   const current = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
   if (current && current.status !== 'queued') {
     // The computer's own sentence about why it could not go on is kept before the job ends, for the message that tells the person
     const note = outcome === 'failed' ? cleanEndNote(why) : null;
     if (note) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: note } });
-    await endJob(jobId, outcome, outcome === 'failed' ? 'error' : null, now);
+    // Only a failure the runner says is ours is given back; one with no cause (or the agent's own) is the person's, so a run cannot be made free by ending it "failed"
+    await endJob(jobId, outcome, outcome === 'failed' && cause === 'ours' ? 'error' : null, now);
   }
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return job ? jobView(job) : null;
@@ -1328,7 +1330,7 @@ async function giveBackMissingModelCalls(batch: number, botId?: string): Promise
     const jobs = await prisma.$queryRaw<Array<{ id: string; personId: string }>>(Prisma.sql`
       SELECT DISTINCT j."id", j."person_id" AS "personId"
       FROM "computer_jobs" j
-      WHERE (j."status" = 'failed' OR (j."status" = 'stopped' AND j."ended_by" = 'error')) ${only}
+      WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error') ${only}
         AND EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
       LIMIT ${batch}`);
     for (const job of jobs) await giveBackModelCalls(job.id, job.personId);
@@ -2187,7 +2189,7 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
   // a write that failed shows here). Once the jobs are gone nothing can find those calls to give them back, so the Brick waits for the next sweep
   const owed = await prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
     SELECT COUNT(*)::bigint AS "n" FROM "computer_jobs" j
-    WHERE j."bot_id" = ${botId} AND (j."status" = 'failed' OR (j."status" = 'stopped' AND j."ended_by" = 'error'))
+    WHERE j."bot_id" = ${botId} AND (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error')
       AND EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")`);
   return Number(owed[0]?.n ?? 0) === 0;
 }

@@ -420,7 +420,7 @@ run('a Brick’s computer, in a real database', () => {
       await giveComputer(sara.brickId, sara.id);
       const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' }, NOW);
       if (!job.ok) throw new Error('no');
-      await finishJob(job.job.id, 'failed', minutes(5));
+      await finishJob(job.job.id, 'failed', minutes(5), null, 'ours');
       const event = await timeOf(job.job.id);
       // The five minutes and their cost are still there (the provider bills them), but not under the person
       expect(event).toMatchObject({ kind: 'computer_time', pool: 'computer', quantity: BigInt(300), costMicros: BigInt(30_000), personKey: 'unknown', personId: null, jobId: job.job.id });
@@ -437,7 +437,7 @@ run('a Brick’s computer, in a real database', () => {
       await giveComputer(sara.brickId, sara.id);
       const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' }, NOW);
       if (!job.ok) throw new Error('no');
-      await finishJob(job.job.id, 'failed', minutes(5));
+      await finishJob(job.job.id, 'failed', minutes(5), null, 'ours');
       const [item] = await activityFor(sara.id);
       expect(item).toMatchObject({ title: 'Visa form', state: 'refunded', spentMicros: null });
       expect(item.lines).toEqual([{ label: 'Computer, 5 minutes', note: 'Nothing' }]);
@@ -465,7 +465,7 @@ run('a Brick’s computer, in a real database', () => {
       if (!failed.ok) throw new Error('no');
       // The first write of its time fails; the sweep writes it again, and the decision is the same
       (meter.recordMeterEvent as jest.Mock).mockRejectedValueOnce(new Error('books down'));
-      await finishJob(failed.job.id, 'failed', minutes(4));
+      await finishJob(failed.job.id, 'failed', minutes(4), null, 'ours');
       expect(await prisma.meterEvent.count({ where: { eventId: `computer:${failed.job.id}:time` } })).toBe(0);
       await sweepComputers(minutes(10));
       expect((await timeOf(failed.job.id)).personKey).toBe('unknown');
@@ -1488,7 +1488,7 @@ run('a Brick’s computer, in a real database', () => {
       expect((await computerView(sara.brickId, sara.id, minutes(3)))?.notice).toBeNull();
       const failed = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(4));
       if (!failed.ok) throw new Error('no');
-      await finishJob(failed.job.id, 'failed', minutes(5));
+      await finishJob(failed.job.id, 'failed', minutes(5), null, 'ours');
       expect((await computerView(sara.brickId, sara.id, minutes(6)))?.notice).toBeNull();
       await startJob({ botId: sara.brickId, personId: sara.id, title: 'C' }, minutes(7));
       await stopJobFor(sara.brickId, sara.id, minutes(8));

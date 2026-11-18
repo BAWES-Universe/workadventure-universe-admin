@@ -880,7 +880,7 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
   });
 
-  it('keeps a person’s results when their Brick is deleted and removed for good: only the Brick’s name on them changes', async () => {
+  it('keeps a person’s results when their Brick is deleted and removed for good: only the Brick’s name and its job’s title on them go', async () => {
     const omar = await person('omar');
     const id = await started(omar);
     out(id, 'a.pdf', 'a', 5);
@@ -902,9 +902,11 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     removeFails = false;
     expect(kept.size).toBe(1);
     expect(await prisma.bot.count({ where: { id: omar.brickId } })).toBe(0);
-    // The job rows went with the Brick; the file did not: it keeps its owner and where it came from, and no job
+    // The job rows went with the Brick; the file did not: it keeps its owner and where it came from, and no job, but no name or title of the Brick's
     const row = await prisma.computerJobFile.findUniqueOrThrow({ where: { id: fileId } });
-    expect(row).toMatchObject({ jobId: null, botId: omar.brickId, ownerId: omar.id, makerName: "omar's Brick", jobTitle: 'Visa form' });
+    expect(row).toMatchObject({ jobId: null, botId: omar.brickId, ownerId: omar.id, makerName: DELETED_BRICK_LABEL, jobTitle: 'A job' });
+    // Neither the Brick's name nor its job's title is kept anywhere: the result row it was handed over as has the neutral name too
+    expect(await prisma.ownedResult.findUniqueOrThrow({ where: { id: row.resultId as string } })).toMatchObject({ makerBotId: omar.brickId, makerName: DELETED_BRICK_LABEL });
     expect(row.resultId).not.toBeNull();
     const orphans = await orphanResultsOf(omar.id);
     expect(orphans.map((one) => [one.name, one.brick, one.jobId, one.delivery])).toEqual([['a.pdf', DELETED_BRICK_LABEL, null, 'not_delivered']]);

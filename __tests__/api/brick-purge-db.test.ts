@@ -99,6 +99,10 @@ async function fullBrick(owner: { id: string; uuid: string }, name: string, over
     data: { eventId: `ev-${randomUUID()}`, kind: 'model_call', pool: 'chat', occurredAt: NOW, personKey: `person:${owner.id}`, personId: owner.id, botId, brick: true, payerKind: 'universe', quantity: BigInt(900), unit: 'token', costMicros: BigInt(7000), basis: 'measured' },
   });
   const artifact = await prisma.artifact.create({ data: { ownerId: owner.id, makerBotId: botId, makerName: name, title: 'Menu', kind: 'markdown' } });
+  // What a person keeps from its work, in rows that outlive the Brick: a result with the Brick's name on it, the ledger row of a file a computer job handed over, what a code job printed
+  const result = await prisma.ownedResult.create({ data: { ownerId: owner.id, sourceKind: 'computer_job', sourceId: `src-${randomUUID()}`, makerBotId: botId, makerName: name, name: 'visa.pdf', contentType: 'application/pdf', sizeBytes: 1, sha256: 'a'.repeat(64), storageKey: `purge/${tag}/${botId}` } });
+  await prisma.computerJobFile.create({ data: { jobId: null, botId, makerName: name, ownerId: owner.id, jobTitle: 'Renew passport', name: 'visa.pdf', path: 'visa.pdf', modifiedAt: NOW, bytes: 1, mimeType: 'application/pdf', resultId: result.id } });
+  await prisma.codeJob.create({ data: { jobKey: `k-${randomUUID()}`, botId, personId: owner.id, state: 'succeeded', capabilities: {}, limits: {}, reservedMicros: BigInt(0), codeHash: 'c'.repeat(64), steps: 1, providerUserId: `pu-${botId}`, deadlineAt: later(1), heartbeatAt: NOW, result: { printed: 'a private line the code printed' } } });
   if (over.computer) {
     await giveComputer(botId, owner.id);
     const job = await startJob({ botId, personId: owner.id, title: 'Renew passport' }, NOW);
@@ -145,6 +149,7 @@ run('purging a deleted Brick, in a real database', () => {
     process.env.COMPUTER_PROVIDER = env.provider;
     process.env.BOT_SERVICE_TOKEN = env.token;
     await prisma.artifact.deleteMany({ where: { ownerId: { in: people } } });
+    await prisma.codeJob.deleteMany({ where: { personId: { in: people } } });
     await prisma.meterEvent.deleteMany({ where: { personId: { in: people } } });
     await prisma.meterReservation.deleteMany({ where: { personId: { in: people } } });
     await prisma.botFileRemoval.deleteMany({ where: { fileId: { contains: tag } } });
@@ -241,6 +246,10 @@ run('purging a deleted Brick, in a real database', () => {
 
       // What a person owns stays, and the Brick's name on it is a neutral line
       expect(await prisma.artifact.findUniqueOrThrow({ where: { id: brick.artifactId } })).toMatchObject({ ownerId: sara.id, title: 'Menu', makerName: DELETED_MAKER_NAME });
+      // What a person keeps from its work stays (the files are theirs) but says nothing of the Brick: no name, no job title, nothing its code printed
+      expect(await prisma.computerJobFile.findFirstOrThrow({ where: { botId: brick.id } })).toMatchObject({ makerName: 'A deleted Brick', jobTitle: 'A job', ownerId: sara.id, name: 'visa.pdf' });
+      expect(await prisma.ownedResult.findFirstOrThrow({ where: { makerBotId: brick.id } })).toMatchObject({ makerName: 'A deleted Brick', ownerId: sara.id, name: 'visa.pdf' });
+      expect(await prisma.codeJob.findFirstOrThrow({ where: { botId: brick.id } })).toMatchObject({ result: null, state: 'succeeded' });
       // Money stays and nothing said: amounts, ids and dates, never a title, a sponsor's name or the words of a voice note
       expect(await prisma.meterEvent.count({ where: { botId: brick.id, kind: 'model_call', costMicros: BigInt(7000) } })).toBe(1);
       expect(await prisma.taskReceipt.findFirstOrThrow({ where: { botId: brick.id } })).toMatchObject({ title: 'A task', payerName: null, chargedMicros: BigInt(1_250_000), payerKind: 'sponsor', state: 'done' });
@@ -250,6 +259,9 @@ run('purging a deleted Brick, in a real database', () => {
       expect(await owned(other.id)).toMatchObject({ bot: 1, memory: 1, conversations: 1, forgets: 2, metrics: 1, tests: 1, spendRules: 1, setups: 1, goals: 1, files: 2 });
       expect(await prisma.artifact.findUniqueOrThrow({ where: { id: other.artifactId } })).toMatchObject({ makerName: 'Bystander Brick' });
       expect(await prisma.botFileRemoval.count({ where: { botId: other.id } })).toBe(0);
+      expect(await prisma.computerJobFile.findFirstOrThrow({ where: { botId: other.id } })).toMatchObject({ makerName: 'Bystander Brick', jobTitle: 'Renew passport' });
+      expect(await prisma.ownedResult.findFirstOrThrow({ where: { makerBotId: other.id } })).toMatchObject({ makerName: 'Bystander Brick' });
+      expect(await prisma.codeJob.findFirstOrThrow({ where: { botId: other.id } })).toMatchObject({ result: { printed: 'a private line the code printed' } });
     });
 
     it('is the same whether the sweep asked for one person or for everyone, and asked twice changes nothing more', async () => {

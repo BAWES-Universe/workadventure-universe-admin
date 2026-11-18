@@ -321,10 +321,14 @@ describe('the bot server’s calls', () => {
     await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'details', ready: { what: 'Your details', where: 'visa-portal.example' } } }), jobParams);
     expect(lib.requestHandover).toHaveBeenCalledWith(JOB, 'details', expect.any(Date), { what: 'Your details', where: 'visa-portal.example' });
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done' } }), jobParams);
-    expect(lib.finishJob).toHaveBeenCalledWith(JOB, 'done', expect.any(Date), undefined);
+    expect(lib.finishJob).toHaveBeenCalledWith(JOB, 'done', expect.any(Date), undefined, undefined);
     // A failure carries the computer's own sentence about why, kept cleaned for the message that tells the person
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', why: 'The site kept showing an error' } }), jobParams);
-    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), 'The site kept showing an error');
+    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), 'The site kept showing an error', undefined);
+    // Who a failure is down to travels with it (only `ours` is given back); a word it does not know is refused
+    await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours' } }), jobParams);
+    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), undefined, 'ours');
+    expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'theirs' } }), jobParams)).status).toBe(400);
     expect(await (await jobAction(asBot('/x', { body: { action: 'plan-effect', key: 'pr-1', kind: 'publish' } }), jobParams)).json()).toEqual({ ok: false, reason: 'look_up', evidence: 'draft pull request' });
     expect(await (await jobAction(asBot('/x', { body: { action: 'settle-effect', key: 'pr-1', state: 'done', evidence: 'pull request 12' } }), jobParams)).json()).toEqual({ ok: true });
   });
