@@ -131,7 +131,7 @@ export function planTagged({ versions, rules, keep = DEFAULT_KEEP, openBranches 
       } else if (!isClosed && now - createdAt(version) < MIN_AGE_DAYS * DAY_MS) {
         kept.push({ version, reason: `younger than ${MIN_AGE_DAYS} days` });
       } else {
-        remove.push({ version, reason: isDevBranch ? 'older dev build' : isClosed ? 'its PR is closed' : 'branch has no open PR' });
+        remove.push({ version, reason: isDevBranch ? 'older dev build' : isClosed ? 'its PR is closed' : stillOpen ? 'beyond the newest builds its open PR keeps' : 'branch has no open PR' });
       }
     });
   }

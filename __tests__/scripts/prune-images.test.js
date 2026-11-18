@@ -116,7 +116,7 @@ export function defineTests({ lib }) {
       const result = plan([...fresh, ...old], { closedBranch: 'fix/a', openBranches: new Set(['fix-a']) });
       // it behaves like any open-PR branch: the newest 3 stay (two fresh, one old), the older ones beyond them go
       assert.deepEqual(idsOf(result.remove), idsOf(old.slice(1).map((v) => ({ version: v }))));
-      assert.ok(result.remove.every((item) => item.reason === 'branch has no open PR'));
+      assert.ok(result.remove.every((item) => item.reason === 'beyond the newest builds its open PR keeps'));
     });
 
     it('refuses a closed PR that comes from the dev or production branch (a release PR)', () => {
