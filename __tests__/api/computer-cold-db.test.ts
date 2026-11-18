@@ -34,7 +34,7 @@ import { finishOutside, purgeBrick } from '@/lib/brick-purge';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { listDeletedBricks } from '@/lib/brick-default';
 import { computerReadiness } from '@/lib/computer-readiness';
-import { archiveById, deleteAllArchives, markVerified, mintDownloadToken, pruneArchives, setArchiveStoreForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
+import { archiveById, deleteAllArchives, markVerified, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
 import { GET as download } from '@/app/api/computer/archives/[id]/download/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -50,6 +50,8 @@ const env = { provider: process.env.COMPUTER_PROVIDER, url: process.env.ADMIN_AP
 /** The bucket, in memory. What is "encrypted" in the real one is plain here: the encryption has its own tests (saved-copies). */
 function memoryStore() {
   const objects = new Map<string, Buffer>();
+  // When each object was last written (the real bucket says so): a test may set it back to make an object old
+  const written = new Map<string, Date>();
   const store: ArchiveStore = {
     async put(finalKey, _stagingKey, archive, mayPublish) {
       const chunks: Buffer[] = [];
@@ -63,6 +65,7 @@ function memoryStore() {
       // As the bucket does: asked right before the copy goes in place
       if (mayPublish && !(await mayPublish())) throw new Error('not published');
       objects.set(finalKey, body);
+      written.set(finalKey, new Date());
       return { bytes: body.length, sha256: createHash('sha256').update(body).digest('hex') };
     },
     async open(key) {
@@ -73,8 +76,11 @@ function memoryStore() {
     async remove(keys) {
       for (const key of keys) objects.delete(key);
     },
+    async list(prefix, max) {
+      return [...objects.keys()].filter((key) => key.startsWith(prefix)).slice(0, max).map((key) => ({ key, modifiedAt: written.get(key) ?? new Date() }));
+    },
   };
-  return { store, objects };
+  return { store, objects, written };
 }
 let bucket: ReturnType<typeof memoryStore>;
 
@@ -1052,6 +1058,86 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
       expect(bucket.objects.size).toBe(0);
       await prisma.brickPurge.deleteMany({ where: { botId: brick.botId } });
+    });
+
+    it('a purge is not finished while any copy row of the Brick remains: it is tried again, and finishes when none is left', async () => {
+      const brick = await idleBrick();
+      await packAway(brick.botId, provider, NOW);
+      await prisma.brickPurge.create({ data: { botId: brick.botId, provider: 'fake', providerRef: null, machinePending: false, copyPending: true, nextTryAt: NOW } });
+      // A copy begins to be written while the purge deletes the others: its row did not exist when the rows were read
+      let lateId = '';
+      const removeObjects = bucket.store.remove.bind(bucket.store);
+      setArchiveStoreForTests({
+        ...bucket.store,
+        remove: async (keys) => {
+          await removeObjects(keys);
+          const late = await prisma.computerArchive.create({ data: { botId: brick.botId, generation: 99, state: 'staging', objectKey: `computer-cold/${brick.botId}/99.${randomUUID()}.ubc` } });
+          lateId = late.id;
+        },
+      });
+      try {
+        const first = await finishOutside(brick.botId, NOW);
+        expect(first.done).toBe(false);
+        expect(first.left).toContain('cold storage copies');
+        expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(1);
+        expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.botId } })).toMatchObject({ copyPending: true, doneAt: null });
+      } finally {
+        setArchiveStoreForTests(bucket.store);
+      }
+      // The next try finds the late row too and deletes it
+      expect((await finishOutside(brick.botId, new Date(NOW.getTime() + 60 * 60_000))).done).toBe(true);
+      expect(await prisma.computerArchive.count({ where: { id: lateId } })).toBe(0);
+      await prisma.brickPurge.deleteMany({ where: { botId: brick.botId } });
+    });
+
+    it('a write that stopped after a purge took its row leaves an object no row points at, and the sweep finds it once no write can still be running', async () => {
+      const brick = await idleBrick();
+      // The process dies after the check that let the copy publish: nothing it would have done after that (removing its objects) happens
+      const real = bucket.store.remove.bind(bucket.store);
+      let dead = false;
+      setArchiveStoreForTests({
+        ...bucket.store,
+        put: async (finalKey, stagingKey, archive, mayPublish) => {
+          const sealed = await bucket.store.put(finalKey, stagingKey, archive, async () => {
+            const allowed = mayPublish ? await mayPublish() : true;
+            // The purge deletes the writer's row right after the check (the process is gone before the copy and before any clean-up)
+            await prisma.computerArchive.deleteMany({ where: { botId: brick.botId } });
+            dead = true;
+            return allowed;
+          });
+          return sealed;
+        },
+        remove: async (keys) => {
+          if (dead) return; // the process is gone: it removes nothing
+          return real(keys);
+        },
+      });
+      try {
+        await expect(storeArchive(brick.botId, new Response('half done').body as ReadableStream<Uint8Array>)).rejects.toBeDefined();
+      } finally {
+        setArchiveStoreForTests(bucket.store);
+      }
+      // An object with no row is left
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+      expect(bucket.objects.size).toBe(1);
+      const [key] = [...bucket.objects.keys()];
+      // A young one may belong to a write that is still running: it is left
+      bucket.written.set(key, new Date(NOW.getTime() - 5 * 60_000));
+      expect(await removeStrayCopies(NOW)).toBe(0);
+      expect(bucket.objects.size).toBe(1);
+      // Old enough that no write can still be running: it goes
+      bucket.written.set(key, new Date(NOW.getTime() - 2 * 60 * 60_000));
+      expect(await removeStrayCopies(NOW)).toBe(1);
+      expect(bucket.objects.size).toBe(0);
+    });
+
+    it('the sweep leaves an old object alone while a row points at it', async () => {
+      const brick = await idleBrick();
+      await packAway(brick.botId, provider, NOW);
+      const [copy] = await verifiedArchives(brick.botId);
+      bucket.written.set(copy.objectKey, new Date(NOW.getTime() - 5 * 60 * 60_000));
+      expect(await removeStrayCopies(NOW)).toBe(0);
+      expect(bucket.objects.has(copy.objectKey)).toBe(true);
     });
 
     it('the sweep removes the copies of a Brick that no longer has a computer record (a pack-away that met the purge)', async () => {

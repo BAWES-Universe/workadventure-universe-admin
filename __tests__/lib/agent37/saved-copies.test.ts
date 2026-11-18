@@ -38,7 +38,7 @@ jest.mock('@/lib/artifact-storage', () => ({
           // As a real bucket: the token is the last key read, so deleting while listing never skips one. Two to a page.
           const keys = [...stored.keys()].filter((key) => key.startsWith(input.Prefix) && (!input.ContinuationToken || key > input.ContinuationToken)).sort();
           const page = keys.slice(0, 2);
-          return { Contents: page.map((Key) => ({ Key })), IsTruncated: keys.length > 2, NextContinuationToken: page[page.length - 1] };
+          return { Contents: page.map((Key) => ({ Key, LastModified: new Date('2026-11-14T12:00:00Z') })), IsTruncated: keys.length > 2, NextContinuationToken: page[page.length - 1] };
         }
         if (kind === 'DeleteObjectCommand') {
           if (failDeletes) throw new Error('bucket would not delete');
@@ -72,7 +72,7 @@ jest.mock('@aws-sdk/lib-storage', () => ({
   },
 }));
 
-import { COPY_OVERHEAD, deleteSavedCopy, openSavedCopy, savedCopyKey, savedCopyOf, storeSavedCopy } from '@/lib/agent37/saved-copies';
+import { COPY_OVERHEAD, deleteSavedCopy, listSealed, openSavedCopy, savedCopyKey, savedCopyOf, storeSavedCopy } from '@/lib/agent37/saved-copies';
 
 const webStream = (...parts: Buffer[]) => Readable.toWeb(Readable.from(parts)) as unknown as ReadableStream<Uint8Array>;
 
@@ -229,5 +229,14 @@ describe('the saved copy of a Brick computer’s files', () => {
     expect(await savedCopyOf('bot-1')).toBeNull();
     // Asked for a Brick with nothing kept it is the same answer
     await expect(deleteSavedCopy('bot-1')).resolves.toBeUndefined();
+  });
+
+  it('lists the objects under a prefix with the time each was written, across pages, up to the limit asked for', async () => {
+    for (const name of ['a', 'b', 'c', 'd', 'e']) stored.set(`computer-cold/bot-1/${name}`, Buffer.from(name));
+    stored.set('computer-cold-other/x', Buffer.from('not under the prefix'));
+    const all = await listSealed('computer-cold/', 100);
+    expect(all.map((object) => object.key)).toEqual(['a', 'b', 'c', 'd', 'e'].map((name) => `computer-cold/bot-1/${name}`));
+    expect(all[0].modifiedAt.toISOString()).toBe('2026-11-14T12:00:00.000Z');
+    expect(await listSealed('computer-cold/', 3)).toHaveLength(3);
   });
 });

@@ -2,7 +2,7 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Readable } from 'node:stream';
 import { prisma } from '@/lib/db';
 import { derivedKey } from '@/lib/encryption';
-import { deleteSealed, openSealedStream, storeSealed, type Sealed } from '@/lib/agent37/saved-copies';
+import { deleteSealed, listSealed, openSealedStream, storeSealed, type Sealed } from '@/lib/agent37/saved-copies';
 
 /**
  * The versioned copies of a Brick computer's home folder that cold storage keeps (lib/computer-cold.ts).
@@ -28,9 +28,11 @@ export interface ArchiveStore {
   put(finalKey: string, stagingKey: string, archive: ReadableStream<Uint8Array>, mayPublish?: () => Promise<boolean>): Promise<Sealed>;
   open(key: string): Promise<{ stream: Readable; bytes: number }>;
   remove(keys: string[]): Promise<void>;
+  /** The objects under a prefix and when each was last written, up to `max`. */
+  list(prefix: string, max: number): Promise<Array<{ key: string; modifiedAt: Date }>>;
 }
 
-const bucketStore: ArchiveStore = { put: (finalKey, stagingKey, archive, mayPublish) => storeSealed(finalKey, stagingKey, archive, undefined, mayPublish), open: openSealedStream, remove: deleteSealed };
+const bucketStore: ArchiveStore = { put: (finalKey, stagingKey, archive, mayPublish) => storeSealed(finalKey, stagingKey, archive, undefined, mayPublish), open: openSealedStream, remove: deleteSealed, list: listSealed };
 let store: ArchiveStore = bucketStore;
 
 /** For tests: keep the copies somewhere else until told otherwise (null puts the bucket back). */
@@ -211,6 +213,33 @@ export async function deleteAllArchives(botId: string): Promise<void> {
     const page = rows.slice(at, at + 200);
     await prisma.computerArchive.deleteMany({ where: { OR: page.map((row) => ({ id: row.id, state: row.state })) } });
   }
+}
+
+const STRAY_PASS_MAX = 20_000;
+const COPY_OBJECT = /^computer-cold\/[^/]+\/\d+\.([0-9a-f-]{36})\.ubc(?:\.new)?$/;
+
+/**
+ * Deletes copy objects that no row points at. A writer whose process stopped after a purge took its row (between the check that let it publish and
+ * the copy into place, or after its upload) leaves an object that a purge, which works from rows, can never find. Every object here is named after its
+ * row, so an object whose row is gone and that is older than any write can last (`STALE_MS`, the time a half-written copy is given up on) belongs to
+ * nobody and is deleted. A younger one may be a write that is still running. Returns how many were deleted.
+ */
+export async function removeStrayCopies(now: Date = new Date()): Promise<number> {
+  const found = await store.list('computer-cold/', STRAY_PASS_MAX);
+  const old = found
+    .filter((object) => now.getTime() - object.modifiedAt.getTime() >= STALE_MS)
+    .flatMap((object) => {
+      const id = COPY_OBJECT.exec(object.key)?.[1];
+      return id ? [{ key: object.key, id }] : [];
+    });
+  const stray: string[] = [];
+  for (let at = 0; at < old.length; at += 500) {
+    const page = old.slice(at, at + 500);
+    const known = new Set((await prisma.computerArchive.findMany({ where: { id: { in: page.map((object) => object.id) } }, select: { id: true } })).map((row) => row.id));
+    for (const object of page) if (!known.has(object.id)) stray.push(object.key);
+  }
+  if (stray.length > 0) await store.remove(stray);
+  return stray.length;
 }
 
 /** Opens a stored copy decrypted, as a stream, for the download route. */

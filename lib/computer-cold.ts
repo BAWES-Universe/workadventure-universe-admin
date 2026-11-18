@@ -12,6 +12,7 @@ import {
   archiveById,
   archiveBytes,
   deleteAllArchives,
+  removeStrayCopies,
   downloadUrl,
   markFailed,
   markVerified,
@@ -705,6 +706,7 @@ export async function restoreDrill(provider: ComputerProvider | null, now: Date 
 }
 
 let lastScratchSweep = 0;
+let lastStraySweep = 0;
 let stepRunning = false;
 
 /**
@@ -735,6 +737,11 @@ export async function coldStep(provider: ComputerProvider | null, now: Date = ne
     // Copies of a Brick that no longer has a computer record were left by a pack-away that met its Brick's purge: a Brick that is gone keeps nothing
     const orphans = await prisma.$queryRaw<Array<{ bot_id: string }>>(Prisma.sql`SELECT DISTINCT a."bot_id" FROM "computer_archives" a WHERE NOT EXISTS (SELECT 1 FROM "brick_computers" c WHERE c."bot_id" = a."bot_id") LIMIT 50`);
     for (const orphan of orphans) await deleteAllArchives(orphan.bot_id).catch((error) => console.error('[Computer] Could not delete the copies of a purged Brick:', words(error)));
+    // Objects no row points at (a write that stopped after a purge took its row) are found by looking at the bucket itself, now and then
+    if (now.getTime() - lastStraySweep > 30 * MIN) {
+      lastStraySweep = now.getTime();
+      await removeStrayCopies(now).catch((error) => console.error('[Computer] Could not look for copies no row points at:', words(error)));
+    }
     if (windingDown) return out;
     const { coldStorageDays } = await getBrickLimits();
     for (const botId of await candidates(now, coldStorageDays, PACK_PER_SWEEP)) {
