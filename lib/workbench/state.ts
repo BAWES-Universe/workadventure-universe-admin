@@ -54,10 +54,7 @@ export interface CodeJobPause {
 
 export async function getCodeJobPause(db: SettingsDb = prisma): Promise<CodeJobPause> {
   try {
-    const row = await db.appSetting.findUnique({ where: { key: STATE_KEY } });
-    const value = isRecord(row?.value) ? row.value : {};
-    if (value.paused !== true) return { paused: false, reason: null, at: null };
-    return { paused: true, reason: typeof value.reason === 'string' ? value.reason : 'manual', at: typeof value.at === 'string' ? value.at : null };
+    return await readCodeJobPause(db);
   } catch (error) {
     // A pause that cannot be read is a pause: nothing starts on a guess
     console.error('[CodeJob] Could not read the pause:', error instanceof Error ? error.message : 'unknown');
@@ -65,11 +62,20 @@ export async function getCodeJobPause(db: SettingsDb = prisma): Promise<CodeJobP
   }
 }
 
+/** The pause as saved, and a read that fails throws: for a change that must not be made, or reported as made, on a guess. */
+async function readCodeJobPause(db: SettingsDb): Promise<CodeJobPause> {
+  const row = await db.appSetting.findUnique({ where: { key: STATE_KEY } });
+  const value = isRecord(row?.value) ? row.value : {};
+  if (value.paused !== true) return { paused: false, reason: null, at: null };
+  return { paused: true, reason: typeof value.reason === 'string' ? value.reason : 'manual', at: typeof value.at === 'string' ? value.at : null };
+}
+
 /** Pauses new jobs (jobs already going finish and are settled). The first reason stands until it is resumed. */
 export async function pauseCodeJobs(reason: string, userId: string | null = null): Promise<CodeJobPause> {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${STATE_LOCK}))`;
-    const current = await getCodeJobPause(tx);
+    // A read that fails fails the pause (the caller sees it and tries again): an unreadable pause is not "already paused", so nothing is skipped and nothing is reported as written
+    const current = await readCodeJobPause(tx);
     if (current.paused) return current;
     const state = { paused: true, reason, at: new Date().toISOString() };
     const value = state as Prisma.InputJsonValue;
