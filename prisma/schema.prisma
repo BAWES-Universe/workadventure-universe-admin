@@ -3173,6 +3173,9 @@ model BrickComputer {
   provider      String    @default("fake") @db.VarChar(10)
   providerRef   String?   @map("provider_ref") @db.VarChar(255)
   madeAt        DateTime? @map("made_at")
+  // Written when a machine was first asked for, before the provider is called and never cleared: a record without one never had a machine made for it,
+  // so a purge has nothing to look for (a failed or timed-out make may still have left one at the provider)
+  makeTriedAt   DateTime? @map("make_tried_at")
   lastWorkedAt  DateTime? @map("last_worked_at")
   // The last saved copy of its home folder: what Files shows when Computer is off, and which day a restore came from
   filesBytes    BigInt    @default(0) @map("files_bytes")

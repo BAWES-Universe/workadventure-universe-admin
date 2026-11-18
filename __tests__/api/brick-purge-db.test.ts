@@ -241,9 +241,21 @@ run('purging a deleted Brick, in a real database', () => {
       await confirmChatPurges([plain.id], later(8));
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: plain.id } })).toMatchObject({ machinePending: false, copyPending: false, doneAt: expect.any(Date) });
 
-      // A computer record with no machine written down (a make that was cut off): nothing is skipped, any machine made for this Brick is removed
+      // A computer record that never had a machine asked for has none to look for: the purge does not wait on a listing of machines (which on a big account
+      // can never prove there is none) and finishes
+      const untouched = await fullBrick(sara, 'Never made');
+      await giveComputer(untouched.id, sara.id);
+      await deleteBrick(untouched.id, sara.id, NOW);
+      expect(await removeGoneBricks(later(8), sara.id)).toEqual([untouched.id]);
+      expect(provider.calls.filter((call) => call.name === 'removeAllFor')).toEqual([]);
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: untouched.id } })).toMatchObject({ machinePending: false });
+      await confirmChatPurges([untouched.id], later(8));
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: untouched.id } })).toMatchObject({ doneAt: expect.any(Date) });
+
+      // A computer record with no machine written down but one asked for (a make that was cut off): nothing is skipped, any machine made for this Brick is removed
       const cut = await fullBrick(sara, 'Cut off');
       await giveComputer(cut.id, sara.id);
+      await prisma.brickComputer.update({ where: { botId: cut.id }, data: { makeTriedAt: NOW } });
       await deleteBrick(cut.id, sara.id, NOW);
       expect(await removeGoneBricks(later(8), sara.id)).toEqual([cut.id]);
       expect(provider.calls.filter((call) => call.name === 'removeAllFor').map((call) => call.ref)).toEqual([cut.id]);
@@ -510,6 +522,8 @@ run('purging a deleted Brick, in a real database', () => {
     it('does not hurry a machine that is still waiting for its own retry: confirming the chat leaves that schedule alone', async () => {
       const sara = await person('sara');
       const brick = await fullBrick(sara, 'Machine first Brick', { computer: true });
+      // A machine that was asked for (the job above ran without one): removing it fails, so it stays pending
+      await prisma.brickComputer.update({ where: { botId: brick.id }, data: { makeTriedAt: NOW } });
       await deleteBrick(brick.id, sara.id, NOW);
       provider.failRemove = true;
       await removeGoneBricks(later(8), sara.id);

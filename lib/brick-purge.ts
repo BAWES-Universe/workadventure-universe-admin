@@ -64,8 +64,10 @@ export async function purgeBrick(id: string, now: Date = new Date()): Promise<Pu
       await lockPurgeAlone(tx, id);
       const brick = await tx.bot.findFirst({ where, select: { ownerId: true } });
       if (!brick) return false;
-      // What is read here is read before the Brick goes: its machine, and the files people sent it that live at the uploader
-      const computer = await tx.brickComputer.findUnique({ where: { botId: id }, select: { provider: true, providerRef: true, machine: true } });
+      // What is read here is read before the Brick goes: its machine, and the files people sent it that live at the uploader. The computer row is held
+      // while it is read: a machine asked for at this moment either has its mark written before it (and is looked for) or finds the row gone and makes none
+      await tx.$queryRaw`SELECT 1 FROM "brick_computers" WHERE "bot_id" = ${id} FOR UPDATE`;
+      const computer = await tx.brickComputer.findUnique({ where: { botId: id }, select: { provider: true, providerRef: true, machine: true, makeTriedAt: true } });
       const sent = await tx.botFile.findMany({ where: { botId: id, source: 'person', bucket: { not: null }, fileId: { not: null } }, select: { bucket: true, fileId: true } });
       // The delete itself decides: a Brick Undo took back at this moment is not touched (nothing below runs for it)
       const { count } = await tx.bot.deleteMany({ where });
@@ -93,7 +95,10 @@ export async function purgeBrick(id: string, now: Date = new Date()): Promise<Pu
       const saving = (await tx.savedCopyWrite.count({ where: botId })) > 0;
       // A cold Brick has no machine: the pack-away deleted it and the provider confirmed it gone, and a return claims the row (`restoring`) before it makes one.
       // Its copies are what is left. (A listing of machines is only ever a look for one that was made and never written down.)
-      const machineMayExist = !!computer && computer.machine !== 'cold';
+      // A record that never had a machine asked for (`none`, no reference, never tried) has none to look for either: the listing could not find what was never made,
+      // and on an account with many machines it could never prove it, so the purge would wait for ever
+      const neverMade = !!computer && computer.machine === 'none' && !computer.providerRef && !computer.makeTriedAt;
+      const machineMayExist = !!computer && computer.machine !== 'cold' && !neverMade;
       await tx.brickPurge.upsert({
         where: botId,
         create: { botId: id, ownerId: brick.ownerId, provider: computer?.provider ?? null, providerRef: computer?.providerRef ?? null, machinePending: machineMayExist, copyPending: !!computer || saving, chatPending: true, nextTryAt: now, purgedAt: now },

@@ -798,7 +798,7 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
   // A machine that was to be put to sleep and is not proved asleep is not woken on top of what may still run: it is stopped first
   if (row.machine === 'stopping' && row.providerRef && !(await stopMachine(botId, row.providerRef, provider, ['stopping']))) throw new Error('The computer could not be put to sleep yet');
   if (!row.providerRef) {
-    const claim = await prisma.brickComputer.updateMany({ where: { botId, providerRef: null, machine: 'none' }, data: { machine: 'waking' } });
+    const claim = await prisma.brickComputer.updateMany({ where: { botId, providerRef: null, machine: 'none' }, data: { machine: 'waking', makeTriedAt: now } });
     if (claim.count === 1) {
       try {
         const info = await provider.create(botId);
