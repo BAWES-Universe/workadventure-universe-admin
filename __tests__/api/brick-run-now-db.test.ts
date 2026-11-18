@@ -371,8 +371,10 @@ run('Run now and snooze, in a real database', () => {
         if (!first.ok) throw new Error('expected the run');
         // Still fresh: it holds the one place
         expect(await tap(ned, b.id, 'run', at(2 * MIN))).toMatchObject({ ok: false, code: 'runs_a_day' });
-        // A quarter of an hour on, nobody took it up: it never ran, so the other item is not refused for it
-        expect(await tap(ned, b.id, 'run', at(20 * MIN))).toMatchObject({ ok: true, run: { state: 'queued', replay: false } });
+        // Exactly a quarter of an hour old is still one the claim would hand out, so it still holds the place
+        expect(await tap(ned, b.id, 'run', at(16 * MIN))).toMatchObject({ ok: false, code: 'runs_a_day' });
+        // A moment older, nobody took it up: it never ran, so the other item is not refused for it
+        expect(await tap(ned, b.id, 'run', at(16 * MIN + 1))).toMatchObject({ ok: true, run: { state: 'queued', replay: false } });
       } finally {
         await saveServerLimits({ bricks: { runsPerDay: 24 } }, ned.id);
       }

@@ -467,8 +467,9 @@ async function requestRun(tx: Tx, row: ItemRow, ownerId: string, key: string | n
     const ofOwner = { item: { ownerId: row.ownerId, kind: { not: 'reminder' } } };
     const [today, waiting] = await Promise.all([
       tx.brickItemRun.count({ where: { ...ofOwner, state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: since } } }),
-      // Only a run that can still be taken up counts: one nobody took up in time never ran and will be dropped, so it holds no place
-      tx.brickItemRun.count({ where: { ...ofOwner, state: 'queued', claimedAt: { gt: new Date(now.getTime() - LATE_GRACE) } } }),
+      // Only a run that can still be taken up counts: one nobody took up in time never ran and will be dropped, so it holds no place. A run is
+      // dropped only once it is older than the grace (as the claim and the ask above do), so one exactly that old still counts.
+      tx.brickItemRun.count({ where: { ...ofOwner, state: 'queued', claimedAt: { gte: new Date(now.getTime() - LATE_GRACE) } } }),
     ]);
     if (today + waiting >= limits.runsPerDay) return { ok: false, status: 422, code: 'runs_a_day', limit: limits.runsPerDay, error: `${limits.runsPerDay} runs a day is the most` };
   }
