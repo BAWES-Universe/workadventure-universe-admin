@@ -286,9 +286,11 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     await claim(null);
     expect(await told(13)).toEqual(['done']);
     // A live claim holds it past an hour too (the hand-overs ahead go on one after the other): only a stale one does not
-    await claim(at(70));
+    await claim(at(60));
     expect(await told(61)).toEqual([]);
-    expect(await told(70 + 5)).toEqual(['done']);
+    expect(await told(63)).toEqual([]);
+    // Not renewed for longer than a hand-over can last (4 minutes): stale
+    expect(await told(65)).toEqual(['done']);
   });
 
   it('holds the ending of a job that still beats as waiting past an hour, and tells it once it stopped beating', async () => {
