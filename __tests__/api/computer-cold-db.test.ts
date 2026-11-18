@@ -835,6 +835,21 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(names().slice(before)).toContain(`remove:fake-${brick.botId}`);
     });
 
+    it('no clean-up deletes the copies a return that is still alive is restoring from, whoever asks: a later save or another server\u2019s sweep leaves them, and takes them again once the return is over or has gone quiet', async () => {
+      const brick = await idleBrick();
+      await packAway(brick.botId, provider, NOW);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId, state: 'verified' } })).toBe(1);
+      // A return is under way and says it is alive
+      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'restoring', packStage: 'returning', packClaimId: 'return-1', packClaimedAt: NOW, returnedAt: new Date(NOW.getTime() - 86_400_000) } });
+      const { dropColdCopiesIfNewer } = await import('@/lib/computer-cold');
+      await dropColdCopiesIfNewer(brick.botId);
+      expect(await pruneArchives(brick.botId, null, NOW, 0)).toBe(0);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId, state: 'verified' } })).toBe(1);
+      // The return went quiet for longer than a claim lives: it no longer holds them
+      expect(await pruneArchives(brick.botId, null, new Date(NOW.getTime() + 60 * 60_000), 0)).toBe(1);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+    });
+
     it('a replacement return cannot claim the Brick between the look and the removal: the removal holds the computer row until the machine is gone', async () => {
       const brick = await idleBrick();
       await packAway(brick.botId, provider, NOW);

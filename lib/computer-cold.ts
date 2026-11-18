@@ -576,7 +576,7 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
 export async function dropColdCopiesIfNewer(botId: string): Promise<void> {
   try {
     const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { packedAt: true, returnedAt: true, machine: true } });
-    if (!row || !row.returnedAt || row.machine === 'cold' || row.machine === 'packing') return;
+    if (!row || !row.returnedAt || row.machine === 'cold' || row.machine === 'packing' || row.machine === 'restoring') return;
     await pruneArchives(botId, null, new Date(), 0);
   } catch (error) {
     console.error('[Computer] Could not drop old cold copies:', words(error));

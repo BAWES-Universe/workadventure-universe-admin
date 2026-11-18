@@ -165,6 +165,9 @@ export async function pruneArchives(botId: string, keepId: string | null = null,
   if (keepId) keep.add(keepId);
   // A pack-away that is still saying it is alive owns the copy it is writing or proving, however long that takes (another server's sweep comes here too)
   const packing = await prisma.brickComputer.findUnique({ where: { botId }, select: { machine: true, packStage: true, packClaimedAt: true } });
+  // A return that is still saying it is alive is reading one of these copies right now: none is deleted under it, whoever asks (a save on a machine
+  // that was made for the return, a later clean-up on another server). It is looked at again once the return is over.
+  if (packing && packing.machine === 'restoring' && packing.packStage === 'returning' && !!packing.packClaimedAt && now.getTime() - packing.packClaimedAt.getTime() < LIVE_CLAIM_MS) return 0;
   const working = !!packing && packing.machine === 'packing' && (packing.packStage === 'claimed' || packing.packStage === 'stored') && !!packing.packClaimedAt && now.getTime() - packing.packClaimedAt.getTime() < LIVE_CLAIM_MS;
   const drop = rows.filter((row) => {
     if (keep.has(row.id)) return false;
