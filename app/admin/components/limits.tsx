@@ -47,6 +47,8 @@ export interface Limit {
   note?: string;
   /** No "Other" box (a choice between fixed steps). */
   fixedSteps?: boolean;
+  /** A row that may be left empty on purpose: a card to empty it is offered, and choosing it hands -1 to the saver (which saves "empty"). */
+  clearable?: { label: string; meaning: string };
   /** A model that stops below this value (#673): where it stops, the line that says so, and the words on each choice above it. */
   cap?: ModelCap;
   /** The values it can be set to, said on its sheet; Other outside them is turned down there. */
@@ -119,20 +121,21 @@ export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }
 /** The choices for one limit: radio cards with what each means, the recommended one marked, and Other. */
 export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone: (value: number) => Promise<void> | void; onCancel: () => void }) {
   const known = !limit.unset && limit.options.some((option) => option.value === limit.value);
-  const [picked, setPicked] = useState<number | 'other'>(known ? limit.value : 'other');
+  const [picked, setPicked] = useState<number | 'other' | 'clear'>(limit.unset && limit.clearable ? 'clear' : known ? limit.value : 'other');
   const [other, setOther] = useState(known || limit.unset ? '' : String(limit.value));
   const [saving, setSaving] = useState(false);
   // What was typed is read as it is, with commas and spaces as thousands marks: "-50" or "1e2" is refused, not turned into 50 or 12
   const typed = other.replace(/[,\s]/g, '');
-  const value = picked === 'other' ? (typed === '' ? 0 : /^\d+(\.\d+)?$/.test(typed) ? Number(typed) : Number.NaN) : picked;
+  const value = picked === 'clear' ? -1 : picked === 'other' ? (typed === '' ? 0 : /^\d+(\.\d+)?$/.test(typed) ? Number(typed) : Number.NaN) : picked;
   const range = limit.range;
   // A row that can't go above another says the lower of the two as its most
   const most = range ? Math.min(range.max, limit.atMost?.value ?? range.max) : 0;
   const rangeLine = range ? `Between ${range.min.toLocaleString('en')} and ${most.toLocaleString('en')} ${limit.unit}.` : null;
   const outOfRange = picked === 'other' && other.trim() !== '' && !!range && (Number.isNaN(value) || value < range.min || value > range.max || (!!range.whole && !Number.isInteger(value)));
   const aboveOther = !!limit.atMost && value > limit.atMost.value;
-  // "Never" (0) is a choice of its own; an empty or 0 "Other" is not
-  const ready = (picked === 'other' ? value > 0 : true) && !outOfRange && !aboveOther;
+  // "Never" (0) is a choice of its own; an empty "Other" is never a choice, and a typed 0 is one only on a row whose range starts at 0
+  const zeroAllowed = !!range && range.min <= 0;
+  const ready = (picked === 'other' ? typed !== '' && !Number.isNaN(value) && (value > 0 || (zeroAllowed && value === 0)) : true) && !outOfRange && !aboveOther;
   return (
     <div className="grid gap-4">
       {limit.cap?.line && (
@@ -158,6 +161,9 @@ export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone
             description={limit.cap && option.value > limit.cap.at ? `${option.meaning} ${limit.cap.short}` : option.meaning}
           />
         ))}
+        {limit.clearable && (
+          <PickCard role="radio" picked={picked === 'clear'} onClick={() => setPicked('clear')} indicator={<Radio checked={picked === 'clear'} />} title={limit.clearable.label} description={limit.clearable.meaning} />
+        )}
         {!limit.fixedSteps && (
           <>
             <PickCard role="radio" picked={picked === 'other'} onClick={() => setPicked('other')} indicator={<Radio checked={picked === 'other'} />} title="Other" />
@@ -1217,9 +1223,17 @@ export function codeJobLimits(views: CodeJobLimitViews): Limit[] {
       options: [],
       note: unset ? (view.required ? 'Not set yet. Code jobs do not run until you set it.' : key === 'maxAnswerBytes' ? 'Not set yet. Every App answer is passed on whole.' : 'Not set yet. Printed results are kept until the person deletes them.') : undefined,
       range: { min: view.range.min / scale, max: view.range.max / scale },
+      // The two that may be empty on purpose can be emptied again from here
+      ...(CODE_JOB_EMPTYABLE[key] ? { clearable: CODE_JOB_EMPTYABLE[key] } : {}),
     };
   });
 }
+
+/** The code job Limits that may be left empty, and what empty means for each. */
+const CODE_JOB_EMPTYABLE: Record<string, { label: string; meaning: string } | undefined> = {
+  keepDays: { label: 'Not set', meaning: 'Printed results are kept until the person deletes them.' },
+  maxAnswerBytes: { label: 'Not set', meaning: 'Every App answer is passed on whole, whatever its size.' },
+};
 
 /** The id without its maker's prefix: "openai/gpt-4o-mini" is "gpt-4o-mini". */
 const shortModel = (id: string) => (id.includes('/') ? id.slice(id.indexOf('/') + 1) : id);
@@ -1685,7 +1699,8 @@ export function UniverseAiLimits() {
   async function saveCodeJobs(id: string, value: number): Promise<boolean> {
     const view = codeJobs?.[id];
     if (!view) return false;
-    const result = await sendLimits('/api/admin/workbench', { [id]: Math.round(value * codeJobScale(id, view.unit)) });
+    // A negative value is the "Not set" card: empty is saved as null
+    const result = await sendLimits('/api/admin/workbench', { [id]: value < 0 ? null : Math.round(value * codeJobScale(id, view.unit)) });
     if (!result.ok) {
       addToast({ description: result.error, variant: 'error' });
       return false;

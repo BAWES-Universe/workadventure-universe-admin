@@ -168,17 +168,44 @@ describe('the provider’s workspace for a code job, as its docs and a live chec
         return json({ items: Array.from({ length: 500 }, (_, n) => ({ mount_relative_path: `out/p${page}-${n}.txt`, size: 1 })), next_cursor: `c${page + 1}` });
       });
       // 2,600 files stand behind the cursor; 60 are wanted
-      const files = await bench.list({ sessionId: 's', prefix: 'out/', timeoutMs: 1, limit: 60 });
+      const files = await bench.list({ sessionId: 's', prefix: 'out/', timeoutMs: 1000, limit: 60 });
       expect(files).toHaveLength(60);
       expect(page).toBe(1);
       // With no limit, a listing that never ends still is not called complete
       page = 0;
-      await expect(bench.list({ sessionId: 's', prefix: 'out/', timeoutMs: 1 })).rejects.toThrow('could not be listed in full');
+      await expect(bench.list({ sessionId: 's', prefix: 'out/', timeoutMs: 1000 })).rejects.toThrow('could not be listed in full');
     });
 
     it('does not call a listing complete when the pages never end', async () => {
       const bench = make(() => json({ items: [{ mount_relative_path: 'out/a', size: 1 }], next_cursor: 'again' }));
-      await expect(bench.list({ sessionId: 's', prefix: 'out/', timeoutMs: 1 })).rejects.toThrow('could not be listed in full');
+      await expect(bench.list({ sessionId: 's', prefix: 'out/', timeoutMs: 1000 })).rejects.toThrow('could not be listed in full');
+    });
+
+    it('keeps to the time it was given: a listing, and the address a file is put at or read from, stop when the time is up', async () => {
+      // A provider that never answers: the request ends only when it is aborted
+      const silent = (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => init.signal?.addEventListener('abort', () => reject(new Error('aborted'))));
+      const bench = make(silent);
+      const started = Date.now();
+      await expect(bench.list({ sessionId: 's', prefix: 'out/', timeoutMs: 80 })).rejects.toThrow();
+      await expect(bench.put({ sessionId: 's', path: 'in/a.txt', bytes: new Uint8Array(1), timeoutMs: 80 })).rejects.toThrow();
+      await expect(bench.read({ sessionId: 's', path: 'out/a.txt', maxBytes: 10, timeoutMs: 80 })).rejects.toThrow();
+      // Three waits of about 80 ms, not three of the provider’s own 30 seconds
+      expect(Date.now() - started).toBeLessThan(3000);
+    });
+
+    it('spends one budget over all the pages of a listing: a provider that answers slowly page after page runs out of time', async () => {
+      const slow = (_url: string, init: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(() => resolve(json({ items: [{ mount_relative_path: 'out/a', size: 1 }], next_cursor: 'more' })), 60);
+          init.signal?.addEventListener('abort', () => {
+            clearTimeout(timer);
+            reject(new Error('aborted'));
+          });
+        });
+      const started = Date.now();
+      await expect(make(slow).list({ sessionId: 's', prefix: 'out/', timeoutMs: 200 })).rejects.toThrow();
+      expect(Date.now() - started).toBeLessThan(2000);
     });
 
     it('reads a file when it is inside the limit, from the stream, and says too big when it is not', async () => {

@@ -256,18 +256,26 @@ export const clip = (text: string, max: number): { text: string; clipped: boolea
 
 // ---------- What the sandbox tools look like on an App link ----------
 
-/** Whether a tool call on an ordinary App link would run the provider's sandbox: the tool itself, or a batch that holds it. Case does not matter. */
-export function touchesSandbox(name: unknown, args: unknown): boolean {
-  if (typeof name !== 'string') return false;
-  const tool = name.trim().toUpperCase();
+/** How deep a batch inside a batch is looked into: far past anything real, so a made-up nesting cannot run the check for long. */
+const BATCH_DEPTH = 8;
+
+/** Whether one entry of a batch (or the tool itself) is the sandbox, or a batch that holds it, however deep. */
+function entryTouchesSandbox(slug: unknown, args: unknown, depth: number): boolean {
+  if (typeof slug !== 'string') return false;
+  const tool = slug.trim().toUpperCase();
   if (SANDBOX_TOOLS.includes(tool)) return true;
-  if (tool !== BATCH_TOOL) return false;
+  if (tool !== BATCH_TOOL || depth >= BATCH_DEPTH) return tool === BATCH_TOOL && depth >= BATCH_DEPTH;
   const list = isRecord(args) ? args.tools : undefined;
   if (!Array.isArray(list)) return false;
-  return list.some((entry) => {
-    const slug = isRecord(entry) ? entry.tool_slug : undefined;
-    return typeof slug === 'string' && SANDBOX_TOOLS.includes(slug.trim().toUpperCase());
-  });
+  return list.some((entry) => isRecord(entry) && entryTouchesSandbox(entry.tool_slug, entry.arguments ?? entry.parameters, depth + 1));
+}
+
+/**
+ * Whether a tool call on an ordinary App link would run the provider's sandbox: the tool itself, or a batch that holds it, at any depth (a
+ * batch inside a batch is looked into too; one nested past any real use is refused rather than trusted). Case does not matter.
+ */
+export function touchesSandbox(name: unknown, args: unknown): boolean {
+  return entryTouchesSandbox(name, args, 0);
 }
 
 // ---------- A job's request ----------
@@ -341,6 +349,13 @@ export type JobRequestRead = { ok: true; value: JobRequest } | { ok: false; reas
 const bad = (error: string): JobRequestRead => ({ ok: false, reason: 'bad_request', error });
 const big = (error: string): JobRequestRead => ({ ok: false, reason: 'too_big', error });
 
+/** The size base64 text decodes to, not the length of the text: padding and line breaks are not data. */
+export function decodedBase64Bytes(content: string): number {
+  const compact = content.replace(/\s+/g, '');
+  const padding = compact.endsWith('==') ? 2 : compact.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((compact.length * 3) / 4) - padding);
+}
+
 export function readJobRequest(args: unknown, limits: FilledLimits, toolkit: string | null): JobRequestRead {
   if (!isRecord(args)) return bad('The request must be an object.');
   const allowed = new Set(['code', 'steps', 'inputs', 'reads']);
@@ -387,7 +402,7 @@ export function readJobRequest(args: unknown, limits: FilledLimits, toolkit: str
   const names = [...inputs.map((input) => input.name), ...reads.map((read) => read.as)];
   if (new Set(names).size !== names.length) return bad('Two inputs have the same file name.');
 
-  const inline = inputs.reduce((sum, input) => sum + (input.base64 ? Math.floor((input.content.length * 3) / 4) : Buffer.byteLength(input.content, 'utf8')), 0);
+  const inline = inputs.reduce((sum, input) => sum + (input.base64 ? decodedBase64Bytes(input.content) : Buffer.byteLength(input.content, 'utf8')), 0);
   if (inline > limits.maxInputBytes) return big('The code or the data is over what a job may carry.');
   return { ok: true, value: { steps, inputs, reads } };
 }

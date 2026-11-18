@@ -119,6 +119,9 @@ export async function boundAppAnswer(answer: LinkAnswer, id: unknown, name: stri
   const max = (await getCodeJobLimits()).maxAnswerBytes;
   const size = Buffer.byteLength(answer.body, 'utf8');
   if (max === null || size <= max) return answer;
+  // A failure is never turned into "it ran": a JSON-RPC error, or a tool result that says it is an error, is passed on as it is, however long its text
+  const parsed = linkJson(answer.body, typeof id === 'number' || typeof id === 'string' ? id : undefined);
+  if (parsed && (isObject(parsed.error) || (isObject(parsed.result) && (parsed.result as { isError?: unknown }).isError === true))) return answer;
   const batch = name.trim().toUpperCase() === BATCH_TOOL && isObject(args) && Array.isArray(args.tools) ? args.tools : null;
   const tools = batch ? batch.map((entry) => (isObject(entry) && typeof entry.tool_slug === 'string' ? entry.tool_slug : '')).filter(Boolean) : [name];
   const kb = (bytes: number) => `${Math.max(1, Math.round(bytes / 1024)).toLocaleString('en')} KB`;

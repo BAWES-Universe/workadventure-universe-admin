@@ -76,27 +76,52 @@ export async function keptBytes(ownerId: string): Promise<number> {
   return sum._sum.sizeBytes ?? 0;
 }
 
-/** Keeps one file for its owner. The file goes into storage first and the row after; a row that cannot be written takes its file away again. */
-export async function keepResult(input: KeepInput, store: OutputStore = getOutputStore()): Promise<Row> {
+/** Lock one owner's results are counted and added under, so two jobs of one person cannot both pass the same room. */
+const ownerLock = (ownerId: string) => `owned-results:${ownerId}`;
+
+/** What keeping a file came to: kept (the row), or turned down because it would take the owner past `limitBytes` (nothing stored, nothing counted). */
+export type Kept = { status: 'kept'; row: Row } | { status: 'over_limit'; keptBytes: number; limitBytes: number };
+
+/**
+ * Keeps one file for its owner. The file goes into storage first and the row after; a row that cannot be written takes its file away again.
+ *
+ * With `limitBytes` (the most one person may keep) the count and the insert are ONE step under the owner's own lock: the owner's results are
+ * added up again inside it, from the bytes actually received (never a size someone listed), and a file that would pass the limit is not
+ * inserted and its stored copy is removed. Two jobs or two sources of one owner can therefore never both pass the same room. Without it,
+ * nothing is checked (a caller with no limit to apply).
+ */
+export async function keepResult(input: KeepInput & { limitBytes?: number | null }, store: OutputStore = getOutputStore()): Promise<Kept> {
   const id = randomUUID();
   const storageKey = outputKeyFor(`${input.sourceKind}-${input.sourceId}`, id);
+  const size = input.bytes.byteLength;
   await store.put(storageKey, input.bytes);
   try {
-    return await prisma.ownedResult.create({
-      data: {
-        id,
-        ownerId: input.ownerId,
-        sourceKind: input.sourceKind,
-        sourceId: input.sourceId,
-        makerBotId: input.makerBotId,
-        makerName: clipText(input.makerName, MAX_NAME_LENGTH),
-        name: input.name,
-        contentType: input.contentType,
-        sizeBytes: input.bytes.byteLength,
-        sha256: sha256Hex(input.bytes),
-        storageKey,
-      },
+    const outcome = await prisma.$transaction(async (tx): Promise<Kept> => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${ownerLock(input.ownerId)}))`;
+      if (input.limitBytes !== undefined && input.limitBytes !== null) {
+        const sum = await tx.ownedResult.aggregate({ where: { ownerId: input.ownerId }, _sum: { sizeBytes: true } });
+        const have = sum._sum.sizeBytes ?? 0;
+        if (have + size > input.limitBytes) return { status: 'over_limit', keptBytes: have, limitBytes: input.limitBytes };
+      }
+      const row = await tx.ownedResult.create({
+        data: {
+          id,
+          ownerId: input.ownerId,
+          sourceKind: input.sourceKind,
+          sourceId: input.sourceId,
+          makerBotId: input.makerBotId,
+          makerName: clipText(input.makerName, MAX_NAME_LENGTH),
+          name: input.name,
+          contentType: input.contentType,
+          sizeBytes: size,
+          sha256: sha256Hex(input.bytes),
+          storageKey,
+        },
+      });
+      return { status: 'kept', row };
     });
+    if (outcome.status === 'over_limit') await store.remove([storageKey]).catch(() => undefined);
+    return outcome;
   } catch (error) {
     await store.remove([storageKey]).catch(() => undefined);
     throw error;
@@ -111,12 +136,24 @@ async function madeByNames(rows: Row[]): Promise<Map<string, string>> {
   return new Map(rows.map((row) => [row.id, live.get(row.makerBotId) ?? DELETED_BRICK]));
 }
 
-/** The owner's results, newest first, a page at a time. Nobody else's. */
+/** A page boundary: the time and the id of the last result on the page, so results made at the same moment are neither skipped nor repeated. */
+const cursorOf = (row: { createdAt: Date; id: string }): string => `${row.createdAt.toISOString()}|${row.id}`;
+
+function readCursor(cursor: string | null | undefined): { at: Date; id: string | null } | null {
+  if (!cursor) return null;
+  const [time, id] = cursor.split('|');
+  const at = new Date(time);
+  if (Number.isNaN(at.getTime())) return null;
+  return { at, id: id && /^[0-9a-f-]{36}$/i.test(id) ? id : null };
+}
+
+/** The owner's results, newest first, a page at a time. Nobody else's. `before` is the `next` of the page before (a bare time is read too). */
 export async function listResults(ownerId: string, options: { limit?: number; before?: string | null } = {}): Promise<{ results: ResultView[]; next: string | null; keptBytes: number }> {
   const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
-  const before = options.before ? new Date(options.before) : null;
+  const from = readCursor(options.before);
+  const after = from === null ? {} : from.id === null ? { createdAt: { lt: from.at } } : { OR: [{ createdAt: { lt: from.at } }, { createdAt: from.at, id: { lt: from.id } }] };
   const rows = await prisma.ownedResult.findMany({
-    where: { ownerId, ...(before && !Number.isNaN(before.getTime()) ? { createdAt: { lt: before } } : {}) },
+    where: { ownerId, ...after },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: limit + 1,
   });
@@ -124,7 +161,7 @@ export async function listResults(ownerId: string, options: { limit?: number; be
   const names = await madeByNames(page);
   return {
     results: page.map((row) => view(row, names.get(row.id) ?? DELETED_BRICK)),
-    next: rows.length > limit ? page[page.length - 1].createdAt.toISOString() : null,
+    next: rows.length > limit ? cursorOf(page[page.length - 1]) : null,
     keptBytes: await keptBytes(ownerId),
   };
 }
@@ -157,11 +194,15 @@ export async function deleteResult(id: string, ownerId: string, store: OutputSto
   return 'deleted';
 }
 
-/** Every result of one job: when the job did not end normally (cancelled, out of time, lost) and its files were not meant to be kept. */
+/**
+ * Every result of one job: when the job did not end normally (cancelled, out of time, lost) and its files were not meant to be kept. The
+ * results are chosen once, with their keys, and only those are removed: one made while the files were being removed keeps both its row and its file.
+ */
 export async function removeResultsOf(sourceKind: SourceKind, sourceId: string, store: OutputStore = getOutputStore()): Promise<void> {
-  const rows = await prisma.ownedResult.findMany({ where: { sourceKind, sourceId }, select: { storageKey: true } });
+  const rows = await prisma.ownedResult.findMany({ where: { sourceKind, sourceId }, select: { id: true, storageKey: true } });
+  if (rows.length === 0) return;
   await store.remove(rows.map((row) => row.storageKey));
-  await prisma.ownedResult.deleteMany({ where: { sourceKind, sourceId } });
+  await prisma.ownedResult.deleteMany({ where: { id: { in: rows.map((row) => row.id) } } });
 }
 
 /** Results whose owner no longer exists (the account was deleted): removed from storage and the books, a batch at a time. */
