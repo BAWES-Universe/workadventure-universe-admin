@@ -30,7 +30,8 @@ const serverRows = [
 
 const send = (body: unknown) =>
   check(new NextRequest('http://localhost:3333/api/me/voice-keys/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
-const answer = (status: number, text = '') => fetchMock.mockResolvedValue({ status, text: async () => text });
+// A plain 200 also says success inside, for a company that only takes a key when it says so (MiniMax)
+const answer = (status: number, text = status === 200 ? '{"base_resp":{"status_code":0}}' : '') => fetchMock.mockResolvedValue({ status, text: async () => text });
 
 // A new person for each test, so the limit on tries (kept per person) starts over
 let people = 0;
@@ -82,20 +83,42 @@ describe('Load models for a voice key', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it.each(VOICE_KEY_COMPANIES.filter((company) => !company.check.sign).map((company) => [company.adapter, company]))('%s: a GET to its own address with the key in one header and nothing billed', async (adapter, company) => {
+  it.each(VOICE_KEY_COMPANIES.filter((company) => !company.check.sign).map((company) => [company.adapter, company]))('%s: a free call to its own address with the key in one header and nothing billed', async (adapter, company) => {
     findMany.mockResolvedValue([{ adapter, name: company.label, recognition: true, speech: true, models: [{ id: 'm', kind: 'speech' }] }]);
     answer(200);
     // A company whose keys live at the person's own address (Azure) is asked there
     const address = company.account?.address ? 'https://my-resource.openai.azure.com' : undefined;
-    expect((await send({ adapter, apiKey: KEY, ...(address ? { address } : {}) })).status).toBe(200);
+    // A company whose keys are made per region (Azure AI Speech) is asked in the region picked
+    const region = company.account?.regions?.[0].id;
+    expect((await send({ adapter, apiKey: KEY, ...(address ? { address } : {}), ...(region ? { region } : {}) })).status).toBe(200);
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe(company.check.url.replace('{address}', address ?? ''));
+    expect(url).toBe(company.check.url.replace('{address}', address ?? '').replace('{region}', region ?? ''));
     expect(new URL(url).protocol).toBe('https:');
-    expect(init.method).toBe('GET');
-    expect(init.body).toBeUndefined();
+    // A GET, or a POST with the catalog's own body when the company lists that way (Async): never the key in the body
+    if (company.check.body) {
+      expect(init.method).toBe('POST');
+      expect(JSON.parse(init.body)).toEqual(company.check.body);
+      expect(init.headers['Content-Type']).toBe('application/json');
+    } else {
+      expect(init.method).toBe('GET');
+      expect(init.body).toBeUndefined();
+    }
     expect(init.redirect).toBe('manual');
     expect(init.headers[company.check.header]).toBe(`${company.check.prefix}${KEY}`);
     expect(Object.values(init.headers).filter((value) => String(value).includes(KEY))).toHaveLength(1);
+  });
+
+  it('checks an Azure AI Speech key in the region picked, and only in one of Azure’s own regions (#1875)', async () => {
+    findMany.mockResolvedValue([{ adapter: 'azure-speech', name: 'Azure AI Speech', recognition: true, speech: true, models: [{ id: 'azure-tts', kind: 'speech' }] }]);
+    answer(200);
+    expect((await send({ adapter: 'azure-speech', apiKey: KEY, region: 'uaenorth' })).status).toBe(200);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://uaenorth.tts.speech.microsoft.com/cognitiveservices/voices/list');
+    expect(fetchMock.mock.calls[0][1].headers['Ocp-Apim-Subscription-Key']).toBe(KEY);
+    fetchMock.mockClear();
+    for (const region of [undefined, '', 'evil.com/x', 'uaenorth.evil']) {
+      expect((await send({ adapter: 'azure-speech', apiKey: KEY, ...(region === undefined ? {} : { region }) })).status).toBe(400);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('checks an Azure key on the person’s own resource, then asks for the deployment to be typed', async () => {
@@ -127,7 +150,17 @@ describe('Load models for a voice key', () => {
       answer(200);
       const response = await send({ adapter: 'aws', apiKey: AWS, region: 'eu-north-1' });
       expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ ok: true, models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }] });
+      expect(await response.json()).toEqual({
+        ok: true,
+        models: [
+          { id: 'amazon-transcribe', label: 'Amazon Transcribe', kind: 'recognition' },
+          { id: 'generative', label: 'Polly Generative', kind: 'speech' },
+          { id: 'neural', label: 'Polly Neural', kind: 'speech' },
+          { id: 'long-form', label: 'Polly Long-Form', kind: 'speech' },
+          { id: 'standard', label: 'Polly Standard', kind: 'speech' },
+          { id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' },
+        ],
+      });
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe('https://sts.eu-north-1.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15');
       expect(init.method).toBe('GET');
@@ -183,11 +216,33 @@ describe('Load models for a voice key', () => {
     expect((await send({ adapter: 'elevenlabs', apiKey: KEY })).status).toBe(200);
     answer(401, '{"detail":{"status":"invalid_api_key"}}');
     expect((await send({ adapter: 'elevenlabs', apiKey: KEY })).status).toBe(422);
+    // MiniMax answers a wrong key with a 200 that says 1004 inside, and a right one with 0
+    answer(200, '{"system_voice":[],"base_resp":{"status_code":1004,"status_msg":"login fail: Please carry the API secret key"}}');
+    expect((await send({ adapter: 'minimax', apiKey: KEY })).status).toBe(422);
+    answer(200, '{"system_voice":[],"base_resp":{"status_code":0,"status_msg":"success"}}');
+    expect((await send({ adapter: 'minimax', apiKey: KEY })).status).toBe(200);
+    answer(200, '{"base_resp":{"status_code":2049,"status_msg":"invalid api key"}}');
+    expect((await send({ adapter: 'minimax', apiKey: KEY })).status).toBe(422);
+    // Its voice catalog runs well past 100 kB, with the code after the voices: the whole answer is read
+    const voices = Array.from({ length: 400 }, (_, i) => ({ voice_id: `voice_${i}`, voice_name: `Voice ${i}`, description: ['x'.repeat(300)] }));
+    answer(200, JSON.stringify({ system_voice: voices, base_resp: { status_code: 0, status_msg: 'success' } }));
+    expect((await send({ adapter: 'minimax', apiKey: KEY })).status).toBe(200);
+    // An answer that doesn't say success (another code, no code, no JSON) never takes the key
+    for (const body of ['{"base_resp":{"status_code":1002,"status_msg":"rate limit"}}', '{"system_voice":[]}', 'not json']) {
+      answer(200, body);
+      expect((await send({ adapter: 'minimax', apiKey: KEY })).status).not.toBe(200);
+    }
     // Deepgram answers a key without projects:read with a 403, and a wrong key with a 401
     answer(403, '{"err_code":"FORBIDDEN","err_msg":"Insufficient permissions."}');
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(200);
     answer(401, '{"err_code":"INVALID_AUTH","err_msg":"Invalid credentials."}');
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(422);
+    // fal answers a usual API key (no billing permission) with a 403, and a wrong key with a 401
+    answer(403, '{"error":{"type":"authorization_error","message":"Access denied"}}');
+    expect((await send({ adapter: 'fal', apiKey: KEY })).status).toBe(200);
+    expect(fetchMock.mock.calls.at(-1)[0]).toBe('https://api.fal.ai/v1/account/billing');
+    answer(401, '{"error":{"type":"authorization_error","message":"Authentication required"}}');
+    expect((await send({ adapter: 'fal', apiKey: KEY })).status).toBe(422);
     // OpenAI answers a restricted key without the models permission with a 403 naming the scope; any other 403 is still refused
     findMany.mockResolvedValue([{ adapter: 'openai', name: 'OpenAI', recognition: true, speech: true, models: [{ id: 'm', kind: 'speech' }] }]);
     answer(403, '{"error":{"message":"You have insufficient permissions for this operation. Missing scopes: api.model.read."}}');
@@ -260,12 +315,34 @@ describe('Load models for a voice key', () => {
     findMany.mockImplementation(async ({ where }: { where: { adapter?: string } }) => (where.adapter ? [] : serverRows));
     for (const [adapter, models] of [
       ['soniox', [{ id: 'stt-rt-v6', label: 'Soniox real-time v6', kind: 'recognition' }, { id: 'tts-rt-v2', label: 'Soniox TTS v2', kind: 'speech' }]],
+      ['async', [{ id: 'async_flash_v1.0', label: 'Async Flash v1.0', kind: 'speech' }, { id: 'async_flash_v1.5', label: 'Async Flash v1.5', kind: 'speech' }, { id: 'async_pro_v1.0', label: 'Async Pro v1.0', kind: 'speech' }]],
+      ['camb', [{ id: 'mars-flash', label: 'MARS Flash', kind: 'speech' }, { id: 'mars-pro', label: 'MARS Pro', kind: 'speech' }, { id: 'mars-instruct', label: 'MARS Instruct', kind: 'speech' }]],
+      ['fal', [{ id: 'fal-ai/wizper', label: 'Wizper (Whisper large v3)', kind: 'recognition' }, { id: 'fal-ai/whisper', label: 'Whisper', kind: 'recognition' }]],
+      ['gladia', [{ id: 'solaria-1', label: 'Solaria-1', kind: 'recognition' }]],
+      ['gradium', [{ id: 'default', label: 'Gradium (current)', kind: 'recognition' }, { id: 'default', label: 'Gradium TTS (current)', kind: 'speech' }, { id: 'gradium-tts-beta', label: 'Gradium TTS beta', kind: 'speech' }]],
+      ['groq', [{ id: 'whisper-large-v3-turbo', label: 'Whisper Large v3 Turbo', kind: 'recognition' }, { id: 'whisper-large-v3', label: 'Whisper Large v3', kind: 'recognition' }, { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' }, { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' }]],
+      ['mistral', [{ id: 'voxtral-mini-transcribe-realtime-2602', label: 'Voxtral Mini Transcribe Realtime', kind: 'recognition' }, { id: 'voxtral-mini-tts-2603', label: 'Voxtral Mini TTS', kind: 'speech' }]],
+      ['meta', [{ id: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe 1.0', kind: 'recognition' }]],
+      ['neuphonic', [{ id: 'neuphonic', label: 'Neuphonic TTS', kind: 'speech' }]],
+      ['resemble', [{ id: 'resemble', label: 'Resemble TTS', kind: 'speech' }]],
+      ['sarvam', [{ id: 'saaras:v4', label: 'Saaras v4', kind: 'recognition' }, { id: 'saaras:v3', label: 'Saaras v3', kind: 'recognition' }, { id: 'bulbul:v3', label: 'Bulbul v3', kind: 'speech' }, { id: 'bulbul:v4-flash', label: 'Bulbul v4 Flash', kind: 'speech' }]],
+      ['smallest', [{ id: 'pulse', label: 'Pulse', kind: 'recognition' }, { id: 'pulse-2', label: 'Pulse 2 (English)', kind: 'recognition' }, { id: 'lightning_v3.1_pro', label: 'Lightning v3.1 Pro', kind: 'speech' }, { id: 'lightning_v3.1', label: 'Lightning v3.1', kind: 'speech' }]],
+      ['speechify', [{ id: 'simba-3.5', label: 'Simba 3.5', kind: 'speech' }, { id: 'simba-3.2', label: 'Simba 3.2 (English)', kind: 'speech' }, { id: 'simba-3.0', label: 'Simba 3.0', kind: 'speech' }]],
+      ['speechmatics', [{ id: 'linden-1', label: 'Linden 1', kind: 'recognition' }, { id: 'speechmatics', label: 'Speechmatics TTS (preview)', kind: 'speech' }]],
+      ['together', [{ id: 'openai/whisper-large-v3', label: 'Whisper Large v3', kind: 'recognition' }, { id: 'hexgrad/Kokoro-82M', label: 'Kokoro 82M', kind: 'speech' }, { id: 'canopylabs/orpheus-3b-0.1-ft', label: 'Orpheus 3B', kind: 'speech' }]],
+      ['nvidia', [{ id: 'nemotron-asr-streaming', label: 'Nemotron ASR Streaming', kind: 'recognition' }, { id: 'magpie-tts-multilingual', label: 'Magpie TTS Multilingual', kind: 'speech' }]],
+      ['minimax', [{ id: 'speech-2.8-turbo', label: 'Speech 2.8 Turbo', kind: 'speech' }, { id: 'speech-2.8-hd', label: 'Speech 2.8 HD', kind: 'speech' }, { id: 'speech-2.6-turbo', label: 'Speech 2.6 Turbo', kind: 'speech' }, { id: 'speech-2.6-hd', label: 'Speech 2.6 HD', kind: 'speech' }, { id: 'speech-02-turbo', label: 'Speech 02 Turbo', kind: 'speech' }, { id: 'speech-02-hd', label: 'Speech 02 HD', kind: 'speech' }]],
+      ['rime', [{ id: 'coda', label: 'Coda', kind: 'speech' }, { id: 'mistv3', label: 'Mist v3', kind: 'speech' }, { id: 'mistv2', label: 'Mist v2', kind: 'speech' }]],
+      ['hume', [{ id: 'octave-2', label: 'Octave 2', kind: 'speech' }]],
+      ['bland', [{ id: 'btts-3', label: 'Bland TTS v3', kind: 'speech' }, { id: 'btts-2', label: 'Bland TTS v2', kind: 'speech' }]],
       ['assemblyai', [{ id: 'universal-3-6-pro', label: 'Universal-3.6 Pro', kind: 'recognition' }, { id: 'universal-streaming-multilingual', label: 'Universal Streaming Multilingual', kind: 'recognition' }, { id: 'universal-streaming-english', label: 'Universal Streaming English', kind: 'recognition' }]],
       ['deepgram', [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }, { id: 'aura-2', label: 'Aura 2', kind: 'speech' }]],
       ['cartesia', [{ id: 'ink-whisper', label: 'Ink Whisper', kind: 'recognition' }, { id: 'sonic-3.6', label: 'Sonic 3.6', kind: 'speech' }]],
       ['fish', [{ id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' }, { id: 's2.1-pro', label: 'S2.1 Pro', kind: 'speech' }]],
       ['elevenlabs', [{ id: 'scribe_v2_realtime', label: 'Scribe v2 Realtime', kind: 'recognition' }, { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }, { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }]],
     ] as const) {
+      // One person per company, so the limit on tries never decides how many companies this can cover
+      (getSessionUser as jest.Mock).mockResolvedValue({ id: `u-${people}-${adapter}`, email: 'ana@example.com' });
       answer(200);
       const response = await send({ adapter, apiKey: KEY });
       expect([adapter, response.status, await response.json()]).toEqual([adapter, 200, { ok: true, models }]);

@@ -34,12 +34,15 @@ jest.mock('@/lib/avatar-catalog-validator', () => ({
   resolveCompanionTexture: jest.fn().mockResolvedValue({ valid: true, texture: null }),
 }));
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn() }));
+// What it hands over is covered in guest-brick-db.test.ts
+jest.mock('@/lib/guest-brick', () => ({ adoptGuestChat: jest.fn().mockResolvedValue({ adopted: false }) }));
 
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { authenticateRequest } from '@/lib/oidc';
 import { GET as roomAccess } from '@/app/api/room/access/route';
 import { isLinkableGuestId } from '@/lib/guest-sign-in-link';
+import { adoptGuestChat } from '@/lib/guest-brick';
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
 
@@ -134,6 +137,31 @@ describe('GET /api/room/access, a guest signing in (#630)', () => {
 
   it('still lets the person in when the move fails, and tells Sentry', async () => {
     db.roomAccess.findMany.mockRejectedValue(new Error('db down'));
+    const body = await enter(`&previousGuestUuid=${GUEST}`);
+    expect(body.status).toBe('ok');
+    expect(Sentry.captureException).toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/room/access, a guest signing in with a chat with the Brick for guests (game #1997)', () => {
+  it('hands that chat to the account that signed in, under the guest id the game checked', async () => {
+    const body = await enter(`&previousGuestUuid=${GUEST}`);
+    expect(body.status).toBe('ok');
+    expect(adoptGuestChat).toHaveBeenCalledTimes(1);
+    expect(adoptGuestChat).toHaveBeenCalledWith(GUEST, 'u1');
+  });
+
+  it('hands nothing over without that id, when the sign-in was not verified, or for an id that is some account’s own', async () => {
+    await enter();
+    (authenticateRequest as jest.Mock).mockResolvedValue({ isAuthenticated: false });
+    await enter(`&previousGuestUuid=${GUEST}`);
+    (authenticateRequest as jest.Mock).mockResolvedValue(SIGNED_IN);
+    await enter(`&previousGuestUuid=${ACCOUNT.uuid}`);
+    expect(adoptGuestChat).not.toHaveBeenCalled();
+  });
+
+  it('still lets the person in when the hand-over fails, and tells Sentry', async () => {
+    (adoptGuestChat as jest.Mock).mockRejectedValueOnce(new Error('db down'));
     const body = await enter(`&previousGuestUuid=${GUEST}`);
     expect(body.status).toBe('ok');
     expect(Sentry.captureException).toHaveBeenCalled();

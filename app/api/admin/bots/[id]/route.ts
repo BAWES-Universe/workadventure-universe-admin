@@ -23,17 +23,17 @@ export async function PATCH(
       UPDATE bots
       SET behavior_config = jsonb_set(behavior_config, '{showToolCalls}', ${JSON.stringify(showToolCalls)}::jsonb, true),
           updated_at = NOW(), updated_by_id = ${user.id}
-      WHERE id = ${id}
+      WHERE id = ${id} AND room_id IS NOT NULL
       RETURNING id
     `);
     if (updated.length === 0) return NextResponse.json({ error: 'Bot not found' }, { status: 404 });
     return NextResponse.json({ showToolCalls });
   } catch (error) {
     if (error instanceof z.ZodError || error instanceof SyntaxError) {
-      return NextResponse.json({ error: 'Show tool calls must be a boolean' }, { status: 400 });
+      return NextResponse.json({ error: 'Show app use must be a boolean' }, { status: 400 });
     }
     console.error('Error saving bot tool-call setting:', error);
-    return NextResponse.json({ error: 'Could not save Show tool calls' }, { status: 500 });
+    return NextResponse.json({ error: 'Could not save Show app use' }, { status: 500 });
   }
 }
 
@@ -105,6 +105,11 @@ export async function GET(
         },
       },
     });
+
+    // A Brick (game #1992) is its owner's: its page is not opened here, by a super admin either
+    if (bot && bot.roomId === null) {
+      return NextResponse.json({ error: 'Bot not found' }, { status: 404 });
+    }
 
     // Build where clause for usage history (always fetch usage, even if bot was deleted)
     const usageWhere: any = {

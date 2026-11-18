@@ -48,10 +48,14 @@ const talking = (model = 'gpt-realtime-2.1'): VoiceProfile => ({
 });
 
 describe('the OpenAI entry', () => {
-  it('talks live only, with its realtime models and its fixed voices, ranked nowhere', () => {
+  it('listens and talks live, with its hearing and realtime models and its fixed voices, ranked nowhere', () => {
     const openai = voiceKeyCompanyInfo('openai');
-    expect(openai?.does).toEqual({ recognition: false, speech: false, talk: true });
+    // Hearing only besides talking live: OpenAI's own speaking is not offered (#1900)
+    expect(openai?.does).toEqual({ recognition: true, speech: false, talk: true });
     expect(openai?.models).toEqual([
+      { id: 'gpt-realtime-whisper', label: 'GPT Realtime Whisper', kind: 'recognition' },
+      { id: 'gpt-transcribe', label: 'GPT Transcribe', kind: 'recognition' },
+      { id: 'gpt-live-transcribe', label: 'GPT Live Transcribe', kind: 'recognition' },
       { id: 'gpt-realtime-2.1', label: 'GPT Realtime 2.1', kind: 'talk' },
       { id: 'gpt-realtime-2.1-mini', label: 'GPT Realtime 2.1 mini', kind: 'talk' },
     ]);
@@ -64,11 +68,17 @@ describe('the OpenAI entry', () => {
 describe('the Google entry', () => {
   it('talks live only, with Gemini 3.8 Live and its 30 prebuilt voices', () => {
     const google = voiceKeyCompanyInfo('google');
-    expect(google?.does).toEqual({ recognition: false, speech: false, talk: true });
-    expect(google?.models).toEqual([{ id: 'gemini-3.8-live', label: 'Gemini 3.8 Live', kind: 'talk' }]);
+    // Gemini text to speech besides talking live (#1891)
+    expect(google?.does).toEqual({ recognition: false, speech: true, talk: true });
+    expect(google?.models).toEqual([
+      { id: 'gemini-3.8-flash-tts', label: 'Gemini 3.8 Flash TTS', kind: 'speech' },
+      { id: 'gemini-3.8-flash-lite-tts', label: 'Gemini 3.8 Flash-Lite TTS', kind: 'speech' },
+      { id: 'gemini-3.8-live', label: 'Gemini 3.8 Live', kind: 'talk' },
+    ]);
     const voices = google?.jobs.talk?.fixedVoices ?? [];
     expect(voices).toHaveLength(30);
     expect(new Set(voices.map((voice) => voice.id)).size).toBe(30);
+    expect(google?.jobs.speech?.fixedVoices).toEqual(voices);
     expect(google?.check.header).toBe('x-goog-api-key');
     expect(google?.check.alsoRefused).toEqual({ status: 400, includes: 'API_KEY_INVALID' });
     expect(JSON.stringify(google)).not.toMatch(/recommend/i);
@@ -103,11 +113,14 @@ describe('the Ultravox entry', () => {
 });
 
 describe('the xAI entry', () => {
-  it('talks live only, with its Grok Voice models and its 28 built-in voices, Eve first', () => {
+  it('listens, speaks and talks live, with its Grok models and its 28 built-in voices for speaking and talking, Eve first', () => {
     const xai = voiceKeyCompanyInfo('xai');
     expect(xai?.label).toBe('xAI');
-    expect(xai?.does).toEqual({ recognition: false, speech: false, talk: true });
+    // Hearing and speaking of its own besides talking live (#1907)
+    expect(xai?.does).toEqual({ recognition: true, speech: true, talk: true });
     expect(xai?.models).toEqual([
+      { id: 'grok-voice-transcribe-2.0', label: 'Grok Voice Transcribe 2.0', kind: 'recognition' },
+      { id: 'grok-tts', label: 'Grok Text to Speech', kind: 'speech' },
       { id: 'grok-voice-latest', label: 'Grok Voice (latest)', kind: 'talk' },
       { id: 'grok-voice-3.0', label: 'Grok Voice 3.0', kind: 'talk' },
     ]);
@@ -115,6 +128,7 @@ describe('the xAI entry', () => {
     expect(voices).toHaveLength(28);
     expect(voices[0]).toEqual({ id: 'eve', name: 'Eve' });
     expect(new Set(voices.map((voice) => voice.id)).size).toBe(28);
+    expect(xai?.jobs.speech?.fixedVoices).toEqual(voices);
     expect(xai?.check).toEqual({ url: 'https://api.x.ai/v1/tts/voices', header: 'Authorization', prefix: 'Bearer ' });
     expect(JSON.stringify(xai)).not.toMatch(/recommend/i);
   });
@@ -189,10 +203,15 @@ describe('a provider with a talking model', () => {
 });
 
 describe('the Zoom entry', () => {
-  it('talks live only, in English, with its built-in model and its ten listed voices, Jenna first, checked for free with Bearer', () => {
+  it('listens with Scribe and talks live in English, with its built-in model and its ten listed voices, Jenna first, checked for free with Bearer', () => {
     const zoom = voiceKeyCompanyInfo('zoom');
-    expect(zoom?.does).toEqual({ recognition: false, speech: false, talk: true });
-    expect(zoom?.models).toEqual([{ id: 'gemma-4', label: 'Gemma 4', kind: 'talk' }]);
+    // Scribe hearing besides talking live (#1908)
+    expect(zoom?.does).toEqual({ recognition: true, speech: false, talk: true });
+    expect(zoom?.models).toEqual([
+      { id: 'zoom-scribe-multilingual', label: 'Scribe Multilingual', kind: 'recognition' },
+      { id: 'whisper', label: 'Whisper', kind: 'recognition' },
+      { id: 'gemma-4', label: 'Gemma 4', kind: 'talk' },
+    ]);
     expect(zoom?.jobs.talk?.fixedVoices?.map((voice) => voice.id)).toEqual(['jenna', 'alex', 'ariel', 'ava', 'brooke', 'hazel', 'mark', 'reid', 'scott', 'tony']);
     expect(zoom?.jobs.talk?.voices).toBeUndefined();
     expect(zoom?.check).toEqual({ url: 'https://api.zoom.us/v2/aiservices/scribe/jobs?page_size=1', header: 'Authorization', prefix: 'Bearer ' });

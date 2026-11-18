@@ -8,7 +8,9 @@ export const runtime = 'nodejs';
  * The artifacts made in this chat that the person may open, the most recently changed first (up to 20). A bot asks it to
  * find the artifact a person means in a later message, and after a restart.
  *
- * Auth: BOT_SERVICE_TOKEN (the admin token also works). Body: { botId, person, chat }
+ * Auth: BOT_SERVICE_TOKEN (the admin token also works). Body: { botId, person, chat, everyoneHere? }
+ * `everyoneHere: true` is for a reply other people in the chat read too (game #1993): only this chat's, and of those only
+ * what all of them may open. Never a "Just you", and nothing the person has in another chat.
  * Response: { artifacts, hidden }
  */
 export const POST = artifactRoute('POST /api/artifacts/in-chat', 'bot', inChatSchema, (body) => listArtifactsInChat(body));

@@ -26,10 +26,10 @@ export function BotToolCallSwitch({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ showToolCalls: value }),
       });
-      if (!response.ok) throw new Error('Could not save Show tool calls. Please try again.');
+      if (!response.ok) throw new Error('Could not save Show app use. Please try again.');
       onSaved(value);
     } catch {
-      setError('Could not save Show tool calls. Please try again.');
+      setError('Could not save Show app use. Please try again.');
     } finally {
       setSaving(false);
     }
@@ -39,14 +39,14 @@ export function BotToolCallSwitch({
     <div className="mt-4 grid gap-3">
       <SettingSwitch
         id={`show-tool-calls-${botId}`}
-        label="Show tool calls"
-        hint="On: show tool names while this bot uses them. Off: keep tool calls hidden."
+        label="Show app use"
+        hint="On: shows which app it used in chat. Off: app use stays hidden."
         checked={value}
         onChange={save}
         disabled={saving}
       />
       <span role="status" className="sr-only">
-        {saving ? 'Saving Show tool calls' : ''}
+        {saving ? 'Saving Show app use' : ''}
       </span>
       {error && (
         <Alert variant="destructive">

@@ -2,6 +2,8 @@ import { NextRequest } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 import { VoiceKeyRefused, createVoiceKey, createVoiceKeySchema, listVoiceKeys, voiceKeyCompanies } from '@/lib/voice-keys';
+import { prisma } from '@/lib/db';
+import { discoverVoiceModels } from '@/lib/voice-discovery';
 
 export const runtime = 'nodejs';
 
@@ -20,6 +22,8 @@ export async function GET(request: NextRequest) {
   const user = await getSessionUser(request);
   if (!user) return respond(request, { error: 'Unauthorized' }, 401);
   try {
+    // The models fill in on their own from each key's company before they are shown
+    await discoverVoiceModels(await prisma.voiceProvider.findMany({ where: { ownerId: user.id } }));
     return respond(request, { keys: await listVoiceKeys(user.id), companies: await voiceKeyCompanies() });
   } catch (error) {
     console.error('[VoiceKeys] Could not list the keys:', error instanceof Error ? error.message : 'unknown');
