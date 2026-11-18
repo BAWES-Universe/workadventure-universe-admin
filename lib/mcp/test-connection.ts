@@ -1,6 +1,6 @@
 import { decryptApiKey } from '@/lib/encryption';
 import { extractErrorCode, readBodyWithLimit, truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
-import { isAllowedServerIp, isAllowedServerUrl } from '@/lib/mcp/outbound-guard';
+import { isAllowedServerUrl, pinnedFetch } from '@/lib/mcp/outbound-guard';
 import { headerProblem } from '@/lib/mcp/header-text';
 
 interface McpToolDescriptor {
@@ -309,16 +309,8 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
       };
     }
 
-    // DNS-level SSRF guard: resolve hostname and verify resolved IPs are not private
-    const ipCheck = await isAllowedServerIp(server.serverUrl);
-    if (!ipCheck.allowed) {
-      return {
-        success: false,
-        toolCount: 0,
-        toolNames: [],
-        error: ipCheck.error || 'Server URL resolves to a blocked address',
-      };
-    }
+    // The DNS-level guard is part of every request (pinnedFetch): the name is resolved once, the addresses are checked, and the connection
+    // is made to the checked address, so a name that changes its answer between a check and the request reaches nothing internal
 
     // The headers a redirect gets: all of them on the same origin (an authenticated /mcp that redirects to /mcp/ still needs its
     // sign-in), only the two that carry no secret and no session on any other origin (prevents leaking bearer tokens, API keys,
@@ -341,16 +333,11 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
       if (!isAllowedServerUrl(url)) {
         throw new Error('Server redirected to an internal or private address');
       }
-      const redirectIpCheck = await isAllowedServerIp(url);
-      if (!redirectIpCheck.allowed) {
-        throw new Error(redirectIpCheck.error || 'Redirect target resolves to a blocked address');
-      }
-      const res = await fetch(url, {
+      const res = await pinnedFetch(url, {
         method: 'POST',
         headers,
         body,
         signal: AbortSignal.timeout(10000),
-        redirect: 'manual',
       });
       if (res.status >= 300 && res.status < 400) {
         const location = res.headers.get('location');
@@ -377,12 +364,11 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
       wwwAuthenticate?: string | null;
       errorBody?: string | null;
     }> {
-      const res = await fetch(server.serverUrl, {
+      const res = await pinnedFetch(server.serverUrl, {
         method: 'POST',
         headers,
         body,
         signal: AbortSignal.timeout(10000),
-        redirect: 'manual',
       });
 
       // Handle redirect via the same SSRF-safe followRedirect
