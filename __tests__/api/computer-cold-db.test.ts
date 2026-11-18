@@ -21,6 +21,7 @@ jest.mock('@/lib/meter', () => {
 });
 
 import { prisma } from '@/lib/db';
+import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 import { createBrick } from '@/lib/brick-create';
 import { COLD_RUN_MAX_MS } from '@/lib/computer-values';
 import { saveServerLimits } from '@/lib/bot-limits';
@@ -924,7 +925,7 @@ run('cold storage for a Brick’s computer, in a real database', () => {
         claimTried = prisma.brickComputer
           .updateMany({ where: { botId: brick.botId, machine: 'cold', providerRef: null }, data: { machine: 'restoring', packStage: 'returning', packClaimId: 'replacement' } })
           .then((done) => { claimAnswered = true; return done; });
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await waitUntilBlockedOnLock();
         answeredEarly = claimAnswered;
         return remove(ref);
       };
@@ -969,9 +970,11 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       });
       await claimedIt;
       const settling = recordKeptBytes({ botId: brick.botId, reason: 'gone', machineBytes: null, copyBytes: 7, now: NOW, onlyWhileCold: true });
-      // It has not finished while the return holds the row
-      const early = await Promise.race([settling.then(() => 'done'), new Promise((resolve) => setTimeout(() => resolve('waiting'), 400))]);
-      expect(early).toBe('waiting');
+      // It has not finished while the return holds the row: the database shows it waiting on that row
+      let settled = false;
+      void settling.then(() => { settled = true; });
+      await waitUntilBlockedOnLock();
+      expect(settled).toBe(false);
       release();
       await returning;
       expect(await settling).toBe(true);

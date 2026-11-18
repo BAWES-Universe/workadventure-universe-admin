@@ -14,6 +14,7 @@ jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
+import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
@@ -332,7 +333,7 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       // Another leader proved the fence and tries to give the person the screen while the first one's stop is still out
       let moved = false;
       const finishing = finishTransition(sara.brickId, 'fencing', control!.epoch, 'human_ready').then((done) => { moved = done; return done; });
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await waitUntilBlockedOnLock();
       // It has not been able to: the stop holds the computer's row until it is over
       expect(moved).toBe(false);
       expect((await readControl(sara.brickId))?.state).toBe('fencing');
@@ -369,13 +370,7 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
         const leader = takeOver(sara.brickId, sara.id, NOW);
         await inStop;
         // Wait until the database shows the replacement's UPDATE waiting on a lock (not a fixed delay): only then has it reached the row the stop holds
-        const waitingOnLock = async () => {
-          const rows = await prisma.$queryRaw<{ n: bigint }[]>`SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE 'UPDATE%brick_computers%'`;
-          return Number(rows[0]?.n ?? 0) > 0;
-        };
-        const until = Date.now() + 10_000;
-        while (!(await waitingOnLock()) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 25));
-        expect(await waitingOnLock()).toBe(true);
+        await waitUntilBlockedOnLock();
         expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).not.toBe('resting');
         release();
         await leader;

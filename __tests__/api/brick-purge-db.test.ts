@@ -32,6 +32,7 @@ jest.mock('@/lib/computer-calls', () => {
 });
 import * as computerCalls from '@/lib/computer-calls';
 import { prisma } from '@/lib/db';
+import { waitUntilBlockedOnLock, waitUntilNoStatementRuns } from '../helpers/db-blocked';
 import { createBrick } from '@/lib/brick-create';
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
 import { finishOutside, isPurged, purgeBrick, confirmChatPurges, DELETED_MAKER_NAME } from '@/lib/brick-purge';
@@ -601,8 +602,8 @@ run('purging a deleted Brick, in a real database', () => {
       expect(await chat.json()).toMatchObject({ status: 'gone' });
       const metrics = await saveMetrics(asBotServer('/api/bots/metrics', { metrics: [{ botId: brick.id, timestamp: later(9).toISOString(), metrics: { responseTime: 2 } }] }));
       expect(metrics.status).toBe(200);
-      // Give the fire-and-forget part of a memory save its moment: it must have written nothing either
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      // The fire-and-forget part of a memory save has nothing left running: it must have written nothing either
+      await waitUntilNoStatementRuns();
       expect(await owned(brick.id)).toEqual(NOTHING);
     });
 
@@ -655,7 +656,6 @@ run('purging a deleted Brick, in a real database', () => {
       const there = new Promise<void>((resolve) => { reached = resolve; });
       return { release, gate, reached, there };
     };
-    const quiet = () => new Promise((resolve) => setTimeout(resolve, 600));
 
     it('a save that is under way when the purge begins is finished first and then deleted with the rest: no chat, memory or test result survives', async () => {
       const sara = await person('sara');
@@ -676,7 +676,7 @@ run('purging a deleted Brick, in a real database', () => {
       await hold.there;
       let finished = false;
       const purge = purgeBrick(brick.id, later(8)).then((outcome) => { finished = true; return outcome; });
-      await quiet();
+      await waitUntilBlockedOnLock();
       // The purge waits for the save that is under way
       expect(finished).toBe(false);
       hold.release();
@@ -712,7 +712,7 @@ run('purging a deleted Brick, in a real database', () => {
       ).then((row) => { answered++; return row; });
       const testId = `late-test-${tag}-${made}`;
       const result = saveTestResult(asBotServer('/api/bots/test/results', { testId, botId: brick.id, results: { ok: true }, passed: true })).then((response) => { answered++; return response; });
-      await quiet();
+      await waitUntilBlockedOnLock(3);
       // None of the three is answered, and none has written, while the purge holds the lock
       expect(answered).toBe(0);
       hold.release();
