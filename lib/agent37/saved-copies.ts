@@ -222,8 +222,14 @@ export async function openSealedStream(key: string): Promise<{ stream: Readable;
   const found = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
   if (!found.Body) throw new Error('The saved copy could not be read');
   const bytes = Math.max(0, (found.ContentLength ?? 0) - COPY_OVERHEAD);
-  const stream = (found.Body as Readable).pipe(decryptor(derivedKey(PURPOSE)));
-  (found.Body as Readable).on('error', (error) => stream.destroy(error));
+  const body = found.Body as Readable;
+  const stream = body.pipe(decryptor(derivedKey(PURPOSE)));
+  body.on('error', (error) => stream.destroy(error));
+  // A download that is cancelled, or that fails its check, destroys the decrypted stream; pipe() does not pass that back, so the response from the bucket is let go here
+  // (otherwise its connection stays checked out of the pool until the bucket's idle timeout)
+  stream.on('close', () => {
+    if (!body.destroyed) body.destroy();
+  });
   return { stream, bytes };
 }
 

@@ -3,6 +3,8 @@ import { gzipSync } from 'node:zlib';
 import { Readable } from 'node:stream';
 
 const stored = new Map<string, Buffer>();
+// Bodies a test hands out for a key to read (a download that is still coming)
+const openBodies = new Map<string, Readable>();
 let abortCalled = false;
 let failUpload = false;
 
@@ -40,6 +42,9 @@ jest.mock('@/lib/artifact-storage', () => ({
           const page = keys.slice(0, 2);
           return { Contents: page.map((Key) => ({ Key, LastModified: new Date('2026-11-14T12:00:00Z') })), IsTruncated: keys.length > 2, NextContinuationToken: page[page.length - 1] };
         }
+        if (kind === 'GetObjectCommand' && openBodies.has(command.input.Key)) {
+          return { Body: openBodies.get(command.input.Key), ContentLength: 1000 };
+        }
         if (kind === 'DeleteObjectCommand') {
           if (failDeletes) throw new Error('bucket would not delete');
           stored.delete(command.input.Key);
@@ -72,7 +77,7 @@ jest.mock('@aws-sdk/lib-storage', () => ({
   },
 }));
 
-import { COPY_OVERHEAD, deleteSavedCopy, listSealed, openSavedCopy, savedCopyKey, savedCopyOf, storeSavedCopy } from '@/lib/agent37/saved-copies';
+import { COPY_OVERHEAD, deleteSavedCopy, listSealed, openSavedCopy, openSealedStream, savedCopyKey, savedCopyOf, storeSavedCopy } from '@/lib/agent37/saved-copies';
 
 const webStream = (...parts: Buffer[]) => Readable.toWeb(Readable.from(parts)) as unknown as ReadableStream<Uint8Array>;
 
@@ -238,5 +243,22 @@ describe('the saved copy of a Brick computer’s files', () => {
     expect(all.map((object) => object.key)).toEqual(['a', 'b', 'c', 'd', 'e'].map((name) => `computer-cold/bot-1/${name}`));
     expect(all[0].modifiedAt.toISOString()).toBe('2026-11-14T12:00:00.000Z');
     expect(await listSealed('computer-cold/', 3)).toHaveLength(3);
+  });
+
+  it('lets go of the response from the bucket when a download is cancelled half way, so its connection is not left checked out', async () => {
+    const body = new Readable({ read() {} });
+    body.push(Buffer.alloc(10));
+    openBodies.set('computer-cold/bot-1/x', body);
+    try {
+      const { stream } = await openSealedStream('computer-cold/bot-1/x');
+      expect(body.destroyed).toBe(false);
+      // The client goes away: the decrypted stream is destroyed
+      stream.on('error', () => undefined);
+      stream.destroy();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(body.destroyed).toBe(true);
+    } finally {
+      openBodies.delete('computer-cold/bot-1/x');
+    }
   });
 });
