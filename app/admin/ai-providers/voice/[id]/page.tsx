@@ -146,17 +146,20 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
       // and a Check key still out is about it too. A change of name or models keeps the list
       const before = seen.current;
       seen.current = found;
+      // The first read after a key was replaced here is the one that follows that save, whether or not the key looks different (a new
+      // key can end in the same four characters): the flag is used up by it, so a later change from elsewhere is never taken as ours
+      const ownKey = keyReplacedHere.current;
+      keyReplacedHere.current = false;
       if (before) {
         const keyChanged = before.hasKey !== found.hasKey || before.apiKeyLast4 !== found.apiKeyLast4;
         const moved = before.endpoint !== found.endpoint || before.adapter !== found.adapter || before.region !== found.region;
         // A key replaced on this page has already cleared the list and said the key is known: that is not undone
-        if (moved || (keyChanged && !keyReplacedHere.current)) {
+        if (moved || (keyChanged && !ownKey)) {
           checkRun.current++;
           setChecking(false);
           setChecked(null);
           setListed(null);
         }
-        if (keyChanged) keyReplacedHere.current = false;
       }
       setAll(answer.data.providers);
       setProvider(found);

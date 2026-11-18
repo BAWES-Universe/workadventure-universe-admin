@@ -1078,6 +1078,27 @@ describe('A voice provider\u2019s models, from the company\u2019s own list for i
     expect(patches().every((patch) => !('models' in (patch.body as object)))).toBe(true);
   });
 
+  it('does not take a key changed elsewhere for one replaced here, even when the key replaced here ended in the same four characters', async () => {
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] } };
+    await open('v-eleven');
+    // The key is replaced here with one that ends the same as the saved one (a1b2)
+    fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+    fireEvent.change(screen.getByLabelText('New key'), { target: { value: 'sk_new_key_a1b2' } });
+    const before = reads();
+    fireEvent.click(screen.getByRole('button', { name: 'Check and replace' }));
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    await screen.findByText('ElevenLabs knows this key. Checked just now, nothing paid.');
+    // The company's list is read for the new key
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText('ElevenLabs knows this key and lists 1 model for it. Checked just now, nothing paid.');
+    // Then the key is changed from another tab: the next read has another key, which is not ours
+    providers = [soniox(), { ...eleven(), apiKeyLast4: 'zz99' }];
+    const again = reads();
+    await rename('ElevenLabs main');
+    await waitFor(() => expect(reads()).toBeGreaterThan(again));
+    await waitFor(() => expect(screen.queryAllByRole('checkbox')).toHaveLength(0));
+  });
+
   it('keeps the rows when the company has no list or it can\u2019t be read', async () => {
     fireEvent.click(await open('v-eleven'));
     expect(await screen.findByText('ElevenLabs knows this key. Checked just now, nothing paid.')).toBeTruthy();
