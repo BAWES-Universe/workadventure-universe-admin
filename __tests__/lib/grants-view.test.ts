@@ -12,6 +12,9 @@ describe('typed dollars', () => {
     expect(microsOfDollars('2')).toBe(2_000_000);
     expect(microsOfDollars(' $2.50 ')).toBe(2_500_000);
     expect(microsOfDollars('1,000')).toBe(1_000_000_000);
+    expect(microsOfDollars('1,234.50')).toBe(1_234_500_000);
+    // A comma that is not a thousands group is never read as one: "1,50" is not $150
+    for (const bad of ['1,50', '1,5', '12,34', '1,2345', ',500', '1,000,00', '1,000,', '1,,000']) expect(microsOfDollars(bad)).toBeNull();
     expect(microsOfDollars('0')).toBeNull();
     expect(microsOfDollars('-5')).toBeNull();
     expect(microsOfDollars('1e2')).toBeNull();
