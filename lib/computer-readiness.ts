@@ -35,7 +35,9 @@ export async function computerReadiness(): Promise<Readiness> {
   // a copy that cannot be restored must be seen before anyone needs it. Computers that could not be packed away yet are said here too.
   if (coldProvider(provider)) {
     const cold = await coldStatus().catch(() => null);
-    if (cold) {
+    // A status that cannot be read is said, not left out: a missing line would let the page call itself ready without the cold storage check
+    if (!cold) checks.push({ name: 'cold storage', ok: false, detail: 'The cold storage status could not be read' });
+    else {
       const drill = cold.lastDrill ? `last restore drill ${cold.lastDrill.ok ? 'passed' : 'FAILED'} on ${cold.lastDrill.at.toISOString().slice(0, 10)}` : 'no restore drill has run yet';
       const slow = cold.slowestReturnMs === null ? 'no return measured yet' : `slowest measured return ${Math.round(cold.slowestReturnMs / 1000)} s over ${cold.returns} return${cold.returns === 1 ? '' : 's'}`;
       // The size is what the bucket really holds (not an estimate from one example); the awake seconds are measurements of the last 30 days

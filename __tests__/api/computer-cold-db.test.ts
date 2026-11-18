@@ -1474,6 +1474,17 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(cold?.detail).toContain('1 computer packed away');
     });
 
+    it('says so on the readiness page, and is not ready, when the cold storage status cannot be read', async () => {
+      const spy = jest.spyOn(prisma.computerColdRun, 'findFirst').mockRejectedValue(new Error('the database is down') as never);
+      try {
+        const readiness = await computerReadiness();
+        expect(readiness.checks.find((check) => check.name === 'cold storage')).toMatchObject({ ok: false, detail: 'The cold storage status could not be read' });
+        expect(readiness.ready).toBe(false);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('does nothing when there is no proved copy to restore', async () => {
       expect(await restoreDrill(provider, NOW)).toBeNull();
       expect(provider.calls.some((call) => call.name === 'makeScratch')).toBe(false);
