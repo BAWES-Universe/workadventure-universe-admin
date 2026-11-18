@@ -844,6 +844,89 @@ run('the bounded Instant executor, in a real database', () => {
     });
   });
 
+  describe('review findings on pausing and on what the books confirm', () => {
+    afterEach(() => setInstantHooks(undefined));
+
+    it('an ask that waited for the person’s rules while Instant was paused is stopped, and holds and sends nothing', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const { pauseInstant } = await import('@/lib/instant/state');
+      setInstantHooks({ beforeRun: async () => { await pauseInstant('manual', sara); return undefined; } });
+      const key = callId();
+      expect(await runInstant(ask({ callId: key }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'paused' });
+      expect(f.funds.reserve).not.toHaveBeenCalled();
+      expect(p.instant.run).not.toHaveBeenCalled();
+      expect(await prisma.instantRun.count({ where: { runKey: instantRunKey(brick, key) } })).toBe(0);
+    });
+
+    it('a give-back the books never confirmed, and a give-back for a run outside the window, are not failures', async () => {
+      await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 2 });
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      const ids: string[] = [];
+      for (const n of [1, 2]) {
+        const key = callId();
+        await runInstant(ask({ callId: key, arguments: { query: `gw${n}` } }), { adapter: p.adapter, funds: f.funds });
+        ids.push(await runIdOf(key));
+      }
+      // An intent the books may or may not have acted on: nothing is known to have been given back
+      await prisma.instantRefund.create({ data: { refundKey: `gw-a-${tag}`, runId: ids[0], personId: sara, kind: 'goodwill', amountMicros: BigInt(1_000) } });
+      expect(await evaluatePause()).toBe(false);
+      // Confirmed, but for a run that finished before the window
+      await prisma.instantRun.update({ where: { id: ids[0] }, data: { finishedAt: new Date(Date.now() - 48 * 3_600_000) } });
+      await prisma.instantRefund.updateMany({ where: { refundKey: `gw-a-${tag}` }, data: { confirmedAt: new Date() } });
+      expect(await evaluatePause()).toBe(false);
+      // Confirmed, for a run in the window: that is a failure of the runs being counted
+      await prisma.instantRun.update({ where: { id: ids[0] }, data: { finishedAt: new Date() } });
+      expect(await evaluatePause()).toBe(true);
+    });
+
+    it('a resume that comes while the failure counts are being read drops that pause', async () => {
+      await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 2 });
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      for (const n of [1, 2]) {
+        p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'x', logId: `rs${n}`, chargeMicros: null });
+        await runInstant(ask({ arguments: { query: `rs${n}` } }), { adapter: p.adapter, funds: f.funds });
+      }
+      expect(await getInstantPause()).toMatchObject({ paused: true });
+      await resumeInstant(sara);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // Two more failures after that resume; the counts are read, then a super admin resumes again before the pause is taken
+      await prisma.instantRun.updateMany({ where: { state: 'failed' }, data: { finishedAt: new Date() } });
+      const real = prisma.instantRun.count.bind(prisma.instantRun);
+      const spy = jest.spyOn(prisma.instantRun, 'count').mockImplementation(((args: never) => {
+        const answer = real(args);
+        spy.mockRestore();
+        return answer.then(async (count) => {
+          await resumeInstant(sara);
+          return count;
+        });
+      }) as never);
+      expect(await evaluatePause()).toBe(false);
+      expect((await getInstantPause()).paused).toBe(false);
+    });
+
+    it('a run the books could not settle shows no customer charge in the meter event, and shows it once the books confirm it', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.funds.settle.mockRejectedValueOnce(new Error('books down'));
+      const key = callId();
+      await runInstant(ask({ callId: key }), { adapter: p.adapter, funds: f.funds });
+      const id = await runIdOf(key);
+      expect((await runOf(id)).customerState).toBe('held');
+      const before = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${id}` } });
+      expect((before.detail as { customerMicros: number | null }).customerMicros).toBeNull();
+      // The sweep says it again, and the books confirm
+      await reconcileRun(id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      const after = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${id}` } });
+      expect((after.detail as { customerMicros: number }).customerMicros).toBe(Number((await runOf(id)).customerMicros));
+      expect(Number((await runOf(id)).customerMicros)).toBeGreaterThan(0);
+    });
+  });
+
   describe('Instant stops by itself', () => {
     it('pauses when the failure share of recent runs passes what a super admin set, once enough runs happened', async () => {
       await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 4 });

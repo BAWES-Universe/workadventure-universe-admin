@@ -170,6 +170,11 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
   const created = await prisma.$transaction(
     async (tx): Promise<{ kind: 'run'; run: Row } | { kind: 'known'; run: Row } | { kind: 'refused'; outcome: InstantOutcome }> => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${EXPOSURE_LOCK}))`;
+      // The pause is read again here, under a lock a pause also takes: a pause made while this ask waited for the person's rules or
+      // grants stops it, and a pause that comes after this commits finds a run that is going (runs going finish and settle). Taken
+      // after the exposure lock; a pause never waits on that lock, so the two cannot make a cycle.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext('instant:state'))`;
+      if ((await getInstantPause(tx)).paused) return { kind: 'refused', outcome: refuse('paused') };
       // The existing run is only handed back from here: looking it up at Composio waits on the network, never under this lock
       const again = await tx.instantRun.findUnique({ where: { runKey } });
       if (again) return { kind: 'known', run: again };
@@ -483,6 +488,8 @@ async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'>): Promise<R
     }
     if (confirmed === null) return run;
     await prisma.instantRun.updateMany({ where: { id: runId, customerState: 'held' }, data: { customerState: 'charged', customerMicros: BigInt(confirmed) } });
+    // The meter event of the run says what the person was charged only from here, at the amount the books confirmed
+    await prisma.$executeRaw`UPDATE meter_events SET detail = jsonb_set(COALESCE(detail::jsonb, '{}'::jsonb), '{customerMicros}', to_jsonb(${confirmed}::bigint)) WHERE event_id = ${`instant:${run.id}`}`;
   } else if (run.state === 'failed' || run.state === 'refused') {
     let gone = false;
     try {
@@ -553,7 +560,9 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
  */
 async function settleSuccess(run: Row, tx: Prisma.TransactionClient, providerMicros: number, basis: 'measured' | 'estimated', limits: InstantLimits, ctx: Ctx): Promise<number> {
   const charged = customerChargeFor(providerMicros, asNumber(run.holdMicros), run.markupBps ?? limits.markupBps);
-  await settleProvider({ ...run, customerMicros: run.customerMicros ?? BigInt(charged) }, tx, providerMicros, basis, ctx.now);
+  // What the person pays is not written into the meter event here: the books have not said it yet, and a run they could not settle is
+  // still held. `finishCustomer` writes the amount into the event once the books confirm it.
+  await settleProvider(run, tx, providerMicros, basis, ctx.now);
   return charged;
 }
 
@@ -736,21 +745,25 @@ export async function evaluatePause(now: Date = new Date()): Promise<boolean> {
   const limits = await getInstantLimits();
   if (limits.pauseFailureRateBps === null || limits.pauseMinRuns === null) return false;
   // Runs that finished before a super admin last turned Instant back on are the ones they already looked at: they never pause it again
-  const resumedAt = (await getInstantPause()).resumedAt;
+  const resumedAt = (await getInstantPause()).resumedAt ?? null;
   const windowStart = now.getTime() - limits.pauseWindowMinutes * MINUTE;
   const since = new Date(Math.max(windowStart, resumedAt ? Date.parse(resumedAt) || 0 : 0));
   // Details Composio would not take are the caller's, not the provider's: they are not runs the failure rate is about
   const notInvalid = { OR: [{ reason: null }, { reason: { not: 'invalid_request' } }] };
-  const [done, failed, givenBack] = await Promise.all([
+  const [done, failed, refunded] = await Promise.all([
     prisma.instantRun.count({ where: { state: { in: ['succeeded', 'failed'] }, finishedAt: { gte: since }, ...notInvalid } }),
     prisma.instantRun.count({ where: { state: 'failed', finishedAt: { gte: since }, ...notInvalid } }),
-    prisma.instantRefund.count({ where: { kind: 'goodwill', createdAt: { gte: since } } }),
+    // Only a give-back the books confirmed, and only for a run that is itself in this window: a give-back for an older run, or one
+    // the books never made, is not a failure of the runs being counted
+    prisma.instantRefund.findMany({ where: { kind: 'goodwill', confirmedAt: { not: null, gte: since } }, select: { runId: true } }),
   ]);
+  const givenBack = refunded.length === 0 ? 0 : await prisma.instantRun.count({ where: { id: { in: refunded.map((one) => one.runId) }, state: 'succeeded', finishedAt: { gte: since }, ...notInvalid } });
   if (done < limits.pauseMinRuns) return false;
   const rate = Math.floor(((failed + givenBack) * 10_000) / done);
   if (rate < limits.pauseFailureRateBps) return false;
-  await pauseInstant('failure_rate');
-  return true;
+  // A super admin who turned Instant back on while the counts were being read has looked at these runs: the pause is dropped
+  // unless the resume time is still the one they were counted after (compared under the state lock)
+  return (await pauseInstant('failure_rate', null, undefined, resumedAt)).paused;
 }
 
 // ---------- Giving back after a charge ----------
