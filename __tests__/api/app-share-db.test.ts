@@ -410,7 +410,7 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       const notes = await prisma.userNotice.findMany({ where: { userId: sara, kind: 'app-share-limit' } });
       expect(notes).toHaveLength(1);
       expect(notes[0]).toMatchObject({ title: expect.stringContaining('used up today'), body: expect.stringContaining('change the limit') });
-      expect(notes[0].data).toEqual({ connectionId: app.id, botId: saraBrick, serverId });
+      expect(notes[0].data).toEqual({ connectionId: app.id, botId: saraBrick, serverId, madeBy: 'h3' });
       // Never the owner's account in what the asker is told
       const turned = await ask(saraBrick, serverId, 'guest-session-5', 'h-last');
       expect(JSON.stringify(turned.body)).not.toContain(sara);
@@ -777,15 +777,22 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
     });
 
-    it('does not take the note back while other uses still fill the day', async () => {
+    it('keeps the note when a different use is given back, so the owner is not told twice the same day', async () => {
       const { app, serverId } = await music();
       await shareSong(app.id, saraBrick, { usesPerDayEveryone: 2, usesPerDayPerson: 2 });
+      // Use 1 is still running; use 2 takes the last place and the owner is told when it finishes
       await ask(saraBrick, serverId, omarKey(), 'i1');
-      await ask(saraBrick, serverId, `lena-${tag}`, 'i2');
-      // Two uses were taken, so the day ran out and the note was made. One is given back: 1 of 2 is used, the day is open again
-      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
+      const last = await ask(saraBrick, serverId, `lena-${tag}`, 'i2');
+      expect(last.body.ownerNote).toMatchObject({ limit: 2 });
+      expect((await settle(saraBrick, serverId, 'i2', 'done')).body).toEqual({ status: 'done' });
+      // Use 1 is then confirmed failed and given back: the day is open, but what the owner was told is not taken back
       expect((await settle(saraBrick, serverId, 'i1', 'failed')).body).toEqual({ status: 'refunded' });
-      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(0);
+      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
+      // Someone takes the last place again: the day ran out again, and the owner is not handed the same note a second time
+      const again = await ask(saraBrick, serverId, omarKey(), 'i3');
+      expect(again.body.allowed).toBe(true);
+      expect(again.body).not.toHaveProperty('ownerNote');
+      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
     });
 
     it('says nothing of an owner it has no chat id for', async () => {
