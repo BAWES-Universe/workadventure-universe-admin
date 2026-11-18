@@ -191,6 +191,11 @@ describe('Instant refuses to open until the limits that bound it are set', () =>
     expect(INSTANT_LIMITS_EMPTY.markupBps).toBeNull();
   });
 
+  it('an unclear wait shorter than a request to Composio may take is refused', () => {
+    expect(checkInstantLimits({ unclearWaitMinutes: 1 })).toMatchObject({ ok: false });
+    expect(checkInstantLimits({ unclearWaitMinutes: 2 })).toMatchObject({ ok: true });
+  });
+
   it('reads saved values that fit and ignores the rest', () => {
     const limits = readInstantLimits({ maxRunMicros: 50_000, exposureCeilingMicros: 'lots', pauseFailureRateBps: 0, pauseMinRuns: 20, extra: 1, sentWaitMinutes: 9 });
     expect(limits.maxRunMicros).toBe(50_000);
