@@ -81,11 +81,14 @@ const newestFirst = (a, b) => createdAt(b) - createdAt(a);
  * @param {number} [input.keep]         dev branch builds to keep
  * @param {Set<string>} input.openBranches  sanitized head branches of open PRs
  * @param {Set<string>} input.running   tags dev runs right now
- * @param {string} [input.closedBranch] a PR just closed from this branch: its images go now, whatever their age
+ * @param {string} [input.closedBranch] a PR just closed from this branch: the images it built go now, whatever their age
+ * @param {Set<string>} [input.closedShas] the 7-character shas of that PR's commits. Tags are made from the sanitized branch name,
+ *                                         so a distinct branch like `fix-a` shares tags with `fix/a`; only an image tagged with one of
+ *                                         these shas is the closing PR's own and goes at once, the rest follow the normal age rule
  * @param {number} [input.now]
  * @returns {{ remove: Array<{version: object, reason: string}>, kept: Array<{version: object, reason: string}> }}
  */
-export function planTagged({ versions, rules, keep = DEFAULT_KEEP, openBranches = new Set(), running = new Set(), closedBranch, now = Date.now() }) {
+export function planTagged({ versions, rules, keep = DEFAULT_KEEP, openBranches = new Set(), running = new Set(), closedBranch, closedShas = new Set(), now = Date.now() }) {
   const closed = closedBranch === undefined ? undefined : sanitizeBranch(closedBranch);
   if (closed !== undefined && isProtectedBranch(rules, closed)) {
     throw new Error(`Refusing to clear the images of "${closedBranch}": it is the dev or production branch, not a pull request branch.`);
@@ -125,13 +128,15 @@ export function planTagged({ versions, rules, keep = DEFAULT_KEEP, openBranches 
       for (const version of group) kept.push({ version, reason: 'not this PR' });
       continue;
     }
+    const builtByThisPr = (version) =>
+      isClosed && tagsOf(version).some((tag) => tag.startsWith(`${lineage}-`) && closedShas.has(tag.slice(lineage.length + 1)));
     group.forEach((version, index) => {
       if (index < allowed) {
         kept.push({ version, reason: isDevBranch ? `one of the newest ${keep} dev builds` : 'branch has an open PR' });
-      } else if (!isClosed && now - createdAt(version) < MIN_AGE_DAYS * DAY_MS) {
+      } else if (!builtByThisPr(version) && now - createdAt(version) < MIN_AGE_DAYS * DAY_MS) {
         kept.push({ version, reason: `younger than ${MIN_AGE_DAYS} days` });
       } else {
-        remove.push({ version, reason: isDevBranch ? 'older dev build' : isClosed ? 'its PR is closed' : stillOpen ? 'beyond the newest builds its open PR keeps' : 'branch has no open PR' });
+        remove.push({ version, reason: isDevBranch ? 'older dev build' : builtByThisPr(version) ? 'its PR is closed' : stillOpen ? 'beyond the newest builds its open PR keeps' : 'branch has no open PR' });
       }
     });
   }
@@ -161,7 +166,7 @@ const describe = ({ version, reason }) => `  ${version.id}  ${version.created_at
  *   listVersions(), openBranches(), runningTags(), children(version) -> digests, deleteVersion(version)
  * Returns what it planned; deletes only when `live` is true.
  */
-export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEEP, live, closedBranch, log = console.log, now = Date.now() }) {
+export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEEP, live, closedBranch, closedShas, log = console.log, now = Date.now() }) {
   const versions = await api.listVersions();
   const tagged = versions.filter((version) => tagsOf(version).length > 0);
   const isGuarded = (version) => tagsOf(version).some((tag) => ['release', 'moving'].includes(classifyTag(tag, rules).kind));
@@ -172,7 +177,7 @@ export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEE
   }
   const openBranches = await api.openBranches();
   const running = await api.runningTags();
-  const first = planTagged({ versions, rules, keep, openBranches, running, closedBranch, now });
+  const first = planTagged({ versions, rules, keep, openBranches, running, closedBranch, closedShas, now });
 
   // Untagged versions follow their parents: keep whatever a kept image points to. An image we cannot read keeps everything untagged.
   let untagged = { remove: [], kept: [] };
@@ -227,4 +232,42 @@ export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEE
   if (sawRunning) log(`${packageName}: untagged versions left alone this time, because an image started running.`);
   log(`${packageName}: deleted ${deleted}.`);
   return { remove, deleted };
+}
+
+/**
+ * Reads the command line: `--live` is a switch, every other `--flag` takes a value. A flag with no value (or followed by
+ * another flag) is an error, so an incomplete `--closed-branch` can never turn into a whole-package run.
+ */
+export function parseArgs(argv) {
+  const out = { live: false };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--live') {
+      out.live = true;
+    } else if (arg.startsWith('--')) {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith('--')) throw new Error(`missing value for ${arg}`);
+      out[arg.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = argv[++i];
+    }
+  }
+  return out;
+}
+
+/**
+ * Deletes one package version through the GitHub API. `github(path, init)` is a fetch against it. A 404 only counts as
+ * "already gone" when the version is really not there: GitHub also answers 404 when the token may not delete.
+ */
+export function makeDeleter({ github, packagePath, packageName }) {
+  return async (version) => {
+    const response = await github(`${packagePath}/versions/${version.id}`, { method: 'DELETE' });
+    if (response.status === 404) {
+      const check = await github(`${packagePath}/versions/${version.id}`);
+      if (check.status === 404) return;
+      throw new Error(`could not delete version ${version.id} of ${packageName}: GitHub answered 404 but the version still exists (does this repository have the Admin role under the package's "Manage Actions access"?)`);
+    }
+    if (!response.ok) {
+      const hint = response.status === 403 ? ` Give this repository the Admin role under the package's "Manage Actions access" (package settings; deleting a version needs Admin, not Write) and run it again.` : '';
+      throw new Error(`could not delete version ${version.id} of ${packageName}: GitHub answered ${response.status}.${hint}`);
+    }
+  };
 }

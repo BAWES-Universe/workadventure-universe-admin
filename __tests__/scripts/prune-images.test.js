@@ -19,7 +19,7 @@ const version = (tags, ageDays, name) => ({
 const idsOf = (items) => items.map(({ version: v }) => v.id).sort((a, b) => a - b);
 
 export function defineTests({ lib }) {
-  const { classifyTag, lineageOf, planTagged, planUntagged, prunePackage, sanitizeBranch, tagRules, DEFAULT_KEEP, OPEN_PR_KEEP } = lib;
+  const { classifyTag, lineageOf, makeDeleter, parseArgs, planTagged, planUntagged, prunePackage, sanitizeBranch, tagRules, DEFAULT_KEEP, OPEN_PR_KEEP } = lib;
   const orbit = tagRules({ prodBranch: 'main', devBranch: 'develop' });
   const game = tagRules({ prodBranch: 'universe', devBranch: 'universe-develop' });
   const plan = (versions, extra = {}) => planTagged({ versions, rules: orbit, now: NOW, ...extra });
@@ -52,7 +52,7 @@ export function defineTests({ lib }) {
     it('clears the right branch when two branches look alike', () => {
       const lookalike = version(['issue-1234567', 'issue-1234567-abcdef0'], 0);
       const plain = version(['issue-7654321'], 0);
-      const result = plan([lookalike, plain], { closedBranch: 'issue' });
+      const result = plan([lookalike, plain], { closedBranch: 'issue', closedShas: new Set(['7654321']) });
       assert.deepEqual(idsOf(result.remove), [plain.id]);
     });
     it('tags a branch the way the dev server does', () => {
@@ -99,7 +99,7 @@ export function defineTests({ lib }) {
       const closing = [version(['fix-a', 'fix-a-1111111'], 0), version(['fix-a-2222222'], 0.1)];
       const other = version(['fix-z-2222222'], 20);
       const oldDev = Array.from({ length: 12 }, (_, index) => version([`develop-3${String(index).padStart(6, '0')}`], 3 + index));
-      const result = plan([...closing, other, ...oldDev], { closedBranch: 'fix/a' });
+      const result = plan([...closing, other, ...oldDev], { closedBranch: 'fix/a', closedShas: new Set(['1111111', '2222222']) });
       assert.deepEqual(idsOf(result.remove), idsOf(closing.map((v) => ({ version: v }))));
       assert.ok(result.remove.every((item) => item.reason === 'its PR is closed'));
     });
@@ -117,6 +117,19 @@ export function defineTests({ lib }) {
       // it behaves like any open-PR branch: the newest 3 stay (two fresh, one old), the older ones beyond them go
       assert.deepEqual(idsOf(result.remove), idsOf(old.slice(1).map((v) => ({ version: v }))));
       assert.ok(result.remove.every((item) => item.reason === 'beyond the newest builds its open PR keeps'));
+    });
+
+    it('clears at once only the images built from the closing PR\'s own commits, not a distinct branch with the same sanitized name', () => {
+      const own = [version(['fix-a', 'fix-a-1111111'], 0), version(['fix-a-2222222'], 0.1)];
+      const lookalike = version(['fix-a-9999999'], 0.2); // built on branch `fix-a`, not by the PR from `fix/a`
+      const result = plan([...own, lookalike], { closedBranch: 'fix/a', closedShas: new Set(['1111111', '2222222']) });
+      assert.deepEqual(idsOf(result.remove), idsOf(own.map((v) => ({ version: v }))));
+      assert.ok(result.kept.some((item) => item.version.id === lookalike.id && /younger/.test(item.reason)));
+    });
+
+    it('treats an unknown set of PR commits as no immediate clearing at all', () => {
+      const young = version(['fix-a-1111111'], 0);
+      assert.equal(plan([young], { closedBranch: 'fix/a' }).remove.length, 0);
     });
 
     it('refuses a closed PR that comes from the dev or production branch (a release PR)', () => {
@@ -236,7 +249,7 @@ export function defineTests({ lib }) {
       const api = makeApi([latest, closing]);
       let calls = 0;
       api.openBranches = async () => new Set(++calls > 1 ? ['fix-a'] : []);
-      await prunePackage({ api, rules: orbit, packageName: 'x', live: true, closedBranch: 'fix/a', now: NOW, log: quiet });
+      await prunePackage({ api, rules: orbit, packageName: 'x', live: true, closedBranch: 'fix/a', closedShas: new Set(['1111111']), now: NOW, log: quiet });
       assert.deepEqual(api.deleted, []);
     });
 
@@ -262,9 +275,47 @@ export function defineTests({ lib }) {
         registryCalls += 1;
         return [];
       };
-      await prunePackage({ api, rules: orbit, packageName: 'x', live: true, closedBranch: 'fix/a', now: NOW, log: quiet });
+      await prunePackage({ api, rules: orbit, packageName: 'x', live: true, closedBranch: 'fix/a', closedShas: new Set(['1111111']), now: NOW, log: quiet });
       assert.deepEqual(api.deleted, [closing.id]);
       assert.equal(registryCalls, 0);
+    });
+  });
+
+  describe('parseArgs', () => {
+    it('reads switches and value flags', () => {
+      const args = parseArgs(['--package', 'p', '--live', '--closed-branch', 'fix/a', '--closed-pr', '7']);
+      assert.deepEqual(args, { live: true, package: 'p', closedBranch: 'fix/a', closedPr: '7' });
+    });
+    it('rejects a value flag with no value, or followed by another flag', () => {
+      assert.throws(() => parseArgs(['--package', 'p', '--closed-branch']), /missing value for --closed-branch/);
+      assert.throws(() => parseArgs(['--closed-branch', '--live']), /missing value for --closed-branch/);
+    });
+  });
+
+  describe('makeDeleter', () => {
+    const answer = (status) => ({ status, ok: status >= 200 && status < 300 });
+    const deleterFor = (statuses) => {
+      const calls = [];
+      const github = async (path, init = {}) => {
+        calls.push(`${init.method ?? 'GET'} ${path}`);
+        return answer(statuses.shift());
+      };
+      return { calls, remove: makeDeleter({ github, packagePath: '/p', packageName: 'pkg' }) };
+    };
+    it('succeeds when GitHub deletes the version', async () => {
+      const { calls, remove } = deleterFor([204]);
+      await remove({ id: 5 });
+      assert.deepEqual(calls, ['DELETE /p/versions/5']);
+    });
+    it('counts a 404 as done only when the version is really gone', async () => {
+      const gone = deleterFor([404, 404]);
+      await gone.remove({ id: 5 });
+      const still = deleterFor([404, 200]);
+      await assert.rejects(still.remove({ id: 5 }), /still exists/);
+    });
+    it('names the Admin role on a 403', async () => {
+      const { remove } = deleterFor([403]);
+      await assert.rejects(remove({ id: 5 }), /Admin role/);
     });
   });
 }

@@ -2,32 +2,20 @@
 // Command line for prune-images.mjs: reads one package from GitHub and its registry, prints the plan,
 // and deletes only when --live is given.
 //
-//   node prune-images-cli.mjs --package play-universe --prod-branch universe --dev-branch universe-develop [--keep 10] [--live] [--closed-branch <head ref>]
+//   node prune-images-cli.mjs --package play-universe --prod-branch universe --dev-branch universe-develop [--keep 10] [--live] [--closed-branch <head ref> --closed-pr <number>]
 //
 // Environment: GITHUB_TOKEN, GITHUB_REPOSITORY (owner/repo), and, to protect what dev and production run now (read before anything is deleted; missing settings stop the run):
 //   DEV_COOLIFY_BASE, DEV_COOLIFY_TOKEN, DEV_APPS and PROD_COOLIFY_BASE, PROD_COOLIFY_TOKEN, PROD_APPS ("<package> <uuid|none>" per line).
 import { appendFileSync } from 'node:fs';
-import { DEFAULT_KEEP, isProtectedBranch, prunePackage, sanitizeBranch, tagRules } from './prune-images.mjs';
+import { DEFAULT_KEEP, isProtectedBranch, makeDeleter, parseArgs, prunePackage, sanitizeBranch, tagRules } from './prune-images.mjs';
 
-function parseArgs(argv) {
-  const out = { live: false };
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === '--live') out.live = true;
-    else if (arg.startsWith('--')) {
-      // A flag that takes a value must be followed by one: a missing --closed-branch must not turn into a whole-package run.
-      const value = argv[i + 1];
-      if (value === undefined || value.startsWith('--')) {
-        console.error(`missing value for ${arg}`);
-        process.exit(2);
-      }
-      out[arg.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = argv[++i];
-    }
-  }
-  return out;
+let args;
+try {
+  args = parseArgs(process.argv.slice(2));
+} catch (error) {
+  console.error(error.message);
+  process.exit(2);
 }
-
-const args = parseArgs(process.argv.slice(2));
 for (const required of ['package', 'prodBranch', 'devBranch']) {
   if (!args[required]) {
     console.error(`missing --${required.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())}`);
@@ -96,7 +84,7 @@ const api = {
       for (const [, uuid] of lines) {
         if (!uuid) throw new Error(`${packageName} has no ${side.toLowerCase()} app uuid configured (use "none" if it has no ${side.toLowerCase()} server); nothing was deleted`);
         if (uuid === 'none') {
-          console.log(`${packageName}: no ${side.toLowerCase()} server.`);
+          console.log(`${packageName}: no ${side.toLowerCase()} server configured, so only release tags, the newest builds and the age rule protect its images there.`);
           continue;
         }
         const base = process.env[`${side}_COOLIFY_BASE`];
@@ -125,19 +113,7 @@ const api = {
     const manifest = await response.json();
     return (manifest.manifests ?? []).map((entry) => entry.digest);
   },
-  deleteVersion: async (version) => {
-    const response = await github(`${packagePath}/versions/${version.id}`, { method: 'DELETE' });
-    if (response.status === 404) {
-      // GitHub also answers 404 when the token may not delete: only a version that is no longer there counts as gone.
-      const check = await github(`${packagePath}/versions/${version.id}`);
-      if (check.status === 404) return; // already gone
-      throw new Error(`could not delete version ${version.id} of ${packageName}: GitHub answered 404 but the version still exists (does this repository have the Admin role under the package's "Manage Actions access"?)`);
-    }
-    if (!response.ok) {
-      const hint = response.status === 403 ? ` Give this repository the Admin role under the package's "Manage Actions access" (package settings; deleting a version needs Admin, not Write) and run it again.` : '';
-      throw new Error(`could not delete version ${version.id} of ${packageName}: GitHub answered ${response.status}.${hint}`);
-    }
-  },
+  deleteVersion: makeDeleter({ github, packagePath, packageName }),
 };
 
 const lines = [];
@@ -152,6 +128,13 @@ if (args.closedBranch && isProtectedBranch(rules, args.closedBranch)) {
   process.exit(0);
 }
 
+// The commits of the closed PR: its images are tagged with their shas, and only those go at once.
+let closedShas = new Set();
+if (args.closedBranch && args.closedPr) {
+  const commits = await pages(`/repos/${owner}/${repo}/pulls/${encodeURIComponent(args.closedPr)}/commits`);
+  closedShas = new Set(commits.map((commit) => commit.sha.slice(0, 7)));
+}
+
 try {
   await prunePackage({
     api,
@@ -160,6 +143,7 @@ try {
     keep,
     live: args.live,
     closedBranch: args.closedBranch || undefined,
+    closedShas,
     log,
   });
   if (process.env.GITHUB_STEP_SUMMARY) {

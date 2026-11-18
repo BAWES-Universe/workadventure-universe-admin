@@ -11,7 +11,7 @@ name: Prune old images
 #           closed (a branch that still has an open PR keeps its newest 3), and untagged versions no kept image uses.
 #
 # The two-day grace period applies to the weekly sweep. When a PR closes, its own branch's images go at once, whatever
-# their age (unless another open PR still uses that branch).
+# their age, when they were built from the closing PR's own commits (and no other open PR uses the branch).
 #
 # The plan is printed before anything is deleted. prune-images-check.yml prints the same plan as a dry run on
 # any pull request that changes this clean-up, so a change shows what it would delete before it merges.
@@ -19,7 +19,11 @@ name: Prune old images
 on:
   schedule:
     - cron: '17 3 * * 0'
-  pull_request:
+  # pull_request_target, not pull_request: GitHub does not start a pull_request workflow for a PR that conflicts with its base,
+  # so a conflicted PR closed unmerged would never clear its images. This job runs only the base branch's own scripts (the
+  # checkout below is the base branch) and never checks out or runs the PR's code; the PR's branch name and number are
+  # passed as plain values.
+  pull_request_target:
     types: [closed]
   workflow_dispatch:
     inputs:
@@ -43,7 +47,7 @@ jobs:
     # A PR from a fork never built images here, and Dependabot (whose runs get no secrets, and whose branches build no
     # images) has nothing to clear.
     if: >-
-      github.event_name != 'pull_request' || (
+      github.event_name != 'pull_request_target' || (
       github.event.pull_request.head.repo.full_name == github.repository
       && github.actor != 'dependabot[bot]'
       && github.event.pull_request.user.login != 'dependabot[bot]')
@@ -75,10 +79,11 @@ jobs:
           PROD_APPS: |
             workadventure-universe-admin ${{ secrets.COOLIFY_ADMIN_UUID }}
           CLOSED_BRANCH: ${{ github.event.pull_request.head.ref }}
+          CLOSED_PR: ${{ github.event.pull_request.number }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
           set -euo pipefail
           args=(--package workadventure-universe-admin --prod-branch main --dev-branch develop)
           [ "$DRY_RUN" = true ] || args+=(--live)
-          [ -z "$CLOSED_BRANCH" ] || args+=(--closed-branch "$CLOSED_BRANCH")
+          [ -z "$CLOSED_BRANCH" ] || args+=(--closed-branch "$CLOSED_BRANCH" --closed-pr "$CLOSED_PR")
           node scripts/prune-images-cli.mjs "${args[@]}"
