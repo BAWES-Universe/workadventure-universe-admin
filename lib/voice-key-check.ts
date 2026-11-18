@@ -150,13 +150,23 @@ export async function loadVoiceKeyModels(adapter: unknown, apiKey: unknown, enab
  */
 async function keyVoiceModels(company: VoiceKeyCompanyInfo, key: string): Promise<VoiceModel[]> {
   const listedJobs = companyJobs(company).filter((job) => company.jobs[job]?.modelList);
-  const [server, listed] = await Promise.all([serverVoiceModels(company.adapter), Promise.all(listedJobs.map((job) => listCompanyModels(company, key, job)))]);
+  // The server's own list is read at the same time as the company's, and a failure there (the database) must not take the company's lists with it
+  const [read, listed] = await Promise.all([
+    serverVoiceModels(company.adapter).then(
+      (models) => ({ models }),
+      (error: unknown) => ({ error }),
+    ),
+    Promise.all(listedJobs.map((job) => listCompanyModels(company, key, job))),
+  ]);
   const fromCompany = new Map<VoiceModel['kind'], VoiceModel[]>();
   listedJobs.forEach((job, index) => {
     const models = listed[index];
     // The short line about each model is for an operator choosing; a key's list keeps the id, label and job
     if (models) fromCompany.set(job, models.map(({ id, label, kind }) => ({ id, ...(label ? { label } : {}), kind })));
   });
+  // Without the server's list, a job the company listed nothing for gives the catalog's starting models; with nothing read at all it fails as it did
+  if ('error' in read && fromCompany.size === 0) throw read.error;
+  const server = 'models' in read ? read.models : (company.models ?? []).filter((model) => !fromCompany.has(model.kind)).map((model) => ({ ...model }));
   if (fromCompany.size === 0) return server;
   // The server's list keeps its order, with each listed job's models swapped for the company's own where that job first comes up
   const models: VoiceModel[] = [];

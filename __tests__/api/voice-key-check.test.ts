@@ -128,6 +128,57 @@ describe('Load models for a voice key', () => {
       ]);
     });
 
+    // The server's own list of a company's models is read with the adapter named: only that read fails (the list of companies is another)
+    const failServerList = () =>
+      findMany.mockImplementation(async ({ where }: { where: { adapter?: string } }) => {
+        if (where.adapter) throw new Error('database down');
+        return serverRows;
+      });
+
+    it('gives the catalog’s starting model for a job whose list can’t be read, and the company’s own list for the other', async () => {
+      fetchMock.mockImplementation(async (url: string) => {
+        if (url.startsWith('https://api.cartesia.ai/models?capability=stt')) return { status: 503, json: async () => ({}), text: async () => '' };
+        if (url.startsWith('https://api.cartesia.ai/models?capability=tts')) return { status: 200, json: async () => ({ data: [{ id: 'sonic-turbo', capability: 'tts' }] }), text: async () => '' };
+        return { status: 200, text: async () => '' };
+      });
+      const response = await send({ adapter: 'cartesia', apiKey: KEY });
+      // sonic-turbo isn't in the server's models: it comes from the company; hearing has no server provider and no list, so the catalog's
+      expect((await response.json()).models).toEqual([
+        { id: 'sonic-turbo', kind: 'speech' },
+        { id: 'ink-whisper', label: 'Ink Whisper', kind: 'recognition' },
+      ]);
+    });
+
+    it('still gives the models the company listed when the server’s own list can’t be read', async () => {
+      failServerList();
+      company({
+        'https://api.cartesia.ai/models?capability=stt': { data: [{ id: 'ink-whisper', capability: 'stt' }] },
+        'https://api.cartesia.ai/models?capability=tts': { data: [{ id: 'sonic-turbo', capability: 'tts' }] },
+      });
+      const response = await send({ adapter: 'cartesia', apiKey: KEY });
+      expect(response.status).toBe(200);
+      // With no server list to follow, the company's jobs come in the order the company does them: hearing, then speaking
+      expect((await response.json()).models).toEqual([
+        { id: 'ink-whisper', kind: 'recognition' },
+        { id: 'sonic-turbo', kind: 'speech' },
+      ]);
+    });
+
+    it('gives the catalog’s starting models for a job the company listed nothing for, when the server’s own list can’t be read', async () => {
+      failServerList();
+      company({ 'https://api.elevenlabs.io/v1/models': [{ model_id: 'eleven_v4_turbo', name: 'Eleven v4 Turbo', can_do_text_to_speech: true }] });
+      const models = (await (await send({ adapter: 'elevenlabs', apiKey: KEY })).json()).models as { id: string; kind: string }[];
+      expect(models.filter((model) => model.kind === 'speech')).toEqual([{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }]);
+      // Hearing has no list at ElevenLabs: the catalog's models
+      expect(models.some((model) => model.kind === 'recognition')).toBe(true);
+    });
+
+    it('still fails when the server’s own list can’t be read and the company listed nothing', async () => {
+      failServerList();
+      answer(200);
+      expect((await send({ adapter: 'elevenlabs', apiKey: KEY })).status).toBe(500);
+    });
+
     it('leaves out what Universe can’t run yet, like Deepgram’s Flux', async () => {
       company({
         'https://api.deepgram.com/v1/models': {
