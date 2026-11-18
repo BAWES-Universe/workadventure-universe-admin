@@ -415,6 +415,26 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect(kept.size).toBe(1);
   });
 
+  it('never passes what one person may keep when two of their jobs hand over at the same moment: one fits, the other is named', async () => {
+    const sara = await person('sara');
+    const second = (await createBrick({ ownerId: sara.id, name: 'Second of Sara' })).id;
+    const first = await started(sara, 'First');
+    const other = await started({ id: sara.id, brickId: second }, 'Second');
+    out(first, 'a.bin', Buffer.alloc(60, 1), 5);
+    out(other, 'b.bin', Buffer.alloc(60, 2), 5);
+    // Both pass a count taken before either keeps: only the step under the owner's lock holds the line
+    await saveCodeJobLimits({ maxKeptBytesPerPerson: 100 }, 'admin');
+    try {
+      await Promise.all([finishJob(first, 'done', minutes(9)), finishJob(other, 'done', minutes(9))]);
+    } finally {
+      await saveCodeJobLimits({ maxKeptBytesPerPerson: 1_073_741_824 }, 'admin');
+    }
+    const handed = (await mine([first, other])).flatMap((report) => report.handed);
+    expect(handed).toHaveLength(1);
+    expect(kept.size).toBe(1);
+    expect(await prisma.ownedResult.aggregate({ where: { ownerId: sara.id }, _sum: { sizeBytes: true } }).then((sum) => sum._sum.sizeBytes ?? 0)).toBeLessThanOrEqual(100);
+  });
+
   it('keeps nothing when what one person may keep is not set', async () => {
     const sara = await person('sara');
     const id = await started(sara);

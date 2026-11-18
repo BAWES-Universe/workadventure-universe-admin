@@ -288,7 +288,13 @@ export async function handOverFiles(input: {
         if (!data) continue;
         const name = uniqueName(pick.name, used);
         // Kept first, claimed after: a crash in between leaves a result that is the person's own (never a claim on a file that is not there)
-        const result = await keepResult({ ownerId: input.ownerId, sourceKind: 'computer_job', sourceId: input.jobId, makerBotId: input.botId, makerName: input.makerName, name, contentType: mimeOf(name), bytes: data }, store);
+        // The count and the keeping are one step under the owner's lock (a job of theirs beside this one cannot both pass the same room), by the bytes actually read
+        const kept = await keepResult({ ownerId: input.ownerId, sourceKind: 'computer_job', sourceId: input.jobId, makerBotId: input.botId, makerName: input.makerName, name, contentType: mimeOf(name), bytes: data, limitBytes: cap }, store);
+        if (kept.status !== 'kept') {
+          personKept = kept.keptBytes;
+          continue;
+        }
+        const result = kept.row;
         const claimed = await prisma.computerJobFile
           .create({
             data: { jobId: input.jobId, botId: input.botId, ownerId: input.ownerId, makerName: input.makerName, jobTitle: input.jobTitle, name, path: pick.entry.path, modifiedAt: new Date(pick.entry.modifiedAt), bytes: data.length, mimeType: mimeOf(name), resultId: result.id },
