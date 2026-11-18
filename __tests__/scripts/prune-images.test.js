@@ -208,6 +208,20 @@ export function defineTests({ lib }) {
       assert.deepEqual(api.deleted, [other.id]);
     });
 
+    it('leaves untagged versions alone when an image started running mid-run, and checks again before each tagged delete', async () => {
+      const latest = version(['latest'], 3, 'sha256:latest');
+      const first = version(['fix-a-1111111'], 5, 'sha256:first');
+      const second = version(['fix-b-2222222'], 5, 'sha256:second');
+      const child = version([], 40, 'sha256:child-of-first');
+      const api = makeApi([latest, first, second, child]);
+      // the plan is made and the first delete checks clean; the second delete finds fix-b has started running
+      const answers = [[], [], ['fix-b-2222222']];
+      let calls = 0;
+      api.runningTags = async () => new Set(answers[Math.min(calls++, answers.length - 1)]);
+      await prunePackage({ api, rules: orbit, packageName: 'x', live: true, now: NOW, log: quiet });
+      assert.deepEqual(api.deleted, [first.id]);
+    });
+
     it('on a closed PR whose branch has another open PR deletes nothing of it', async () => {
       const latest = version(['latest'], 3);
       const young = version(['fix-a-1111111'], 0);

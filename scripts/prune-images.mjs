@@ -200,17 +200,26 @@ export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEE
     log(`${packageName}: dry run, nothing deleted.`);
     return { remove, deleted: 0 };
   }
-  // Read what dev and production run once more right before deleting: a deployment may have switched since the plan was made.
-  const runningNow = await api.runningTags();
+  // Read what dev and production run again right before each tagged delete: a deployment may have switched since the plan was made.
+  // A tagged image that turns out to be running takes its untagged children with it (they were planned for deletion because
+  // nothing kept pointed to them), so once one is skipped the untagged versions are left for the next run. Tagged ones go first.
   let deleted = 0;
+  let sawRunning = false;
   for (const { version } of remove) {
-    if (tagsOf(version).some((tag) => runningNow.has(tag))) {
-      log(`  kept ${version.id}: it started running while this plan was being made`);
+    if (tagsOf(version).length > 0) {
+      const runningNow = await api.runningTags();
+      if (tagsOf(version).some((tag) => runningNow.has(tag))) {
+        sawRunning = true;
+        log(`  kept ${version.id}: it started running while this plan was being made`);
+        continue;
+      }
+    } else if (sawRunning) {
       continue;
     }
     await api.deleteVersion(version);
     deleted += 1;
   }
+  if (sawRunning) log(`${packageName}: untagged versions left alone this time, because an image started running.`);
   log(`${packageName}: deleted ${deleted}.`);
   return { remove, deleted };
 }
