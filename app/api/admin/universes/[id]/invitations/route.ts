@@ -5,7 +5,7 @@ import { EVERYONE_KEY, MEMBER_KEY, coversWorld } from '@/lib/roles';
 import { allows, invitationReach, isAdministratorRole, ranksAbove, reachOf, worldsAllowing } from '@/lib/role-access';
 import { SYSTEM_USER_EMAIL } from '@/lib/system-user';
 import { withWokas } from '@/lib/woka-avatar';
-import { badRequest, checkScope, failed, needs, scopeSchema, universeContext } from '@/lib/universe-route';
+import { badRequest, checkScope, failed, needs, scopeSchema, seesHiddenRoles, universeContext } from '@/lib/universe-route';
 import { notifyInvitation } from '@/lib/push-messages';
 
 const inviteSchema = z.object({
@@ -144,13 +144,19 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const rows = [...newest, ...theirs]
       .filter((row) => !seen.has(row.id) && !!seen.add(row.id))
       .sort((a, b) => b.invitedAt.getTime() - a.invitedAt.getTime());
+    // A role whose badge is off is named only to people who give or manage roles, as on the members and roles screens
+    const named = [...new Set(rows.flatMap((row) => row.roleIds))];
+    const hidden =
+      seesHiddenRoles(access) || named.length === 0
+        ? new Set<string>()
+        : new Set((await prisma.role.findMany({ where: { universeId: id, showBadge: false, id: { in: named } }, select: { id: true } })).map((role) => role.id));
     const invitations = rows.map((row) => ({
       id: row.id,
       userId: row.invitedUser.id,
       name: row.invitedUser.name,
       invitedBy: { userId: row.invitedBy.id, name: row.invitedBy.name },
       invitedAt: row.invitedAt,
-      roleIds: row.roleIds,
+      roleIds: row.roleIds.filter((roleId) => !hidden.has(roleId)),
       // An invitation from before roles names one world and a tag: they join as a Member there
       worlds: row.universeId ? { allWorlds: row.allWorlds, worldIds: row.worldIds } : { allWorlds: false, worldIds: [row.worldId] },
       tags: row.tags,

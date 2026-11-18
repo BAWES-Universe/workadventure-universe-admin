@@ -388,6 +388,25 @@ describe('invitations list and cancel', () => {
     expect(unreachable.canCancel).toBe(false);
   });
 
+  it('keeps a role whose badge is hidden off the invitations of viewers who may not see it', async () => {
+    const withRoles = { ...pending, roleIds: ['r-mod', 'r-secret'] };
+    db.membershipInvitation.findMany.mockResolvedValue([withRoles]);
+    db.role.findMany.mockResolvedValue([{ id: 'r-secret' }]);
+
+    // May invite but not give roles: the hidden role is not named, the visible one is
+    asViewer('inviter');
+    const viewer = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
+    expect(viewer.invitations[0].roleIds).toEqual(['r-mod']);
+    expect(db.role.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { universeId: 'u1', showBadge: false, id: { in: ['r-mod', 'r-secret'] } } }));
+
+    // The owner sees every role, so nothing is left out
+    db.role.findMany.mockClear();
+    asViewer('owner');
+    const owner = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
+    expect(owner.invitations[0].roleIds).toEqual(['r-mod', 'r-secret']);
+    expect(db.role.findMany).not.toHaveBeenCalled();
+  });
+
   it('takes back an invitation, as someone who may invite in the worlds it names', async () => {
     asViewer('inviter');
     db.membershipInvitation.findFirst.mockResolvedValue(pending);
