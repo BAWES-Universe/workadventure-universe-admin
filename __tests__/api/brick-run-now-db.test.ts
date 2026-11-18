@@ -22,7 +22,7 @@ jest.mock('@/lib/bot-limits', () => {
   const actual = jest.requireActual('@/lib/bot-limits');
   return { ...actual, getBrickLimits: jest.fn(actual.getBrickLimits) };
 });
-import { changeItem, checkRun, claimDueRuns, claimWork, createItem, finishRun, readItem, type NewItemInput } from '@/lib/brick-items';
+import { changeItem, checkRun, claimDueRuns, claimWork, createItem, finishRun, readItem, viewOf, type NewItemInput } from '@/lib/brick-items';
 import { changeFromScreen, didByBrick } from '@/lib/brick-item-screens';
 import { itemsRefused } from '@/lib/brick-item-api';
 
@@ -576,6 +576,34 @@ run('Run now and snooze, in a real database', () => {
       expect(await row(briefing.id)).toMatchObject({ regularDueAt: null, snoozedUntil: null, heldSince: null });
       expect(mine(await claimDueRuns(at(HOUR + 7 * MIN)), briefing.id)).toEqual([]);
       expect(await runsOf(briefing.id)).toHaveLength(1);
+    });
+
+    it('a snoozed occurrence that then waits for usage is shown as waiting, not snoozed until the usage is back, and the rule still carries on', async () => {
+      const gil = await person('gil');
+      await saveServerLimits({ bricks: { snooze: 10 } }, gil.id);
+      try {
+        const briefing = await set(gil, { kind: 'schedule', words: 'Headlines', cadence: hourly });
+        const [first] = mine(await claimDueRuns(at(HOUR)), briefing.id);
+        await finishRun(first.runId, { attempt: 1, state: 'done', outcome: 'spoke' }, at(HOUR));
+        await tap(gil, briefing.id, 'snooze', at(HOUR + MIN));
+        expect(viewOf(await row(briefing.id))).toMatchObject({ snoozedUntil: at(HOUR + 11 * MIN).toISOString(), nextRegularAt: at(2 * HOUR).toISOString() });
+        await prisma.botsAiProvider.upsert({ where: { providerId: 'universe-ai' }, create: { providerId: 'universe-ai', name: 'Universe AI', type: 'universe-ai', enabled: true }, update: {} });
+        await prisma.botsAiUsage.createMany({ data: Array.from({ length: 30 }, () => ({ botId: gil.brickId, providerId: 'universe-ai', talkedPersonId: gil.id, channel: 'dm', timestamp: at(MIN) })) });
+        await prisma.replyWindow.upsert({ where: { key: `ua:person:${gil.id}` }, create: { key: `ua:person:${gil.id}`, startedAt: NOW }, update: { startedAt: NOW } });
+        // The snoozed 8:11 falls due with no room: it waits for the usage
+        expect(mine(await claimDueRuns(at(HOUR + 12 * MIN)), briefing.id)).toEqual([]);
+        const held = await row(briefing.id);
+        expect(held.heldSince).not.toBeNull();
+        const view = viewOf(held);
+        expect(view).toMatchObject({ snoozedUntil: null, heldSince: expect.any(String), nextRegularAt: at(2 * HOUR).toISOString() });
+        // The usage is back: it runs once, and 9:00 is still the regular one after it
+        await prisma.botsAiUsage.deleteMany({ where: { talkedPersonId: gil.id } });
+        const handed = mine(await claimDueRuns(at(HOUR + 13 * MIN)), briefing.id);
+        expect(handed).toHaveLength(1);
+        expect(await row(briefing.id)).toMatchObject({ nextDueAt: at(2 * HOUR), regularDueAt: null, snoozedUntil: null, heldSince: null });
+      } finally {
+        await saveServerLimits({ bricks: { snooze: 60 } }, gil.id);
+      }
     });
 
     it('snoozing a repeating item changes nothing a run is about: a Run now that waits, or is running, goes on and reports', async () => {

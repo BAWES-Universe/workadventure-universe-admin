@@ -155,7 +155,8 @@ export function viewOf(row: ItemRow): ItemView {
     timeZone: row.timeZone,
     nextDueAt: row.nextDueAt?.toISOString() ?? null,
     nextRegularAt: (row.regularDueAt ?? row.nextDueAt)?.toISOString() ?? null,
-    snoozedUntil: row.snoozedUntil && row.nextDueAt ? row.nextDueAt.toISOString() : null,
+    // A snoozed occurrence that then waits for usage is put off by that wait: its next due time is when the usage is back, not the snooze
+    snoozedUntil: row.snoozedUntil && row.nextDueAt && row.heldSince === null ? row.nextDueAt.toISOString() : null,
     waitingFor: row.waitingFor,
     statusLine: row.statusLine,
     steps: steps.success ? steps.data : [],
