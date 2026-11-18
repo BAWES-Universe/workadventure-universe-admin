@@ -29,7 +29,6 @@ interface Universe {
   description?: string | null;
   featured?: boolean;
   _count?: { worlds?: number; rooms?: number; members?: number };
-  owner?: { name?: string | null } | null;
 }
 interface World {
   id: string;
@@ -141,11 +140,7 @@ export default function SpacePage() {
                 title={universe.name}
                 pills={universe.featured ? <StatusPill status="featured" /> : undefined}
                 description={universe.description}
-                meta={
-                  <StatLine
-                    items={[countPlace('world', universe._count?.worlds, 'world'), countPlace('room', universe._count?.rooms, 'room'), universe.owner?.name && `by ${universe.owner.name}`]}
-                  />
-                }
+                meta={<StatLine items={[countPlace('world', universe._count?.worlds, 'world'), countPlace('room', universe._count?.rooms, 'room')]} />}
               />
             ))}
           </div>
