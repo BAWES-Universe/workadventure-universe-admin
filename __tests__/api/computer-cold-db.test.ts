@@ -425,6 +425,40 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(await prisma.computerArchive.count({ where: { id: row.id } })).toBe(0);
     });
 
+    it('a write whose copy a clean-up took for deletion after the write was allowed to publish does not bring it back as stored', async () => {
+      const brick = await idleBrick();
+      const put = bucket.store.put.bind(bucket.store);
+      const remove = bucket.store.remove.bind(bucket.store);
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let pruning: Promise<number> = Promise.resolve(0);
+      let heldOnce = false;
+      bucket.store.put = async (finalKey, stagingKey, stream, mayPublish) => {
+        // The write was allowed to publish and has published; then a clean-up (the row looks abandoned) takes the copy for deletion and is slow to delete
+        const sealed = await put(finalKey, stagingKey, stream, mayPublish);
+        await prisma.computerArchive.updateMany({ where: { botId: brick.botId }, data: { createdAt: new Date(NOW.getTime() - 3 * 3_600_000) } });
+        bucket.store.remove = async (keys) => {
+          if (!heldOnce) {
+            heldOnce = true;
+            await held;
+          }
+          return remove(keys);
+        };
+        pruning = pruneArchives(brick.botId, null, NOW);
+        for (let tries = 0; tries < 100 && (await prisma.computerArchive.count({ where: { botId: brick.botId, state: 'superseded' } })) === 0; tries++) await new Promise((resolve) => setTimeout(resolve, 20));
+        return sealed;
+      };
+      const outcome = await storeArchive(brick.botId, Readable.toWeb(Readable.from([Buffer.from('home')])) as ReadableStream<Uint8Array>).then(() => 'stored', () => 'refused');
+      release();
+      await pruning;
+      bucket.store.put = put;
+      bucket.store.remove = remove;
+      expect(outcome).toBe('refused');
+      // No copy stands as restorable while its object is gone
+      const rows = await prisma.computerArchive.findMany({ where: { botId: brick.botId } });
+      expect(rows.filter((row) => ['stored', 'verified'].includes(row.state) && !bucket.objects.has(row.objectKey))).toEqual([]);
+    });
+
     it('a run that was open when its server stopped is closed at the longest a run may last, and its time is booked once', async () => {
       const brick = await idleBrick();
       const started = new Date(NOW.getTime() - 9 * 3_600_000);

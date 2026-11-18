@@ -104,8 +104,10 @@ export async function storeArchive(botId: string, archive: ReadableStream<Uint8A
       const sealed = await store.put(row.objectKey, stagingKeyOf(botId, generation, id), archive, async () => (await prisma.computerArchive.count({ where: { id, state: 'staging' } })) === 1 && !(await purged()));
       // A Brick purged while the copy was written: it must not stand (its row may be gone already, and the object is not to stay without one)
       if (await purged()) throw new Error('The Brick was deleted while its files were being copied');
-      const stored = await prisma.computerArchive.update({ where: { id }, data: { state: 'stored', bytes: BigInt(sealed.bytes), sha256: sealed.sha256 } });
-      return view(stored);
+      // Only while the row is still `staging`: a clean-up that took this copy for deletion meanwhile (`superseded`) owns its object, and the copy must not come back as stored
+      const sealedRow = await prisma.computerArchive.updateMany({ where: { id, state: 'staging' }, data: { state: 'stored', bytes: BigInt(sealed.bytes), sha256: sealed.sha256 } });
+      if (sealedRow.count !== 1) throw new Error('The copy was taken for deletion while it was being written');
+      return view(await prisma.computerArchive.findUniqueOrThrow({ where: { id } }));
     } catch (error) {
       await markFailed(id, 'The copy could not be written whole').catch(() => undefined);
       const removed = await store.remove([row.objectKey, stagingKeyOf(botId, generation, id)]).then(() => true, () => false);
