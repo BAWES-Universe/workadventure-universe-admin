@@ -651,6 +651,35 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect((await mine([id]))[0].handed.map((card) => card.name)).toEqual(['a.pdf']);
   });
 
+  it('does not rest the machine under a job that finished while another hand-over was running: the first lets go, and the second still hands its files over', async () => {
+    const sara = await person('sara');
+    const first = await started(sara, 'First');
+    out(first, 'a.pdf', 'a', 5);
+    // The first job's hand-over is held up on the machine until the test lets it go
+    let open: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    const before = provider.execAnswer;
+    provider.execAnswer = async (command) => {
+      if (command.includes(`Outputs/${first}`)) await gate;
+      return before(command);
+    };
+    const firstEnds = finishJob(first, 'done', minutes(9));
+    // Wait (in real time) until that hand-over holds the machine
+    for (let i = 0; i < 200 && !(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).filesClaimedAt; i++) await new Promise((resolve) => setTimeout(resolve, 25));
+    // A second writer starts on the machine (the first is already done) and finishes while the first one still holds it
+    const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second' }, minutes(10));
+    if (!second.ok) throw new Error('no second job');
+    expect(second.job.status).toBe('running');
+    out(second.job.id, 'b.pdf', 'b', 11);
+    const secondEnds = finishJob(second.job.id, 'done', minutes(12));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    open();
+    await Promise.all([firstEnds, secondEnds]);
+    expect((await mine([first]))[0].handed.map((card) => card.name)).toEqual(['a.pdf']);
+    // The first one's close-out did not rest the machine before the second read its files
+    expect((await mine([second.job.id]))[0].handed.map((card) => card.name)).toEqual(['b.pdf']);
+  });
+
   it('does not wait for a machine that is not working any more: nothing is handed over and nothing is held up', async () => {
     const sara = await person('sara');
     const id = await started(sara);

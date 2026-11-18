@@ -599,11 +599,12 @@ async function takeBaseline(jobId: string, botId: string, provider: Provider): P
  * Puts the machine of a Brick to rest when no job holds it. The rest is claimed first (working -> resting) so only one caller does it,
  * and a job that starts meanwhile finds a resting machine and wakes it. Returns whether it rested one.
  */
-async function restIfUnheld(botId: string, now: Date): Promise<boolean> {
+async function restIfUnheld(botId: string, now: Date, exceptJobId?: string): Promise<boolean> {
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   const provider = providerFor(row);
   if (!row || !row.providerRef || !provider) return false;
-  const holders = () => prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } });
+  // A job that is done but has not handed its files over yet holds the machine too (it may be waiting for another hand-over's claim): resting it now would lose those files
+  const holders = async () => (await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } })) + (await pendingHandOvers(botId, now, exceptJobId));
   if ((await holders()) > 0) return false;
   // Files of a job that just finished are being read off this machine: it is not put to rest under them (the job that reads them rests it when they are done)
   if (row.filesClaimedAt && Date.now() - row.filesClaimedAt.getTime() < FILES_CLAIM_MS) return false;
@@ -632,6 +633,23 @@ async function restIfUnheld(botId: string, now: Date): Promise<boolean> {
     await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting', restClaimedAt: now }, data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null } });
   }
   return true;
+}
+
+/**
+ * Jobs that finished well and write files, whose ending is not closed yet and not older than the longest hand-over (and the minute the sweep leaves it): their
+ * files may still be waiting to be read off the machine, so it is not put to rest under them. `exceptJobId` is the job asking, which is about to close its own ending.
+ */
+async function pendingHandOvers(botId: string, now: Date, exceptJobId?: string): Promise<number> {
+  return prisma.computerJob.count({
+    where: {
+      botId,
+      status: 'done',
+      writes: true,
+      endClosedAt: null,
+      endedAt: { gt: new Date(now.getTime() - 60 * 1000 - HAND_OVER_LATEST_MS) },
+      ...(exceptJobId ? { id: { not: exceptJobId } } : {}),
+    },
+  });
 }
 
 /**
@@ -894,7 +912,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   let endFiles: FilesList | null = null;
   if (held) {
     endFiles = await closeOutIfUnheld(job.botId);
-    await restIfUnheld(job.botId, now);
+    await restIfUnheld(job.botId, now, job.id);
   }
   // Everything this ending does is finished: only now may Brick tell the person how it went (its time is in the books, its files are listed)
   await prisma.computerJob.updateMany({ where: { id: jobId }, data: { endClosedAt: new Date(), ...(endFiles ? { endFiles: endFiles as unknown as Prisma.InputJsonValue } : {}) } }).catch((error) => console.error('[Computer] Could not mark an ending closed:', error instanceof Error ? error.message : 'unknown'));
