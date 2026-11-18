@@ -631,6 +631,8 @@ async function dropOutputs(jobId: string, store: OutputStore): Promise<void> {
 async function closeSession(jobId: string, ctx: Ctx): Promise<void> {
   const row = await prisma.codeJob.findUnique({ where: { id: jobId }, select: { providerSessionId: true, providerState: true, startedAt: true, createdAt: true, nestedCheckedAt: true } });
   if (!row || !row.providerSessionId || (row.providerState === 'closed' && row.nestedCheckedAt !== null)) return;
+  // Said first, whatever comes of it: a session the provider keeps failing on goes behind the ones not tried yet, and never keeps them out of the sweep's batch
+  await prisma.codeJob.updateMany({ where: { id: jobId }, data: { nestedTriedAt: ctx.now() } });
   let confirmed = row.providerState === 'closed';
   for (let attempt = 0; attempt < CLOSE_RETRIES && !confirmed; attempt += 1) {
     try {
@@ -852,7 +854,7 @@ export async function sweepCodeJobs(deps: Deps = {}): Promise<SweepResult> {
       const won = await finishJob(job.id, late ? { state: 'timed_out', reason: 'timed_out' } : { state: 'interrupted', reason: 'interrupted' }, { runs: [], reads: [], files: [], notKept: [], clipped: false }, limits, price, ctx);
       if (won) result.stopped += 1;
     }
-    const open = await prisma.codeJob.findMany({ where: { state: { notIn: ACTIVE }, providerSessionId: { not: null }, OR: [{ providerState: { in: ['open', 'unknown'] } }, { nestedCheckedAt: null }] }, orderBy: { createdAt: 'asc' }, take: SWEEP_BATCH, select: { id: true } });
+    const open = await prisma.codeJob.findMany({ where: { state: { notIn: ACTIVE }, providerSessionId: { not: null }, OR: [{ providerState: { in: ['open', 'unknown'] } }, { nestedCheckedAt: null }] }, orderBy: [{ nestedTriedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }], take: SWEEP_BATCH, select: { id: true } });
     for (const job of open) {
       await closeSession(job.id, ctx);
       const after = await prisma.codeJob.findUnique({ where: { id: job.id }, select: { providerState: true } });

@@ -13,7 +13,7 @@ jest.mock('@/lib/db', () => ({
     universe: { findUnique: jest.fn() },
     role: { findMany: jest.fn(), findFirst: jest.fn() },
     roomAccess: { aggregate: jest.fn(), findMany: jest.fn(), groupBy: jest.fn() },
-    membershipInvitation: { findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
+    membershipInvitation: { findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), count: jest.fn() },
     ownershipOffer: { findUnique: jest.fn() },
   },
 }));
@@ -80,6 +80,7 @@ beforeEach(() => {
   db.roomAccess.findMany.mockResolvedValue([]);
   db.roomAccess.groupBy.mockResolvedValue([]);
   db.membershipInvitation.findMany.mockResolvedValue([]);
+  db.membershipInvitation.count.mockResolvedValue(0);
   db.ownershipOffer.findUnique.mockResolvedValue(null);
   friends.mockResolvedValue({ friends: [], incoming: [], outgoing: [], blocked: [] });
   search.mockResolvedValue([]);
@@ -354,29 +355,116 @@ describe('invitations list and cancel', () => {
 
     asViewer('plain');
     const none = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
-    expect(none).toEqual({ invitations: [], canCancel: false });
+    expect(none).toEqual({ invitations: [], canCancel: false, total: 0, nextCursor: null });
   });
 
-  it('lists only the invitations the viewer could send or take back: every-world ones need the permission everywhere', async () => {
+  it('lists every pending invitation to whoever may invite in some world, and marks the ones they may take back', async () => {
     const campusOnly = { ...pending, id: 'inv-campus' };
     const hqOnly = { ...pending, id: 'inv-hq', worldIds: ['hq'], worldId: 'hq' };
     const everyWorld = { ...pending, id: 'inv-all', allWorlds: true, worldIds: [] };
     const older = { ...pending, id: 'inv-old', universeId: null, allWorlds: false, worldIds: [], worldId: 'campus' };
     db.membershipInvitation.findMany.mockResolvedValue([campusOnly, hqOnly, everyWorld, older]);
 
+    // Invites in the HQ world only: sees all four, as every admin of the universe does, but may take back just HQ's
     asViewer('hq-inviter');
     const scoped = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
-    expect(scoped.invitations.map((invitation: { id: string }) => invitation.id)).toEqual(['inv-hq']);
+    expect(scoped.invitations.map((invitation: { id: string }) => invitation.id)).toEqual(['inv-campus', 'inv-hq', 'inv-all', 'inv-old']);
+    expect(scoped.invitations.filter((invitation: { canCancel: boolean }) => invitation.canCancel).map((invitation: { id: string }) => invitation.id)).toEqual(['inv-hq']);
     expect(scoped.canCancel).toBe(true);
+    // A second query asks for the ones that start in their worlds, so 200 newer elsewhere can't push them out
+    expect(db.membershipInvitation.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ allWorlds: false, worldId: { in: ['hq'] } }), take: 200 }),
+    );
 
     asViewer('inviter');
     const everywhere = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
     expect(everywhere.invitations).toHaveLength(4);
+    expect(everywhere.invitations.every((invitation: { canCancel: boolean }) => invitation.canCancel)).toBe(true);
 
-    // Nothing they may touch is waiting: no list, and nothing to cancel
+    // Nothing they may take back is waiting: the list is there, with nothing to cancel
     asViewer('hq-inviter');
     db.membershipInvitation.findMany.mockResolvedValue([campusOnly, everyWorld]);
-    expect(await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json()).toEqual({ invitations: [], canCancel: false });
+    const unreachable = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
+    expect(unreachable.invitations).toHaveLength(2);
+    expect(unreachable.canCancel).toBe(false);
+  });
+
+  it('keeps the invitations a world-limited inviter can take back in the list when 200 newer ones in two worlds fill the first query', async () => {
+    // 200 newer invitations start in HQ but also name Campus: an HQ-only inviter may not take those back
+    const wide = Array.from({ length: 200 }, (_, index) => ({
+      ...pending,
+      id: `wide-${index}`,
+      worldIds: ['hq', 'campus'],
+      worldId: 'hq',
+      invitedAt: new Date(Date.UTC(2026, 10, 1, 12, 0, 200 - index)),
+    }));
+    const hqOnly = { ...pending, id: 'inv-hq-only', worldIds: ['hq'], worldId: 'hq', invitedAt: new Date('2026-10-01T09:00:00Z') };
+    const store = [...wide, hqOnly];
+    // A small stand-in for the database: the filters the route asks for, newest first, cut at take
+    db.membershipInvitation.findMany.mockImplementation(async (args: { where: Record<string, unknown>; take: number }) => {
+      const { allWorlds, worldId, NOT } = args.where as { allWorlds?: boolean; worldId?: { in: string[] }; NOT?: { worldIds?: { hasSome: string[] } } };
+      return store
+        .filter((row) => allWorlds === undefined || row.allWorlds === allWorlds)
+        .filter((row) => !worldId || worldId.in.includes(row.worldId))
+        .filter((row) => !NOT?.worldIds || !row.worldIds.some((id) => NOT.worldIds!.hasSome.includes(id)))
+        .sort((a, b) => b.invitedAt.getTime() - a.invitedAt.getTime())
+        .slice(0, args.take);
+    });
+
+    asViewer('hq-inviter');
+    const body = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
+    const mine = body.invitations.find((invitation: { id: string }) => invitation.id === 'inv-hq-only');
+    expect(mine).toMatchObject({ id: 'inv-hq-only', canCancel: true });
+    expect(body.canCancel).toBe(true);
+  });
+
+  it('lists 200 at a time, says how many wait in all, and hands out a place to ask for the next 200', async () => {
+    const many = Array.from({ length: 201 }, (_, index) => ({ ...pending, id: `inv-${index}`, invitedAt: new Date(Date.UTC(2026, 9, 17, 10, 0, 0) - index * 1000) }));
+    db.membershipInvitation.findMany.mockResolvedValue(many);
+    db.membershipInvitation.count.mockResolvedValue(450);
+    asViewer('owner');
+    const first = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
+    expect(first.invitations).toHaveLength(200);
+    expect(first.total).toBe(450);
+    expect(typeof first.nextCursor).toBe('string');
+    // One more than shown is asked for, to know there is a next page; same-time invitations are told apart by id
+    expect(db.membershipInvitation.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 201, orderBy: [{ invitedAt: 'desc' }, { id: 'desc' }] }));
+
+    // The next page starts after the last one shown, and nothing more is added to it
+    db.membershipInvitation.findMany.mockClear();
+    db.membershipInvitation.findMany.mockResolvedValue(many.slice(0, 5));
+    asViewer('hq-inviter');
+    const next = await (await listInvitations(request(`/api/admin/universes/u1/invitations?cursor=${first.nextCursor}`), params())).json();
+    expect(next.nextCursor).toBeNull();
+    expect(db.membershipInvitation.findMany).toHaveBeenCalledTimes(1);
+    const where = db.membershipInvitation.findMany.mock.calls[0][0].where;
+    expect(where.AND[1]).toEqual({ OR: [{ invitedAt: { lt: many[199].invitedAt } }, { invitedAt: many[199].invitedAt, id: { lt: 'inv-199' } }] });
+  });
+
+  it('refuses a place in the list that makes no sense', async () => {
+    asViewer('owner');
+    const response = await listInvitations(request('/api/admin/universes/u1/invitations?cursor=nonsense'), params());
+    expect(response.status).toBe(400);
+    expect(db.membershipInvitation.findMany).not.toHaveBeenCalled();
+  });
+
+  it('keeps a role whose badge is hidden off the invitations of viewers who may not see it', async () => {
+    const withRoles = { ...pending, roleIds: ['r-mod', 'r-secret'] };
+    db.membershipInvitation.findMany.mockResolvedValue([withRoles]);
+    db.role.findMany.mockResolvedValue([{ id: 'r-secret' }]);
+
+    // May invite but not give roles: the hidden role is not named, the visible one is
+    asViewer('inviter');
+    const viewer = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
+    expect(viewer.invitations[0].roleIds).toEqual(['r-mod']);
+    expect(db.role.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { universeId: 'u1', showBadge: false, id: { in: ['r-mod', 'r-secret'] } } }));
+
+    // The owner sees every role, so nothing is left out
+    db.role.findMany.mockClear();
+    asViewer('owner');
+    const owner = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
+    expect(owner.invitations[0].roleIds).toEqual(['r-mod', 'r-secret']);
+    expect(db.role.findMany).not.toHaveBeenCalled();
   });
 
   it('takes back an invitation, as someone who may invite in the worlds it names', async () => {

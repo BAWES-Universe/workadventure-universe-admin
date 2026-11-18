@@ -51,6 +51,7 @@ model User {
   defaultBrick      DefaultBrick?
   brickVisit        BrickVisit?
   brickHomesPlaced  BrickHome[]
+  bricksMet         BrickMet[]
   brickOffers       BrickOffer[]
   brickItems        BrickItem[] @relation("BrickItemOwner")
   brickTemplates    BrickTemplate[] @relation("BrickTemplateMaker")
@@ -82,6 +83,7 @@ model User {
   pushDevices      PushDevice[]
   pushActivity     PushActivity?
   artifacts        Artifact[]        @relation("ArtifactOwner")
+  computerResults  ComputerJobFile[] @relation("ComputerResultOwner")
   artifactAsks     ArtifactVersion[] @relation("ArtifactAsker")
   artifactPasses   ArtifactPass[]    @relation("ArtifactPassHolder")
   nearbySharedItems NearbySharedItem[]
@@ -403,6 +405,7 @@ model Room {
   reports    Report[]
   brickVisits BrickVisit[]
   brickHomes  BrickHome[]
+  bricksMet   BrickMet[]
 
   @@unique([worldId, slug]) // Slug unique within world
   @@map("rooms")
@@ -935,6 +938,7 @@ model Bot {
   voiceListenUses VoiceListenUse[]
   defaultBrickOf  DefaultBrick?
   visit           BrickVisit?
+  metBy           BrickMet[]
   computer        BrickComputer?
   computerJobs    ComputerJob[]
   home            BrickHome?
@@ -986,6 +990,36 @@ model BrickVisit {
 
   @@index([roomId, seenAt])
   @@map("brick_visits")
+}
+
+// Someone who met a Brick that was visiting or standing in a place, and may keep writing to it after the visit is over (game
+// #2005, "People who met"; Khalid, 5 Nov: "if i met them and i have dmd them and permissions allow dms then i should be able to
+// keep dming until a person changes permission"). One row per Brick and person. It is written when the Brick answers them
+// nearby or in a direct message while it is somewhere other people can reach it, and it never depends on where the Brick or the
+// person is afterwards: ending a visit, a home that goes, or walking into another universe changes nothing. What ends it is
+// a decision: its owner takes the person off (`revokedAt`, lib/brick-met.ts), the Brick is switched off or deleted, the person's access is
+// withdrawn where they met it (a ban, or the roles there), or, for someone who only met it and never wrote, the days Limits
+// give ("Bricks") run out. `dmAt` is when they first wrote: from then on only a decision ends it, never time. `roomId` is the
+// place they met it last, whose roles and bans still apply; it is null once that room is gone.
+model BrickMet {
+  botId     String    @map("bot_id")
+  userId    String    @map("user_id")
+  roomId    String?   @map("room_id")
+  // Null when the owner took the person off before they ever met it
+  metAt     DateTime? @map("met_at")
+  lastMetAt DateTime? @map("last_met_at")
+  dmAt      DateTime? @map("dm_at")
+  // Set when the Brick's owner took this person off: no direct message, wherever the Brick is, and meeting it again does not undo it
+  revokedAt DateTime? @map("revoked_at")
+
+  bot  Bot   @relation(fields: [botId], references: [id], onDelete: Cascade)
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room Room? @relation(fields: [roomId], references: [id], onDelete: SetNull)
+
+  @@id([botId, userId])
+  @@index([userId])
+  @@index([roomId])
+  @@map("brick_met")
 }
 
 // A Brick that lives in a room (game #2005). The Brick stays its owner's own Brick, with no room of its own: this row only
@@ -1088,6 +1122,11 @@ model BrickItem {
   timeZone      String    @map("time_zone") @db.VarChar(64)
   // When it is next due; empty when nothing is due (done, paused, or a goal that waits for something)
   nextDueAt     DateTime? @map("next_due_at")
+  // Snooze moves one occurrence and never the recurrence. While a repeating item has a snoozed occurrence, `nextDueAt` is that one
+  // (`snoozedUntil` names it) and `regularDueAt` is where the recurrence itself comes next, so the rule never drifts: an hourly task
+  // due at 08:00 and snoozed to 08:10 still runs at 09:00 after it. Both are empty when nothing is snoozed, and only an item that is on has them.
+  regularDueAt  DateTime? @map("regular_due_at")
+  snoozedUntil  DateTime? @map("snoozed_until")
   // What a goal with no timed check waits for, in a line
   waitingFor    String?   @map("waiting_for") @db.VarChar(300)
   // A goal's one status line and its steps ([{ text, state: todo | doing | done }])
@@ -1155,8 +1194,14 @@ model BrickItemRun {
   late       Boolean   @default(false)
   // A watch or goal check run after an outage: one fresh check, never the missed ones
   fresh      Boolean   @default(false)
-  // claimed, done, failed, dropped (the item changed before it ran)
+  // queued (Run now was asked and the bot server has not been handed it yet), claimed, done, failed, dropped (the item changed before it ran)
   state      String    @default("claimed") @db.VarChar(8)
+  // Run now: an extra run the owner asked for, outside the recurrence. It never moves the item's next due time, and `requestKey` is its
+  // own idempotency key (the owner's tap): asking again with the same key finds the same run.
+  manual     Boolean   @default(false)
+  requestKey String?   @map("request_key") @db.VarChar(64)
+  /// Whether the run used Universe AI (set when it is made, or handed out): only those count in the runs a day, whatever key the Brick uses later.
+  universeAi Boolean   @default(true) @map("universe_ai")
   // What it came to: quiet, spoke, waiting, or empty while it runs
   outcome    String?   @db.VarChar(10)
   // The result in a line, for "Everything Brick did"
@@ -3182,6 +3227,8 @@ model BrickComputer {
   restClaimedAt DateTime? @map("rest_claimed_at")
   // Set while the browser is being cleared after a job: a job that starts meanwhile waits for it, so it is never cleared under it
   cleanClaimedAt DateTime? @map("clean_claimed_at")
+  // Set while the files a finished job made are being handed over (the file card): the machine is not put to rest meanwhile, whoever asks. A claim a stopped server left expires.
+  filesClaimedAt DateTime? @map("files_claimed_at")
   // When the sweep last sent the machine a no-op command to keep it awake while a job holds it
   keptAwakeAt   DateTime? @map("kept_awake_at")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
@@ -3241,14 +3288,83 @@ model ComputerJob {
   // What the person asked for in more words than the title, for the agent only: never shown, never sent anywhere else, and cleared when the job ends
   brief             String? @db.VarChar(4000)
 
+  // Brick tells the person how a job went, in their chat with it (the report back). Each ending is said once: `endToldAt` is empty until it was
+  // said, and set at once for the endings that are never said (the person's own Stop, turned off, deleted). Each time the job waits for its person
+  // `handoverSeq` goes up and `handoverUntold` is true until that wait was said, so a second wait is a second message and a retry is none.
+  endToldAt      DateTime? @map("ended_told_at")
+  // When everything an ending does was finished (its time written to the books, its files listed, its machine rested): an ending is told only after that, so
+  // a message never goes with a file list or a bill that is not written yet. One that never got there (a server stopped halfway) is told after a while.
+  endClosedAt    DateTime? @map("end_closed_at")
+  // Beaten every few seconds while this finished job waits in line for its files to be handed over (and as it takes its turn), emptied when it stops waiting: a wait is told
+  // from one that was abandoned (a server that stopped) by it, so the gap between one hand-over letting go of the machine and the next taking it is never mistaken for nobody waiting.
+  handOverAliveAt DateTime? @map("hand_over_alive_at")
+  /// The files list taken as this job ended (what its report says it saved); null when none was taken.
+  endFiles       Json?     @map("end_files")
+  /// The files list taken when this job began on the machine: what was there before it. What the job made is what the end list has that this one
+  /// does not (same path, size and time); null when it could not be taken, and then nothing is attributed to the job.
+  startFiles     Json?     @map("start_files")
+  /// The conversation the job began in (only a direct chat: `dm`, and the chat's id). The result goes back to THAT conversation; null for a job that
+  /// began without one (a goal's run), which goes to the person's own direct chat.
+  originKind     String?   @map("origin_kind") @db.VarChar(10)
+  originRef      String?   @map("origin_ref") @db.VarChar(255)
+  /// The report could not be delivered for good (no chat, not allowed, the original conversation gone, or the chat refused it): it is not "told". The
+  /// result stays with the person in Files; it is never offered again.
+  endUndeliverableAt  DateTime? @map("end_undeliverable_at")
+  endUndeliverableWhy String?   @map("end_undeliverable_why") @db.VarChar(20)
+  handoverSeq    Int       @default(0) @map("handover_seq")
+  handoverUntold Boolean   @default(false) @map("handover_untold")
+  // What the computer said in one plain sentence when it could not go on, cleaned (no links, no markup), and what the job was waiting for
+  // when nobody answered: the one thing the ending message needs that is gone once the job is over
+  endNote       String? @map("end_note") @db.VarChar(200)
+  endWaitingFor String? @map("end_waiting_for") @db.VarChar(10)
+
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
   tokens  ComputerJobToken[]
+  files   ComputerJobFile[]
 
   @@unique([botId, runId])
   @@index([botId, status])
   @@index([personId, status])
+  @@index([status, endToldAt])
   @@map("computer_jobs")
+}
+
+// The delivery ledger of the files a computer job made. The file itself is the person's own result in `owned_results` (the one place results are kept, the same as a
+// code job's; `resultId`): kept until they delete it or the days in Limits pass, whether or not the chat took it, and it does not go with the job, the computer or the
+// Brick that made it (deleting a Brick deletes the job rows and the machine, and the person's files stay, under "A deleted Brick"). This row is only what the job
+// knows about it: the path and time it was handed over from (so the same file is never handed over twice, even after the person deleted the result), the name and the
+// job's title then, and when the chat took it. `resultId` empties when the result is deleted; the row stays. Only an account being deleted takes its rows with it.
+model ComputerJobFile {
+  id         String    @id @default(uuid())
+  // The job that made it; null once that job is gone (its Brick was deleted)
+  jobId      String?   @map("job_id")
+  // The Brick that made it, by id (kept when the Brick is deleted) and the name it had
+  botId      String    @map("bot_id")
+  makerName  String    @map("maker_name") @db.VarChar(100)
+  // The person it belongs to, and what the job was called then
+  ownerId    String    @map("owner_id")
+  jobTitle   String    @map("job_title") @db.VarChar(200)
+  name       String    @db.VarChar(200)
+  // From the home folder, as the machine's list gave it, and when the file was last changed
+  path       String    @db.VarChar(400)
+  modifiedAt DateTime  @map("modified_at")
+  bytes      Int
+  mimeType   String    @map("mime_type") @db.VarChar(100)
+  // The owned result this became; null once the person deleted it (or it was past Limits' days)
+  resultId   String?   @unique @map("result_id")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  // When the chat took this file; null while it has not (it is still the person's, in Files)
+  deliveredAt DateTime? @map("delivered_at")
+
+  job    ComputerJob? @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  owner  User         @relation("ComputerResultOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  result OwnedResult? @relation(fields: [resultId], references: [id], onDelete: SetNull)
+
+  @@unique([botId, path, modifiedAt])
+  @@index([jobId])
+  @@index([ownerId, createdAt])
+  @@map("computer_job_files")
 }
 
 // An effect outside the computer that a job meant to have, written BEFORE it is tried and once per key, so a retry looks up
@@ -3501,6 +3617,8 @@ model CodeJob {
   nestedCalls       Int       @default(0) @map("nested_calls")
   // When the provider's log of the session was read after it was confirmed deleted and found clean (null until then: the sweep reads it again)
   nestedCheckedAt   DateTime? @map("nested_checked_at")
+  // When the sweep last tried to read that log (whether or not it could): a job whose read keeps failing goes behind the ones not tried yet, so it never keeps the others out of the sweep's batch
+  nestedTriedAt     DateTime? @map("nested_tried_at")
   // What the code printed and returned, clipped, and the files that were kept
   result            Json?
   deadlineAt        DateTime  @map("deadline_at")
@@ -3545,6 +3663,9 @@ model OwnedResult {
   // The Artifact the owner made from it, once they did
   artifactId  String?  @map("artifact_id")
   createdAt   DateTime @default(now()) @map("created_at")
+
+  // The ledger row of a computer job that handed this over to the chat, when it came from one
+  computerFile ComputerJobFile?
 
   @@unique([sourceKind, sourceId, name])
   @@index([ownerId, createdAt])

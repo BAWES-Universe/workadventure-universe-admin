@@ -11,6 +11,8 @@ import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provi
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
+import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
+import { cleanEndNote } from '@/lib/computer-report';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -18,6 +20,7 @@ import {
   costOfSeconds,
   isOver,
   roomFor,
+  silentEnding,
   type EffectKind,
   type EndedBy,
   type MachineState,
@@ -321,7 +324,13 @@ const queueReasonOf = (no: NoRoom): QueuedFor | null => (no.reason === 'allowanc
  * is writing it waits its turn, if the person's allowance or our room is used up it waits with its work saved (and the first
  * leads to "Ask for more"), and otherwise it runs and the machine is made or woken, here and nowhere else.
  */
-export async function startJob(input: { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null }, now: Date = new Date()): Promise<Started> {
+/** The conversation a job began in: only a direct chat, by its id. A job always goes back to where it began; one with no conversation (a goal's run) goes to the person's own direct chat. */
+export interface JobOrigin {
+  kind: 'dm';
+  ref: string;
+}
+
+export async function startJob(input: { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; origin?: JobOrigin | null }, now: Date = new Date()): Promise<Started> {
   const bot = await brickOf(input.botId, input.personId);
   if (!bot) return { ok: false, reason: 'not_owner' };
   const row = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
@@ -339,7 +348,7 @@ export async function startJob(input: { botId: string; personId: string; title: 
   let created;
   try {
     created = await prisma.computerJob.create({
-      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null },
+      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null, originKind: input.origin?.kind ?? null, originRef: input.origin?.ref.slice(0, 255) ?? null },
     });
   } catch (error) {
     // Two asks for the same run at once: the first made the job, the second finds it
@@ -483,7 +492,12 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
       await endJob(job.id, 'stopped', 'rule', now, false, 'queued');
       // Another try may have claimed the job while this one was refused: that one runs and is left alone, only a job this try ended is a refusal
       const after = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { status: true, endedBy: true } });
-      if (after?.status === 'stopped' && after.endedBy === 'rule') return { rule: room.words };
+      if (after?.status === 'stopped' && after.endedBy === 'rule') {
+        // Its words are kept for the report back, as the renew path does: without them the report says only that it stopped
+        const kept = cleanEndNote(room.words);
+        if (kept) await prisma.computerJob.updateMany({ where: { id: job.id, status: 'stopped', endedBy: 'rule', endNote: null }, data: { endNote: kept } });
+        return { rule: room.words };
+      }
       return after && !isOver(after.status) ? 'running' : 'gone';
     }
     const reason = queueReasonOf(room);
@@ -560,19 +574,40 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     await restIfUnheld(job.botId, now);
     return 'gone';
   }
+  // What is on the machine before this job works on it: only so the message can name files the job saved outside its own output folder (those are never handed over)
+  if (job.writes) await takeBaseline(job.id, job.botId, provider);
   return 'running';
+}
+
+/**
+ * The list of files on the machine as the job begins, kept on the job. Best effort: a list that could not be taken is left empty, and then nothing is
+ * attributed to the job (nothing can be proved), never a wrong file handed over. It never holds up the start for long (one quick command).
+ */
+async function takeBaseline(jobId: string, botId: string, provider: Provider): Promise<void> {
+  try {
+    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true } });
+    if (!row?.providerRef) return;
+    const listed = await provider.exec(row.providerRef, 'universe-files', { timeoutMs: 20_000 });
+    if (listed.exitCode !== 0 || listed.truncated) return;
+    await prisma.computerJob.updateMany({ where: { id: jobId }, data: { startFiles: parseFilesList(listed.stdout, new Date()) as unknown as Prisma.InputJsonValue } });
+  } catch (error) {
+    console.error('[Computer] Could not list the files a job began with:', error instanceof Error ? error.message : 'unknown');
+  }
 }
 
 /**
  * Puts the machine of a Brick to rest when no job holds it. The rest is claimed first (working -> resting) so only one caller does it,
  * and a job that starts meanwhile finds a resting machine and wakes it. Returns whether it rested one.
  */
-async function restIfUnheld(botId: string, now: Date): Promise<boolean> {
+async function restIfUnheld(botId: string, now: Date, exceptJobId?: string): Promise<boolean> {
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   const provider = providerFor(row);
   if (!row || !row.providerRef || !provider) return false;
-  const holders = () => prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } });
+  // A job that is done but has not handed its files over yet holds the machine too (it may be waiting for another hand-over's claim): resting it now would lose those files
+  const holders = async () => (await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } })) + (await pendingHandOvers(botId, now, exceptJobId));
   if ((await holders()) > 0) return false;
+  // Files of a job that just finished are being read off this machine: it is not put to rest under them (the job that reads them rests it when they are done)
+  if (row.filesClaimedAt && Date.now() - row.filesClaimedAt.getTime() < FILES_CLAIM_MS) return false;
   const claim = await prisma.brickComputer.updateMany({ where: { botId, machine: 'working' }, data: { machine: 'resting', restClaimedAt: now } });
   if (claim.count !== 1) return false;
   if ((await holders()) > 0) {
@@ -598,6 +633,25 @@ async function restIfUnheld(botId: string, now: Date): Promise<boolean> {
     await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting', restClaimedAt: now }, data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null } });
   }
   return true;
+}
+
+/**
+ * Jobs that finished well and write files, whose ending is not closed yet and not older than the longest hand-over (and the minute the sweep leaves it): their
+ * files may still be waiting to be read off the machine, so it is not put to rest under them. `exceptJobId` is the job asking, which is about to close its own ending.
+ */
+async function pendingHandOvers(botId: string, now: Date, exceptJobId?: string): Promise<number> {
+  return prisma.computerJob.count({
+    where: {
+      botId,
+      status: 'done',
+      writes: true,
+      endClosedAt: null,
+      // Not older than the longest hand-over, or one that is still waiting in line for it (it beats while it waits, so a job behind several others, and the gap
+      // between one hand-over letting go of the machine and the next taking it, are never taken for nobody waiting)
+      OR: [{ endedAt: { gt: new Date(now.getTime() - 60 * 1000 - HAND_OVER_LATEST_MS) } }, { handOverAliveAt: { gt: new Date(now.getTime() - HAND_OVER_ALIVE_MS) } }],
+      ...(exceptJobId ? { id: { not: exceptJobId } } : {}),
+    },
+  });
 }
 
 /**
@@ -686,6 +740,9 @@ export async function renewJob(
   }
   if (room.reason === 'rule') {
     // A rule the person said in chat stops it here, saying so: not "our room is used up", and nothing to ask more credit for
+    // Its words are kept for the message that tells the person (the report back)
+    const kept = cleanEndNote(room.words);
+    if (kept) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: kept } });
     await endJob(jobId, 'stopped', 'rule', now);
     return { ok: false, reason: 'rule', words: room.words };
   }
@@ -695,10 +752,15 @@ export async function renewJob(
 }
 
 /** The job finished: its machine is saved and rests, what it cost is counted, and the next job in line starts. Safe to say twice. */
-export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date()): Promise<JobView | null> {
+export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date(), why?: string | null): Promise<JobView | null> {
   // A job that never started (still in line) did not finish: it is stopped by the person or starts, never "done"
   const current = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
-  if (current && current.status !== 'queued') await endJob(jobId, outcome, outcome === 'failed' ? 'error' : null, now);
+  if (current && current.status !== 'queued') {
+    // The computer's own sentence about why it could not go on is kept before the job ends, for the message that tells the person
+    const note = outcome === 'failed' ? cleanEndNote(why) : null;
+    if (note) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: note } });
+    await endJob(jobId, outcome, outcome === 'failed' ? 'error' : null, now);
+  }
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return job ? jobView(job) : null;
 }
@@ -723,14 +785,15 @@ export async function stopJobFor(botId: string, ownerId: string, now: Date = new
  * effort and quick: a machine that is not awake is left alone (a command would wake it), and a step that fails never holds up the end of
  * the job (it is logged for the one who looks; the list from the last job stays).
  */
-async function closeOutIfUnheld(botId: string): Promise<void> {
+async function closeOutIfUnheld(botId: string): Promise<FilesList | null> {
   let claimedAt: Date | null = null;
+  let taken: FilesList | null = null;
   try {
     const row = await prisma.brickComputer.findUnique({ where: { botId } });
     const provider = providerFor(row);
-    if (!row?.providerRef || !provider || row.machine !== 'working') return;
+    if (!row?.providerRef || !provider || row.machine !== 'working') return null;
     const holders = () => prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } });
-    if ((await holders()) > 0) return;
+    if ((await holders()) > 0) return null;
     // The cleanup is claimed first (one at a time, a claim that was never let go is taken over after a while), and the holders are counted
     // again after: a job that took the machine before the claim is seen here, and one that comes after it waits for the cleanup in bringUp
     const now = new Date();
@@ -738,18 +801,19 @@ async function closeOutIfUnheld(botId: string): Promise<void> {
       where: { botId, machine: 'working', OR: [{ cleanClaimedAt: null }, { cleanClaimedAt: { lte: new Date(now.getTime() - CLEAN_CLAIM_STALE_MS) } }] },
       data: { cleanClaimedAt: now },
     });
-    if (claim.count !== 1) return;
+    if (claim.count !== 1) return null;
     claimedAt = now;
-    if ((await holders()) > 0) return;
+    if ((await holders()) > 0) return null;
     try {
       const listed = await provider.exec(row.providerRef, 'universe-files', { timeoutMs: 20_000 });
       if (listed.exitCode === 0 && !listed.truncated) {
-        await prisma.brickComputer.updateMany({ where: { botId, providerRef: row.providerRef }, data: { filesList: parseFilesList(listed.stdout, new Date()) as unknown as Prisma.InputJsonValue } });
+        taken = parseFilesList(listed.stdout, new Date());
+        await prisma.brickComputer.updateMany({ where: { botId, providerRef: row.providerRef }, data: { filesList: taken as unknown as Prisma.InputJsonValue } });
       }
     } catch (error) {
       console.error('[Computer] Could not list the files after a job:', error instanceof Error ? error.message : 'unknown');
     }
-    if ((await holders()) > 0) return;
+    if ((await holders()) > 0) return taken;
     const cleaned = await provider.exec(row.providerRef, 'universe-clean', { timeoutMs: 20_000 });
     // A profile that could not be removed stays marked on the machine, and the next start-up removes it before any job can use it
     if (cleaned.exitCode !== 0 || !/(^|\n)cleaned=1\s*$/.test(cleaned.stdout)) console.error('[Computer] The browser could not be cleared after a job; it is cleared before the next one');
@@ -758,6 +822,18 @@ async function closeOutIfUnheld(botId: string): Promise<void> {
   } finally {
     if (claimedAt) await prisma.brickComputer.updateMany({ where: { botId, cleanClaimedAt: claimedAt }, data: { cleanClaimedAt: null } }).catch(() => undefined);
   }
+  return taken;
+}
+
+/** How long a claim for handing over files is believed: the hand-over ends within its own time budget, so one older than this was left by a server that stopped. */
+const FILES_CLAIM_MS = HAND_OVER_LATEST_MS;
+/** How long a job that ended while another job's files were being read waits for them to be done before its own are read, and how often it looks. */
+const CLAIM_WAIT_MS = HAND_OVER_LATEST_MS;
+const CLAIM_POLL_MS = 500;
+let claimWaitMs = CLAIM_WAIT_MS;
+/** For tests: how long a hand-over waits for another one. */
+export function setHandOverClaimWaitForTests(ms: number | null): void {
+  claimWaitMs = ms ?? CLAIM_WAIT_MS;
 }
 
 /** How long a cleanup claim is believed: the commands it runs end within 40 seconds, so one older than this was left by a server that stopped. */
@@ -784,10 +860,28 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   if (only !== undefined && job.status !== only) return;
   const held = job.status === 'running' || job.status === 'waiting';
   const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
-  const seconds = job.secondsRun + stretch;
+  let seconds = job.secondsRun + stretch;
   const ended = await prisma.computerJob.updateMany({
     where: { id: jobId, status: job.status },
-    data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, readyWhat: null, readyWhere: null, control: 'brick', stretchStarted: null, secondsRun: seconds, agentResponseId: null, brief: null },
+    data: {
+      status,
+      endedBy,
+      endedAt: now,
+      queuedFor: null,
+      waitingFor: null,
+      readyWhat: null,
+      readyWhere: null,
+      control: 'brick',
+      stretchStarted: null,
+      secondsRun: seconds,
+      agentResponseId: null,
+      brief: null,
+      // What it waited for is kept when nobody answered, so Brick can say which step it waited at; no wait is left to tell about
+      endWaitingFor: endedBy === 'unanswered' ? job.waitingFor : null,
+      handoverUntold: false,
+      // The person's own Stop, a computer turned off and a Brick deleted are never told: they just did it
+      endToldAt: silentEnding(endedBy) ? now : null,
+    },
   });
   // Someone else ended it between the read and the write: that one counts and settles
   if (ended.count === 0) return;
@@ -795,6 +889,11 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   await revokeJobTokens(jobId, now).catch((error) => console.error('[Computer] Could not revoke a job’s keys:', error instanceof Error ? error.message : 'unknown'));
   // A turn the agent was still running is cancelled, so it does not go on working (and spending) for a job that is over
   if (held && job.agentResponseId) await cancelAgentTurn(job.botId, job.agentResponseId);
+
+  // A job that finished well hands over the files it made while its machine is still awake for it (the file card). The time that takes is the machine held for the
+  // job, so it is counted with the job's; one that cannot be handed over is only named in the message. It never holds up the end of the job for long: it is limited by time.
+  // The message about it waits for the ending to be closed below, so it never goes without its cards.
+  if (held && status === 'done') seconds += await handOverJobFiles(job, now);
 
   try {
     if (job.reservationKey) {
@@ -811,12 +910,98 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown');
   }
 
+  // The list taken as THIS job ended is kept on the job, so a later job's list can never be read as this one's; none taken (another job still held the machine) says no files
+  let endFiles: FilesList | null = null;
   if (held) {
-    await closeOutIfUnheld(job.botId);
-    await restIfUnheld(job.botId, now);
+    endFiles = await closeOutIfUnheld(job.botId);
+    await restIfUnheld(job.botId, now, job.id);
   }
+  // Everything this ending does is finished: only now may Brick tell the person how it went (its time is in the books, its files are listed)
+  await prisma.computerJob.updateMany({ where: { id: jobId }, data: { endClosedAt: new Date(), ...(endFiles ? { endFiles: endFiles as unknown as Prisma.InputJsonValue } : {}) } }).catch((error) => console.error('[Computer] Could not mark an ending closed:', error instanceof Error ? error.message : 'unknown'));
   // The turn passes to the next job in line, except while a Stop is ending everything
   if (advance && endedBy !== 'off' && endedBy !== 'deleted') await startNext(job.botId, now);
+}
+
+/**
+ * The files a finished job made are moved off its machine for the person's chat (lib/computer-file-cards), while it is still awake for the job. It runs before
+ * the job's ending is closed, and a "done" message is told only after that, so the cards are never missed. Returns the whole seconds it took, already added to
+ * the job's time (the machine was held for them). Never throws: a machine that cannot be read only means no cards.
+ */
+async function handOverJobFiles(job: { id: string; botId: string; personId: string; title: string; writes: boolean }, now: Date): Promise<number> {
+  // While it waits (and as it takes its turn) the job says so, so the machine is not rested and its ending is not told in a gap between two hand-overs
+  const beat = () => prisma.computerJob.updateMany({ where: { id: job.id }, data: { handOverAliveAt: new Date() } }).then(() => undefined, () => undefined);
+  try {
+    // Only a job that writes makes files. Which files are its own is what is in its own output folder: a job running beside it has a folder of its own
+    if (!job.writes) return 0;
+    const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
+    const provider = providerFor(row);
+    if (!row?.providerRef || !provider || row.machine !== 'working') return 0;
+    const limits = await getBrickLimits();
+    // The machine is not put to rest while its files are read (the sweep rests a working machine nobody holds, and the job is already over)
+    // Only when no other hand-over holds it (none, or one that is long past): two at once would let the first to finish let go of the machine under the other.
+    // A job that began while another one's files were being read waits for that one to finish (a hand-over is limited by time) instead of giving its own
+    // up: its ending would otherwise close with its files left behind, and nothing would hand them over later.
+    let waitUntil = Date.now() + claimWaitMs;
+    // The claim being waited for: another hand-over taking the machine after it was let go is progress, and the wait for it starts again (a claim that is never let go is
+    // long past after FILES_CLAIM_MS and is taken over), so a job behind two others is not given up while they, one after the other, make their way through
+    let waitingFor: number | null = null;
+    let claimedAt = new Date();
+    let beatAt = Date.now();
+    await beat();
+    for (;;) {
+      if (Date.now() - beatAt >= HAND_OVER_BEAT_MS) {
+        beatAt = Date.now();
+        await beat();
+      }
+      claimedAt = new Date();
+      const claim = await prisma.brickComputer.updateMany({
+        where: { botId: job.botId, machine: 'working', providerRef: row.providerRef, OR: [{ filesClaimedAt: null }, { filesClaimedAt: { lt: new Date(claimedAt.getTime() - FILES_CLAIM_MS) } }] },
+        data: { filesClaimedAt: claimedAt },
+      });
+      if (claim.count === 1) break;
+      // Held by another hand-over: wait for it. Anything else (the machine is not working any more, or is another one) is not a wait.
+      const now2 = await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { machine: true, providerRef: true, filesClaimedAt: true } });
+      if (!now2 || now2.machine !== 'working' || now2.providerRef !== row.providerRef) return 0;
+      // Let go of between the two reads: try again at once
+      if (!now2.filesClaimedAt) continue;
+      if (waitingFor !== now2.filesClaimedAt.getTime()) {
+        if (waitingFor !== null) waitUntil = Date.now() + claimWaitMs;
+        waitingFor = now2.filesClaimedAt.getTime();
+      }
+      // The deadline is applied only after the claim was read: one taken just before it is progress (the wait starts again), not a reason to give up
+      if (Date.now() >= waitUntil) return 0;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(CLAIM_POLL_MS, Math.max(1, waitUntil - Date.now()))));
+    }
+    try {
+      return await handOver(job, now, row.providerRef, provider, limits);
+    } finally {
+      await prisma.brickComputer.updateMany({ where: { botId: job.botId, filesClaimedAt: claimedAt }, data: { filesClaimedAt: null } }).catch(() => undefined);
+    }
+  } catch (error) {
+    console.error('[Computer] Could not hand over the files of a job:', error instanceof Error ? error.message : 'unknown');
+    return 0;
+  } finally {
+    // Not waiting any more, whichever way it ended (its files handed over, given up, or nothing to hand over)
+    await prisma.computerJob.updateMany({ where: { id: job.id, handOverAliveAt: { not: null } }, data: { handOverAliveAt: null } }).catch(() => undefined);
+  }
+}
+
+async function handOver(job: { id: string; botId: string; personId: string; title: string }, now: Date, ref: string, provider: Provider, limits: Awaited<ReturnType<typeof getBrickLimits>>): Promise<number> {
+  const bot = await prisma.bot.findUnique({ where: { id: job.botId }, select: { name: true } });
+  const result = await handOverFiles({
+    jobId: job.id,
+    botId: job.botId,
+    ownerId: job.personId,
+    makerName: (bot?.name ?? 'Brick').slice(0, 100),
+    jobTitle: job.title.slice(0, 200),
+    ref,
+    provider,
+    limits: { count: limits.computerFiles, bytes: limits.computerFileMb * 1024 * 1024 },
+  });
+  // The machine was held for the job all the time it looked, whether or not a file came of it
+  const seconds = Math.round(result.ms / SECOND);
+  if (seconds > 0) await prisma.computerJob.updateMany({ where: { id: job.id }, data: { secondsRun: { increment: seconds } } });
+  return seconds;
 }
 
 /**
@@ -870,14 +1055,21 @@ const SWEEP_PAGES = 10;
  * the ones missing are picked first and only then limited, so newer jobs never push an older one out. Safe to run twice.
  */
 async function recordMissingComputerTime(now: Date, batch: number, botId?: string): Promise<void> {
-  // A job that ended a moment ago may still be writing its own event: the sweep leaves it a minute. One Brick's, before its removal, does not wait.
-  const cutoff = botId ? now : new Date(now.getTime() - 60 * 1000);
+  // A job that ended a moment ago may still be writing its own event, and its files may be waiting to be handed over (the longest that takes, with the wait for
+  // another hand-over, is within HAND_OVER_LATEST_MS): the sweep leaves it that long and a minute. One Brick's, before its removal, does not wait.
+  const cutoff = botId ? now : new Date(now.getTime() - 60 * 1000 - HAND_OVER_LATEST_MS);
   const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
+  // A job whose files are being handed over is still adding the seconds that takes to its time: its event is written by that job, after, never by the sweep before
+  const claimCutoff = new Date(now.getTime() - FILES_CLAIM_MS);
+  // ...nor one that is waiting in line for its hand-over (it beats while it waits): the gap between two hand-overs on the machine is no reason to write its time
+  const aliveCutoff = new Date(now.getTime() - HAND_OVER_ALIVE_MS);
   const ended = await prisma.$queryRaw<Array<{ id: string; botId: string; personId: string; runId: string | null; secondsRun: number; status: string; endedBy: string | null; endedAt: Date | null }>>(Prisma.sql`
     SELECT j."id", j."bot_id" AS "botId", j."person_id" AS "personId", j."run_id" AS "runId", j."seconds_run" AS "secondsRun", j."status", j."ended_by" AS "endedBy", j."ended_at" AS "endedAt"
     FROM "computer_jobs" j
     WHERE j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0 AND j."ended_at" <= ${cutoff} ${only}
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')
+      AND NOT EXISTS (SELECT 1 FROM "brick_computers" c WHERE c."bot_id" = j."bot_id" AND c."files_claimed_at" > ${claimCutoff})
+      AND (j."hand_over_alive_at" IS NULL OR j."hand_over_alive_at" <= ${aliveCutoff})
     ORDER BY j."ended_at" ASC
     LIMIT ${batch}`);
   for (const job of ended) {
@@ -1101,7 +1293,11 @@ export async function requestHandover(jobId: string, waitingFor: WaitingFor, now
   if (job.status === 'running') {
     // The stretch so far is counted, and the machine stays awake for them
     const stretch = job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
-    await prisma.computerJob.updateMany({ where: { id: jobId, status: 'running' }, data: { status: 'waiting', waitingFor, control: 'brick', secondsRun: job.secondsRun + stretch, stretchStarted: now, ...readyData } });
+    await prisma.computerJob.updateMany({
+      where: { id: jobId, status: 'running' },
+      // A new wait is one more thing to tell the person, once (the report back); asked again while it waits it is the same wait
+      data: { status: 'waiting', waitingFor, control: 'brick', secondsRun: job.secondsRun + stretch, stretchStarted: now, handoverSeq: { increment: 1 }, handoverUntold: true, ...readyData },
+    });
   } else if (job.status === 'waiting') {
     await prisma.computerJob.updateMany({ where: { id: jobId, status: 'waiting', control: 'brick' }, data: { waitingFor, ...readyData } });
   }
@@ -1467,6 +1663,7 @@ export async function removeMachineBeforeDelete(botId: string, now: Date = new D
     WHERE j."bot_id" = ${botId} AND j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
   if (Number(unwritten[0]?.n ?? 0) > 0) return false;
+  // What its jobs made is NOT deleted with it: those files are the person's own (owned records with the job and Brick that made them), and stay, under "A deleted Brick", until they delete them
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   if (!row || !row.providerRef || row.machine === 'none') return true;
   const provider = providerFor(row);

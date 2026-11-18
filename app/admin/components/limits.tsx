@@ -643,6 +643,19 @@ export function brickLimits(values: BrickLimits): Limit[] {
       ],
     },
     {
+      id: 'metExpiresDays',
+      label: 'Days someone who only met a Brick can still start a message to it',
+      hint: 'Meeting a Brick, in a place it visits or lives in, lets a person message it afterwards, wherever it is. Once they have written to it, that stays until its owner or a host changes it, whatever this says.',
+      unit: 'days',
+      value: values.metExpiresDays,
+      recommended: recommended.metExpiresDays,
+      options: [
+        { value: 7, label: '7 days', meaning: 'Only a fresh meeting counts.' },
+        { value: 30, label: '30 days', meaning: 'A month to write back.' },
+        { value: 90, label: '90 days', meaning: 'A season to write back.' },
+      ],
+    },
+    {
       id: 'itemsPerPerson',
       label: 'Goals and tasks one person can have going',
       hint: 'Reminders, schedules, watches and goals together, paused ones included. Done ones do not count.',
@@ -1035,6 +1048,32 @@ export function brickLimits(values: BrickLimits): Limit[] {
         { value: 5, label: '5 templates', meaning: 'Very short lists.' },
         { value: 10, label: '10 templates', meaning: 'Short and easy to scan.' },
         { value: 20, label: '20 templates', meaning: 'For a busy shelf.' },
+      ],
+    },
+    {
+      id: 'computerFiles',
+      label: 'Files a finished computer job hands over',
+      hint: 'When a job on a Brick’s computer finishes, Brick puts the files it made in the chat as cards, newest first. This is how many. Any others are named in the message and stay on the computer. 0 hands over none.',
+      unit: 'files',
+      value: values.computerFiles,
+      recommended: recommended.computerFiles,
+      options: [
+        { value: 1, label: '1 file', meaning: 'Only the newest.' },
+        { value: 5, label: '5 files', meaning: 'Enough for most jobs.' },
+        { value: 10, label: '10 files', meaning: 'For jobs that make a few.' },
+      ],
+    },
+    {
+      id: 'computerFileMb',
+      label: 'Largest file a computer job hands over',
+      hint: 'A file bigger than this is not copied into the chat. Brick names it in the message and it stays on the computer. Every file handed over is kept in Universe in Files, so this also limits storage. The chat takes up to 50 MB.',
+      unit: 'megabytes',
+      value: values.computerFileMb,
+      recommended: recommended.computerFileMb,
+      options: [
+        { value: 10, label: '10 MB', meaning: 'Documents and pictures.' },
+        { value: 25, label: '25 MB', meaning: 'Most receipts, reports and slides.' },
+        { value: 50, label: '50 MB', meaning: 'The most the chat takes; slower to hand over.' },
       ],
     },
   ], LIMIT_RANGES.bricks);

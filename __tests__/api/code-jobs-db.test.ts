@@ -1340,6 +1340,48 @@ run('code jobs for Apps, in a real database', () => {
       expect(await actualState.pauseCodeJobs('provider_ran_tools')).toMatchObject({ paused: true, reason: 'provider_ran_tools' });
     });
 
+    it('does not let jobs whose log cannot be read keep a newer job out of the sweep: those tried go behind the ones not tried yet', async () => {
+      // A batch of the oldest jobs whose provider log keeps failing, and one newer job whose log reads fine
+      const base = Date.now() - 60 * 60_000;
+      const row = (name: string, at: Date) => ({
+        jobKey: `${name}-${tag}`,
+        botId: saraBrick,
+        personId: sara,
+        state: 'cancelled',
+        reason: 'cancelled',
+        capabilities: {},
+        limits: LIMITS as unknown as object,
+        reservedMicros: BigInt(0),
+        settledMicros: BigInt(0),
+        codeHash: 'x',
+        steps: 1,
+        providerUserId: `codejob-${name}-${tag}`,
+        providerSessionId: `${name}-session-${tag}`,
+        providerState: 'closed',
+        deadlineAt: at,
+        heartbeatAt: at,
+        finishedAt: at,
+        meteredAt: at,
+        createdAt: at,
+      });
+      await prisma.codeJob.createMany({ data: Array.from({ length: 60 }, (_, index) => row(`bad${index}`, new Date(base + index * 1000))) });
+      await prisma.codeJob.create({ data: row('good', new Date(base + 3_600_000)) });
+      const failing = provider.adapter.nestedRuns.getMockImplementation() as NonNullable<ReturnType<typeof provider.adapter.nestedRuns.getMockImplementation>>;
+      provider.adapter.nestedRuns.mockImplementation((async (call: { sessionId: string }) => {
+        if (call.sessionId.startsWith('bad')) throw new Error('provider log unavailable');
+        return 0;
+      }) as never);
+      try {
+        const goodId = (await prisma.codeJob.findFirstOrThrow({ where: { jobKey: `good-${tag}` } })).id;
+        // The first sweep takes the oldest batch (all failing); the second takes the ones not tried yet first, and reaches the newer job
+        await sweepCodeJobs(deps());
+        await sweepCodeJobs(deps());
+        expect((await rowOf(goodId)).nestedCheckedAt).not.toBeNull();
+      } finally {
+        provider.adapter.nestedRuns.mockImplementation(failing);
+      }
+    });
+
     it('keeps the workspace id of a job that ended while the workspace was being made, when deleting it then fails, and the sweep deletes it', async () => {
       let release!: () => void;
       const gate = new Promise<void>((resolve) => (release = resolve));

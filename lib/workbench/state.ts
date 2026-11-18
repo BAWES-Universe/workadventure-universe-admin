@@ -52,14 +52,6 @@ export interface CodeJobPause {
   at: string | null;
 }
 
-/** The pause as saved, and an error if it cannot be read: for a writer, which must never act on a guess. */
-async function readCodeJobPause(db: SettingsDb): Promise<CodeJobPause> {
-  const row = await db.appSetting.findUnique({ where: { key: STATE_KEY } });
-  const value = isRecord(row?.value) ? row.value : {};
-  if (value.paused !== true) return { paused: false, reason: null, at: null };
-  return { paused: true, reason: typeof value.reason === 'string' ? value.reason : 'manual', at: typeof value.at === 'string' ? value.at : null };
-}
-
 export async function getCodeJobPause(db: SettingsDb = prisma): Promise<CodeJobPause> {
   try {
     return await readCodeJobPause(db);
@@ -70,11 +62,19 @@ export async function getCodeJobPause(db: SettingsDb = prisma): Promise<CodeJobP
   }
 }
 
+/** The pause as saved, and a read that fails throws: for a change that must not be made, or reported as made, on a guess. */
+async function readCodeJobPause(db: SettingsDb): Promise<CodeJobPause> {
+  const row = await db.appSetting.findUnique({ where: { key: STATE_KEY } });
+  const value = isRecord(row?.value) ? row.value : {};
+  if (value.paused !== true) return { paused: false, reason: null, at: null };
+  return { paused: true, reason: typeof value.reason === 'string' ? value.reason : 'manual', at: typeof value.at === 'string' ? value.at : null };
+}
+
 /** Pauses new jobs (jobs already going finish and are settled). The first reason stands until it is resumed. */
 export async function pauseCodeJobs(reason: string, userId: string | null = null): Promise<CodeJobPause> {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${STATE_LOCK}))`;
-    // Read strictly: a read that failed is not "already paused", and nothing is written on it; the error reaches the caller, who keeps the job open to say it again
+    // A read that fails fails the pause (the caller sees it and tries again): an unreadable pause is not "already paused", so nothing is skipped and nothing is reported as written
     const current = await readCodeJobPause(tx);
     if (current.paused) return current;
     const state = { paused: true, reason, at: new Date().toISOString() };

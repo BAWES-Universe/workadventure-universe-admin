@@ -14,4 +14,4 @@ export function itemsFailed(error: unknown, what: string) {
 
 /** A refusal as the answer: the words, and the code and setting the Brick can say plainly. */
 export const itemsRefused = (refused: Refused) =>
-  NextResponse.json({ error: refused.error, ...(refused.code ? { code: refused.code } : {}), ...(refused.limit !== undefined ? { limit: refused.limit } : {}) }, { status: refused.status });
+  NextResponse.json({ error: refused.error, ...(refused.code ? { code: refused.code } : {}), ...(refused.limit !== undefined ? { limit: refused.limit } : {}), ...(refused.until ? { until: refused.until } : {}) }, { status: refused.status });

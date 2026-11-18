@@ -384,9 +384,13 @@ run('goals and tasks, in a real database', () => {
     // A briefing moves once and carries on from there
     expect(await changeItem(sami.brickId, briefing.id, { userId: sami.uuid, action: 'snooze' }, at(MIN))).toMatchObject({ ok: true, item: { state: 'on', nextDueAt: at(HOUR + MIN).toISOString(), cadence: { type: 'daily' } } });
     expect(await changeItem(sami.brickId, watch.id, { userId: sami.uuid, action: 'snooze' }, at(MIN))).toMatchObject({ ok: false, status: 409 });
+    // The same occurrence is snoozed once: asked again while it still waits (a double tap, even after the setting changed) is the item as it is
     await saveServerLimits({ bricks: { snooze: 15 } }, sami.id);
     try {
-      expect(await changeItem(sami.brickId, briefing.id, { userId: sami.uuid, action: 'snooze' }, at(MIN))).toMatchObject({ ok: true, item: { nextDueAt: at(16 * MIN).toISOString() } });
+      expect(await changeItem(sami.brickId, briefing.id, { userId: sami.uuid, action: 'snooze' }, at(2 * MIN))).toMatchObject({ ok: true, item: { nextDueAt: at(HOUR + MIN).toISOString() } });
+      // Another briefing, snoozed by the new setting
+      const other = await set(sami, { kind: 'schedule', cadence: { type: 'daily', time: '07:30', days: [0, 1, 2, 3, 4, 5, 6] } });
+      expect(await changeItem(sami.brickId, other.id, { userId: sami.uuid, action: 'snooze' }, at(MIN))).toMatchObject({ ok: true, item: { nextDueAt: at(16 * MIN).toISOString() } });
     } finally {
       await saveServerLimits({ bricks: { snooze: 60 } }, sami.id);
     }

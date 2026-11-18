@@ -12,7 +12,7 @@
  *
  * `modelList` is where a company lists a job's models (GET, the same key header): Soniox GET /v1/models (real-time ones), Deepgram
  * GET /v1/models (streaming listening ones), ElevenLabs GET /v1/models (speaking ones), Cartesia GET /models?capability=stt|tts, Soniox
- * GET /v1/tts-models (speaking ones). Fish
+ * GET /v1/tts-models (speaking ones), Google GET /v1beta/models (live ones), OpenAI GET /v1/models (realtime ones). Fish
  * Audio has no such list, so its models are typed on New voice provider. `voices` is where a speaking job lists its voices
  * (lib/voice-voices.ts reads every company's the same way).
  *
@@ -70,6 +70,12 @@ export interface VoiceModelListSpec {
   id: string;
   label?: string;
   where?: Record<string, string | boolean>;
+  /** A model is kept only when each of these list fields holds this value (Google: the models that do `bidiGenerateContent`, its Live API). */
+  whereHas?: Record<string, string>;
+  /** Only model ids starting with one of these are kept, for a company whose list says nothing about what a model does (OpenAI). */
+  keepStarting?: string[];
+  /** Taken off the front of each id as the company lists it (Google lists `models/gemini-…`; the bot server calls `gemini-…`). */
+  idAfter?: string;
   /**
    * Model ids starting with any of these are left out: models the company lists that Universe can't run yet (Deepgram's Flux
    * models need another address, not built or tested with a real key yet).
@@ -948,6 +954,19 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
         host: 'generativelanguage.googleapis.com',
         // From Google's Live API docs (7 Nov 2026): the older live models shut on 17 Nov 2026
         models: [{ id: 'gemini-3.8-live', label: 'Gemini 3.8 Live' }],
+        // GET /v1beta/models lists every model the key may use (at most 1,000 in one answer); the live ones do bidiGenerateContent
+        modelList: {
+          url: 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000',
+          list: 'models',
+          id: 'name',
+          idAfter: 'models/',
+          label: 'displayName',
+          whereHas: { supportedGenerationMethods: 'bidiGenerateContent' },
+          // Google's live transcription and live translation models run on the same Live API, but they don't hold a conversation
+          // (https://ai.google.dev/gemini-api/docs/live-api/live-transcribe), so they stay out
+          leaveOut: ['gemini-3.5-transcribe', 'gemini-3.5-live-translate'],
+          about: 'description',
+        },
         fixedVoices: GOOGLE_VOICES,
       },
     },
@@ -1259,6 +1278,15 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
           { id: 'gpt-realtime-2.1', label: 'GPT Realtime 2.1' },
           { id: 'gpt-realtime-2.1-mini', label: 'GPT Realtime 2.1 mini' },
         ],
+        // GET /v1/models lists every model the key may use with nothing on what each does: the talking ones are named for realtime.
+        // The realtime models that only listen (whisper, transcribe) or translate (translate) are not conversational, so they stay out
+        modelList: {
+          url: 'https://api.openai.com/v1/models',
+          list: 'data',
+          id: 'id',
+          keepStarting: ['gpt-realtime', 'gpt-4o-realtime', 'gpt-4o-mini-realtime'],
+          leaveOut: ['gpt-realtime-whisper', 'gpt-realtime-transcribe', 'gpt-realtime-translate'],
+        },
         // OpenAI has no call that lists voices: these are the realtime voices its docs list
         fixedVoices: [
           { id: 'marin', name: 'Marin' },

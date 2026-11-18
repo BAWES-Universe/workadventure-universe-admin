@@ -1,4 +1,4 @@
-import { firstDue, isTimeZone, nextDue, readCadence, repeatMinutes, zonedToUtc } from '@/lib/brick-item-time';
+import { firstDue, isTimeZone, nextDue, readCadence, repeatMinutes, snoozePlan, zonedToUtc } from '@/lib/brick-item-time';
 
 const iso = (ms: number | Date | null) => (ms === null ? null : new Date(ms).toISOString());
 
@@ -91,5 +91,49 @@ describe('a moment names its own offset, and a daily time repeats at the gap its
     expect(daily([1, 4])).toBe(3 * 1440);
     expect(daily([1])).toBe(7 * 1440);
     expect(daily([0, 6])).toBe(1440);
+  });
+});
+
+describe('snoozePlan: one occurrence moves, the recurrence never does', () => {
+  const at = (text: string) => new Date(text);
+  const hourly = { type: 'every' as const, minutes: 60 };
+  const kuwait = 'Asia/Kuwait';
+
+  it('keeps the next regular run of an hourly task where the rule puts it: 8:00 snoozed to 8:10 is still followed by 9:00', () => {
+    // 8:00 ran; the next regular one is 9:00. The tap is at 8:00 and snoozes 10 minutes.
+    const plan = snoozePlan(hourly, kuwait, at('2026-11-12T09:00:00Z'), at('2026-11-12T08:00:00Z'), 10);
+    expect(plan).toEqual({ nextDueAt: at('2026-11-12T08:10:00Z'), regularDueAt: at('2026-11-12T09:00:00Z'), snoozed: true });
+    // The run after the snoozed one is the regular 9:00 (counting from the snoozed 8:10 would give 9:10: that is the drift this prevents)
+    expect(iso(plan!.regularDueAt)).toBe('2026-11-12T09:00:00.000Z');
+  });
+
+  it('moves an occurrence that is due and not yet run: the regular one after it is the first still to come', () => {
+    // 8:00 is due, unclaimed, and the tap is at 8:03
+    expect(snoozePlan(hourly, kuwait, at('2026-11-12T08:00:00Z'), at('2026-11-12T08:03:00Z'), 10)).toEqual({ nextDueAt: at('2026-11-12T08:13:00Z'), regularDueAt: at('2026-11-12T09:00:00Z'), snoozed: true });
+  });
+
+  it('never doubles a run: a snooze that reaches or passes the next regular run is that regular run, nothing snoozed', () => {
+    const next = at('2026-11-12T09:00:00Z');
+    // Exactly at it, and past it
+    expect(snoozePlan(hourly, kuwait, next, at('2026-11-12T08:00:00Z'), 60)).toEqual({ nextDueAt: next, regularDueAt: null, snoozed: false });
+    expect(snoozePlan(hourly, kuwait, next, at('2026-11-12T08:00:00Z'), 90)).toEqual({ nextDueAt: next, regularDueAt: null, snoozed: false });
+    // A tap late on the message, a few minutes before the next one
+    expect(snoozePlan(hourly, kuwait, next, at('2026-11-12T08:55:00Z'), 10)).toEqual({ nextDueAt: next, regularDueAt: null, snoozed: false });
+  });
+
+  it('keeps a daily time of day across a clock change: the snoozed run is real minutes, the daily one stays on the wall clock', () => {
+    const london = { type: 'daily' as const, time: '08:00', days: [0, 1, 2, 3, 4, 5, 6] };
+    // Saturday 24 Oct 2026, 08:00 BST (07:00Z) ran; the next regular one is Sunday 08:00 GMT (08:00Z), after the clocks go back at 02:00
+    const next = new Date(zonedToUtc(2026, 10, 25, 8, 0, 'Europe/London'));
+    expect(iso(next)).toBe('2026-10-25T08:00:00.000Z');
+    const plan = snoozePlan(london, 'Europe/London', next, at('2026-10-24T07:00:00Z'), 30);
+    expect(plan).toEqual({ nextDueAt: at('2026-10-24T07:30:00Z'), regularDueAt: next, snoozed: true });
+    // 8:00 on the last night itself: 90 minutes from 00:30Z crosses the change and lands at 02:00 GMT, still real minutes
+    expect(snoozePlan(london, 'Europe/London', next, at('2026-10-25T00:30:00Z'), 90)).toEqual({ nextDueAt: at('2026-10-25T02:00:00Z'), regularDueAt: next, snoozed: true });
+  });
+
+  it('is not for one that does not repeat: a one-off moves itself', () => {
+    expect(snoozePlan({ type: 'once', at: '2026-11-12T10:00:00.000Z' }, kuwait, null, at('2026-11-12T08:00:00Z'), 10)).toBeNull();
+    expect(snoozePlan({ type: 'none' }, kuwait, null, at('2026-11-12T08:00:00Z'), 10)).toBeNull();
   });
 });
