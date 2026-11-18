@@ -48,6 +48,15 @@ describe('the Agent37 client', () => {
     await expect(done.api.listInstances()).resolves.toEqual([machine]);
   });
 
+  it('refuses an answer that holds no list (an empty body, `{}`, data that is not a list, a body that is not JSON) and takes a real empty list for what it is', async () => {
+    for (const bad of [json(200, {}), json(200, { data: null }), json(200, { data: { a: 1 } }), json(200, [1]), new Response('', { status: 200 }), new Response('<html>', { status: 200 })]) {
+      const odd = client([bad]);
+      await expect(odd.api.listInstances()).rejects.toThrow('did not answer with a list of machines');
+    }
+    const empty = client([json(200, { data: [] })]);
+    await expect(empty.api.listInstances()).resolves.toEqual([]);
+  });
+
   it('never asks again for a create: after a lost answer the caller looks first', async () => {
     const { api, calls } = client([json(502, { error: 'bad_gateway' }), json(201, { id: 'x' })]);
     await expect(api.createInstance({ template: 't' })).rejects.toBeInstanceOf(Agent37Error);

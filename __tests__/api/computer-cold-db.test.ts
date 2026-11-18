@@ -35,7 +35,7 @@ import { finishOutside, purgeBrick } from '@/lib/brick-purge';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { listDeletedBricks } from '@/lib/brick-default';
 import { computerReadiness } from '@/lib/computer-readiness';
-import { archiveById, deleteAllArchives, markVerified, removeBrickObjects, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
+import { archiveById, deleteAllArchives, markVerified, removeBrickObjects, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, setWriteLimitForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
 import { GET as download } from '@/app/api/computer/archives/[id]/download/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -397,6 +397,35 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       await deleteAllArchives(brick.botId, new Date(Date.now() + 61 * 60_000));
       expect(bucket.objects.size).toBe(0);
       expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+    });
+
+    it('a write that runs past the limit is stopped: its stream is cancelled, nothing is published or left, and a write that finished its upload but waited past the limit is not published either', async () => {
+      const brick = await idleBrick();
+      setWriteLimitForTests(60);
+      try {
+        // An upload that never ends: it is stopped at the limit, so it cannot land an object after its row could have been taken
+        const endless = new ReadableStream<Uint8Array>({
+          start: (controller) => controller.enqueue(new Uint8Array([1, 2, 3])),
+          pull: () => new Promise<void>(() => undefined),
+        });
+        await expect(storeArchive(brick.botId, endless)).rejects.toThrow('longer than a write may');
+        expect(bucket.objects.size).toBe(0);
+        expect(await prisma.computerArchive.count({ where: { botId: brick.botId, state: 'staging' } })).toBe(0);
+        // One that finished its upload and then waited (a slow bucket) past the limit is not allowed to publish
+        const put = bucket.store.put.bind(bucket.store);
+        bucket.store.put = async (finalKey, stagingKey, stream, mayPublish) => {
+          const sealed = await put(finalKey, stagingKey, stream, async () => {
+            await new Promise((resolve) => setTimeout(resolve, 120));
+            return mayPublish ? mayPublish() : true;
+          });
+          return sealed;
+        };
+        await expect(storeArchive(brick.botId, Readable.toWeb(Readable.from([Buffer.from('home')])) as ReadableStream<Uint8Array>)).rejects.toThrow();
+        expect(bucket.objects.size).toBe(0);
+        expect(await prisma.computerArchive.count({ where: { botId: brick.botId, state: 'stored' } })).toBe(0);
+      } finally {
+        setWriteLimitForTests(null);
+      }
     });
 
     it('the purge keeps the row a writer changed while the purge was deleting: a copy that landed after its objects were deleted and could not be taken back out is still found by the next try', async () => {

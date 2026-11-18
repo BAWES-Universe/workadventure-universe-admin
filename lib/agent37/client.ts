@@ -221,10 +221,13 @@ export class Agent37Client {
   /** Newest first. The docs say nothing about pages, so this is the newest instances: enough to find one that was just made. */
   async listInstances(): Promise<Instance[]> {
     const answer = await this.again(() => this.call<{ data?: Instance[]; [more: string]: unknown }>('GET', `${this.api}/v1/instances`, this.account()));
-    const rows = Array.isArray(answer?.data) ? answer.data : [];
+    // An answer with no list in it (an empty body, `{}`, a page that is not the list) says nothing: it is not read as an account with no machines,
+    // which would let a make look for its machine in nothing and a purge call a Brick clear without looking
+    if (!answer || typeof answer !== 'object' || !Array.isArray(answer.data)) throw new Error('Agent37 did not answer with a list of machines');
+    const rows = answer.data;
     // The answer is the whole account (checked 18 Nov against the account: the answer is only `data`, newest first, each machine with `created`, and `limit`, `page`, `cursor` and `offset` change nothing). If Agent37 ever says more is to come, a list that is
     // not all of it must not pass for all of it: a make would look for its machine in it, and a purge would call a Brick clear
-    if (answer && morePages(answer, rows.length)) throw new Error('Agent37 says the list of machines is only part of them');
+    if (morePages(answer, rows.length)) throw new Error('Agent37 says the list of machines is only part of them');
     return rows;
   }
 

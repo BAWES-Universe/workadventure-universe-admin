@@ -17,6 +17,19 @@ import { deleteSealed, listSealed, openSealedStream, storeSealed, type Sealed } 
 export const KEEP_VERIFIED = 2;
 /** A copy still `staging`, or one that failed, is cleaned up after this long. */
 const STALE_MS = 60 * 60 * 1000;
+/**
+ * The longest a write of a copy may run. Shorter than `STALE_MS` on purpose: a copy's row is taken for abandoned (by a clean-up or a purge) once it is
+ * `STALE_MS` old, so a write that outlasted that could land an object after its row was taken. A write that reaches this is stopped (its stream is
+ * cancelled, nothing is published) instead of left to run.
+ */
+const WRITE_MAX_MS = 50 * 60 * 1000;
+let writeLimitMs = WRITE_MAX_MS;
+
+/** For tests: how long a write may run before it is stopped (null: the real limit). */
+export function setWriteLimitForTests(ms: number | null): void {
+  writeLimitMs = ms ?? WRITE_MAX_MS;
+}
+
 /** A pack-away that said it was alive within this long is still working (kept in step with the pack-away's own take-over time). */
 const LIVE_CLAIM_MS = 45 * 60 * 1000;
 /** How long a restore address works: one restore on one throwaway or new computer, retries included. */
@@ -100,10 +113,17 @@ export async function storeArchive(botId: string, archive: ReadableStream<Uint8A
       if (attempt < 5 && (error as { code?: string }).code === 'P2002') continue;
       throw error;
     }
+    // A write that reaches its limit is stopped: its stream is cancelled, so the upload cannot finish and nothing is published after its row could have been taken
+    const startedAt = Date.now();
+    const limit = new AbortController();
+    const timer = setTimeout(() => limit.abort(new Error('The copy took longer than a write may')), writeLimitMs);
+    timer.unref?.();
     try {
       if (await purged()) throw new Error('The Brick was deleted while its files were being copied');
-      // Published only while this write is still the live one: its row is still there as `staging` (a purge that deleted the row has given this write up) and the Brick is not purged
-      const sealed = await store.put(row.objectKey, stagingKeyOf(botId, generation, id), archive, async () => (await prisma.computerArchive.count({ where: { id, state: 'staging' } })) === 1 && !(await purged()));
+      const bounded = archive.pipeThrough(new TransformStream<Uint8Array, Uint8Array>(), { signal: limit.signal });
+      // Published only while this write is still the live one: its row is still there as `staging` (a purge that deleted the row has given this write up),
+      // the Brick is not purged and the write is within its limit
+      const sealed = await store.put(row.objectKey, stagingKeyOf(botId, generation, id), bounded, async () => Date.now() - startedAt < writeLimitMs && (await prisma.computerArchive.count({ where: { id, state: 'staging' } })) === 1 && !(await purged()));
       // A Brick purged while the copy was written: it must not stand (its row may be gone already, and the object is not to stay without one)
       if (await purged()) throw new Error('The Brick was deleted while its files were being copied');
       // Only while the row is still `staging`: a clean-up that took this copy for deletion meanwhile (`superseded`) owns its object, and the copy must not come back as stored
@@ -122,6 +142,8 @@ export async function storeArchive(botId: string, archive: ReadableStream<Uint8A
           .catch((recordError) => console.error('[Computer] A copy’s object could not be deleted and its record could not be written; the purge and the sweep look for it by listing:', recordError instanceof Error ? recordError.message : 'unknown'));
       }
       throw error;
+    } finally {
+      clearTimeout(timer);
     }
   }
 }
