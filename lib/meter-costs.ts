@@ -232,7 +232,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
         (COUNT(*) FILTER (WHERE kind = 'model_call' AND COALESCE(detail->>'error', 'false') <> 'true' AND COALESCE(detail->>'greeting', 'false') <> 'true'))::int AS replies,
         COALESCE(SUM(quantity) FILTER (WHERE kind = 'app_use'), 0)::bigint AS uses,
         COALESCE(SUM(CASE unit WHEN 'second' THEN quantity WHEN 'minute' THEN quantity * 60 ELSE 0 END) FILTER (WHERE kind = 'computer_time'), 0)::bigint AS seconds,
-        (COUNT(*) FILTER (WHERE kind = 'model_call' AND payer_kind <> 'universe'))::int AS own,
+        (COUNT(*) FILTER (WHERE kind = 'model_call' AND payer_kind <> 'universe' AND COALESCE(detail->>'error', 'false') <> 'true' AND COALESCE(detail->>'greeting', 'false') <> 'true'))::int AS own,
         (COUNT(*) FILTER (WHERE payer_kind = 'universe' AND basis = 'measured'))::int AS measured,
         (COUNT(*) FILTER (WHERE payer_kind = 'universe' AND basis = 'estimated'))::int AS estimated,
         (COUNT(*) FILTER (WHERE payer_kind = 'universe' AND cost_micros IS NULL))::int AS unpriced,
