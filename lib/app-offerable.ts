@@ -49,7 +49,33 @@ export async function offerableForBrick(viaBrickId: string, userId: string): Pro
       orderBy: { createdAt: 'asc' },
     }),
   ]);
-  const confirmed = await Promise.all(mine.map(confirmIfPending));
+  // Only the connections this answer can show are asked about: a ready-made one whose app is off, or any while the adapter is
+  // off, never makes the owner wait for the provider (or fail on its answer)
+  const shownReadyMade = new Set(readyMade.filter((app) => app.enabled).map((app) => app.key));
+  const showable = mine.filter((row) => {
+    if (row.catalogKey) return true;
+    if (!row.providerToolkit || !adapterOn) return false;
+    // The older ready-made GitHub connection is only read for the GitHub row below
+    if (row.providerToolkit === GITHUB_ROW_KEY && githubApp) return true;
+    return shownReadyMade.has(row.providerToolkit);
+  });
+  const confirmedFirst = await Promise.all(showable.map(confirmIfPending));
+  // A sign-in the provider just confirmed may have been granted to this Brick while it was being asked: connection and grant are
+  // read together again for those, so a connection that already had its grant is not reported as not used yet
+  const asked = showable.filter((row) => row.source === 'ready_made' && !row.providerConfirmedAt).map((row) => row.id);
+  const reread =
+    asked.length > 0
+      ? await prisma.appConnection.findMany({
+          where: { id: { in: asked }, ownerId },
+          include: { grants: { where: { botId: viaBrickId }, select: { id: true } } },
+        })
+      : [];
+  const confirmed = confirmedFirst.flatMap((row) => {
+    if (!asked.includes(row.id)) return [row];
+    const fresh = reread.find((one) => one.id === row.id);
+    // Gone while it was being asked: not offered as connected
+    return fresh ? [{ ...fresh, providerConfirmedAt: fresh.providerConfirmedAt ?? row.providerConfirmedAt }] : [];
+  });
   const byCatalogKey = new Map(confirmed.filter((row) => row.catalogKey).map((row) => [row.catalogKey as string, row]));
   const byToolkit = new Map(confirmed.filter((row) => row.providerToolkit).map((row) => [row.providerToolkit as string, row]));
   const view = (row: (typeof confirmed)[number] | undefined) => ({
@@ -59,27 +85,32 @@ export async function offerableForBrick(viaBrickId: string, userId: string): Pro
   });
 
   const out: OfferableApp[] = [];
-  const taken = new Set<string>();
-  const add = (app: OfferableApp) => {
-    // One row for one app: a ready-made app with the name or key of a listed one is shown once, as the listed one (the Apps page does the same)
-    if (taken.has(app.key) || taken.has(nameKey(app.name))) return;
-    taken.add(app.key);
-    taken.add(nameKey(app.name));
+  // Listed apps are all offered, each once by its key (two may share a name, as "Connect another" lists them). A ready-made
+  // app that has the key or the name of a listed one is shown once, as the listed one (the Apps page does the same); two
+  // ready-made apps with the same name stay separate.
+  const listedKeys = new Set<string>();
+  const listedNames = new Set<string>();
+  const addListed = (app: OfferableApp) => {
+    if (listedKeys.has(app.key)) return;
+    listedKeys.add(app.key);
+    listedNames.add(nameKey(app.name));
     out.push(app);
   };
 
   if (githubApp) {
-    // An older ready-made GitHub connection that still works is the person's GitHub: they are not asked to connect a second one
+    // An older ready-made GitHub connection that still works is the person's GitHub: they are not asked to connect a second one.
+    // Never while the adapter is off: the ready-made routes answer as if it did not exist, so it could not be used.
     const older = byToolkit.get(GITHUB_ROW_KEY);
-    const own = byCatalogKey.get(GITHUB_CATALOG_KEY) ?? (older && connectedState(older).connected ? older : undefined);
-    add({ key: GITHUB_ROW_KEY, name: 'GitHub', blurb: GITHUB_BLURB, kind: 'listed', ...view(own) });
+    const own = byCatalogKey.get(GITHUB_CATALOG_KEY) ?? (adapterOn && older && connectedState(older).connected ? older : undefined);
+    addListed({ key: GITHUB_ROW_KEY, name: 'GitHub', blurb: GITHUB_BLURB, kind: 'listed', ...view(own) });
   }
   for (const entry of entries) {
-    add({ key: entry.key, name: entry.name, blurb: entry.blurb, kind: 'listed', ...view(byCatalogKey.get(entry.key)) });
+    addListed({ key: entry.key, name: entry.name, blurb: entry.blurb, kind: 'listed', ...view(byCatalogKey.get(entry.key)) });
   }
   for (const app of readyMade) {
     if (!app.enabled) continue;
-    add({ key: app.key, name: app.name, blurb: '', kind: 'readyMade', ...view(byToolkit.get(app.key)) });
+    if (listedKeys.has(app.key) || listedNames.has(nameKey(app.name))) continue;
+    out.push({ key: app.key, name: app.name, blurb: '', kind: 'readyMade', ...view(byToolkit.get(app.key)) });
   }
   return out;
 }

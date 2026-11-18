@@ -4,7 +4,15 @@
  * owner's own connection, before and after they connect it. No database: the reads are stubbed. The same rules run against a
  * real database in __tests__/api/app-offerable-db.test.ts.
  */
-type Row = { id: string; catalogKey: string | null; providerToolkit: string | null; connected: boolean; grants: { id: string }[] };
+type Row = {
+  id: string;
+  catalogKey: string | null;
+  providerToolkit: string | null;
+  connected: boolean;
+  grants: { id: string }[];
+  source?: string;
+  providerConfirmedAt?: Date | null;
+};
 
 const state = {
   owner: 'owner-1' as string | null,
@@ -13,16 +21,18 @@ const state = {
   adapter: true,
   readyMade: [] as { key: string; name: string; enabled: boolean }[],
   github: false,
+  /** What reading the asked connections again finds */
+  reread: [] as Row[],
 };
 
 jest.mock('@/lib/db', () => ({
   prisma: {
     appCatalogEntry: { findMany: jest.fn(async () => state.entries) },
-    appConnection: { findMany: jest.fn(async () => state.rows) },
+    appConnection: { findMany: jest.fn(async (args?: { where?: { id?: unknown } }) => (args?.where?.id ? state.reread : state.rows)) },
   },
 }));
 jest.mock('@/lib/app-connections', () => ({
-  confirmIfPending: jest.fn(async (row: unknown) => row),
+  confirmIfPending: jest.fn(async (row: Row) => (row.source === 'ready_made' && !row.providerConfirmedAt ? { ...row, providerConfirmedAt: new Date(), connected: true } : row)),
   connectedState: (row: Row) => ({ connected: row.connected, reconnectRequired: false }),
 }));
 jest.mock('@/lib/brick-make', () => ({ ownerAskingThrough: jest.fn(async () => state.owner) }));
@@ -31,6 +41,7 @@ jest.mock('@/lib/app-adapter/settings', () => ({ readReadyMadeApps: jest.fn(asyn
 jest.mock('@/lib/github/app', () => ({ getGitHubApp: jest.fn(async () => (state.github ? { appId: 1 } : null)) }));
 
 import { offerableForBrick } from '@/lib/app-offerable';
+import { confirmIfPending } from '@/lib/app-connections';
 
 const row = (extra: Partial<Row>): Row => ({ id: 'c1', catalogKey: null, providerToolkit: null, connected: false, grants: [], ...extra });
 
@@ -41,6 +52,8 @@ beforeEach(() => {
   state.adapter = true;
   state.readyMade = [];
   state.github = false;
+  state.reread = [];
+  jest.clearAllMocks();
 });
 
 describe('offerableForBrick', () => {
@@ -108,5 +121,55 @@ describe('offerableForBrick', () => {
     state.entries = [{ key: 'search', name: 'Web search', blurb: 'Look things up' }];
     state.readyMade = [{ key: 'search', name: 'Search tool', enabled: true }];
     expect((await offerableForBrick('brick', 'u'))?.map((app) => app.name)).toEqual(['Web search']);
+  });
+
+  it('keeps a listed app whose key is another app’s name, and a ready-made one whose key is a listed name', async () => {
+    state.entries = [{ key: 'web', name: 'Search', blurb: '' }];
+    state.readyMade = [{ key: 'search', name: 'Search tool', enabled: true }];
+    expect((await offerableForBrick('brick', 'u'))?.map((app) => `${app.key}:${app.kind}`)).toEqual(['web:listed', 'search:readyMade']);
+    // A real name match is still dropped, as the listed one
+    state.readyMade = [{ key: 'search', name: 'search', enabled: true }];
+    expect((await offerableForBrick('brick', 'u'))?.map((app) => `${app.key}:${app.kind}`)).toEqual(['web:listed']);
+  });
+
+  it('offers two listed apps that share a name, and two ready-made apps that share a name, as Connect another lists them', async () => {
+    state.entries = [{ key: 'tavily-a', name: 'Tavily', blurb: '' }, { key: 'tavily-b', name: 'Tavily', blurb: '' }];
+    state.readyMade = [{ key: 'mail-a', name: 'Mail', enabled: true }, { key: 'mail-b', name: 'mail', enabled: true }];
+    expect((await offerableForBrick('brick', 'u'))?.map((app) => app.key)).toEqual(['tavily-a', 'tavily-b', 'mail-a', 'mail-b']);
+  });
+
+  it('does not take an older ready-made GitHub for a working one while the adapter is off', async () => {
+    state.github = true;
+    state.adapter = false;
+    state.rows = [row({ id: 'old', providerToolkit: 'github', connected: true, source: 'ready_made', providerConfirmedAt: new Date() })];
+    expect((await offerableForBrick('brick', 'u'))?.[0]).toMatchObject({ key: 'github', connectionId: null, connected: false, usable: false });
+  });
+
+  it('asks the provider only about connections this answer can show', async () => {
+    state.readyMade = [{ key: 'gmail', name: 'Gmail', enabled: true }, { key: 'slack', name: 'Slack', enabled: false }];
+    state.rows = [
+      row({ id: 'g', providerToolkit: 'gmail', source: 'ready_made' }),
+      row({ id: 's', providerToolkit: 'slack', source: 'ready_made' }),
+      row({ id: 'k', catalogKey: 'tavily', source: 'catalog' }),
+    ];
+    state.reread = [row({ id: 'g', providerToolkit: 'gmail', source: 'ready_made', providerConfirmedAt: new Date() })];
+    await offerableForBrick('brick', 'u');
+    expect((confirmIfPending as jest.Mock).mock.calls.map(([asked]: [Row]) => asked.id).sort()).toEqual(['g', 'k']);
+    // and none while the adapter is off, except the list's own
+    (confirmIfPending as jest.Mock).mockClear();
+    state.adapter = false;
+    await offerableForBrick('brick', 'u');
+    expect((confirmIfPending as jest.Mock).mock.calls.map(([asked]: [Row]) => asked.id)).toEqual(['k']);
+  });
+
+  it('reads the grant again after the provider confirms, so a grant made meanwhile is not reported as not used yet', async () => {
+    state.readyMade = [{ key: 'gmail', name: 'Gmail', enabled: true }];
+    state.rows = [row({ id: 'g', providerToolkit: 'gmail', source: 'ready_made' })];
+    // The owner granted it to this Brick while the provider was being asked
+    state.reread = [row({ id: 'g', providerToolkit: 'gmail', source: 'ready_made', providerConfirmedAt: new Date(), connected: true, grants: [{ id: 'grant' }] })];
+    expect(await offerableForBrick('brick', 'u')).toMatchObject([{ key: 'gmail', connectionId: 'g', connected: true, usable: true }]);
+    // Still no grant: confirmed, and not used yet
+    state.reread = [row({ id: 'g', providerToolkit: 'gmail', source: 'ready_made', providerConfirmedAt: new Date(), connected: true, grants: [] })];
+    expect(await offerableForBrick('brick', 'u')).toMatchObject([{ connected: true, usable: false }]);
   });
 });
