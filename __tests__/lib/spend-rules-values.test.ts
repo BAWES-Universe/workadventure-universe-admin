@@ -43,6 +43,12 @@ describe('what a rule said in chat means', () => {
     expect(draftRule({ botId: 'brick1', taskKey: 'job1', capMicros: 5_000_000, period: 'task' })).toMatchObject({ ok: true, draft: { scope: 'task', period: 'task' } });
   });
 
+  it('a cap on one task that also says a day or a month is refused, not quietly turned into a one-task cap', () => {
+    expect(draftRule({ botId: 'brick1', taskKey: 'job1', scope: 'task', capMicros: 5_000_000, period: 'month' })).toMatchObject({ ok: false, reason: 'invalid' });
+    expect(draftRule({ botId: 'brick1', taskKey: 'job1', scope: 'task', capMicros: 5_000_000, period: 'day' })).toMatchObject({ ok: false, reason: 'invalid' });
+    expect(draftRule({ botId: 'brick1', taskKey: 'job1', scope: 'task', capMicros: 5_000_000, period: 'task' })).toMatchObject({ ok: true, draft: { scope: 'task', period: 'task' } });
+  });
+
   it('"only use my accounts" needs no period and no amount', () => {
     const drafted = draftRule({ botId: 'brick1', scope: 'person', onlyOwnAccounts: true });
     expect(drafted).toMatchObject({ ok: true, draft: { scope: 'person', botId: null, taskKey: null, period: null, capMicros: null, onlyOwnAccounts: true, covers: 'all' } });

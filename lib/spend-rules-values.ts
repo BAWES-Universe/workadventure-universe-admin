@@ -147,8 +147,14 @@ export function draftRule(input: DraftInput): Drafted {
 
   let period: RulePeriod | null = null;
   if (hasCap) {
-    if (scope === 'task') period = 'task';
-    else if (isOne(RULE_PERIODS, input.period)) period = input.period;
+    if (scope === 'task') {
+      // A cap on one task counts that task. A recurring period said with it is a different rule (a Brick's month): never quietly
+      // turned into a one-task cap that later tasks do not inherit
+      if (input.period === 'day' || input.period === 'month') {
+        return { ok: false, reason: 'invalid', error: 'A cap on one task counts that task. For a day or a month, say it for the Brick or for everything' };
+      }
+      period = 'task';
+    } else if (isOne(RULE_PERIODS, input.period)) period = input.period;
     else {
       return {
         ok: false,
