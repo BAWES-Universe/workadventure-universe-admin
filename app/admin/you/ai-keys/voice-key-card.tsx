@@ -3,7 +3,7 @@
 import { Bot, Globe, ListPlus, Plus, RefreshCw, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { VoiceKeySummary } from '@/lib/voice-keys';
-import { voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { listedModelJobs, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { count } from '../../components/ds';
 import { voiceKeyLimitsLine } from '../../components/limits';
 import { Planet } from '../../components/ds/planet-icon';
@@ -54,9 +54,10 @@ export function VoiceKeyCard({
   // A speech server on the person's own computer has the plug a chat server has; a company has its logo
   const company = voiceKeyCompanyInfo(key.adapter);
   const logo = { logo: company?.logo, ...(key.address ? { plainIcon: 'plug' as const } : {}) };
-  // A company's key lists what the company lists for it, read again here; an own server's models are read when its address changes,
-  // and a model typed as the person named it (an Azure deployment) has no list
-  const canLoadModels = Boolean(company) && !company?.account?.typedModel;
+  // A company's key lists what the company lists for it, read again here, for a job the key does that the company has a list for: an
+  // own server's models are read when its address changes, a model typed as the person named it (an Azure deployment) has no list,
+  // and some companies (Fish Audio) have none. The same rule as the route's
+  const canLoadModels = listedModelJobs({ adapter: key.adapter, recognition: key.recognition, speech: key.speech, endpoint: key.address }).length > 0;
   return (
     <article
       className={`grid gap-4 rounded-2xl border bg-foreground/[.03] p-4 ${down ? 'border-[rgb(245_196_81/0.55)]' : 'border-foreground/10'}`}

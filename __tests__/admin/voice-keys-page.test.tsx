@@ -139,7 +139,7 @@ describe('a voice key on the AI keys page', () => {
     const fresh = { ...voiceKey, models: [...models, { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] };
     const base = fetchMock.getMockImplementation()!;
     fetchMock.mockImplementation((url: string, init?: RequestInit) =>
-      url === '/api/me/voice-keys/vk-1/models' ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ key: fresh, added: [fresh.models[3]] }) }) : base(url, init),
+      url === '/api/me/voice-keys/vk-1/models' ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ models: fresh.models, added: [fresh.models[3]] }) }) : base(url, init),
     );
     render(<AiKeysPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Load models' }));
@@ -152,13 +152,43 @@ describe('a voice key on the AI keys page', () => {
     answer({ voice: [voiceKey] });
     const base = fetchMock.getMockImplementation()!;
     fetchMock.mockImplementation((url: string, init?: RequestInit) =>
-      url === '/api/me/voice-keys/vk-1/models' ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ key: voiceKey, added: [], unread: ['recognition'] }) }) : base(url, init),
+      url === '/api/me/voice-keys/vk-1/models' ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ models, added: [], unread: ['recognition'] }) }) : base(url, init),
     );
     render(<AiKeysPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Load models' }));
+    // Not "lists no new models": the listening list was not read, so only the lists that were are spoken for
     await waitFor(() =>
-      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'ElevenLabs lists no new models for My ElevenLabs. Its list for listening couldn\u2019t be read right now, try again.' })),
+      expect(mockAddToast).toHaveBeenCalledWith(
+        expect.objectContaining({ description: 'No new models were added to My ElevenLabs from the lists that were read. Its list for listening couldn\u2019t be read right now, try again.' }),
+      ),
     );
+  });
+
+  it('"Load models" keeps a rename saved while it was loading, taking only the models from its answer', async () => {
+    answer({ voice: [voiceKey] });
+    const base = fetchMock.getMockImplementation()!;
+    let finish: () => void = () => undefined;
+    const grown = [...models, { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }];
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/me/voice-keys/vk-1/models') {
+        // The key as it was read before the rename is in the answer too: it must not be put back
+        return new Promise((resolve) => {
+          finish = () => resolve({ ok: true, status: 200, json: () => Promise.resolve({ key: voiceKey, models: grown, added: [grown[3]], unread: [] }) });
+        });
+      }
+      if (url === '/api/me/voice-keys/vk-1' && init?.method === 'PATCH') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ key: { ...voiceKey, name: 'Studio' } }) });
+      return base(url, init);
+    });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load models' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Rename My ElevenLabs' }));
+    fireEvent.change(screen.getByLabelText('Key name'), { target: { value: 'Studio' } });
+    fireEvent.click(screen.getByTestId('ai-key-rename-save'));
+    expect(await screen.findByRole('heading', { name: 'Studio' })).toBeTruthy();
+    finish();
+    expect(await screen.findByText(/4 models/)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Studio' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'My ElevenLabs' })).toBeNull();
   });
 
   it('"Load models" on two keys at once: one finishing does not end or re-enable the other', async () => {
@@ -171,7 +201,7 @@ describe('a voice key on the AI keys page', () => {
       if (!match) return base(url, init);
       const key = match[1] === 'vk-1' ? voiceKey : second;
       return new Promise((resolve) => {
-        done[match[1]] = () => resolve({ ok: true, status: 200, json: () => Promise.resolve({ key, added: [], unread: [] }) });
+        done[match[1]] = () => resolve({ ok: true, status: 200, json: () => Promise.resolve({ models: key.models, added: [], unread: [] }) });
       });
     });
     render(<AiKeysPage />);
@@ -191,6 +221,13 @@ describe('a voice key on the AI keys page', () => {
     answer({ voice: [{ ...voiceKey, adapter: 'azure', company: 'Azure' }] });
     render(<AiKeysPage />);
     await screen.findByRole('button', { name: 'Lend to a universe' });
+    expect(screen.queryByRole('button', { name: 'Load models' })).toBeNull();
+  });
+
+  it('has no Load models for a key with no list for what it does: Fish Audio, or ElevenLabs only listening', async () => {
+    answer({ voice: [{ ...voiceKey, adapter: 'fish', company: 'Fish Audio', recognition: false }, { ...voiceKey, id: 'vk-2', name: 'Listening only', recognition: true, speech: false }] });
+    render(<AiKeysPage />);
+    await screen.findByText('Listening only', { selector: 'h2' });
     expect(screen.queryByRole('button', { name: 'Load models' })).toBeNull();
   });
 

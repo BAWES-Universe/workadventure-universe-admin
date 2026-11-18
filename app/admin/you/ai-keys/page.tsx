@@ -226,15 +226,17 @@ export default function AiKeysPage() {
     setLoadingModels((ids) => new Set(ids).add(key.id));
     try {
       const response = await authenticatedFetch(`/api/me/voice-keys/${encodeURIComponent(key.id)}/models`, { method: 'POST' });
-      const body = (await response.json().catch(() => null)) as { error?: string; key?: VoiceKeySummary; added?: unknown[]; unread?: unknown[] } | null;
-      if (!response.ok || !body?.key) throw new AiKeyFailure(aiKeyError(response.status, body?.error));
-      const fresh = body.key;
-      updateVoice((list) => list.map((entry) => (entry.id === key.id ? fresh : entry)));
+      const body = (await response.json().catch(() => null)) as { error?: string; models?: VoiceKeySummary['models']; added?: unknown[]; unread?: unknown[] } | null;
+      if (!response.ok || !Array.isArray(body?.models)) throw new AiKeyFailure(aiKeyError(response.status, body?.error));
+      const models = body.models;
+      // Only the models are taken from the answer: the card as it is now (a rename saved meanwhile, a lend changed) is kept
+      updateVoice((list) => list.map((entry) => (entry.id === key.id ? { ...entry, models } : entry)));
       const added = Array.isArray(body.added) ? body.added.length : 0;
       const company = voiceKeyCompanyInfo(key.adapter)?.label ?? key.name;
       // A job whose list the company couldn't give right now is named, so "no new models" is never said about a list that wasn't read
       const unread = (Array.isArray(body.unread) ? body.unread : []).map((job) => UNREAD_JOB_WORDS[String(job)]).filter((word): word is string => Boolean(word));
-      const said = added > 0 ? `${count(added, 'new model', 'new models')} from ${company} added to ${key.name}` : `${company} lists no new models for ${key.name}`;
+      const nothing = unread.length > 0 ? `No new models were added to ${key.name} from the lists that were read` : `${company} lists no new models for ${key.name}`;
+      const said = added > 0 ? `${count(added, 'new model', 'new models')} from ${company} added to ${key.name}` : nothing;
       addToast({ description: unread.length > 0 ? `${said}. Its list for ${unread.join(' and ')} couldn’t be read right now, try again.` : said, variant: 'success', duration: unread.length > 0 ? 5000 : 3000 });
     } catch (error) {
       addToast({ description: aiKeyFailureText(error), variant: 'error', duration: 4000 });

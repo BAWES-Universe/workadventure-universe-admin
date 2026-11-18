@@ -15,9 +15,9 @@ export async function OPTIONS(request: NextRequest) {
 /**
  * POST /api/me/voice-keys/:id/models - "Load models" on one of the caller's saved keys: its company is asked again with the saved
  * key (free: nothing is heard or spoken), and the models it lists now that the key doesn't have yet are added. Nothing is taken off.
- * Answers `{ key, added, unread }`, `added` the models just added (`[]` when there are none) and `unread` the jobs (`"recognition"`,
+ * Answers `{ models, added, unread }`: `models` the key's models as saved, `added` the models just added (`[]` when there are none) and `unread` the jobs (`"recognition"`,
  * `"speech"`, `"talk"`) whose list the company has but couldn't be read right now (`[]` when all were read). 404 not the caller's
- * key, 409 a key with no list to load (an own server, a typed Azure deployment) or one that can't be read, 422 the company turned
+ * key, 409 a key with no list to load (an own server, a typed Azure deployment, a company with no list, a key that does only jobs the company has no list for) or one that can't be read, 422 the company turned
  * the key away, 502 it couldn't be reached, or none of its lists could be read, 429 too many tries.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
