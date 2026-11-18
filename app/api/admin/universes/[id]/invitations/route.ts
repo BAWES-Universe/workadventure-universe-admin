@@ -133,12 +133,16 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const inUniverse = { status: 'pending', OR: [{ universeId: id }, { world: { universeId: id } }] };
     const [newest, theirs] = await Promise.all([
       prisma.membershipInvitation.findMany({ ...query, where: inUniverse }),
-      // Someone who may invite only in some worlds also gets the newest 200 that start in one of theirs (an invitation's
-      // world is always one it gives, and never a deleted one), so more than 200 newer invitations elsewhere never push
-      // out the ones they can take back
+      // Someone who may invite only in some worlds also gets the newest 200 they can take back: ones that name no world
+      // beyond theirs (the rule cancelling uses, and a deleted world asks for nothing). An invitation's first world is
+      // always one it gives, so it is theirs too. More than 200 newer invitations elsewhere, or in theirs and others'
+      // together, never push out the ones they can take back
       where === 'all'
         ? Promise.resolve([])
-        : prisma.membershipInvitation.findMany({ ...query, where: { ...inUniverse, allWorlds: false, worldId: { in: where } } }),
+        : prisma.membershipInvitation.findMany({
+            ...query,
+            where: { ...inUniverse, allWorlds: false, worldId: { in: where }, NOT: { worldIds: { hasSome: access.worldIds.filter((worldId) => !where.includes(worldId)) } } },
+          }),
     ]);
     const seen = new Set<string>();
     const rows = [...newest, ...theirs]

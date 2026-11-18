@@ -112,6 +112,10 @@ describe('universe Members page', () => {
     const section = await screen.findByRole('region', { name: /Pending invitations/ });
     expect(within(section).getByText('Jana')).toBeTruthy();
     expect(within(section).getByText('Omar')).toBeTruthy();
+    // The button sits on Jana's row, and Omar's row has none
+    const rowOf = (name: string) => within(section).getByRole('link', { name }).closest('[data-kind]') as HTMLElement;
+    expect(within(rowOf('Jana')).getByRole('button', { name: 'Cancel invite' })).toBeTruthy();
+    expect(within(rowOf('Omar')).queryByRole('button', { name: 'Cancel invite' })).toBeNull();
     expect(within(section).getAllByRole('button', { name: 'Cancel invite' })).toHaveLength(1);
   });
 

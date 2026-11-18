@@ -700,4 +700,23 @@ run('universe roles and people routes (real database)', () => {
     expect(listed.body.invitations.map((invitation: { userId: string }) => invitation.userId)).toContain(early.id);
     await prisma.membershipInvitation.deleteMany({ where: { invitedUserId: { in: [early.id, ...crowdIds] } } });
   });
+
+  it('lists an older invitation only the viewer may take back, however many newer ones start in their world but also name another', async () => {
+    const early = await prisma.user.create({ data: { uuid: `early2-${tag}`, email: `early2-${tag}@example.test`, name: 'early2' } });
+    await prisma.membershipInvitation.create({
+      data: { worldId: worldA, universeId, allWorlds: false, worldIds: [worldA], invitedUserId: early.id, invitedByUserId: people.admin, status: 'pending', tags: [], roleIds: [], invitedAt: new Date('2026-01-01T00:00:00Z') },
+    });
+    const crowd = Array.from({ length: 200 }, (_, index) => ({ uuid: `wide-${index}-${tag}`, email: `wide-${index}-${tag}@example.test`, name: `wide ${index}` }));
+    await prisma.user.createMany({ data: crowd });
+    const crowdIds = (await prisma.user.findMany({ where: { uuid: { in: crowd.map((person) => person.uuid) } }, select: { id: true } })).map((person) => person.id);
+    // Newer, start in world A like the Moderator's, but also name world B: the Moderator may not take these back
+    await prisma.membershipInvitation.createMany({
+      data: crowdIds.map((userId) => ({ worldId: worldA, universeId, allWorlds: false, worldIds: [worldA, worldB], invitedUserId: userId, invitedByUserId: people.admin, status: 'pending', tags: [], roleIds: [] })),
+    });
+
+    const listed = await as('mod', inviteRoute.GET, {});
+    const mine = listed.body.invitations.find((invitation: { userId: string }) => invitation.userId === early.id);
+    expect(mine).toMatchObject({ canCancel: true });
+    await prisma.membershipInvitation.deleteMany({ where: { invitedUserId: { in: [early.id, ...crowdIds] } } });
+  });
 });

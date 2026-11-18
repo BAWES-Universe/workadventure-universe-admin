@@ -388,6 +388,35 @@ describe('invitations list and cancel', () => {
     expect(unreachable.canCancel).toBe(false);
   });
 
+  it('keeps the invitations a world-limited inviter can take back in the list when 200 newer ones in two worlds fill the first query', async () => {
+    // 200 newer invitations start in HQ but also name Campus: an HQ-only inviter may not take those back
+    const wide = Array.from({ length: 200 }, (_, index) => ({
+      ...pending,
+      id: `wide-${index}`,
+      worldIds: ['hq', 'campus'],
+      worldId: 'hq',
+      invitedAt: new Date(Date.UTC(2026, 10, 1, 12, 0, 200 - index)),
+    }));
+    const hqOnly = { ...pending, id: 'inv-hq-only', worldIds: ['hq'], worldId: 'hq', invitedAt: new Date('2026-10-01T09:00:00Z') };
+    const store = [...wide, hqOnly];
+    // A small stand-in for the database: the filters the route asks for, newest first, cut at take
+    db.membershipInvitation.findMany.mockImplementation(async (args: { where: Record<string, unknown>; take: number }) => {
+      const { allWorlds, worldId, NOT } = args.where as { allWorlds?: boolean; worldId?: { in: string[] }; NOT?: { worldIds?: { hasSome: string[] } } };
+      return store
+        .filter((row) => allWorlds === undefined || row.allWorlds === allWorlds)
+        .filter((row) => !worldId || worldId.in.includes(row.worldId))
+        .filter((row) => !NOT?.worldIds || !row.worldIds.some((id) => NOT.worldIds!.hasSome.includes(id)))
+        .sort((a, b) => b.invitedAt.getTime() - a.invitedAt.getTime())
+        .slice(0, args.take);
+    });
+
+    asViewer('hq-inviter');
+    const body = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
+    const mine = body.invitations.find((invitation: { id: string }) => invitation.id === 'inv-hq-only');
+    expect(mine).toMatchObject({ id: 'inv-hq-only', canCancel: true });
+    expect(body.canCancel).toBe(true);
+  });
+
   it('keeps a role whose badge is hidden off the invitations of viewers who may not see it', async () => {
     const withRoles = { ...pending, roleIds: ['r-mod', 'r-secret'] };
     db.membershipInvitation.findMany.mockResolvedValue([withRoles]);
