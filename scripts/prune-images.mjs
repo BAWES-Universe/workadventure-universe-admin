@@ -165,9 +165,10 @@ export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEE
   const versions = await api.listVersions();
   const tagged = versions.filter((version) => tagsOf(version).length > 0);
   const isGuarded = (version) => tagsOf(version).some((tag) => ['release', 'moving'].includes(classifyTag(tag, rules).kind));
-  // If nothing looks like a release or the current dev build, the tag names probably changed: delete nothing.
-  if (tagged.length > 0 && !tagged.some(isGuarded)) {
-    throw new Error(`${packageName}: none of its ${tagged.length} tagged versions looks like a release or the current dev build, so the tag rules may be out of date. Nothing was deleted.`);
+  // If nothing looks like a release or the current dev build, the tag names probably changed (or the list is only untagged
+  // versions): delete nothing. An empty package just has nothing to do.
+  if (versions.length > 0 && !tagged.some(isGuarded)) {
+    throw new Error(`${packageName}: none of its ${versions.length} versions (${tagged.length} tagged) looks like a release or the current dev build, so the tag rules may be out of date. Nothing was deleted.`);
   }
   const openBranches = await api.openBranches();
   const running = await api.runningTags();
@@ -200,12 +201,16 @@ export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEE
     log(`${packageName}: dry run, nothing deleted.`);
     return { remove, deleted: 0 };
   }
+  // A PR that was reopened while this run was planning keeps its images: read the open PRs once more before deleting for a close.
+  const reopened = closedBranch !== undefined && (await api.openBranches()).has(sanitizeBranch(closedBranch));
+  if (reopened) log(`  ${packageName}: ${closedBranch} has an open PR again, so its images are kept.`);
   // Read what dev and production run again right before each tagged delete: a deployment may have switched since the plan was made.
   // A tagged image that turns out to be running takes its untagged children with it (they were planned for deletion because
   // nothing kept pointed to them), so once one is skipped the untagged versions are left for the next run. Tagged ones go first.
   let deleted = 0;
   let sawRunning = false;
-  for (const { version } of remove) {
+  for (const { version, reason } of remove) {
+    if (reopened && reason === 'its PR is closed') continue;
     if (tagsOf(version).length > 0) {
       const runningNow = await api.runningTags();
       if (tagsOf(version).some((tag) => runningNow.has(tag))) {

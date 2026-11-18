@@ -10,6 +10,9 @@ name: Prune old images
 #   goes:   older develop builds, the images a PR put on dev as `<branch>` and `<branch>-<sha7>` once the PR is
 #           closed (a branch that still has an open PR keeps its newest 3), and untagged versions no kept image uses.
 #
+# The two-day grace period applies to the weekly sweep. When a PR closes, its own branch's images go at once, whatever
+# their age (unless another open PR still uses that branch).
+#
 # The plan is printed before anything is deleted. prune-images-check.yml prints the same plan as a dry run on
 # any pull request that changes this clean-up, so a change shows what it would delete before it merges.
 

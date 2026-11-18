@@ -14,7 +14,15 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--live') out.live = true;
-    else if (arg.startsWith('--')) out[arg.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = argv[++i];
+    else if (arg.startsWith('--')) {
+      // A flag that takes a value must be followed by one: a missing --closed-branch must not turn into a whole-package run.
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith('--')) {
+        console.error(`missing value for ${arg}`);
+        process.exit(2);
+      }
+      out[arg.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = argv[++i];
+    }
   }
   return out;
 }
@@ -119,7 +127,12 @@ const api = {
   },
   deleteVersion: async (version) => {
     const response = await github(`${packagePath}/versions/${version.id}`, { method: 'DELETE' });
-    if (response.status === 404) return; // already gone
+    if (response.status === 404) {
+      // GitHub also answers 404 when the token may not delete: only a version that is no longer there counts as gone.
+      const check = await github(`${packagePath}/versions/${version.id}`);
+      if (check.status === 404) return; // already gone
+      throw new Error(`could not delete version ${version.id} of ${packageName}: GitHub answered 404 but the version still exists (does this repository have the Admin role under the package's "Manage Actions access"?)`);
+    }
     if (!response.ok) {
       const hint = response.status === 403 ? ` Give this repository the Admin role under the package's "Manage Actions access" (package settings; deleting a version needs Admin, not Write) and run it again.` : '';
       throw new Error(`could not delete version ${version.id} of ${packageName}: GitHub answered ${response.status}.${hint}`);

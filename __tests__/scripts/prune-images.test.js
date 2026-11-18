@@ -230,13 +230,41 @@ export function defineTests({ lib }) {
       assert.deepEqual(api.deleted, []);
     });
 
+    it('keeps the images of a closed PR whose branch was reopened while the run was planning', async () => {
+      const latest = version(['latest'], 3);
+      const closing = version(['fix-a-1111111'], 0);
+      const api = makeApi([latest, closing]);
+      let calls = 0;
+      api.openBranches = async () => new Set(++calls > 1 ? ['fix-a'] : []);
+      await prunePackage({ api, rules: orbit, packageName: 'x', live: true, closedBranch: 'fix/a', now: NOW, log: quiet });
+      assert.deepEqual(api.deleted, []);
+    });
+
+    it('deletes nothing from a package whose versions are all untagged', async () => {
+      const api = makeApi([version([], 40, 'sha256:a'), version([], 41, 'sha256:b')]);
+      await assert.rejects(prunePackage({ api, rules: orbit, packageName: 'x', live: true, now: NOW, log: quiet }), /Nothing was deleted/);
+      assert.deepEqual(api.deleted, []);
+    });
+
+    it('has nothing to do for an empty package', async () => {
+      const api = makeApi([]);
+      const result = await prunePackage({ api, rules: orbit, packageName: 'x', live: true, now: NOW, log: quiet });
+      assert.equal(result.deleted, 0);
+    });
+
     it('on a closed PR clears only that branch and does not ask the registry', async () => {
       const latest = version(['latest'], 3);
       const closing = version(['fix-a-1111111'], 0);
       const orphan = version([], 40, 'sha256:orphan');
-      const api = makeApi([latest, closing, orphan], { failChildren: true });
+      const api = makeApi([latest, closing, orphan]);
+      let registryCalls = 0;
+      api.children = async () => {
+        registryCalls += 1;
+        return [];
+      };
       await prunePackage({ api, rules: orbit, packageName: 'x', live: true, closedBranch: 'fix/a', now: NOW, log: quiet });
       assert.deepEqual(api.deleted, [closing.id]);
+      assert.equal(registryCalls, 0);
     });
   });
 }
