@@ -700,6 +700,31 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
     });
 
+    it('keys the note and the reset to the day that ran out, even when the note is made a moment after midnight', async () => {
+      const { app, serverId } = await music();
+      await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });
+      // Only the clock is frozen: the database keeps running
+      jest.useFakeTimers({ now: new Date('2031-03-10T23:59:59.500Z'), doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'clearImmediate', 'queueMicrotask', 'performance', 'hrtime'] });
+      const realTransaction = prisma.$transaction.bind(prisma);
+      // The ask is decided inside the transaction; midnight passes before the owner is told
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation((async (...args: unknown[]) => {
+        const done = await (realTransaction as (...a: unknown[]) => Promise<unknown>)(...args);
+        jest.setSystemTime(new Date('2031-03-11T00:00:02.000Z'));
+        return done;
+      }) as never);
+      try {
+        const last = await ask(saraBrick, serverId, omarKey(), 'm1');
+        expect(last.body.allowed).toBe(true);
+        expect(last.body.ownerNote).toMatchObject({ limit: 1 });
+      } finally {
+        spy.mockRestore();
+        jest.useRealTimers();
+      }
+      const notices = await prisma.userNotice.findMany({ where: { userId: sara, kind: 'app-share-limit' }, select: { dedupeKey: true } });
+      expect(notices).toHaveLength(1);
+      expect(notices[0].dedupeKey).toMatch(/:2031-03-10$/);
+    });
+
     it('says nothing of an owner it has no chat id for', async () => {
       await prisma.user.update({ where: { id: sara }, data: { matrixChatId: null } });
       const { app, serverId } = await music();
