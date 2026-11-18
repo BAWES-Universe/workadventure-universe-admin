@@ -152,7 +152,14 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
     if (Array.isArray(body.models)) saved.models = body.models as VoiceModel[];
     if (typeof body.enabled === 'boolean') saved.enabled = body.enabled;
     if (typeof body.name === 'string') saved.name = body.name;
-    if ('endpoint' in body) saved.endpoint = (body.endpoint as string | null) ?? null;
+    if ('endpoint' in body) {
+      saved.endpoint = (body.endpoint as string | null) ?? null;
+      // The list read, and the check, were for the old address: they don't carry over, and a Check key still out is about it too
+      checkRun.current++;
+      setChecking(false);
+      setChecked(null);
+      setListed(null);
+    }
     setProvider((current) => (current ? { ...current, ...saved } : current));
     setAll((list) => list.map((entry) => (entry.id === id ? { ...entry, ...saved } : entry)));
     reload();

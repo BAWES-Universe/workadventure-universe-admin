@@ -981,6 +981,44 @@ describe('A voice provider\u2019s models, from the company\u2019s own list for i
     expect(screen.getByText('ElevenLabs knows this key. Checked just now, nothing paid.')).toBeTruthy();
   });
 
+  // The Address section's own Change, then a new address saved
+  const changeAddress = async (address: string) => {
+    const section = screen.getByText('Address', { selector: 'h3, h2, p, span, div, label' }).closest('section') as HTMLElement;
+    fireEvent.click(within(section).getByRole('button', { name: 'Change' }));
+    fireEvent.change(screen.getByLabelText('Address'), { target: { value: address } });
+    fireEvent.submit(screen.getByLabelText('Address').closest('form') as HTMLFormElement);
+  };
+
+  it('drops the company\u2019s list when the address changes, so models of the old address can\u2019t be ticked', async () => {
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await screen.findByText('ElevenLabs knows this key and lists 1 model for it. Checked just now, nothing paid.');
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    await changeAddress('https://eleven.example.com');
+    await waitFor(() => expect(patches().some((patch) => (patch.body as { endpoint?: string }).endpoint === 'https://eleven.example.com')).toBe(true));
+    await waitFor(() => expect(screen.queryAllByRole('checkbox')).toHaveLength(0));
+    expect(screen.queryByText(/lists 1 model for it/)).toBeNull();
+  });
+
+  it('drops the answer of a Check key that was still out when the address changed', async () => {
+    let release!: () => void;
+    holdSavedCheck = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('/v-eleven/check'))).toBe(true));
+    await changeAddress('https://eleven.example.com');
+    await waitFor(() => expect(patches().some((patch) => (patch.body as { endpoint?: string }).endpoint === 'https://eleven.example.com')).toBe(true));
+    release();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+    expect(screen.queryByText(/knows this key/)).toBeNull();
+  });
+
   it('keeps the rows when the company has no list or it can\u2019t be read', async () => {
     fireEvent.click(await open('v-eleven'));
     expect(await screen.findByText('ElevenLabs knows this key. Checked just now, nothing paid.')).toBeTruthy();
