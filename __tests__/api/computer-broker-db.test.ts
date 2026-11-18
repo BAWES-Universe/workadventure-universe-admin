@@ -389,6 +389,8 @@ run('the broker, the fence and keep-awake, in a real database', () => {
     it('cancels the turn, stops what the agent started, proves none is left, and only then is the person’s', async () => {
       const { sara, jobId } = await running();
       await prisma.computerJob.update({ where: { id: jobId }, data: { agentSessionId: 'sess-1', agentResponseId: 'resp-5' } });
+      // Starting a writing job already listed the files once (the baseline its results are told apart from): only what the take-over runs is checked here
+      fake.commands.length = 0;
       const taken = await takeOver(sara.brickId, sara.id, NOW);
       expect(taken.ok).toBe(true);
       expect(fake.cancelledTurns).toEqual(['resp-5']);

@@ -220,13 +220,19 @@ describe('the bot server’s calls', () => {
     lib.startJob.mockResolvedValue({ ok: true, job: { id: JOB, status: 'queued', queuedFor: 'allowance' } as never, restoredFrom: null });
     const started = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'Visa form' } }), params);
     expect(await started.json()).toEqual({ ok: true, job: { id: JOB, status: 'queued', queuedFor: 'allowance' }, restoredFrom: null });
-    expect(lib.startJob).toHaveBeenCalledWith({ botId: BRICK, personId: 'u-sara', title: 'Visa form', writes: undefined });
+    expect(lib.startJob).toHaveBeenCalledWith(expect.objectContaining({ botId: BRICK, personId: 'u-sara', title: 'Visa form', origin: null }));
+    // The chat it began in is kept, and only a direct chat can start computer work
+    await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'Visa form', origin: { kind: 'dm', ref: '!room:matrix' } } }), params);
+    expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ origin: { kind: 'dm', ref: '!room:matrix' } }));
+    const calls = lib.startJob.mock.calls.length;
+    expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'Visa form', origin: { kind: 'group', ref: '!group:matrix' } } }), params)).status).toBe(400);
+    expect(lib.startJob.mock.calls.length).toBe(calls);
     await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'Visa form', brief: 'Two people, passport ready' } }), params);
     expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ brief: 'Two people, passport ready' }));
     expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x', brief: 'y'.repeat(4001) } }), params)).status).toBe(400);
     resolve.mockResolvedValue({ personId: null, guest: true });
     expect(await (await startRoute(asBot('/x', { body: { userId: 'wa-guest', isGuest: true, title: 'x' } }), params)).json()).toEqual({ ok: false, reason: 'not_owner' });
-    expect(lib.startJob).toHaveBeenCalledTimes(2);
+    expect(lib.startJob).toHaveBeenCalledTimes(3);
   });
 
   it('says a rule the person said in chat stops it, with the rule’s own words, before any job is started', async () => {
@@ -315,7 +321,10 @@ describe('the bot server’s calls', () => {
     await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'details', ready: { what: 'Your details', where: 'visa-portal.example' } } }), jobParams);
     expect(lib.requestHandover).toHaveBeenCalledWith(JOB, 'details', expect.any(Date), { what: 'Your details', where: 'visa-portal.example' });
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done' } }), jobParams);
-    expect(lib.finishJob).toHaveBeenCalledWith(JOB, 'done');
+    expect(lib.finishJob).toHaveBeenCalledWith(JOB, 'done', expect.any(Date), undefined);
+    // A failure carries the computer's own sentence about why, kept cleaned for the message that tells the person
+    await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', why: 'The site kept showing an error' } }), jobParams);
+    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), 'The site kept showing an error');
     expect(await (await jobAction(asBot('/x', { body: { action: 'plan-effect', key: 'pr-1', kind: 'publish' } }), jobParams)).json()).toEqual({ ok: false, reason: 'look_up', evidence: 'draft pull request' });
     expect(await (await jobAction(asBot('/x', { body: { action: 'settle-effect', key: 'pr-1', state: 'done', evidence: 'pull request 12' } }), jobParams)).json()).toEqual({ ok: true });
   });

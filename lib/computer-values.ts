@@ -72,3 +72,13 @@ export function roomFor(minutes: number, microsPerMinute: number | null): number
 
 /** The longest one cold-storage run (a pack-away, a proof, a drill) may last: a run still open after this long was stopped with its server, and is closed at this length. */
 export const COLD_RUN_MAX_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * The endings Brick never tells the person about, because they just did it themselves: their own Stop, the computer turned off, the Brick
+ * deleted. Every other ending is said once in their chat with the Brick (the report back).
+ */
+export const silentEnding = (endedBy: string | null): boolean => endedBy === 'person' || endedBy === 'off' || endedBy === 'deleted';
+
+/** Why a report can never be delivered: nobody to deliver it to, not allowed to, the conversation it began in is gone, or the chat turned it down. */
+export const UNDELIVERABLE_WHY = ['no_chat', 'not_allowed', 'origin_gone', 'refused'] as const;
+export type UndeliverableWhy = (typeof UNDELIVERABLE_WHY)[number];

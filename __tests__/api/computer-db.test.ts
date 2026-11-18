@@ -185,7 +185,8 @@ run('a Brick’s computer, in a real database', () => {
       await giveComputer(sara.brickId, sara.id);
       const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' }, NOW);
       expect(started.ok && started.job).toMatchObject({ status: 'running', title: 'Visa form', writes: true, control: 'brick' });
-      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake']);
+      // The machine is made, woken, and listed once as the job begins (the files that were there before, so the message can name what it saved elsewhere)
+      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'exec']);
       const view = await computerView(sara.brickId, sara.id, NOW);
       expect(view).toMatchObject({ machine: 'working', job: { status: 'running' } });
       expect((await currentEnvelope(NOW)).reservedMicros).toBeGreaterThan(0);
@@ -250,8 +251,8 @@ run('a Brick’s computer, in a real database', () => {
       if (!job.ok) throw new Error('no');
       await finishJob(job.job.id, 'done', minutes(1));
       expect((await computerView(sara.brickId, sara.id))?.machine).toBe('resting');
-      // The job's end reads where its browser went, lists the files, then clears the browser: three commands before the copy is saved
-      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'exec', 'exec', 'exec', 'saveFiles', 'rest']);
+      // The list as the job began, then at its end: its own output folder to hand over what it made (the file card), where its browser went, the files for Files, and the browser cleared
+      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'exec', 'exec', 'exec', 'exec', 'exec', 'saveFiles', 'rest']);
       // A second job wakes the SAME machine: never a second one
       await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
       expect(provider.calls.filter((call) => call.name === 'create')).toHaveLength(1);
@@ -731,7 +732,8 @@ run('a Brick’s computer, in a real database', () => {
       if (!a.ok || !b.ok) throw new Error('no');
       // The Brick is marked deleted, but this job was made after the stop listed its jobs: it is still in line
       await prisma.bot.update({ where: { id: sara.brickId }, data: { deletedAt: NOW, goneAt: minutes(60 * 24 * 30), enabled: false } });
-      await prisma.computerJob.update({ where: { id: a.job.id }, data: { status: 'done', endedAt: NOW } });
+      // Its ending is closed (its files were handed over): a finished job whose ending is still open keeps the machine awake for its hand-over
+      await prisma.computerJob.update({ where: { id: a.job.id }, data: { status: 'done', endedAt: NOW, endClosedAt: NOW } });
       const before = woke();
       await sweepComputers(minutes(1));
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: b.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'deleted' });

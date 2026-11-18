@@ -15,6 +15,7 @@ import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
 import { GET as listReadyMade, POST as connectReadyMadeApp } from '@/app/api/me/apps/ready-made/route';
 import { GET as adminGet, PUT as adminPut } from '@/app/api/admin/ready-made-apps/route';
+import { GET as offerable } from '@/app/api/bots/[id]/apps/offerable/route';
 import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { POST as useApp } from '@/app/api/ready-made/use/route';
 import { POST as linkApp } from '@/app/api/ready-made/link/route';
@@ -317,6 +318,56 @@ run('ready-made apps through the adapter, in a real database', () => {
     }
   });
 
+  it('lets a Brick offer the ready-made apps and GitHub in chat, before and after the person connects them', async () => {
+    const adapter = fake();
+    setAdapterForTests(adapter);
+    // A name of its own: an app with the name of another is offered once
+    await saveReadyMadeApps({ apps: { [KEY]: { name: `Mail ${tag}`, authConfigId: 'ac_1', enabled: true } } }, boss);
+    const ask = async () =>
+      (await (await offerable(new NextRequest(`http://localhost/api/bots/${saraBrick}/apps/offerable?userId=${encodeURIComponent(`sara-${tag}`)}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }), params({ id: saraBrick }))).json()).apps as { key: string; name: string; kind: string; connectionId: string | null; connected: boolean; usable: boolean }[];
+    const gmail = (apps: Awaited<ReturnType<typeof ask>>) => apps.find((app) => app.key === KEY);
+
+    // Before: on offer, nothing of the person's yet
+    expect(gmail(await ask())).toMatchObject({ name: `Mail ${tag}`, kind: 'readyMade', connectionId: null, connected: false, usable: false });
+    expect((await ask()).map((app) => app.key)).toContain('notion');
+    // Connected, sign-in not finished: theirs, and not working yet
+    asSara();
+    const made = await (await connect()).json();
+    adapter.connectionStatus.mockResolvedValue('pending');
+    mockUser.current = null;
+    expect(gmail(await ask())).toMatchObject({ connectionId: made.id, connected: false, usable: false });
+    // Signed in at the provider: connected, and the Brick may still not use it
+    adapter.connectionStatus.mockResolvedValue('active');
+    expect(gmail(await ask())).toMatchObject({ connectionId: made.id, connected: true, usable: false });
+    // Let this Brick use it
+    await grantToBrick(sara, made.id, saraBrick);
+    expect(gmail(await ask())).toMatchObject({ connectionId: made.id, connected: true, usable: true });
+    // Never the link or the provider's names
+    expect(JSON.stringify(await ask())).not.toMatch(/mcp\.example|ca_|authConfig|serverUrl/);
+
+    // GitHub: through Universe's own GitHub App once it is made, first, as a listed app, never twice
+    expect((await ask()).filter((app) => app.name === 'GitHub').map((app) => app.kind)).toEqual(['readyMade']);
+    await saveGitHubApp({ id: 77, slug: 'bawes-universe', client_id: 'Iv1.client', client_secret: 's', webhook_secret: null, pem: 'pem', html_url: 'https://github.com/apps/bawes-universe' }, null, null);
+    try {
+      const withApp = await ask();
+      expect(withApp[0]).toMatchObject({ key: 'github', name: 'GitHub', kind: 'listed', connectionId: null, connected: false, usable: false });
+      expect(withApp.filter((app) => app.name === 'GitHub')).toHaveLength(1);
+      asSara();
+      const github = await (await connectApp(request('/api/me/apps', { method: 'POST', body: { catalogKey: 'github' } }))).json();
+      mockUser.current = null;
+      expect((await ask())[0]).toMatchObject({ key: 'github', connectionId: github.id, connected: false, usable: false });
+      await grantToBrick(sara, github.id, saraBrick);
+      expect((await ask())[0]).toMatchObject({ key: 'github', connectionId: github.id, usable: true });
+    } finally {
+      await prisma.appSetting.deleteMany({ where: { key: 'github-app' } });
+      forgetGitHubApp();
+    }
+
+    // The adapter off: no ready-made app is offered, as if there were none
+    setAdapterForTests(null);
+    expect((await ask()).some((app) => app.kind === 'readyMade')).toBe(false);
+  });
+
   it('never stores the provider key, even when the provider’s session answer carries headers, and shows it nowhere', async () => {
     const adapter = fake();
     // A provider that sends the key back in the link's headers (the adapter drops them; a fake that returned them would still be ignored)
@@ -485,7 +536,7 @@ run('ready-made apps through the adapter, in a real database', () => {
 
     it('counts a tool run through the link like a use, once for each call id, and needs a call id', async () => {
       const { adapter, serverId } = await connectedAndGranted();
-      const message = { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'COMPOSIO_REMOTE_WORKBENCH', arguments: { code: 'secret code' } } };
+      const message = { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'GMAIL_FETCH_EMAILS', arguments: { query: 'secret code' } } };
       expect((await link(serverId, { message })).status).toBe(400);
       expect(adapter.callLink).not.toHaveBeenCalled();
       const callId = `call-${randomUUID()}`;
@@ -495,8 +546,8 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(adapter.callLink).toHaveBeenCalledTimes(1);
       const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
       expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, basis: 'estimated', payerKind: 'universe', quantity: BigInt(1), costMicros: BigInt(100) });
-      expect(events[0].detail).toMatchObject({ kind: 'sandbox', sandboxRuns: 1, executions: 0 });
+      expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, basis: 'estimated', payerKind: 'universe', quantity: BigInt(1), costMicros: BigInt(300) });
+      expect(events[0].detail).toMatchObject({ kind: 'execution', sandboxRuns: 0, executions: 1 });
       // What was asked is not written down: only which app and which tool
       expect(JSON.stringify(events[0].detail)).not.toContain('secret code');
     });

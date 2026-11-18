@@ -6,6 +6,8 @@ import { WAITING_FOR, EFFECT_KINDS } from '@/lib/computer-values';
 import { finishJob, getJob, planEffect, renewJob, reportProgress, requestHandover, settleEffect } from '@/lib/computer';
 
 export const runtime = 'nodejs';
+// Finishing a job hands its files over before it answers (limited by time: a few minutes), so a host that limits how long a request may run is told how long this one may
+export const maxDuration = 300;
 
 const actionSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('progress'), stepDone: z.number().int().min(0), stepTotal: z.number().int().min(1).nullable().optional(), label: z.string().max(200).nullable().optional() }),
@@ -16,7 +18,7 @@ const actionSchema = z.discriminatedUnion('action', [
     /** For "details": what Brick is ready to put in and where, named before the person is asked. */
     ready: z.object({ what: z.string().trim().min(1).max(150), where: z.string().trim().min(1).max(150) }).nullable().optional(),
   }),
-  z.object({ action: z.literal('finish'), outcome: z.enum(['done', 'failed']) }),
+  z.object({ action: z.literal('finish'), outcome: z.enum(['done', 'failed']), /** The computer's one sentence about why it could not go on; cleaned before it is kept. */ why: z.string().max(2000).nullable().optional() }),
   z.object({ action: z.literal('plan-effect'), key: z.string().min(1).max(255), kind: z.enum(EFFECT_KINDS), evidence: z.string().max(500).nullable().optional() }),
   z.object({ action: z.literal('settle-effect'), key: z.string().min(1).max(255), state: z.enum(['done', 'failed']), evidence: z.string().max(500).nullable().optional() }),
 ]);
@@ -74,7 +76,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       case 'handover':
         return NextResponse.json({ job: await requestHandover(jobId, body.waitingFor, new Date(), body.ready) });
       case 'finish':
-        return NextResponse.json({ job: await finishJob(jobId, body.outcome) });
+        return NextResponse.json({ job: await finishJob(jobId, body.outcome, new Date(), body.why) });
       case 'plan-effect':
         return NextResponse.json(await planEffect(jobId, { key: body.key, kind: body.kind, evidence: body.evidence }));
       case 'settle-effect':
