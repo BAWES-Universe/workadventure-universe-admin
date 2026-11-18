@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
@@ -355,20 +356,52 @@ type StillLeader = (db?: Pick<typeof prisma, 'brickComputer'>) => Promise<boolea
  * screen. False when it was no longer the leader (nothing was stopped).
  */
 async function stopMachineWhileLeader(botId: string, ref: string, provider: Provider, stillLeader?: StillLeader): Promise<boolean> {
-  const outcome = await prisma.$transaction(
-    async (tx) => {
-      await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
-      // Asked through this transaction's own connection (it holds the row, so another connection's write to it would wait for this one)
-      if (stillLeader && !(await stillLeader(tx))) return null;
-      const proven = await stopAtProvider(ref, provider);
-      // Written before the lock is let go: a replacement transition that sets this machine's state waits for the lock and comes after this record, so this
-      // record can never overwrite what it wrote
-      await noteStopped(botId, ref, proven, undefined, tx);
-      return true;
-    },
-    { timeout: 120_000, maxWait: 10_000 },
-  );
-  return outcome === true;
+  // The provider's calls are inside the lock, so they are given less time than the transaction has: a stop that takes longer is not proved (the machine is
+  // `stopping` and every sweep tries again), and the record is still written before the transaction ends, never rolled back with it
+  let stopped = false;
+  try {
+    const outcome = await prisma.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
+        // Asked through this transaction's own connection (it holds the row, so another connection's write to it would wait for this one)
+        if (stillLeader && !(await stillLeader(tx))) return null;
+        stopped = true;
+        const proven = await withinMs(stopAtProvider(ref, provider), leaderStop.deadlineMs, false);
+        // Written before the lock is let go: a replacement transition that sets this machine's state waits for the lock and comes after this record, so this
+        // record can never overwrite what it wrote
+        await noteStopped(botId, ref, proven, undefined, tx);
+        return true;
+      },
+      { timeout: leaderStop.transactionMs, maxWait: 10_000 },
+    );
+    return outcome === true;
+  } catch (error) {
+    // The transaction ended badly (a database that did not answer in time, a lost connection) after the stop was sent: the record may have been rolled back
+    // with it, so it still says `working` for a machine that may be asleep. It is written again, outside the lock and only where it still says `working`
+    // (a change of hands that came after has its own state and is not overwritten): `stopping`, which nothing uses and the sweep proves or tries again.
+    if (!stopped) throw error;
+    console.error('[Computer] A leader’s stop did not finish in its transaction, the machine is marked to be proved asleep:', error instanceof Error ? error.message : 'unknown');
+    Sentry.captureException(error, { tags: { area: 'computer', step: 'leader-stop' } });
+    await noteStopped(botId, ref, false, ['working']);
+    return true;
+  }
+}
+
+/** How long a leader's stop may hold the computer's row: the provider's calls get the first part of it, the record the rest. Changed only by tests. */
+const leaderStop = { deadlineMs: 90_000, transactionMs: 120_000 };
+export function setLeaderStopTimesForTests(times: { deadlineMs: number; transactionMs: number } | null): void {
+  leaderStop.deadlineMs = times?.deadlineMs ?? 90_000;
+  leaderStop.transactionMs = times?.transactionMs ?? 120_000;
+}
+
+/** What a promise says, or `fallback` when it has not said it within `ms`. The promise is left to finish on its own; a throw from it is the fallback too. */
+async function withinMs<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([promise.catch(() => fallback), new Promise<T>((resolve) => (timer = setTimeout(() => resolve(fallback), ms)))]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // ---------- Jobs ----------
