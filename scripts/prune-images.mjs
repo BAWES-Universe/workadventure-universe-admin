@@ -33,9 +33,9 @@ export function tagRules({ prodBranch, devBranch }) {
   const prod = escapeRe(sanitizeBranch(prodBranch));
   const release = [
     /^latest$/,
-    new RegExp(`^${prod}(-[0-9a-f]+)?$`),
-    /^(main|master)(-[0-9a-f]+)?$/,
-    /^sha-[0-9a-f]+$/,
+    new RegExp(`^${prod}(-[0-9a-f]{7,40})?$`),
+    /^(main|master)(-[0-9a-f]{7,40})?$/,
+    /^sha-[0-9a-f]{7,40}$/,
     // A version, with an optional pre-release suffix. A branch like `v2-login` is not a release.
     /^v?\d+(\.\d+)*(-(rc|beta|alpha|pre)[0-9A-Za-z.]*)?$/,
   ];

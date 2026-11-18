@@ -60,6 +60,13 @@ export function defineTests({ lib }) {
       for (const tag of ['v1.2.3', '1.2.3-rc.1', 'v2.0.0-beta1', '0.3']) assert.equal(classifyTag(tag, orbit).kind, 'release', tag);
     });
 
+    it('does not mistake a branch whose name ends in a short hex-looking word for a release build', () => {
+      for (const tag of ['main-fade', 'master-cafe', 'sha-beef', 'main-deadbe']) assert.equal(classifyTag(tag, orbit).kind, 'dev', tag);
+      assert.equal(classifyTag('universe-cafe', game).kind, 'dev');
+      for (const tag of ['main-1a2b3c4', 'sha-1a2b3c4', 'main-1a2b3c4d5e6f']) assert.equal(classifyTag(tag, orbit).kind, 'release', tag);
+      assert.equal(classifyTag('universe-752de31', game).kind, 'release');
+    });
+
     it('tags a branch the way the dev server does', () => {
       assert.equal(sanitizeBranch('claude/project-thread-4y14p9'), 'claude-project-thread-4y14p9');
     });
