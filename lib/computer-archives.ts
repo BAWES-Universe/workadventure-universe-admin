@@ -277,12 +277,22 @@ export async function deleteAllArchives(botId: string, now: Date = new Date()): 
 }
 
 let strayPassMax = 20_000;
-/** Where the last pass of the sweep stopped, when the bucket held more than a pass looks at: the next pass goes on from there, so no object is out of reach. */
-let strayCursor: string | undefined;
+/** Where the sweep for copies no row points at writes down how far it has looked: it is the database's, so a restart between passes does not send it back to the top. */
+export const STRAY_CURSOR_KEY = 'computer-stray-sweep-cursor';
 /** A test makes a pass small so that the bucket is longer than one. */
 export function setStrayPassForTests(max: number): void {
   strayPassMax = max;
-  strayCursor = undefined;
+}
+async function readStrayCursor(): Promise<string | undefined> {
+  const row = await prisma.appSetting.findUnique({ where: { key: STRAY_CURSOR_KEY } }).catch(() => null);
+  const after = (row?.value as { after?: unknown } | null | undefined)?.after;
+  return typeof after === 'string' ? after : undefined;
+}
+async function writeStrayCursor(after: string | null): Promise<void> {
+  const value = { after };
+  await prisma.appSetting
+    .upsert({ where: { key: STRAY_CURSOR_KEY }, create: { key: STRAY_CURSOR_KEY, value }, update: { value } })
+    .catch((error) => console.error('[Computer] Could not write down how far the sweep for stray copies has looked:', error instanceof Error ? error.message : 'unknown'));
 }
 const COPY_OBJECT = /^computer-cold\/[^/]+\/\d+\.([0-9a-f-]{36})\.ubc(?:\.new)?$/;
 
@@ -291,12 +301,13 @@ const COPY_OBJECT = /^computer-cold\/[^/]+\/\d+\.([0-9a-f-]{36})\.ubc(?:\.new)?$
  * the copy into place, or after its upload) leaves an object that a purge, which works from rows, can never find. Every object here is named after its
  * row, so an object whose row is gone and that is older than any write can last (`STALE_MS`, the time a half-written copy is given up on) belongs to
  * nobody and is deleted. A younger one may be a write that is still running. A bucket longer than one pass is looked at over several passes (each goes
- * on where the one before stopped), so an object that lands late is reached however many there are before it. Returns how many were deleted.
+ * on where the one before stopped, which is written down in the database, so a restart does not send it back), so an object that lands late is reached however many there are before it. Returns how many were deleted.
  */
 export async function removeStrayCopies(now: Date = new Date()): Promise<number> {
-  const found = await store.list('computer-cold/', strayPassMax, strayCursor);
-  // A pass that was full may have left objects unlooked at: the next one starts after the last it saw, and after the end it starts again from the top
-  strayCursor = found.length >= strayPassMax ? found[found.length - 1].key : undefined;
+  // A pass that was full may have left objects unlooked at: the next one starts after the last it saw (written down below, once this page is dealt with),
+  // and after the end it starts again from the top
+  const found = await store.list('computer-cold/', strayPassMax, await readStrayCursor());
+  const next = found.length >= strayPassMax ? found[found.length - 1].key : null;
   const old = found
     .filter((object) => now.getTime() - object.modifiedAt.getTime() >= STALE_MS)
     .flatMap((object) => {
@@ -310,6 +321,8 @@ export async function removeStrayCopies(now: Date = new Date()): Promise<number>
     for (const object of page) if (!known.has(object.id)) stray.push(object.key);
   }
   if (stray.length > 0) await store.remove(stray);
+  // Only now that everything on the page was looked at and what had to go is gone: a pass that failed is looked at again by the next
+  await writeStrayCursor(next);
   return stray.length;
 }
 

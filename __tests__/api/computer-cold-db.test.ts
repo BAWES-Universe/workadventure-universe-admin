@@ -36,7 +36,7 @@ import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { listDeletedBricks } from '@/lib/brick-default';
 import { computerReadiness } from '@/lib/computer-readiness';
 import { CopyOutcomeUnknown } from '@/lib/agent37/saved-copies';
-import { archiveById, deleteAllArchives, markVerified, removeBrickObjects, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, setStrayPassForTests, setWriteLimitForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
+import { archiveById, deleteAllArchives, markVerified, removeBrickObjects, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, setStrayPassForTests, setWriteLimitForTests, storeArchive, STRAY_CURSOR_KEY, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
 import { GET as download } from '@/app/api/computer/archives/[id]/download/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -383,6 +383,41 @@ run('cold storage for a Brick’s computer, in a real database', () => {
         expect(passes).toBeGreaterThan(1);
       } finally {
         setStrayPassForTests(20_000);
+        await prisma.appSetting.deleteMany({ where: { key: STRAY_CURSOR_KEY } });
+      }
+    });
+
+    it('the sweep writes down how far it has looked, so a restart goes on from there; it moves the mark only once the page is dealt with', async () => {
+      for (const name of ['a', 'b', 'c', 'd', 'e']) bucket.objects.set(`computer-cold/0-${name}/other.txt`, Buffer.from(name));
+      const lastSeen = async () => ((await prisma.appSetting.findUnique({ where: { key: STRAY_CURSOR_KEY } }))?.value as { after: string | null } | null)?.after;
+      // Where each pass began, as the bucket was asked
+      const asked: Array<string | undefined> = [];
+      const real = bucket.store.list;
+      setArchiveStoreForTests({ ...bucket.store, list: async (prefix, max, startAfter) => { asked.push(startAfter); return real(prefix, max, startAfter); } });
+      setStrayPassForTests(2);
+      try {
+        await removeStrayCopies(NOW);
+        expect(await lastSeen()).toBe('computer-cold/0-b/other.txt');
+        // Nothing of the first pass is kept in memory: the next one begins where the database says
+        await removeStrayCopies(NOW);
+        expect(asked).toEqual([undefined, 'computer-cold/0-b/other.txt']);
+        expect(await lastSeen()).toBe('computer-cold/0-d/other.txt');
+        // A pass whose page could not be dealt with (an object that has to go cannot be deleted) leaves the mark where it was
+        bucket.objects.set('computer-cold/0-e/9.' + '0'.repeat(8) + '-0000-0000-0000-' + '0'.repeat(12) + '.ubc', Buffer.from('stray'));
+        bucket.written.set('computer-cold/0-e/9.' + '0'.repeat(8) + '-0000-0000-0000-' + '0'.repeat(12) + '.ubc', new Date(NOW.getTime() - 2 * 3_600_000));
+        setArchiveStoreForTests({ ...bucket.store, remove: async () => { throw new Error('the bucket is down'); } });
+        await expect(removeStrayCopies(NOW)).rejects.toThrow('down');
+        expect(await lastSeen()).toBe('computer-cold/0-d/other.txt');
+        // Then it goes on, reaches the end of the bucket and the mark goes back to the top
+        setArchiveStoreForTests(bucket.store);
+        expect(await removeStrayCopies(NOW)).toBe(1);
+        expect(await lastSeen()).toBe('computer-cold/0-e/other.txt');
+        await removeStrayCopies(NOW);
+        expect(await lastSeen()).toBeNull();
+      } finally {
+        setStrayPassForTests(20_000);
+        setArchiveStoreForTests(bucket.store);
+        await prisma.appSetting.deleteMany({ where: { key: STRAY_CURSOR_KEY } });
       }
     });
 
