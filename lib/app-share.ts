@@ -3,7 +3,6 @@ import { prisma } from '@/lib/db';
 import { startOfDay } from '@/lib/app-uses';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { findUserByIdentifier } from '@/lib/user-identifier';
-import { addNotice } from '@/lib/notices';
 import { recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
 
@@ -238,13 +237,29 @@ async function tellOwnerOfLimit(input: { shareId: string; ownerId: string; conne
     const day = input.at.toISOString().slice(0, 10);
     // The owner's chat is read before the notice is claimed: when this fails nothing was claimed, so a later ask tries again
     const owner = await prisma.user.findUnique({ where: { id: input.ownerId }, select: { matrixChatId: true } });
-    const added = await addNotice({
-      userId: input.ownerId,
-      kind: 'app-share-limit',
-      dedupeKey: `app-share-limit:${input.shareId}:${day}`,
-      title: `${input.appName} used up today's ${input.limit} uses for other people`,
-      body: `${input.botName} carries on without it for them until tomorrow. You can change the limit.`,
-      data: { connectionId: input.connectionId, botId: input.botId, serverId: input.serverId },
+    // The day's uses are counted again under the share's lock, the one a refund settles under: a use given back between taking the
+    // last place and getting here leaves the day open, and then no note is made (taking it back would find nothing to take)
+    const added = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-share:${input.serverId}`}))`;
+      const share = await tx.appShare.findUnique({ where: { id: input.shareId }, select: { usesPerDayEveryone: true } });
+      if (!share) return false;
+      const used = await tx.appShareUse.count({ where: { serverId: input.serverId, createdAt: { gte: startOfDay(input.at), lt: nextDay(input.at) }, status: { not: 'refunded' } } });
+      if (used < share.usesPerDayEveryone) return false;
+      // Skipping a duplicate (rather than catching it) keeps this step usable inside the transaction
+      const made = await tx.userNotice.createMany({
+        data: [
+          {
+            userId: input.ownerId,
+            kind: 'app-share-limit',
+            dedupeKey: `app-share-limit:${input.shareId}:${day}`,
+            title: `${input.appName} used up today's ${input.limit} uses for other people`.slice(0, 200),
+            body: `${input.botName} carries on without it for them until tomorrow. You can change the limit.`.slice(0, 1000),
+            data: { connectionId: input.connectionId, botId: input.botId, serverId: input.serverId },
+          },
+        ],
+        skipDuplicates: true,
+      });
+      return made.count > 0;
     });
     if (!added || !owner?.matrixChatId) return undefined;
     return { matrixUserId: owner.matrixChatId, appName: input.appName, botName: input.botName, limit: input.limit, connectionId: input.connectionId, day };

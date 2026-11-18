@@ -741,6 +741,34 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
     });
 
+    it('makes no note when the last use is given back after it was taken but before the owner is told', async () => {
+      const { app, serverId } = await music();
+      await shareSong(app.id, saraBrick, { usesPerDayEveryone: 2, usesPerDayPerson: 2 });
+      await ask(saraBrick, serverId, `lena-${tag}`, 'j1');
+      // The second use takes the last place. Between that and the note, the first is given back (its job never ran)
+      const realFind = prisma.user.findUnique.bind(prisma.user);
+      let refunded = false;
+      const spy = jest.spyOn(prisma.user, 'findUnique').mockImplementation(((args: { select?: { matrixChatId?: boolean } }) => {
+        const call = realFind(args as never);
+        if (refunded || !args?.select?.matrixChatId) return call;
+        refunded = true;
+        return call.then(async (found: unknown) => {
+          expect((await settle(saraBrick, serverId, 'j1', 'failed')).body).toEqual({ status: 'refunded' });
+          return found;
+        });
+      }) as never);
+      try {
+        const last = await ask(saraBrick, serverId, omarKey(), 'j2');
+        expect(last.body.allowed).toBe(true);
+        expect(last.body).not.toHaveProperty('ownerNote');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(refunded).toBe(true);
+      // 1 of 2 uses is taken: the day is open, and the owner is not told it is used up
+      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(0);
+    });
+
     it('keeps the day\'s note for a use that stays taken, however it ended', async () => {
       const { app, serverId } = await music();
       await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });
