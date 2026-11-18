@@ -36,3 +36,14 @@ export async function whileNotPurged<T>(botId: string, write: (tx: Tx) => Promis
     { timeout: 70_000, maxWait: 10_000 },
   );
 }
+
+/** Groups rows by the Brick they belong to, in the order they came, one array per Brick (linear in the number of rows). */
+export function groupByBrick<T extends { botId: string }>(rows: T[]): Map<string, T[]> {
+  const byBrick = new Map<string, T[]>();
+  for (const row of rows) {
+    const group = byBrick.get(row.botId);
+    if (group) group.push(row);
+    else byBrick.set(row.botId, [row]);
+  }
+  return byBrick;
+}

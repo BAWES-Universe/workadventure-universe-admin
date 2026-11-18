@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { corsHeaders } from '@/lib/cors';
-import { whileNotPurged } from '@/lib/brick-purge-lock';
+import { groupByBrick, whileNotPurged } from '@/lib/brick-purge-lock';
 
 export const runtime = 'nodejs';
 
@@ -194,12 +194,7 @@ export async function POST(request: NextRequest) {
       // Each Brick's rows are written under the lock a purge takes, after looking for its marker again: a purge that began after the check above
       // cannot leave these rows behind
       (async () => {
-        const byBrick = new Map<string, typeof rowsToInsert>();
-        for (const row of rowsToInsert) {
-          const group = byBrick.get(row.botId);
-          if (group) group.push(row);
-          else byBrick.set(row.botId, [row]);
-        }
+        const byBrick = groupByBrick(rowsToInsert);
         for (const [botId, data] of byBrick) {
           try {
             await whileNotPurged(botId, (tx) => tx.botsMetric.createMany({ data }));
