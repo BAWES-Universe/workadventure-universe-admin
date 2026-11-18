@@ -368,8 +368,14 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       try {
         const leader = takeOver(sara.brickId, sara.id, NOW);
         await inStop;
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        // The replacement has been running for a while and has not been able to write: the stop holds the row
+        // Wait until the database shows the replacement's UPDATE waiting on a lock (not a fixed delay): only then has it reached the row the stop holds
+        const waitingOnLock = async () => {
+          const rows = await prisma.$queryRaw<{ n: bigint }[]>`SELECT count(*)::bigint AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE 'UPDATE%brick_computers%'`;
+          return Number(rows[0]?.n ?? 0) > 0;
+        };
+        const until = Date.now() + 10_000;
+        while (!(await waitingOnLock()) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 25));
+        expect(await waitingOnLock()).toBe(true);
         expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).not.toBe('resting');
         release();
         await leader;
