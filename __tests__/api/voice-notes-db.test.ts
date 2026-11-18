@@ -483,6 +483,18 @@ run('voice notes for every bot, in a real database', () => {
       expect(await reserve(person, { clientTurnId, contentHash: 'h' })).toEqual({ ok: false, reason: 'expired' });
     });
 
+    it('keeps an answer that is the empty text as an answer, and reads a provider name the way discovery does', async () => {
+      const person = `p-${randomUUID()}`;
+      const clientTurnId = turnId();
+      const turn = turnOf(await reserve(person, { clientTurnId, contentHash: 'h' }));
+      // Not trimmed, not lower-case: it is still the provider the bot server can send a file to
+      expect(await leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: [' Soniox '] })).toMatchObject({ granted: true });
+      await recordVoiceNote(turn.id, { event: 'heard', generation: 1, transcript: 'Hi' });
+      await leaseVoiceNoteStage(turn.id, { stage: 'answer' });
+      await recordVoiceNote(turn.id, { event: 'answered', generation: 2, answer: '' });
+      expect(await reserve(person, { clientTurnId, contentHash: 'h' })).toMatchObject({ ok: true, replay: true, answer: { answer: '' } });
+    });
+
     it('never hears with Universe AI once it is turned off after the reservation, and gives the reservation back', async () => {
       const turn = await fresh();
       await prisma.voiceProvider.update({ where: { id: providers[0] }, data: { enabled: false } });

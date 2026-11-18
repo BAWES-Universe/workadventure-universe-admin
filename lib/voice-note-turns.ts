@@ -121,7 +121,8 @@ const wholeOf = (value: unknown, name: string, min: number, max: number): number
 
 const readAdapterList = (value: unknown): Set<string> => {
   if (!Array.isArray(value) || value.length > 20) throw new VoiceNoteError('adapters must be a list of the providers the bot server can send a file to', 400);
-  return new Set(value.filter((name): name is string => typeof name === 'string' && /^[a-z0-9][a-z0-9-]{0,48}$/.test(name)));
+  // Read the way the discovery list is (lib/voice-note-hearing.ts): trimmed and lower-case, then checked
+  return new Set(value.filter((name): name is string => typeof name === 'string').map((name) => name.trim().toLowerCase()).filter((name) => /^[a-z0-9][a-z0-9-]{0,48}$/.test(name)));
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -161,7 +162,8 @@ const view = (turn: VoiceNoteTurn): TurnView => ({ id: turn.id, state: turn.stat
 function replay(turn: VoiceNoteTurn, now: Date): Reservation {
   if (turn.state === 'answered') {
     const kept = turn.buffer && turn.bufferUntil && turn.bufferUntil > now ? openBuffer(turn.id, turn.buffer) : null;
-    if (!kept?.answer) return { ok: false, reason: 'expired' };
+    // An answer that is the empty text is still an answer that is kept: only one that is gone or unreadable is expired
+    if (!kept || typeof kept.answer !== 'string') return { ok: false, reason: 'expired' };
     return { ok: true, turn: view(turn), replay: true, answer: kept };
   }
   return { ok: true, turn: view(turn), replay: true };
