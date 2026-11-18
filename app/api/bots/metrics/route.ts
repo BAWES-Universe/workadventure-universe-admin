@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { corsHeaders } from '@/lib/cors';
+import { whileNotPurged } from '@/lib/brick-purge-lock';
 
 export const runtime = 'nodejs';
 
@@ -190,14 +191,20 @@ export async function POST(request: NextRequest) {
 
     // Fire-and-forget: Don't await, just start the operation
     if (rowsToInsert.length > 0) {
-      prisma.botsMetric
-        .createMany({
-          data: rowsToInsert,
-        })
-        .catch((err) => {
-          // Log error but don't block response
-          console.error('Error storing metrics:', err);
-        });
+      // Each Brick's rows are written under the lock a purge takes, after looking for its marker again: a purge that began after the check above
+      // cannot leave these rows behind
+      (async () => {
+        const byBrick = new Map<string, typeof rowsToInsert>();
+        for (const row of rowsToInsert) byBrick.set(row.botId, [...(byBrick.get(row.botId) ?? []), row]);
+        for (const [botId, data] of byBrick) {
+          try {
+            await whileNotPurged(botId, (tx) => tx.botsMetric.createMany({ data }));
+          } catch (err) {
+            // Log error but don't block response; one Brick's failure does not stop the others
+            console.error('Error storing metrics:', err);
+          }
+        }
+      })();
     }
 
     // Return immediately (fire-and-forget)

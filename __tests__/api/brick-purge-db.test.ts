@@ -41,6 +41,9 @@ import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/compute
 import { POST as saveMemory } from '@/app/api/bots/memory/[id]/route';
 import { POST as saveConversation } from '@/app/api/bots/[id]/conversations/route';
 import { POST as saveMetrics } from '@/app/api/bots/metrics/route';
+import { POST as saveTestResult } from '@/app/api/bots/test/results/route';
+import { saveMemoryRow } from '@/lib/bot-memory-person';
+import { lockPurgeAlone, purgedUnderLock } from '@/lib/brick-purge-lock';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -592,6 +595,100 @@ run('purging a deleted Brick, in a real database', () => {
       const chat = await saveConversation(asBotServer(`/api/bots/${done.id}/conversations`, { userUuid: sara.uuid, userId: sara.id, isGuest: false, messages: [{ role: 'user', content: 'a year later' }], startedAt: later(8 + 400).toISOString() }), params(done.id));
       expect(await chat.json()).toMatchObject({ conversationId: null, status: 'gone' });
       expect(await prisma.botsConversation.count({ where: { botId: done.id } })).toBe(0);
+    });
+
+    // A save that checked "not purged" a moment before the purge committed used to insert after the purge had deleted its rows, and nothing
+    // ever removed that row. Both orders are held open here with a transaction, so they happen every time and not by luck.
+    const pause = () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let reached!: () => void;
+      const there = new Promise<void>((resolve) => { reached = resolve; });
+      return { release, gate, reached, there };
+    };
+    const quiet = () => new Promise((resolve) => setTimeout(resolve, 600));
+
+    it('a save that is under way when the purge begins is finished first and then deleted with the rest: no chat, memory or test result survives', async () => {
+      const sara = await person('sara');
+      const brick = await fullBrick(sara, 'Race save first');
+      await deleteBrick(brick.id, sara.id, NOW);
+      const hold = pause();
+      const lateUuid = `late-${tag}-${made}`;
+      const save = prisma.$transaction(
+        async (tx) => {
+          expect(await purgedUnderLock(tx, brick.id)).toBe(false);
+          hold.reached();
+          await hold.gate;
+          await tx.botsConversation.create({ data: { botId: brick.id, userUuid: lateUuid, isGuest: true, messages: [], startedAt: NOW, endedAt: NOW, messageCount: 0 } });
+          await tx.botsMemory.create({ data: { botId: brick.id, userUuid: lateUuid, isGuest: true, memories: { late: true } } });
+        },
+        { timeout: 30_000 },
+      );
+      await hold.there;
+      let finished = false;
+      const purge = purgeBrick(brick.id, later(8)).then((outcome) => { finished = true; return outcome; });
+      await quiet();
+      // The purge waits for the save that is under way
+      expect(finished).toBe(false);
+      hold.release();
+      await save;
+      expect(await purge).toBe('purged');
+      expect(await prisma.botsConversation.count({ where: { botId: brick.id } })).toBe(0);
+      expect(await prisma.botsMemory.count({ where: { botId: brick.id } })).toBe(0);
+    });
+
+    it('a save that comes while the purge is running waits for it, finds the marker and writes nothing: chat, memory and test result', async () => {
+      const sara = await person('sara');
+      const brick = await fullBrick(sara, 'Race purge first');
+      await deleteBrick(brick.id, sara.id, NOW);
+      await prisma.botsConversation.deleteMany({ where: { botId: brick.id } });
+      await prisma.botsMemory.deleteMany({ where: { botId: brick.id } });
+      const hold = pause();
+      // The purge's own order: the lock first, the marker written last, nothing visible to others until it commits
+      const purging = prisma.$transaction(
+        async (tx) => {
+          await lockPurgeAlone(tx, brick.id);
+          hold.reached();
+          await hold.gate;
+          await tx.brickPurge.create({ data: { botId: brick.id, ownerId: sara.id, chatPending: true, nextTryAt: NOW, purgedAt: NOW } });
+        },
+        { timeout: 30_000 },
+      );
+      await hold.there;
+      expect(await prisma.brickPurge.count({ where: { botId: brick.id } })).toBe(0);
+      let answered = 0;
+      const chat = saveConversation(asBotServer(`/api/bots/${brick.id}/conversations`, { userUuid: `late-${tag}-${made}`, isGuest: true, messages: [{ role: 'user', content: 'too late' }], startedAt: NOW.toISOString() }), params(brick.id)).then((response) => { answered++; return response; });
+      const memory = saveMemoryRow(brick.id, `late-${tag}-${made}`, { late: true }, (tx, clean) =>
+        tx.botsMemory.create({ data: { botId: brick.id, userUuid: `late-${tag}-${made}`, isGuest: true, memories: clean as Prisma.InputJsonValue } }),
+      ).then((row) => { answered++; return row; });
+      const testId = `late-test-${tag}-${made}`;
+      const result = saveTestResult(asBotServer('/api/bots/test/results', { testId, botId: brick.id, results: { ok: true }, passed: true })).then((response) => { answered++; return response; });
+      await quiet();
+      // None of the three is answered, and none has written, while the purge holds the lock
+      expect(answered).toBe(0);
+      hold.release();
+      await purging;
+      expect(await (await chat).json()).toMatchObject({ conversationId: null, status: 'gone' });
+      expect(await memory).toBeNull();
+      expect((await result).status).toBe(200);
+      expect(await prisma.botsConversation.count({ where: { botId: brick.id } })).toBe(0);
+      expect(await prisma.botsMemory.count({ where: { botId: brick.id } })).toBe(0);
+      expect(await prisma.botsTestResult.count({ where: { testId } })).toBe(0);
+    });
+
+    it('a Brick that is not purged is saved as always: the chat, the memory row and the test result are written', async () => {
+      const sara = await person('sara');
+      const brick = await createBrick({ ownerId: sara.id, name: 'Live save' });
+      const uuid = `live-${tag}-${made}`;
+      const chat = await saveConversation(asBotServer(`/api/bots/${brick.id}/conversations`, { userUuid: uuid, isGuest: true, messages: [{ role: 'user', content: 'hello' }], startedAt: NOW.toISOString() }), params(brick.id));
+      expect(await chat.json()).toMatchObject({ status: 'created' });
+      expect(await saveMemoryRow(brick.id, uuid, { a: 1 }, (tx, clean) => tx.botsMemory.create({ data: { botId: brick.id, userUuid: uuid, isGuest: true, memories: clean as Prisma.InputJsonValue } }))).not.toBeNull();
+      const testId = `live-test-${tag}-${made}`;
+      await saveTestResult(asBotServer('/api/bots/test/results', { testId, botId: brick.id, results: { ok: true }, passed: true }));
+      expect(await prisma.botsConversation.count({ where: { botId: brick.id } })).toBe(1);
+      expect(await prisma.botsMemory.count({ where: { botId: brick.id } })).toBe(1);
+      expect(await prisma.botsTestResult.count({ where: { testId } })).toBe(1);
+      await prisma.botsTestResult.deleteMany({ where: { testId } });
     });
   });
 });

@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { computerTimeInBooks, providerFor } from '@/lib/computer';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { deleteAllArchives } from '@/lib/computer-archives';
+import { lockPurgeAlone } from '@/lib/brick-purge-lock';
 
 /**
  * The final purge of a deleted Brick (audit F08, GPT 6.10; Khalid, 17 Nov: when a Brick is deleted, delete EVERYTHING, keep nothing).
@@ -58,6 +59,9 @@ export async function purgeBrick(id: string, now: Date = new Date()): Promise<Pu
   const where = { id, roomId: null, goneAt: { lte: now } };
   const done = await prisma.$transaction(
     async (tx) => {
+      // Alone against every save a bot server makes for this Brick: one that began first is finished before this goes on (and its rows are
+      // deleted below), one that comes after waits for the marker written below and then finds it
+      await lockPurgeAlone(tx, id);
       const brick = await tx.bot.findFirst({ where, select: { ownerId: true } });
       if (!brick) return false;
       // What is read here is read before the Brick goes: its machine, and the files people sent it that live at the uploader

@@ -278,7 +278,7 @@ export async function POST(
           // Always store userUuid (even for guests with no match)
           // This allows us to track ephemeral guest sessions
           // Under the lock every Forget takes, taking out what was forgotten as it is now (game #2003)
-          await saveMemoryRow(botId, userUuid, memoryData, (tx, clean) =>
+          const saved = await saveMemoryRow(botId, userUuid, memoryData, (tx, clean) =>
             tx.botsMemory.upsert({
               where: {
                 botId_userUuid: {
@@ -307,6 +307,8 @@ export async function POST(
               },
             }),
           );
+          // Purged while this save was running: nothing was written, and nothing more is
+          if (saved === null) break;
           written.push(userUuid);
         }
 
@@ -399,7 +401,7 @@ export async function POST(
           fullMemoryData = (await withoutForgottenOne(botId, body.userUuid, fullMemoryData)) as typeof fullMemoryData;
 
           // Under the lock every Forget takes, taking out what was forgotten as it is now (game #2003)
-          await saveMemoryRow(botId, body.userUuid, fullMemoryData, (tx, clean) =>
+          const savedNow = await saveMemoryRow(botId, body.userUuid, fullMemoryData, (tx, clean) =>
             tx.botsMemory.upsert({
               where: {
                 botId_userUuid: {
@@ -431,7 +433,7 @@ export async function POST(
               },
             }),
           );
-          written.push(body.userUuid);
+          if (savedNow !== null) written.push(body.userUuid);
         }
       } catch (err) {
         // Log error but don't block response (fire-and-forget)

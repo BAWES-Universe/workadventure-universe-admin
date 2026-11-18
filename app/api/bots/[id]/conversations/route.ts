@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { isPurged } from '@/lib/brick-purge';
+import { whileNotPurged } from '@/lib/brick-purge-lock';
 import { botContentReadDenied, getViewer, isPrivileged } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
 import { visibleUserUuid } from '@/lib/visible-identity';
@@ -130,20 +131,26 @@ export async function POST(
 
     try {
       // Try to create new active conversation (ended_at = started_at for active conversations)
-      const conversation = await prisma.botsConversation.create({
-        data: {
-          botId,
-          userUuid,
-          userId: finalUserId,
-          userName: userName || null,
-          isGuest: finalIsGuest,
-          messages: messages,
-          startedAt: conversationStartedAt,
-          endedAt: conversationEndedAt,
-          messageCount: messageCount || messages.length,
-        },
-        select: { id: true },
-      });
+      // Written under the lock a purge takes, after looking again for the purge marker: a purge that began after the check above cannot leave
+      // this row behind, because either it waits for this write and deletes it, or this waits for the purge and finds the marker
+      const made = await whileNotPurged(botId, (tx) =>
+        tx.botsConversation.create({
+          data: {
+            botId,
+            userUuid,
+            userId: finalUserId,
+            userName: userName || null,
+            isGuest: finalIsGuest,
+            messages: messages,
+            startedAt: conversationStartedAt,
+            endedAt: conversationEndedAt,
+            messageCount: messageCount || messages.length,
+          },
+          select: { id: true },
+        }),
+      );
+      if (made.gone) return NextResponse.json({ conversationId: null, status: 'gone' }, { headers: corsHeaders(request) });
+      const conversation = made.value;
       
       console.log(`Created new conversation ${conversation.id} for bot ${botId}, user ${userUuid}`);
       
