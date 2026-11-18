@@ -654,6 +654,41 @@ describe('Load models on a saved key', () => {
     expect(db.voiceProvider.update).not.toHaveBeenCalled();
   });
 
+  it('says so, and adds nothing, when the company’s list could not be read right now', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved());
+    // The company knows the key, but its list is unavailable
+    fetchMock.mockImplementation(async (url: string) => (url === 'https://api.elevenlabs.io/v1/models' ? { status: 503, json: async () => ({}), body: null } : { status: 200, text: async () => '', body: null }));
+    const response = await call(loadModels, 'POST');
+    expect(response.status).toBe(502);
+    expect((await response.json()).error).toBe('Couldn’t read ElevenLabs’s list of models right now. Try again in a moment.');
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+  });
+
+  it('adds what it could read and names the job whose list could not be read', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved({ adapter: 'cartesia', recognition: true, speech: true, models: [{ id: 'sonic-3', kind: 'speech' }] }));
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith('https://api.cartesia.ai/models?capability=stt')) return { status: 503, json: async () => ({}), body: null };
+      if (url.startsWith('https://api.cartesia.ai/models?capability=tts')) return { status: 200, json: async () => ({ data: [{ id: 'sonic-3', capability: 'tts' }, { id: 'sonic-turbo', capability: 'tts' }] }), body: null };
+      return { status: 200, text: async () => '', body: null };
+    });
+    const response = await call(loadModels, 'POST');
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    // Only what was read is added: the catalog's hearing model that stands in for the unread list is not
+    expect(body.added).toEqual([{ id: 'sonic-turbo', kind: 'speech' }]);
+    expect(body.unread).toEqual(['recognition']);
+    expect(db.voiceProvider.update.mock.calls[0][0].data.models).toEqual([
+      { id: 'sonic-3', kind: 'speech' },
+      { id: 'sonic-turbo', kind: 'speech' },
+    ]);
+  });
+
+  it('answers with no unread job when every list was read', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved());
+    company([{ model_id: 'flash', name: 'Flash', can_do_text_to_speech: true }]);
+    expect((await (await call(loadModels, 'POST')).json()).unread).toEqual([]);
+  });
+
   it('saves nothing when the company lists nothing new, and leaves out models for a job the key doesn’t do', async () => {
     db.voiceProvider.findFirst.mockResolvedValue(saved());
     company([{ model_id: 'flash', name: 'Flash', can_do_text_to_speech: true }]);

@@ -6,7 +6,7 @@ import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
 import { lendModelId } from '@/lib/voice-lend-model';
 import { modelChange, readHiddenModels } from '@/lib/voice-hidden-models';
-import { AWS_KEY, TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, accountRegion, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { AWS_KEY, TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, accountRegion, listedModelJobs, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { checkVoiceKeyLimits, readVoiceKeyLimits, savedVoiceKeyLimits, VOICE_KEY_LIMIT_NAMES, type VoiceKeyLimitValues } from '@/lib/voice-limit-values';
@@ -573,7 +573,7 @@ export async function checkVoiceKey(ownerId: string, id: string): Promise<VoiceK
  * models it lists now for what the key does that the key doesn't have yet are added. Nothing is taken off: a list cut short or a
  * model the company stops listing never pulls a lend. Answers with the key and the models added (none when there are no new ones).
  */
-export async function reloadVoiceKeyModels(ownerId: string, id: string): Promise<{ key: VoiceKeySummary; added: VoiceModel[] }> {
+export async function reloadVoiceKeyModels(ownerId: string, id: string): Promise<{ key: VoiceKeySummary; added: VoiceModel[]; unread: VoiceModel['kind'][] }> {
   const row = await owned(id, ownerId);
   if (!row) throw new VoiceKeyRefused('Key not found', 404);
   const company = voiceKeyCompanyInfo(row.adapter);
@@ -590,8 +590,14 @@ export async function reloadVoiceKeyModels(ownerId: string, id: string): Promise
   if (!loaded.ok) throw new VoiceKeyRefused(loaded.message, loaded.reason === 'refused' ? 422 : loaded.reason === 'unreachable' ? 502 : 409);
   const doesJob = (model: VoiceModel) => (model.kind === 'talk' ? row.recognition && row.speech && Boolean(company.does.talk) : row[model.kind]);
   // What is new is worked out again under the row lock, against the models and the ones taken off as they are by then
-  const added = await addListedModels(ownerId, id, loaded.models.filter(doesJob));
-  return { key: await summary((await owned(id, ownerId)) ?? row, ownerId), added };
+  // The jobs this key does that the company has a list for: when none of those lists could be read, nothing was loaded and "no new
+  // models" would be a lie. When only some could not, what was read is added and the others are named
+  const listedJobs = listedModelJobs(row);
+  const unread = (loaded.unread ?? []).filter((kind) => listedJobs.includes(kind));
+  if (listedJobs.length > 0 && unread.length === listedJobs.length) throw new VoiceKeyRefused(`Couldn’t read ${companyName(row.adapter)}’s list of models right now. Try again in a moment.`, 502);
+  // A job whose list wasn't read has only fallback models: those are not what the company lists, so they are not added
+  const added = await addListedModels(ownerId, id, loaded.models.filter((model) => doesJob(model) && !unread.includes(model.kind)));
+  return { key: await summary((await owned(id, ownerId)) ?? row, ownerId), added, unread };
 }
 
 /**
