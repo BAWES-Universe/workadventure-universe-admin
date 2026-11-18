@@ -632,6 +632,21 @@ run('voice notes for every bot, in a real database', () => {
       expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
     });
 
+    it('does not set aside a job that another bot server took after it was read', async () => {
+      const gone = await prisma.voiceProvider.create({ data: { adapter: 'soniox', name: `Gone2 ${tag}`, recognition: true, enabled: true, models: [] } });
+      providers.push(gone.id);
+      const job = await addVoiceNoteCleanup({ providerId: gone.id, kind: 'file', objectId: `f-${randomUUID()}` });
+      const real = prisma.voiceNoteCleanup.findMany.bind(prisma.voiceNoteCleanup);
+      const spy = jest.spyOn(prisma.voiceNoteCleanup, 'findMany').mockImplementationOnce(((args: never) =>
+        real(args).then(async (rows) => {
+          await prisma.voiceNoteCleanup.update({ where: { id: job.id }, data: { leaseUntil: new Date(Date.now() + 120_000) } });
+          return rows;
+        })) as never);
+      await claimVoiceNoteCleanups({ limit: 50 });
+      spy.mockRestore();
+      expect(await prisma.voiceNoteCleanup.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ state: 'pending' });
+    });
+
     it('sets aside a job whose provider is gone', async () => {
       const gone = await prisma.voiceProvider.create({ data: { adapter: 'soniox', name: `Gone ${tag}`, recognition: true, enabled: true, models: [] } });
       providers.push(gone.id);
