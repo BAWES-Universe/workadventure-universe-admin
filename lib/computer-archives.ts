@@ -150,7 +150,12 @@ async function writeArchive(botId: string, archive: ReadableStream<Uint8Array>, 
       if (sealedRow.count !== 1) throw new Error('The copy was taken for deletion while it was being written');
       return view(await prisma.computerArchive.findUniqueOrThrow({ where: { id } }));
     } catch (error) {
-      await markFailed(id, error instanceof CopyOutcomeUnknown ? UNKNOWN_COPY_FAILURE : 'The copy could not be written whole').catch(() => undefined);
+      // The marker of a copy whose outcome is not known is tried again: it is what keeps the row for the hold. If it cannot be written at all, the row stays
+      // `staging` and is taken as abandoned after `STALE_MS`; an object that lands after that has no row, and the purge and the sweep find it by listing
+      const failure = error instanceof CopyOutcomeUnknown ? UNKNOWN_COPY_FAILURE : 'The copy could not be written whole';
+      for (let attemptAt = 0; attemptAt < (error instanceof CopyOutcomeUnknown ? 3 : 1); attemptAt++) {
+        if (await markFailed(id, failure).then(() => true, () => false)) break;
+      }
       const removed = await store.remove([row.objectKey, stagingKeyOf(botId, generation, id)]).then(() => true, () => false);
       // An object that could not be deleted keeps a row that says so (made again if a purge deleted it), so the clean-up finds it and tries again
       if (!removed && !(error instanceof CopyOutcomeUnknown)) {

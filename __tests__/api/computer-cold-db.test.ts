@@ -329,6 +329,61 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
     });
 
+    it('a copy that lands after its row was taken past the hold is found by listing: the purge is not done while it is young, and the sweep deletes it once no write can be running', async () => {
+      const brick = await idleBrick();
+      bucket.store.put = async () => {
+        await prisma.brickPurge.create({ data: { botId: brick.botId, machinePending: false, copyPending: true } });
+        throw new CopyOutcomeUnknown();
+      };
+      await expect(storeArchive(brick.botId, Readable.toWeb(Readable.from([Buffer.from('home')])) as ReadableStream<Uint8Array>)).rejects.toThrow('no answer in time');
+      const row = await prisma.computerArchive.findFirstOrThrow({ where: { botId: brick.botId } });
+      // Past the hold the row is taken, and the bucket has nothing yet
+      const past = new Date(Date.now() + 5 * 3_600_000);
+      await deleteAllArchives(brick.botId, past);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+      expect(await removeBrickObjects(brick.botId, past)).toBe(0);
+      // The copy finishes at the bucket after that: an object with no row
+      bucket.objects.set(row.objectKey, Buffer.from('late'));
+      bucket.written.set(row.objectKey, past);
+      // Young: it may be a write still running, so it is left and the purge is not done
+      expect(await removeBrickObjects(brick.botId, new Date(past.getTime() + 5 * 60_000))).toBe(1);
+      expect(await removeStrayCopies(new Date(past.getTime() + 5 * 60_000))).toBe(0);
+      expect(bucket.objects.size).toBe(1);
+      // Once no write can be running it is deleted, by the purge or by the sweep
+      expect(await removeStrayCopies(new Date(past.getTime() + 2 * 3_600_000))).toBe(1);
+      expect(bucket.objects.size).toBe(0);
+    });
+
+    it('the marker of a copy whose outcome is not known is tried again; if it cannot be written the row stays and the object is still found by listing', async () => {
+      const brick = await idleBrick();
+      bucket.store.put = async () => {
+        throw new CopyOutcomeUnknown();
+      };
+      const body = () => Readable.toWeb(Readable.from([Buffer.from('home')])) as ReadableStream<Uint8Array>;
+      // Two failed tries, the third writes it
+      const flaky = jest.spyOn(prisma.computerArchive, 'updateMany').mockRejectedValueOnce(new Error('the database blinked') as never).mockRejectedValueOnce(new Error('the database blinked') as never);
+      try {
+        await expect(storeArchive(brick.botId, body())).rejects.toThrow('no answer in time');
+      } finally {
+        flaky.mockRestore();
+      }
+      expect((await prisma.computerArchive.findFirstOrThrow({ where: { botId: brick.botId } })).state).toBe('failed');
+      await prisma.computerArchive.deleteMany({ where: { botId: brick.botId } });
+      // Never written: the row is left as it was, and is taken as abandoned after the time a write can last, with whatever landed
+      const down = jest.spyOn(prisma.computerArchive, 'updateMany').mockRejectedValue(new Error('the database is down') as never);
+      try {
+        await expect(storeArchive(brick.botId, body())).rejects.toThrow('no answer in time');
+      } finally {
+        down.mockRestore();
+      }
+      const row = await prisma.computerArchive.findFirstOrThrow({ where: { botId: brick.botId } });
+      expect(row.state).toBe('staging');
+      bucket.objects.set(row.objectKey, Buffer.from('late'));
+      await deleteAllArchives(brick.botId, new Date(Date.now() + 2 * 3_600_000));
+      expect(bucket.objects.size).toBe(0);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+    });
+
     it('a write whose row cannot be written gives the stream up too', async () => {
       const brick = await idleBrick();
       let cancelled = false;
