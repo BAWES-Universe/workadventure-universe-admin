@@ -17,6 +17,7 @@ jest.mock('@/lib/workbench/state', () => {
 });
 
 import { prisma } from '@/lib/db';
+import { saveMeterSettings } from '@/lib/meter';
 import { AdapterError } from '@/lib/app-adapter/types';
 import { readCodeJobsBudget } from '@/lib/workbench/budget';
 import { setAdapterForTests, type ReadyMadeAdapter, type WorkbenchAdapter, type WorkbenchRun } from '@/lib/app-adapter';
@@ -147,6 +148,8 @@ const pending: Promise<void>[] = [];
 const background = (work: Promise<void>) => void pending.push(work);
 const finishAll = async () => void (await Promise.all(pending.splice(0)));
 
+/** What the migration seeds for the meter: these tests count against it and never set it themselves, so they put it back */
+const SEEDED_METER = { memberAllowanceMicros: 250_000, poolCeilingMicros: 2_000_000, reserveMicros: 500_000, storageMicrosPerGbMonth: 90_000, atOnceMember: 1, atOnceAll: 3, appUseCeilingMicros: 10_000_000, appUseMemberCeilingMicros: 500_000 };
 const LIMITS: CodeJobLimits = { ...(CODE_JOB_LIMITS_RECOMMENDED as CodeJobLimits), maxSeconds: 10 };
 
 run('code jobs for Apps, in a real database', () => {
@@ -200,6 +203,8 @@ run('code jobs for Apps, in a real database', () => {
     await prisma.meterEvent.deleteMany({ where: { personId: { in: [sara, omar] } } });
     await saveCodeJobLimits(LIMITS, boss);
     await resumeCodeJobs(boss);
+    // The meter's settings are the ones the migration seeds, put back every time: another suite may have deleted them
+    await saveMeterSettings(SEEDED_METER, boss);
   });
 
   afterEach(async () => {
