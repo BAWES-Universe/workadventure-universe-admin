@@ -212,6 +212,7 @@ describe('lists of companies that say little about each model', () => {
         { id: 'gpt-realtime-2.1', object: 'model' },
         { id: 'gpt-realtime-2.1-mini', object: 'model' },
         { id: 'gpt-4o-realtime-preview-2025-06-03', object: 'model' },
+        { id: 'gpt-4o-mini-realtime-preview-2024-12-17', object: 'model' },
         { id: 'gpt-realtime-whisper', object: 'model' },
         { id: 'gpt-realtime-translate', object: 'model' },
         { id: 'gpt-realtime-transcribe', object: 'model' },
@@ -219,6 +220,6 @@ describe('lists of companies that say little about each model', () => {
         { id: 'tts-1', object: 'model' },
       ],
     });
-    expect((await listCompanyModels(voiceKeyCompanyInfo('openai')!, 'k', 'talk'))?.map((model) => model.id)).toEqual(['gpt-realtime-2.1', 'gpt-realtime-2.1-mini', 'gpt-4o-realtime-preview-2025-06-03']);
+    expect((await listCompanyModels(voiceKeyCompanyInfo('openai')!, 'k', 'talk'))?.map((model) => model.id)).toEqual(['gpt-realtime-2.1', 'gpt-realtime-2.1-mini', 'gpt-4o-realtime-preview-2025-06-03', 'gpt-4o-mini-realtime-preview-2024-12-17']);
   });
 });
