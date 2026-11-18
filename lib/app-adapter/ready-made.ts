@@ -5,8 +5,8 @@ import { readReadyMadeApps } from '@/lib/app-adapter/settings';
 import { createConnection } from '@/lib/app-connections';
 import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { getMeterSettings } from '@/lib/meter';
-import { holdUnpricedUse, recordAppUseWithinCap, type AppStop } from '@/lib/app-use-cap';
-import { personKeyOf } from '@/lib/meter-values';
+import { holdUnpricedUse, reasonOfStop, recordAppUseWithinCap, type AppStop } from '@/lib/app-use-cap';
+import { nextMonthStart, personKeyOf } from '@/lib/meter-values';
 import { boundOfCall, priceCall } from '@/lib/composio-rates';
 import { readComposioBilling } from '@/lib/composio-billing';
 import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
@@ -271,7 +271,14 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
 
 /** The answer of a link to a call that was held back: a tool result that says so (an error the Brick reads and tells the person), as the link itself would send one. */
 function stoppedAnswer(id: unknown, stopped?: AppStop): LinkAnswer {
-  const body = { jsonrpc: '2.0', id: typeof id === 'number' || typeof id === 'string' ? id : null, result: { content: [{ type: 'text', text: appStoppedWords(stopped) }], isError: true } };
+  const result: Record<string, unknown> = { content: [{ type: 'text', text: appStoppedWords(stopped) }], isError: true };
+  // For a game that can tell the reasons apart (read only when present; an older one just reads the words): who stopped it, when it starts again, and whether asking for more helps
+  if (stopped) {
+    const by = reasonOfStop(stopped);
+    const monthly = by === 'person' || by === 'budget';
+    result._meta = { 'universe/stop': { by, ...(monthly ? { resetsAt: nextMonthStart(new Date()).toISOString() } : {}), canAskForMore: by === 'person' } };
+  }
+  const body = { jsonrpc: '2.0', id: typeof id === 'number' || typeof id === 'string' ? id : null, result };
   return { status: 200, contentType: 'application/json', sessionId: null, body: JSON.stringify(body) };
 }
 

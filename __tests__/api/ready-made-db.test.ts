@@ -886,6 +886,8 @@ run('ready-made apps through the adapter, in a real database', () => {
         const stopped = await (await call({ callId: `call-${randomUUID()}`, message: { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'GMAIL_FETCH_EMAILS', arguments: {} } } })).json();
         expect(stopped.status).toBe(200);
         expect(JSON.parse(stopped.body)).toMatchObject({ id: 7, result: { isError: true, content: [{ type: 'text', text: expect.stringContaining('Nothing was done') }] } });
+        // The game can tell who stopped it (read only when present): the month's budget here, which asking for more does not lift
+        expect(JSON.parse(stopped.body).result._meta['universe/stop']).toMatchObject({ by: 'budget', canAskForMore: false, resetsAt: expect.any(String) });
         expect(adapter.callLink).not.toHaveBeenCalled();
         expect(await paidUses()).toBe(0);
         // A listing is not a use and costs nothing: it still goes through
