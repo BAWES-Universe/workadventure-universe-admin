@@ -413,6 +413,8 @@ const runInfo = (run: { id: string; state: string }, replay: boolean): RunNowInf
 /** Whether a Run now request, or a run already queued, may use this item as it is: on, or paused by the owner themselves. */
 /** A run the owner asked for that was dropped before the bot server was ever handed it (0 tries): it never ran, so it never counts in the runs a day. */
 const NEVER_RAN = { state: 'dropped', attempts: 0 } as const;
+/** Only what a Brick on Universe AI runs counts in a person's runs a day: a Brick on their own key is never limited by them. */
+const ON_UNIVERSE_AI = { bot: { aiProviderRef: UNIVERSE_AI_REF } } as const;
 
 const manualMayRun = (item: { state: string; pausedBy: string | null }): boolean => item.state === 'on' || (item.state === 'paused' && (item.pausedBy === 'owner' || item.pausedBy === null));
 
@@ -463,15 +465,18 @@ async function requestRun(tx: Tx, row: ItemRow, ownerId: string, key: string | n
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-runs:${row.ownerId}`}))`;
     const room = bot.aiProviderRef === UNIVERSE_AI_REF ? await goalsRoom(row.ownerId, now, tx, roomSettings) : ({ ok: true } as const);
     if (!room.ok) return { ok: false, status: 409, code: 'no_room', until: room.resumesAt.toISOString(), error: 'Your usage for goals and tasks is used up for now' };
-    const since = new Date(now.getTime() - DAY);
-    const ofOwner = { item: { ownerId: row.ownerId, kind: { not: 'reminder' } } };
-    const [today, waiting] = await Promise.all([
-      tx.brickItemRun.count({ where: { ...ofOwner, state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: since } } }),
-      // Only a run that can still be taken up counts: one nobody took up in time never ran and will be dropped, so it holds no place. A run is
-      // dropped only once it is older than the grace (as the claim and the ask above do), so one exactly that old still counts.
-      tx.brickItemRun.count({ where: { ...ofOwner, state: 'queued', claimedAt: { gte: new Date(now.getTime() - LATE_GRACE) } } }),
-    ]);
-    if (today + waiting >= limits.runsPerDay) return { ok: false, status: 422, code: 'runs_a_day', limit: limits.runsPerDay, error: `${limits.runsPerDay} runs a day is the most` };
+    // The runs a day are for Universe AI's usage. A Brick on the owner's own key is never limited by them, and what it runs is not counted.
+    if (bot.aiProviderRef === UNIVERSE_AI_REF) {
+      const since = new Date(now.getTime() - DAY);
+      const ofOwner = { item: { ownerId: row.ownerId, kind: { not: 'reminder' }, ...ON_UNIVERSE_AI } };
+      const [today, waiting] = await Promise.all([
+        tx.brickItemRun.count({ where: { ...ofOwner, state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: since } } }),
+        // Only a run that can still be taken up counts: one nobody took up in time never ran and will be dropped, so it holds no place. A run is
+        // dropped only once it is older than the grace (as the claim and the ask above do), so one exactly that old still counts.
+        tx.brickItemRun.count({ where: { ...ofOwner, state: 'queued', claimedAt: { gte: new Date(now.getTime() - LATE_GRACE) } } }),
+      ]);
+      if (today + waiting >= limits.runsPerDay) return { ok: false, status: 422, code: 'runs_a_day', limit: limits.runsPerDay, error: `${limits.runsPerDay} runs a day is the most` };
+    }
   }
 
   // The run waits "queued" until the bot server asks for work: the claim makes it the person's run with its lease, after the same checks
@@ -939,8 +944,10 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
           onUniverse = bot.aiProviderRef === UNIVERSE_AI_REF;
           const room = onUniverse ? await goalsRoom(item.ownerId, now, tx, roomSettings) : ({ ok: true } as const);
           if (!room.ok) return drop('There was no room in the usage for goals and tasks');
-          const today = await tx.brickItemRun.count({ where: { state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
-          if (today >= limits.runsPerDay) return drop('The runs a day were used up');
+          if (onUniverse) {
+            const today = await tx.brickItemRun.count({ where: { state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' }, ...ON_UNIVERSE_AI } } });
+            if (today >= limits.runsPerDay) return drop('The runs a day were used up');
+          }
         }
         // It is the person's run now. The item's own time, held wait and state are not touched: it was extra.
         const handed = await tx.brickItemRun.update({ where: { id }, data: { state: 'claimed', claimedAt: now, leaseUntil: lease, attempts: 1, late: false, fresh: false }, include: RUN_INCLUDE });
@@ -994,9 +1001,10 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
       AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
       ${ofKinds}
       -- A person who is at their runs a day is left out here, so what they hold back never fills the batch ahead of everyone else
-      AND (i."kind" = 'reminder' OR (
-        SELECT count(*) FROM "brick_item_runs" r JOIN "brick_items" j ON j."id" = r."item_id"
-        WHERE j."owner_id" = i."owner_id" AND j."kind" <> 'reminder' AND r."state" <> 'queued' AND NOT (r."state" = 'dropped' AND r."attempts" = 0) AND r."claimed_at" > ${new Date(now.getTime() - DAY)}
+      -- (a Brick on its owner's own key is never held back by them, and what it runs is not counted)
+      AND (i."kind" = 'reminder' OR b."ai_provider_ref" IS DISTINCT FROM ${UNIVERSE_AI_REF} OR (
+        SELECT count(*) FROM "brick_item_runs" r JOIN "brick_items" j ON j."id" = r."item_id" JOIN "bots" jb ON jb."id" = j."bot_id"
+        WHERE j."owner_id" = i."owner_id" AND j."kind" <> 'reminder' AND jb."ai_provider_ref" = ${UNIVERSE_AI_REF} AND r."state" <> 'queued' AND NOT (r."state" = 'dropped' AND r."attempts" = 0) AND r."claimed_at" > ${new Date(now.getTime() - DAY)}
       ) < ${limits.runsPerDay})
     ORDER BY i."next_due_at" ASC, i."id" ASC
     LIMIT ${limit}`);
@@ -1052,9 +1060,10 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
         // There is room: the wait is over, whether or not this check goes on to run (the runs a day below can still hold it back)
         if (item.heldSince !== null) await tx.brickItem.update({ where: { id }, data: NOT_HELD });
 
-        // Runs a day: watches, schedules and goals together, per person. A reminder is fixed text with no AI and never uses them.
-        if (item.kind !== 'reminder') {
-          const today = await tx.brickItemRun.count({ where: { state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
+        // Runs a day: what Universe AI runs for watches, schedules and goals together, per person. A reminder is fixed text with no AI and never uses
+        // them, and a Brick on the person's own key is never limited by them.
+        if (item.kind !== 'reminder' && onUniverse) {
+          const today = await tx.brickItemRun.count({ where: { state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' }, ...ON_UNIVERSE_AI } } });
           if (today >= limits.runsPerDay) return null;
         }
 

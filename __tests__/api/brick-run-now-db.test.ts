@@ -16,6 +16,7 @@ import { ensureDefaultBrick } from '@/lib/brick-default';
 import { deleteBrick } from '@/lib/brick-delete';
 import * as botLimits from '@/lib/bot-limits';
 import { saveServerLimits } from '@/lib/bot-limits';
+import { createBrick } from '@/lib/brick-create';
 
 // The real limits, with the read counted
 jest.mock('@/lib/bot-limits', () => {
@@ -359,6 +360,72 @@ run('Run now and snooze, in a real database', () => {
       expect(second).toMatchObject({ ok: true, run: { state: 'queued', replay: false } });
       expect(second.ok && second.run!.runId).not.toBe(first.run!.runId);
       expect(await runsOf(briefing.id)).toMatchObject([{ id: first.run!.runId, state: 'dropped', attempts: 0, error: 'It was not taken up in time' }, { state: 'queued' }]);
+    });
+
+    it('a Brick on its owner’s own key is never limited by Run now and the runs a day, and what it runs is not counted for the owner’s Brick on Universe AI', async () => {
+      const own = (who: Who) => prisma.bot.update({ where: { id: who.brickId }, data: { aiProviderRef: 'own-key-test' } });
+      const everyDay = { type: 'every', minutes: 24 * 60 } as const;
+      // Run now: 30 taps on an own-key Brick all run, with the limit at 3, and none of them is counted for the owner's Brick on Universe AI
+      const rhea = await person('rhea');
+      await prisma.botsAiProvider.upsert({ where: { providerId: 'universe-ai' }, create: { providerId: 'universe-ai', name: 'Universe AI', type: 'universe-ai', enabled: true }, update: {} });
+      const second = await createBrick({ ownerId: rhea.id, name: 'Own key Brick', description: 'x', characterTextureId: 'male1' });
+      const rheaOwn: Who = { ...rhea, brickId: second.id };
+      await saveServerLimits({ bricks: { runsPerDay: 3 } }, rhea.id);
+      try {
+        await own(rheaOwn);
+        const ownBriefing = await set(rheaOwn, { kind: 'schedule', words: 'Own', cadence: everyDay });
+        const universeBriefing = await set(rhea, { kind: 'schedule', words: 'Universe', cadence: everyDay });
+        for (let i = 0; i < 30; i++) {
+          expect(await tap(rheaOwn, ownBriefing.id, 'run', at((2 * i + 1) * MIN))).toMatchObject({ ok: true, run: { replay: false } });
+          const [handed] = mine(await claimDueRuns(at((2 * i + 2) * MIN)), ownBriefing.id);
+          expect(handed).toMatchObject({ manual: true });
+          await finishRun(handed.runId, { attempt: 1, state: 'done', outcome: 'quiet' }, at((2 * i + 2) * MIN));
+        }
+        expect(await runsOf(ownBriefing.id)).toHaveLength(30);
+        // The Brick on Universe AI still has all of its own runs a day, and stops at the limit after them
+        for (let i = 0; i < 3; i++) {
+          expect(await tap(rhea, universeBriefing.id, 'run', at((100 + 2 * i) * MIN))).toMatchObject({ ok: true });
+          const [handed] = mine(await claimDueRuns(at((101 + 2 * i) * MIN)), universeBriefing.id);
+          expect(handed).toBeDefined();
+          await finishRun(handed.runId, { attempt: 1, state: 'done', outcome: 'quiet' }, at((101 + 2 * i) * MIN));
+        }
+        expect(await tap(rhea, universeBriefing.id, 'run', at(110 * MIN))).toMatchObject({ ok: false, code: 'runs_a_day' });
+        // And the own-key Brick is still not held back by the Universe AI runs
+        expect(await tap(rheaOwn, ownBriefing.id, 'run', at(111 * MIN))).toMatchObject({ ok: true });
+      } finally {
+        await saveServerLimits({ bricks: { runsPerDay: 24 } }, rhea.id);
+      }
+    });
+
+    it('a Brick on its owner’s own key is never held back by the runs a day on its schedule, while one on Universe AI is held after its limit', async () => {
+      const own = (who: Who) => prisma.bot.update({ where: { id: who.brickId }, data: { aiProviderRef: 'own-key-test' } });
+      await prisma.botsAiProvider.upsert({ where: { providerId: 'universe-ai' }, create: { providerId: 'universe-ai', name: 'Universe AI', type: 'universe-ai', enabled: true }, update: {} });
+      // With the limit at 1 an own-key briefing runs every hour, and a Universe AI one is held after its first
+      const rolf = await person('rolf');
+      const rune = await person('rune');
+      await saveServerLimits({ bricks: { runsPerDay: 1 } }, rolf.id);
+      try {
+        await own(rolf);
+        const mineOwn = await set(rolf, { kind: 'schedule', words: 'Own', cadence: hourly });
+        const mineUniverse = await set(rune, { kind: 'schedule', words: 'Universe', cadence: hourly });
+        for (let h = 1; h <= 5; h++) {
+          const batch = await claimDueRuns(at(h * HOUR));
+          const [ran] = mine(batch, mineOwn.id);
+          expect(ran).toBeDefined();
+          await finishRun(ran.runId, { attempt: 1, state: 'done', outcome: 'quiet' }, at(h * HOUR));
+          const [other] = mine(batch, mineUniverse.id);
+          if (h === 1) {
+            expect(other).toBeDefined();
+            await finishRun(other.runId, { attempt: 1, state: 'done', outcome: 'quiet' }, at(h * HOUR));
+          } else {
+            expect(other).toBeUndefined();
+          }
+        }
+        expect(await runsOf(mineOwn.id)).toHaveLength(5);
+        expect(await runsOf(mineUniverse.id)).toHaveLength(1);
+      } finally {
+        await saveServerLimits({ bricks: { runsPerDay: 24 } }, rolf.id);
+      }
     });
 
     it('a stale run nobody took up holds no place in the runs a day of the owner’s other items', async () => {
