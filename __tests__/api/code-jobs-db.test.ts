@@ -1344,10 +1344,10 @@ run('code jobs for Apps, in a real database', () => {
       await prisma.codeJob.createMany({ data: Array.from({ length: 60 }, (_, index) => row(`bad${index}`, new Date(base + index * 1000))) });
       await prisma.codeJob.create({ data: row('good', new Date(base + 3_600_000)) });
       const failing = provider.adapter.nestedRuns.getMockImplementation() as NonNullable<ReturnType<typeof provider.adapter.nestedRuns.getMockImplementation>>;
-      provider.adapter.nestedRuns.mockImplementation(async (call) => {
+      provider.adapter.nestedRuns.mockImplementation((async (call: { sessionId: string }) => {
         if (call.sessionId.startsWith('bad')) throw new Error('provider log unavailable');
         return 0;
-      });
+      }) as never);
       try {
         const goodId = (await prisma.codeJob.findFirstOrThrow({ where: { jobKey: `good-${tag}` } })).id;
         // The first sweep takes the oldest batch (all failing); the second takes the ones not tried yet first, and reaches the newer job
