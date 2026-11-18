@@ -1166,6 +1166,8 @@ model BrickItemRun {
   // own idempotency key (the owner's tap): asking again with the same key finds the same run.
   manual     Boolean   @default(false)
   requestKey String?   @map("request_key") @db.VarChar(64)
+  /// Whether the run used Universe AI (set when it is made, or handed out): only those count in the runs a day, whatever key the Brick uses later.
+  universeAi Boolean   @default(true) @map("universe_ai")
   // What it came to: quiet, spoke, waiting, or empty while it runs
   outcome    String?   @db.VarChar(10)
   // The result in a line, for "Everything Brick did"

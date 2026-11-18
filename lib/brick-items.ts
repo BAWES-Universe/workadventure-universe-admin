@@ -413,8 +413,8 @@ const runInfo = (run: { id: string; state: string }, replay: boolean): RunNowInf
 /** Whether a Run now request, or a run already queued, may use this item as it is: on, or paused by the owner themselves. */
 /** A run the owner asked for that was dropped before the bot server was ever handed it (0 tries): it never ran, so it never counts in the runs a day. */
 const NEVER_RAN = { state: 'dropped', attempts: 0 } as const;
-/** Only what a Brick on Universe AI runs counts in a person's runs a day: a Brick on their own key is never limited by them. */
-const ON_UNIVERSE_AI = { bot: { aiProviderRef: UNIVERSE_AI_REF } } as const;
+/** Only what Universe AI ran counts in a person's runs a day (a run records it: `universeAi`): a Brick on their own key is never limited by them, and what it ran is never counted, whatever key it has later. */
+const UNIVERSE_AI_RUN = { universeAi: true } as const;
 
 const manualMayRun = (item: { state: string; pausedBy: string | null }): boolean => item.state === 'on' || (item.state === 'paused' && (item.pausedBy === 'owner' || item.pausedBy === null));
 
@@ -468,7 +468,7 @@ async function requestRun(tx: Tx, row: ItemRow, ownerId: string, key: string | n
     // The runs a day are for Universe AI's usage. A Brick on the owner's own key is never limited by them, and what it runs is not counted.
     if (bot.aiProviderRef === UNIVERSE_AI_REF) {
       const since = new Date(now.getTime() - DAY);
-      const ofOwner = { item: { ownerId: row.ownerId, kind: { not: 'reminder' }, ...ON_UNIVERSE_AI } };
+      const ofOwner = { ...UNIVERSE_AI_RUN, item: { ownerId: row.ownerId, kind: { not: 'reminder' } } };
       const [today, waiting] = await Promise.all([
         tx.brickItemRun.count({ where: { ...ofOwner, state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: since } } }),
         // Only a run that can still be taken up counts: one nobody took up in time never ran and will be dropped, so it holds no place. A run is
@@ -484,8 +484,8 @@ async function requestRun(tx: Tx, row: ItemRow, ownerId: string, key: string | n
   for (let step = 0; step < 5; step++) {
     const dueAt = new Date(now.getTime() + step);
     const made = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-      INSERT INTO "brick_item_runs" ("id", "item_id", "due_at", "revision", "claimed_at", "lease_until", "attempts", "state", "manual", "request_key")
-      VALUES (${randomUUID()}, ${row.id}, ${dueAt}, ${row.revision}, ${now}, ${now}, 0, 'queued', true, ${key})
+      INSERT INTO "brick_item_runs" ("id", "item_id", "due_at", "revision", "claimed_at", "lease_until", "attempts", "state", "manual", "request_key", "universe_ai")
+      VALUES (${randomUUID()}, ${row.id}, ${dueAt}, ${row.revision}, ${now}, ${now}, 0, 'queued', true, ${key}, ${bot.aiProviderRef === UNIVERSE_AI_REF})
       ON CONFLICT ("item_id", "due_at") DO NOTHING
       RETURNING "id"`);
     if (made.length) return { ok: true, item: view, run: { runId: made[0].id, state: 'queued', replay: false } };
@@ -945,12 +945,12 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
           const room = onUniverse ? await goalsRoom(item.ownerId, now, tx, roomSettings) : ({ ok: true } as const);
           if (!room.ok) return drop('There was no room in the usage for goals and tasks');
           if (onUniverse) {
-            const today = await tx.brickItemRun.count({ where: { state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' }, ...ON_UNIVERSE_AI } } });
+            const today = await tx.brickItemRun.count({ where: { ...UNIVERSE_AI_RUN, state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
             if (today >= limits.runsPerDay) return drop('The runs a day were used up');
           }
         }
         // It is the person's run now. The item's own time, held wait and state are not touched: it was extra.
-        const handed = await tx.brickItemRun.update({ where: { id }, data: { state: 'claimed', claimedAt: now, leaseUntil: lease, attempts: 1, late: false, fresh: false }, include: RUN_INCLUDE });
+        const handed = await tx.brickItemRun.update({ where: { id }, data: { state: 'claimed', claimedAt: now, leaseUntil: lease, attempts: 1, late: false, fresh: false, universeAi: onUniverse }, include: RUN_INCLUDE });
         if (onUniverse) await windowStart(`ua:person:${item.ownerId}`, roomSettings.windowHours, now, tx);
         return handed;
       });
@@ -1003,8 +1003,8 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
       -- A person who is at their runs a day is left out here, so what they hold back never fills the batch ahead of everyone else
       -- (a Brick on its owner's own key is never held back by them, and what it runs is not counted)
       AND (i."kind" = 'reminder' OR b."ai_provider_ref" IS DISTINCT FROM ${UNIVERSE_AI_REF} OR (
-        SELECT count(*) FROM "brick_item_runs" r JOIN "brick_items" j ON j."id" = r."item_id" JOIN "bots" jb ON jb."id" = j."bot_id"
-        WHERE j."owner_id" = i."owner_id" AND j."kind" <> 'reminder' AND jb."ai_provider_ref" = ${UNIVERSE_AI_REF} AND r."state" <> 'queued' AND NOT (r."state" = 'dropped' AND r."attempts" = 0) AND r."claimed_at" > ${new Date(now.getTime() - DAY)}
+        SELECT count(*) FROM "brick_item_runs" r JOIN "brick_items" j ON j."id" = r."item_id"
+        WHERE j."owner_id" = i."owner_id" AND j."kind" <> 'reminder' AND r."universe_ai" AND r."state" <> 'queued' AND NOT (r."state" = 'dropped' AND r."attempts" = 0) AND r."claimed_at" > ${new Date(now.getTime() - DAY)}
       ) < ${limits.runsPerDay})
     ORDER BY i."next_due_at" ASC, i."id" ASC
     LIMIT ${limit}`);
@@ -1063,14 +1063,14 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
         // Runs a day: what Universe AI runs for watches, schedules and goals together, per person. A reminder is fixed text with no AI and never uses
         // them, and a Brick on the person's own key is never limited by them.
         if (item.kind !== 'reminder' && onUniverse) {
-          const today = await tx.brickItemRun.count({ where: { state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' }, ...ON_UNIVERSE_AI } } });
+          const today = await tx.brickItemRun.count({ where: { ...UNIVERSE_AI_RUN, state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
           if (today >= limits.runsPerDay) return null;
         }
 
         // The run, once per item and due time: the unique pair is the backstop under the row lock
         const made = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-          INSERT INTO "brick_item_runs" ("id", "item_id", "due_at", "revision", "claimed_at", "lease_until", "late", "fresh")
-          VALUES (${randomUUID()}, ${id}, ${dueAt}, ${item.revision}, ${now}, ${lease}, ${overdue && reminderLike}, ${overdue && !reminderLike})
+          INSERT INTO "brick_item_runs" ("id", "item_id", "due_at", "revision", "claimed_at", "lease_until", "late", "fresh", "universe_ai")
+          VALUES (${randomUUID()}, ${id}, ${dueAt}, ${item.revision}, ${now}, ${lease}, ${overdue && reminderLike}, ${overdue && !reminderLike}, ${onUniverse})
           ON CONFLICT ("item_id", "due_at") DO NOTHING
           RETURNING "id"`);
         // The next one is the first still to come: after an outage everything missed but this one is skipped, never replayed. A snoozed

@@ -428,6 +428,63 @@ run('Run now and snooze, in a real database', () => {
       }
     });
 
+    it('what a run used is kept on the run: runs made on an own key never count after the Brick moves to Universe AI', async () => {
+      const setKey = (who: Who, ref: string) => prisma.bot.update({ where: { id: who.brickId }, data: { aiProviderRef: ref } });
+      await prisma.botsAiProvider.upsert({ where: { providerId: 'universe-ai' }, create: { providerId: 'universe-ai', name: 'Universe AI', type: 'universe-ai', enabled: true }, update: {} });
+      const everyDay = { type: 'every', minutes: 24 * 60 } as const;
+      const runOnce = async (who: Who, itemId: string, minute: number) => {
+        const asked = await tap(who, itemId, 'run', at(minute * MIN));
+        if (!asked.ok) return asked;
+        const [handed] = mine(await claimDueRuns(at((minute + 1) * MIN)), itemId);
+        await finishRun(handed.runId, { attempt: 1, state: 'done', outcome: 'quiet' }, at((minute + 1) * MIN));
+        return asked;
+      };
+      const kim = await person('kim');
+      await saveServerLimits({ bricks: { runsPerDay: 3 } }, kim.id);
+      try {
+        // Own key to Universe AI (an own key removed, or no longer lent): the runs it made on the own key never count
+        await setKey(kim, 'own-key-test');
+        const kimItem = await set(kim, { kind: 'schedule', words: 'Own', cadence: everyDay });
+        for (let i = 0; i < 3; i++) expect(await runOnce(kim, kimItem.id, 2 * i + 1)).toMatchObject({ ok: true });
+        await setKey(kim, 'universe-ai');
+        for (let i = 0; i < 3; i++) expect(await runOnce(kim, kimItem.id, 20 + 2 * i)).toMatchObject({ ok: true });
+        // ...and the three it makes on Universe AI are its limit
+        expect(await tap(kim, kimItem.id, 'run', at(40 * MIN))).toMatchObject({ ok: false, code: 'runs_a_day' });
+
+      } finally {
+        await saveServerLimits({ bricks: { runsPerDay: 24 } }, kim.id);
+      }
+    });
+
+    it('Universe AI runs still count after the Brick that made them moves to an own key: the owner’s other Brick on Universe AI is still at the limit', async () => {
+      const setKey = (who: Who, ref: string) => prisma.bot.update({ where: { id: who.brickId }, data: { aiProviderRef: ref } });
+      await prisma.botsAiProvider.upsert({ where: { providerId: 'universe-ai' }, create: { providerId: 'universe-ai', name: 'Universe AI', type: 'universe-ai', enabled: true }, update: {} });
+      const everyDay = { type: 'every', minutes: 24 * 60 } as const;
+      const runOnce = async (who: Who, itemId: string, minute: number) => {
+        const asked = await tap(who, itemId, 'run', at(minute * MIN));
+        if (!asked.ok) return asked;
+        const [handed] = mine(await claimDueRuns(at((minute + 1) * MIN)), itemId);
+        await finishRun(handed.runId, { attempt: 1, state: 'done', outcome: 'quiet' }, at((minute + 1) * MIN));
+        return asked;
+      };
+      const ida = await person('ida');
+      await saveServerLimits({ bricks: { runsPerDay: 3 } }, ida.id);
+      try {
+        // One Brick makes the three Universe AI runs and then moves; the one that moved is not limited at all
+        const lea = ida;
+        const leaOther = await createBrick({ ownerId: lea.id, name: 'Second', description: 'x', characterTextureId: 'male1' });
+        const leaSecond: Who = { ...lea, brickId: leaOther.id };
+        const first = await set(lea, { kind: 'schedule', words: 'First', cadence: everyDay });
+        const second = await set(leaSecond, { kind: 'schedule', words: 'Second', cadence: everyDay });
+        for (let i = 0; i < 3; i++) expect(await runOnce(lea, first.id, 2 * i + 1)).toMatchObject({ ok: true });
+        await setKey(lea, 'own-key-test');
+        expect(await tap(leaSecond, second.id, 'run', at(20 * MIN))).toMatchObject({ ok: false, code: 'runs_a_day' });
+        expect(await runOnce(lea, first.id, 30)).toMatchObject({ ok: true });
+      } finally {
+        await saveServerLimits({ bricks: { runsPerDay: 24 } }, ida.id);
+      }
+    });
+
     it('a stale run nobody took up holds no place in the runs a day of the owner’s other items', async () => {
       const ned = await person('ned');
       await saveServerLimits({ bricks: { runsPerDay: 1 } }, ned.id);
