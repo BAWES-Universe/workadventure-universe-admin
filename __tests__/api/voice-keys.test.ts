@@ -629,9 +629,10 @@ describe('Load models on a saved key', () => {
 
   it('keeps a model ticked or taken off by hand while the list was loading, working out what is new from the models as they are when it saves', async () => {
     // Read before the call to the company: flash and turbo. By the time it saves, turbo was taken off (and kept off) and "mine" was ticked
+    const first = saved();
     db.voiceProvider.findFirst
-      .mockResolvedValueOnce(saved())
-      .mockResolvedValue(saved({ models: [{ id: 'flash', label: 'Flash', kind: 'speech' }, { id: 'mine', kind: 'speech' }], hiddenModels: ['speech:turbo'] }));
+      .mockResolvedValueOnce(first)
+      .mockResolvedValue({ ...first, models: [{ id: 'flash', label: 'Flash', kind: 'speech' }, { id: 'mine', kind: 'speech' }], hiddenModels: ['speech:turbo'] });
     company([
       { model_id: 'flash', name: 'Flash', can_do_text_to_speech: true },
       { model_id: 'turbo', name: 'Turbo', can_do_text_to_speech: true },
@@ -687,6 +688,27 @@ describe('Load models on a saved key', () => {
     db.voiceProvider.findFirst.mockResolvedValue(saved());
     company([{ model_id: 'flash', name: 'Flash', can_do_text_to_speech: true }]);
     expect((await (await call(loadModels, 'POST')).json()).unread).toEqual([]);
+  });
+
+  it('adds nothing when the key was changed while the company was being asked, so the old key’s list never goes to the new one', async () => {
+    // Read with one key, and by the time it saves under the lock the key is another
+    const first = saved();
+    db.voiceProvider.findFirst.mockResolvedValueOnce(first).mockResolvedValue({ ...first, apiKeyEncrypted: encryptApiKey('sk-rotated-key-77aa') });
+    company([{ model_id: 'eleven_v5', name: 'Eleven v5', can_do_text_to_speech: true }]);
+    const response = await call(loadModels, 'POST');
+    expect(response.status).toBe(409);
+    expect((await response.json()).error).toBe('The key changed while its models were loading. Try again.');
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+  });
+
+  it('adds nothing when the address or region changed while the company was being asked', async () => {
+    const first = saved();
+    db.voiceProvider.findFirst.mockResolvedValueOnce(first).mockResolvedValue({ ...first, endpoint: 'https://moved.example.com' });
+    company([{ model_id: 'eleven_v5', name: 'Eleven v5', can_do_text_to_speech: true }]);
+    expect((await call(loadModels, 'POST')).status).toBe(409);
+    db.voiceProvider.findFirst.mockResolvedValueOnce(first).mockResolvedValue({ ...first, region: 'eu-west-1' });
+    expect((await call(loadModels, 'POST')).status).toBe(409);
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
   });
 
   it('saves nothing when the company lists nothing new, and leaves out models for a job the key doesn’t do', async () => {
