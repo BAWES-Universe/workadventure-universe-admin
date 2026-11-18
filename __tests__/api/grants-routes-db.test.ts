@@ -325,6 +325,14 @@ run('the grants routes, on the real books', () => {
     expect(await prisma.grantProgram.count({ where: { kind: 'exception', status: 'active', categoryId: 'instant_apps' } })).toBe(1);
   });
 
+  it('previews an exception that sets one category to No grant and the other to its own amount with the funding of the amount, once and monthly apart', async () => {
+    await saveMeterSettings({ rolloutBudgetMicros: 100 * MILLION }, admin.id);
+    const [omar, noor] = [await person('Omar'), await person('Noor')];
+    const preview = await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'none' }, computers: { mode: 'own', amountMicros: 5 * MILLION, interval: 'once' } } });
+    const view = await preview.json();
+    expect(view.numbers).toMatchObject({ interval: 'once', mostOnceMicros: 10 * MILLION, mostMonthlyMicros: null, issuedNowMicros: 10 * MILLION });
+  });
+
   it('an exception the admin opened that was ended and replaced meanwhile is not saved onto its replacement', async () => {
     const [omar, noor] = [await person('Omar'), await person('Noor')];
     const body = (amount: number, extra: object = {}) => ({ audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: amount * MILLION, interval: 'monthly' }, computers: { mode: 'same' }, ...extra });

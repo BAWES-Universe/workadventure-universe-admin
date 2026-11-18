@@ -350,7 +350,10 @@ export async function previewFor(request: PreviewRequest, now: Date = new Date()
     let numbers: PreviewNumbers | null = null;
     let clash: ClashView | null = null;
     let most = 0;
+    let mostOnce = 0;
+    let mostMonthly = 0;
     let issuedNow = 0;
+    let ownInterval: PreviewNumbers['interval'] | null = null;
     for (const category of MONEY_CATEGORIES) {
       const setting = request[category];
       const input = settingInput(category, setting, recipients, now);
@@ -359,13 +362,20 @@ export async function previewFor(request: PreviewRequest, now: Date = new Date()
       const first = numbersOf(preview, request, { interval: setting.mode === 'own' ? setting.interval : 'none', ownRules: 0 });
       if (setting.mode === 'own') {
         most += first.mostNowMicros ?? 0;
+        if (setting.interval === 'once') mostOnce += first.mostNowMicros ?? 0;
+        else mostMonthly += first.mostNowMicros ?? 0;
         issuedNow += first.issuedNowMicros ?? 0;
+        // What the funding check reads: the first category that gives credit, not one set to "No grant"
+        ownInterval = ownInterval ?? setting.interval;
       }
       numbers = numbers ?? first;
       // "No grant" is a figure like any other: the books refuse it too when another rule of the same rank says something else for the same people
       if (!clash) clash = await clashOf(category, recipients, request.replaceId ? (readExceptionId(request.replaceId)?.[category] ?? undefined) : undefined, setting.mode === 'own' ? { amountMicros: setting.amountMicros, interval: setting.interval } : { amountMicros: 0, interval: 'none' });
     }
-    return { numbers: numbers ? { ...numbers, mostNowMicros: most > 0 ? most : null, issuedNowMicros: issuedNow > 0 ? issuedNow : null } : null, clash };
+    return {
+      numbers: numbers ? { ...numbers, interval: ownInterval ?? numbers.interval, mostNowMicros: most > 0 ? most : null, mostOnceMicros: mostOnce > 0 ? mostOnce : null, mostMonthlyMicros: mostMonthly > 0 ? mostMonthly : null, issuedNowMicros: issuedNow > 0 ? issuedNow : null } : null,
+      clash,
+    };
   } catch (error) {
     if (error instanceof CreditRefused || error instanceof GrantsRefused) return { numbers: null, clash: null, problem: error.message };
     throw error;
