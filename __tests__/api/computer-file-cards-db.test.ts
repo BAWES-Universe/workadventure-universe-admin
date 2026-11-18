@@ -683,6 +683,24 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect((await mine([id]))[0].handed.map((card) => card.name)).toEqual(['a.pdf']);
   });
 
+  it('does not give up on a claim that was taken just before the wait ran out: the deadline is applied after the claim is read', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    out(id, 'a.pdf', 'a', 5);
+    setHandOverClaimWaitForTests(300);
+    const realPause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    // One hand-over holds the machine...
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date() } });
+    const finished = finishJob(id, 'done', minutes(9));
+    await realPause(150);
+    // ...and another takes it just before the 300 ms of waiting run out; the waiter next looks only after the deadline has passed
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date() } });
+    await realPause(300);
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: null } });
+    await finished;
+    expect((await mine([id]))[0].handed.map((card) => card.name)).toEqual(['a.pdf']);
+  });
+
   it('does not rest the machine under a job that finished while another hand-over was running: the first lets go, and the second still hands its files over', async () => {
     const sara = await person('sara');
     const first = await started(sara, 'First');

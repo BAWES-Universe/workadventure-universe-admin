@@ -63,6 +63,11 @@ export interface Report {
  * plus the longest handing over of files can run, so the cards are never written after the message went without them.
  */
 const UNFINISHED_ENDING_MS = 5 * 60 * 1000 + HAND_OVER_LATEST_MS;
+/**
+ * A job waiting in line for the machine's hand-over is not given up while the hand-overs ahead of it keep taking the machine one after the other, which can take longer
+ * than UNFINISHED_ENDING_MS: its ending is held while a hand-over on its Brick's computer is live (a claim younger than HAND_OVER_LATEST_MS), but never longer than this.
+ */
+const UNFINISHED_ENDING_CEILING_MS = 60 * 60 * 1000;
 /** How long a job that was refused by a rule before it began waits before it is listed (the call that asked may be deleting it). */
 const NEVER_STARTED_GRACE_MS = 30 * 1000;
 const WHY_MAX = 160;
@@ -206,6 +211,8 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
   const size = Math.max(1, Math.min(limit, 200));
   // An ending is told once everything it does is finished; one a server left half done is told anyway after a while, never held for ever
   const unfinishedBefore = new Date(now.getTime() - UNFINISHED_ENDING_MS);
+  const ceilingBefore = new Date(now.getTime() - UNFINISHED_ENDING_CEILING_MS);
+  const staleClaimBefore = new Date(now.getTime() - HAND_OVER_LATEST_MS);
   const ended = await prisma.computerJob.findMany({
     where: {
       status: { in: ['done', 'stopped', 'failed'] },
@@ -217,7 +224,18 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
         // moment of asking is deleted by that call, so it is given a moment before it is listed
         { OR: [{ startedAt: { not: null } }, { endedBy: 'rule', endedAt: { lte: new Date(now.getTime() - NEVER_STARTED_GRACE_MS) } }] },
         { OR: [{ endedBy: null }, { endedBy: { notIn: ['person', 'off', 'deleted'] } }] },
-        { OR: [{ endClosedAt: { not: null } }, { endedAt: { lte: unfinishedBefore } }] },
+        {
+          OR: [
+            { endClosedAt: { not: null } },
+            // Not while a hand-over on its Brick's computer is live: the job may be waiting in line for it, and its cards are not made yet
+            {
+              endedAt: { lte: unfinishedBefore },
+              // (a plain NOT would drop a computer whose claim is empty: a comparison with nothing is neither true nor false)
+              bot: { OR: [{ computer: { is: null } }, { computer: { filesClaimedAt: null } }, { computer: { filesClaimedAt: { lt: staleClaimBefore } } }] },
+            },
+            { endedAt: { lte: ceilingBefore } },
+          ],
+        },
       ],
     },
     orderBy: [{ endedAt: 'asc' }, { id: 'asc' }],

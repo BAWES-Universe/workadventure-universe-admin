@@ -949,7 +949,6 @@ async function handOverJobFiles(job: { id: string; botId: string; personId: stri
         data: { filesClaimedAt: claimedAt },
       });
       if (claim.count === 1) break;
-      if (Date.now() >= waitUntil) return 0;
       // Held by another hand-over: wait for it. Anything else (the machine is not working any more, or is another one) is not a wait.
       const now2 = await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { machine: true, providerRef: true, filesClaimedAt: true } });
       if (!now2 || now2.machine !== 'working' || now2.providerRef !== row.providerRef) return 0;
@@ -959,6 +958,8 @@ async function handOverJobFiles(job: { id: string; botId: string; personId: stri
         if (waitingFor !== null) waitUntil = Date.now() + claimWaitMs;
         waitingFor = now2.filesClaimedAt.getTime();
       }
+      // The deadline is applied only after the claim was read: one taken just before it is progress (the wait starts again), not a reason to give up
+      if (Date.now() >= waitUntil) return 0;
       await new Promise((resolve) => setTimeout(resolve, Math.min(CLAIM_POLL_MS, Math.max(1, waitUntil - Date.now()))));
     }
     try {

@@ -269,6 +269,28 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     expect((await reportsToTell(200, new Date(justNow.getTime() + 10 * 60_000))).filter((report) => report.jobId === stuck.id).map((report) => report.kind)).toEqual(['done']);
   });
 
+  it('holds an unclosed ending past nine minutes while a hand-over on its computer is live, never past an hour, and tells it when the hand-over is over', async () => {
+    const sara = await person('sara');
+    const justNow = new Date();
+    const waiting = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'In line', status: 'done', startedAt: new Date(justNow.getTime() - 60_000), endedAt: justNow } });
+    const at = (minutes: number) => new Date(justNow.getTime() + minutes * 60_000);
+    const told = async (minutes: number) => (await reportsToTell(200, at(minutes))).filter((report) => report.jobId === waiting.id).map((report) => report.kind);
+    // The hand-overs ahead of it take the machine one after the other: the last took it at minute 12
+    const claim = (when: Date | null) => prisma.brickComputer.upsert({ where: { botId: sara.brickId }, create: { botId: sara.brickId, machine: 'working', filesClaimedAt: when }, update: { filesClaimedAt: when } });
+    await claim(at(12));
+    expect(await told(10)).toEqual([]);
+    expect(await told(13)).toEqual([]);
+    // Nobody has taken it for longer than a hand-over can last: the ending is told as it stands
+    expect(await told(12 + 5)).toEqual(['done']);
+    // A claim that is let go is no hold
+    await claim(null);
+    expect(await told(13)).toEqual(['done']);
+    // Never held for ever, whatever is claimed
+    await claim(at(70));
+    expect(await told(30)).toEqual([]);
+    expect(await told(61)).toEqual(['done']);
+  });
+
   it('marks an ending closed when its own work is finished, so a real finish is told at once', async () => {
     const sara = await person('sara');
     const id = await started(sara);
