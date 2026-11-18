@@ -611,7 +611,11 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       await shareSong(app.id);
       as(sara);
       const response = await listServersRoute(request(`/api/bots/${saraBrick}/mcp-servers`), params({ id: saraBrick }));
-      expect(JSON.stringify(await response.json())).not.toContain('make_song');
+      // The owner still lists the app; only the bot server is told what is shared
+      expect(response.status).toBe(200);
+      const owned = ((await response.json()) as { id: string }[]).find((entry) => entry.id === serverId);
+      expect(owned).toBeDefined();
+      expect(owned).not.toHaveProperty('shared');
     });
 
     it('stops listing a job at once when sharing is stopped, or when its tool changed since it was picked', async () => {
@@ -658,13 +662,42 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
     });
 
-    it('hands it on the turned-away ask when that is the one that made the note, and never the asker\'s own limit', async () => {
+    it('never hands a note for the asker\'s own limit, only for the limit for everyone', async () => {
       const { app, serverId } = await music();
       await shareSong(app.id, saraBrick, { usesPerDayEveryone: 50, usesPerDayPerson: 1 });
       expect((await ask(saraBrick, serverId, omarKey(), 'q1')).body.allowed).toBe(true);
       const person = await ask(saraBrick, serverId, omarKey(), 'q2');
       expect(person.body).toMatchObject({ allowed: false, reason: 'limit_reached' });
       expect(person.body.ownerNote).toBeUndefined();
+    });
+
+    it('keeps trying on the next turned-away ask when the owner\'s chat could not be read, and then tells them once', async () => {
+      const { app, serverId } = await music();
+      await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });
+      const real = prisma.user.findUnique.bind(prisma.user);
+      let failed = false;
+      const spy = jest.spyOn(prisma.user, 'findUnique').mockImplementation(((args: { where?: { id?: string }; select?: { matrixChatId?: boolean } }) => {
+        if (!failed && args?.where?.id === sara && args?.select?.matrixChatId) {
+          failed = true;
+          return Promise.reject(new Error('lookup down'));
+        }
+        return real(args as never);
+      }) as never);
+      try {
+        const last = await ask(saraBrick, serverId, omarKey(), 's1');
+        expect(last.body.allowed).toBe(true);
+        expect(last.body).not.toHaveProperty('ownerNote');
+        // Nothing was claimed, so the owner is not left without a note
+        expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+      const turned = await ask(saraBrick, serverId, `lena-${tag}`, 's2');
+      expect(turned.body).toMatchObject({ allowed: false, reason: 'limit_reached' });
+      expect(turned.body.ownerNote).toMatchObject({ limit: 1, appName: 'ACE-Step' });
+      const again = await ask(saraBrick, serverId, 'guest-y', 's3');
+      expect(again.body.ownerNote).toBeUndefined();
+      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
     });
 
     it('says nothing of an owner it has no chat id for', async () => {
