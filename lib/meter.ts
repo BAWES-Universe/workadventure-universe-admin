@@ -45,12 +45,18 @@ export async function saveMeterSettings(change: Partial<MeterSettings>, userId: 
 }
 
 /** Saves a monthly computer allowance that takes the place of the current one from a later day (the 1st), and changes nothing before it. */
-export async function scheduleMemberAllowance(micros: number, from: Date, userId: string): Promise<void> {
+export async function scheduleMemberAllowance(micros: number, from: Date, userId: string, now: Date = new Date()): Promise<void> {
   await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('meter:settings'))`;
     const row = await tx.appSetting.findUnique({ where: { key: SETTING_KEY } });
     const saved = row?.value && typeof row.value === 'object' && !Array.isArray(row.value) ? (row.value as Record<string, unknown>) : {};
-    const value = { ...saved, [MEMBER_ALLOWANCE_LATER_KEY]: { micros, from: from.toISOString() } } as Prisma.InputJsonValue;
+    const next: Record<string, unknown> = { ...saved };
+    // An allowance that was waiting for a day that has come is the allowance in force now (the reader says so): it becomes the saved
+    // one before it is replaced, or scheduling the next change would quietly put the older figure back until that day
+    const waiting = saved[MEMBER_ALLOWANCE_LATER_KEY] as { micros?: unknown; from?: unknown } | undefined;
+    if (waiting && typeof waiting.micros === 'number' && typeof waiting.from === 'string' && new Date(waiting.from).getTime() <= now.getTime()) next.memberAllowanceMicros = waiting.micros;
+    next[MEMBER_ALLOWANCE_LATER_KEY] = { micros, from: from.toISOString() };
+    const value = next as Prisma.InputJsonValue;
     await tx.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
   });
 }
@@ -97,6 +103,9 @@ export async function recordMeterEvent(input: MeterEventInput, db: Db = prisma):
   const same =
     !!first &&
     first.kind === input.kind &&
+    first.pool === input.pool &&
+    first.payerKind === input.payerKind &&
+    (first.payerPersonId ?? null) === (input.payerPersonId ?? null) &&
     first.personKey === input.personKey &&
     first.botId === input.botId &&
     first.unit === input.unit &&
