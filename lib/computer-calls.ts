@@ -63,11 +63,29 @@ export async function authorizeModelCall(
     }
     return { ok: true, ...base, reservedMicros: room.reservation.amountMicros };
   }
-  if (room.reason === 'allowance') return { ok: false, reason: 'allowance' };
-  if (room.reason === 'rule') return { ok: false, reason: 'rule', ruleId: room.ruleId, why: room.why, leftMicros: room.leftMicros, words: room.words };
+  // A call refused for the person's own allowance or a rule they said ends the job right here, as a refused renewal does (stopped, by `allowance` or `rule`,
+  // which is theirs): the agent's turns that fail on the refusal can then never end the job as ours and give back everything it ran before the limit
+  if (room.reason === 'allowance') {
+    await endForRefusal(base.jobId, { reason: 'allowance' }, now);
+    return { ok: false, reason: 'allowance' };
+  }
+  if (room.reason === 'rule') {
+    await endForRefusal(base.jobId, { reason: 'rule', words: room.words }, now);
+    return { ok: false, reason: 'rule', ruleId: room.ruleId, why: room.why, leftMicros: room.leftMicros, words: room.words };
+  }
   // Asked again for a call whose room was settled or lapsed: the first try is the call, and a second one is not another
   if (room.reason === 'closed' || room.reason === 'key_reused') return { ok: false, reason: 'refused' };
   return { ok: false, reason: 'pool' };
+}
+
+/** Ends the job a call was refused for (computer.ts owns how a job ends; it is loaded when asked, as it reads this file). A refusal is answered whatever this does. */
+async function endForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule'; words: string }, now: Date): Promise<void> {
+  try {
+    const { stopJobForRefusal } = await import('@/lib/computer');
+    await stopJobForRefusal(jobId, why, now);
+  } catch (error) {
+    console.error('[Computer] Could not end a job whose model call was refused:', error instanceof Error ? error.message : 'unknown');
+  }
 }
 
 export interface CallFacts {

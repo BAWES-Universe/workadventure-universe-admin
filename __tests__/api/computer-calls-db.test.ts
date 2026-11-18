@@ -206,6 +206,26 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect(await prisma.meterReservation.count({ where: { reservationKey: callRoomKey(jobId, 'big') } })).toBe(0);
     });
 
+    it('ends the job right there as the person’s when it is refused for their allowance, so a failed turn after it can never end it as ours and give back what it ran', async () => {
+      const { sara, jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      // 900,000 of the 1,000,000 allowance goes on the job's own calls (60,000 more is its own room)
+      expect(await call(token, 'spent', 900_000)).toMatchObject({ ok: true });
+      await settleModelCall(jobId, 'spent', { costMicros: 900_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW);
+      expect(await call(token, 'more', 100_000)).toEqual({ ok: false, reason: 'allowance' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'stopped', endedBy: 'allowance' });
+      const month = async () => (await computerView(sara.brickId, sara.id, NOW))?.month?.leftFraction as number;
+      expect(await month()).toBeLessThan(0.2);
+      // The runner's three failed turns on the refusal end it "failed, ours": the job is already over, so nothing is given back
+      await finishJob(jobId, 'failed', NOW, 'Three turns failed', 'ours');
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'stopped', endedBy: 'allowance' });
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:spent` } })).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
+      expect(await month()).toBeLessThan(0.2);
+      await sweepComputers(minutes(30));
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:spent` } })).toMatchObject({ personKey: `person:${sara.id}` });
+      expect(await month()).toBeLessThan(0.2);
+    });
+
     it('is refused with "pool" when the platform ceiling has no room, never "ask for more"', async () => {
       const { jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };

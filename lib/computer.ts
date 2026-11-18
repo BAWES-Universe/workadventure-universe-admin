@@ -991,6 +991,20 @@ export async function renewJob(
   return { ok: false, reason };
 }
 
+/**
+ * A model call of a running job was refused because the person's own allowance is used up, or a rule they said does not let it go on: the job ends now,
+ * the way a refused renewal ends it, as theirs (`allowance` or `rule`). Whatever the computer's runner says about it later changes nothing: a job
+ * that is over is not ended again, so a failed turn after the refusal can never end it as ours. Safe to say twice; a job already over is left as it is.
+ */
+export async function stopJobForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule'; words: string }, now: Date = new Date()): Promise<void> {
+  if (why.reason === 'rule') {
+    // Its words are kept for the message that tells the person (the report back)
+    const kept = cleanEndNote(why.words);
+    if (kept) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: kept } });
+  }
+  await endJob(jobId, 'stopped', why.reason, now);
+}
+
 /** The job finished: its machine is saved and rests, what it cost is counted, and the next job in line starts. Safe to say twice. */
 export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date(), why?: string | null, cause?: FinishCause | null): Promise<JobView | null> {
   // A job that never started (still in line) did not finish: it is stopped by the person or starts, never "done"
