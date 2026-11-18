@@ -108,12 +108,17 @@ export async function checkReplyAllowance(
     const extra = guest || !person.personId ? null : await runningExtra(person.personId, now);
     // A super admin's exception can change how many replies a signed-in person has in a window (or give none); otherwise it is Limits' number
     const signedIn = guest || !person.personId ? limits.signedIn : await repliesPerWindowFor(person.personId, limits.signedIn, now);
-    if (!extra?.noLimit) {
+    if (extra?.noLimit) {
+      // Nothing is counted, but the person's window keeps running: when the grant ends, the replies it covered are in the window they were
+      // given in and count like any other, not as if the window had only just opened
+      await windowStart(`ua:${personKey}`, limits.windowHours, now);
+    } else {
       checks.push({
         kind: guest ? 'guest' : 'universe-ai',
         key: `ua:${personKey}`,
         hours: limits.windowHours,
-        limit: room(guest ? limits.guest : signedIn) * (extra?.multiplier ?? 1),
+        // The replies kept for text grow with the window: they are taken off the window the person really has, after its multiple
+        limit: room((guest ? limits.guest : signedIn) * (extra?.multiplier ?? 1)),
         // Every Universe AI reply this person got, from any bot: a reply no personal key paid for
         where: (since) => ({ ...personRows, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } }),
       });
