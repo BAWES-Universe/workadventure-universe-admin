@@ -63,6 +63,8 @@ export interface Report {
  * plus the longest handing over of files can run, so the cards are never written after the message went without them.
  */
 const UNFINISHED_ENDING_MS = 5 * 60 * 1000 + HAND_OVER_LATEST_MS;
+/** How long a job that was refused by a rule before it began waits before it is listed (the call that asked may be deleting it). */
+const NEVER_STARTED_GRACE_MS = 30 * 1000;
 const WHY_MAX = 160;
 const WHERE_MAX = 120;
 const FILE_NAME_MAX = 80;
@@ -209,9 +211,14 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
       status: { in: ['done', 'stopped', 'failed'] },
       endToldAt: null,
       endUndeliverableAt: null,
-      startedAt: { not: null },
       bot: { deletedAt: null },
-      AND: [{ OR: [{ endedBy: null }, { endedBy: { notIn: ['person', 'off', 'deleted'] } }] }, { OR: [{ endClosedAt: { not: null } }, { endedAt: { lte: unfinishedBefore } }] }],
+      AND: [
+        // A job that never began is only reported when a rule stopped it while it waited in line (nobody else says so); one the caller was told "a rule stopped this" at the
+        // moment of asking is deleted by that call, so it is given a moment before it is listed
+        { OR: [{ startedAt: { not: null } }, { endedBy: 'rule', endedAt: { lte: new Date(now.getTime() - NEVER_STARTED_GRACE_MS) } }] },
+        { OR: [{ endedBy: null }, { endedBy: { notIn: ['person', 'off', 'deleted'] } }] },
+        { OR: [{ endClosedAt: { not: null } }, { endedAt: { lte: unfinishedBefore } }] },
+      ],
     },
     orderBy: [{ endedAt: 'asc' }, { id: 'asc' }],
     take: size,

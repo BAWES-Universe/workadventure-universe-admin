@@ -46,8 +46,17 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
     const { id } = await params;
     const owner = await brickOwner(request);
     if (owner.response) return owner.response;
-    const raw = await request.json().catch(() => ({}));
-    const parsed = revokeSchema.safeParse(raw ?? {});
+    // No body at all takes everyone off (that is what the request says); a body that is not valid JSON, or is not an object, is refused, never read as "everyone"
+    const text = await request.text();
+    let raw: unknown = {};
+    if (text.trim() !== '') {
+      try {
+        raw = JSON.parse(text);
+      } catch {
+        return brickJson(request, { error: 'Invalid input data' }, 400);
+      }
+    }
+    const parsed = revokeSchema.safeParse(raw);
     if (!parsed.success) return brickJson(request, { error: 'Invalid input data', details: parsed.error.issues }, 400);
     const count = await revokeMet(id, owner.userId, parsed.data.personId ?? null);
     if (count === null) return brickJson(request, { error: 'Brick not found' }, 404);

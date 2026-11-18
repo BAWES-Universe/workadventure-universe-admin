@@ -149,22 +149,31 @@ export function shellQuote(text: string): string {
 }
 
 /**
- * What every read starts with: in the home folder, and the path is a plain file whose real place is exactly where it says (a link, or a folder that
- * is a link, to anywhere else is refused: the agent could make "receipt.pdf" a link to a key). Exit 4: not a plain file. Exit 5: not where it says.
+ * What every read starts with: in the home folder, the path is a plain file, and the file is OPENED once (descriptor 3) and checked as opened: its real
+ * place must be exactly where the path says (a link, or a folder that is a link, to anywhere else is refused: the agent could make "receipt.pdf" a
+ * link to a key). Everything after reads that one open file (size, time, bytes), never the name again, so a name swapped for a link after the check
+ * cannot send the read somewhere else. Exit 4: not a plain file. Exit 5: not where it says.
  */
-function preamble(path: string): string {
+export function preamble(path: string): string {
   return [
     'cd "${HOME:-/home/node}" 2>/dev/null || exit 9',
     `f=${shellQuote(`./${path}`)}`,
     '[ -f "$f" ] && [ ! -L "$f" ] || exit 4',
-    '[ "$(readlink -f -- "$f")" = "$(pwd -P)/${f#./}" ] || exit 5',
+    'exec 3< "$f" || exit 4',
+    'o="/proc/$$/fd/3"',
+    '[ -f "$o" ] || exit 4',
+    '[ "$(readlink -f -- "$o")" = "$(pwd -P)/${f#./}" ] || exit 5',
   ].join('\n');
 }
 
-/** Size and modified time (seconds) of the file now, after the checks. */
-export const probeCommand = (path: string): string => `${preamble(path)}\nprintf '%s %s\\n' "$(stat -c %s -- "$f")" "$(stat -c %Y -- "$f")"`;
-/** `length` bytes from `offset`, as one line of base64. */
-export const pieceCommand = (path: string, offset: number, length: number): string => `${preamble(path)}\ntail -c +${offset + 1} -- "$f" | head -c ${length} | base64 -w0`;
+/** What says this is the same file, unchanged: its place on the disk, the time its content or its details last changed and the time it was written, to the nanosecond (a rewrite inside one second still shows). */
+const SIGNATURE = `"$(stat -L -c '%i %z %y' -- "$o")"`;
+
+/** Size, modified time (seconds) and signature of the file now, after the checks, all from the one open file. */
+export const probeCommand = (path: string): string => `${preamble(path)}\nprintf '%s %s|%s\\n' "$(stat -L -c %s -- "$o")" "$(stat -L -c %Y -- "$o")" ${SIGNATURE}`;
+/** The signature of the file, a line, and then `length` bytes from `offset` as one line of base64: all from the one open file. */
+export const pieceCommand = (path: string, offset: number, length: number): string =>
+  `${preamble(path)}\nprintf '%s\\n' ${SIGNATURE}\ntail -c +${offset + 1} <&3 | head -c ${length} | base64 -w0`;
 
 type Exec = Pick<ComputerProvider, 'exec'>;
 
@@ -173,11 +182,11 @@ type Exec = Pick<ComputerProvider, 'exec'>;
  * list said, a piece that was cut or did not add up, or it changed while it was read. Never returns part of a file.
  */
 export async function readFile(provider: Exec, ref: string, entry: FileEntry, deadline: number, clock: () => number = Date.now): Promise<Buffer | null> {
-  const probe = async (): Promise<{ bytes: number; at: number } | null> => {
+  const probe = async (): Promise<{ bytes: number; at: number; sig: string } | null> => {
     const answer = await provider.exec(ref, probeCommand(entry.path), { timeoutMs: 20_000 });
     if (answer.exitCode !== 0 || answer.truncated) return null;
-    const match = /^(\d+) (\d+)\s*$/.exec(answer.stdout);
-    return match ? { bytes: Number(match[1]), at: Number(match[2]) } : null;
+    const match = /^(\d+) (\d+)\|(.+?)\s*$/.exec(answer.stdout);
+    return match ? { bytes: Number(match[1]), at: Number(match[2]), sig: match[3] } : null;
   };
   const before = await probe();
   if (!before || before.bytes !== entry.bytes || new Date(before.at * 1000).toISOString() !== entry.modifiedAt) return null;
@@ -192,7 +201,10 @@ export async function readFile(provider: Exec, ref: string, entry: FileEntry, de
         const length = Math.min(PIECE_BYTES, before.bytes - offset);
         const answer = await provider.exec(ref, pieceCommand(entry.path, offset, length), { timeoutMs: 60_000 });
         if (answer.exitCode !== 0 || answer.truncated) return null;
-        const text = answer.stdout.trim();
+        // Each piece says which version of the file it came from: pieces of two versions are never put together
+        const lines = answer.stdout.trim().split('\n');
+        if (lines.length !== 2 || lines[0].trim() !== before.sig) return null;
+        const text = lines[1].trim();
         if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text)) return null;
         const bytes = Buffer.from(text, 'base64');
         return bytes.length === length ? bytes : null;
@@ -206,7 +218,7 @@ export async function readFile(provider: Exec, ref: string, entry: FileEntry, de
   const data = Buffer.concat(parts);
   if (data.length !== before.bytes) return null;
   const after = await probe();
-  return after && after.bytes === before.bytes && after.at === before.at ? data : null;
+  return after && after.bytes === before.bytes && after.at === before.at && after.sig === before.sig ? data : null;
 }
 
 // ---------- Handing a job's files over ----------

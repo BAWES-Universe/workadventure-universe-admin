@@ -16,7 +16,7 @@ import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-dele
 import { saveMeterSettings } from '@/lib/meter';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { finishJob, giveComputer, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
+import { finishJob, giveComputer, setHandOverClaimWaitForTests, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
 import { deleteOwnResult, deleteResult, DELETED_BRICK_LABEL, markFileDelivered, orphanResultsOf, orphanResultsPage, PIECE_BYTES, readCard, readOwnResult, readResult, resultsOf } from '@/lib/computer-file-cards';
 import { setOutputStoreForTests, type OutputStore } from '@/lib/workbench/store';
@@ -75,11 +75,14 @@ function machine(command: string) {
   if (!named) return command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {};
   const file = machineFiles.get(named[1].replace(/'\\''/g, "'"));
   if (!file) return { exitCode: 4 };
-  if (command.includes('stat -c')) return { stdout: `${file.data.length} ${file.at}\n` };
-  const piece = /tail -c \+(\d+) -- "\$f" \| head -c (\d+)/.exec(command);
-  if (!piece) return {};
-  const from = Number(piece[1]) - 1;
-  return { stdout: file.data.subarray(from, from + Number(piece[2])).toString('base64') };
+  const signature = `1 ${file.at} ${file.at}`;
+  const piece = /tail -c \+(\d+) <&3 \| head -c (\d+)/.exec(command);
+  if (piece) {
+    const from = Number(piece[1]) - 1;
+    return { stdout: `${signature}\n${file.data.subarray(from, from + Number(piece[2])).toString('base64')}` };
+  }
+  if (command.includes('stat -L -c %s')) return { stdout: `${file.data.length} ${file.at}|${signature}\n` };
+  return {};
 }
 
 async function person(name: string, chat: string | null = `@${name}-${tag}:chat.example`): Promise<{ id: string; brickId: string }> {
@@ -130,6 +133,7 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     machineFiles.clear();
     kept.clear();
     removeFails = false;
+    setHandOverClaimWaitForTests(null);
     provider = new FakeComputerProvider();
     provider.execAnswer = machine;
     setComputerProviderForTests(provider);
@@ -485,7 +489,7 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     const sara = await person('sara');
     const id = await started(sara);
     out(id, 'a.pdf', 'a', 5);
-    provider.execAnswer = (command) => (command === 'universe-files' || command.includes('find "$d"') || command.includes('stat -c') ? { exitCode: 1 } : machine(command));
+    provider.execAnswer = (command) => (command === 'universe-files' || command.includes('find "$d"') || command.includes('stat -L -c %s') ? { exitCode: 1 } : machine(command));
     await finishJob(id, 'done', minutes(9));
     const [done] = await mine([id]);
     expect(done.handed).toEqual([]);
@@ -563,19 +567,107 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect((await mine([id]))[0].handed.map((card) => card.name)).toEqual(['a.pdf']);
   });
 
-  it('leaves another hand-over’s claim on the machine alone: a second job finishing meanwhile hands over nothing and never lets go of it', async () => {
+  it('leaves another hand-over’s claim on the machine alone: when it is never let go, a second job hands over nothing after its wait and never lets go of it', async () => {
     const sara = await person('sara');
     const id = await started(sara);
     out(id, 'a.pdf', 'a', 5);
-    // Another hand-over is reading files on this machine right now
+    setHandOverClaimWaitForTests(700);
+    // Another hand-over is reading files on this machine right now, and does not finish within the wait
     const theirs = new Date();
     await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: theirs } });
+    const began = Date.now();
     await finishJob(id, 'done', minutes(9));
+    // It waited for the other one before giving up
+    expect(Date.now() - began).toBeGreaterThanOrEqual(600);
     const [done] = await mine([id]);
     expect(done.handed).toEqual([]);
     // What it made is only named, and the other claim is still there, untouched
     expect(done.files).toEqual(['a.pdf']);
     expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).filesClaimedAt?.getTime()).toBe(theirs.getTime());
+  });
+
+  it('waits for another hand-over to finish instead of giving its files up: they are handed over once the machine is let go of', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    out(id, 'a.pdf', 'a', 5);
+    setHandOverClaimWaitForTests(10_000);
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date() } });
+    // The other hand-over finishes a moment later and lets go
+    setTimeout(() => prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: null } }).then(() => undefined), 800);
+    await finishJob(id, 'done', minutes(9));
+    expect((await mine([id]))[0].handed.map((card) => card.name)).toEqual(['a.pdf']);
+    expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).filesClaimedAt).toBeNull();
+  });
+
+  it('does not wait for a machine that is not working any more: nothing is handed over and nothing is held up', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    out(id, 'a.pdf', 'a', 5);
+    setHandOverClaimWaitForTests(10_000);
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { machine: 'stopped', filesClaimedAt: new Date() } });
+    const began = Date.now();
+    await finishJob(id, 'done', minutes(9));
+    expect(Date.now() - began).toBeLessThan(5000);
+    expect((await mine([id]))[0].handed).toEqual([]);
+  });
+
+  it('counts the time the machine was looked at as the job’s time even when no file came of it', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    // Nothing was made, and the machine is slow to answer the list
+    const slow = provider.execAnswer;
+    provider.execAnswer = async (command) => {
+      if (command.includes('find "$d"')) await new Promise((resolve) => setTimeout(resolve, 1600));
+      return slow(command);
+    };
+    await finishJob(id, 'done', minutes(9));
+    const job = await prisma.computerJob.findUniqueOrThrow({ where: { id } });
+    expect(job.secondsRun).toBeGreaterThanOrEqual(9 * 60 + 1);
+    expect(job.secondsRun).toBeLessThan(9 * 60 + 10);
+    const event = await prisma.meterEvent.findUnique({ where: { eventId: `computer:${id}:time` } });
+    expect(Number(event?.quantity)).toBe(job.secondsRun);
+  });
+
+  it('does not let the sweep write a job’s time while a hand-over holds its machine: it is written once the claim is gone', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    await finishJob(id, 'done', minutes(9));
+    // The books have nothing for it (the write at the end did not happen), and a hand-over is adding to the job's time right now
+    await prisma.meterEvent.deleteMany({ where: { eventId: `computer:${id}:time` } });
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date() } });
+    await sweepComputers(new Date());
+    expect(await prisma.meterEvent.count({ where: { eventId: `computer:${id}:time` } })).toBe(0);
+    // A claim long past (a stopped server left it) does not hold the books back
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date(Date.now() - 60 * 60 * 1000) } });
+    await sweepComputers(new Date());
+    expect(await prisma.meterEvent.count({ where: { eventId: `computer:${id}:time` } })).toBe(1);
+  });
+
+  it('leaves a job that ended a minute and a half ago to its own hand-over: the sweep writes its time only after the longest hand-over could have been', async () => {
+    const sara = await person('sara');
+    const id = await started(sara, 'Visa form', new Date(Date.now() - 60 * 60 * 1000));
+    await finishJob(id, 'done', new Date(Date.now() - 90 * 1000));
+    await prisma.meterEvent.deleteMany({ where: { eventId: `computer:${id}:time` } });
+    await sweepComputers(new Date());
+    expect(await prisma.meterEvent.count({ where: { eventId: `computer:${id}:time` } })).toBe(0);
+    await sweepComputers(new Date(Date.now() + 10 * 60 * 1000));
+    expect(await prisma.meterEvent.count({ where: { eventId: `computer:${id}:time` } })).toBe(1);
+  });
+
+  it('lists a job a rule stopped while it waited in line once its grace has passed, and not before', async () => {
+    const sara = await person('sara');
+    await giveComputer(sara.brickId, sara.id);
+    const job = await prisma.computerJob.create({
+      data: { botId: sara.brickId, personId: sara.id, title: 'Never began', status: 'failed', endedBy: 'rule', endedAt: minutes(0), endClosedAt: minutes(0) },
+    });
+    // Not yet: the call that asked may be deleting it
+    expect(await reportsToTell(200, new Date(minutes(0).getTime() + 10_000)).then((all) => all.filter((one) => one.jobId === job.id))).toEqual([]);
+    expect((await reportsToTell(200, new Date(minutes(0).getTime() + 45_000))).filter((one) => one.jobId === job.id)).toHaveLength(1);
+    // One that never began and was ended by anything else is never listed
+    const other = await prisma.computerJob.create({
+      data: { botId: sara.brickId, personId: sara.id, title: 'Never began either', status: 'failed', endedBy: 'person', endedAt: minutes(0), endClosedAt: minutes(0) },
+    });
+    expect((await reportsToTell(200, minutes(30))).filter((one) => one.jobId === other.id)).toEqual([]);
   });
 
   it('takes over a hand-over claim that is long past, and lets go of its own', async () => {

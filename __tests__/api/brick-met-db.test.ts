@@ -319,6 +319,28 @@ run('keeping an allowed direct message after a visit ends, in a real database', 
       expect(await dm(lina)).toMatchObject({ allowed: false });
     });
 
+    it('takes everyone off when no body is sent or it is empty, one person when named, and refuses a body that is not an object, never reading it as "everyone"', async () => {
+      await meet(omar);
+      expect(await ask(brickId, lina, 'chat', places.open.roomUrl)).toMatchObject({ allowed: true });
+      await endTheVisit();
+      const raw = (body: string | undefined) =>
+        deleteMet(new NextRequest(`http://localhost/api/bricks/${brickId}/met`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, ...(body === undefined ? {} : { body }) }), ids(brickId));
+      // Not valid JSON, or not an object: refused, and nobody is taken off
+      for (const bad of ['{"personId":', 'oops', 'null', '[]', '"all"', '{"person":"x"}']) {
+        const refused = await raw(bad);
+        expect(refused.status).toBe(400);
+      }
+      expect(await dm(omar)).toMatchObject({ allowed: true });
+      expect(await dm(lina)).toMatchObject({ allowed: true });
+      // One named
+      expect(await (await raw('{"personId":"' + omar.id + '"}')).json()).toEqual({ takenOff: 1 });
+      expect(await dm(omar)).toMatchObject({ allowed: false });
+      expect(await dm(lina)).toMatchObject({ allowed: true });
+      // No body at all: that is what the request says (everyone still on it: Lina; Omar was already off)
+      expect(await (await raw(undefined)).json()).toEqual({ takenOff: 1 });
+      expect(await dm(lina)).toMatchObject({ allowed: false });
+    });
+
     it('takes everyone off in one decision, and lists who may still write, by name', async () => {
       await meet(omar);
       await dm(omar);

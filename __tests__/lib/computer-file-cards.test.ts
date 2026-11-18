@@ -7,7 +7,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, s
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { cardName, insideFolder, madeInJob, mimeOf, outputFolder, outputListCommand, pickFiles, PIECE_BYTES, pieceCommand, probeCommand, readFile, shellQuote, uniqueName } from '@/lib/computer-file-cards';
+import { cardName, insideFolder, madeInJob, mimeOf, outputFolder, outputListCommand, pickFiles, PIECE_BYTES, pieceCommand, preamble, probeCommand, readFile, shellQuote, uniqueName } from '@/lib/computer-file-cards';
 import type { FileEntry, FilesList } from '@/lib/computer-files';
 
 const run = promisify(execFile);
@@ -246,6 +246,40 @@ describe('reading a file off a machine', () => {
       },
     };
     expect(await readFile(changing, 'ref', listed, later())).toBeNull();
+  });
+
+  it('refuses a file rewritten between two pieces with the same size inside the same second (size and whole-second time alone cannot tell)', async () => {
+    const original = Buffer.alloc(PIECE_BYTES + 10, 1);
+    const target = join(home, 'Documents/same-second.bin');
+    writeFileSync(target, original);
+    const when = new Date('2026-11-17T12:05:00Z');
+    utimesSync(target, when, when);
+    const listed = modified('Documents/same-second.bin');
+    let pieces = 0;
+    const rewriting = {
+      async exec(ref: string, command: string, options?: { timeoutMs?: number }) {
+        // After the first piece is read the file is replaced by another of the same size, and its time is put back to the same second
+        if (command.includes('tail -c') && ++pieces === 1) {
+          writeFileSync(target, Buffer.alloc(PIECE_BYTES + 10, 2));
+          utimesSync(target, when, when);
+        }
+        return machine.exec(ref, command, options);
+      },
+    };
+    expect(await readFile(rewriting, 'ref', listed, later())).toBeNull();
+    // Left alone, the same file is read whole
+    writeFileSync(target, original);
+    utimesSync(target, when, when);
+    expect((await readFile(machine, 'ref', modified('Documents/same-second.bin'), later()))?.equals(original)).toBe(true);
+  });
+
+  it('reads from the one file it checked: a name swapped for a link after the check cannot send the read somewhere else', async () => {
+    writeFileSync(join(home, 'Documents/receipt.pdf'), 'the receipt');
+    writeFileSync(join(home, 'secret.txt'), 'a key');
+    // The check, then the agent swaps the name for a link to a secret, then the read
+    const script = `${preamble('Documents/receipt.pdf')}\nrm -f "$f"\nln -s "${join(home, 'secret.txt')}" "$f"\ntail -c +1 <&3`;
+    const { stdout } = await run('sh', ['-c', script], { env: { ...process.env, HOME: home } });
+    expect(stdout).toBe('the receipt');
   });
 
   it('gives up when the time is up, and when the machine does not answer', async () => {

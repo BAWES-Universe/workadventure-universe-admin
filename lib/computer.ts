@@ -802,6 +802,14 @@ async function closeOutIfUnheld(botId: string): Promise<FilesList | null> {
 
 /** How long a claim for handing over files is believed: the hand-over ends within its own time budget, so one older than this was left by a server that stopped. */
 const FILES_CLAIM_MS = HAND_OVER_LATEST_MS;
+/** How long a job that ended while another job's files were being read waits for them to be done before its own are read, and how often it looks. */
+const CLAIM_WAIT_MS = 60 * 1000;
+const CLAIM_POLL_MS = 500;
+let claimWaitMs = CLAIM_WAIT_MS;
+/** For tests: how long a hand-over waits for another one. */
+export function setHandOverClaimWaitForTests(ms: number | null): void {
+  claimWaitMs = ms ?? CLAIM_WAIT_MS;
+}
 
 /** How long a cleanup claim is believed: the commands it runs end within 40 seconds, so one older than this was left by a server that stopped. */
 const CLEAN_CLAIM_STALE_MS = 90_000;
@@ -904,13 +912,25 @@ async function handOverJobFiles(job: { id: string; botId: string; personId: stri
     const limits = await getBrickLimits();
     // The machine is not put to rest while its files are read (the sweep rests a working machine nobody holds, and the job is already over)
     // Only when no other hand-over holds it (none, or one that is long past): two at once would let the first to finish let go of the machine under the other.
-    // One that is held is left to finish, and what this job made is only named in its message.
-    const claimedAt = new Date();
-    const claim = await prisma.brickComputer.updateMany({
-      where: { botId: job.botId, machine: 'working', providerRef: row.providerRef, OR: [{ filesClaimedAt: null }, { filesClaimedAt: { lt: new Date(claimedAt.getTime() - FILES_CLAIM_MS) } }] },
-      data: { filesClaimedAt: claimedAt },
-    });
-    if (claim.count !== 1) return 0;
+    // A job that began while another one's files were being read waits for that one to finish (a hand-over is limited by time) instead of giving its own
+    // up: its ending would otherwise close with its files left behind, and nothing would hand them over later.
+    const waitUntil = Date.now() + claimWaitMs;
+    let claimedAt = new Date();
+    for (;;) {
+      claimedAt = new Date();
+      const claim = await prisma.brickComputer.updateMany({
+        where: { botId: job.botId, machine: 'working', providerRef: row.providerRef, OR: [{ filesClaimedAt: null }, { filesClaimedAt: { lt: new Date(claimedAt.getTime() - FILES_CLAIM_MS) } }] },
+        data: { filesClaimedAt: claimedAt },
+      });
+      if (claim.count === 1) break;
+      if (Date.now() >= waitUntil) return 0;
+      // Held by another hand-over: wait for it. Anything else (the machine is not working any more, or is another one) is not a wait.
+      const now2 = await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { machine: true, providerRef: true, filesClaimedAt: true } });
+      if (!now2 || now2.machine !== 'working' || now2.providerRef !== row.providerRef) return 0;
+      // Let go of between the two reads: try again at once
+      if (!now2.filesClaimedAt) continue;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(CLAIM_POLL_MS, Math.max(1, waitUntil - Date.now()))));
+    }
     try {
       return await handOver(job, now, row.providerRef, provider, limits);
     } finally {
@@ -934,7 +954,8 @@ async function handOver(job: { id: string; botId: string; personId: string; titl
     provider,
     limits: { count: limits.computerFiles, bytes: limits.computerFileMb * 1024 * 1024 },
   });
-  const seconds = result.handed > 0 ? Math.round(result.ms / SECOND) : 0;
+  // The machine was held for the job all the time it looked, whether or not a file came of it
+  const seconds = Math.round(result.ms / SECOND);
   if (seconds > 0) await prisma.computerJob.updateMany({ where: { id: job.id }, data: { secondsRun: { increment: seconds } } });
   return seconds;
 }
@@ -990,14 +1011,18 @@ const SWEEP_PAGES = 10;
  * the ones missing are picked first and only then limited, so newer jobs never push an older one out. Safe to run twice.
  */
 async function recordMissingComputerTime(now: Date, batch: number, botId?: string): Promise<void> {
-  // A job that ended a moment ago may still be writing its own event: the sweep leaves it a minute. One Brick's, before its removal, does not wait.
-  const cutoff = botId ? now : new Date(now.getTime() - 60 * 1000);
+  // A job that ended a moment ago may still be writing its own event, and its files may be waiting to be handed over (the longest that takes, with the wait for
+  // another hand-over, is within HAND_OVER_LATEST_MS): the sweep leaves it that long and a minute. One Brick's, before its removal, does not wait.
+  const cutoff = botId ? now : new Date(now.getTime() - 60 * 1000 - HAND_OVER_LATEST_MS);
   const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
+  // A job whose files are being handed over is still adding the seconds that takes to its time: its event is written by that job, after, never by the sweep before
+  const claimCutoff = new Date(now.getTime() - FILES_CLAIM_MS);
   const ended = await prisma.$queryRaw<Array<{ id: string; botId: string; personId: string; runId: string | null; secondsRun: number; status: string; endedBy: string | null; endedAt: Date | null }>>(Prisma.sql`
     SELECT j."id", j."bot_id" AS "botId", j."person_id" AS "personId", j."run_id" AS "runId", j."seconds_run" AS "secondsRun", j."status", j."ended_by" AS "endedBy", j."ended_at" AS "endedAt"
     FROM "computer_jobs" j
     WHERE j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0 AND j."ended_at" <= ${cutoff} ${only}
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')
+      AND NOT EXISTS (SELECT 1 FROM "brick_computers" c WHERE c."bot_id" = j."bot_id" AND c."files_claimed_at" > ${claimCutoff})
     ORDER BY j."ended_at" ASC
     LIMIT ${batch}`);
   for (const job of ended) {
