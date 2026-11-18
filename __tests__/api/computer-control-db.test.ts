@@ -352,8 +352,9 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       let replacement: Promise<unknown> = Promise.resolve();
       fake.stop = async (ref: string) => {
         reached();
-        // A replacement writes the machine's state while the stop is out: it waits for the row, so it can only come after the stop is recorded
-        replacement = prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
+        // A replacement writes the machine's state while the stop is out: it waits for the row, so it can only come after the stop is recorded.
+        // It is started here with then() (a Prisma query is lazy and runs only when awaited), and not waited for: it stays blocked on the row lock
+        replacement = prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { machine: 'resting' } }).then((result) => result);
         await gate;
         return stop(ref);
       };
@@ -367,6 +368,9 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       try {
         const leader = takeOver(sara.brickId, sara.id, NOW);
         await inStop;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        // The replacement has been running for a while and has not been able to write: the stop holds the row
+        expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).not.toBe('resting');
         release();
         await leader;
         await replacement;
