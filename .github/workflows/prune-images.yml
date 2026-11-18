@@ -53,6 +53,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          # A closed PR has no merge ref when it conflicts, so take the script from the branch the PR targeted (the code already merged there).
+          ref: ${{ github.event.pull_request.base.ref || github.ref }}
           sparse-checkout: scripts
       - uses: actions/setup-node@v6
         with:
