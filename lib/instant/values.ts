@@ -345,7 +345,8 @@ export const INSTANT_LIMIT_RANGES: Record<keyof InstantLimits, { min: number; ma
   goodwillPerPersonPerMonth: { min: 0, max: 10_000 },
   markupBps: { min: 0, max: 100_000 },
   sentWaitMinutes: { min: 1, max: 1_440 },
-  unclearWaitMinutes: { min: 1, max: 10_080 },
+  // Longer than the 60 seconds a request to Composio may take, so the sweep never closes a run whose answer is still on its way
+  unclearWaitMinutes: { min: 2, max: 10_080 },
   chargeWaitMinutes: { min: 1, max: 10_080 },
   pauseWindowMinutes: { min: 1, max: 10_080 },
 };
