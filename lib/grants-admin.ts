@@ -435,15 +435,18 @@ async function putBack(taken: TakenOut[], issuer: Issuer, now: Date): Promise<vo
 }
 
 /** Puts back what a refused save had already changed: a new rule ends, a changed one goes back to what it was. */
-async function undo(done: { before: ProgramView | undefined; after: ProgramView }[], issuer: Issuer, now: Date): Promise<void> {
+async function undo(done: { before: ProgramView | undefined; after: ProgramView }[], issuer: Issuer, now: Date): Promise<number> {
+  let failed = 0;
   for (const { before, after } of done.reverse()) {
     try {
       if (before) await saveException({ ...inputOfProgram(before), programId: before.programId }, issuer, now);
       else await endProgram(after.programId, issuer, now);
     } catch (error) {
+      failed += 1;
       console.error('[Grants] Could not put back a rule after a refused save:', error instanceof Error ? error.message : 'unknown');
     }
   }
+  return failed;
 }
 
 /**
@@ -457,9 +460,17 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
   if (request.replaceId && !existing) throw new GrantsRefused('That exception was not found', 404);
   // The same people already have a rule for this category: this is a change to it, never a second one
   let active = await listPrograms(undefined, { kind: 'exception' });
+  // The people as the admin opened them: taking clashing people out of this rule later never makes the save look for another rule
+  const openedKey = recipientKey(recipients);
   const findExisting = (category: MoneyCategory): ProgramView | undefined => {
-    const named = existing?.[category] ? active.find((program) => program.programId === existing[category]) : undefined;
-    return named ?? active.find((program) => program.categoryId === category && recipientKey(program.recipients) === recipientKey(recipients));
+    const wanted = existing?.[category];
+    if (wanted) {
+      const named = active.find((program) => program.programId === wanted);
+      // The rule the admin opened has ended or been replaced since: it is theirs to look at again, never quietly this save onto its replacement
+      if (!named) throw new GrantsRefused('That exception changed since you opened it. Close it, open it again and look before saving.', 409);
+      return named;
+    }
+    return active.find((program) => program.categoryId === category && recipientKey(program.recipients) === openedKey);
   };
 
   // Changes to other rules made to settle a clash: put back if the save is refused after all
@@ -482,7 +493,12 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
       for (const program of toEnd) await endProgram(program.programId, issuer, now);
       return;
     } catch (error) {
-      await undo(done, issuer, now);
+      const notPutBack = await undo(done, issuer, now);
+      if (notPutBack > 0) {
+        // Never let the screen say "nothing changed", or go on to a second try, while a rule this save changed is still changed
+        await putBack(taken, issuer, now).catch(() => undefined);
+        throw new GrantsRefused('That didn’t save, and part of it could not be put back. Check the exceptions list before trying again.', 500);
+      }
       if (!(error instanceof ClashRefused) || !request.clashChoice || attempt > 0) {
         await putBack(taken, issuer, now);
         throw error;

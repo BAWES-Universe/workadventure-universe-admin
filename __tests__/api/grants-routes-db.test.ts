@@ -325,6 +325,21 @@ run('the grants routes, on the real books', () => {
     expect(await prisma.grantProgram.count({ where: { kind: 'exception', status: 'active', categoryId: 'instant_apps' } })).toBe(1);
   });
 
+  it('an exception the admin opened that was ended and replaced meanwhile is not saved onto its replacement', async () => {
+    const [omar, noor] = [await person('Omar'), await person('Noor')];
+    const body = (amount: number, extra: object = {}) => ({ audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: amount * MILLION, interval: 'monthly' }, computers: { mode: 'same' }, ...extra });
+    await call(postException, '/x', { method: 'POST', body: body(10) });
+    const opened = (await overview()).exceptions[0].id;
+    // Another admin ends it and makes a new one for the same people
+    await call(deleteException, '/x', { method: 'DELETE' }, ctx({ id: opened }));
+    await call(postException, '/x', { method: 'POST', body: body(20) });
+    const stale = await call<any>(postException, '/x', { method: 'POST', body: body(99, { replaceId: opened }) });
+    expect(stale.status).toBe(409);
+    const o = await overview();
+    expect(o.exceptions).toHaveLength(1);
+    expect(o.exceptions[0].instant_apps.amountMicros).toBe(20 * MILLION);
+  });
+
   describe('two rules that disagree for the same people', () => {
     async function twoRules() {
       const [omar, noor, faisal] = [await person('Omar'), await person('Noor'), await person('Faisal')];
