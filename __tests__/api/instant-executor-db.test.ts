@@ -535,6 +535,21 @@ run('the bounded Instant executor, in a real database', () => {
       expect(p.instant.run).toHaveBeenCalledTimes(1);
     });
 
+    it('a saved run is only handed back to the person it belongs to: the same Brick and call id from someone else gets a refusal and nothing of the run', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      const mine = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      expect(mine).toMatchObject({ status: 'done', ok: true });
+      const theirs = await runInstant(ask({ callId: id, personId: omar }), { adapter: p.adapter, funds: f.funds });
+      expect(theirs).toMatchObject({ status: 'refused', reason: 'not_owner' });
+      expect(JSON.stringify(theirs)).not.toContain('weather');
+      expect(p.instant.run).toHaveBeenCalledTimes(1);
+      // The owner asking again still gets their own run back
+      expect(await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'already_done' });
+    });
+
     it('the very same ask under a new call id waits while the first is unclear: never paid twice', async () => {
       await setLimits();
       const p = fakeProvider();
