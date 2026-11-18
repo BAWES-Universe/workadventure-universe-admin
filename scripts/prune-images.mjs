@@ -209,7 +209,8 @@ export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEE
     log(`${packageName}: dry run, nothing deleted.`);
     return { remove, deleted: 0 };
   }
-  // A PR that was reopened while this run was planning keeps its images: read the open PRs once more before deleting for a close.
+  // A PR that was reopened while this run was planning keeps all its images, old or new: a close run plans only that branch's
+  // images, so a reopened branch skips the whole plan. Read the open PRs once more before deleting for a close.
   const reopened = closedBranch !== undefined && (await api.openBranches()).has(sanitizeBranch(closedBranch));
   if (reopened) log(`  ${packageName}: ${closedBranch} has an open PR again, so its images are kept.`);
   // Read what dev and production run again right before each tagged delete: a deployment may have switched since the plan was made.
@@ -217,8 +218,8 @@ export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEE
   // nothing kept pointed to them), so once one is skipped the untagged versions are left for the next run. Tagged ones go first.
   let deleted = 0;
   let sawRunning = false;
-  for (const { version, reason } of remove) {
-    if (reopened && reason === 'its PR is closed') continue;
+  for (const { version } of remove) {
+    if (reopened) continue;
     if (tagsOf(version).length > 0) {
       const runningNow = await api.runningTags();
       if (tagsOf(version).some((tag) => runningNow.has(tag))) {

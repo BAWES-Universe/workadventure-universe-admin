@@ -272,6 +272,17 @@ export function defineTests({ lib }) {
       assert.deepEqual(api.deleted, []);
     });
 
+    it('keeps older builds of a reopened branch too, not only the ones its close would clear at once', async () => {
+      const latest = version(['latest'], 3);
+      const fresh = version(['fix-a-1111111'], 0);
+      const old = version(['fix-a-3333333'], 20); // old enough for the age rule, not built by the closing PR
+      const api = makeApi([latest, fresh, old]);
+      let calls = 0;
+      api.openBranches = async () => new Set(++calls > 1 ? ['fix-a'] : []);
+      await prunePackage({ api, rules: orbit, packageName: 'x', live: true, closedBranch: 'fix/a', closedShas: new Set(['1111111']), otherBranches: new Set(), now: NOW, log: quiet });
+      assert.deepEqual(api.deleted, []);
+    });
+
     it('deletes nothing from a package whose versions are all untagged', async () => {
       const api = makeApi([version([], 40, 'sha256:a'), version([], 41, 'sha256:b')]);
       await assert.rejects(prunePackage({ api, rules: orbit, packageName: 'x', live: true, now: NOW, log: quiet }), /Nothing was deleted/);
