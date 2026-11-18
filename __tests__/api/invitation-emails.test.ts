@@ -11,7 +11,7 @@ jest.mock('@/lib/db', () => ({
     world: { findUnique: jest.fn() },
     worldMember: { findUnique: jest.fn() },
     user: { findUnique: jest.fn() },
-    membershipInvitation: { findMany: jest.fn(), findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
+    membershipInvitation: { findMany: jest.fn(), findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), count: jest.fn() },
   },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -93,6 +93,7 @@ function asUniverseInviter() {
 beforeEach(() => {
   jest.clearAllMocks();
   db.membershipInvitation.findMany.mockImplementation(async (query) => [row(query)]);
+  db.membershipInvitation.count.mockResolvedValue(1);
 });
 
 describe('pending invitations of a universe', () => {
