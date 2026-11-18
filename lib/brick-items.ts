@@ -440,11 +440,19 @@ async function requestRun(tx: Tx, row: ItemRow, ownerId: string, key: string | n
   } else if (row.state !== 'on') {
     return wrongState(row.state);
   }
+  // A check runs only while its goal is on, even a check the owner paused itself (pausing a goal moves only the checks that are on)
+  if (row.parentId && !(await goalIsOn(tx, row.parentId))) return { ok: false, status: 409, code: 'needs_goal', error: 'A check runs only while its goal is on' };
   // Only a Brick that is on and still its owner's runs anything
   const bot = await tx.bot.findUnique({ where: { id: row.botId }, select: { enabled: true, deletedAt: true, roomId: true, ownerId: true, aiProviderRef: true } });
   if (!bot?.enabled || bot.deletedAt || bot.roomId !== null || bot.ownerId !== row.ownerId) return { ok: false, status: 409, code: 'off', error: 'This Brick is switched off' };
   // One run of an item at a time: while one is running it is busy, and while one that was asked for still waits, that is the answer
-  const open = await tx.brickItemRun.findFirst({ where: { itemId: row.id, OR: [{ state: 'queued' }, { state: 'claimed', leaseUntil: { gt: now } }] }, orderBy: { claimedAt: 'desc' }, select: { id: true, state: true } });
+  let open = await tx.brickItemRun.findFirst({ where: { itemId: row.id, OR: [{ state: 'queued' }, { state: 'claimed', leaseUntil: { gt: now } }] }, orderBy: { claimedAt: 'desc' }, select: { id: true, state: true, claimedAt: true } });
+  // One nobody took up in time (the bot server was away, or none asks for this kind) is dropped here as the claim would: it never ran, so it
+  // counts for nothing, and this ask starts a new one instead of being told that old one is still coming
+  if (open?.state === 'queued' && now.getTime() - open.claimedAt.getTime() > LATE_GRACE) {
+    await tx.brickItemRun.update({ where: { id: open.id }, data: { state: 'dropped', error: 'It was not taken up in time', finishedAt: now } });
+    open = null;
+  }
   if (open?.state === 'queued') return { ok: true, item: view, run: runInfo(open, true) };
   if (open) return { ok: false, status: 409, code: 'busy', error: 'It is running right now' };
 
@@ -912,6 +920,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
         };
         // Only while the item is the one that was asked: a pause, a change or a delete since the tap stops it
         if (!item || item.revision !== run.revision || !manualMayRun(item)) return drop('It changed before it ran');
+        if (item.parentId && !(await goalIsOn(tx, item.parentId))) return drop('Its goal is paused');
         if (now.getTime() - run.claimedAt.getTime() > LATE_GRACE) return drop('It was not taken up in time');
         // One run of an item at a time: a scheduled run of this item that is still running (it fell due after the tap) goes first. This one stays
         // queued and is handed out by a later ask once that run is over, or dropped as not taken up in time.
@@ -1191,7 +1200,8 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
       // already, with Reopen. Anything else changed in between (new words, a new time) is meant to run again, and stays as it is.
       const pausedOnly = item.state === 'paused' && item.revision === run.revision + 1;
       const cadenceNow = readCadence(item.cadence);
-      const workDone = report.state === 'done' && ((item.kind !== 'goal' && cadenceNow?.type === 'once') || (item.kind === 'watch' && report.outcome === 'spoke'));
+      // An extra run (Run now) is never the one-off's own occurrence, so it does not end the one-off: only a watch that spoke is done
+      const workDone = report.state === 'done' && ((!run.manual && item.kind !== 'goal' && cadenceNow?.type === 'once') || (item.kind === 'watch' && report.outcome === 'spoke'));
       if (pausedOnly && workDone) {
         const ended = await tx.brickItem.update({
           where: { id: item.id },

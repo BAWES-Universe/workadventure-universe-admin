@@ -24,6 +24,7 @@ jest.mock('@/lib/bot-limits', () => {
 });
 import { changeItem, checkRun, claimDueRuns, claimWork, createItem, finishRun, readItem, type NewItemInput } from '@/lib/brick-items';
 import { changeFromScreen, didByBrick } from '@/lib/brick-item-screens';
+import { itemsRefused } from '@/lib/brick-item-api';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -326,6 +327,55 @@ run('Run now and snooze, in a real database', () => {
       expect(await tap(zed, briefing.id, 'run', at(MIN))).toMatchObject({ ok: true, run: { state: 'queued' } });
       // changeItem reads them before it opens the transaction; Run now itself reads none
       expect(reads).toHaveBeenCalledTimes(1);
+    });
+
+    it('a check the owner paused itself is still refused once its goal is paused, and a run asked for before that is dropped, not handed out', async () => {
+      const ola = await person('ola');
+      const goal = await set(ola, { kind: 'goal', words: 'Sell the bike', outcome: 'Sold', cadence: hourly });
+      const make = async (words: string) => {
+        const made = await createItem(ola.brickId, { userId: ola.uuid, kind: 'reminder', words, cadence: { type: 'daily', time: '07:30', days: [0, 1, 2, 3, 4, 5, 6] }, parentId: goal.id }, NOW);
+        if (!made.ok) throw new Error('expected the check');
+        return made.item;
+      };
+      const mine1 = await make('Ring the buyer');
+      const mine2 = await make('Post the advert');
+      // Both checks were paused by the owner, one has a run asked for; then the goal is paused
+      await tap(ola, mine1.id, 'pause', at(MIN));
+      await tap(ola, mine2.id, 'resume', at(MIN));
+      expect(await tap(ola, mine2.id, 'run', at(2 * MIN))).toMatchObject({ ok: true, run: { state: 'queued' } });
+      await tap(ola, goal.id, 'pause', at(3 * MIN));
+      expect(await tap(ola, mine1.id, 'run', at(4 * MIN))).toMatchObject({ ok: false, status: 409, code: 'needs_goal' });
+      expect(mine(await claimDueRuns(at(5 * MIN)), mine2.id)).toEqual([]);
+      expect(await runsOf(mine2.id)).toMatchObject([{ state: 'dropped', attempts: 0 }]);
+    });
+
+    it('a stale run that nobody took up is dropped by the next ask, which starts a new one instead of being told the old one still comes', async () => {
+      const pip = await person('pip');
+      const briefing = await set(pip, { kind: 'schedule', cadence: hourly });
+      const first = await tap(pip, briefing.id, 'run', at(MIN));
+      if (!first.ok) throw new Error('expected the run');
+      // No server asked for it: it is still waiting a quarter of an hour on
+      const second = await tap(pip, briefing.id, 'run', at(20 * MIN));
+      expect(second).toMatchObject({ ok: true, run: { state: 'queued', replay: false } });
+      expect(second.ok && second.run!.runId).not.toBe(first.run!.runId);
+      expect(await runsOf(briefing.id)).toMatchObject([{ id: first.run!.runId, state: 'dropped', attempts: 0, error: 'It was not taken up in time' }, { state: 'queued' }]);
+    });
+
+    it('a Run now that reports done after the owner paused a one-off does not end the one-off: it was an extra run', async () => {
+      const ray = await person('ray');
+      const once = await set(ray, { words: 'Call the bank', cadence: { type: 'once', at: at(5 * HOUR).toISOString() } });
+      await tap(ray, once.id, 'run', at(MIN));
+      const [handed] = mine(await claimDueRuns(at(2 * MIN)), once.id);
+      await tap(ray, once.id, 'pause', at(3 * MIN));
+      await finishRun(handed.runId, { attempt: 1, state: 'done', outcome: 'spoke' }, at(4 * MIN));
+      // Still paused for its own time, not Done: resuming brings the reminder back
+      expect(await row(once.id)).toMatchObject({ state: 'paused', doneAt: null });
+      expect(await tap(ray, once.id, 'resume', at(5 * MIN))).toMatchObject({ ok: true, item: { state: 'on', nextDueAt: iso(5 * HOUR) } });
+    });
+
+    it('a refusal over the API carries the time usage is back, for the Brick to say', async () => {
+      const body = await itemsRefused({ ok: false, status: 409, code: 'no_room', until: iso(3 * HOUR), error: 'Your usage for goals and tasks is used up for now' }).json();
+      expect(body).toEqual({ error: 'Your usage for goals and tasks is used up for now', code: 'no_room', until: iso(3 * HOUR) });
     });
 
     it('a tap that was dropped never ran, so it never uses up the runs a day', async () => {
