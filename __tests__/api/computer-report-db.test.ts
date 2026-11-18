@@ -269,7 +269,7 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     expect((await reportsToTell(200, new Date(justNow.getTime() + 10 * 60_000))).filter((report) => report.jobId === stuck.id).map((report) => report.kind)).toEqual(['done']);
   });
 
-  it('holds an unclosed ending past nine minutes while a hand-over on its computer is live, never past an hour, and tells it when the hand-over is over', async () => {
+  it('holds an unclosed ending past nine minutes while a hand-over on its computer is live, however long that goes on, and tells it when the claim is stale or let go', async () => {
     const sara = await person('sara');
     const justNow = new Date();
     const waiting = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'In line', status: 'done', startedAt: new Date(justNow.getTime() - 60_000), endedAt: justNow } });
@@ -285,10 +285,21 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     // A claim that is let go is no hold
     await claim(null);
     expect(await told(13)).toEqual(['done']);
-    // Never held for ever, whatever is claimed
+    // A live claim holds it past an hour too (the hand-overs ahead go on one after the other): only a stale one does not
     await claim(at(70));
-    expect(await told(30)).toEqual([]);
-    expect(await told(61)).toEqual(['done']);
+    expect(await told(61)).toEqual([]);
+    expect(await told(70 + 5)).toEqual(['done']);
+  });
+
+  it('holds the ending of a job that still beats as waiting past an hour, and tells it once it stopped beating', async () => {
+    const sara = await person('sara');
+    const justNow = new Date();
+    const at = (minutes: number) => new Date(justNow.getTime() + minutes * 60_000);
+    const waiting = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'In line', status: 'done', startedAt: at(-1), endedAt: justNow, handOverAliveAt: at(89.9) } });
+    await prisma.brickComputer.upsert({ where: { botId: sara.brickId }, create: { botId: sara.brickId, machine: 'working', filesClaimedAt: null }, update: { filesClaimedAt: null } });
+    const told = async (minutes: number) => (await reportsToTell(200, at(minutes))).filter((report) => report.jobId === waiting.id).map((report) => report.kind);
+    expect(await told(90)).toEqual([]);
+    expect(await told(91)).toEqual(['done']);
   });
 
   it('does not tell an unclosed ending in the gap between two hand-overs while its job still beats as waiting, and tells it once it stopped beating', async () => {

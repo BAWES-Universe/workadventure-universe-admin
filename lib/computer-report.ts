@@ -63,11 +63,6 @@ export interface Report {
  * plus the longest handing over of files can run, so the cards are never written after the message went without them.
  */
 const UNFINISHED_ENDING_MS = 5 * 60 * 1000 + HAND_OVER_LATEST_MS;
-/**
- * A job waiting in line for the machine's hand-over is not given up while the hand-overs ahead of it keep taking the machine one after the other, which can take longer
- * than UNFINISHED_ENDING_MS: its ending is held while a hand-over on its Brick's computer is live (a claim younger than HAND_OVER_LATEST_MS) or while it itself still beats as waiting, but never longer than this.
- */
-const UNFINISHED_ENDING_CEILING_MS = 60 * 60 * 1000;
 /** How long a job that was refused by a rule before it began waits before it is listed (the call that asked may be deleting it). */
 const NEVER_STARTED_GRACE_MS = 30 * 1000;
 const WHY_MAX = 160;
@@ -211,7 +206,6 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
   const size = Math.max(1, Math.min(limit, 200));
   // An ending is told once everything it does is finished; one a server left half done is told anyway after a while, never held for ever
   const unfinishedBefore = new Date(now.getTime() - UNFINISHED_ENDING_MS);
-  const ceilingBefore = new Date(now.getTime() - UNFINISHED_ENDING_CEILING_MS);
   const staleClaimBefore = new Date(now.getTime() - HAND_OVER_LATEST_MS);
   const staleAliveBefore = new Date(now.getTime() - HAND_OVER_ALIVE_MS);
   const ended = await prisma.computerJob.findMany({
@@ -232,13 +226,13 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
             {
               endedAt: { lte: unfinishedBefore },
               AND: [
-                // Not while it is itself waiting in line for its hand-over (it beats while it waits: the moment between two hand-overs has no claim on the machine)
+                // Not while it is itself waiting in line for its hand-over, however long that takes (it beats while it waits: the moment between two hand-overs has no claim on
+                // the machine). One whose server stopped stops beating, and a claim not renewed for the longest hand-over is long past: both are recovered, so nothing is held for ever.
                 { OR: [{ handOverAliveAt: null }, { handOverAliveAt: { lt: staleAliveBefore } }] },
                 // (a plain NOT would drop a computer whose claim is empty: a comparison with nothing is neither true nor false)
                 { bot: { OR: [{ computer: { is: null } }, { computer: { filesClaimedAt: null } }, { computer: { filesClaimedAt: { lt: staleClaimBefore } } }] } },
               ],
             },
-            { endedAt: { lte: ceilingBefore } },
           ],
         },
       ],
