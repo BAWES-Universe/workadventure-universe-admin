@@ -1317,6 +1317,29 @@ run('code jobs for Apps, in a real database', () => {
       expect((await rowOf(job.jobId)).nestedCheckedAt).not.toBeNull();
     });
 
+    it('says it failed when the pause could not be read inside its own transaction, instead of reading that as already paused', async () => {
+      const realTransaction = prisma.$transaction.bind(prisma) as (fn: (tx: unknown) => Promise<unknown>) => Promise<unknown>;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: (tx: unknown) => Promise<unknown>) =>
+        realTransaction((tx) =>
+          fn(
+            new Proxy(tx as object, {
+              get: (target, prop) =>
+                prop === 'appSetting'
+                  ? { findUnique: async () => Promise.reject(new Error('canceling statement due to statement timeout')), upsert: (target as { appSetting: { upsert: (a: unknown) => unknown } }).appSetting.upsert }
+                  : Reflect.get(target, prop),
+            }),
+          ),
+        )) as never);
+      try {
+        await expect(actualState.pauseCodeJobs('provider_ran_tools')).rejects.toThrow('statement timeout');
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await getCodeJobPause()).paused).toBe(false);
+      // And with the read working it is written
+      expect(await actualState.pauseCodeJobs('provider_ran_tools')).toMatchObject({ paused: true, reason: 'provider_ran_tools' });
+    });
+
     it('keeps the workspace id of a job that ended while the workspace was being made, when deleting it then fails, and the sweep deletes it', async () => {
       let release!: () => void;
       const gate = new Promise<void>((resolve) => (release = resolve));

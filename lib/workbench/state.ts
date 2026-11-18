@@ -52,12 +52,17 @@ export interface CodeJobPause {
   at: string | null;
 }
 
+/** The pause as saved, and an error if it cannot be read: for a writer, which must never act on a guess. */
+async function readCodeJobPause(db: SettingsDb): Promise<CodeJobPause> {
+  const row = await db.appSetting.findUnique({ where: { key: STATE_KEY } });
+  const value = isRecord(row?.value) ? row.value : {};
+  if (value.paused !== true) return { paused: false, reason: null, at: null };
+  return { paused: true, reason: typeof value.reason === 'string' ? value.reason : 'manual', at: typeof value.at === 'string' ? value.at : null };
+}
+
 export async function getCodeJobPause(db: SettingsDb = prisma): Promise<CodeJobPause> {
   try {
-    const row = await db.appSetting.findUnique({ where: { key: STATE_KEY } });
-    const value = isRecord(row?.value) ? row.value : {};
-    if (value.paused !== true) return { paused: false, reason: null, at: null };
-    return { paused: true, reason: typeof value.reason === 'string' ? value.reason : 'manual', at: typeof value.at === 'string' ? value.at : null };
+    return await readCodeJobPause(db);
   } catch (error) {
     // A pause that cannot be read is a pause: nothing starts on a guess
     console.error('[CodeJob] Could not read the pause:', error instanceof Error ? error.message : 'unknown');
@@ -69,7 +74,8 @@ export async function getCodeJobPause(db: SettingsDb = prisma): Promise<CodeJobP
 export async function pauseCodeJobs(reason: string, userId: string | null = null): Promise<CodeJobPause> {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${STATE_LOCK}))`;
-    const current = await getCodeJobPause(tx);
+    // Read strictly: a read that failed is not "already paused", and nothing is written on it; the error reaches the caller, who keeps the job open to say it again
+    const current = await readCodeJobPause(tx);
     if (current.paused) return current;
     const state = { paused: true, reason, at: new Date().toISOString() };
     const value = state as Prisma.InputJsonValue;
