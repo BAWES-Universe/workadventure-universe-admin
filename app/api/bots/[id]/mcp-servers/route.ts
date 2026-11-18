@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { corsHeaders } from '@/lib/cors';
 import { createMcpServerSchema, unsendableIssueMessage } from '@/lib/mcp/server-input';
 import { WITH_CONNECTION, effectiveServer } from '@/lib/app-connections';
+import { sharedJobsOf } from '@/lib/app-share';
 
 export const runtime = 'nodejs';
 
@@ -84,7 +85,8 @@ export async function GET(
       await prisma.botMcpServer.findMany({
         // An app with a key (game #2044) is not an app link: the bot server gets it from GET .../key-apps, never as a server to connect to
         where: { botId, OR: [{ connectionId: null }, { connection: { kind: { not: 'direct' } } }] },
-        include: WITH_CONNECTION,
+        // The jobs an owner shared (game #2006) are read with the grant, for the bot server only: nobody else is told what is shared here
+        include: isAdminToken ? { ...WITH_CONNECTION, share: { include: { jobs: true } }, tools: { select: { name: true, fingerprint: true, heading: true, confirmedAt: true } } } : WITH_CONNECTION,
         orderBy: { createdAt: 'asc' },
       })
     ).map((row) => effectiveServer(row));
@@ -170,6 +172,9 @@ export async function GET(
             // A ready-made app: the bot server never calls its link itself (it needs the provider key, which stays in Orbit), it goes through
             // POST /api/ready-made/link. False for every other server.
             readyMade: s.connection?.source === 'ready_made' || s.connection?.source === 'github',
+            // For the bot server only: the jobs this Brick's owner lets other people ask it for from this app, with the inputs people may fill in
+            // and the fields that may come back. A job whose tool changed since it was picked is not listed, as it is not shared
+            ...(isAdminToken ? sharedJobsOf(s as Parameters<typeof sharedJobsOf>[0]) : {}),
             // Set when a person's app is lent to this bot's universe: what the lender allowed (null = all four) and the uses a day
             ...(lendOf.has(s.connectionId ?? '') ? { lent: { things: lendOf.get(s.connectionId as string)!.things, usesPerDay: lendOf.get(s.connectionId as string)!.usesPerDay } } : {}),
             // A server that existed before its tools were checked keeps working in text, and reads Not checked yet (#738)

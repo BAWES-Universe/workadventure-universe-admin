@@ -37,6 +37,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ...(verdict.allowed && verdict.readyMade ? { readyMade: true } : {}),
       ...(verdict.allowed && verdict.paidBy ? { paidBy: verdict.paidBy } : {}),
       ...(verdict.allowed && verdict.shared ? { shared: verdict.shared } : {}),
+      // Once a day, on the ask that made the owner's note: the bot server says it in the owner's own chat with the Brick (game #2006)
+      ...(verdict.ownerNote ? { ownerNote: verdict.ownerNote } : {}),
       ...(!verdict.allowed && verdict.resetsAt ? { resetsAt: verdict.resetsAt.toISOString() } : {}),
       ...(!verdict.allowed && verdict.earlier ? { earlier: verdict.earlier } : {}),
     });

@@ -17,7 +17,7 @@ import { isReconnectRequired, parseOAuthConfig, refreshBlockedReason } from '@/l
 import { syncToolSignInNotices } from '@/lib/tool-signin';
 import { revokeAtApp } from '@/lib/mcp/revoke';
 import { holdRefreshLease } from '@/lib/mcp/oauth-refresh';
-import { checkSharedUse, isAppShareable } from '@/lib/app-share';
+import { checkSharedUse, isAppShareable, type OwnerNote } from '@/lib/app-share';
 import { revokeGitHub } from '@/lib/github/connection';
 
 /**
@@ -93,6 +93,8 @@ export interface AppUseVerdict {
   resetsAt?: Date;
   /** For `already_asked` on a shared job: what the first try came to (running, done, unknown or refunded). The job is never run again. */
   earlier?: string;
+  /** Set on the one ask that made the day's note for the owner (game #2006): what the bot server needs to say it in their own chat with the Brick. */
+  ownerNote?: OwnerNote;
 }
 
 export const useCheckSchema = z
@@ -180,8 +182,8 @@ export async function checkAppUse(botId: string, serverId: string, input: z.infe
   const botName = await prisma.bot.findUnique({ where: { id: botId }, select: { name: true } });
   const shared = await checkSharedUse({ id: row.id, botId, connectionId: connection.id }, connection.name, botName?.name ?? 'Your Brick', input);
   if (!shared) return refuse('not_owner');
-  if (!shared.allowed) return { allowed: false, reason: shared.reason, viaConnection: true, ...(shared.resetsAt ? { resetsAt: shared.resetsAt } : {}), ...(shared.earlier ? { earlier: shared.earlier } : {}) };
-  return { allowed: true, viaConnection: true, shared: { returns: shared.returns }, paidBy: { kind: 'person', personId: shared.ownerId } };
+  if (!shared.allowed) return { allowed: false, reason: shared.reason, viaConnection: true, ...(shared.resetsAt ? { resetsAt: shared.resetsAt } : {}), ...(shared.earlier ? { earlier: shared.earlier } : {}), ...(shared.ownerNote ? { ownerNote: shared.ownerNote } : {}) };
+  return { allowed: true, viaConnection: true, shared: { returns: shared.returns }, paidBy: { kind: 'person', personId: shared.ownerId }, ...(shared.ownerNote ? { ownerNote: shared.ownerNote } : {}) };
 }
 
 /** The lender is told once a day that today's uses ran out, with what they need to change the limit. Never throws. */
