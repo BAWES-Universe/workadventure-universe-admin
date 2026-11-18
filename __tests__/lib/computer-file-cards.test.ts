@@ -258,12 +258,13 @@ describe('reading a file off a machine', () => {
     let pieces = 0;
     const rewriting = {
       async exec(ref: string, command: string, options?: { timeoutMs?: number }) {
-        // After the first piece is read the file is replaced by another of the same size, and its time is put back to the same second
+        // The first piece is read from the original; only then is the file replaced by another of the same size, with its time put back to the same second
+        const answer = await machine.exec(ref, command, options);
         if (command.includes('tail -c') && ++pieces === 1) {
           writeFileSync(target, Buffer.alloc(PIECE_BYTES + 10, 2));
           utimesSync(target, when, when);
         }
-        return machine.exec(ref, command, options);
+        return answer;
       },
     };
     expect(await readFile(rewriting, 'ref', listed, later())).toBeNull();
