@@ -1366,7 +1366,9 @@ export async function windDownStatus(): Promise<WindDownStatus> {
 export async function continueWindDown(now: Date = new Date(), batch: number = SWEEP_BATCH): Promise<{ bricks: number; left: number }> {
   if (!(await isWindingDown())) return { bricks: 0, left: 0 };
   const withJobs = await prisma.computerJob.findMany({ where: { status: { in: ['queued', 'running', 'waiting'] } }, distinct: ['botId'], select: { botId: true }, orderBy: { createdAt: 'asc' }, take: batch });
-  const withMachines = await prisma.brickComputer.findMany({ where: { machine: { in: BILLED_MACHINES }, NOT: { providerRef: null } }, select: { botId: true }, orderBy: { updatedAt: 'asc' }, take: batch });
+  // A Brick whose return from cold storage holds the claim is left to that return: it is making or filling the machine, and a stop under it would strand the
+  // row as stopped while the return still writes to it. The return ends one way or the other (awake, which the next sweep stops, or cold again).
+  const withMachines = await prisma.brickComputer.findMany({ where: { machine: { in: BILLED_MACHINES }, NOT: [{ providerRef: null }, { machine: 'restoring', packStage: 'returning' }] }, select: { botId: true }, orderBy: { updatedAt: 'asc' }, take: batch });
   const bricks = Array.from(new Set([...withJobs, ...withMachines].map((entry) => entry.botId))).slice(0, batch);
   for (const botId of bricks) await windDownBrick(botId, now);
   const status = await windDownStatus();
@@ -1384,6 +1386,8 @@ async function windDownBrick(botId: string, now: Date): Promise<void> {
     const provider = providerFor(row);
     // Only a machine that was awake when this began: ending the jobs may have put it to rest, and a rest is checked too
     if (!row?.providerRef || !provider || !(wasBilled || BILLED_MACHINES.includes(row.machine))) return;
+    // Not under a return that holds the Brick (see continueWindDown): neither its files are saved nor its machine stopped until the return is over
+    if (row.machine === 'restoring' && row.packStage === 'returning') return;
     const ref = row.providerRef;
     if (await provider.awake(ref)) await saveCopy(botId, ref, provider);
     // Proven: the provider no longer says it runs. A stop that did not take (or a look that could not be made) leaves the machine "stopping",

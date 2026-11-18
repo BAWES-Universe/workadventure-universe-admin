@@ -1910,6 +1910,22 @@ run('a Brick’s computer, in a real database', () => {
       expect((await windDownStatus()).machinesLeft).toBe(0);
     });
 
+    it('a Brick whose return from cold storage holds the claim is left to the return: its machine is not saved or stopped under it', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const ref = `fake-${sara.brickId}`;
+      // The return made its computer and wrote it down; it is now filling it from the copy
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'restoring', packStage: 'returning', packClaimId: 'claim-1', packClaimedAt: new Date(), providerRef: ref } });
+      await startWindDown('team@example.test', minutes(1));
+      await continueWindDown(minutes(2));
+      expect(provider.calls.filter((call) => call.name === 'stop' || call.name === 'saveFiles')).toEqual([]);
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machine: 'restoring', packStage: 'returning', providerRef: ref });
+      // Once the return is over and the machine is awake, the wind-down stops it
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'waking', packStage: null, packClaimId: null, packClaimedAt: null } });
+      await continueWindDown(minutes(3));
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopped');
+    });
+
     it('a machine that is awake and not ready is stopped, and stopped again by the sweep when that did not take', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
