@@ -22,7 +22,7 @@ export function defineTests({ lib }) {
   const { classifyTag, lineageOf, makeDeleter, parseArgs, planTagged, planUntagged, prunePackage, sanitizeBranch, tagRules, DEFAULT_KEEP, OPEN_PR_KEEP } = lib;
   const orbit = tagRules({ prodBranch: 'main', devBranch: 'develop' });
   const game = tagRules({ prodBranch: 'universe', devBranch: 'universe-develop' });
-  const plan = (versions, extra = {}) => planTagged({ versions, rules: orbit, now: NOW, ...extra });
+  const plan = (versions, extra = {}) => planTagged({ versions, rules: orbit, otherBranches: new Set(), now: NOW, ...extra });
 
   describe('classifyTag', () => {
     it('knows Orbit release tags', () => {
@@ -125,6 +125,20 @@ export function defineTests({ lib }) {
       const result = plan([...own, lookalike], { closedBranch: 'fix/a', closedShas: new Set(['1111111', '2222222']) });
       assert.deepEqual(idsOf(result.remove), idsOf(own.map((v) => ({ version: v }))));
       assert.ok(result.kept.some((item) => item.version.id === lookalike.id && /younger/.test(item.reason)));
+    });
+
+    it('waits for the age rule when another existing branch is tagged the same (a shared commit makes the tag ambiguous)', () => {
+      const shared = version(['fix-a-1111111'], 0); // could be from `fix/a` or from `fix-a`, both at commit 1111111
+      const result = plan([shared], { closedBranch: 'fix/a', closedShas: new Set(['1111111']), otherBranches: new Set(['fix-a', 'other']) });
+      assert.equal(result.remove.length, 0);
+      assert.ok(result.kept.some((item) => /younger/.test(item.reason)));
+      // an unrelated branch does not get in the way
+      assert.equal(plan([shared], { closedBranch: 'fix/a', closedShas: new Set(['1111111']), otherBranches: new Set(['other']) }).remove.length, 1);
+    });
+
+    it('treats an unreadable branch list as no immediate clearing at all', () => {
+      const young = version(['fix-a-1111111'], 0);
+      assert.equal(plan([young], { closedBranch: 'fix/a', closedShas: new Set(['1111111']), otherBranches: undefined }).remove.length, 0);
     });
 
     it('treats an unknown set of PR commits as no immediate clearing at all', () => {
@@ -249,7 +263,7 @@ export function defineTests({ lib }) {
       const api = makeApi([latest, closing]);
       let calls = 0;
       api.openBranches = async () => new Set(++calls > 1 ? ['fix-a'] : []);
-      await prunePackage({ api, rules: orbit, packageName: 'x', live: true, closedBranch: 'fix/a', closedShas: new Set(['1111111']), now: NOW, log: quiet });
+      await prunePackage({ api, rules: orbit, packageName: 'x', live: true, closedBranch: 'fix/a', closedShas: new Set(['1111111']), otherBranches: new Set(), now: NOW, log: quiet });
       assert.deepEqual(api.deleted, []);
     });
 
@@ -275,7 +289,7 @@ export function defineTests({ lib }) {
         registryCalls += 1;
         return [];
       };
-      await prunePackage({ api, rules: orbit, packageName: 'x', live: true, closedBranch: 'fix/a', closedShas: new Set(['1111111']), now: NOW, log: quiet });
+      await prunePackage({ api, rules: orbit, packageName: 'x', live: true, closedBranch: 'fix/a', closedShas: new Set(['1111111']), otherBranches: new Set(), now: NOW, log: quiet });
       assert.deepEqual(api.deleted, [closing.id]);
       assert.equal(registryCalls, 0);
     });

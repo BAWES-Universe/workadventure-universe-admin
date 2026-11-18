@@ -135,6 +135,18 @@ if (args.closedBranch && args.closedPr) {
   closedShas = new Set(commits.map((commit) => commit.sha.slice(0, 7)));
 }
 
+// Every other branch that still exists. A branch tagged the same as the closing one (`fix/a` and `fix-a`) can share a commit and
+// so a tag, which makes ownership unclear: those images wait for the age rule. If the list cannot be read, nothing clears at once.
+let otherBranches;
+if (args.closedBranch) {
+  try {
+    const branches = await pages(`/repos/${owner}/${repo}/branches`);
+    otherBranches = new Set(branches.filter((branch) => branch.name !== args.closedBranch).map((branch) => sanitizeBranch(branch.name)));
+  } catch (error) {
+    console.log(`Could not list the branches (${error.message}), so nothing is cleared at once; the age rule applies.`);
+  }
+}
+
 try {
   await prunePackage({
     api,
@@ -144,6 +156,7 @@ try {
     live: args.live,
     closedBranch: args.closedBranch || undefined,
     closedShas,
+    otherBranches,
     log,
   });
   if (process.env.GITHUB_STEP_SUMMARY) {

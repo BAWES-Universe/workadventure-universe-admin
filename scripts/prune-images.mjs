@@ -85,10 +85,13 @@ const newestFirst = (a, b) => createdAt(b) - createdAt(a);
  * @param {Set<string>} [input.closedShas] the 7-character shas of that PR's commits. Tags are made from the sanitized branch name,
  *                                         so a distinct branch like `fix-a` shares tags with `fix/a`; only an image tagged with one of
  *                                         these shas is the closing PR's own and goes at once, the rest follow the normal age rule
+ * @param {Set<string>} [input.otherBranches] sanitized names of every other branch that still exists. When one of them is tagged the
+ *                                         same as the closing branch (`fix/a` and `fix-a`), a shared commit gives both the same tag, so
+ *                                         ownership is unclear and the age rule applies. Left out (unknown), nothing clears at once
  * @param {number} [input.now]
  * @returns {{ remove: Array<{version: object, reason: string}>, kept: Array<{version: object, reason: string}> }}
  */
-export function planTagged({ versions, rules, keep = DEFAULT_KEEP, openBranches = new Set(), running = new Set(), closedBranch, closedShas = new Set(), now = Date.now() }) {
+export function planTagged({ versions, rules, keep = DEFAULT_KEEP, openBranches = new Set(), running = new Set(), closedBranch, closedShas = new Set(), otherBranches, now = Date.now() }) {
   const closed = closedBranch === undefined ? undefined : sanitizeBranch(closedBranch);
   if (closed !== undefined && isProtectedBranch(rules, closed)) {
     throw new Error(`Refusing to clear the images of "${closedBranch}": it is the dev or production branch, not a pull request branch.`);
@@ -129,7 +132,7 @@ export function planTagged({ versions, rules, keep = DEFAULT_KEEP, openBranches 
       continue;
     }
     const builtByThisPr = (version) =>
-      isClosed && tagsOf(version).some((tag) => tag.startsWith(`${lineage}-`) && closedShas.has(tag.slice(lineage.length + 1)));
+      isClosed && otherBranches !== undefined && !otherBranches.has(lineage) && tagsOf(version).some((tag) => tag.startsWith(`${lineage}-`) && closedShas.has(tag.slice(lineage.length + 1)));
     group.forEach((version, index) => {
       if (index < allowed) {
         kept.push({ version, reason: isDevBranch ? `one of the newest ${keep} dev builds` : 'branch has an open PR' });
@@ -166,7 +169,7 @@ const describe = ({ version, reason }) => `  ${version.id}  ${version.created_at
  *   listVersions(), openBranches(), runningTags(), children(version) -> digests, deleteVersion(version)
  * Returns what it planned; deletes only when `live` is true.
  */
-export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEEP, live, closedBranch, closedShas, log = console.log, now = Date.now() }) {
+export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEEP, live, closedBranch, closedShas, otherBranches, log = console.log, now = Date.now() }) {
   const versions = await api.listVersions();
   const tagged = versions.filter((version) => tagsOf(version).length > 0);
   const isGuarded = (version) => tagsOf(version).some((tag) => ['release', 'moving'].includes(classifyTag(tag, rules).kind));
@@ -177,7 +180,7 @@ export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEE
   }
   const openBranches = await api.openBranches();
   const running = await api.runningTags();
-  const first = planTagged({ versions, rules, keep, openBranches, running, closedBranch, closedShas, now });
+  const first = planTagged({ versions, rules, keep, openBranches, running, closedBranch, closedShas, otherBranches, now });
 
   // Untagged versions follow their parents: keep whatever a kept image points to. An image we cannot read keeps everything untagged.
   let untagged = { remove: [], kept: [] };
