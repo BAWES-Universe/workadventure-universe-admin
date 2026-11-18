@@ -16,12 +16,12 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
 import { POST as writeEvents } from '@/app/api/meter/events/route';
-import { recordMeterEvent, saveMeterSettings, settleEventsThrough } from '@/lib/meter';
+import { recordMeterEvent, saveMeterSettings, scheduleMemberAllowance, settleEventsThrough } from '@/lib/meter';
 import { currentEnvelope, memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
 import { GrantRefused, markGrantBilled, recordGrant } from '@/lib/meter-grants';
 import { compareModelCalls, compareReplyWindow } from '@/lib/meter-shadow';
 import { getMeterSettings } from '@/lib/meter';
-import { readMeterEvent, type MeterEventInput } from '@/lib/meter-values';
+import { readMeterEvent, readMeterSettings, type MeterEventInput } from '@/lib/meter-values';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -93,6 +93,14 @@ run('the meter, in a real database', () => {
       await recordMeterEvent(first);
       expect(await recordMeterEvent(event({ eventId: first.eventId, quantity: 9 }))).toEqual({ recorded: false, conflict: true });
       expect(Number((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: first.eventId } })).quantity)).toBe(3);
+    });
+
+    it('says so when the same id comes back with another payer or another pool', async () => {
+      const first = event({ eventId: `payer-${tag}`, payerKind: 'universe', payerPersonId: null });
+      await recordMeterEvent(first);
+      expect(await recordMeterEvent({ ...first, payerKind: 'person', payerPersonId: 'someone' })).toEqual({ recorded: false, conflict: true });
+      expect(await recordMeterEvent({ ...first, pool: first.pool === 'chat' ? 'computer' : 'chat' })).toEqual({ recorded: false, conflict: true });
+      expect(await recordMeterEvent(first)).toEqual({ recorded: false, conflict: false });
     });
 
     it('keeps an unknown price empty and a real zero as zero, with their marks', async () => {
@@ -382,6 +390,18 @@ run('the meter, in a real database', () => {
       expect(await releaseRoom({ key: `t-${tag}` }, minutes(4))).toMatchObject({ state: 'released' });
       expect(await releaseRoom({ key: `unknown-${tag}` }, minutes(4))).toBeNull();
       expect(await prisma.meterReservation.count()).toBe(2);
+    });
+  });
+
+  describe('scheduling a new allowance', () => {
+    it('does not put an older allowance back when the one that was waiting has already taken effect', async () => {
+      await saveMeterSettings({ memberAllowanceMicros: 100 }, 'admin');
+      await scheduleMemberAllowance(200, new Date('2026-07-01T00:00:00Z'), 'admin', new Date('2026-06-20T00:00:00Z'));
+      // July 15: the 200 is in force; scheduling 300 for August must leave the 200 where it is until then
+      await scheduleMemberAllowance(300, new Date('2026-08-01T00:00:00Z'), 'admin', new Date('2026-07-15T00:00:00Z'));
+      const row = await prisma.appSetting.findUniqueOrThrow({ where: { key: 'meter' } });
+      expect(readMeterSettings(row.value, new Date('2026-07-15T00:00:00Z')).memberAllowanceMicros).toBe(200);
+      expect(readMeterSettings(row.value, new Date('2026-08-02T00:00:00Z')).memberAllowanceMicros).toBe(300);
     });
   });
 
