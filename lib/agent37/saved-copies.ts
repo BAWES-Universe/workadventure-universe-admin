@@ -79,6 +79,9 @@ export interface Sealed {
   sha256: string;
 }
 
+/** The longest the copy into place may take (a copy is seconds; this is the bound that keeps a write's whole life under its limit). */
+export const COPY_REQUEST_MAX_MS = 5 * 60 * 1000;
+
 /**
  * Writes a folder's tar.gz (as Agent37 streams it) into the bucket, encrypted, under `finalKey`, and says its size and SHA-256. The stream is read to its
  * end and checked as a gzip (a stream cut short fails the check) while it is written under `stagingKey`; only a whole one is copied over `finalKey`.
@@ -135,7 +138,9 @@ export async function storeSealed(finalKey: string, stagingKey: string, archive:
     throw new Error('The copy was not published: its save is no longer allowed to');
   }
   // The stream was whole and the upload finished: now, and only now, it takes the place of what was there (one copy inside the bucket)
-  await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: finalKey, CopySource: `${bucket}/${stagingKey}` }));
+  // Bounded: a copy request that is still out much later could land an object after the row that names it was taken as abandoned (the writer's own limit,
+  // `WRITE_MAX_MS` in computer-archives, plus this, stays under the hour after which a row is taken). The request is given up on, and what is there is taken out
+  await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: finalKey, CopySource: `${bucket}/${stagingKey}` }), { abortSignal: AbortSignal.timeout(COPY_REQUEST_MAX_MS) });
   await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).catch(() => undefined);
   return { bytes, sha256: hash.digest('hex') };
 }

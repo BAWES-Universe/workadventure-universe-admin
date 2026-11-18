@@ -3,6 +3,8 @@ import { gzipSync } from 'node:zlib';
 import { Readable } from 'node:stream';
 
 const stored = new Map<string, Buffer>();
+// The signal each copy into place was sent with (a copy that is not bounded could land after the row that names it was taken)
+const copySignals: Array<AbortSignal | undefined> = [];
 // Bodies a test hands out for a key to read (a download that is still coming)
 const openBodies = new Map<string, Readable>();
 let abortCalled = false;
@@ -29,9 +31,10 @@ jest.mock('@/lib/artifact-storage', () => ({
   artifactBucket: () => ({
     bucket: 'b',
     s3: {
-      send: async (command: { input: { Key: string; CopySource?: string } }) => {
+      send: async (command: { input: { Key: string; CopySource?: string } }, options?: { abortSignal?: AbortSignal }) => {
         const kind = command.constructor.name;
         if (kind === 'CopyObjectCommand') {
+          copySignals.push(options?.abortSignal);
           stored.set(command.input.Key, stored.get((command.input.CopySource as string).replace('b/', '')) as Buffer);
           return {};
         }
@@ -86,6 +89,7 @@ beforeAll(() => {
 });
 beforeEach(() => {
   stored.clear();
+  copySignals.length = 0;
   abortCalled = false;
   failUpload = false;
   purged = false;
@@ -103,6 +107,13 @@ describe('the saved copy of a Brick computer’s files', () => {
     expect(file.length).toBe(archive.length + COPY_OVERHEAD);
     expect(info.bytes).toBe(archive.length);
     expect(openSavedCopy(file).equals(archive)).toBe(true);
+  });
+
+  it('bounds the copy into place: it is sent with a signal that gives the request up after a few minutes, so it cannot land long after its row was taken', async () => {
+    await storeSavedCopy('bot-1', webStream(archive));
+    expect(copySignals).toHaveLength(1);
+    expect(copySignals[0]).toBeInstanceOf(AbortSignal);
+    expect(copySignals[0]?.aborted).toBe(false);
   });
 
   it('does not leave a copy behind for a Brick that was purged while its save was running: the purge marker is there by the time the copy lands', async () => {

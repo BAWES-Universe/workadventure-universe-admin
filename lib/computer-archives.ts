@@ -20,7 +20,8 @@ const STALE_MS = 60 * 60 * 1000;
 /**
  * The longest a write of a copy may run. Shorter than `STALE_MS` on purpose: a copy's row is taken for abandoned (by a clean-up or a purge) once it is
  * `STALE_MS` old, so a write that outlasted that could land an object after its row was taken. A write that reaches this is stopped (its stream is
- * cancelled, nothing is published) instead of left to run.
+ * cancelled, nothing is published) instead of left to run; the copy into place that follows is bounded to 5 minutes (`COPY_REQUEST_MAX_MS`), so a
+ * write's whole life stays under `STALE_MS`.
  */
 const WRITE_MAX_MS = 50 * 60 * 1000;
 let writeLimitMs = WRITE_MAX_MS;
