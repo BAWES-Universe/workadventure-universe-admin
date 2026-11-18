@@ -248,6 +248,20 @@ run('apps a person connects once, in a real database', () => {
     expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).refreshLeaseUntil).toBeNull();
   });
 
+  it('letting go of the renewal lease clears only the lease that request took, never one another request took after it ended', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'old', refreshToken: 'refresh-1', expiresAt: nowSeconds() - 60 });
+    const other = new Date(Date.now() + 3 * LEASE_MS);
+    // A slow renewal: while it runs, its lease has ended and another request has taken one
+    global.fetch = jest.fn(async () => {
+      await prisma.appConnection.update({ where: { id: connection.id }, data: { refreshLeaseUntil: other } });
+      return new Response(JSON.stringify({ access_token: 'new', expires_in: 3600, refresh_token: 'r2' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const stored = (await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).authConfig!;
+    const outcome = await ensureFreshOAuthConfig({ serverId: 'unused', connectionId: connection.id, authConfig: stored });
+    expect(outcome.status).toBe('refreshed');
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).refreshLeaseUntil?.getTime()).toBe(other.getTime());
+  });
+
   /* ---------------- taking it away, in the middle of a chat ---------------- */
 
   it('stops one Brick at once when the app is taken from it, and leaves the other Brick using it', async () => {
