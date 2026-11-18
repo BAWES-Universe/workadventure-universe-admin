@@ -962,6 +962,9 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
           idAfter: 'models/',
           label: 'displayName',
           whereHas: { supportedGenerationMethods: 'bidiGenerateContent' },
+          // Google's live transcription and live translation models run on the same Live API, but they don't hold a conversation
+          // (https://ai.google.dev/gemini-api/docs/live-api/live-transcribe), so they stay out
+          leaveOut: ['gemini-3.5-transcribe', 'gemini-3.5-live-translate'],
           about: 'description',
         },
         fixedVoices: GOOGLE_VOICES,

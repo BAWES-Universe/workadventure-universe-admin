@@ -194,6 +194,17 @@ describe('lists of companies that say little about each model', () => {
     expect(fetchMock).toHaveBeenCalledWith('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000', expect.objectContaining({ headers: expect.objectContaining({ 'x-goog-api-key': 'k' }) }));
   });
 
+  it('Google: leaves out the live transcription and live translation models, which run on the Live API but do not talk', async () => {
+    reply({
+      models: [
+        { name: 'models/gemini-3.8-live', displayName: 'Gemini 3.8 Live', supportedGenerationMethods: ['bidiGenerateContent'] },
+        { name: 'models/gemini-3.5-transcribe-live', displayName: 'Gemini 3.5 Transcribe Live', supportedGenerationMethods: ['bidiGenerateContent'] },
+        { name: 'models/gemini-3.5-live-translate-preview', displayName: 'Gemini 3.5 Live Translate', supportedGenerationMethods: ['bidiGenerateContent'] },
+      ],
+    });
+    expect((await listCompanyModels(voiceKeyCompanyInfo('google')!, 'k', 'talk'))?.map((model) => model.id)).toEqual(['gemini-3.8-live']);
+  });
+
   it('OpenAI: only the conversational realtime models, without the ones that only listen or translate', async () => {
     reply({
       object: 'list',
