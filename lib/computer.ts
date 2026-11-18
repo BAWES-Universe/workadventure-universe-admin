@@ -337,8 +337,8 @@ async function stopAtProvider(ref: string, provider: Provider): Promise<boolean>
     .catch(() => false);
 }
 
-async function noteStopped(botId: string, ref: string, proven: boolean, only?: string[]): Promise<void> {
-  await prisma.brickComputer.updateMany({ where: { botId, providerRef: ref, ...(only ? { machine: { in: only } } : {}) }, data: { machine: proven ? 'stopped' : 'stopping', restClaimedAt: null } });
+async function noteStopped(botId: string, ref: string, proven: boolean, only?: string[], db: Pick<typeof prisma, 'brickComputer'> = prisma): Promise<void> {
+  await db.brickComputer.updateMany({ where: { botId, providerRef: ref, ...(only ? { machine: { in: only } } : {}) }, data: { machine: proven ? 'stopped' : 'stopping', restClaimedAt: null } });
 }
 
 /** Whether the take-over leader still leads. Given a connection, it asks through that one (the stop is made while that connection holds the computer's row). */
@@ -356,13 +356,15 @@ async function stopMachineWhileLeader(botId: string, ref: string, provider: Prov
       await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
       // Asked through this transaction's own connection (it holds the row, so another connection's write to it would wait for this one)
       if (stillLeader && !(await stillLeader(tx))) return null;
-      return stopAtProvider(ref, provider);
+      const proven = await stopAtProvider(ref, provider);
+      // Written before the lock is let go: a replacement transition that sets this machine's state waits for the lock and comes after this record, so this
+      // record can never overwrite what it wrote
+      await noteStopped(botId, ref, proven, undefined, tx);
+      return true;
     },
     { timeout: 120_000, maxWait: 10_000 },
   );
-  if (outcome === null) return false;
-  await noteStopped(botId, ref, outcome);
-  return true;
+  return outcome === true;
 }
 
 // ---------- Jobs ----------

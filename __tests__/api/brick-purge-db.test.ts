@@ -6,6 +6,8 @@
  *
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/brick-purge-db.test.ts
  */
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
 import { Prisma } from '@prisma/client';
@@ -261,6 +263,28 @@ run('purging a deleted Brick, in a real database', () => {
       expect(provider.calls.filter((call) => call.name === 'removeAllFor').map((call) => call.ref)).toEqual([cut.id]);
       await confirmChatPurges([cut.id], later(8));
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: cut.id } })).toMatchObject({ doneAt: expect.any(Date) });
+    });
+  });
+
+  describe('the mark that a machine was asked for', () => {
+    it('is backfilled by its migration for every record that has no machine written down and is not packed away, so a make that was cut off and put back to none is still looked for', async () => {
+      const sara = await person('sara');
+      const rows: Record<string, string> = {};
+      for (const [name, machine, ref] of [['none', 'none', null], ['waking', 'waking', null], ['cold', 'cold', null], ['working', 'working', 'fake-x']] as const) {
+        const brick = await fullBrick(sara, `Backfill ${name}`);
+        await giveComputer(brick.id, sara.id);
+        await prisma.brickComputer.update({ where: { botId: brick.id }, data: { machine, providerRef: ref, makeTriedAt: null } });
+        rows[name] = brick.id;
+      }
+      const sql = readFileSync(path.join(process.cwd(), 'prisma/migrations/20261118020000_make_tried_at/migration.sql'), 'utf8');
+      const update = sql.split(';').map((part) => part.replace(/^(\s*--.*\n)+/g, '').trim()).find((part) => part.startsWith('UPDATE'));
+      expect(update).toBeDefined();
+      await prisma.$executeRawUnsafe(update as string);
+      const tried = async (name: string) => (await prisma.brickComputer.findUniqueOrThrow({ where: { botId: rows[name] }, select: { makeTriedAt: true } })).makeTriedAt !== null;
+      expect(await tried('none')).toBe(true);
+      expect(await tried('waking')).toBe(true);
+      expect(await tried('cold')).toBe(false);
+      expect(await tried('working')).toBe(false);
     });
   });
 

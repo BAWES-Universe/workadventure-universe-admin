@@ -195,7 +195,11 @@ export async function POST(request: NextRequest) {
       // cannot leave these rows behind
       (async () => {
         const byBrick = new Map<string, typeof rowsToInsert>();
-        for (const row of rowsToInsert) byBrick.set(row.botId, [...(byBrick.get(row.botId) ?? []), row]);
+        for (const row of rowsToInsert) {
+          const group = byBrick.get(row.botId);
+          if (group) group.push(row);
+          else byBrick.set(row.botId, [row]);
+        }
         for (const [botId, data] of byBrick) {
           try {
             await whileNotPurged(botId, (tx) => tx.botsMetric.createMany({ data }));

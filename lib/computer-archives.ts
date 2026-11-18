@@ -178,15 +178,20 @@ export async function pruneArchives(botId: string, keepId: string | null = null,
   });
   let removed = 0;
   for (const row of drop) {
+    // Taken for deletion before its objects are touched, and only as it was read: a copy that a pack-away took over and is proving meanwhile (or a writer
+    // that is still uploading) changed the row, so this does not touch it; and once the row is `superseded` nothing proves, publishes or restores from it.
+    // A run that stops half way leaves it `superseded`, which every later clean-up deletes
+    if (row.state !== 'superseded') {
+      const taken = await prisma.computerArchive.updateMany({ where: { id: row.id, state: row.state }, data: { state: 'superseded' } });
+      if (taken.count !== 1) continue;
+    }
     try {
       await store.remove([row.objectKey, `${row.objectKey}.new`]);
     } catch (error) {
       console.error('[Computer] Could not delete an old copy:', error instanceof Error ? error.message : 'unknown');
-      await prisma.computerArchive.updateMany({ where: { id: row.id }, data: { state: 'superseded' } });
       continue;
     }
-    // As it was read: a row its writer changed meanwhile stays, so the next clean-up finds the object it names
-    const gone = await prisma.computerArchive.deleteMany({ where: { id: row.id, state: row.state } });
+    const gone = await prisma.computerArchive.deleteMany({ where: { id: row.id, state: 'superseded' } });
     if (gone.count === 1) removed++;
   }
   return removed;

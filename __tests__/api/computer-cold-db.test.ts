@@ -404,6 +404,27 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
     });
 
+    it('a clean-up takes a copy for deletion before it deletes its objects: a pack-away that proves the copy meanwhile cannot keep a copy whose objects are being removed', async () => {
+      const brick = await idleBrick();
+      const row = await prisma.computerArchive.create({ data: { botId: brick.botId, generation: 1, state: 'stored', objectKey: `computer-cold/${brick.botId}/1.old.ubc`, createdAt: new Date(NOW.getTime() - 3 * 3_600_000) } });
+      bucket.objects.set(row.objectKey, Buffer.from('old'));
+      const remove = bucket.store.remove.bind(bucket.store);
+      let proved: unknown = 'not asked';
+      bucket.store.remove = async (keys) => {
+        // The pack-away that took the stale claim over proves this very copy while its objects are being deleted
+        proved = await markVerified(row.id, 1000, NOW);
+        await remove(keys);
+      };
+      await pruneArchives(brick.botId, null, NOW);
+      bucket.store.remove = remove;
+      expect(proved).toBeNull();
+      // No copy is left that says it can be restored from while its object is gone
+      const verified = await prisma.computerArchive.findMany({ where: { botId: brick.botId, state: 'verified' } });
+      expect(verified.filter((one) => !bucket.objects.has(one.objectKey))).toEqual([]);
+      expect(bucket.objects.has(row.objectKey)).toBe(false);
+      expect(await prisma.computerArchive.count({ where: { id: row.id } })).toBe(0);
+    });
+
     it('a run that was open when its server stopped is closed at the longest a run may last, and its time is booked once', async () => {
       const brick = await idleBrick();
       const started = new Date(NOW.getTime() - 9 * 3_600_000);

@@ -494,7 +494,7 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
   if (!cold) throw new ColdError('This provider cannot bring a computer back from cold storage', 'setup');
   // The return has a claim of its own, like a pack-away: a sweep that takes a stopped return over gives it a new id, and this run then changes nothing
   const claimId = randomUUID();
-  const claimed = await prisma.brickComputer.updateMany({ where: { botId, machine: 'cold', providerRef: null }, data: { machine: 'restoring', packStage: 'returning', packClaimedAt: now, packClaimId: claimId } });
+  const claimed = await prisma.brickComputer.updateMany({ where: { botId, machine: 'cold', providerRef: null }, data: { machine: 'restoring', packStage: 'returning', packClaimedAt: now, packClaimId: claimId, makeTriedAt: now } });
   if (claimed.count !== 1) {
     // Another job is bringing it back: wait for it, then use what it made
     const until = Date.now() + RETURN_WAIT_MS;

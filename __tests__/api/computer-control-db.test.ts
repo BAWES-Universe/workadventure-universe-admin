@@ -341,6 +341,41 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       expect(await finishing).toBeDefined();
     });
 
+    it('the record of a stop is written while the computer\'s row is still held: a state a replacement transition writes afterwards is never overwritten by it', async () => {
+      const { sara } = await running();
+      fake.execAnswer = async (command) => (command.startsWith('universe-fence --check') ? { stdout: 'remaining=2\n' } : {});
+      let reached!: () => void;
+      const inStop = new Promise<void>((resolve) => (reached = resolve));
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const stop = fake.stop.bind(fake);
+      let replacement: Promise<unknown> = Promise.resolve();
+      fake.stop = async (ref: string) => {
+        reached();
+        // A replacement writes the machine's state while the stop is out: it waits for the row, so it can only come after the stop is recorded
+        replacement = prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
+        await gate;
+        return stop(ref);
+      };
+      // Where the stop was recorded after the lock was let go, the replacement is made to come first (the order a slow write could give), so the stop record
+      // would overwrite it
+      const update = prisma.brickComputer.updateMany.bind(prisma.brickComputer);
+      const spy = jest.spyOn(prisma.brickComputer, 'updateMany').mockImplementation(((args: { data?: { machine?: string } }) => {
+        const isStopRecord = args?.data?.machine === 'stopped' || args?.data?.machine === 'stopping';
+        return isStopRecord ? replacement.then(() => update(args as never)) : update(args as never);
+      }) as never);
+      try {
+        const leader = takeOver(sara.brickId, sara.id, NOW);
+        await inStop;
+        release();
+        await leader;
+        await replacement;
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
+    });
+
     it('a leader whose lease was taken over before it started sends no cancel and no fence at all', async () => {
       const { sara, jobId } = await running();
       await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-1' } });
