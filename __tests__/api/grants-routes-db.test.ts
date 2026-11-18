@@ -251,6 +251,23 @@ run('the grants routes, on the real books', () => {
     expect(gifts.filter((gift: any) => gift.ended)).toHaveLength(30);
   });
 
+  it('keeps an ended gift that was to be billed and was not, however many ended after it', async () => {
+    await saveMeterSettings({ rolloutBudgetMicros: 1_000_000 * MILLION }, admin.id);
+    const omar = await person('Omar');
+    const ends = () => new Date(Date.now() + 20 * 86_400_000).toISOString();
+    const owed = await (await call<any>(postGift, '/x', { method: 'POST', body: { grantKey: randomUUID(), audience: { kind: 'people', userIds: [omar] }, scope: 'apps', amountMicros: 3 * MILLION, shared: false, endsAt: ends(), settlement: 'to_bill', note: 'Agreed on 15 Nov' } })).json();
+    await ensureIssued(omar);
+    await call(patchGift, '/x', { method: 'PATCH', body: { action: 'end' } }, ctx({ id: owed.id }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    for (let i = 0; i < 32; i++) {
+      const gift = await (await call<any>(postGift, '/x', { method: 'POST', body: { grantKey: randomUUID(), audience: { kind: 'people', userIds: [omar] }, scope: 'both', amountMicros: (i + 2) * MILLION, shared: false, endsAt: ends(), settlement: 'gift' } })).json();
+      await call(patchGift, '/x', { method: 'PATCH', body: { action: 'end' } }, ctx({ id: gift.id }));
+    }
+    const { gifts } = await overview();
+    expect(gifts.find((gift: any) => gift.id === owed.id)).toMatchObject({ ended: true, settlement: 'to_bill' });
+    expect(gifts.filter((gift: any) => gift.ended).length).toBe(31);
+  });
+
   it('never ends a default or an exception through the gift routes', async () => {
     await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 2 * MILLION, interval: 'once', recipients: { kind: 'all' } } }, ctx({ category: 'instant_apps' }));
     const omar = await person('Omar');
