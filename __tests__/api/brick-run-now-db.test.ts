@@ -361,6 +361,23 @@ run('Run now and snooze, in a real database', () => {
       expect(await runsOf(briefing.id)).toMatchObject([{ id: first.run!.runId, state: 'dropped', attempts: 0, error: 'It was not taken up in time' }, { state: 'queued' }]);
     });
 
+    it('a stale run nobody took up holds no place in the runs a day of the owner’s other items', async () => {
+      const ned = await person('ned');
+      await saveServerLimits({ bricks: { runsPerDay: 1 } }, ned.id);
+      try {
+        const a = await set(ned, { kind: 'schedule', words: 'A', cadence: hourly });
+        const b = await set(ned, { kind: 'schedule', words: 'B', cadence: hourly });
+        const first = await tap(ned, a.id, 'run', at(MIN));
+        if (!first.ok) throw new Error('expected the run');
+        // Still fresh: it holds the one place
+        expect(await tap(ned, b.id, 'run', at(2 * MIN))).toMatchObject({ ok: false, code: 'runs_a_day' });
+        // A quarter of an hour on, nobody took it up: it never ran, so the other item is not refused for it
+        expect(await tap(ned, b.id, 'run', at(20 * MIN))).toMatchObject({ ok: true, run: { state: 'queued', replay: false } });
+      } finally {
+        await saveServerLimits({ bricks: { runsPerDay: 24 } }, ned.id);
+      }
+    });
+
     it('a Run now that reports done after the owner paused a one-off does not end the one-off: it was an extra run', async () => {
       const ray = await person('ray');
       const once = await set(ray, { words: 'Call the bank', cadence: { type: 'once', at: at(5 * HOUR).toISOString() } });
