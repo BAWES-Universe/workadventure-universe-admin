@@ -43,6 +43,13 @@ describe('what a rule said in chat means', () => {
     expect(draftRule({ botId: 'brick1', taskKey: 'job1', capMicros: 5_000_000, period: 'task' })).toMatchObject({ ok: true, draft: { scope: 'task', period: 'task' } });
   });
 
+  it('an ask for nothing more passes a rule that is exactly at its cap and stops one that is past it', () => {
+    const capped = rule({ capMicros: 100 });
+    expect(holdToRules([capped], attempt({ amountMicros: 0 }), () => ({ spentMicros: 40, heldMicros: 60 }))).toEqual({ ok: true });
+    expect(holdToRules([capped], attempt({ amountMicros: 0 }), () => ({ spentMicros: 40, heldMicros: 61 }))).toMatchObject({ ok: false, why: 'cap', leftMicros: 0 });
+    expect(holdToRules([capped], attempt({ amountMicros: 1 }), () => ({ spentMicros: 40, heldMicros: 60 }))).toMatchObject({ ok: false });
+  });
+
   it('a cap on one task that also says a day or a month is refused, not quietly turned into a one-task cap', () => {
     expect(draftRule({ botId: 'brick1', taskKey: 'job1', scope: 'task', capMicros: 5_000_000, period: 'month' })).toMatchObject({ ok: false, reason: 'invalid' });
     expect(draftRule({ botId: 'brick1', taskKey: 'job1', scope: 'task', capMicros: 5_000_000, period: 'day' })).toMatchObject({ ok: false, reason: 'invalid' });

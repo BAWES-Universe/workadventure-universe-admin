@@ -182,7 +182,7 @@ export interface SpendAttempt {
   /** The task it belongs to (a computer job, an Instant run): what "for each task" counts. */
   taskKey: string | null;
   chargeClass: ChargeClass;
-  /** What it would take, millionths of a dollar. Use 1 to ask whether anything more may be taken at all. */
+  /** What it would take, millionths of a dollar. Use 1 to ask whether anything more may be taken at all; 0 asks only whether the rule is already past (a renewal that adds nothing). */
   amountMicros: number;
 }
 
@@ -219,7 +219,9 @@ export function holdToRules(rules: readonly SpendRule[], attempt: SpendAttempt, 
     if (rule.capMicros !== null) {
       const so = spent(rule);
       const left = Math.max(0, rule.capMicros - so.spentMicros - so.heldMicros);
-      if (attempt.amountMicros > left && (worst === null || left < (worst.leftMicros ?? 0))) {
+      // An ask for nothing more (a renewal that adds no exposure) passes a job that is at its cap, and stops one that is past it
+      const over = so.spentMicros + so.heldMicros > rule.capMicros;
+      if ((attempt.amountMicros > left || (attempt.amountMicros === 0 && over)) && (worst === null || left < (worst.leftMicros ?? 0))) {
         worst = { ok: false, ruleId: rule.id, why: 'cap', leftMicros: left, words: rule.words };
       }
     }

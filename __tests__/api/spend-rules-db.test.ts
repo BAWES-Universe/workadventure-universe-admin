@@ -365,6 +365,38 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-a`, scope: 'bot', period: 'month', capMicros: 1_000_000 })).toMatchObject({ ok: true, created: false });
     });
 
+    it('a renewal at the exact cap goes on when the job can cost no more than it already could', async () => {
+      const sara = await person('sara');
+      // 100 millionths for a 10-minute stretch: a first stretch renewed with 33 more, five minutes in, can still cost 100
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100 });
+      const key = `k-${tag}-exact`;
+      expect((await reserveRoom({ key, personId: sara.id, amountMicros: 100, botId: sara.brickId, jobId: 'jx' }, NOW)).ok).toBe(true);
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: NOW } });
+      expect(await renewRoom({ key, moreMicros: 33 }, new Date(NOW.getTime() + 300_000))).toMatchObject({ ok: true });
+      await releaseRoom({ key }, NOW);
+    });
+
+    it('a renewal that waited for the lock past the end of its lease is a lapsed hold, not a renewed one', async () => {
+      const sara = await person('sara');
+      const key = `k-${tag}-lapse`;
+      await prisma.meterReservation.create({ data: { reservationKey: key, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, jobId: 'jl', amountMicros: BigInt(100), state: 'held', expiresAt: new Date(Date.now() + 1_000) } });
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      const other = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('meter:pool'))`;
+        locked();
+        await held;
+      });
+      await lockTaken;
+      const renewing = renewRoom({ key, moreMicros: 0 });
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      release();
+      await other;
+      expect(await renewing).toEqual({ ok: false, reason: 'closed' });
+    });
+
     it('a model call whose id holds ":call:" still finds the room it settled', async () => {
       const sara = await person('sara');
       await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
