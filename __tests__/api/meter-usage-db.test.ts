@@ -702,6 +702,13 @@ run('usage for people, and cost for us, in a real database', () => {
   describe('the Costs page', () => {
     const range = { from: new Date('2026-11-14T00:00:00Z'), to: new Date('2026-11-15T00:00:00Z') };
 
+    it('a report whose settings cannot be read fails, and does not show $0 above the usual', async () => {
+      await setUp();
+      const spy = jest.spyOn(prisma.appSetting, 'findUnique').mockRejectedValueOnce(new Error('db down'));
+      await expect(costsReport(range.from, range.to, NOW)).rejects.toThrow('db down');
+      spy.mockRestore();
+    });
+
     it('counts what was recorded by person, Brick and what the Brick did, each figure with its mark', async () => {
       await setUp();
       const sara = await person('sara');
