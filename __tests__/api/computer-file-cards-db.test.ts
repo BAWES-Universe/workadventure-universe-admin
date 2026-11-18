@@ -16,6 +16,7 @@ import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-dele
 import { saveMeterSettings } from '@/lib/meter';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
+import { proposeRule } from '@/lib/spend-rules';
 import { finishJob, giveComputer, setHandOverClaimWaitForTests, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
 import { deleteOwnResult, deleteResult, DELETED_BRICK_LABEL, markFileDelivered, orphanResultsOf, orphanResultsPage, PIECE_BYTES, readCard, readOwnResult, readResult, resultsOf } from '@/lib/computer-file-cards';
@@ -619,6 +620,37 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).filesClaimedAt).toBeNull();
   });
 
+  it('keeps waiting for a hand-over that runs a minute and a half: the second job still gets its files once the first lets go', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    out(id, 'a.pdf', 'a', 5);
+    // The real default wait; time is moved by hand so the test does not take a minute and a half
+    jest.useFakeTimers({ advanceTimers: true, doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'queueMicrotask', 'performance', 'hrtime'] });
+    const turn = () => new Promise<void>((resolve) => jest.requireActual('node:timers').setImmediate(resolve));
+    const realPause = (ms: number) => new Promise<void>((resolve) => jest.requireActual('node:timers').setTimeout(resolve, ms));
+    try {
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date() } });
+      const finished = finishJob(id, 'done', minutes(9));
+      // Wait (in real time) until the second job is waiting for the machine
+      for (let i = 0; i < 500 && jest.getTimerCount() === 0; i++) await turn();
+      expect(jest.getTimerCount()).toBeGreaterThan(0);
+      // The first hand-over holds the machine for 90 seconds: the second job keeps waiting through them
+      for (let waited = 0; waited < 90_000; waited += 500) {
+        jest.advanceTimersByTime(500);
+        await realPause(2);
+      }
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: null } });
+      for (let i = 0; i < 40; i++) {
+        jest.advanceTimersByTime(500);
+        await realPause(5);
+      }
+      await finished;
+    } finally {
+      jest.useRealTimers();
+    }
+    expect((await mine([id]))[0].handed.map((card) => card.name)).toEqual(['a.pdf']);
+  });
+
   it('does not wait for a machine that is not working any more: nothing is handed over and nothing is held up', async () => {
     const sara = await person('sara');
     const id = await started(sara);
@@ -688,6 +720,22 @@ run('The files a finished computer job made reach the chat as cards, in a real d
       data: { botId: sara.brickId, personId: sara.id, title: 'Never began either', status: 'failed', endedBy: 'person', endedAt: minutes(0), endClosedAt: minutes(0) },
     });
     expect((await reportsToTell(200, minutes(30))).filter((one) => one.jobId === other.id)).toEqual([]);
+  });
+
+  it('keeps the rule’s words when a rule stops a job while it waits in line, and the report says them', async () => {
+    const sara = await person('sara');
+    const first = await started(sara, 'First');
+    const queued = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second' }, NOW);
+    if (!queued.ok) throw new Error('not queued');
+    expect(queued.job.status).toBe('queued');
+    // A rule is said while it waits, so its turn meets it
+    await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'cap-1', scope: 'bot', period: 'month', capMicros: 10_000 });
+    await finishJob(first, 'done', minutes(9));
+    const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: queued.job.id } });
+    expect(after).toMatchObject({ status: 'stopped', endedBy: 'rule' });
+    expect(after.endNote).toContain('No more than $0.01 a month');
+    const [report] = await mine([queued.job.id]);
+    expect(report).toMatchObject({ kind: 'rule', why: expect.stringContaining('No more than $0.01 a month') });
   });
 
   it('takes over a hand-over claim that is long past, and lets go of its own', async () => {

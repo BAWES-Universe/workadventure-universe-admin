@@ -492,7 +492,12 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
       await endJob(job.id, 'stopped', 'rule', now, false, 'queued');
       // Another try may have claimed the job while this one was refused: that one runs and is left alone, only a job this try ended is a refusal
       const after = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { status: true, endedBy: true } });
-      if (after?.status === 'stopped' && after.endedBy === 'rule') return { rule: room.words };
+      if (after?.status === 'stopped' && after.endedBy === 'rule') {
+        // Its words are kept for the report back, as the renew path does: without them the report says only that it stopped
+        const kept = cleanEndNote(room.words);
+        if (kept) await prisma.computerJob.updateMany({ where: { id: job.id, status: 'stopped', endedBy: 'rule', endNote: null }, data: { endNote: kept } });
+        return { rule: room.words };
+      }
       return after && !isOver(after.status) ? 'running' : 'gone';
     }
     const reason = queueReasonOf(room);
@@ -803,7 +808,7 @@ async function closeOutIfUnheld(botId: string): Promise<FilesList | null> {
 /** How long a claim for handing over files is believed: the hand-over ends within its own time budget, so one older than this was left by a server that stopped. */
 const FILES_CLAIM_MS = HAND_OVER_LATEST_MS;
 /** How long a job that ended while another job's files were being read waits for them to be done before its own are read, and how often it looks. */
-const CLAIM_WAIT_MS = 60 * 1000;
+const CLAIM_WAIT_MS = HAND_OVER_LATEST_MS;
 const CLAIM_POLL_MS = 500;
 let claimWaitMs = CLAIM_WAIT_MS;
 /** For tests: how long a hand-over waits for another one. */
