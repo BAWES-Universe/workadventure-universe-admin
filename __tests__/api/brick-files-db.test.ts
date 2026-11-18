@@ -18,6 +18,8 @@ import { createBrick } from '@/lib/brick-create';
 import { GET as listFiles } from '@/app/api/bricks/[id]/files/route';
 import { DELETE as deleteFile } from '@/app/api/bricks/[id]/files/[fileId]/route';
 import { GET as pending, POST as confirm } from '@/app/api/bot-files/removals/route';
+import { FILES_PAGE, MADE_SHOWN, SEARCH_MAX_LENGTH } from '@/lib/brick-files';
+import { getServerLimits } from '@/lib/bot-limits';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const session = getSessionUser as jest.Mock;
@@ -40,16 +42,23 @@ const botServer = (path: string, init: { method?: string; body?: unknown } = {})
   new NextRequest(`http://localhost${path}`, { method: init.method ?? 'GET', headers: { authorization: `Bearer ${SERVICE_TOKEN}`, 'content-type': 'application/json' }, ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }) });
 
 interface Listed {
+  id: string;
   name: string;
   audience: string;
   store: { bucket?: string; fileId?: string };
 }
 interface FilesAnswer {
-  made: { files: Listed[]; total: number; artifacts: number };
-  sent: { files: Listed[]; total: number };
+  made: { files: Listed[]; total: number; artifacts: number; fileTotal: number; nextCursor: string | null };
+  sent: { files: Listed[]; total: number; nextCursor: string | null };
   computer: unknown;
   count: number;
   bytes: number;
+}
+interface PageAnswer {
+  section: string;
+  files: Listed[];
+  total: number;
+  nextCursor: string | null;
 }
 
 let counter = 0;
@@ -88,6 +97,47 @@ run('a Brick’s files (real database)', () => {
   async function read(who: Who, id = brickId) {
     const answer = await listFiles(as(who, `/api/bricks/${id}/files`), params(id));
     return { status: answer.status, body: (await answer.json()) as FilesAnswer };
+  }
+
+  /** One page of one list: `query` is what follows the ? in the address. */
+  async function page(query: string, who: Who = 'sara', id = brickId) {
+    const answer = await listFiles(as(who, `/api/bricks/${id}/files?${query}`), params(id));
+    return { status: answer.status, body: (await answer.json()) as PageAnswer };
+  }
+
+  /** Every page of a list, one after the other, the way the game's "Show more" and its export walk it. */
+  async function walk(section: 'made' | 'sent', extra = '', first?: { files: Listed[]; nextCursor: string | null }) {
+    const names: string[] = [];
+    const ids: string[] = [];
+    let cursor: string | null = first ? first.nextCursor : null;
+    for (const one of first?.files ?? []) {
+      names.push(one.name);
+      ids.push(one.id);
+    }
+    let pages = first ? 1 : 0;
+    do {
+      if (!first || cursor) {
+        const { status, body } = await page(`section=${section}${extra}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+        expect(status).toBe(200);
+        for (const one of body.files) {
+          names.push(one.name);
+          ids.push(one.id);
+        }
+        cursor = body.nextCursor;
+        pages += 1;
+      }
+    } while (cursor);
+    return { names, ids, pages };
+  }
+
+  /** `count` files at once, one a minute older than the last (or all at one moment), named name-1, name-2 ... newest first. */
+  async function many(count: number, over: Record<string, unknown> = {}, { sameMoment = false, name = 'sent', owner = people.sara.id }: { sameMoment?: boolean; name?: string; owner?: string | null } = {}) {
+    const base = Date.now() - 30 * 60 * 1000;
+    const data = Array.from({ length: count }, (_, index) => {
+      counter += 1;
+      return { botId: brickId, number: counter, ownerId: owner, source: 'person', kind: 'document', name: `${name}-${index + 1}.pdf`, sizeBytes: 10, bucket: 'refs', fileId: `${uploaderId(counter)}.pdf`, chatKind: 'dm', chatRef: 'room-1', seenBy: [], createdAt: new Date(sameMoment ? base : base - index * 60 * 1000), ...over };
+    });
+    await prisma.botFile.createMany({ data });
   }
 
   it('lists what it made, what they sent, and how many things it made in all, with their sizes', async () => {
@@ -193,5 +243,165 @@ run('a Brick’s files (real database)', () => {
     expect(done.status).toBe(200);
     expect(await prisma.botFileRemoval.count({ where: { id: { in: ids } } })).toBe(0);
     expect((await confirm(botServer('/api/bot-files/removals', { method: 'POST', body: { ids: [] } }))).status).toBe(400);
+  });
+
+  describe('more than the first look shows', () => {
+    it('reaches every one of 130 sent files, newest first, none twice, and counts them all', async () => {
+      await many(130);
+      const { body } = await read('sara');
+      expect(body.sent.files).toHaveLength(FILES_PAGE);
+      expect(body.sent.total).toBe(130);
+      expect(body.count).toBe(130);
+      expect(body.bytes).toBe(1300);
+      expect(body.sent.nextCursor).not.toBeNull();
+      expect(body.sent.files[0].name).toBe('sent-1.pdf');
+      const all = await walk('sent', '', body.sent);
+      expect(all.names).toHaveLength(130);
+      expect(new Set(all.ids).size).toBe(130);
+      expect(all.names).toEqual(Array.from({ length: 130 }, (_, index) => `sent-${index + 1}.pdf`));
+      expect(all.pages).toBe(Math.ceil(130 / FILES_PAGE));
+    });
+
+    it('lists no more than a page whatever is asked for, and says the first look is the last page when it is', async () => {
+      await many(3);
+      expect((await read('sara')).body.sent.nextCursor).toBeNull();
+      await many(FILES_PAGE + 5, {}, { name: 'more' });
+      for (const limit of ['1000', '0', '-4', 'many', '2.5']) {
+        expect((await page(`section=sent&limit=${limit}`)).body.files.length).toBeLessThanOrEqual(FILES_PAGE);
+      }
+      expect((await page('section=sent&limit=2')).body.files).toHaveLength(2);
+      expect((await page('section=sent')).body.total).toBe(FILES_PAGE + 8);
+    });
+
+    it('keeps every file in place when many share one moment', async () => {
+      await many(FILES_PAGE * 2 + 7, {}, { sameMoment: true });
+      const all = await walk('sent');
+      expect(all.ids).toHaveLength(FILES_PAGE * 2 + 7);
+      expect(new Set(all.ids).size).toBe(FILES_PAGE * 2 + 7);
+    });
+
+    it('shows more than two of what it made in the same list, with how many there are', async () => {
+      await many(5, { source: 'bot' }, { name: 'made' });
+      await prisma.artifact.create({ data: { ownerId: people.sara.id, makerBotId: brickId, makerName: 'Brick', title: 'A page', kind: 'page' } });
+      const { body } = await read('sara');
+      expect(body.made.files.map((f) => f.name)).toEqual(['made-1.pdf', 'made-2.pdf']);
+      expect(MADE_SHOWN).toBe(2);
+      expect(body.made).toMatchObject({ fileTotal: 5, artifacts: 1, total: 6 });
+      expect(body.made.nextCursor).not.toBeNull();
+      const all = await walk('made', '', body.made);
+      expect(all.names).toEqual(['made-1.pdf', 'made-2.pdf', 'made-3.pdf', 'made-4.pdf', 'made-5.pdf']);
+      // The two lists never mix
+      await many(2, {}, { name: 'sent' });
+      expect((await walk('made')).names).toHaveLength(5);
+      expect((await walk('sent')).names).toHaveLength(2);
+    });
+
+    it('lists and counts only live files of the owner: not expired, not gone, not another person’s, not another Brick’s, not without a place', async () => {
+      const limits = (await getServerLimits()).files;
+      await many(3, {}, { name: 'mine' });
+      await many(4, { expiresAt: new Date(Date.now() - 1000) }, { name: 'expired' });
+      await many(2, { expiresAt: new Date(Date.now() + DAY) }, { name: 'guest-live', owner: null });
+      await many(2, {}, { name: 'omars', owner: people.omar.id });
+      await file(otherBrickId, people.sara.id, { name: 'elsewhere.pdf' });
+      await many(2, { bucket: null, fileId: null, url: null }, { name: 'nowhere' });
+      await many(2, { bucket: '', fileId: '' }, { name: 'empty-place' });
+      await many(1, { bucket: null, fileId: null, url: 'https://example.test/x.pdf' }, { name: 'link' });
+      if (limits.findable > 0) await many(2, { createdAt: new Date(Date.now() - (limits.findable + 1) * DAY) }, { name: 'too-old' });
+      const first = await read('sara');
+      const listed = (await walk('sent')).names;
+      expect(listed.sort()).toEqual(['link-1.pdf', 'mine-1.pdf', 'mine-2.pdf', 'mine-3.pdf']);
+      expect(first.body.sent.total).toBe(4);
+      expect(first.body.count).toBe(4);
+      expect((await page('section=sent')).body.total).toBe(4);
+      // Nobody else gets any of it, and a page is for the owner only
+      for (const who of ['omar', 'root'] as const) expect((await page('section=sent', who)).status).toBe(404);
+      expect((await page('section=sent', 'guest')).status).toBe(403);
+      expect((await page('section=sent', null)).status).toBe(401);
+    });
+
+    it('goes on from where it was when files are deleted meanwhile, even the one the page ended on', async () => {
+      await many(120);
+      const first = await read('sara');
+      const next = first.body.sent.nextCursor as string;
+      // The person deletes the last file they saw (the cursor's own), one earlier and one that comes later
+      const ids = (await walk('sent')).ids;
+      for (const id of [first.body.sent.files[FILES_PAGE - 1].id, first.body.sent.files[3].id, ids[FILES_PAGE + 4]]) {
+        expect((await deleteFile(as('sara', `/api/bricks/${brickId}/files/${id}`, 'DELETE'), fileParams(brickId, id))).status).toBe(200);
+      }
+      const rest = await walk('sent', '', { files: [], nextCursor: next });
+      // Everything after the page they saw is there once, in order, minus the one deleted from it
+      const expected = ids.slice(FILES_PAGE).filter((id) => id !== ids[FILES_PAGE + 4]);
+      expect(rest.ids).toEqual(expected);
+      expect((await read('sara')).body.sent.total).toBe(117);
+    });
+
+    it('goes on when a file is added meanwhile: the new one is not mixed into pages already walked', async () => {
+      await many(70);
+      const first = await read('sara');
+      await many(1, { createdAt: new Date() }, { name: 'brand-new' });
+      const rest = await walk('sent', '', { files: [], nextCursor: first.body.sent.nextCursor });
+      expect(rest.names).toEqual(Array.from({ length: 20 }, (_, index) => `sent-${FILES_PAGE + index + 1}.pdf`));
+    });
+
+    it('searches the whole set by name, by page, for the owner’s own live files only', async () => {
+      await many(70, {}, { name: 'invoice' });
+      await many(5, {}, { name: 'Passport' });
+      await many(3, { source: 'bot' }, { name: 'passport-made' });
+      await many(4, { expiresAt: new Date(Date.now() - 1000) }, { name: 'passport-old' });
+      await many(2, {}, { name: 'passport-omar', owner: people.omar.id });
+      const found = await page('section=sent&q=PASSPORT');
+      expect(found.body.total).toBe(5);
+      expect(found.body.files.map((f) => f.name).sort()).toEqual(Array.from({ length: 5 }, (_, index) => `Passport-${index + 1}.pdf`));
+      expect((await page('section=made&q=passport')).body.total).toBe(3);
+      // The oldest of 70 is found though the first look never listed it
+      const oldest = await page('section=sent&q=invoice-70');
+      expect(oldest.body.files.map((f) => f.name)).toEqual(['invoice-70.pdf']);
+      expect(oldest.body.nextCursor).toBeNull();
+      // A search with many results goes on by cursor too
+      const all = await walk('sent', '&q=invoice');
+      expect(all.names).toHaveLength(70);
+      expect(all.pages).toBe(2);
+      expect((await page('section=sent&q=nothing-like-this')).body).toMatchObject({ files: [], total: 0, nextCursor: null });
+    });
+
+    it('takes odd searches in its stride: blank, very long, with wildcards, with a character the database cannot search', async () => {
+      await many(3, {}, { name: 'report' });
+      expect((await page('section=sent&q=')).body.total).toBe(3);
+      expect((await page('section=sent&q=%20%20')).body.total).toBe(3);
+      expect((await page(`section=sent&q=${'x'.repeat(SEARCH_MAX_LENGTH * 10)}`)).status).toBe(200);
+      expect((await page('section=sent&q=%00')).status).toBe(200);
+      expect((await page('section=sent&q=rep%00ort')).body.total).toBe(3);
+      expect((await page('section=sent&q=%25')).status).toBe(200);
+      expect((await page('section=sent&q=%27%3B%20drop%20table%20bot_files%3B--')).body.total).toBe(0);
+      expect(await prisma.botFile.count({ where: { botId: brickId } })).toBe(3);
+    });
+
+    it('takes % _ and \\ in a search as the characters they are, never as wildcards', async () => {
+      await many(1, {}, { name: 'a_b' });
+      await many(1, {}, { name: 'axb' });
+      await many(1, {}, { name: '100% done' });
+      await many(1, {}, { name: '100 percent' });
+      await many(1, {}, { name: 'back\\slash' });
+      const names = async (q: string) => (await page(`section=sent&q=${encodeURIComponent(q)}`)).body.files.map((f) => f.name).sort();
+      expect(await names('a_b')).toEqual(['a_b-1.pdf']);
+      expect(await names('%')).toEqual(['100% done-1.pdf']);
+      expect(await names('_')).toEqual(['a_b-1.pdf']);
+      expect(await names('100%')).toEqual(['100% done-1.pdf']);
+      expect(await names('\\')).toEqual(['back\\slash-1.pdf']);
+      expect(await names('a%b')).toEqual([]);
+      expect((await page('section=sent&q=%25')).body.total).toBe(1);
+    });
+
+    it('refuses a list it does not have and a place in it that it never gave out', async () => {
+      await many(60);
+      expect((await page('section=artifacts')).status).toBe(400);
+      expect((await page('section=sent&cursor=not-a-cursor!')).status).toBe(400);
+      expect((await page(`section=sent&cursor=${Buffer.from('abc:def').toString('base64url')}`)).status).toBe(400);
+      expect((await page(`section=sent&cursor=${Buffer.from('99999999999999999999:x').toString('base64url')}`)).status).toBe(400);
+      expect((await page('section=sent&cursor=')).status).toBe(200);
+      const cursor = (await read('sara')).body.sent.nextCursor as string;
+      // A place in one Brick's list is only a place in time: it shows nothing of another Brick
+      expect((await page(`section=sent&cursor=${cursor}`, 'sara', otherBrickId)).body.files).toEqual([]);
+    });
   });
 });
