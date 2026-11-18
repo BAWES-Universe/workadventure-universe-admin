@@ -751,6 +751,17 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await costsReport(range.from, range.to, NOW)).bricks.rows[0].sure).toBe('Paid by someone else');
     });
 
+    it('counts replies on a person’s own key only when they were replies: not a failed call, not a greeting', async () => {
+      const sara = await person('sara');
+      const own = (n: number, detail: object) =>
+        recordMeterEvent(event({ eventId: `own-${tag}-${n}`, kind: 'model_call', pool: 'chat', unit: 'call', personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'person', payerPersonId: sara.id, basis: 'paid_by_other', costMicros: 1_000, detail }));
+      await own(1, { error: false, greeting: false });
+      await own(2, { error: true, greeting: false });
+      await own(3, { error: false, greeting: true });
+      const report = await costsReport(range.from, range.to, NOW);
+      expect(report.bricks.rows[0]).toMatchObject({ ownKeyReplies: 1 });
+    });
+
     it('stays inside the dates it was given, both ends included, and lists days newest first', async () => {
       const sara = await person('sara');
       const at = (iso: string) => new Date(iso);
