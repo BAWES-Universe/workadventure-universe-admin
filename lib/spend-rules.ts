@@ -215,7 +215,10 @@ export async function changeRule(
     if (change.period !== undefined) next.period = change.period;
     if (next.capMicros !== null && (!Number.isSafeInteger(next.capMicros) || next.capMicros < 0)) return { ok: false, reason: 'invalid', error: 'A cap is a whole number of millionths of a dollar, 0 or more' };
     // A cap on one task counts that task; a cap on a Brick or on everything needs to say how long
-    if (next.capMicros !== null && next.scope === 'task') next.period = 'task';
+    if (next.capMicros !== null && next.scope === 'task') {
+      if (change.period === 'day' || change.period === 'month') return { ok: false, reason: 'invalid', error: 'A cap on one task counts that task. For a day or a month, say it for the Brick or for everything' };
+      next.period = 'task';
+    }
     if (next.capMicros !== null && next.period === null) return { ok: false, reason: 'invalid', error: 'A cap needs to say how long it counts' };
     if (next.capMicros === null) next.period = null;
     if (next.capMicros === null && !next.onlyOwnAccounts) return { ok: false, reason: 'invalid', error: 'A rule needs a cap or "only my own accounts"' };
