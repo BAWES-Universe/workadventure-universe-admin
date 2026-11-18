@@ -82,6 +82,8 @@ export interface JobView {
   stepLabel: string | null;
   waitingFor: WaitingFor | null;
   control: 'brick' | 'person';
+  /** The control generation the runner fences with: it moves when the person takes the machine or gives it back, and when the job pauses or resumes. The runner sends the one it holds with each action; an action under an older one is refused as stale. */
+  generation: number;
   /** What Brick is ready to put in at the hand-over and where, as it named it: the person's one tap fills in this and nothing else. */
   ready: { what: string; where: string } | null;
   startedAt: Date | null;
@@ -142,6 +144,7 @@ type JobRow = {
   readyWhat: string | null;
   readyWhere: string | null;
   control: string;
+  controlGeneration?: number;
   startedAt: Date | null;
   endedAt: Date | null;
   pausedAt?: Date | null;
@@ -177,6 +180,7 @@ function jobView(row: JobRow): JobView {
     stepLabel: row.stepLabel,
     waitingFor: row.waitingFor as WaitingFor | null,
     control: row.control === 'person' ? 'person' : 'brick',
+    generation: row.controlGeneration ?? 0,
     ready: row.readyWhat && row.readyWhere ? { what: row.readyWhat, where: row.readyWhere } : null,
     startedAt: row.startedAt,
     endedAt: row.endedAt,
@@ -651,7 +655,7 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     const claimed = await prisma.computerJob.updateMany({
       where: { id: job.id, status: 'queued' },
       // A paused job that starts again is counted once: the pause is cleared by this very claim
-      data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: now, ...(job.pausedAt ? { pausedAt: null, pausedFor: null, pausedNeedMicros: null, resumeCount: { increment: 1 } } : {}) },
+      data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: now, ...(job.pausedAt ? { pausedAt: null, pausedFor: null, pausedNeedMicros: null, resumeCount: { increment: 1 }, controlGeneration: { increment: 1 } } : {}) },
     });
     if (claimed.count === 0) {
       // Two tries in the same millisecond share one room: it is given back only when the job that won did not take it
@@ -945,10 +949,11 @@ export async function renewJob(
 }
 
 /** The job finished: its machine is saved and rests, what it cost is counted, and the next job in line starts. Safe to say twice. */
-export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date()): Promise<JobView | null> {
+export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date(), generation?: number): Promise<JobView | null> {
   // A job that never started (still in line) did not finish: it is stopped by the person or starts, never "done"
   const current = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
-  if (current && current.status !== 'queued') await endJob(jobId, outcome, outcome === 'failed' ? 'error' : null, now);
+  // With the control generation the runner holds, a finish from an older hand (before a take over, a hand back, a pause or a resume) ends nothing
+  if (current && current.status !== 'queued') await endJob(jobId, outcome, outcome === 'failed' ? 'error' : null, now, true, undefined, true, generation);
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return job ? jobView(job) : null;
 }
@@ -1047,7 +1052,7 @@ async function untilCleaned(botId: string): Promise<void> {
  * `outside` false writes only our own tables (the Brick's purge ends its jobs this way, so a slow provider or backup never holds the purge):
  * the machine, its browser and the agent's turn are left to the purge's own removal of the machine.
  */
-async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true): Promise<void> {
+async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, generation?: number): Promise<void> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (!job || isOver(job.status)) return;
   // A caller that saw the job in line ends it only while it still is: another try may have put it on the machine in between
@@ -1056,7 +1061,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
   const seconds = job.secondsRun + stretch;
   const ended = await prisma.computerJob.updateMany({
-    where: { id: jobId, status: job.status },
+    where: { id: jobId, status: job.status, ...(generation !== undefined ? { controlGeneration: generation } : {}) },
     data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, readyWhat: null, readyWhere: null, control: 'brick', stretchStarted: null, secondsRun: seconds, agentResponseId: null, brief: null },
   });
   // Someone else ended it between the read and the write: that one counts and settles
@@ -1129,6 +1134,7 @@ export async function pauseJob(jobId: string, reason: 'allowance' | 'budget' | '
       stretchStarted: null,
       secondsRun: seconds,
       pausedSeconds: seconds,
+      controlGeneration: { increment: 1 },
       agentResponseId: null,
       reservationKey: null,
       control: 'brick',

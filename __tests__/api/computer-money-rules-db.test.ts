@@ -29,6 +29,7 @@ import { currentEnvelope, reserveDiskRoom } from '@/lib/meter-allowance';
 import { POST as authorizeRoute } from '@/app/api/computer/llm/authorize/route';
 import { POST as settleRoute } from '@/app/api/computer/llm/settle/route';
 import { POST as startRoute } from '@/app/api/bots/[id]/computer-jobs/route';
+import { POST as jobActionRoute } from '@/app/api/bots/[id]/computer-jobs/[jobId]/route';
 import { root, setUpComputerCredit, wipeComputerCredit } from '../helpers/computer-credit-setup';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -588,6 +589,42 @@ run('the money rules of a computer’s model steps, in a real database', () => {
       await createGiftFor({ what: 'gift', audience: { kind: 'people', userIds: [sara.id] }, scope: 'computers', amountMicros: 500_000, shared: false, endsAt: days(20).toISOString(), settlement: 'gift' } as Parameters<typeof createGiftFor>[0], root, NOW);
       await sweepComputers(minutes(3));
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'stopped', resumeCount: 0 });
+    });
+  });
+
+  describe('fencing: an action from an older hand changes nothing', () => {
+    const act = (brickId: string, jobId: string, body: unknown) =>
+      jobActionRoute(new NextRequest('http://localhost/x', { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.BOT_SERVICE_TOKEN}` }, body: JSON.stringify(body) }), { params: Promise.resolve({ id: brickId, jobId }) });
+
+    it('a finish with the generation the runner holds ends the job; an older one is refused as stale and ends nothing; one sent with no generation works as before', async () => {
+      const a = await running('fence-a');
+      const view = await prisma.computerJob.findUniqueOrThrow({ where: { id: a.jobId } });
+      const stale = await act(a.sara.brickId, a.jobId, { action: 'finish', outcome: 'done', generation: view.controlGeneration + 1 });
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toEqual({ ok: false, reason: 'stale', generation: view.controlGeneration });
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: a.jobId } })).status).toBe('running');
+      const ok = await act(a.sara.brickId, a.jobId, { action: 'finish', outcome: 'done', generation: view.controlGeneration });
+      expect(ok.status).toBe(200);
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: a.jobId } })).status).toBe('done');
+      const b = await running('fence-b');
+      expect((await act(b.sara.brickId, b.jobId, { action: 'finish', outcome: 'done' })).status).toBe(200);
+    });
+
+    it('the generation the job shows moves when it pauses and again when it resumes, so a finish from before either ends nothing', async () => {
+      await setUpComputerCredit({ memberAllowanceMicros: STRETCH + 10_000 }, NOW);
+      const { sara, jobId, token } = await running();
+      const first = (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).controlGeneration;
+      await authorizeStep(ask(token, 'op-1'), NOW);
+      const paused = (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).controlGeneration;
+      expect(paused).toBeGreaterThan(first);
+      await createGiftFor({ what: 'gift', audience: { kind: 'people', userIds: [sara.id] }, scope: 'computers', amountMicros: 500_000, shared: false, endsAt: days(20).toISOString(), settlement: 'gift' } as Parameters<typeof createGiftFor>[0], root, NOW);
+      await sweepComputers(minutes(3));
+      const resumed = await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
+      expect(resumed).toMatchObject({ status: 'running', resumeCount: 1 });
+      expect(resumed.controlGeneration).toBeGreaterThan(paused);
+      const old = await act(sara.brickId, jobId, { action: 'finish', outcome: 'done', generation: first });
+      expect(old.status).toBe(409);
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).status).toBe('running');
     });
   });
 
