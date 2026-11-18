@@ -1,6 +1,7 @@
 import * as lib from '@/scripts/prune-images.mjs';
 
 // The test bodies. Shared by both repos: Orbit runs them under jest, the game repo under `node --test`.
+// Each file starts with the lines that bring in `describe` and `it`, then pastes this.
 import assert from 'node:assert/strict';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -109,6 +110,15 @@ export function defineTests({ lib }) {
       assert.equal(result.remove.length, 0);
     });
 
+    it('keeps a branch that another open PR still uses when one PR closes', () => {
+      const fresh = [version(['fix-a-1111111'], 0), version(['fix-a-2222222'], 0.5)];
+      const old = Array.from({ length: 5 }, (_, index) => version([`fix-a-3${index}00000`], 5 + index));
+      const result = plan([...fresh, ...old], { closedBranch: 'fix/a', openBranches: new Set(['fix-a']) });
+      // it behaves like any open-PR branch: the newest 3 stay (two fresh, one old), the older ones beyond them go
+      assert.deepEqual(idsOf(result.remove), idsOf(old.slice(1).map((v) => ({ version: v }))));
+      assert.ok(result.remove.every((item) => item.reason === 'branch has no open PR'));
+    });
+
     it('refuses a closed PR that comes from the dev or production branch (a release PR)', () => {
       for (const branch of ['develop', 'main', 'master']) {
         assert.throws(() => plan([version(['develop-1111111'], 5)], { closedBranch: branch }), /Refusing/);
@@ -184,6 +194,25 @@ export function defineTests({ lib }) {
     it('deletes nothing when no tag looks like a release or the current dev build', async () => {
       const api = makeApi([version(['weird-1'], 40), version(['weird-2'], 41)]);
       await assert.rejects(prunePackage({ api, rules: orbit, packageName: 'x', live: true, now: NOW, log: quiet }), /Nothing was deleted/);
+      assert.deepEqual(api.deleted, []);
+    });
+
+    it('does not delete an image that began running after the plan was made', async () => {
+      const latest = version(['latest'], 3);
+      const switched = version(['fix-a-1111111'], 5);
+      const other = version(['fix-b-2222222'], 5);
+      const api = makeApi([latest, switched, other]);
+      let calls = 0;
+      api.runningTags = async () => new Set(++calls > 1 ? ['fix-a-1111111'] : []);
+      await prunePackage({ api, rules: orbit, packageName: 'x', live: true, now: NOW, log: quiet });
+      assert.deepEqual(api.deleted, [other.id]);
+    });
+
+    it('on a closed PR whose branch has another open PR deletes nothing of it', async () => {
+      const latest = version(['latest'], 3);
+      const young = version(['fix-a-1111111'], 0);
+      const api = makeApi([latest, young], { open: ['fix-a'] });
+      await prunePackage({ api, rules: orbit, packageName: 'x', live: true, closedBranch: 'fix/a', now: NOW, log: quiet });
       assert.deepEqual(api.deleted, []);
     });
 

@@ -121,7 +121,7 @@ const api = {
     const response = await github(`${packagePath}/versions/${version.id}`, { method: 'DELETE' });
     if (response.status === 404) return; // already gone
     if (!response.ok) {
-      const hint = response.status === 403 ? ` Give this repository the Write role under the package's "Manage Actions access" (package settings) and run it again.` : '';
+      const hint = response.status === 403 ? ` Give this repository the Admin role under the package's "Manage Actions access" (package settings; deleting a version needs Admin, not Write) and run it again.` : '';
       throw new Error(`could not delete version ${version.id} of ${packageName}: GitHub answered ${response.status}.${hint}`);
     }
   },

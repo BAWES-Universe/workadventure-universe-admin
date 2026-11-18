@@ -114,10 +114,13 @@ export function planTagged({ versions, rules, keep = DEFAULT_KEEP, openBranches 
   for (const [lineage, group] of candidates) {
     group.sort(newestFirst);
     const isDevBranch = lineage === rules.dev;
-    const isClosed = closed !== undefined && lineage === closed;
+    const isThisPr = closed !== undefined && lineage === closed;
+    const stillOpen = openBranches.has(lineage);
+    // The closed PR's branch goes at once, unless another open PR still uses the same branch: then it is an ordinary open-PR branch.
+    const isClosed = isThisPr && !stillOpen;
     // The dev branch keeps its newest builds. A branch with an open PR keeps a few. Any other branch keeps nothing, once it is old enough.
-    const allowed = isClosed ? 0 : isDevBranch ? keep : openBranches.has(lineage) ? OPEN_PR_KEEP : 0;
-    if (closed !== undefined && !isClosed) {
+    const allowed = isClosed ? 0 : isDevBranch ? keep : stillOpen ? OPEN_PR_KEEP : 0;
+    if (closed !== undefined && !isThisPr) {
       // A closed PR clears only its own branch. The weekly run does the rest.
       for (const version of group) kept.push({ version, reason: 'not this PR' });
       continue;
@@ -166,7 +169,7 @@ export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEE
   if (tagged.length > 0 && !tagged.some(isGuarded)) {
     throw new Error(`${packageName}: none of its ${tagged.length} tagged versions looks like a release or the current dev build, so the tag rules may be out of date. Nothing was deleted.`);
   }
-  const openBranches = closedBranch === undefined ? await api.openBranches() : new Set();
+  const openBranches = await api.openBranches();
   const running = await api.runningTags();
   const first = planTagged({ versions, rules, keep, openBranches, running, closedBranch, now });
 
@@ -197,8 +200,14 @@ export async function prunePackage({ api, rules, packageName, keep = DEFAULT_KEE
     log(`${packageName}: dry run, nothing deleted.`);
     return { remove, deleted: 0 };
   }
+  // Read what dev and production run once more right before deleting: a deployment may have switched since the plan was made.
+  const runningNow = await api.runningTags();
   let deleted = 0;
   for (const { version } of remove) {
+    if (tagsOf(version).some((tag) => runningNow.has(tag))) {
+      log(`  kept ${version.id}: it started running while this plan was being made`);
+      continue;
+    }
     await api.deleteVersion(version);
     deleted += 1;
   }
