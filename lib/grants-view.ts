@@ -100,6 +100,9 @@ export interface PreviewNumbers {
   startsOn?: 'next' | 'now';
   /** The most credit issued to the people there are now (per month for a monthly rule); null when it is not a money figure. */
   mostNowMicros: number | null;
+  /** For an exception that sets both categories: how much of the most is one-time credit and how much is monthly, so they are never said as one sum. */
+  mostOnceMicros?: number | null;
+  mostMonthlyMicros?: number | null;
   /** What saving issues straight away to the people there now (the funding check). Never more than the most it can issue. */
   issuedNowMicros?: number | null;
   /** True when nothing caps how long or how many it reaches, so there is no lifetime maximum. */
@@ -250,7 +253,13 @@ export function previewRows(request: PreviewRequest, numbers: PreviewNumbers | n
   }
   if (request.what === 'exception') {
     rows.push(['Who gets what', [{ b: plural(n.people, 'person', 'people') }, ' get their own rule in place of the defaults. Someone taken off goes back to the defaults at the next renewal. Credit already given stays.']]);
-    rows.push(['Most credit issued', n.mostNowMicros === null ? ['No credit from this rule.'] : ['Up to ', { b: `${usd(n.mostNowMicros)} a month` }, n.laterToo ? '. A universe’s members change, so it grows when people join.' : '. It only grows if you add people.']]);
+    // One-time credit and monthly credit are said apart: a sum of the two is neither
+    const monthly = n.mostMonthlyMicros ?? (n.mostOnceMicros ? null : n.mostNowMicros);
+    const once = n.mostOnceMicros ?? null;
+    const said: Seg[] = [];
+    if (monthly) said.push({ b: `${usd(monthly)} a month` });
+    if (once) said.push(...(said.length ? [' and '] : []), { b: `${usd(once)} once` });
+    rows.push(['Most credit issued', said.length === 0 ? ['No credit from this rule.'] : ['Up to ', ...said, n.laterToo ? '. A universe’s members change, so it grows when people join.' : '. It only grows if you add people.']]);
     rows.push(cost);
     const funding = fundingRow(n);
     if (funding) rows.push(funding);

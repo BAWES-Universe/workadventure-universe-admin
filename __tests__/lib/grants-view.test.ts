@@ -104,6 +104,13 @@ describe('the three-part preview', () => {
     expect(said['Most credit issued']).toContain('Up to $560 a month');
   });
 
+  it('says an exception’s one-time credit and its monthly credit apart, never as one monthly sum', () => {
+    const request: PreviewRequest = { what: 'exception', audience: { kind: 'people', userIds: ['a'] }, instant_apps: { mode: 'own', amountMicros: 10_000_000, interval: 'once' }, computers: { mode: 'same' } };
+    expect(words(previewRows(request, numbers({ people: 1, mostNowMicros: 10_000_000, mostOnceMicros: 10_000_000, mostMonthlyMicros: null })))['Most credit issued']).toContain('Up to $10 once');
+    expect(words(previewRows(request, numbers({ people: 1, mostNowMicros: 10_000_000, mostOnceMicros: 10_000_000, mostMonthlyMicros: null })))['Most credit issued']).not.toContain('a month');
+    expect(words(previewRows(request, numbers({ people: 1, mostNowMicros: 15_000_000, mostOnceMicros: 10_000_000, mostMonthlyMicros: 5_000_000 })))['Most credit issued']).toContain('Up to $5 a month and $10 once');
+  });
+
   it('says none as nobody getting the default, without a made-up figure', () => {
     const rows = previewRows({ ...once, interval: 'none', amountMicros: null }, null);
     expect(rows).toHaveLength(1);
