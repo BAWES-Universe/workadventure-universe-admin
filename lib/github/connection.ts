@@ -28,6 +28,8 @@ import {
 export const GITHUB_CATALOG_KEY = '@github';
 /** The key "Connect another" shows the GitHub row under, and takes back on Connect. */
 export const GITHUB_ROW_KEY = 'github';
+/** The line under it, on the Apps page and in a Brick's offers. */
+export const GITHUB_BLURB = 'Code, pull requests, issues and CI';
 export const GITHUB_SOURCE = 'github';
 
 /** What a GitHub connection keeps, encrypted, in its authConfig. Only the token fields are read by the generic sign-in state. */

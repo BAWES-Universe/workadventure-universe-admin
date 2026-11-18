@@ -7,9 +7,11 @@ export const runtime = 'nodejs';
 
 /**
  * GET /api/bots/:id/apps/offerable?userId=...   (game chat card "Let it use Gmail")
- *   { apps: [{ key, name, blurb, connectionId, connected, usable }] }
- * What the bot server tells a Brick it may offer its owner: every app on the list that is on, with the owner's own connection of
- * it (if any), whether that is signed in and works, and whether this Brick already uses it. Never a link or a sign-in.
+ *   { apps: [{ key, name, blurb, kind, connectionId, connected, usable }] }
+ * What the bot server tells a Brick it may offer its owner: every app the person can connect from the Apps page (GitHub through
+ * Universe's own GitHub App, the list that is on, and the ready-made apps while the adapter is), with the owner's own connection of
+ * it (if any), whether that is signed in and works, and whether this Brick already uses it. `kind` says which call connects it:
+ * `listed` (POST /api/me/apps { catalogKey }, also GitHub) or `readyMade` (POST /api/me/apps/ready-made). Never a link or a sign-in.
  * Only for the owner of Brick :id (`userId` is their game uuid or email); for anyone else, and for a room bot, the answer is the
  * same as for a Brick that does not exist.
  *

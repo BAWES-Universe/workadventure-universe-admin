@@ -200,7 +200,7 @@ export default function MyStarsPage() {
           const places = await placesResponse.json();
           setStarredPlaces([
             ...(places.universes ?? []).map((u: { id: string; name: string; ownerName: string | null; isStarred: boolean; starCount: number; favoritedAt: string }) => ({
-              kind: 'universe' as const, id: u.id, name: u.name, context: u.ownerName ? `Universe · by ${u.ownerName}` : 'Universe', isStarred: u.isStarred, starCount: u.starCount, favoritedAt: u.favoritedAt,
+              kind: 'universe' as const, id: u.id, name: u.name, context: 'Universe', isStarred: u.isStarred, starCount: u.starCount, favoritedAt: u.favoritedAt,
             })),
             ...(places.worlds ?? []).map((w: { id: string; name: string; universe: { name: string }; isStarred: boolean; starCount: number; favoritedAt: string }) => ({
               kind: 'world' as const, id: w.id, name: w.name, context: (
