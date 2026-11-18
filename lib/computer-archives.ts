@@ -2,7 +2,7 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Readable } from 'node:stream';
 import { prisma } from '@/lib/db';
 import { derivedKey } from '@/lib/encryption';
-import { deleteSealed, listSealed, openSealedStream, storeSealed, type Sealed } from '@/lib/agent37/saved-copies';
+import { CopyOutcomeUnknown, deleteSealed, listSealed, openSealedStream, storeSealed, type Sealed } from '@/lib/agent37/saved-copies';
 
 /**
  * The versioned copies of a Brick computer's home folder that cold storage keeps (lib/computer-cold.ts).
@@ -17,6 +17,13 @@ import { deleteSealed, listSealed, openSealedStream, storeSealed, type Sealed } 
 export const KEEP_VERIFIED = 2;
 /** A copy still `staging`, or one that failed, is cleaned up after this long. */
 const STALE_MS = 60 * 60 * 1000;
+/**
+ * A write whose copy into place was given up on before it answered keeps its row, marked, for this long from when the write began: the request may still
+ * finish at the bucket (it is not known), so a purge does not call the Brick clear of copies until that is long past, and then deletes the row with the
+ * keys, which takes a copy that landed meanwhile. Far longer than a request is bounded to.
+ */
+const UNKNOWN_COPY_HOLD_MS = 4 * 60 * 60 * 1000;
+const UNKNOWN_COPY_FAILURE = 'The copy into place gave no answer in time; its outcome is not known';
 /**
  * The longest a write of a copy may run. Shorter than `STALE_MS` on purpose: a copy's row is taken for abandoned (by a clean-up or a purge) once it is
  * `STALE_MS` old, so a write that outlasted that could land an object after its row was taken. A write that reaches this is stopped (its stream is
@@ -96,6 +103,17 @@ const stagingKeyOf = (botId: string, generation: number, id: string) => `compute
  * not finish: nothing then stands as a copy, and what was written is deleted. Returns the copy, `stored` (not yet proved).
  */
 export async function storeArchive(botId: string, archive: ReadableStream<Uint8Array>, details: { imageRevision?: number | null; manifest?: unknown } = {}): Promise<ArchiveRow> {
+  try {
+    return await writeArchive(botId, archive, details);
+  } catch (error) {
+    // A failure before the stream was taken up (the Brick was purged, the database did not answer) leaves the machine's answer unread: it is given up on, so
+    // its connection is not held open until a timeout. Once taken up, the stream is cancelled or consumed by the write itself
+    if (!archive.locked) await archive.cancel().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function writeArchive(botId: string, archive: ReadableStream<Uint8Array>, details: { imageRevision?: number | null; manifest?: unknown }): Promise<ArchiveRow> {
   // The purge writes its marker before it reads or deletes any copy, and this copy's row is written before the marker is read again: a Brick purged
   // before the row is seen here, and one purged after is seen by the purge, which finds the row. The marker is looked at again after the upload.
   const purged = async () => (await prisma.brickPurge.count({ where: { botId } })) > 0;
@@ -132,10 +150,10 @@ export async function storeArchive(botId: string, archive: ReadableStream<Uint8A
       if (sealedRow.count !== 1) throw new Error('The copy was taken for deletion while it was being written');
       return view(await prisma.computerArchive.findUniqueOrThrow({ where: { id } }));
     } catch (error) {
-      await markFailed(id, 'The copy could not be written whole').catch(() => undefined);
+      await markFailed(id, error instanceof CopyOutcomeUnknown ? UNKNOWN_COPY_FAILURE : 'The copy could not be written whole').catch(() => undefined);
       const removed = await store.remove([row.objectKey, stagingKeyOf(botId, generation, id)]).then(() => true, () => false);
       // An object that could not be deleted keeps a row that says so (made again if a purge deleted it), so the clean-up finds it and tries again
-      if (!removed) {
+      if (!removed && !(error instanceof CopyOutcomeUnknown)) {
         // If this record cannot be written either (the database and the bucket failed together), the object has no row. It is not lost: a purge is not done
         // while the Brick's part of the bucket holds anything (`removeBrickObjects`), and the sweep finds the rest by listing (`removeStrayCopies`)
         await prisma.computerArchive
@@ -200,6 +218,8 @@ export async function pruneArchives(botId: string, keepId: string | null = null,
   const working = !!packing && packing.machine === 'packing' && (packing.packStage === 'claimed' || packing.packStage === 'stored') && !!packing.packClaimedAt && now.getTime() - packing.packClaimedAt.getTime() < LIVE_CLAIM_MS;
   const drop = rows.filter((row) => {
     if (keep.has(row.id)) return false;
+    // A write whose copy into place was given up on before it answered keeps its row while that copy may still land (see `UNKNOWN_COPY_HOLD_MS`)
+    if (row.state === 'failed' && row.failure === UNKNOWN_COPY_FAILURE && now.getTime() - row.createdAt.getTime() <= UNKNOWN_COPY_HOLD_MS) return false;
     if (row.state === 'verified' || row.state === 'superseded' || row.state === 'failed') return true;
     // staging or stored and not the one in progress: left behind by a pack-away that stopped
     if (working) return false;
@@ -233,7 +253,13 @@ export async function pruneArchives(botId: string, keepId: string | null = null,
  * or it goes stale and the next try takes it with its objects, so a purge that finds a row left is not done and an object that lands late is never missed.
  */
 export async function deleteAllArchives(botId: string, now: Date = new Date()): Promise<void> {
-  const rows = (await prisma.computerArchive.findMany({ where: { botId } })).filter((row) => !(row.state === 'staging' && now.getTime() - row.createdAt.getTime() <= STALE_MS));
+  const rows = (await prisma.computerArchive.findMany({ where: { botId } })).filter((row) => {
+    const age = now.getTime() - row.createdAt.getTime();
+    if (row.state === 'staging' && age <= STALE_MS) return false;
+    // A write whose copy into place may still finish at the bucket: its row stays until that is long past
+    if (row.state === 'failed' && row.failure === UNKNOWN_COPY_FAILURE && age <= UNKNOWN_COPY_HOLD_MS) return false;
+    return true;
+  });
   if (rows.length === 0) return;
   await store.remove(rows.flatMap((row) => [row.objectKey, `${row.objectKey}.new`]));
   // Only the rows whose objects were just deleted, and only as they were when they were read: a copy that began being written meanwhile keeps its

@@ -79,6 +79,14 @@ export interface Sealed {
   sha256: string;
 }
 
+/** The copy into place was given up on before it answered: whether it landed, or will, is not known. */
+export class CopyOutcomeUnknown extends Error {
+  constructor() {
+    super('The copy into place gave no answer in time');
+    this.name = 'CopyOutcomeUnknown';
+  }
+}
+
 /** The longest the copy into place may take (a copy is seconds; this is the bound that keeps a write's whole life under its limit). */
 export const COPY_REQUEST_MAX_MS = 5 * 60 * 1000;
 
@@ -140,7 +148,13 @@ export async function storeSealed(finalKey: string, stagingKey: string, archive:
   // The stream was whole and the upload finished: now, and only now, it takes the place of what was there (one copy inside the bucket)
   // Bounded: a copy request that is still out much later could land an object after the row that names it was taken as abandoned (the writer's own limit,
   // `WRITE_MAX_MS` in computer-archives, plus this, stays under the hour after which a row is taken). The request is given up on, and what is there is taken out
-  await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: finalKey, CopySource: `${bucket}/${stagingKey}` }), { abortSignal: AbortSignal.timeout(COPY_REQUEST_MAX_MS) });
+  try {
+    await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: finalKey, CopySource: `${bucket}/${stagingKey}` }), { abortSignal: AbortSignal.timeout(COPY_REQUEST_MAX_MS) });
+  } catch (error) {
+    // Given up on by the signal: the request may still finish at the bucket, so the caller is told the outcome is not known (not that it failed)
+    if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) throw new CopyOutcomeUnknown();
+    throw error;
+  }
   await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).catch(() => undefined);
   return { bytes, sha256: hash.digest('hex') };
 }

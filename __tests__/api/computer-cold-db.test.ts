@@ -35,6 +35,7 @@ import { finishOutside, purgeBrick } from '@/lib/brick-purge';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { listDeletedBricks } from '@/lib/brick-default';
 import { computerReadiness } from '@/lib/computer-readiness';
+import { CopyOutcomeUnknown } from '@/lib/agent37/saved-copies';
 import { archiveById, deleteAllArchives, markVerified, removeBrickObjects, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, setWriteLimitForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
 import { GET as download } from '@/app/api/computer/archives/[id]/download/route';
 
@@ -293,6 +294,52 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       await expect(storeArchive(brick.botId, Readable.toWeb(Readable.from([Buffer.from('home')])) as ReadableStream<Uint8Array>)).rejects.toThrow();
       expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
       expect(bucket.objects.size).toBe(0);
+    });
+
+    it('a write that fails before it takes up the stream (the Brick was purged) gives the stream up, so its connection is not held open', async () => {
+      const brick = await idleBrick();
+      await prisma.brickPurge.create({ data: { botId: brick.botId, machinePending: false, copyPending: true } });
+      let cancelled = false;
+      const response = new ReadableStream<Uint8Array>({ pull: () => new Promise<void>(() => undefined), cancel: () => { cancelled = true; } });
+      await expect(storeArchive(brick.botId, response)).rejects.toThrow('deleted');
+      expect(cancelled).toBe(true);
+    });
+
+    it('a write whose copy into place was given up on before it answered keeps a marked row: the purge is not done while that copy may still land, and then takes the row and whatever landed', async () => {
+      const brick = await idleBrick();
+      bucket.store.put = async () => {
+        // The purge's marker is there, and the request is given up on: it is not known whether it will still finish at the bucket
+        await prisma.brickPurge.create({ data: { botId: brick.botId, machinePending: false, copyPending: true } });
+        throw new CopyOutcomeUnknown();
+      };
+      await expect(storeArchive(brick.botId, Readable.toWeb(Readable.from([Buffer.from('home')])) as ReadableStream<Uint8Array>)).rejects.toThrow('no answer in time');
+      const row = await prisma.computerArchive.findFirstOrThrow({ where: { botId: brick.botId } });
+      expect(row.state).toBe('failed');
+      // The copy lands at the bucket later, after the purge saw an empty prefix
+      await deleteAllArchives(brick.botId, new Date());
+      expect(bucket.objects.size).toBe(0);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(1);
+      bucket.objects.set(row.objectKey, Buffer.from('late'));
+      // The clean-up sweep leaves it too, and a try soon after still finds the row
+      await pruneArchives(brick.botId, null, new Date());
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(1);
+      // Long after (more than the hold), the row is taken with the object that landed meanwhile
+      await deleteAllArchives(brick.botId, new Date(Date.now() + 5 * 3_600_000));
+      expect(bucket.objects.size).toBe(0);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+    });
+
+    it('a write whose row cannot be written gives the stream up too', async () => {
+      const brick = await idleBrick();
+      let cancelled = false;
+      const response = new ReadableStream<Uint8Array>({ pull: () => new Promise<void>(() => undefined), cancel: () => { cancelled = true; } });
+      const spy = jest.spyOn(prisma.computerArchive, 'create').mockRejectedValueOnce(new Error('the database did not answer') as never);
+      try {
+        await expect(storeArchive(brick.botId, response)).rejects.toThrow('did not answer');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(cancelled).toBe(true);
     });
 
     it('a copy that lands after the purge read its rows is deleted by the copy itself, and an object that cannot be deleted keeps a row so the clean-up finds it', async () => {

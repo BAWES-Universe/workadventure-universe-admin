@@ -13,6 +13,7 @@ let failUpload = false;
 let purged = false;
 const writes = new Map<string, { botId: string; expiresAt: Date }>();
 let failDeletes = false;
+let copyTimesOut = false;
 jest.mock('@/lib/db', () => ({
   prisma: {
     brickPurge: { count: async () => (purged ? 1 : 0) },
@@ -35,6 +36,7 @@ jest.mock('@/lib/artifact-storage', () => ({
         const kind = command.constructor.name;
         if (kind === 'CopyObjectCommand') {
           copySignals.push(options?.abortSignal);
+          if (copyTimesOut) throw Object.assign(new Error('The operation was aborted'), { name: 'TimeoutError' });
           stored.set(command.input.Key, stored.get((command.input.CopySource as string).replace('b/', '')) as Buffer);
           return {};
         }
@@ -80,7 +82,7 @@ jest.mock('@aws-sdk/lib-storage', () => ({
   },
 }));
 
-import { COPY_OVERHEAD, deleteSavedCopy, listSealed, openSavedCopy, openSealedStream, savedCopyKey, savedCopyOf, storeSavedCopy } from '@/lib/agent37/saved-copies';
+import { COPY_OVERHEAD, CopyOutcomeUnknown, deleteSavedCopy, listSealed, openSavedCopy, openSealedStream, savedCopyKey, savedCopyOf, storeSavedCopy } from '@/lib/agent37/saved-copies';
 
 const webStream = (...parts: Buffer[]) => Readable.toWeb(Readable.from(parts)) as unknown as ReadableStream<Uint8Array>;
 
@@ -95,6 +97,7 @@ beforeEach(() => {
   purged = false;
   writes.clear();
   failDeletes = false;
+  copyTimesOut = false;
 });
 
 describe('the saved copy of a Brick computer’s files', () => {
@@ -114,6 +117,11 @@ describe('the saved copy of a Brick computer’s files', () => {
     expect(copySignals).toHaveLength(1);
     expect(copySignals[0]).toBeInstanceOf(AbortSignal);
     expect(copySignals[0]?.aborted).toBe(false);
+  });
+
+  it('says the outcome is not known when the copy into place is given up on by its signal (it may still finish at the bucket), and a plain failure is not that', async () => {
+    copyTimesOut = true;
+    await expect(storeSavedCopy('bot-1', webStream(archive))).rejects.toBeInstanceOf(CopyOutcomeUnknown);
   });
 
   it('does not leave a copy behind for a Brick that was purged while its save was running: the purge marker is there by the time the copy lands', async () => {
