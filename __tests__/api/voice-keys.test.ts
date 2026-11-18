@@ -609,6 +609,31 @@ describe('Load models on a saved key', () => {
     expect(fetchMock.mock.calls.every(([, init]) => init.headers['xi-api-key'] === 'sk-saved-key-9f2a')).toBe(true);
   });
 
+  it('never adds back a model that was taken off by hand, and adds the other new ones', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved({ hiddenModels: ['speech:eleven_v4_turbo'] }));
+    company([
+      { model_id: 'flash', name: 'Flash', can_do_text_to_speech: true },
+      { model_id: 'eleven_v4_turbo', name: 'Eleven v4 Turbo', can_do_text_to_speech: true },
+      { model_id: 'eleven_v5', name: 'Eleven v5', can_do_text_to_speech: true },
+    ]);
+    const response = await call(loadModels, 'POST');
+    expect((await response.json()).added).toEqual([{ id: 'eleven_v5', label: 'Eleven v5', kind: 'speech' }]);
+    expect(db.voiceProvider.update.mock.calls[0][0].data.models).toEqual([
+      { id: 'flash', label: 'Flash', kind: 'speech' },
+      { id: 'turbo', label: 'Turbo', kind: 'speech' },
+      { id: 'eleven_v5', label: 'Eleven v5', kind: 'speech' },
+    ]);
+    // The one taken off stays on the kept-off list
+    expect(db.voiceProvider.update.mock.calls[0][0].data.hiddenModels).toEqual(['speech:eleven_v4_turbo']);
+  });
+
+  it('saves nothing when only a model taken off by hand is listed', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved({ hiddenModels: ['speech:eleven_v4_turbo'] }));
+    company([{ model_id: 'eleven_v4_turbo', name: 'Eleven v4 Turbo', can_do_text_to_speech: true }]);
+    expect(await (await call(loadModels, 'POST')).json()).toMatchObject({ added: [] });
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+  });
+
   it('saves nothing when the company lists nothing new, and leaves out models for a job the key doesn’t do', async () => {
     db.voiceProvider.findFirst.mockResolvedValue(saved());
     company([{ model_id: 'flash', name: 'Flash', can_do_text_to_speech: true }]);

@@ -5,7 +5,7 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
 import { lendModelId } from '@/lib/voice-lend-model';
-import { modelChange } from '@/lib/voice-hidden-models';
+import { modelChange, readHiddenModels } from '@/lib/voice-hidden-models';
 import { AWS_KEY, TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, accountRegion, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits } from '@/lib/voice-limits';
@@ -591,8 +591,10 @@ export async function reloadVoiceKeyModels(ownerId: string, id: string): Promise
   const has = readModels(row.models);
   const known = new Set(has.map(lendModelId));
   const doesJob = (model: VoiceModel) => (model.kind === 'talk' ? row.recognition && row.speech && Boolean(company.does.talk) : row[model.kind]);
+  // A model taken off by hand stays off: the company's list never adds it back, only the person does
+  const hidden = new Set(readHiddenModels(row.hiddenModels));
   // A key lists at most 200 models, as when it was added
-  const added = loaded.models.filter((model) => doesJob(model) && !known.has(lendModelId(model))).slice(0, Math.max(0, 200 - has.length));
+  const added = loaded.models.filter((model) => doesJob(model) && !known.has(lendModelId(model)) && !hidden.has(lendModelId(model))).slice(0, Math.max(0, 200 - has.length));
   if (added.length === 0) return { key: await summary(row, ownerId), added };
   return { key: await updateVoiceKey(ownerId, id, { models: [...has, ...added] }), added };
 }
