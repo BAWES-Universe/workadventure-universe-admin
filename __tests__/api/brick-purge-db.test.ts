@@ -189,6 +189,34 @@ run('purging a deleted Brick, in a real database', () => {
   });
 
   describe('the final purge (A32)', () => {
+    it('a Brick that cannot be purged now (the database fails for it) does not take the ids of the Bricks purged before it: it is tried again by the next sweep', async () => {
+      const sara = await person('sara');
+      const first = await fullBrick(sara, 'Sweep one');
+      const second = await fullBrick(sara, 'Sweep two');
+      await deleteBrick(first.id, sara.id, NOW);
+      await deleteBrick(second.id, sara.id, NOW);
+      const real = prisma.$transaction.bind(prisma);
+      let calls = 0;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
+        calls += 1;
+        // The second purge of the sweep fails as a database timeout would
+        if (calls === 2) return Promise.reject(new Error('Transaction API error: timed out'));
+        return (real as (...a: unknown[]) => unknown)(...args);
+      }) as never);
+      let removed: string[];
+      try {
+        removed = await removeGoneBricks(later(8), sara.id);
+      } finally {
+        spy.mockRestore();
+      }
+      // One was purged and its id came back, the other was left whole for the next sweep
+      expect(removed).toHaveLength(1);
+      const left = [first.id, second.id].find((id) => !removed.includes(id)) as string;
+      expect(await owned(left)).toMatchObject({ bot: 1 });
+      expect(await owned(removed[0])).toEqual(NOTHING);
+      expect(await removeGoneBricks(later(9), sara.id)).toEqual([left]);
+    });
+
     it('deletes everything the Brick owned in one go, with no backup made first, and keeps only what a person owns and the money', async () => {
       const sara = await person('sara');
       const brick = await fullBrick(sara, 'Gone Brick', { computer: true });

@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { endAllApprovals } from '@/lib/bot-actions';
 import { pauseItemsOfDeletedBrick } from '@/lib/brick-items';
+import * as Sentry from '@sentry/nextjs';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
 import { stopComputerWork } from '@/lib/computer';
 import { purgeBrick, sweepPurges } from '@/lib/brick-purge';
@@ -119,7 +120,18 @@ export async function removeGoneBricks(now: Date = new Date(), ownerId?: string,
     });
     if (gone.length === 0) break;
     for (const { id } of gone) {
-      const result = await purgeBrick(id, now);
+      // One Brick that cannot be purged now (the database timed out, a lock was held too long) is looked at again next sweep and never takes the
+      // ids of the Bricks purged before it with it: the bot server needs every one of them to close those chats
+      let result: Awaited<ReturnType<typeof purgeBrick>>;
+      try {
+        result = await purgeBrick(id, now);
+      } catch (error) {
+        Sentry.captureException(error, { tags: { area: 'bricks', step: 'purge' } });
+        console.error(`[Brick delete] Brick ${id} could not be purged now:`, error instanceof Error ? error.message : 'unknown');
+        waiting.push(id);
+        await markWaiting(id, now).catch(() => undefined);
+        continue;
+      }
       if (result !== 'purged') {
         // 'books': what its computer ran is not in the books yet, looked at again next sweep. 'not_due': Undo, or another sweep, got there first.
         if (result === 'books') console.warn(`[Brick delete] Brick ${id} waits: what its computer ran is not in the books yet`);
@@ -128,7 +140,10 @@ export async function removeGoneBricks(now: Date = new Date(), ownerId?: string,
         continue;
       }
       removed.push(id);
-      await syncToolSignInNotices(id);
+      // The Brick is purged and its id is kept above whatever this does: a sign-in notice that cannot be updated now is not a reason to lose the rest
+      await syncToolSignInNotices(id).catch((error) => {
+        console.error(`[Brick delete] The sign-in notices of Brick ${id} could not be updated:`, error instanceof Error ? error.message : 'unknown');
+      });
     }
     if (gone.length < batch) break;
   }
