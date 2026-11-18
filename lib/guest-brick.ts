@@ -173,7 +173,8 @@ export async function claimGuestBrickReply(input: { guestId?: unknown; turnId?: 
     await tx.guestBrickReply.upsert({
       where: { turnId },
       create: { turnId, guestKey, universeKey, createdAt: at },
-      update: { failed: false, createdAt: at },
+      // Counted in the universe whose pool was just checked: a retry of a failed turn from another universe moves it there
+      update: { failed: false, createdAt: at, universeKey },
     });
     return { allowed: true, turnId, counted: true };
   });

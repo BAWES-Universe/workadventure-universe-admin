@@ -265,6 +265,17 @@ run('the Brick for guests, in a real database', () => {
       expect(await guestChatHandedTo(undefined, rana.uuid)).toEqual({ handed: false });
     });
 
+    it('a failed turn tried again from another universe is counted in that universe', async () => {
+      const a = await universe('retry-a');
+      const b = await universe('retry-b');
+      const guestId = guest();
+      const again = turn();
+      await claim(guestId, a.roomUrl, again);
+      await finishGuestBrickReply(again, { failed: true });
+      expect(await claim(guestId, b.roomUrl, again)).toMatchObject({ allowed: true, counted: true });
+      expect((await prisma.guestBrickReply.findUniqueOrThrow({ where: { turnId: again } })).universeKey).toBe(b.id);
+    });
+
     it('does nothing when the guest never talked to the Brick, or only had a reply that failed', async () => {
       const a = await universe('quiet');
       const lina = await person('lina-in');
