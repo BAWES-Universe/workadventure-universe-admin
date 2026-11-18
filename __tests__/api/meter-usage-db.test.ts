@@ -590,6 +590,31 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: owed.grant.grantKey } })).multiplier).toBe(2);
     });
 
+    it('an edit never goes onto a grant that was ended after the edit read it, a new end before the start is refused, and the same key with other agreed words is another agreement', async () => {
+      const sara = await person('sara');
+      const base = { personId: sara.id, givenById: sara.id, startsAt: days(-1) };
+      const live = await recordGrant({ ...base, grantKey: `g-${tag}-w1`, settlement: 'to_bill', multiplier: 2, endsAt: days(5), note: 'Agreed 5 KD' });
+      const real = prisma.meterGrant.findUnique.bind(prisma.meterGrant);
+      const spy = jest.spyOn(prisma.meterGrant, 'findUnique').mockImplementationOnce(((args: never) =>
+        real(args).then(async (row) => {
+          // Another admin ends it a second after this edit's clock, while the edit is between its read and its write
+          await endGrantNow(live.grant.grantKey, new Date(NOW.getTime() + 1000));
+          return row;
+        })) as never);
+      await expect(changeGrant(live.grant.grantKey, { multiplier: 9 }, NOW)).rejects.toThrow(GrantRefused);
+      spy.mockRestore();
+      expect(await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: live.grant.grantKey } })).toMatchObject({ multiplier: 2, endsAt: new Date(NOW.getTime() + 1000) });
+
+      const omar = await person('omar');
+      const later = await recordGrant({ ...base, personId: omar.id, grantKey: `g-${tag}-w2`, settlement: 'gift', multiplier: 2, startsAt: days(2), endsAt: days(5) });
+      await expect(changeGrant(later.grant.grantKey, { endsAt: days(1) }, NOW)).rejects.toThrow(/after it starts/);
+
+      const billed = await recordGrant({ ...base, grantKey: `g-${tag}-w3`, settlement: 'to_bill', multiplier: 2, endsAt: days(5), note: 'Agreed 5 KD' });
+      expect((await recordGrant({ ...base, grantKey: `g-${tag}-w3`, settlement: 'to_bill', multiplier: 2, endsAt: days(5), note: ' Agreed 5 KD ' })).recorded).toBe(false);
+      await expect(recordGrant({ ...base, grantKey: `g-${tag}-w3`, settlement: 'to_bill', multiplier: 2, endsAt: days(5), note: 'Agreed 50 KD' })).rejects.toThrow(/different grant/);
+      expect((await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: billed.grant.grantKey } })).note).toBe('Agreed 5 KD');
+    });
+
     it('lets a running one change and end, and refuses to rewrite one that was billed, one that ended, or a gift marked billed', async () => {
       const sara = await person('sara');
       const base = { personId: sara.id, givenById: sara.id, startsAt: days(-1) };
