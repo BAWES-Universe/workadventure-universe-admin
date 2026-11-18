@@ -427,6 +427,23 @@ run('voice notes for every bot, in a real database', () => {
       expect(await reserve(person, { clientTurnId, contentHash: 'h' })).toMatchObject({ ok: true, turn: { state: 'delivered' } });
     });
 
+    it('a recovery that read an expired lease does not take the turn over once the bot server has renewed it', async () => {
+      const turn = await fresh();
+      await leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS });
+      await recordVoiceNote(turn.id, { event: 'submitted', generation: 1, refs: { file: 'f-1', transcription: 't-1' } });
+      await prisma.voiceNoteTurn.update({ where: { id: turn.id }, data: { leaseUntil: new Date(Date.now() - 5_000) } });
+      const real = prisma.voiceNoteTurn.findUnique.bind(prisma.voiceNoteTurn);
+      const spy = jest.spyOn(prisma.voiceNoteTurn, 'findUnique').mockImplementationOnce(((args: never) =>
+        real(args).then(async (row) => {
+          // The first bot server reports its progress now, which renews the lease without a new generation
+          await prisma.voiceNoteTurn.update({ where: { id: turn.id }, data: { leaseUntil: new Date(Date.now() + 60_000) } });
+          return row;
+        })) as never);
+      expect(await leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS })).toEqual({ granted: false, reason: 'held' });
+      spy.mockRestore();
+      expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: turn.id } })).toMatchObject({ state: 'hearing', generation: 1 });
+    });
+
     it('fences out a bot server whose lease was taken over', async () => {
       const turn = await fresh();
       await leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS });
@@ -483,6 +500,16 @@ run('voice notes for every bot, in a real database', () => {
       expect(await reserve(person, { clientTurnId, contentHash: 'h' })).toEqual({ ok: false, reason: 'expired' });
     });
 
+    it('keeps room for the answer: a long note in a three-byte language is cut to half of what a turn keeps, so a long answer still fits', async () => {
+      const person = `p-${randomUUID()}`;
+      const turn = turnOf(await reserve(person, { clientTurnId: turnId(), contentHash: 'h' }));
+      await leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS });
+      await recordVoiceNote(turn.id, { event: 'heard', generation: 1, transcript: '字'.repeat(20_000) });
+      const lease = await leaseVoiceNoteStage(turn.id, { stage: 'answer' });
+      expect(lease).toMatchObject({ granted: true });
+      await expect(recordVoiceNote(turn.id, { event: 'answered', generation: 2, answer: '答'.repeat(5_000) })).resolves.toMatchObject({ state: 'answered' });
+    });
+
     it('keeps an answer that is the empty text as an answer, and reads a provider name the way discovery does', async () => {
       const person = `p-${randomUUID()}`;
       const clientTurnId = turnId();
@@ -493,6 +520,31 @@ run('voice notes for every bot, in a real database', () => {
       await leaseVoiceNoteStage(turn.id, { stage: 'answer' });
       await recordVoiceNote(turn.id, { event: 'answered', generation: 2, answer: '' });
       expect(await reserve(person, { clientTurnId, contentHash: 'h' })).toMatchObject({ ok: true, replay: true, answer: { answer: '' } });
+    });
+
+    it('looks the hearing up again once it holds the reservations’ lock: a hearing taken away while it waited is not used', async () => {
+      const turn = await fresh();
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      const other = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('voice-note-reserve'))`;
+        locked();
+        await held;
+      });
+      await lockTaken;
+      const leasing = leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      await prisma.voiceProvider.update({ where: { id: providers[0] }, data: { enabled: false } });
+      try {
+        release();
+        await other;
+        expect(await leasing).toEqual({ granted: false, reason: 'no-hearing' });
+        expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: turn.id } })).toMatchObject({ state: 'failed', released: true });
+      } finally {
+        await prisma.voiceProvider.update({ where: { id: providers[0] }, data: { enabled: true } });
+      }
     });
 
     it('never hears with Universe AI once it is turned off after the reservation, and gives the reservation back', async () => {

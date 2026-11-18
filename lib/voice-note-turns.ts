@@ -357,8 +357,10 @@ async function findTurn(id: string): Promise<VoiceNoteTurn> {
 }
 
 /** Moves a turn on only if nobody else did first: the state and generation it was read with. */
-const moveOn = (turn: VoiceNoteTurn, data: Prisma.VoiceNoteTurnUpdateManyMutationInput) =>
-  prisma.voiceNoteTurn.updateMany({ where: { id: turn.id, state: turn.state, generation: turn.generation }, data });
+const moveOn = (turn: VoiceNoteTurn, data: Prisma.VoiceNoteTurnUpdateManyMutationInput, onLease = false) =>
+  // `onLease`: a recovery that took the turn over because its lease had run out only does so while the lease is still the one it read:
+  // a bot server that reported its progress in the meantime renewed it (without a new generation), and is still the one holding it
+  prisma.voiceNoteTurn.updateMany({ where: { id: turn.id, state: turn.state, generation: turn.generation, ...(onLease ? { leaseUntil: turn.leaseUntil } : {}) }, data });
 
 /** Marks a turn failed and gives back its reservation, once. */
 async function failUnused(turn: VoiceNoteTurn) {
@@ -400,7 +402,7 @@ export async function leaseVoiceNoteStage(id: string, input: { stage?: unknown; 
     if (turn.state === 'hearing' && live) return { granted: false, reason: 'held' };
     if (turn.state === 'hearing' && !turn.providerRefs) {
       // The bot server that held it is gone, and nobody knows whether the provider got the note: never sent again
-      const done = await moveOn(turn, { state: 'uncertain', leaseUntil: null });
+      const done = await moveOn(turn, { state: 'uncertain', leaseUntil: null }, true);
       return { granted: false, reason: done.count > 0 ? 'uncertain' : 'held' };
     }
     if (turn.state !== 'reserved' && turn.state !== 'hearing') return { granted: false, reason: turn.state as TurnState };
@@ -414,29 +416,38 @@ export async function leaseVoiceNoteStage(id: string, input: { stage?: unknown; 
     if (!hearing) {
       // The key it was reserved with can't be used now. A hearing that was started stays counted
       if (turn.state === 'reserved') await failUnused(turn);
-      else await moveOn(turn, { state: 'uncertain', leaseUntil: null });
+      else await moveOn(turn, { state: 'uncertain', leaseUntil: null }, true);
       return { granted: false, reason: 'no-hearing' };
     }
     if (turn.state === 'reserved') {
       // Started under the reservations' lock, still young enough at that moment (the clock moved on while the hearing was looked
-      // up): a reservation counts as being heard until it is too old, then never starts, so nothing passes the notes at once
+      // up): a reservation counts as being heard until it is too old, then never starts, so nothing passes the notes at once.
+      // The hearing is looked up again under the lock too: a lend the owner took back while this waited for it is not heard with.
+      const adapters = readAdapterList(input.adapters);
       const started = await prisma.$transaction(async (tx) => {
         await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext('voice-note-reserve'))`);
+        const current = await hearingFor(turn, adapters);
+        if (!current) return { lost: true as const };
         const at = now.getTime() + (Date.now() - entered);
-        return tx.voiceNoteTurn.updateMany({
+        const moved = await tx.voiceNoteTurn.updateMany({
           where: { id: turn.id, state: 'reserved', generation: turn.generation, createdAt: { gt: new Date(at - STARTING_MS) } },
           data: { state: 'hearing', generation, leaseUntil },
         });
+        return { lost: false as const, count: moved.count, hearing: current };
       }, LOCKED);
+      if (started.lost) {
+        await failUnused(turn);
+        return { granted: false, reason: 'no-hearing' };
+      }
       if (started.count === 0) {
         const after = await findTurn(turn.id);
         if (after.state !== 'reserved') return { granted: false, reason: 'held' };
         await failUnused(after);
         return { granted: false, reason: 'expired' };
       }
-      return { ...granted, hearing };
+      return { ...granted, hearing: started.hearing };
     }
-    const done = await moveOn(turn, { state: 'hearing', generation, leaseUntil });
+    const done = await moveOn(turn, { state: 'hearing', generation, leaseUntil }, true);
     if (done.count === 0) return { granted: false, reason: 'held' };
     return { ...granted, hearing, reconcile: turn.providerRefs };
   }
@@ -504,7 +515,11 @@ export async function recordVoiceNote(id: string, input: Record<string, unknown>
       if (typeof input.transcript !== 'string') throw new VoiceNoteError('transcript is required', 400);
       const heardSeconds = input.seconds === undefined ? turn.seconds : Math.min(turn.seconds, wholeOf(input.seconds, 'seconds', 0, LENGTH_CEILING));
       const costMicros = input.costMicros === undefined ? null : wholeOf(input.costMicros, 'costMicros', 0, 2_000_000_000);
-      const buffer = sealBuffer(turn.id, { transcript: input.transcript.slice(0, 20_000) });
+      // Half of what a kept turn can hold is left for the answer, in bytes (a long note in a language with three bytes to a letter would
+      // otherwise fill the buffer and the answer could never be stored, after both providers were already paid)
+      let transcript = input.transcript.slice(0, 20_000);
+      while (Buffer.byteLength(transcript) > BUFFER_MAX_BYTES / 2) transcript = transcript.slice(0, Math.floor(transcript.length * 0.9));
+      const buffer = sealBuffer(turn.id, { transcript });
       fenced((await moveOn(turn, { state: 'heard', heardSeconds, costMicros, buffer, bufferUntil: new Date(now.getTime() + BUFFER_MS), leaseUntil: null })).count);
       return ok('heard');
     }
