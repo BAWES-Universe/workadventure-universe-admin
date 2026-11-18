@@ -99,6 +99,7 @@ export async function GET(req: NextRequest, { params }: Params) {
     result.canSelect = !!directGrant && inScope && lifecycleOk && windowOk
   } else if (set.visibility === 'restricted') {
     const policyMatch = set.policies.some((p) => {
+      if (p.worldId && p.worldId !== worldId) return false
       if (p.action !== 'select' && p.action !== 'manage') return false
       if (p.worldId && p.worldId !== worldId) return false
       if (p.subjectType === 'everyone') return true
