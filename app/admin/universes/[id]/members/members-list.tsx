@@ -336,7 +336,7 @@ export function UniverseMembersPage() {
         </div>
       )}
 
-      {invitations && invitations.list.length > 0 && (
+      {invitations && (invitations.list.length > 0 || invitations.nextCursor !== null) && (
         <section className="grid min-w-0 gap-2" aria-labelledby="pending-invitations">
           <SectionHeader id="pending-invitations" title="Pending invitations" count={invitations.total} />
           <div className="grid min-w-0 gap-0.5">

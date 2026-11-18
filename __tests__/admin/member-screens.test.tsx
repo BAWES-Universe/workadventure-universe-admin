@@ -142,6 +142,17 @@ describe('universe Members page', () => {
     expect(calls.some((call) => call.url.endsWith('/u1/invitations?cursor=next-1'))).toBe(true);
   });
 
+  it('keeps Show more when every invitation on screen is cancelled and more are waiting', async () => {
+    invitationsList = [{ id: 'a', userId: 'a', name: 'Jana', invitedBy: { userId: 'owner', name: 'Khalid' }, invitedAt: '2026-10-17T10:00:00Z', roleIds: [], worlds: everywhere, canCancel: true }];
+    invitationsPaging = { total: 2, nextCursor: 'next-1', more: [] };
+    wrap(<UniverseMembersPage />);
+    const section = await screen.findByRole('region', { name: /Pending invitations/ });
+    fireEvent.click(within(section).getByRole('button', { name: 'Cancel invite' }));
+    await waitFor(() => expect(screen.queryByText('Jana')).toBeNull());
+    // One is left on the server, still reachable
+    expect(screen.getByRole('button', { name: 'Show 1 more' })).toBeTruthy();
+  });
+
   it('has no Show more button when everything fits', async () => {
     invitationsList = [{ id: 'a', userId: 'a', name: 'Jana', invitedBy: { userId: 'owner', name: 'Khalid' }, invitedAt: '2026-10-17T10:00:00Z', roleIds: [], worlds: everywhere, canCancel: true }];
     wrap(<UniverseMembersPage />);
