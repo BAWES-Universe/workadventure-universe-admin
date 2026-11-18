@@ -47,8 +47,6 @@ const FRESH_COPY_MS = 5 * 60_000;
 
 /** The image the machines are made from is still being built (or its build failed): no machine is made until it is ready. */
 export class ImageNotReady extends Error {
-  /** Said before any machine was asked for: nothing can have been left at the provider. */
-  readonly noMachineMade = true;
   constructor(message = 'The computer image is not ready yet') {
     super(message);
     this.name = 'ImageNotReady';
@@ -57,7 +55,6 @@ export class ImageNotReady extends Error {
 
 /** The wallet cannot carry another machine: said plainly, and nothing is made or woken. */
 export class Agent37FundsLow extends Error {
-  readonly noMachineMade = true;
   constructor(message = 'The computer wallet is too low to start another computer') {
     super(message);
     this.name = 'Agent37FundsLow';
@@ -452,20 +449,13 @@ export class Agent37ComputerProvider implements ComputerProvider {
     this.brickOf.delete(ref);
   }
 
-  async removeAllFor(botId: string, opts: { mayHaveUnrecorded?: boolean; since?: Date | null } = {}): Promise<void> {
-    // A machine that failed to come up is still there at the provider (its disk may be billed and hold files): only one already being deleted is left alone
+  async removeAllFor(botId: string): Promise<void> {
+    // A machine that failed to come up is still there at the provider (its disk may be billed and hold files): only one already being deleted is left alone.
+    // `listInstances` is the whole account in one answer (Agent37 has no pages: checked on 18 Nov, and an answer that says more is to come is refused there),
+    // so a machine of this Brick that was never written down is found here too
     const listed = await this.client.listInstances();
     const made = listed.filter((instance) => instance.metadata?.creation_id === creationId(botId) && !['deleting', 'deleted'].includes(String(instance.status)));
     for (const instance of made) await this.remove(instance.id);
-    // A Brick whose every make was written down, and that has its machine's reference, had that machine removed by it: the listing is a second look only.
-    // Otherwise (no reference, or a make that failed with a machine possibly left unwritten) the listing is the only place to look, and Agent37's docs say
-    // nothing of pages or of a cut: "newest first" is all. A machine of this Brick is newer than its computer record, so a listing that holds a machine
-    // made no later than that record reaches back far enough to hold every one; one that does not cannot rule a machine out, and the purge stays open
-    if (opts.mayHaveUnrecorded) {
-      const since = opts.since ? opts.since.getTime() : null;
-      const reaches = since !== null && listed.some((instance) => typeof instance.created === 'number' && instance.created * 1000 <= since);
-      if (!reaches) throw new Error('The list of machines does not reach back to when this Brick’s computer was made, so a machine that was never written down cannot be ruled out');
-    }
   }
 
   async awake(ref: string): Promise<boolean> {

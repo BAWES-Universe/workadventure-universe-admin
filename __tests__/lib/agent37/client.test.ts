@@ -35,6 +35,19 @@ describe('the Agent37 client', () => {
     expect(stubborn.sleep).toHaveBeenCalledTimes(3);
   });
 
+  it('hands back the whole list as it comes, and refuses one that says more is to come, so a part of the machines never passes for all of them', async () => {
+    const machine = { id: 'a', status: 'running', url: 'https://a.agent37.app', created: 1793794006 };
+    const whole = client([json(200, { data: [machine] })]);
+    await expect(whole.api.listInstances()).resolves.toEqual([machine]);
+    for (const extra of [{ next_cursor: 'abc' }, { has_more: true }, { next: '/v1/instances?page=2' }, { links: { next: 'x' } }, { pagination: { next: 2 } }, { total: 5 }]) {
+      const cut = client([json(200, { data: [machine], ...extra })]);
+      await expect(cut.api.listInstances()).rejects.toThrow('only part of them');
+    }
+    // Words that say nothing is left do not refuse it
+    const done = client([json(200, { data: [machine], has_more: false, next: null, total: 1 })]);
+    await expect(done.api.listInstances()).resolves.toEqual([machine]);
+  });
+
   it('never asks again for a create: after a lost answer the caller looks first', async () => {
     const { api, calls } = client([json(502, { error: 'bad_gateway' }), json(201, { id: 'x' })]);
     await expect(api.createInstance({ template: 't' })).rejects.toBeInstanceOf(Agent37Error);

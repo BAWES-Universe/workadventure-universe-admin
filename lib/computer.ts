@@ -897,10 +897,7 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
         // caller is told, and keeps the room it held for the disk until the sweep has written it (the job is not failed for the books)
         await writeKeptDisk(botId, provider, kept);
       } catch (error) {
-        // A make that failed after a machine may have been asked for (no answer, a gateway failure, a machine that did not come up) may have left one nobody
-        // wrote down: that is kept for good, so a purge never takes the reference it has for the only machine there is. One refused before any was asked for leaves none
-        const none = (error as { noMachineMade?: boolean } | null)?.noMachineMade === true;
-        await prisma.brickComputer.updateMany({ where: { botId, providerRef: null }, data: { machine: 'none', ...(none ? {} : { makeUnsureAt: now }) } });
+        await prisma.brickComputer.updateMany({ where: { botId, providerRef: null }, data: { machine: 'none' } });
         throw error;
       }
     } else {

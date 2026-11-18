@@ -68,7 +68,7 @@ export async function purgeBrick(id: string, now: Date = new Date()): Promise<Pu
       // What is read here is read before the Brick goes: its machine, and the files people sent it that live at the uploader. The computer row is held
       // while it is read: a machine asked for at this moment either has its mark written before it (and is looked for) or finds the row gone and makes none
       await tx.$queryRaw`SELECT 1 FROM "brick_computers" WHERE "bot_id" = ${id} FOR UPDATE`;
-      const computer = await tx.brickComputer.findUnique({ where: { botId: id }, select: { provider: true, providerRef: true, machine: true, makeTriedAt: true, makeUnsureAt: true, createdAt: true } });
+      const computer = await tx.brickComputer.findUnique({ where: { botId: id }, select: { provider: true, providerRef: true, machine: true, makeTriedAt: true } });
       const sent = await tx.botFile.findMany({ where: { botId: id, source: 'person', bucket: { not: null }, fileId: { not: null } }, select: { bucket: true, fileId: true } });
       // The delete itself decides: a Brick Undo took back at this moment is not touched (nothing below runs for it)
       const { count } = await tx.bot.deleteMany({ where });
@@ -107,7 +107,7 @@ export async function purgeBrick(id: string, now: Date = new Date()): Promise<Pu
       const machineMayExist = !!computer && computer.machine !== 'cold' && !neverMade;
       await tx.brickPurge.upsert({
         where: botId,
-        create: { botId: id, ownerId: brick.ownerId, provider: computer?.provider ?? null, providerRef: computer?.providerRef ?? null, machinePending: machineMayExist, machineSince: computer?.createdAt ?? null, makeUnsure: !!computer?.makeUnsureAt, copyPending: !!computer || saving, chatPending: true, nextTryAt: now, purgedAt: now },
+        create: { botId: id, ownerId: brick.ownerId, provider: computer?.provider ?? null, providerRef: computer?.providerRef ?? null, machinePending: machineMayExist, copyPending: !!computer || saving, chatPending: true, nextTryAt: now, purgedAt: now },
         update: {},
       });
       return true;
@@ -143,7 +143,7 @@ export async function finishOutside(botId: string, now: Date = new Date()): Prom
     } else {
       try {
         if (note.providerRef) await provider.remove(note.providerRef);
-        await provider.removeAllFor?.(botId, { mayHaveUnrecorded: !note.providerRef || note.makeUnsure, since: note.machineSince });
+        await provider.removeAllFor?.(botId);
         machineGone = true;
       } catch (error) {
         console.error('[Brick purge] A machine could not be removed:', error instanceof Error ? error.message : 'unknown');

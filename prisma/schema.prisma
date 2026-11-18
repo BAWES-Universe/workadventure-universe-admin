@@ -3211,9 +3211,6 @@ model BrickComputer {
   // Written when a machine was first asked for, before the provider is called and never cleared: a record without one never had a machine made for it,
   // so a purge has nothing to look for (a failed or timed-out make may still have left one at the provider)
   makeTriedAt   DateTime? @map("make_tried_at")
-  // Written when a make failed in a way that may have left a machine at the provider nobody wrote down (an answer that never came, a machine that did not come up
-  // healthy), never cleared: a purge of a Brick with this mark cannot rely on the reference it has, and must prove the provider's listing reaches back far enough
-  makeUnsureAt  DateTime? @map("make_unsure_at")
   lastWorkedAt  DateTime? @map("last_worked_at")
   // The last saved copy of its home folder: what Files shows when Computer is off, and which day a restore came from
   filesBytes    BigInt    @default(0) @map("files_bytes")
@@ -3331,10 +3328,6 @@ model BrickPurge {
   providerRef    String?   @map("provider_ref") @db.VarChar(255)
   // Still to delete outside: the machine at its provider (also any made for this Brick that was never written down), the saved files in our bucket
   machinePending Boolean   @default(false) @map("machine_pending")
-  // When this Brick's computer record was made (no machine of it is older) and whether a make of it ever failed with a machine possibly left unwritten:
-  // what a provider's listing must reach back to, to show nothing of it is left that was never written down
-  machineSince   DateTime?  @map("machine_since")
-  makeUnsure     Boolean   @default(false) @map("make_unsure")
   copyPending    Boolean   @default(false) @map("copy_pending")
   // Its chat rooms (Matrix) still to clear: the bot server holds the chat account, so it asks for this list and confirms each Brick it cleared
   chatPending    Boolean   @default(false) @map("chat_pending")

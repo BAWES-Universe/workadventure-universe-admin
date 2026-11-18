@@ -270,26 +270,6 @@ run('purging a deleted Brick, in a real database', () => {
       expect(await prisma.codeJob.findFirstOrThrow({ where: { botId: other.id } })).toMatchObject({ result: { printed: 'a private line the code printed' } });
     });
 
-    it('looks for a machine nobody wrote down in the provider’s listing, reaching back to when the Brick’s computer was made, for a Brick with no reference or whose make ever failed: one whose every make was written down needs no such proof', async () => {
-      const sara = await person('sara');
-      const clean = await fullBrick(sara, 'Clean', { computer: true });
-      const unsure = await fullBrick(sara, 'Unsure', { computer: true });
-      const unwritten = await fullBrick(sara, 'Unwritten');
-      await giveComputer(unwritten.id, sara.id);
-      await prisma.brickComputer.update({ where: { botId: unwritten.id }, data: { makeTriedAt: NOW } });
-      // A make of this one failed once (the answer never came), and then worked: its reference is written, but a machine may have been left behind unwritten
-      await prisma.brickComputer.update({ where: { botId: unsure.id }, data: { makeUnsureAt: NOW } });
-      const since = async (id: string) => (await prisma.brickComputer.findUniqueOrThrow({ where: { botId: id } })).createdAt;
-      const [cleanSince, unsureSince, unwrittenSince] = [await since(clean.id), await since(unsure.id), await since(unwritten.id)];
-      for (const one of [clean, unsure, unwritten]) await deleteBrick(one.id, sara.id, NOW);
-      await removeGoneBricks(later(8), sara.id);
-      const asked = new Map(provider.calls.filter((call) => call.name === 'removeAllFor').map((call, at) => [call.ref, provider.removeAllForOpts[at]]));
-      expect(asked.get(clean.id)).toEqual({ mayHaveUnrecorded: false, since: cleanSince });
-      expect(asked.get(unsure.id)).toEqual({ mayHaveUnrecorded: true, since: unsureSince });
-      expect(asked.get(unwritten.id)).toEqual({ mayHaveUnrecorded: true, since: unwrittenSince });
-      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: unsure.id } })).toMatchObject({ makeUnsure: true, machineSince: unsureSince });
-    });
-
     it('is the same whether the sweep asked for one person or for everyone, and asked twice changes nothing more', async () => {
       const sara = await person('sara');
       const brick = await fullBrick(sara, 'Twice Brick');
@@ -514,7 +494,7 @@ run('purging a deleted Brick, in a real database', () => {
       await removeGoneBricks(later(8), sara.id);
       const note = await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } });
       expect(note).toMatchObject({ chatPending: true, doneAt: null });
-      expect(Object.keys(note).sort()).toEqual(['attempts', 'botId', 'chatPending', 'copyPending', 'doneAt', 'lastTriedAt', 'machinePending', 'machineSince', 'makeUnsure', 'nextTryAt', 'ownerId', 'provider', 'providerRef', 'purgedAt']);
+      expect(Object.keys(note).sort()).toEqual(['attempts', 'botId', 'chatPending', 'copyPending', 'doneAt', 'lastTriedAt', 'machinePending', 'nextTryAt', 'ownerId', 'provider', 'providerRef', 'purgedAt']);
     });
 
     it('lists, to the bot server only, the Bricks whose chats are to clear (the id and nothing else), and a Brick Undo gave back is never on it', async () => {

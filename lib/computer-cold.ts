@@ -527,8 +527,6 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
       try {
         made = await provider.create(botId);
       } catch (error) {
-        // As for any make: one that failed after a machine may have been asked for may have left one nobody wrote down, which a purge must then look for in the provider's listing
-        if ((error as { noMachineMade?: boolean } | null)?.noMachineMade !== true) await prisma.brickComputer.updateMany({ where: { botId }, data: { makeUnsureAt: new Date() } });
         return giveBack(new ColdError(`A computer could not be made: ${words(error)}`, 'restore'));
       }
       // Written at once, so a server that stops here leaves a reference to find and remove

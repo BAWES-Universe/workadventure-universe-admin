@@ -10,6 +10,17 @@
  */
 
 export const AGENT37_API = 'https://api.agent37.com';
+
+/** An answer that says more is to come: a next page or cursor, a "more" flag, or a total larger than what came. */
+export function morePages(answer: Record<string, unknown>, got: number): boolean {
+  const said = ['next', 'next_cursor', 'nextCursor', 'next_page', 'nextPage', 'cursor', 'has_more', 'hasMore', 'more'];
+  if (said.some((key) => !!answer[key])) return true;
+  const links = answer.links as Record<string, unknown> | undefined;
+  if (links && typeof links === 'object' && !!links.next) return true;
+  const pagination = answer.pagination as Record<string, unknown> | undefined;
+  if (pagination && typeof pagination === 'object' && (!!pagination.next || !!pagination.next_cursor || pagination.has_more === true)) return true;
+  return ['total', 'count', 'total_count'].some((key) => typeof answer[key] === 'number' && (answer[key] as number) > got);
+}
 /** Where commands run: the instance address is for the agent, this one is for the machine. Signed links cannot authorize it. */
 export const AGENT37_SANDBOX = 'https://sandbox.agent37.app';
 
@@ -26,8 +37,6 @@ export interface Instance {
   /** Epoch seconds; present only while sleeping or waking. */
   slept_at?: number | null;
   past_due?: boolean;
-  /** When it was made, in epoch seconds. */
-  created?: number;
   /** The revision of the template this machine's image came from; behind the template's own revision means it can be updated. */
   template_revision?: number | null;
   /** What the machine may reach on the internet, as Agent37 stored it (domains are lowercased, a bare address becomes /32). Not every answer carries it. */
@@ -211,8 +220,12 @@ export class Agent37Client {
 
   /** Newest first. The docs say nothing about pages, so this is the newest instances: enough to find one that was just made. */
   async listInstances(): Promise<Instance[]> {
-    const answer = await this.again(() => this.call<{ data?: Instance[] }>('GET', `${this.api}/v1/instances`, this.account()));
-    return Array.isArray(answer?.data) ? answer.data : [];
+    const answer = await this.again(() => this.call<{ data?: Instance[]; [more: string]: unknown }>('GET', `${this.api}/v1/instances`, this.account()));
+    const rows = Array.isArray(answer?.data) ? answer.data : [];
+    // The answer is the whole account (checked 18 Nov against the account: the answer is only `data`, newest first, each machine with `created`, and `limit`, `page`, `cursor` and `offset` change nothing). If Agent37 ever says more is to come, a list that is
+    // not all of it must not pass for all of it: a make would look for its machine in it, and a purge would call a Brick clear
+    if (answer && morePages(answer, rows.length)) throw new Error('Agent37 says the list of machines is only part of them');
+    return rows;
   }
 
   /** Starts a stopped instance or wakes a sleeping one. 200 when done, 202 while a host move finishes: either way, look again. */
