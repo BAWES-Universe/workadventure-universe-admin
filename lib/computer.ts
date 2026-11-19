@@ -935,17 +935,25 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
  */
 async function giveBackMissingModelCalls(batch: number, botId?: string): Promise<void> {
   const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
+  // A job whose give-back keeps failing for a reason of its own still matches on every sweep, so a plain "oldest first" would let it (and others like it)
+  // take the whole batch for ever, and a plain LIMIT would take whichever the database returns. Half the batch is the oldest and half the newest of the jobs
+  // that match, so a job that can never be given back holds one slot at most and never keeps a newer one out
+  const half = Math.max(1, Math.ceil(batch / 2));
   try {
     const jobs = await prisma.$queryRaw<Array<{ id: string; personId: string }>>(Prisma.sql`
-      SELECT DISTINCT j."id", j."person_id" AS "personId"
-      FROM "computer_jobs" j
-      WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error') ${only}
-        AND (
-          EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
-          -- ...or credit the job drew that has not gone back (a give-back that failed once is found again: giving back is safe to repeat)
-          OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros")
-        )
-      LIMIT ${batch}`);
+      SELECT "id", "personId" FROM (
+        SELECT j."id", j."person_id" AS "personId",
+          ROW_NUMBER() OVER (ORDER BY j."ended_at" ASC NULLS LAST, j."id") AS "oldest",
+          ROW_NUMBER() OVER (ORDER BY j."ended_at" DESC NULLS LAST, j."id") AS "newest"
+        FROM "computer_jobs" j
+        WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error') ${only}
+          AND (
+            EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
+            -- ...or credit the job drew that has not gone back (a give-back that failed once is found again: giving back is safe to repeat)
+            OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros")
+          )
+      ) matching
+      WHERE "oldest" <= ${half} OR "newest" <= ${half}`);
     for (const job of jobs) await giveBackModelCalls(job.id, job.personId);
   } catch (error) {
     console.error('[Computer] Could not look for a failed job’s model calls:', error instanceof Error ? error.message : 'unknown');

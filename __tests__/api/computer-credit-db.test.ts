@@ -129,6 +129,8 @@ run('credit for computers, on the real books', () => {
     issuer = { userId: admin.id, superAdmin: true };
   });
   beforeEach(async () => {
+    // The give-back is the real one again, whatever a test did to it
+    (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(jest.requireActual('@/lib/credit-spend').refundHold);
     await wipe();
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
     setComputerProviderForTests(new FakeComputerProvider());
@@ -331,6 +333,37 @@ run('credit for computers, on the real books', () => {
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
       const holds = await prisma.creditHold.findMany({ where: { jobKey: jobId } });
       expect(holds.map((hold) => Number(hold.refundedMicros)).sort()).toEqual([20_000, 30_000]);
+    });
+
+    it('the sweep takes the oldest and the newest of the jobs it must give back, so jobs whose give-back never works cannot keep a newer one out', async () => {
+      // Seven people, each with a job that drew credit; the give-back of the first six never works (their books are out of reach), the last one's works from the sweep
+      const jobs: Array<{ sara: Awaited<ReturnType<typeof running>>; jobId: string }> = [];
+      for (const name of ['ana', 'bea', 'cy', 'dee', 'eli', 'fay', 'gus']) {
+        const sara = await running(name);
+        const { jobId, token } = await job(sara);
+        await gift([sara.id], 'computers', 1_000_000);
+        await call(token, 'a', 10_000, 30_000);
+        jobs.push({ sara, jobId });
+      }
+      const stuck = jobs.slice(0, 6).map((one) => one.jobId);
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const actual = jest.requireActual('@/lib/credit-spend');
+      (creditSpend.refundHold as jest.Mock).mockImplementation(async (...args: unknown[]) => {
+        throw new Error(`the books are out of reach (${String(args.length)})`);
+      });
+      // They failed in this order: the six that will stay stuck first, the last one newest
+      for (const [index, one] of jobs.entries()) await failedOnOurSide(one.jobId, new Date(NOW.getTime() + (10 + index) * 60_000));
+      for (const one of jobs) expect((await computerCredit(prisma as never, one.sara.id, NOW)).availableMicros).toBe(1_000_000 - 30_000);
+      // The books answer again, for the newest only (the older ones stay out of reach for their own reasons)
+      (creditSpend.refundHold as jest.Mock).mockImplementation(async (input: { holdKey: string }, at?: Date) => {
+        if (stuck.some((id) => input.holdKey.includes(id))) throw new Error('this one never works');
+        return actual.refundHold(input, at);
+      });
+      // A batch of 2: one oldest and one newest. Plain "oldest first" (or a LIMIT with no order) would take the stuck ones and never reach the newest
+      await sweepComputers(new Date(NOW.getTime() + 60 * 60_000), 2);
+      quiet.mockRestore();
+      expect((await computerCredit(prisma as never, jobs[6].sara.id, NOW)).availableMicros).toBe(1_000_000);
+      for (const one of jobs.slice(0, 6)) expect((await computerCredit(prisma as never, one.sara.id, NOW)).availableMicros).toBe(1_000_000 - 30_000);
     });
 
     it('a job that failed on our side counts nothing against the month and keeps nothing drawn from credit: calls, time, a late call, and asked twice is once', async () => {
