@@ -41,7 +41,7 @@ describe('a Brick that lives in a room: the migration', () => {
   });
 
   it('gives a Brick one home at most and a room any number of Bricks, in rooms, Bricks and people that exist', () => {
-    expect(result.checks).toEqual({ secondHomeForTheSameBrick: false, twoBricksInOneRoom: true, noRoom: false, noBot: false, noPerson: false });
+    expect(result.checks).toEqual({ secondHomeForTheSameBrick: false, twoBricksInOneRoom: true, noRoom: false, noBot: false, noPerson: false, samePlaceWithARealPerson: true });
   });
 
   it('never gives a Brick a room of its own', () => {

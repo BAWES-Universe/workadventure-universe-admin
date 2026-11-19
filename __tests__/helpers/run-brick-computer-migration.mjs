@@ -36,12 +36,15 @@ const everything = async () => ({
 const before = await everything();
 await run(TARGET);
 const after = await everything();
-const counts = async (botId) => {
+// The effects are counted by their own ids, never through the jobs they belonged to: once the jobs are gone that join finds nothing
+// even if effects were left behind
+const counts = async (botId, effectIds = null) => {
   const where = botId ? `WHERE bot_id = '${botId}'` : '';
+  const effectsWhere = effectIds ? `WHERE id IN (${effectIds.length > 0 ? effectIds.map((id) => `'${id}'`).join(', ') : 'NULL'})` : '';
   return {
     computers: (await db.query(`SELECT count(*)::int AS n FROM brick_computers ${where}`)).rows[0].n,
     jobs: (await db.query(`SELECT count(*)::int AS n FROM computer_jobs ${where}`)).rows[0].n,
-    effects: (await db.query(`SELECT count(*)::int AS n FROM computer_effects ${botId ? `WHERE job_id IN (SELECT id FROM computer_jobs WHERE bot_id = '${botId}')` : ''}`)).rows[0].n,
+    effects: (await db.query(`SELECT count(*)::int AS n FROM computer_effects ${effectsWhere}`)).rows[0].n,
   };
 };
 const countsAfterMigration = await counts();
@@ -105,8 +108,10 @@ const checks = {
 };
 
 // Deleting the Brick takes its computer, jobs and effects with it; the meter's books keep what happened (nothing here points at them)
+const effectIdsOfBrick1 = (await db.query(`SELECT e.id FROM computer_effects e JOIN computer_jobs j ON j.id = e.job_id WHERE j.bot_id = 'brick1'`)).rows.map((row) => row.id);
+const beforeBrickGone = await counts('brick1', effectIdsOfBrick1);
 await db.exec(`DELETE FROM bots WHERE id = 'brick1'`);
-const afterBrickGone = await counts('brick1');
+const afterBrickGone = await counts('brick1', effectIdsOfBrick1);
 
-console.log(JSON.stringify({ before, after, countsAfterMigration, checks, afterBrickGone }));
+console.log(JSON.stringify({ before, after, countsAfterMigration, checks, beforeBrickGone, afterBrickGone }));
 await db.close();
