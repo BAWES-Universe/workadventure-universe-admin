@@ -852,7 +852,7 @@ run('the bounded Instant executor, in a real database', () => {
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
       const { pauseInstant } = await import('@/lib/instant/state');
-      setInstantHooks({ beforeRun: async () => { await pauseInstant('manual', sara); return undefined; } });
+      setInstantHooks({ beforeRun: async () => { await pauseInstant('manual', sara); return null; } });
       const key = callId();
       expect(await runInstant(ask({ callId: key }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'paused' });
       expect(f.funds.reserve).not.toHaveBeenCalled();
