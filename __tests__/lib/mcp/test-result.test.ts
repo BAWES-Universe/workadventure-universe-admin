@@ -65,6 +65,9 @@ describe('redactCredentialMaterial', () => {
     expect(redactCredentialMaterial('Authorization: Bearer abc=')).toBe('Authorization: Bearer [redacted]');
     expect(redactCredentialMaterial('Authorization: Bearer abc==')).toBe('Authorization: Bearer [redacted]');
     expect(redactCredentialMaterial('Authorization: Bearer resource_metadata123')).toBe('Authorization: Bearer [redacted]');
+    // A padded token whose letters happen to spell the parameter name is a credential: only the name followed by a value is the parameter
+    expect(redactCredentialMaterial('Authorization: Bearer resource_metadata=')).toBe('Authorization: Bearer [redacted]');
+    expect(redactCredentialMaterial('Authorization: Bearer resource_metadata==')).toBe('Authorization: Bearer [redacted]');
     expect(redactCredentialMaterial('Bearer error="invalid_token"')).toBe('Bearer error="invalid_token"');
     expect(redactCredentialMaterial('Bearer realm=mcp, error=invalid_token')).toBe('Bearer realm=mcp, error=invalid_token');
   });
