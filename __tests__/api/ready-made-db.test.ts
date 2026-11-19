@@ -97,16 +97,20 @@ run('ready-made apps through the adapter, in a real database', () => {
   }
 
   it('is not there at all while the adapter is off: the same answer as a route that does not exist', async () => {
+    // A real grant first, made while the adapter was on: the use is turned away because the adapter is off, not because nothing is there
+    const { serverId } = await connectedAndGranted();
+    const meterBefore = await prisma.meterEvent.count({ where: { personId: sara } });
     setAdapterForTests(null);
-    await list();
     asSara();
     const response = await connect();
     expect(response.status).toBe(404);
-    expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(0);
+    // The connection made while it was on is the only one: the tap while it is off added nothing
+    expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(1);
     mockUser.current = { id: boss, email: 'boss@example.test' };
     expect((await adminGet(request('/api/admin/ready-made-apps'))).status).toBe(404);
     expect((await adminPut(request('/api/admin/ready-made-apps', { method: 'PUT', body: { apps: {} } }))).status).toBe(404);
-    expect((await useIt()).status).toBe(404);
+    expect((await useIt({ serverId })).status).toBe(404);
+    expect(await prisma.meterEvent.count({ where: { personId: sara } })).toBe(meterBefore);
   });
 
   it('opens one account at the provider when the same person taps connect twice at the same moment', async () => {
@@ -568,7 +572,11 @@ run('ready-made apps through the adapter, in a real database', () => {
       asSara();
       return testServer(request(`/api/bots/${saraBrick}/mcp-servers/${serverId}/test`, { method: 'POST' }), params({ id: saraBrick, serverId }));
     };
-    const answerOf = (status: number, body: string, sessionId: string | null = null) => ({ status, contentType: 'text/event-stream', sessionId, body });
+    // What the provider sends: a stream is labelled as one and each of its events ends with a blank line; plain JSON is labelled as JSON
+    const answerOf = (status: number, body: string, sessionId: string | null = null) => {
+      const stream = body.startsWith('event:');
+      return { status, contentType: stream ? 'text/event-stream' : 'application/json', sessionId, body: stream && !body.endsWith('\n\n') ? `${body}\n` : body };
+    };
 
     it('opens a session and lists the tools through the adapter, not with a plain request that would be turned away', async () => {
       const { adapter, serverId } = await connectedAndGranted();

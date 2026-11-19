@@ -311,7 +311,12 @@ run('Connect GitHub for Bricks, in a real database', () => {
     // A look changes nothing, so the same call may run again; a change runs once
     expect((await send({ jsonrpc: '2.0', id: '2', method: 'tools/call', params: { name: 'github_whoami', arguments: {} } }, 'call-1')).status).toBe(200);
     const openIssue = { jsonrpc: '2.0', id: '4', method: 'tools/call', params: { name: 'github_create_issue', arguments: { repo: 'acme/tools', title: 'Broken' } } };
-    expect((await send(openIssue, 'call-3')).status).toBe(200);
+    const opened7 = await send(openIssue, 'call-3');
+    expect(opened7.status).toBe(200);
+    // The answer is the issue that was made, not a tool error wrapped in a 200
+    const made = JSON.parse((await opened7.json()).body).result;
+    expect(made.isError).not.toBe(true);
+    expect(JSON.parse(made.content[0].text)).toMatchObject({ number: 7 });
     expect((await send(openIssue, 'call-3')).status).toBe(409);
     expect(calls.filter((call) => call.key.startsWith('POST')).length).toBe(1);
     expect(await prisma.meterEvent.count({ where: { eventId: { startsWith: `github:${saraBrick}:` } } })).toBe(1);
