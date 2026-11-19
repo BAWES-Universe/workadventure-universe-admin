@@ -21,7 +21,7 @@ export const runtime = 'nodejs';
 export async function POST(request: NextRequest) {
   try {
     requireServiceToken(request);
-    // Each removal is written down before it is made, so one that fails halfway still tells the bot server about the ones already gone
+    // Each removal is written down by the very statement that deletes the Brick, so one that fails halfway still tells the bot server about the ones already gone
     try {
       await removeGoneBricks();
     } catch (error) {

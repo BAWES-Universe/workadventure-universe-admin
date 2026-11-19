@@ -197,6 +197,109 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       }
     });
 
+    it('marks its claims by the database\'s clock, so a server whose clock runs ahead cannot make the machine skip the later prepare of another: the key left is the later one\'s', async () => {
+      const { jobId } = await running();
+      // The first prepare is made by a server whose clock is an hour ahead
+      jest.useFakeTimers({
+        now: Date.now() + 3_600_000,
+        doNotFake: ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'],
+      });
+      try {
+        expect(await prepareJob(jobId, RELAY, NOW)).toMatchObject({ ok: true });
+      } finally {
+        jest.useRealTimers();
+      }
+      expect(await prepareJob(jobId, RELAY, minutes(1))).toMatchObject({ ok: true });
+      const written = fake.commands.filter((entry) => entry.command.includes('relay.json'));
+      expect(written).toHaveLength(2);
+      const home = mkdtempSync(join(tmpdir(), 'universe-relay-'));
+      try {
+        // Both reach the machine in the order they were made
+        for (const entry of written) expect(spawnSync('sh', ['-c', entry.command], { env: { ...process.env, HOME: home }, encoding: 'utf8' }).status).toBe(0);
+        const kept = JSON.parse(readFileSync(join(home, '.universe', 'relay.json'), 'utf8')) as { token: string };
+        const secondToken = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(written[1].command)?.[1] ?? '';
+        expect(kept.token).toBe(secondToken);
+        expect((await verifyJobToken(kept.token, 'model', minutes(2))).ok).toBe(true);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it('a prepare whose claim went to another before it made its key ends that key at once: of the keys the job has, only the one the claim\'s holder wrote is good', async () => {
+      const { jobId } = await running();
+      let letGo: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (letGo = resolve));
+      let reached: () => void = () => undefined;
+      const atTheMint = new Promise<void>((resolve) => (reached = resolve));
+      const real = prisma.computerJobToken.create.bind(prisma.computerJobToken) as (args: unknown) => Promise<unknown>;
+      let held = false;
+      const spy = jest.spyOn(prisma.computerJobToken, 'create').mockImplementation(((args: unknown) => {
+        if (!held) {
+          held = true;
+          reached();
+          return gate.then(() => real(args));
+        }
+        return real(args);
+      }) as never);
+      let slow: ReturnType<typeof prepareJob> | null = null;
+      try {
+        slow = prepareJob(jobId, RELAY, NOW);
+        await atTheMint;
+        // Its claim lapsed meanwhile (a stopped process) and another prepare took it, made its key and wrote it
+        await prisma.computerJob.update({ where: { id: jobId }, data: { prepareClaimedAt: new Date(Date.now() - 50_000) } });
+        expect(await prepareJob(jobId, RELAY, minutes(1))).toMatchObject({ ok: true });
+        const written = fake.commands.filter((entry) => entry.command.includes('relay.json'));
+        expect(written).toHaveLength(1);
+        const goodToken = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(written[0].command)?.[1] ?? '';
+        // The slow one makes its key only now, after the other's keys were ended: it is made good for a moment
+        letGo();
+        expect(await slow).toEqual({ ok: false, reason: 'preparing' });
+        // ...and ended before it was ever written anywhere: the keys of the job that are good are the other's alone
+        const live = await prisma.computerJobToken.findMany({ where: { jobId, revokedAt: null } });
+        expect(live).toHaveLength(1);
+        expect((await verifyJobToken(goodToken, 'model', minutes(2))).ok).toBe(true);
+        expect(fake.commands.filter((entry) => entry.command.includes('relay.json'))).toHaveLength(1);
+      } finally {
+        letGo();
+        spy.mockRestore();
+        await slow?.catch(() => undefined);
+      }
+    });
+
+    it('a prepare whose claim went to another while its key was being written leaves no key of its own good: of the keys the job has, only the one the claim\'s holder wrote works', async () => {
+      const { jobId } = await running();
+      let letGo: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (letGo = resolve));
+      let reached: () => void = () => undefined;
+      const atTheWrite = new Promise<void>((resolve) => (reached = resolve));
+      let writes = 0;
+      fake.execAnswer = async () => {
+        writes += 1;
+        if (writes === 1) {
+          reached();
+          await gate;
+          return { exitCode: 1 };
+        }
+        return {};
+      };
+      const slow = prepareJob(jobId, RELAY, NOW);
+      try {
+        await atTheWrite;
+        await prisma.computerJob.update({ where: { id: jobId }, data: { prepareClaimedAt: new Date(Date.now() - 50_000) } });
+        expect(await prepareJob(jobId, RELAY, minutes(1))).toMatchObject({ ok: true });
+        const goodToken = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(fake.commands.at(-1)?.command ?? '')?.[1] ?? '';
+        letGo();
+        // Its own write failed and its claim is gone: it says so, and changes nothing of the other's
+        expect((await slow).ok).toBe(false);
+        const live = await prisma.computerJobToken.findMany({ where: { jobId, revokedAt: null } });
+        expect(live).toHaveLength(1);
+        expect((await verifyJobToken(goodToken, 'model', minutes(2))).ok).toBe(true);
+      } finally {
+        letGo();
+        await slow.catch(() => undefined);
+      }
+    });
+
     it('says the job is not the runner’s to act on when the person took over while the key was being written', async () => {
       const { sara, jobId } = await running();
       let taken = false;
@@ -444,17 +547,81 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       }
     });
 
+    it('stops keeping its claim fresh after a few minutes, so an agent that never says the turn\'s id cannot hold the job for ever: the claim lapses and the next start works', async () => {
+      const { jobId } = await running();
+      let letGo: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (letGo = resolve));
+      const open = jest.spyOn(fake, 'openTurn').mockImplementation((async () =>
+        (async function* () {
+          await gate;
+          yield { type: 'completed', outputText: '', usage: null } as TurnEvent;
+        })()) as never);
+      const beats: Array<() => unknown> = [];
+      const realInterval = global.setInterval;
+      const realClear = global.clearInterval;
+      const interval = jest.spyOn(global, 'setInterval').mockImplementation(((handler: () => unknown, ms?: number, ...rest: unknown[]) => {
+        if (ms === 15_000) {
+          beats.push(handler);
+          return realInterval(() => undefined, 1_000_000);
+        }
+        return (realInterval as unknown as (...args: unknown[]) => NodeJS.Timeout)(handler, ms, ...rest);
+      }) as never);
+      const cleared: unknown[] = [];
+      const clear = jest.spyOn(global, 'clearInterval').mockImplementation(((handle: never) => {
+        cleared.push(handle);
+        return realClear(handle);
+      }) as never);
+      let now: jest.SpyInstance | null = null;
+      try {
+        const started = await startTurn(jobId, 'go');
+        if (!started.ok) throw new Error('no turn');
+        const waiting = started.events.next();
+        for (let wait = 0; wait < 100 && beats.length === 0; wait++) await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(beats).toHaveLength(1);
+        // Within the cap it is renewed
+        const before = (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt!;
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await beats[0]();
+        const renewed = (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt!;
+        expect(renewed.getTime()).toBeGreaterThan(before.getTime());
+        // Ten minutes on, still without an id: it is not renewed again
+        const real = Date.now();
+        now = jest.spyOn(Date, 'now').mockReturnValue(real + 10 * 60_000);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await beats[0]();
+        now.mockRestore();
+        now = null;
+        expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt!.getTime()).toBe(renewed.getTime());
+        expect(cleared.length).toBeGreaterThan(0);
+        // The claim lapses as one left by a server that stopped does, and the next start is not turned away for good
+        await prisma.computerJob.update({ where: { id: jobId }, data: { turnClaimedAt: new Date(Date.now() - 50_000) } });
+        const next = await startTurn(jobId, 'again');
+        expect(next.ok).toBe(true);
+        expect(open).toHaveBeenCalledTimes(2);
+        if (next.ok) await next.events.return(undefined);
+        letGo();
+        await started.events.return(undefined);
+        void waiting;
+      } finally {
+        letGo();
+        now?.mockRestore();
+        open.mockRestore();
+        interval.mockRestore();
+        clear.mockRestore();
+      }
+    });
+
     it('looks at the job again once it holds the claim: a turn another start kept in between is busy (its id is given), and nothing is opened', async () => {
       const { jobId } = await running();
-      const real = prisma.computerJob.updateMany.bind(prisma.computerJob) as (args: { data?: Record<string, unknown> }) => Promise<{ count: number }>;
+      const real = prisma.$queryRaw.bind(prisma) as (query: { sql: string }) => Promise<unknown>;
       let done = false;
-      const spy = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation(((args: { data?: Record<string, unknown> }) => {
-        if (!done && args?.data && 'turnClaimedAt' in args.data) {
+      const spy = jest.spyOn(prisma, '$queryRaw').mockImplementation(((query: { sql: string }) => {
+        if (!done && typeof query?.sql === 'string' && query.sql.includes('"turn_claimed_at"')) {
           done = true;
           // Another start kept its turn's id just before this one's claim was taken
-          return prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-kept', agentSessionId: 'sess-kept' } }).then(() => real(args));
+          return prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-kept', agentSessionId: 'sess-kept' } }).then(() => real(query));
         }
-        return real(args);
+        return real(query);
       }) as never);
       try {
         // The turn the job holds is still running on the machine

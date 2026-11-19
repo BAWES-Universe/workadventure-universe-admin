@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { providerFor, fenceMachine } from '@/lib/computer';
 import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
@@ -54,10 +55,15 @@ type Claim = 'prepareClaimedAt' | 'turnClaimedAt';
  */
 async function claimOnJob(jobId: string, field: Claim, staleMs: number, waitMs: number): Promise<Date | 'busy' | 'gone'> {
   const deadline = Date.now() + waitMs;
+  // The mark is made by the database's clock, never a server's: servers' clocks differ, and a claim's mark is also what a later claim is told apart from
+  // (the machine keeps the write whose claim is later) and when a left claim lapses. One clock decides all of it. Kept to the millisecond the column holds.
+  const column = field === 'prepareClaimedAt' ? Prisma.raw('"prepare_claimed_at"') : Prisma.raw('"turn_claimed_at"');
   for (;;) {
-    const mark = new Date();
-    const claimed = await prisma.computerJob.updateMany({ where: { id: jobId, OR: [{ [field]: null }, { [field]: { lt: new Date(mark.getTime() - staleMs) } }] }, data: { [field]: mark } });
-    if (claimed.count === 1) return mark;
+    const marks = await prisma.$queryRaw<Array<{ mark: Date }>>(Prisma.sql`
+      UPDATE "computer_jobs" SET ${column} = date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
+      WHERE "id" = ${jobId} AND (${column} IS NULL OR ${column} < date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC') - make_interval(secs => ${staleMs / 1000}))
+      RETURNING ${column} AS "mark"`);
+    if (marks.length === 1) return marks[0].mark;
     if (!(await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } }))) return 'gone';
     if (Date.now() >= deadline) return 'busy';
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -74,6 +80,8 @@ const PREPARE_CLAIM_WAIT_MS = 5_000;
 // A turn's id is kept within the agent's own start limit (30 s) and a little more; a claim left by a server that stopped lapses soon after, so
 // the runner is not told to wait for minutes behind it
 const TURN_CLAIM_STALE_MS = 45_000;
+/** The most a start's claim is kept fresh while the agent has not said its turn's id: long past the agent's own start limit (30 s), so a turn that is only slow is covered. */
+const TURN_CLAIM_RENEW_MAX_MS = 5 * 60_000;
 
 export type Prepared =
   | { ok: true; expiresAt: Date }
@@ -104,6 +112,16 @@ export async function prepareJob(jobId: string, relay: unknown, now: Date = new 
 
 /** Whether the prepare that made this claim still holds it (another takes a claim that was left too long). */
 const holdsPrepareClaim = async (jobId: string, claim: Date) => (await prisma.computerJob.count({ where: { id: jobId, prepareClaimedAt: claim } })) === 1;
+
+/**
+ * A key whose write failed ends: every key of the job while this still holds the claim (as before), and in any case this one's own, so a prepare that lost its
+ * claim meanwhile never leaves the key it made good next to the one that took the claim over. (A key is only ever usable from the machine's relay file, which holds one:
+ * the key crosses only the write, so a key that was not written, or was written over, reaches no call.)
+ */
+async function endOwnKey(jobId: string, token: string, now: Date, claim: Date): Promise<void> {
+  await revokeJobTokens(jobId, now, { prepareClaim: claim });
+  await revokeToken(token, now);
+}
 
 async function prepareClaimed(jobId: string, address: string, now: Date, claim: Date): Promise<Prepared> {
   const live = await liveJob(jobId);
@@ -136,12 +154,12 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
   try {
     const done = await live.provider.exec(live.job.ref, command, { timeoutMs: 30_000 });
     if (done.exitCode !== 0) {
-      await revokeJobTokens(jobId, now, { prepareClaim: claim });
+      await endOwnKey(jobId, minted.token, now, claim);
       return { ok: false, reason: 'failed' };
     }
   } catch (error) {
     console.error('[Computer] Could not prepare a machine:', error instanceof Error ? error.message : 'unknown');
-    await revokeJobTokens(jobId, now, { prepareClaim: claim });
+    await endOwnKey(jobId, minted.token, now, claim);
     return { ok: false, reason: 'failed' };
   }
   // The person may have taken over while the key was being written: the key is then of an older control number (it is refused), and the
@@ -150,7 +168,10 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
   if (!after.ok) return after;
   if (after.job.generation !== generation) return { ok: false, reason: 'not_running' };
   // The claim went to another while the key was being written: that one's key is the one that stays, and the caller asks again
-  if (!(await holdsPrepareClaim(jobId, claim))) return { ok: false, reason: 'preparing' };
+  if (!(await holdsPrepareClaim(jobId, claim))) {
+    await revokeToken(minted.token, now);
+    return { ok: false, reason: 'preparing' };
+  }
   return { ok: true, expiresAt: minted.expiresAt };
 }
 
@@ -253,14 +274,24 @@ async function* keeping(
   // renewing it, and it lapses as before. The mark changes with each renewal, so it is the latest one that is let go of.
   let mark = start?.claim ?? null;
   let renewing: Promise<void> | null = null;
+  const began = Date.now();
   const beat =
     mark !== null && start
       ? setInterval(() => {
+          // Never for ever: an agent that accepts the turn and neither says its id nor ends the stream would keep the claim for good, and every start
+          // after it would be told "starting" for good. After the cap the claim lapses by itself, as one left by a server that stopped does
+          if (Date.now() - began > TURN_CLAIM_RENEW_MAX_MS) {
+            if (beat) clearInterval(beat);
+            return undefined;
+          }
           renewing = (async () => {
             if (mark === null) return;
-            const next = new Date();
-            const renewed = await prisma.computerJob.updateMany({ where: { id: job.jobId, turnClaimedAt: mark }, data: { turnClaimedAt: next } });
-            if (renewed.count === 1) mark = next;
+            // The new mark is the database's, as the claim's was
+            const renewed = await prisma.$queryRaw<Array<{ mark: Date }>>(Prisma.sql`
+              UPDATE "computer_jobs" SET "turn_claimed_at" = date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC')
+              WHERE "id" = ${job.jobId} AND "turn_claimed_at" = ${mark}
+              RETURNING "turn_claimed_at" AS "mark"`);
+            if (renewed.length === 1) mark = renewed[0].mark;
           })().catch(() => undefined);
           return renewing;
         }, TURN_CLAIM_STALE_MS / 3)
