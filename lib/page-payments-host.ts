@@ -347,7 +347,8 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
 
   const restoredOf = (body: Record<string, unknown> | null): { paidAt: string | null } => ({ paidAt: typeof body?.paidAt === 'string' ? body.paidAt : null });
 
-  const receiptFor = (): string | null => (buyer === 'guest' && options.pageUrl ? `${options.pageUrl.split('#')[0]}#receipt=${recoveryCode()}` : null);
+  // Only a code already settled (under the lock, or claimed) is ever put in a receipt: making one here could write it outside the lock
+  const receiptFor = (): string | null => (buyer === 'guest' && options.pageUrl && memoryCode ? `${options.pageUrl.split('#')[0]}#receipt=${memoryCode}` : null);
 
   /** Check payment and Restore each have a deadline of their own, and are cancelled when the host is destroyed: a stalled ask never blocks the next one for good. */
   const asking = new Set<AbortController>();
