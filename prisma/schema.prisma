@@ -1162,6 +1162,8 @@ model BrickItem {
   heldSince   DateTime?   @map("held_since")
   heldToldAt  DateTime?   @map("held_told_at")
   heldNoticeAt  DateTime? @map("held_notice_at")
+  // When the bot server was last asked to tell the person about a run that was given up without a report (handed out again until it confirms with markTold)
+  failureNoticeAt DateTime? @map("failure_notice_at")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
@@ -1383,6 +1385,8 @@ model BotMcpServer {
   signInLostStatus   Int?      @map("sign_in_lost_status")
   noAnswerAt         DateTime? @map("no_answer_at")
   reconnectedAt      DateTime? @map("reconnected_at")
+  // Set with a change of the sign-in state, cleared once the person's card follows: a card that could not be made is tried again
+  noticesPendingAt   DateTime? @map("notices_pending_at")
   // Who connected it last (a sign-in, a key or a token), the person told when its sign-in expires. Null for connections
   // made before this was kept: the bot's maker is told instead.
   connectedById      String?   @map("connected_by_id")
@@ -1443,6 +1447,10 @@ model AppConnection {
   signInLostStatus   Int?      @map("sign_in_lost_status")
   noAnswerAt         DateTime? @map("no_answer_at")
   reconnectedAt      DateTime? @map("reconnected_at")
+  // When a call with the current key last worked (written at most once a minute): a refusal seen before it is old news
+  lastWorkedAt       DateTime? @map("last_worked_at")
+  // Set with a change of the sign-in state, cleared once the cards of every Brick that uses it follow: a fan-out that failed is tried again
+  noticesPendingAt   DateTime? @map("notices_pending_at")
   connectedById      String?   @map("connected_by_id")
   // A key app (game #2044): kind = direct. The definition is the data it runs from (one HTTPS origin, its operations, where the key goes),
   // the key is kept encrypted in its own column and is never copied to a grant, a screen or the bot server; only its last characters are shown.
@@ -2089,6 +2097,10 @@ model MeterReservation {
   state          String    @db.VarChar(10)
   expiresAt      DateTime  @map("expires_at")
   renewals       Int       @default(0)
+  // What each authorized stretch of a lease was priced at, as it was taken: [{ at: ms, micros: the room held for one stretch, stretchMs }], one entry
+  // for the first stretch and one for each renewal. A lease is counted by these (what each stretch can cost under its own price), so a price that
+  // changed in the middle of a lease never re-prices the stretches already authorized. Empty on older rows, which are counted as equal stretches.
+  terms          Json?
   settledMicros  BigInt?   @map("settled_micros")
   createdAt      DateTime  @default(now()) @map("created_at")
   closedAt       DateTime? @map("closed_at")
@@ -2118,10 +2130,26 @@ model MeterGrant {
   // What was agreed, for extra usage to be billed
   note        String?   @db.VarChar(1000)
   billedAt    DateTime? @map("billed_at")
+  // Taken back before it started: it never ran, and its dates stay as they were given
+  cancelledAt DateTime? @map("cancelled_at")
   createdAt   DateTime  @default(now()) @map("created_at")
 
   @@index([personId, endsAt])
   @@map("meter_grants")
+}
+
+// The monthly computer allowance for each member as it was at each change, so the Costs page works a past month out with the allowance
+// that applied in it, never with today's. `effectiveFrom` is when a figure begins (a later day for one that was scheduled); an empty
+// `allowanceMicros` means there was no allowance from then.
+model MeterAllowanceChange {
+  id             String   @id @default(uuid())
+  effectiveFrom  DateTime @map("effective_from")
+  allowanceMicros BigInt? @map("allowance_micros")
+  createdById    String?  @map("created_by_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([effectiveFrom])
+  @@map("meter_allowance_changes")
 }
 
 // A member's "Ask for more" (game #1999): what a person tapped when their computer time ran out. Only a request: it is not a
@@ -2167,6 +2195,9 @@ model SpendRule {
   // The plain sentence shown back to the person
   words           String    @db.VarChar(300)
   version         Int       @default(1)
+  // What the message that made it said (a hash of its normalized draft): a later edit never changes it, so the same message again
+  // is told apart from a different one however the rule has been corrected since. Empty for a rule made before it was kept.
+  proposalFingerprint String? @map("proposal_fingerprint") @db.VarChar(64)
   // active or ended
   state           String    @default("active") @db.VarChar(6)
   createdById     String    @map("created_by_id")
@@ -3612,6 +3643,8 @@ model VoiceNoteTurn {
   providerRefs Json?     @map("provider_refs")
   // A reservation that was never used, given back
   released     Boolean   @default(false)
+  // What the note's reply runs on (universe-ai, provider or own-key), so a reply on its way counts against the person's reply limits
+  replySource  String?   @map("reply_source") @db.VarChar(16)
   costMicros   Int?      @map("cost_micros")
   // The words heard and the answer, encrypted per turn, until the device has them or `bufferUntil`
   buffer       String?   @db.Text
@@ -3727,6 +3760,9 @@ model InstantRefund {
   // Null while only the intent is saved (written before the books are asked, so a give-back the books made and we never recorded is
   // found again and finished by the retry); set once the books confirmed it. Both count against the limits.
   confirmedAt  DateTime? @map("confirmed_at")
+  // Set when the books stayed unreachable for the whole wait and the intent was let go of: it no longer counts against the limits, but the row stays, so a
+  // give-back the books did make is found again and recorded at their amount (the sweep asks again, slowly, and a person's next ask finishes it). Cleared when confirmed.
+  releasedAt   DateTime? @map("released_at")
   createdAt    DateTime @default(now()) @map("created_at")
 
   @@index([runId])

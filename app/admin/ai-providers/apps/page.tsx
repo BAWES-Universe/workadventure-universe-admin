@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Cpu } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -20,7 +20,9 @@ const RANGES = [7, 30, 90];
 export default function AppsDemandPage() {
   const replacePage = useReplacePage();
   const [days, setDays] = useState(30);
-  const [report, setReport] = useState<DemandReport | null>(null);
+  const [loaded, setReport] = useState<DemandReport | null>(null);
+  // Figures are shown only for the days now selected: a report of other days that is still on screen while the new one is read is not shown under them
+  const report = loaded && loaded.days === days ? loaded : null;
   const [failed, setFailed] = useState(false);
   const [open, setOpenKey] = useState<string | null>(null);
   // What a refused save said. It lives here, not in the sheet: reading the page again after a stale save makes a new sheet (it is keyed by the App's version), which would clear it before it is read
@@ -36,22 +38,25 @@ export default function AppsDemandPage() {
   // Only the latest read may show: a slower read of other days must not land on top of the days now showing
   const latest = useRef(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<boolean> => {
     const mine = ++latest.current;
     setFailed(false);
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/admin/apps-demand?days=${days}`);
-      if (mine !== latest.current) return;
+      // A newer read has taken over (it is the one that shows), or the person is sent away: nothing here failed
+      if (mine !== latest.current) return true;
       if (response.status === 401 || response.status === 403) {
         replacePage('/admin');
-        return;
+        return true;
       }
       if (!response.ok) throw new Error('load');
       const next = (await response.json()) as DemandReport;
       if (mine === latest.current) setReport(next);
+      return true;
     } catch {
       if (mine === latest.current) setFailed(true);
+      return false;
     }
   }, [days, replacePage]);
 
@@ -156,12 +161,26 @@ export default function AppsDemandPage() {
 }
 
 /** One App: its numbers, and "Runs on" with the note that people see no change. */
-function RouteSheet({ app, days, note, onNote, onClose, onSaved }: { app: AppRow; days: number; note: string | null; onNote: (words: string | null) => void; onClose: () => void; onSaved: () => Promise<void> }) {
+function RouteSheet({ app, days, note, onNote, onClose, onSaved }: { app: AppRow; days: number; note: string | null; onNote: (words: string | null) => void; onClose: () => void; onSaved: () => Promise<boolean> }) {
   const [route, setRoute] = useState<AppRouteName>(app.route);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const split = byRouteLine(app);
   const shown = error ?? note;
+  const universeOff = !app.own.ready && app.route !== 'universe';
+
+  // A radio group moves with the arrow keys: the picked one is the one Tab stops on, and an arrow picks the next one that can be picked and focuses it
+  const moveBetweenRoutes = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const forward = event.key === 'ArrowDown' || event.key === 'ArrowRight';
+    const back = event.key === 'ArrowUp' || event.key === 'ArrowLeft';
+    if (!forward && !back) return;
+    event.preventDefault();
+    const options: AppRouteName[] = universeOff ? ['composio'] : ['composio', 'universe'];
+    const at = Math.max(0, options.indexOf(route));
+    const next = options[(at + (forward ? 1 : -1) + options.length) % options.length];
+    setRoute(next);
+    event.currentTarget.querySelector<HTMLButtonElement>(`[data-testid="apps-route-${next}"]`)?.focus();
+  };
 
   const save = async () => {
     setSaving(true);
@@ -178,8 +197,10 @@ function RouteSheet({ app, days, note, onNote, onClose, onSaved }: { app: AppRow
         const body = (await response.json().catch(() => null)) as { code?: string; why?: string[] } | null;
         if (body?.code === 'stale') {
           // Said once, kept by the page, then the page is read again: the sheet that opens next shows the newer state with this note
-          onNote('Someone moved this App since you opened it. It is reloaded: look again and save.');
-          await onSaved();
+          // The page is read again first, and the words say what happened: "reloaded" only when it was
+          const reloaded = await onSaved();
+          if (reloaded) onNote('Someone moved this App since you opened it. It is reloaded: look again and save.');
+          else setError('Someone moved this App since you opened it, and the page could not be reloaded. Close this and open the App again.');
           return;
         }
         setError(body?.why?.join(' ') ?? 'Our own version is not ready to run this App yet.');
@@ -210,16 +231,17 @@ function RouteSheet({ app, days, note, onNote, onClose, onSaved }: { app: AppRow
         </p>
       )}
 
-      <div className="grid gap-2" role="radiogroup" aria-label="Runs on">
+      <div className="grid gap-2" role="radiogroup" aria-label="Runs on" onKeyDown={moveBetweenRoutes}>
         <h3 className="text-sm font-semibold">Runs on</h3>
-        <PickCard role="radio" picked={route === 'composio'} indicator={<Radio checked={route === 'composio'} />} title="Composio" onClick={() => setRoute('composio')} data-testid="apps-route-composio" />
+        <PickCard role="radio" tabIndex={route === 'composio' ? 0 : -1} picked={route === 'composio'} indicator={<Radio checked={route === 'composio'} />} title="Composio" onClick={() => setRoute('composio')} data-testid="apps-route-composio" />
         <PickCard
           role="radio"
+          tabIndex={route === 'universe' ? 0 : -1}
           picked={route === 'universe'}
           indicator={<Radio checked={route === 'universe'} />}
           title="Universe"
           description={app.own.ready ? (app.own.passedChecksOn ? `Our own version passed its checks on ${dayWords(app.own.passedChecksOn)}.` : undefined) : app.own.why.join(' ')}
-          disabled={!app.own.ready && app.route !== 'universe'}
+          disabled={universeOff}
           onClick={() => setRoute('universe')}
           data-testid="apps-route-universe"
         />

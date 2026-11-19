@@ -308,6 +308,15 @@ run('the bounded Instant executor, in a real database', () => {
         quiet.mockRestore();
         await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT IF EXISTS instant_event_refused');
       }
+      // Once the database takes it, the next sweep writes the event the run missed: one event, at the provider cost, with what the person was charged
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date() });
+      const events = await prisma.meterEvent.findMany({ where: { personId: sara } });
+      expect(events).toHaveLength(1);
+      expect(Number(events[0].costMicros)).toBe(7_000);
+      expect(events[0].detail).toMatchObject({ customerMicros: 7_000, runId: (await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } })).id });
+      // And a sweep after that writes nothing more
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect(await prisma.meterEvent.count({ where: { personId: sara } })).toBe(1);
     });
 
     it('applies the markup a super admin set to what the person pays, never past the hold', async () => {
@@ -537,6 +546,21 @@ run('the bounded Instant executor, in a real database', () => {
       expect(p.instant.run).toHaveBeenCalledTimes(1);
     });
 
+    it('a saved run is only handed back to the person it belongs to: the same Brick and call id from someone else gets a refusal and nothing of the run', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      const mine = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      expect(mine).toMatchObject({ status: 'done', ok: true });
+      const theirs = await runInstant(ask({ callId: id, personId: omar }), { adapter: p.adapter, funds: f.funds });
+      expect(theirs).toMatchObject({ status: 'refused', reason: 'not_owner' });
+      expect(JSON.stringify(theirs)).not.toContain('weather');
+      expect(p.instant.run).toHaveBeenCalledTimes(1);
+      // The owner asking again still gets their own run back
+      expect(await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'already_done' });
+    });
+
     it('the very same ask under a new call id waits while the first is unclear: never paid twice', async () => {
       await setLimits();
       const p = fakeProvider();
@@ -676,6 +700,41 @@ run('the bounded Instant executor, in a real database', () => {
       p.setLogsDown(true);
       await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 120 * MIN) });
       expect(await runOf(rowId)).toMatchObject({ state: 'ambiguous', customerState: 'held', providerState: 'pending' });
+    });
+
+    it('when Composio cannot be asked for a long while, the hold is let go and the run is written off as released unconfirmed', async () => {
+      await setLimits({ unclearWaitMinutes: 30, unreachableWaitMinutes: 600 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'server', status: 500 });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const rowId = await runIdOf(id);
+      p.setLogsDown(true);
+      // Still inside the long wait: nothing is decided on a guess
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 599 * MIN) });
+      expect(await runOf(rowId)).toMatchObject({ state: 'ambiguous', customerState: 'held', providerState: 'pending' });
+      expect(f.left()).toBeLessThan(1_000_000);
+      // Past it: the person's credit comes back, our exposure closes at the top price as an estimate, and the run says why
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 601 * MIN) });
+      const row = await runOf(rowId);
+      expect(row).toMatchObject({ state: 'failed', reason: 'unclear', customerState: 'released', providerState: 'settled', providerBasis: 'estimated' });
+      expect(Number(row.providerMicros)).toBe(TOP);
+      expect(row.detail).toMatchObject({ releasedUnconfirmed: true });
+      expect(f.left()).toBe(1_000_000);
+      // And the Costs report says so on the Instant row
+      const { costsReport } = await import('@/lib/meter-costs');
+      const day = new Date(Date.now() + 601 * MIN);
+      const report = await costsReport(new Date(day.getTime() - 3 * 86_400_000), new Date(day.getTime() + 2 * 86_400_000), day);
+      expect(report.goes.find((entry) => entry.key === 'instant')?.releasedUnconfirmed).toBeGreaterThanOrEqual(1);
+      // Asked again, the person is told it could not be confirmed and that they were not charged (never "failed")
+      const again = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds, now: day });
+      expect(again).toMatchObject({ status: 'failed', reason: 'unclear', message: 'We couldn’t confirm this one, so you weren’t charged.' });
+      // The log is reachable again later: nothing is charged to the person afterwards, and the credit stays whole
+      p.setLogsDown(false);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(day.getTime() + 60 * MIN) });
+      expect(await runOf(rowId)).toMatchObject({ state: 'failed', customerState: 'released' });
+      expect(f.left()).toBe(1_000_000);
     });
 
     it('a run still in flight is never called unclear by a look-up that happens during its wait', async () => {
@@ -831,6 +890,161 @@ run('the bounded Instant executor, in a real database', () => {
     });
   });
 
+  describe('review findings on pausing and on what the books confirm', () => {
+    afterEach(() => setInstantHooks(undefined));
+
+    it('an ask that waited for the person’s rules while Instant was paused is stopped, and holds and sends nothing', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const { pauseInstant } = await import('@/lib/instant/state');
+      setInstantHooks({ beforeRun: async () => { await pauseInstant('manual', sara); return null; } });
+      const key = callId();
+      expect(await runInstant(ask({ callId: key }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'paused' });
+      expect(f.funds.reserve).not.toHaveBeenCalled();
+      expect(p.instant.run).not.toHaveBeenCalled();
+      expect(await prisma.instantRun.count({ where: { runKey: instantRunKey(brick, key) } })).toBe(0);
+    });
+
+    it('a give-back the books never confirmed, and a give-back for a run outside the window, are not failures', async () => {
+      await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 2 });
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      const ids: string[] = [];
+      for (const n of [1, 2]) {
+        const key = callId();
+        await runInstant(ask({ callId: key, arguments: { query: `gw${n}` } }), { adapter: p.adapter, funds: f.funds });
+        ids.push(await runIdOf(key));
+      }
+      // An intent the books may or may not have acted on: nothing is known to have been given back
+      await prisma.instantRefund.create({ data: { refundKey: `gw-a-${tag}`, runId: ids[0], personId: sara, kind: 'goodwill', amountMicros: BigInt(1_000) } });
+      expect(await evaluatePause()).toBe(false);
+      // Confirmed, but for a run that finished before the window
+      await prisma.instantRun.update({ where: { id: ids[0] }, data: { finishedAt: new Date(Date.now() - 48 * 3_600_000) } });
+      await prisma.instantRefund.updateMany({ where: { refundKey: `gw-a-${tag}` }, data: { confirmedAt: new Date() } });
+      expect(await evaluatePause()).toBe(false);
+      // Confirmed, for a run in the window: that is a failure of the runs being counted
+      await prisma.instantRun.update({ where: { id: ids[0] }, data: { finishedAt: new Date() } });
+      expect(await evaluatePause()).toBe(true);
+    });
+
+    it('a resume that comes while the failure counts are being read drops that pause', async () => {
+      await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 2 });
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      for (const n of [1, 2]) {
+        p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'x', logId: `rs${n}`, chargeMicros: null });
+        await runInstant(ask({ arguments: { query: `rs${n}` } }), { adapter: p.adapter, funds: f.funds });
+      }
+      expect(await getInstantPause()).toMatchObject({ paused: true });
+      await resumeInstant(sara);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // Two more failures after that resume; the counts are read, then a super admin resumes again before the pause is taken
+      await prisma.instantRun.updateMany({ where: { state: 'failed' }, data: { finishedAt: new Date() } });
+      // The counts are read in one transaction: the resume comes as it ends, before the pause is taken
+      const realTx = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, ...rest: unknown[]) => {
+        spy.mockRestore();
+        return realTx(fn, ...rest).then(async (answer) => {
+          await resumeInstant(sara);
+          return answer;
+        });
+      }) as never);
+      expect(await evaluatePause()).toBe(false);
+      expect((await getInstantPause()).paused).toBe(false);
+    });
+
+    it('reads all its counts from one snapshot: a run that fails while they are being read is in all of them or in none', async () => {
+      await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 2 });
+      const make = (state: 'succeeded' | 'failed') =>
+        prisma.instantRun.create({ data: { runKey: `k-${randomUUID()}`, botId: brick, personId: sara, toolSlug: 'EXA_SEARCH', toolkit: 'exa', argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v', topMicros: BigInt(TOP), holdMicros: BigInt(TOP), state, customerState: state === 'failed' ? 'released' : 'charged', providerUserId: `u-${randomUUID().slice(0, 6)}`, finishedAt: new Date() } as never });
+      await make('succeeded');
+      await make('succeeded');
+      await make('failed');
+      // One failure in three is under the half a super admin set. A second failure lands after the first count is read (the later counts wait for it, so
+      // that is the order whichever way they are asked): read apart, the rate is two in three, a count of runs from before a run and a count of failures from after it
+      let asked = 0;
+      let landed: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (landed = resolve));
+      const interleaved = (count: (args: unknown) => Promise<number>) => async (args: unknown) => {
+        const mine = ++asked;
+        if (mine > 1) await gate;
+        const answer = await count(args);
+        if (mine === 1) {
+          await make('failed');
+          landed();
+        }
+        return answer;
+      };
+      const realCount = prisma.instantRun.count.bind(prisma.instantRun) as (args: unknown) => Promise<number>;
+      const countSpy = jest.spyOn(prisma.instantRun, 'count').mockImplementation(interleaved(realCount) as never);
+      const realTx = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+      const txSpy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, ...rest: unknown[]) => {
+        txSpy.mockRestore();
+        if (typeof fn !== 'function') return realTx(fn, ...rest);
+        return realTx(async (tx: { instantRun: { count: (args: unknown) => Promise<number> } }) => {
+          const counted = new Proxy(tx.instantRun, { get: (target, key) => (key === 'count' ? interleaved((args) => target.count(args)) : Reflect.get(target, key)) });
+          return (fn as (tx: unknown) => Promise<unknown>)(new Proxy(tx, { get: (target, key) => (key === 'instantRun' ? counted : Reflect.get(target, key)) }));
+        }, ...rest);
+      }) as never);
+      try {
+        expect(await evaluatePause()).toBe(false);
+      } finally {
+        countSpy.mockRestore();
+        txSpy.mockRestore();
+      }
+      expect((await getInstantPause()).paused).toBe(false);
+    });
+
+    it('a run the books could not settle shows no customer charge in the meter event, and shows it once the books confirm it', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.funds.settle.mockRejectedValueOnce(new Error('books down'));
+      const key = callId();
+      await runInstant(ask({ callId: key }), { adapter: p.adapter, funds: f.funds });
+      const id = await runIdOf(key);
+      expect((await runOf(id)).customerState).toBe('held');
+      const before = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${id}` } });
+      expect((before.detail as { customerMicros: number | null }).customerMicros).toBeNull();
+      // The sweep says it again, and the books confirm
+      await reconcileRun(id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      const after = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${id}` } });
+      expect((after.detail as { customerMicros: number }).customerMicros).toBe(Number((await runOf(id)).customerMicros));
+      expect(Number((await runOf(id)).customerMicros)).toBeGreaterThan(0);
+    });
+  });
+
+  describe('charging a run and telling the meter event, in one step', () => {
+    it('a meter event that cannot be updated leaves the run held, and the next sweep charges it and writes the amount', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const key = callId();
+      await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION instant_test_refuse_event_update() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'cannot update the event for the test'; END $$ LANGUAGE plpgsql`);
+      await prisma.$executeRawUnsafe(`CREATE TRIGGER instant_test_refuse_event_update BEFORE UPDATE ON meter_events FOR EACH ROW WHEN (NEW.event_id LIKE 'instant:%') EXECUTE FUNCTION instant_test_refuse_event_update()`);
+      const silenced = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let id = '';
+      try {
+        await runInstant(ask({ callId: key }), { adapter: p.adapter, funds: f.funds }).catch(() => undefined);
+        id = await runIdOf(key);
+        // Not marked charged: nothing about the run says it is done while the event does not
+        expect((await runOf(id)).customerState).toBe('held');
+      } finally {
+        silenced.mockRestore();
+        await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS instant_test_refuse_event_update ON meter_events');
+        await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS instant_test_refuse_event_update()');
+      }
+      // The books answer again with the same amount, and both are written
+      await reconcileRun(id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      const run = await runOf(id);
+      expect(run.customerState).toBe('charged');
+      expect(Number(run.customerMicros)).toBeGreaterThan(0);
+      const event = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${id}` } });
+      expect((event.detail as { customerMicros: number }).customerMicros).toBe(Number(run.customerMicros));
+    });
+  });
+
   describe('Instant stops by itself', () => {
     it('pauses when the failure share of recent runs passes what a super admin set, once enough runs happened', async () => {
       await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 4 });
@@ -971,6 +1185,87 @@ run('the bounded Instant executor, in a real database', () => {
       expect(Number((await runOf(runId)).refundedMicros)).toBe(0);
     });
 
+    it('the sweep finishes a give-back the books never confirmed, and lets go of one they could not be reached about for the whole wait', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 6_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 600 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const first = await charged(f, p, 'a');
+      const second = await charged(f, p, 'b');
+      // Both give-backs fail at the books: the intents stay, and the budget (6,000) is used up by the first (5,000) so the second is refused
+      f.funds.refund.mockResolvedValueOnce({ ok: false, refundedMicros: 0, reason: 'unavailable' });
+      expect(await giveBack({ personId: sara, runId: first }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'unavailable' });
+      expect(await giveBack({ personId: sara, runId: second }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'budget' });
+      const { sweepGoodwill } = await import('@/lib/instant/executor');
+      // Too soon: nothing is asked again yet
+      expect(await sweepGoodwill({ funds: f.funds })).toMatchObject({ looked: 0 });
+      // The books answer now: the sweep finishes it and it is confirmed
+      const later = new Date(Date.now() + 10 * MIN);
+      expect(await sweepGoodwill({ funds: f.funds, now: later })).toEqual({ looked: 1, settled: 1, released: 0 });
+      expect((await prisma.instantRefund.findFirstOrThrow({ where: { runId: first } })).confirmedAt).not.toBeNull();
+      expect(Number((await runOf(first)).refundedMicros)).toBe(5_000);
+      // A give-back the books stay unreachable about: tried again each sweep, and let go after the wait so it stops using the budget
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 600 });
+      f.funds.refund.mockResolvedValue({ ok: false, refundedMicros: 0, reason: 'unavailable' });
+      expect(await giveBack({ personId: sara, runId: second }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'unavailable' });
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 20 * MIN) })).toEqual({ looked: 1, settled: 0, released: 0 });
+      expect(await prisma.instantRefund.count({ where: { runId: second, confirmedAt: null } })).toBe(1);
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN) })).toEqual({ looked: 1, settled: 0, released: 1 });
+      // Let go of, not deleted: the row stays (marked), and no longer counts against the budget
+      const rows = await prisma.instantRefund.findMany({ where: { runId: second } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].releasedAt).not.toBeNull();
+      expect(rows[0].confirmedAt).toBeNull();
+    });
+
+    it('a give-back let go of that the books did make is found again by the sweep and recorded at their amount, even with the budget now at 1', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 600 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const runId = await charged(f, p);
+      const { sweepGoodwill } = await import('@/lib/instant/executor');
+      // The books give it back and then fail to answer: the intent stays, and the wait runs out
+      const real = f.funds.refund.getMockImplementation()!;
+      f.funds.refund.mockImplementationOnce((async (input: never) => {
+        await real(input);
+        throw new Error('connection reset');
+      }) as never);
+      expect(await giveBack({ personId: sara, runId }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'unavailable' });
+      f.funds.refund.mockImplementation((async () => ({ ok: false, refundedMicros: 0, reason: 'unavailable' })) as never);
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN) })).toEqual({ looked: 1, settled: 0, released: 1 });
+      // It is not in the month's budget while let go of: another person's give-back is not refused for it
+      expect(await prisma.instantRefund.count({ where: { runId, releasedAt: null } })).toBe(0);
+      // Later the books answer again (they already gave it): confirmed at their first amount, whatever the limits say now
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 1, goodwillPerPersonPerMonth: 1, unreachableWaitMinutes: 600 });
+      f.funds.refund.mockImplementation(real as never);
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN + 7 * 60 * MIN) })).toEqual({ looked: 1, settled: 1, released: 0 });
+      const row = await prisma.instantRefund.findFirstOrThrow({ where: { runId } });
+      expect(row.confirmedAt).not.toBeNull();
+      expect(row.releasedAt).toBeNull();
+      expect(Number((await runOf(runId)).refundedMicros)).toBe(5_000);
+    });
+
+    it('a row dropped and made again under the same key while the sweep waits on the books is not let go of by the sweep', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 600 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const runId = await charged(f, p);
+      const { sweepGoodwill } = await import('@/lib/instant/executor');
+      f.funds.refund.mockResolvedValueOnce({ ok: false, refundedMicros: 0, reason: 'unavailable' });
+      expect(await giveBack({ personId: sara, runId }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'unavailable' });
+      const first = await prisma.instantRefund.findFirstOrThrow({ where: { runId } });
+      // While the sweep asks the books, the row is dropped and a new one is made under the same key (a plain no, then a new ask)
+      f.funds.refund.mockImplementationOnce((async () => {
+        await prisma.instantRefund.delete({ where: { id: first.id } });
+        await prisma.instantRefund.create({ data: { refundKey: first.refundKey, runId, personId: sara, kind: 'goodwill', amountMicros: BigInt(5_000) } });
+        return { ok: false, refundedMicros: 0, reason: 'unavailable' };
+      }) as never);
+      const result = await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN) });
+      expect(result.released).toBe(0);
+      const rows = await prisma.instantRefund.findMany({ where: { runId } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].releasedAt).toBeNull();
+    });
+
     it('when the books fail after they gave it back, the intent stays and a later ask finishes it at the books amount, even if the limits moved', async () => {
       await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 3 });
       const p = fakeProvider();
@@ -1061,6 +1356,20 @@ run('the bounded Instant executor, in a real database', () => {
       expect(asked.filter((id) => id === 'trs_f1').length).toBeLessThanOrEqual(2);
       const rows = await prisma.instantSessionCheck.findMany({ where: { sessionId: { in: ['trs_f1', 'trs_f2', 'trs_f3'] } }, orderBy: { sessionId: 'asc' } });
       expect(rows.map((row) => row.state)).toEqual(['failed', 'denied', 'denied']);
+    });
+
+    it('a session whose check could not be saved is not counted as checked, denied or remaining-free', async () => {
+      const p = fakeProvider();
+      await connection(`g-${tag}`, 'https://backend.composio.dev/tool_router/trs_g/mcp');
+      p.instant.sessionInstant.mockResolvedValue('allowed');
+      p.instant.denySessionInstant.mockResolvedValue('denied' as never);
+      const spy = jest.spyOn(prisma.instantSessionCheck, 'upsert').mockRejectedValueOnce(new Error('could not save'));
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        expect(await denyInstantOnSessions(50, p.adapter)).toMatchObject({ checked: 0, denied: 0, failed: 1, remaining: 1 });
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('a session the provider no longer has is recorded as gone', async () => {
@@ -1389,19 +1698,14 @@ run('the bounded Instant executor, in a real database', () => {
       await prisma.instantRun.update({ where: { id: row.id }, data: { sentAt: new Date(Date.now() - 600 * MIN) } });
       p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', 7_000, 'log-roll')]);
       p.script.logs.set('log-roll', p.line(row.providerUserId, 'success', 7_000, 'log-roll'));
-      // The books take the charge, and writing it down here fails once (a lost connection)
-      const real = prisma.instantRun.updateMany.bind(prisma.instantRun);
-      const lost = jest.spyOn(prisma.instantRun, 'updateMany').mockImplementation(((args: { data?: { customerState?: string } }) => {
-        if (args?.data?.customerState === 'charged') {
-          lost.mockRestore();
-          throw new Error('database went away');
-        }
-        return real(args as never);
-      }) as never);
+      // The books take the charge, and writing it down here fails once (the step that records it, in the database, is refused)
+      await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION instant_test_lost_write() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'database went away'; END $$ LANGUAGE plpgsql`);
+      await prisma.$executeRawUnsafe(`CREATE TRIGGER instant_test_lost_write BEFORE UPDATE ON instant_runs FOR EACH ROW WHEN (NEW.customer_state = 'charged') EXECUTE FUNCTION instant_test_lost_write()`);
       try {
         await expect(reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() })).rejects.toThrow();
       } finally {
-        lost.mockRestore();
+        await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS instant_test_lost_write ON instant_runs');
+        await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS instant_test_lost_write()');
       }
       expect(f.holds.get(`instant:${row.id}`)).toMatchObject({ state: 'charged', charged: 7_000 });
       expect(await runOf(row.id)).toMatchObject({ state: 'succeeded', providerState: 'settled', customerState: 'held' });
@@ -1979,6 +2283,12 @@ run('the bounded Instant executor, in a real database', () => {
         data: { eventId: `run-hide-9-${tag}`, kind: 'app_use', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(1000), basis: 'measured', detail: { runId: 'run-hide-9', taskKey: 'some-other-task' } },
       });
       await closeReceipt({ botId: brick, taskKey: 'hide-9', personId: sara, state: 'refunded' });
+      // The only event under its key is the Brick's own thinking at no cost: nothing was taken, so it is hidden
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-11', title: 'Only free thinking', category: 'apps' });
+      await prisma.meterEvent.create({
+        data: { eventId: `hide-11-${tag}`, kind: 'model_call', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'person', route: 'chat', jobId: 'hide-11', quantity: BigInt(1), unit: 'use', costMicros: BigInt(0), basis: 'measured', detail: { taskKey: 'hide-11' } },
+      });
+      await closeReceipt({ botId: brick, taskKey: 'hide-11', personId: sara, state: 'refunded' });
       // A task with no category is not an Apps task here: left as it was
       await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-5', title: 'No category', category: null });
       await closeReceipt({ botId: brick, taskKey: 'hide-5', personId: sara, state: 'refunded' });
@@ -1989,6 +2299,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(titles).not.toContain('Refused by a rule');
       expect(titles).not.toContain('No run made');
       expect(titles).not.toContain('Only thinking');
+      expect(titles).not.toContain('Only free thinking');
       expect(titles).not.toContain('Shares the run, no charge');
       expect(titles).toContain('Owns the run charge');
       expect(titles).not.toContain('Another task’s charge');
@@ -2013,6 +2324,157 @@ run('the bounded Instant executor, in a real database', () => {
       // And the sweep itself says it too (here nothing is left for it to move)
       expect((await sweepInstant({ funds: f.funds, adapter: p.adapter })).receipts).toBeGreaterThanOrEqual(0);
       expect(await receiptState('look-7')).toBe('refunded');
+    });
+  });
+
+  describe('a run let go unconfirmed after the long wait (A1): what the person and we each see, and what late evidence does', () => {
+    beforeEach(() => setInstantHooks(instantRulesAndReceipts));
+    afterEach(() => setInstantHooks(undefined));
+
+    const WAIT = 600;
+    /** A run whose answer never came back and whose log cannot be reached, asked about once the long wait is over. */
+    async function released(p: ReturnType<typeof fakeProvider>, f: ReturnType<typeof fakeFunds>, over: Record<string, unknown> = {}) {
+      await setLimits({ unclearWaitMinutes: 30, unreachableWaitMinutes: WAIT });
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'server', status: 500 });
+      await runInstant(ask({ callId: id, ...over }), { adapter: p.adapter, funds: f.funds });
+      const rowId = await runIdOf(id);
+      p.setLogsDown(true);
+      const at = new Date(Date.now() + (WAIT + 1) * MIN);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: at });
+      return { id, rowId, at, row: await runOf(rowId) };
+    }
+    const eventOf = (runId: string) => prisma.meterEvent.findUnique({ where: { eventId: `instant:${runId}` } });
+
+    it('a release the books did not acknowledge is tried again by the next sweep, and the credit comes back once', async () => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.state.releaseOk = false;
+      const { rowId, at } = await released(p, f);
+      // The run is let go, but the books did not say the hold is gone: it is not called released, and the credit is still held
+      expect(await runOf(rowId)).toMatchObject({ state: 'failed', reason: 'unclear' });
+      expect((await runOf(rowId)).customerState).not.toBe('released');
+      expect(f.left()).toBeLessThan(1_000_000);
+      f.state.releaseOk = true;
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: at });
+      expect(await runOf(rowId)).toMatchObject({ customerState: 'released' });
+      expect(f.left()).toBe(1_000_000);
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: at });
+      expect(f.left()).toBe(1_000_000);
+    });
+
+    it('asked again with the same call id, it says it could not be confirmed and never runs the App again', async () => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const { id, at } = await released(p, f);
+      expect(p.sent).toHaveLength(1);
+      for (let again = 0; again < 2; again++) {
+        expect(await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds, now: at })).toMatchObject({ status: 'failed', reason: 'unclear', message: 'We couldn’t confirm this one, so you weren’t charged.' });
+      }
+      expect(p.sent).toHaveLength(1);
+      expect(f.left()).toBe(1_000_000);
+    });
+
+    it('a late success is the person’s free: nothing is charged, the run keeps its own outcome, and a late charge replaces the estimate once', async () => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const { rowId, at, row } = await released(p, f);
+      expect(Number(row.providerMicros)).toBe(TOP);
+      expect(await eventOf(rowId)).toMatchObject({ basis: 'estimated' });
+      p.setLogsDown(false);
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', TOP - 1_000)]);
+      // Said twice (a second delivery of the same evidence): it is applied once
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 120 * MIN) });
+      const after = await runOf(rowId);
+      expect(after).toMatchObject({ state: 'failed', reason: 'unclear', customerState: 'released', providerBasis: 'measured' });
+      expect(Number(after.providerMicros)).toBe(TOP - 1_000);
+      expect(after.detail).toMatchObject({ releasedUnconfirmed: true, lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 }, adjustment: { estimatedMicros: TOP, verifiedMicros: TOP - 1_000 } });
+      expect(await eventOf(rowId)).toMatchObject({ basis: 'measured', costMicros: BigInt(TOP - 1_000) });
+      expect(await prisma.meterEvent.count({ where: { eventId: `instant:${rowId}` } })).toBe(1);
+      expect(f.left()).toBe(1_000_000);
+      expect(p.sent).toHaveLength(1);
+      // A late figure below the top price stops nothing
+      expect((await getInstantPause()).paused).toBe(false);
+    });
+
+    it('a vendor charge above the estimate is the real one: our cost follows it, the person still pays nothing', async () => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const { rowId, at, row } = await released(p, f);
+      p.setLogsDown(false);
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', TOP + 2_000)]);
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
+      const after = await runOf(rowId);
+      expect(Number(after.providerMicros)).toBe(TOP + 2_000);
+      expect(after.detail).toMatchObject({ adjustment: { estimatedMicros: TOP, verifiedMicros: TOP + 2_000 } });
+      expect(await eventOf(rowId)).toMatchObject({ costMicros: BigInt(TOP + 2_000), basis: 'measured' });
+      expect(after.customerState).toBe('released');
+      expect(f.left()).toBe(1_000_000);
+      // A late figure above the top price says the table is too low, as one found on time does: Instant stops
+      expect(await getInstantPause()).toMatchObject({ paused: true, reason: 'price_over_top' });
+    });
+
+    it('a late success line that has no charge yet is not the evidence: it is looked for again, and the charge found later replaces the estimate', async () => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const { rowId, at, row } = await released(p, f);
+      p.setLogsDown(false);
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', null)]);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
+      expect((await runOf(rowId)).detail).not.toHaveProperty('lateEvidence');
+      expect(Number((await runOf(rowId)).providerMicros)).toBe(TOP);
+      // The charge is posted
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', TOP - 1_000)]);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 120 * MIN) });
+      const after = await runOf(rowId);
+      expect(Number(after.providerMicros)).toBe(TOP - 1_000);
+      expect(after.providerBasis).toBe('measured');
+    });
+
+    it('a late failure changes nothing for the person and keeps the estimate when the line has no charge; it is written down once', async () => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const { rowId, at, row } = await released(p, f);
+      p.setLogsDown(false);
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'failed', null)]);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
+      const after = await runOf(rowId);
+      expect(after).toMatchObject({ state: 'failed', reason: 'unclear', customerState: 'released', providerBasis: 'estimated' });
+      expect(Number(after.providerMicros)).toBe(TOP);
+      expect(after.detail).toMatchObject({ releasedUnconfirmed: true, lateEvidence: { status: 'failed', chargeMicros: null } });
+      expect(f.left()).toBe(1_000_000);
+    });
+
+    it('when the log is still unreachable the estimate stands and nothing else moves, and a run released long ago is no longer looked for', async () => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const { rowId, at } = await released(p, f);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
+      expect(await runOf(rowId)).toMatchObject({ providerBasis: 'estimated', customerState: 'released' });
+      expect((await runOf(rowId)).detail).not.toHaveProperty('lateEvidence');
+      p.setLogsDown(false);
+      p.script.byUser.set((await runOf(rowId)).providerUserId, [p.line((await runOf(rowId)).providerUserId, 'success', 1_000)]);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 40 * 24 * 60 * MIN) });
+      expect(await runOf(rowId)).toMatchObject({ providerBasis: 'estimated' });
+    });
+
+    it('a task with one run that worked and one let go unconfirmed ends done, charged only for the one that worked', async () => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      await setLimits({ unclearWaitMinutes: 30, unreachableWaitMinutes: WAIT });
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'mixed-1', title: 'Two lookups', category: 'apps' });
+      const worked = await runInstant(ask({ callId: callId(), taskKey: 'mixed-1', arguments: { query: 'one' } }), { adapter: p.adapter, funds: f.funds });
+      expect(worked).toMatchObject({ status: 'done' });
+      const { rowId, at } = await released(p, f, { taskKey: 'mixed-1', arguments: { query: 'two' } });
+      await closeReceipt({ botId: brick, taskKey: 'mixed-1', personId: sara, state: 'done' });
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: at });
+      const receipt = await prisma.taskReceipt.findFirstOrThrow({ where: { personId: sara, taskKey: 'mixed-1' } });
+      expect(receipt.state).toBe('done');
+      const charged = Number((await prisma.instantRun.findFirstOrThrow({ where: { taskKey: 'mixed-1', state: 'succeeded' } })).customerMicros);
+      expect(charged).toBeGreaterThan(0);
+      expect((await activityFor(sara)).find((item) => item.title === 'Two lookups')).toMatchObject({ state: 'done', spentMicros: charged });
+      expect((await runOf(rowId)).customerState).toBe('released');
     });
   });
 });

@@ -25,11 +25,14 @@ const SETTING_KEY = 'bot-limits';
  * The super admin's limits as saved, the recommended value for anything never changed. A read that fails is logged and
  * gives the recommended values, so a reply or a save never fails over its limits alone.
  */
-export async function getServerLimits(): Promise<ServerLimits> {
+export async function getServerLimits(db: Pick<Prisma.TransactionClient, 'appSetting'> = prisma): Promise<ServerLimits> {
   try {
-    const row = await prisma.appSetting.findUnique({ where: { key: SETTING_KEY } });
+    const row = await db.appSetting.findUnique({ where: { key: SETTING_KEY } });
     return readServerLimits(row?.value);
   } catch (error) {
+    // Inside a transaction a failed read has already aborted it: carrying on would only end in "transaction aborted" on the next statement, hiding
+    // what went wrong. The caller gets the real error; only a read on its own falls back to the recommended values
+    if (db !== prisma) throw error;
     console.error('[BotLimits] Could not read the saved limits:', error instanceof Error ? error.message : 'unknown');
     return readServerLimits(null);
   }
@@ -90,13 +93,13 @@ export async function getUniverseAiReplyLimits(): Promise<{ signedIn: number; gu
  * from it in one universe, 10 and 200 until changed. They are apart from fair usage: a guest's replies from it never count
  * toward the replies a host's bot gives them.
  */
-export async function getBrickLimits(): Promise<ServerLimits['bricks']> {
-  return (await getServerLimits()).bricks;
+export async function getBrickLimits(db?: Pick<Prisma.TransactionClient, 'appSetting'>): Promise<ServerLimits['bricks']> {
+  return (await getServerLimits(db)).bricks;
 }
 
 /** The most Apps one bot or Brick can use at once (5 until a super admin changes it), the same number for Apps added by hand and lent ones. */
-export async function maxAppsPerBot(): Promise<number> {
-  return (await getBrickLimits()).appsPerBot;
+export async function maxAppsPerBot(db?: Pick<Prisma.TransactionClient, 'appSetting'>): Promise<number> {
+  return (await getBrickLimits(db)).appsPerBot;
 }
 
 /** The line a person reads when a bot is full of Apps; every way of adding one says it the same. */
@@ -116,7 +119,9 @@ export async function lockBotForApps(tx: Prisma.TransactionClient, botId: string
  * count is taken, so two Apps added at the same moment, by hand or lent, cannot both slip in past the limit.
  */
 export async function claimAppSlot(tx: Prisma.TransactionClient, botId: string): Promise<void> {
-  const max = await maxAppsPerBot();
+  // The limit is read through the caller's own transaction: the global client would take a second connection while this one is held,
+  // and under load callers waiting for that second connection starve the pool they are holding one of
+  const max = await maxAppsPerBot(tx);
   await lockBotForApps(tx, botId);
   if ((await tx.botMcpServer.count({ where: { botId } })) >= max) throw new AppsFull(max);
 }

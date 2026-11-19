@@ -46,6 +46,11 @@ describe('a tool is offered only when its arguments can be held to a top price',
     expect(six.ok && one.ok && six.topMicros - one.topMicros).toBe(5_000);
     expect(admitInstantTool('EXA_GET_CONTENTS_ACTION', { urls: ['https://a.example'], subpages: 50 })).toEqual({ ok: false, reason: 'unbounded' });
     expect(admitInstantTool('EXA_GET_CONTENTS_ACTION', { urls: [] })).toEqual({ ok: false, reason: 'unbounded' });
+    // An option that is not a flag or a small object, or a timeout that is not a number, is not an argument the price was read for
+    expect(admitInstantTool('EXA_GET_CONTENTS_ACTION', { urls: ['https://a.example'], summary: { query: 'x'.repeat(3_000) } })).toEqual({ ok: false, reason: 'unbounded' });
+    expect(admitInstantTool('EXA_GET_CONTENTS_ACTION', { urls: ['https://a.example'], livecrawl_timeout: '9999' })).toEqual({ ok: false, reason: 'unbounded' });
+    expect(admitInstantTool('EXA_GET_CONTENTS_ACTION', { urls: ['https://a.example'], text: 'yes' })).toEqual({ ok: false, reason: 'unbounded' });
+    expect(admitInstantTool('EXA_GET_CONTENTS_ACTION', { urls: ['https://a.example'], summary: { query: 'what is it' }, livecrawl: 'fallback', livecrawl_timeout: 5000 })).toMatchObject({ ok: true });
     expect(admitInstantTool('EXA_GET_CONTENTS_ACTION', { urls: Array.from({ length: 21 }, (_, i) => `https://x${i}.example`) })).toEqual({ ok: false, reason: 'unbounded' });
     expect(admitInstantTool('EXA_GET_CONTENTS_ACTION', {})).toEqual({ ok: false, reason: 'unbounded' });
   });
@@ -109,6 +114,9 @@ describe('money is exact', () => {
     expect(readInstantCharge('0.003')).toBe(3_000);
     expect(readInstantCharge(0)).toBe(0);
     expect(readInstantCharge({ amount: '0.007', currency: 'EUR' })).toBeNull();
+    expect(readInstantCharge({ currency: 978, amount: '0.01' })).toBeNull();
+    expect(readInstantCharge({ currency_code: 840, amount: '0.01' })).toBeNull();
+    expect(readInstantCharge({ amount: '0.01', currency: ' usd ' })).toBe(10_000);
     expect(readInstantCharge({})).toBeNull();
     expect(readInstantCharge(undefined)).toBeNull();
     expect(readInstantCharge(null)).toBeNull();
@@ -181,6 +189,11 @@ describe('Instant refuses to open until the limits that bound it are set', () =>
     for (const key of INSTANT_NEEDED) expect(INSTANT_LIMITS_EMPTY[key]).toBeNull();
     expect(INSTANT_LIMITS_EMPTY.goodwillBudgetMicros).toBeNull();
     expect(INSTANT_LIMITS_EMPTY.markupBps).toBeNull();
+  });
+
+  it('an unclear wait shorter than a request to Composio may take is refused', () => {
+    expect(checkInstantLimits({ unclearWaitMinutes: 1 })).toMatchObject({ ok: false });
+    expect(checkInstantLimits({ unclearWaitMinutes: 2 })).toMatchObject({ ok: true });
   });
 
   it('reads saved values that fit and ignores the rest', () => {

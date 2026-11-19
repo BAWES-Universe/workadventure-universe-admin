@@ -196,8 +196,8 @@ export class Agent37Client {
     }
     // A success whose body is not the JSON that was asked for says nothing (a gateway's page, a cut-off answer): for a question where
     // "no answer" would read as an answer, it is not reached, never taken for an empty one
-    // (an empty or blank body is not JSON either: it would read as "no active turn")
-    if (jsonRequired && (malformed || text.trim() === '')) throw new Agent37Unreached('body');
+    // (An empty body, `null`, a list or anything that is not an object is as little as a cut-off one: the check would read it as "no turn running")
+    if (jsonRequired && (malformed || !json || typeof json !== 'object' || Array.isArray(json))) throw new Agent37Unreached('body');
     return json as T;
   }
 

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { corsHeaders } from '@/lib/cors';
 import { encryptApiKey } from '@/lib/encryption';
-import { buildManifest, getGitHubApp, GITHUB_APP_ORG, GITHUB_WEB, orbitBase } from '@/lib/github/app';
+import { buildManifest, getGitHubApp, GITHUB_APP_ORG, GITHUB_WEB, keptGitHubAppId, orbitBase } from '@/lib/github/app';
 
 export const runtime = 'nodejs';
 
@@ -28,7 +28,10 @@ export async function POST(request: NextRequest) {
   if (existing && body?.again !== true) return NextResponse.json({ existing: { slug: existing.slug, url: existing.htmlUrl } }, { headers });
   // Who asked, until when, and which app it replaces (none for the first): the return is refused after an hour (GitHub's own limit for
   // the code), once they are no longer a super admin, or when the app kept is no longer the one it set out to replace
-  const state = encryptApiKey(JSON.stringify({ kind: 'github-app-create', userId: user.id, replaces: existing?.appId ?? null, exp: Math.floor(Date.now() / 1000) + 60 * 60 }));
+  // The app kept is read from the store itself when its secrets cannot be read (no app comes back then, but a row with an id is there):
+  // the setup then replaces that one, not "the first app", which the return would refuse as another setup having finished
+  const replaces = existing?.appId ?? (await keptGitHubAppId());
+  const state = encryptApiKey(JSON.stringify({ kind: 'github-app-create', userId: user.id, replaces, exp: Math.floor(Date.now() / 1000) + 60 * 60 }));
   return NextResponse.json(
     { action: `${GITHUB_WEB}/organizations/${GITHUB_APP_ORG}/settings/apps/new?state=${encodeURIComponent(state)}`, manifest: JSON.stringify(buildManifest(base)) },
     { headers: { ...headers, 'Cache-Control': 'no-store' } },

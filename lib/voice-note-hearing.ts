@@ -113,13 +113,21 @@ export async function botHearing(botId: string, adapters: Set<string>): Promise<
   const profile = borrowUniverseAi(followUniverseAi(parsed.data, providers), providers);
   const language = profile.language.mode === 'fixed' ? profile.language.code : null;
   const row = providers.get(profile.recognition.providerId);
+  const unusableOwnKey = async () => {
+    const fallback = await universeAiHearing(adapters, undefined, language);
+    return fallback.route === 'none' ? fallback : { ...fallback, reason: 'own-key-unusable' as const };
+  };
   if (row && row.ownerId !== null) {
     if (ownerKeyCanHear(profile, row, lent.get(row.id), adapters)) {
       return { v: 1, route: 'owner-key', reason: null, payer: 'owner', provider: served(row), model: profile.recognition.model, language };
     }
-    const fallback = await universeAiHearing(adapters, undefined, language);
-    return fallback.route === 'none' ? fallback : { ...fallback, reason: 'own-key-unusable' };
+    return unusableOwnKey();
   }
-  // A key of someone else's, or one no longer lent here, is left out by providersFor: the profile then reads as naming nothing
+  // A key of someone else's, or one no longer lent here, is left out by providersFor: the profile then reads as naming nothing. A key that
+  // still exists but is not here to use (its lend was removed, or it is another person's) is still "a key that can't be used", so say so
+  if (!row) {
+    const named = await prisma.voiceProvider.findUnique({ where: { id: profile.recognition.providerId }, select: { ownerId: true } });
+    if (named && named.ownerId !== null) return unusableOwnKey();
+  }
   return universeAiHearing(adapters, row ? { row, model: profile.recognition.model } : undefined, language);
 }

@@ -16,6 +16,7 @@ import { ensureDefaultBrick } from '@/lib/brick-default';
 import { checkReplyAllowance } from '@/lib/reply-limits';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
+import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -263,6 +264,47 @@ run('the Brick for guests, in a real database', () => {
       expect(await guestChatHandedTo(randomUUID(), rana.uuid)).toEqual({ handed: false });
       expect(await guestChatHandedTo(guestId, 'nobody')).toEqual({ handed: false });
       expect(await guestChatHandedTo(undefined, rana.uuid)).toEqual({ handed: false });
+    });
+
+    it('reads the windows only once it holds the locks: a claim that waited while another opened a new window counts in the new one', async () => {
+      const a = await universe('lockwin');
+      const guestId = guest();
+      const key = `gb:guest:${guestId}`;
+      const longAgo = new Date(Date.now() - 4 * 3_600_000);
+      // Two replies from the old window, which is still running when the claim begins
+      for (const n of [1, 2]) await prisma.guestBrickReply.create({ data: { turnId: `old-${randomUUID()}-${n}`, guestKey: guestId, universeKey: a.id, createdAt: longAgo } });
+      await prisma.replyWindow.create({ data: { key, startedAt: new Date(Date.now() - 4.9 * 3_600_000) } });
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      // Another claim holds the guest's lock and, before it lets go, has moved the window on and counted one reply in the new one
+      const other = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`gb:pool:${a.id}`}))`;
+        locked();
+        await held;
+        await tx.replyWindow.update({ where: { key }, data: { startedAt: new Date() } });
+        await tx.guestBrickReply.create({ data: { turnId: `new-${randomUUID()}`, guestKey: guestId, universeKey: a.id, createdAt: new Date() } });
+      });
+      await lockTaken;
+      const claiming = claim(guestId, a.roomUrl);
+      // The claim has reached the database and is waiting on the lock the other one holds
+      await waitUntilBlockedOnLock();
+      release();
+      await other;
+      expect(await claiming).toMatchObject({ allowed: true, counted: true });
+    });
+
+    it('a failed turn tried again from another universe is counted in that universe', async () => {
+      const a = await universe('retry-a');
+      const b = await universe('retry-b');
+      const guestId = guest();
+      const again = turn();
+      await claim(guestId, a.roomUrl, again);
+      await finishGuestBrickReply(again, { failed: true });
+      expect(await claim(guestId, b.roomUrl, again)).toMatchObject({ allowed: true, counted: true });
+      expect((await prisma.guestBrickReply.findUniqueOrThrow({ where: { turnId: again } })).universeKey).toBe(b.id);
     });
 
     it('does nothing when the guest never talked to the Brick, or only had a reply that failed', async () => {

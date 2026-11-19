@@ -30,6 +30,7 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { decryptApiKey } from '@/lib/encryption';
 import { disconnect, effectiveServer, listConnections, WITH_CONNECTION } from '@/lib/app-connections';
+import { grantKeyAppToBricks } from '@/lib/app-direct/grants';
 import { openKeyForm, readKey, readKeyForm, submitKey, KeyFormError } from '@/lib/app-direct/connect';
 import type { GuardDeps } from '@/lib/app-direct/guard';
 
@@ -366,6 +367,29 @@ run('key apps, in a real database', () => {
     await prisma.botMcpServer.update({ where: { id: grant.id }, data: { authType: 'bearer', authConfig: 'x:y:z', headers: { a: 'b' } } });
     const forged = effectiveServer(await prisma.botMcpServer.findUniqueOrThrow({ where: { id: grant.id }, include: WITH_CONNECTION }));
     expect(forged).toMatchObject({ authType: 'none', authConfig: null, headers: null });
+  });
+
+  it('goes on to the owner’s other Bricks when one of them could not be given the app', async () => {
+    const second = (await createBrick({ ownerId: sara, name: 'Second Brick' })).id;
+    try {
+      const made = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
+      await prisma.botMcpServer.deleteMany({ where: { connectionId: made.id } });
+      const real = prisma.$transaction.bind(prisma);
+      let calls = 0;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
+        calls += 1;
+        // The first Brick's grant fails (a dropped connection, a deadlock Postgres broke)
+        return calls === 1 ? Promise.reject(new Error('the database dropped the connection')) : (real as (...a: unknown[]) => unknown)(...args);
+      }) as never);
+      try {
+        expect(await grantKeyAppToBricks(sara, { id: made.id, name: made.name })).toMatchObject({ granted: 1 });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await prisma.botMcpServer.count({ where: { connectionId: made.id } })).toBe(1);
+    } finally {
+      await prisma.bot.deleteMany({ where: { id: second } });
+    }
   });
 
   it('disconnect takes it away', async () => {

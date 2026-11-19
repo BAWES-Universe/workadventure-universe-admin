@@ -100,8 +100,13 @@ export interface PreviewNumbers {
   startsOn?: 'next' | 'now';
   /** The most credit issued to the people there are now (per month for a monthly rule); null when it is not a money figure. */
   mostNowMicros: number | null;
+  /** For an exception that sets both categories: how much of the most is one-time credit and how much is monthly, so they are never said as one sum. */
+  mostOnceMicros?: number | null;
+  mostMonthlyMicros?: number | null;
   /** What saving issues straight away to the people there now (the funding check). Never more than the most it can issue. */
   issuedNowMicros?: number | null;
+  /** For a monthly default that starts on the 1st: what the first month issues to the people there now. Nothing is issued before it. */
+  firstMonthMicros?: number | null;
   /** True when nothing caps how long or how many it reaches, so there is no lifetime maximum. */
   noLifetimeMax: boolean;
   endsOn?: string;
@@ -140,7 +145,10 @@ export const usd = (micros: number): string => {
 
 /** Dollars typed by a person, to millionths: null for anything that is not a positive amount, so nothing is guessed. */
 export function microsOfDollars(text: string): number | null {
-  const cleaned = text.trim().replace(/^\$/, '').replace(/,/g, '');
+  const typed = text.trim().replace(/^\$/, '');
+  // Commas only as thousands groups ("1,234.50"): "1,50" is not $150, it is refused
+  if (typed.includes(',') && !/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(typed)) return null;
+  const cleaned = typed.replace(/,/g, '');
   if (!/^\d+(\.\d{1,6})?$/.test(cleaned)) return null;
   const micros = Math.round(Number(cleaned) * 1_000_000);
   return micros > 0 && Number.isSafeInteger(micros) ? micros : null;
@@ -154,6 +162,12 @@ export const nameList = (names: string[], max = 3): string => {
   const rest = names.length - (max - 1);
   return `${names.slice(0, max - 1).join(', ')} and ${rest} others`;
 };
+
+/** A day as the person reading it has it: in their own time zone, which is the zone the end of a gift is picked in. Null for what is not a date. */
+export function localDay(iso: string): string | null {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
 
 const plural = (value: number, one: string, many: string) => `${value.toLocaleString('en')} ${value === 1 ? one : many}`;
 
@@ -203,7 +217,7 @@ export function exceptionLines(exception: ExceptionView): string[] {
 export function giftLines(gift: GiftView): string[] {
   const scope = gift.scope === 'both' ? 'Instant Apps and computers' : gift.scope === 'apps' ? 'Instant Apps' : 'Computers';
   const amount = gift.shared ? `${usd(gift.amountMicros)} shared in total` : `${usd(gift.amountMicros)} each, ${usd(gift.totalMicros)} in total`;
-  return [amount, scope, `${gift.ended ? 'ended' : 'until'} ${new Date(gift.endsAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' })}`];
+  return [amount, scope, `${gift.ended ? 'ended' : 'until'} ${localDay(gift.endsAt) ?? ''}`.trim()];
 }
 
 export function giftMeta(gift: GiftView): string[] {
@@ -247,7 +261,13 @@ export function previewRows(request: PreviewRequest, numbers: PreviewNumbers | n
   }
   if (request.what === 'exception') {
     rows.push(['Who gets what', [{ b: plural(n.people, 'person', 'people') }, ' get their own rule in place of the defaults. Someone taken off goes back to the defaults at the next renewal. Credit already given stays.']]);
-    rows.push(['Most credit issued', n.mostNowMicros === null ? ['No credit from this rule.'] : ['Up to ', { b: `${usd(n.mostNowMicros)} a month` }, n.laterToo ? '. A universe’s members change, so it grows when people join.' : '. It only grows if you add people.']]);
+    // One-time credit and monthly credit are said apart: a sum of the two is neither
+    const monthly = n.mostMonthlyMicros ?? (n.mostOnceMicros ? null : n.mostNowMicros);
+    const once = n.mostOnceMicros ?? null;
+    const said: Seg[] = [];
+    if (monthly) said.push({ b: `${usd(monthly)} a month` });
+    if (once) said.push(...(said.length ? [' and '] : []), { b: `${usd(once)} once` });
+    rows.push(['Most credit issued', said.length === 0 ? ['No credit from this rule.'] : ['Up to ', ...said, n.laterToo ? '. A universe’s members change, so it grows when people join.' : '. It only grows if you add people.']]);
     rows.push(cost);
     const funding = fundingRow(n);
     if (funding) rows.push(funding);
@@ -262,7 +282,9 @@ export function previewRows(request: PreviewRequest, numbers: PreviewNumbers | n
       ? [n.people === 1 ? 'This person has ' : `The ${n.people} share `, { b: `one ${amount}` }, ` for ${scopeWords(request.scope)}. Whoever uses it first uses it. Two people can never spend the same dollar at once.`]
       : [n.people === 1 ? 'This person gets ' : `Each of the ${n.people} gets `, { b: `one ${amount}` }, ` for ${scopeWords(request.scope)}${request.scope === 'both' ? `, not ${amount} for each` : ''}. ${only}`],
   ]);
-  rows.push(['Most credit issued', [{ b: `${usd(total)} in total` }, n.endsOn ? `, ending ${n.endsOn}. Used before their own credit, because it ends sooner.` : '.']]);
+  // The day the admin picked is the day in their own zone (the box takes it that way), so the preview says it in that zone too, never the server's
+  const endsOn = localDay(request.endsAt) ?? n.endsOn;
+  rows.push(['Most credit issued', [{ b: `${usd(total)} in total` }, endsOn ? `, ending ${endsOn}. Used before their own credit, because it ends sooner.` : '.']]);
   rows.push(cost);
   const funding = fundingRow(n);
   if (funding) rows.push(funding);
@@ -273,6 +295,12 @@ export function previewRows(request: PreviewRequest, numbers: PreviewNumbers | n
 /** The funding line: nothing is given out until the rollout budget is set, and a rule bigger than what is left this month is refused on save. */
 function fundingRow(n: PreviewNumbers): PreviewRow | null {
   if (n.budget.budgetMicros === null) return ['Funding', ['Nothing is given out until you set the rollout budget in Limits.']];
+  // A monthly default that starts on the 1st issues nothing now: its first month comes out of the budget of the month it starts in
+  if (n.interval === 'monthly' && n.startsOn !== 'now' && n.firstMonthMicros !== undefined && n.firstMonthMicros !== null) {
+    const month = usd(n.firstMonthMicros);
+    if (n.firstMonthMicros > n.budget.budgetMicros) return ['Funding', [`Nothing is issued now. On the 1st it issues ${month} for the first month, which is more than the ${usd(n.budget.budgetMicros)} rollout budget. Raise the budget in Limits before then.`]];
+    return ['Funding', [`Nothing is issued now. Starts on the 1st: ${month} for the first month, from that month’s rollout budget (${usd(n.budget.budgetMicros)}).`]];
+  }
   const first = n.interval === 'none' ? 0 : n.issuedNowMicros ?? n.mostNowMicros ?? 0;
   if (first > n.budget.roomMicros) return ['Funding', [`This is more than the ${usd(n.budget.roomMicros)} left in this month’s rollout budget. Raise the budget in Limits first.`]];
   return null;
