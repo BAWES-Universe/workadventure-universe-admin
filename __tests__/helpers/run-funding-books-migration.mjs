@@ -72,7 +72,8 @@ const checks = {
     return accepted(program('d3', { kind: 'default', category_id: 'computers' }));
   })(),
   requestKeyOnce: await (async () => {
-    await accepted(program('rk1', { request_key: 'abc' }));
+    // The first one is made with exec, so a migration that refuses every request key stops the setup here instead of passing as the "duplicate"
+    await db.exec(program('rk1', { request_key: 'abc' }));
     return accepted(program('rk2', { request_key: 'abc' }));
   })(),
   ruleOk: await accepted(rule('r1')),

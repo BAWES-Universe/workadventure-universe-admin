@@ -59,8 +59,9 @@ const checks = {
   // One Brick walks with a person at a time, and a Brick walks with one person
   secondBrickForTheSamePerson: await accepted(`INSERT INTO brick_visits (user_id, bot_id) VALUES ('sara', 'brick2')`),
   theSameBrickForAnotherPerson: await accepted(`INSERT INTO brick_visits (user_id, bot_id) VALUES ('omar', 'brick1')`),
-  anotherPersonsOwnBrick: await accepted(`INSERT INTO brick_visits (user_id, bot_id) VALUES ('omar', 'brick2')`),
+  // A person who does not exist, tried while brick2 has no visit yet: only the missing person can refuse it (afterwards, brick2 is taken)
   noPerson: await accepted(`INSERT INTO brick_visits (user_id, bot_id) VALUES ('nobody', 'brick2')`),
+  anotherPersonsOwnBrick: await accepted(`INSERT INTO brick_visits (user_id, bot_id) VALUES ('omar', 'brick2')`),
   noBot: await accepted(`INSERT INTO brick_visits (user_id, bot_id) VALUES ('owner', 'nothing')`),
 };
 
