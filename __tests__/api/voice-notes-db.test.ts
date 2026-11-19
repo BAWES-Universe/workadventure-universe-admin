@@ -356,6 +356,30 @@ run('voice notes for every bot, in a real database', () => {
       expect(await reserveFor(capped, person, { source: 'own-key', seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit', allowance: { allowed: false, limit: 'bot' } });
     });
 
+    it('takes the last reply under the reservation lock: two notes at the same instant never both get it', async () => {
+      const capped = await newBot('Capped at once');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 1 } });
+      const person = `race-${randomUUID()}`;
+      const results = await Promise.all([reserveFor(capped, person, { seconds: 10 }), reserveFor(capped, person, { seconds: 10 })]);
+      expect(results.filter((result) => result.ok)).toHaveLength(1);
+      expect(results.find((result) => !result.ok)).toMatchObject({ reason: 'reply-limit', allowance: { allowed: false, limit: 'bot' } });
+    });
+
+    it('counts a note on its way as a reply, but not one already answered (its usage row is counted instead)', async () => {
+      const capped = await newBot('Capped two');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 2 } });
+      const person = `way-${randomUUID()}`;
+      // One reply already given: its usage row, and its note answered
+      const first = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+      await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { state: 'answered' } });
+      await prisma.botsAiUsage.create({ data: { botId: capped, providerId: 'universe-ai', talkedUserId: person, talkedGuest: true } });
+      // The next note takes the second reply; one more is refused while it is on its way
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
+      // Another person is not counted against it
+      expect(await reserveFor(capped, `other-${randomUUID()}`, { seconds: 10 })).toMatchObject({ ok: true });
+    });
+
     it('stops at the hour\'s minutes and the notes heard at once, for everyone, with "busy"', async () => {
       await saveVoiceLimits({ notesAtOnce: 1 }, makerId);
       try {

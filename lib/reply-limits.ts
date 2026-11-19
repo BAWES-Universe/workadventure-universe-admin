@@ -63,7 +63,36 @@ type Check = {
   hours: number;
   limit: number;
   where: (since: Date) => Prisma.BotsAiUsageWhereInput;
+  /** Which voice notes still on their way to a reply count against this limit too (see `ReplySlot`). */
+  pending: PendingNotes;
 };
+
+/** The voice notes reserved but not yet answered that would use up a reply of one limit. */
+export interface PendingNotes {
+  /** The person the limit counts: their key (a signed-in person's account, or a guest's id). */
+  personKey: string;
+  /** Only notes for this bot (a limit about one bot), or any bot when empty. */
+  botId?: string;
+  /** Only guests' notes (the pool every guest on a bot shares). */
+  guestsOnly?: boolean;
+  /** Notes that run on the maker's own key never count against a Universe AI limit. */
+  notOwnKey: boolean;
+}
+
+/**
+ * One limit a reply was allowed under, as data: kept so a reservation can count the same limit again under its own lock, and count the
+ * notes already on their way (which have no usage row yet), instead of trusting a reading taken before the lock.
+ */
+export interface ReplySlot {
+  kind: LimitKind;
+  limit: number;
+  resetsAt: string;
+  who: Asker;
+  usage: Prisma.BotsAiUsageWhereInput;
+  pending: PendingNotes;
+  /** What to write down when the slot is found full, as when the first check finds a limit reached. */
+  hit: { botId: string; kind: LimitKind; talkedUserId: string; windowEndsAt: Date };
+}
 
 /**
  * May this person get one more reply from this bot now? Asked by the bot server before each reply, after it knows what
@@ -74,6 +103,8 @@ export async function checkReplyAllowance(
   botId: string,
   input: { userId?: unknown; isGuest?: unknown; source?: unknown; greeting?: unknown },
   now: Date = new Date(),
+  /** Given by a caller that will count again under its own lock: filled with every limit the reply was allowed under. */
+  collect?: ReplySlot[],
 ): Promise<ReplyAllowance> {
   const source = input.source;
   if (source !== 'universe-ai' && source !== 'provider' && source !== 'own-key') {
@@ -121,6 +152,7 @@ export async function checkReplyAllowance(
         limit: room((guest ? limits.guest : signedIn) * (extra?.multiplier ?? 1)),
         // Every Universe AI reply this person got, from any bot: a reply no personal key paid for
         where: (since) => ({ ...personRows, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } }),
+        pending: { personKey, notOwnKey: true },
       });
     }
     if (guest) {
@@ -130,6 +162,7 @@ export async function checkReplyAllowance(
         hours: limits.windowHours,
         limit: limits.guestPool,
         where: (since) => ({ botId: bot.id, talkedGuest: true, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } }),
+        pending: { personKey, botId: bot.id, guestsOnly: true, notOwnKey: true },
       });
     }
   }
@@ -140,13 +173,18 @@ export async function checkReplyAllowance(
       hours: BOT_LIMIT_WINDOW_HOURS,
       limit: bot.dailyReplyCap,
       where: (since) => ({ ...personRows, botId: bot.id, error: false, greeting: false, timestamp: { gte: since } }),
+      pending: { personKey, botId: bot.id, notOwnKey: false },
     });
   }
 
   for (const check of checks) {
     const since = await windowStart(check.key, check.hours, now);
     const used = await prisma.botsAiUsage.count({ where: check.where(since) });
-    if (used < check.limit) continue;
+    if (used < check.limit) {
+      const endsAt = new Date(since.getTime() + check.hours * HOUR);
+      collect?.push({ kind: check.kind, limit: check.limit, resetsAt: endsAt.toISOString(), who, usage: check.where(since), pending: check.pending, hit: { botId: bot.id, kind: check.kind, talkedUserId: userId, windowEndsAt: endsAt } });
+      continue;
+    }
     const resetsAt = new Date(since.getTime() + check.hours * HOUR);
     // A greeting that is not made is not a person running out: nobody asked for it
     if (!greeting) {
