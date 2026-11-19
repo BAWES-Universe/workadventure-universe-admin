@@ -6,7 +6,7 @@
  * (the authorization callback and the server-side refresh) apply the same check,
  * including the DNS resolution step, before sending credentials anywhere.
  */
-import { lookup } from 'dns/promises';
+import { resolveHost } from '@/lib/name-lookup';
 import http from 'node:http';
 import https from 'node:https';
 import { Readable } from 'node:stream';
@@ -153,7 +153,7 @@ export async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: b
       // IP literal that passed all checks — still resolve it to catch CNAME-based bypasses
     }
 
-    const addresses = await lookup(hostname, { all: true });
+    const addresses = await resolveHost(hostname);
     for (const addr of addresses) {
       const ip = addr.address;
       // Reject private and loopback ranges

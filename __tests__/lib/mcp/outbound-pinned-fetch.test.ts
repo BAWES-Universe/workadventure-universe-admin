@@ -4,7 +4,7 @@
  * socket only.
  */
 const lookupMock = jest.fn();
-jest.mock('dns/promises', () => ({ lookup: (...args: unknown[]) => lookupMock(...args) }));
+jest.mock('@/lib/name-lookup', () => ({ resolveHost: (...args: unknown[]) => lookupMock(...args) }));
 
 const requests: { options: Record<string, unknown>; body?: string }[] = [];
 // What the pretend server answers, and whether the answer comes after the request call has returned (as a real one does)
