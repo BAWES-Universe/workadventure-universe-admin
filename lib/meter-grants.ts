@@ -51,7 +51,7 @@ export class GrantRefused extends Error {}
 /** The key was already used, for figures that are not these (most likely changed since by another admin): something is saved under it. */
 export class GrantKeyUsed extends GrantRefused {}
 
-const view = (row: { id: string; grantKey: string; personId: string; settlement: string; multiplier: number | null; noLimit: boolean; startsAt: Date; endsAt: Date; givenById: string; note: string | null; billedAt: Date | null }): Grant => ({
+const view = (row: { id: string; grantKey: string; personId: string; settlement: string; multiplier: number | null; noLimit: boolean; startsAt: Date; endsAt: Date; givenById: string; note: string | null; billedAt: Date | null; cancelledAt?: Date | null }): Grant => ({
   id: row.id,
   grantKey: row.grantKey,
   personId: row.personId,
@@ -153,7 +153,7 @@ export function pickRunning<T extends { grantKey: string; multiplier: number | n
 
 /** The extra usage running for a person right now, for the replies' limit and the usage page (see `pickRunning`). */
 export async function runningExtra(personId: string, now: Date = new Date(), db: Pick<typeof prisma, 'meterGrant'> = prisma): Promise<RunningExtra | null> {
-  const rows = await db.meterGrant.findMany({ where: { personId, startsAt: { lte: now }, endsAt: { gt: now } }, select: { grantKey: true, multiplier: true, noLimit: true, endsAt: true } });
+  const rows = await db.meterGrant.findMany({ where: { personId, cancelledAt: null, startsAt: { lte: now }, endsAt: { gt: now } }, select: { grantKey: true, multiplier: true, noLimit: true, endsAt: true } });
   const best = pickRunning(rows);
   return best ? { grantKey: best.grantKey, multiplier: best.noLimit ? null : best.multiplier, noLimit: best.noLimit, endsAt: best.endsAt } : null;
 }
@@ -172,7 +172,7 @@ export interface GrantChange {
 export async function changeGrant(grantKey: string, change: GrantChange, now: Date = new Date()): Promise<Grant> {
   const row = await prisma.meterGrant.findUnique({ where: { grantKey } });
   if (!row) throw new GrantRefused('That extra usage does not exist');
-  if (row.endsAt <= now) throw new GrantRefused('That extra usage has ended. Give a new one instead.');
+  if (row.endsAt <= now || row.cancelledAt) throw new GrantRefused('That extra usage has ended. Give a new one instead.');
   if (row.billedAt) throw new GrantRefused('That extra usage is marked billed. Give a new one instead.');
   const noLimit = change.noLimit ?? (change.multiplier === undefined ? row.noLimit : false);
   const multiplier = noLimit ? null : change.multiplier === undefined ? row.multiplier : change.multiplier;
@@ -188,12 +188,12 @@ export async function changeGrant(grantKey: string, change: GrantChange, now: Da
   if (change.endsAt !== undefined) data.endsAt = endsAt;
   if (change.note !== undefined) data.note = note;
   // Written only against the end that was read: an admin who ended it (or moved its end) while this one waited has it as they left it
-  const { count } = await prisma.meterGrant.updateMany({ where: { grantKey, billedAt: null, endsAt: { gt: now, equals: row.endsAt } }, data });
+  const { count } = await prisma.meterGrant.updateMany({ where: { grantKey, billedAt: null, cancelledAt: null, endsAt: { gt: now, equals: row.endsAt } }, data });
   if (count === 0) {
     const now2 = await prisma.meterGrant.findUnique({ where: { grantKey } });
     if (!now2) throw new GrantRefused('That extra usage does not exist');
     if (now2.billedAt) throw new GrantRefused('That extra usage is marked billed. Give a new one instead.');
-    if (now2.endsAt <= now) throw new GrantRefused('That extra usage has ended. Give a new one instead.');
+    if (now2.endsAt <= now || now2.cancelledAt) throw new GrantRefused('That extra usage has ended. Give a new one instead.');
     throw new GrantRefused('That extra usage was changed by someone else a moment ago. Open it again and look before changing it.');
   }
   const updated = await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey } });
@@ -202,15 +202,16 @@ export async function changeGrant(grantKey: string, change: GrantChange, now: Da
 
 /** "End it now": a running extra usage stops this moment. What it already covered stays covered; it is still listed, as ended. */
 export async function endGrantNow(grantKey: string, now: Date = new Date()): Promise<'ended' | 'already_ended' | 'not_found'> {
-  const row = await prisma.meterGrant.findUnique({ where: { grantKey }, select: { startsAt: true, endsAt: true } });
+  const row = await prisma.meterGrant.findUnique({ where: { grantKey }, select: { startsAt: true, endsAt: true, cancelledAt: true } });
   if (!row) return 'not_found';
-  if (row.endsAt <= now) return 'already_ended';
-  // One that has not started yet never runs: it ends where it would have begun, and the database holds an end after a start.
-  // Only a grant still running is written, so two admins ending it at the same moment (or one changing it) cannot reopen it.
+  if (row.endsAt <= now || row.cancelledAt) return 'already_ended';
+  // One that has not started yet never runs: it is marked cancelled and its dates stay as they were given, so no spend is ever
+  // attributed to a window it never had. Only a grant still open is written, so two admins ending it at the same moment (or one
+  // changing it) cannot reopen it.
   const never = row.startsAt >= now;
   const { count } = await prisma.meterGrant.updateMany({
-    where: { grantKey, endsAt: { gt: now } },
-    data: never ? { startsAt: new Date(now.getTime() - 1000), endsAt: now } : { endsAt: now },
+    where: { grantKey, cancelledAt: null, endsAt: { gt: now } },
+    data: never ? { cancelledAt: now } : { endsAt: now },
   });
   return count > 0 ? 'ended' : 'already_ended';
 }

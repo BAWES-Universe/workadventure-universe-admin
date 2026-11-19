@@ -671,6 +671,13 @@ run('usage for people, and cost for us, in a real database', () => {
       const later = await recordGrant({ ...base, personId: omar.id, grantKey: `g-${tag}-g`, settlement: 'gift', multiplier: 2, startsAt: days(2), endsAt: days(5) });
       expect(await endGrantNow(later.grant.grantKey, NOW)).toBe('ended');
       expect(await runningExtra(omar.id, days(3))).toBeNull();
+      // Its dates stay as they were given (it is marked cancelled instead of being made to look as if it ran for a second)
+      const kept = await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: `g-${tag}-g` } });
+      expect(kept.startsAt).toEqual(days(2));
+      expect(kept.endsAt).toEqual(days(5));
+      expect(kept.cancelledAt).toEqual(NOW);
+      expect(await endGrantNow(later.grant.grantKey, NOW)).toBe('already_ended');
+      await expect(changeGrant(later.grant.grantKey, { multiplier: 3 }, NOW)).rejects.toThrow(/ended/);
       await expect(changeGrant(gift.grant.grantKey, { multiplier: 3 }, new Date(NOW.getTime() + 1000))).rejects.toThrow(/ended/);
     });
   });
@@ -882,6 +889,20 @@ run('usage for people, and cost for us, in a real database', () => {
       // And the person’s row says extra usage runs, until when
       expect((await costsReport(new Date('2026-11-01T00:00:00Z'), range.to, NOW)).people.rows.find((row) => row.name === 'sara')?.extraUntil).toBe(days(10).toISOString());
     });
+    it('never attributes spending to a gift that was cancelled before it started', async () => {
+      await setUp();
+      const sara = await person('sara');
+      const faisal = await person('faisal');
+      const later = await recordGrant({ grantKey: `g-${tag}-later`, personId: sara.id, settlement: 'to_bill', multiplier: 5, startsAt: days(1), endsAt: days(10), givenById: faisal.id, note: 'Agreed' });
+      expect(await endGrantNow(later.grant.grantKey, NOW)).toBe('ended');
+      // Spent in the second before it was cancelled: no extra usage was running, so none of it is "above the usual"
+      await spendComputer(sara, 2_500, new Date(NOW.getTime() - 500));
+      const report = await costsReport(range.from, range.to, NOW);
+      const row = report.given.find((item) => item.grantKey === `g-${tag}-later`)!;
+      expect(row).toMatchObject({ ended: true, aboveUsualMicros: 0 });
+      expect(report.people.rows.find((item) => item.name === 'sara')?.extraUntil).toBeNull();
+    });
+
     it('reads the computer spending once for everyone, whatever the number of people and months their grants span', async () => {
       await setUp();
       const sara = await person('sara');
