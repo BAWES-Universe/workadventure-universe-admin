@@ -225,6 +225,35 @@ run('a Brick’s computer, in a real database', () => {
       expect(view?.month?.leftFraction).toBeCloseTo(0.97, 2);
     });
 
+    it('an end that finds the job\'s seconds moved since it read them (a take-over and a hand-back) is worked out again on what is there, and never writes the smaller count over the newer', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      await prisma.computerJob.update({ where: { id: job.job.id }, data: { secondsRun: 100 } });
+      const real = prisma.computerJob.updateMany.bind(prisma.computerJob) as (args: { data?: Record<string, unknown> }) => Promise<{ count: number }>;
+      let moved = false;
+      const spy = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation(((args: { data?: Record<string, unknown> }) => {
+        // After the end read the job and before it wrote: a take-over recorded 300 seconds and a hand-back put it running again (the status is as it was)
+        if (!moved && args?.data?.status === 'done') {
+          moved = true;
+          return prisma.computerJob.update({ where: { id: job.job.id }, data: { secondsRun: 300, stretchStarted: minutes(1) } }).then(() => real(args));
+        }
+        return real(args);
+      }) as never);
+      try {
+        await finishJob(job.job.id, 'done', minutes(2));
+      } finally {
+        spy.mockRestore();
+      }
+      const ended = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.job.id } });
+      expect(ended.status).toBe('done');
+      // The 300 recorded, and the minute since the stretch began: never the 100 and the two minutes from the first read
+      expect(ended.secondsRun).toBe(360);
+      const events = await prisma.meterEvent.findMany({ where: { eventId: `computer:${job.job.id}:time` } });
+      expect(events[0]?.quantity).toBe(BigInt(360));
+    });
+
     it('rests the machine when the last job is over, and keeps the disk: nothing is removed or reset', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
@@ -377,6 +406,30 @@ run('a Brick’s computer, in a real database', () => {
       // New content is never held back by an older start
       expect(await dbImageStore.claim!('h2', new Date(now.getTime() + CLAIM_MS + 2000))).toMatchObject({ hash: 'h2' });
       await prisma.appSetting.deleteMany({ where: { key: 'computer-image' } });
+    });
+
+    it('does not start a second build of content that is already building, ready, or failed and still waiting', async () => {
+      const key = 'computer-image';
+      const now = new Date('2026-11-15T12:00:00Z');
+      const put = async (value: Record<string, unknown>) => {
+        await prisma.appSetting.deleteMany({ where: { key } });
+        await prisma.appSetting.create({ data: { key, value: value as never } });
+      };
+      const base = { hash: 'h1', revision: null, startedAt: new Date(now.getTime() - 60_000).toISOString(), failures: 0, error: null };
+      // Another sweep recorded its build id after this one read the setting
+      await put({ ...base, state: 'building', buildId: 'b-1' });
+      expect(await dbImageStore.claim!('h1', now)).toBeNull();
+      await put({ ...base, state: 'ready', buildId: 'b-1', revision: 3 });
+      expect(await dbImageStore.claim!('h1', now)).toBeNull();
+      // A failed build waits out its time, counted from when it failed
+      await put({ ...base, state: 'failed', buildId: 'b-1', failures: 1, failedAt: new Date(now.getTime() - 60_000).toISOString() });
+      expect(await dbImageStore.claim!('h1', now)).toBeNull();
+      await put({ ...base, state: 'failed', buildId: 'b-1', failures: 1, failedAt: new Date(now.getTime() - 6 * 60_000).toISOString() });
+      expect(await dbImageStore.claim!('h1', now)).toMatchObject({ state: 'building', buildId: null, failures: 1 });
+      // Changed content is never held back by an older build
+      await put({ ...base, state: 'ready', buildId: 'b-1', revision: 3 });
+      expect(await dbImageStore.claim!('h2', now)).toMatchObject({ hash: 'h2' });
+      await prisma.appSetting.deleteMany({ where: { key } });
     });
 
     it('keeps a renewing job going while there is room, and gives every held room back when a job ends or lapses', async () => {
@@ -1063,6 +1116,28 @@ run('a Brick’s computer, in a real database', () => {
       }
     });
 
+    it('a details tap is not claimed when the person handed the machine back after the job was read', async () => {
+      const { sara, jobId } = await waitingJob();
+      const ready = { what: 'Your details', where: 'Step 1' };
+      await requestHandover(jobId, 'details', minutes(1), ready);
+      await takeOver(sara.brickId, sara.id);
+      const asked = await fillInDetails(sara.brickId, sara.id, ready);
+      const key = asked.ok ? asked.job.detailsToFill[0].key : '';
+      const read = prisma.computerJob.findUnique.bind(prisma.computerJob);
+      const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementationOnce(((...args: Parameters<typeof read>) =>
+        read(...args).then(async (row) => {
+          // The job was read with the person in control; they hand it back before the tap is claimed
+          await handBack(sara.brickId, sara.id);
+          return row;
+        })) as never);
+      try {
+        expect(await planEffect(jobId, { key, kind: 'details' })).toEqual({ ok: false, reason: 'hand_over_first' });
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await prisma.computerEffect.findUniqueOrThrow({ where: { jobId_effectKey: { jobId, effectKey: key } } })).state).toBe('approved');
+    });
+
     it('a details tap spent by a failed try is not claimed again by a try that read the row before it failed', async () => {
       const { sara, jobId } = await waitingJob();
       const ready = { what: 'Your details', where: 'Step 1' };
@@ -1421,6 +1496,27 @@ run('a Brick’s computer, in a real database', () => {
       await undoBrickDelete(sara.brickId, sara.id, minutes(2));
       expect(provider.calls.length).toBe(before);
       expect(await prisma.computerJob.count({ where: { botId: sara.brickId, status: { in: ['queued', 'running', 'waiting'] } } })).toBe(0);
+    });
+
+    it('Stop still ends a job that went from running to waiting between the read and the end', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      const read = prisma.computerJob.findUnique.bind(prisma.computerJob);
+      const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementationOnce(((...args: Parameters<typeof read>) =>
+        read(...args).then(async (row) => {
+          // The job asks the person to take over right after it was read as running
+          await prisma.computerJob.update({ where: { id: job.job.id }, data: { status: 'waiting', waitingFor: 'details' } });
+          return row;
+        })) as never);
+      try {
+        await stopJobFor(sara.brickId, sara.id, minutes(2));
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'person' });
+      expect(await prisma.meterReservation.count({ where: { personKey: `person:${sara.id}`, state: 'held' } })).toBe(0);
     });
 
     it('Stop ends a job waiting for the allowance too, so it never starts later', async () => {

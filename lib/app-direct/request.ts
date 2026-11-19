@@ -40,9 +40,9 @@ function fill(template: BodyTemplate, values: Record<string, unknown>): unknown 
     const out: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(template)) {
       const value = fill(item as BodyTemplate, values);
-      // A value the model left out (an optional one) is not sent at all, and an object left empty by that is not sent either
+      // A value the model left out (an optional one) is not sent at all, and an object left empty by that is not sent either (an empty object the template itself holds is a value, and goes)
       if (value === undefined) continue;
-      if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0 && item && typeof item === 'object' && !('$param' in item)) continue;
+      if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0 && item && typeof item === 'object' && !('$param' in item) && Object.keys(item).length > 0) continue;
       out[key] = value;
     }
     return out;

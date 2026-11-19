@@ -10,6 +10,8 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => moc
 jest.mock('@/lib/mcp/outbound-guard', () => ({
   ...jest.requireActual('@/lib/mcp/outbound-guard'),
   isAllowedServerIp: jest.fn(async () => ({ allowed: true })),
+  // The request itself goes through the pretend fetch (the pinned connection has its own test)
+  pinnedFetch: jest.fn(async (url: string, init?: RequestInit) => global.fetch(url, init)),
 }));
 
 import { prisma } from '@/lib/db';

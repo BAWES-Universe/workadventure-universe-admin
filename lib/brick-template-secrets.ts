@@ -33,8 +33,19 @@ interface Pattern {
 const hasDigit = (value: string) => /\d/.test(value);
 /** The text before a match ends inside a link (https://...): what follows is an address, not a key. */
 const insideLink = (head: string) => /(?:^|[^a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/\S*$/i.test(head);
+/** The words a query parameter is named with when it carries a credential ("key", "access_token", "X-Amz-Signature", "apiKey"). Whole words only: "keyword" is not "key". */
+const CREDENTIAL_WORDS = new Set(['key', 'apikey', 'accesskey', 'accesstoken', 'authtoken', 'token', 'secret', 'password', 'passwd', 'pwd', 'auth', 'authorization', 'sig', 'signature', 'credential', 'credentials']);
 /** The value of a link's query parameter that is named like a credential ("?key=", "&access_token=", "&sig="): that one is a key, not an address. */
-const afterCredentialParam = (head: string) => /[?&;][a-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|sig|signature|credential)[a-z0-9_.-]*=$/i.test(head);
+const afterCredentialParam = (head: string) => {
+  const name = /[?&;]([A-Za-z0-9_.-]*)=$/.exec(head)?.[1];
+  if (name === undefined) return false;
+  // Split at separators and where a capital follows a small letter ("apiKey"), then every word is looked at on its own
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+    .split(/[_.-]+/)
+    .some((word) => CREDENTIAL_WORDS.has(word));
+};
 const mixesCases = (value: string) => /[a-z]/.test(value) && /[A-Z]/.test(value) && /\d/.test(value);
 
 const PATTERNS: Pattern[] = [
@@ -62,8 +73,8 @@ const PATTERNS: Pattern[] = [
       return hasDigit(bare) || /[^A-Za-z0-9]/.test(bare) || (/[a-z]/.test(bare) && /[A-Z]/.test(bare)) || bare.length >= 20;
     },
   },
-  // A long run inside a link's path ("/recipes/ChickenAndVegetableSoup2026") is an address, not a key; the value of a credential-named query parameter still is one
-  { kind: 'secret', what: 'a long key-like string', pattern: /\b[A-Za-z0-9+/_-]{40,}={0,2}/g, accept: (match, head) => mixesCases(match) && (!insideLink(head) || afterCredentialParam(head)) },
+  // A long run inside a link's path ("/recipes/ChickenAndVegetableSoup2026") is an address, not a key; the value of a credential-named query parameter still is one, in any letters (a hex key has no capitals)
+  { kind: 'secret', what: 'a long key-like string', pattern: /\b[A-Za-z0-9+/_-]{40,}={0,2}/g, accept: (match, head) => afterCredentialParam(head) || (mixesCases(match) && !insideLink(head)) },
   { kind: 'detail', what: 'an email address', pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
   { kind: 'detail', what: 'a phone number', pattern: /(?<![\w.])\+?\d[\d\s().-]{8,}\d(?!\w)/g, accept: (match) => match.replace(/\D/g, '').length >= 9 },
 ];

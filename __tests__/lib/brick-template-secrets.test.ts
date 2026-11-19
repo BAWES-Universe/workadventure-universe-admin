@@ -34,6 +34,25 @@ describe('the secret check of the look before sharing', () => {
     expect(kinds(`Call https://api.example.com/data?sig=${key}`)).toEqual(['secret:a long key-like string']);
   });
 
+  it('finds a long value of a credential-named query parameter in any letters (all lowercase, or hex), and still leaves a path alone', () => {
+    const hex = '0f3a9c1d7b2e4a6c8d0e1f2a3b4c5d6e7f8a9b0c';
+    expect(kinds(`Call https://api.example.com/data?access_token=${hex}`)).toEqual(['secret:a long key-like string']);
+    expect(kinds(`Call https://api.example.com/data?city=Kuwait&sig=${hex}`)).toEqual(['secret:a long key-like string']);
+    expect(kinds(`Call https://api.example.com/data/${hex}`)).toEqual([]);
+    expect(kinds(`Call https://api.example.com/data?city=${hex}`)).toEqual([]);
+  });
+
+  it('does not take a parameter for a credential because its name holds "key" or "token" inside another word, and still finds the ones named by those words', () => {
+    // An ordinary search link: a long lowercase word is not a key
+    expect(kinds('Open https://example.com/search?keyword=chickenandvegetablesoupwithfreshherbsrecipe')).toEqual([]);
+    expect(kinds('Open https://example.com/list?monkey=chickenandvegetablesoupwithfreshherbsrecipe&tokenizer=chickenandvegetablesoupwithfreshherbsrecipe')).toEqual([]);
+    const hex = '0f3a9c1d7b2e4a6c8d0e1f2a3b4c5d6e7f8a9b0c';
+    // ("apiKey=" is also the written-out pattern's own: found either way)
+    expect(kinds(`Call https://api.example.com/data?apiKey=${hex}`)).toHaveLength(1);
+    expect(kinds(`Call https://api.example.com/data?X-Amz-Signature=${hex}`)).toEqual(['secret:a long key-like string']);
+    expect(kinds(`Call https://api.example.com/data?sig=${hex}`)).toEqual(['secret:a long key-like string']);
+  });
+
   it('says a secret once, under its most specific name', () => {
     const found = findInText('sk-proj-abcdefghijklmnopqrstuvwxyz123456abcdefghij', 'instructions');
     expect(found).toHaveLength(1);

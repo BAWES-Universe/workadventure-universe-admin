@@ -146,7 +146,9 @@ export async function checkAppUse(botId: string, serverId: string, input: z.infe
     if (connection.universeId) {
       if (connection.universeId !== universeId) return refuse('gone');
       if (!row.enabled) return refuse('off');
-      if ((await recordUse({ connectionId: connection.id, universeId, botId, callId: input.callId, limit: null, serverId: row.id })) === 'gone') return refuse('gone');
+      const recorded = await recordUse({ connectionId: connection.id, universeId, botId, callId: input.callId, limit: null, serverId: row.id });
+      if (recorded === 'gone') return refuse('gone');
+      if (recorded === 'off') return refuse('off');
       return { allowed: true, viaConnection: true, paidBy: { kind: 'universe', universeId } };
     }
     const lend = await prisma.appLend.findUnique({ where: { connectionId_universeId: { connectionId: connection.id, universeId } } });
@@ -161,6 +163,7 @@ export async function checkAppUse(botId: string, serverId: string, input: z.infe
     const outcome = await recordUse({ connectionId: connection.id, universeId, botId, callId: input.callId, limit: lend.usesPerDay, serverId: row.id, lend: true });
     // Taken back while this check was waiting: nothing is recorded, and nothing is let through
     if (outcome === 'gone') return refuse('gone');
+    if (outcome === 'off') return refuse('off');
     if (outcome === 'limit_reached') {
       await tellLenderOfLimit(lend, connection.name);
       return refuse('limit_reached');

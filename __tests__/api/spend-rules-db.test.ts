@@ -5,7 +5,7 @@
  *
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/spend-rules-db.test.ts --runInBand
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
@@ -278,6 +278,148 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await ask()).toMatchObject({ ok: false, leftMicros: 100_000 });
       if (small.ok) await endRule(small.rule.id, sara.id);
       expect(await ask()).toEqual({ ok: true });
+    });
+  });
+
+  describe('review findings on the rule checks', () => {
+    const attemptOf = (sara: { id: string; brickId: string }, micros: number) => ({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer' as const, amountMicros: micros });
+
+    it('a cap lowered while a step waits for the person’s lock is the cap the step is held to', async () => {
+      const sara = await person('sara');
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 10_000_000 });
+      if (!made.ok) throw new Error('not made');
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      // Another step has the person's lock
+      const other = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`spend-check:${sara.id}`}))`;
+        locked();
+        await held;
+      });
+      await lockTaken;
+      const waiting = prisma.$transaction((tx) => checkSpend(attemptOf(sara, 5_000_000), NOW, tx));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await changeRule(made.rule.id, sara.id, { capMicros: 2_000_000 });
+      release();
+      await other;
+      expect(await waiting).toMatchObject({ ok: false, why: 'cap', leftMicros: 2_000_000 });
+    });
+
+    it('a first rule added while a step waits for the lock is held too', async () => {
+      const sara = await person('sara');
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      const other = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`spend-check:${sara.id}`}))`;
+        locked();
+        await held;
+      });
+      await lockTaken;
+      const waiting = prisma.$transaction((tx) => checkSpend(attemptOf(sara, 5_000_000), NOW, tx));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 });
+      release();
+      await other;
+      expect(await waiting).toMatchObject({ ok: false, why: 'cap' });
+    });
+
+    it('ending a rule waits for an edit that is in the middle of saving it, so the edit never lands on an ended rule', async () => {
+      const sara = await person('sara');
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 });
+      if (!made.ok) throw new Error('not made');
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      // An edit has the rule's lock
+      const editing = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`spend-rule:${made.rule.id}`}))`;
+        locked();
+        await held;
+        await tx.spendRule.updateMany({ where: { id: made.rule.id, state: 'active' }, data: { capMicros: BigInt(9_000_000) } });
+      });
+      await lockTaken;
+      let ended = false;
+      const ending = endRule(made.rule.id, sara.id).then((answer) => { ended = true; return answer; });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(ended).toBe(false);
+      release();
+      await editing;
+      expect(await ending).toEqual({ ok: true });
+      expect((await prisma.spendRule.findUnique({ where: { id: made.rule.id } }))?.state).toBe('ended');
+      expect(await changeRule(made.rule.id, sara.id, { capMicros: 2_000_000 })).toMatchObject({ ok: false, reason: 'not_found' });
+    });
+
+    it('two long message ids that start the same are two messages, not one', async () => {
+      const sara = await person('sara');
+      const long = 'x'.repeat(300);
+      const first = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-a`, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+      const second = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-b`, scope: 'bot', period: 'month', capMicros: 5_000_000 });
+      expect(first).toMatchObject({ ok: true, created: true });
+      expect(second).toMatchObject({ ok: true, created: true });
+      // The same long message again still finds its rule
+      expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-a`, scope: 'bot', period: 'month', capMicros: 1_000_000 })).toMatchObject({ ok: true, created: false });
+    });
+
+    it('a message id that reads like a hashed key never makes the same rule as the long id it was made from', async () => {
+      const sara = await person('sara');
+      const long = 'x'.repeat(300);
+      const digest = createHash('sha256').update(long).digest('hex');
+      const first = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: long, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+      const second = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `sha256:${digest}`, scope: 'bot', period: 'month', capMicros: 5_000_000 });
+      expect(first).toMatchObject({ ok: true, created: true });
+      expect(second).toMatchObject({ ok: true, created: true });
+    });
+
+    it('a call priced between the two reads of a check is never missed: its cost or its room is counted, whichever read ran first', async () => {
+      const sara = await person('sara');
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+      const jobId = randomUUID();
+      const eventId = `computer:${jobId}:call:c1`;
+      await prisma.meterEvent.create({
+        data: { eventId, kind: 'model_call', pool: 'computer', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId, quantity: BigInt(1), unit: 'call', costMicros: null, basis: 'measured' },
+      });
+      await prisma.meterReservation.create({
+        data: { reservationKey: `computer:call:${jobId}:c1`, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, jobId, amountMicros: BigInt(90_000), settledMicros: BigInt(90_000), state: 'settled', expiresAt: NOW },
+      });
+      // The price is written (as settleModelCall does for a call reported after the sweep wrote it unknown) right after the first of the two reads
+      let priced = false;
+      const price = async () => {
+        if (priced) return;
+        priced = true;
+        await prisma.meterEvent.updateMany({ where: { eventId, costMicros: null }, data: { costMicros: BigInt(90_000), basis: 'measured' } });
+      };
+      const realAggregate = prisma.meterEvent.aggregate.bind(prisma.meterEvent) as (args: unknown) => Promise<unknown>;
+      const realFind = prisma.meterEvent.findMany.bind(prisma.meterEvent) as (args: unknown) => Promise<unknown>;
+      const aggregate = jest.spyOn(prisma.meterEvent, 'aggregate').mockImplementation(((args: unknown) => realAggregate(args).then(async (row) => (await price(), row))) as never);
+      const find = jest.spyOn(prisma.meterEvent, 'findMany').mockImplementation(((args: unknown) => realFind(args).then(async (row) => (await price(), row))) as never);
+      try {
+        // 90,000 of the 100,000 was spent, so 20,000 more is over the cap
+        expect(await checkSpend(attemptOf(sara, 20_000), NOW)).toMatchObject({ ok: false, why: 'cap' });
+        expect(priced).toBe(true);
+      } finally {
+        aggregate.mockRestore();
+        find.mockRestore();
+      }
+    });
+
+    it('a model call whose id holds ":call:" still finds the room it settled', async () => {
+      const sara = await person('sara');
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+      const jobId = randomUUID();
+      const callId = 'part:call:2';
+      await prisma.meterEvent.create({
+        data: { eventId: `computer:${jobId}:call:${callId}`, kind: 'model_call', pool: 'computer', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId, quantity: BigInt(1), unit: 'call', costMicros: null, basis: 'measured' },
+      });
+      await prisma.meterReservation.create({
+        data: { reservationKey: `computer:call:${jobId}:${callId}`, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, jobId, amountMicros: BigInt(90_000), settledMicros: BigInt(90_000), state: 'settled', expiresAt: NOW },
+      });
+      // The 90,000 the call took is counted, so 20,000 more is over the 100,000
+      expect(await checkSpend(attemptOf(sara, 20_000), NOW)).toMatchObject({ ok: false, why: 'cap' });
     });
   });
 

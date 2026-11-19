@@ -390,6 +390,18 @@ if [ "$(uname -m)" = x86_64 ] && command -v cc >/dev/null 2>&1 && cc -shared -fP
   HIDDEN=$!
 fi
 sh -c 'sleep 302' &
+# the desktop's own program names, started by the agent: a screen of its own on another display, a window manager that runs a command,
+# and what a window manager the agent made starts
+cp /bin/sh ${dir}/bin/Xvfb
+${dir}/bin/Xvfb -c 'sleep 308; true' :100 &
+X1=$!
+cp /bin/sh ${dir}/bin/openbox
+${dir}/bin/openbox -c 'sleep 309; true' --startup 'sleep 1' &
+X2=$!
+# what a window manager the agent made starts: a program of its own (not root's), so the fence has no reason to keep it
+cp /bin/sh ${dir}/agent/openbox && chown 65534:65534 ${dir}/agent/openbox
+${dir}/agent/openbox -c 'sleep 310 & wait; true' &
+X3=$!
 sleep 1
 for p in $A1 $A2 $A3 $LATE; do kill -0 $p 2>/dev/null && echo "agent-up"; done
 # the preloaded code is really in place before the fence runs: the cleared one still maps its library with no LD_ left, the hidden one has
@@ -401,6 +413,8 @@ python3 ${dir}/universe-fence
 echo "after: $(python3 ${dir}/universe-fence --check)"
 for p in $GW $BR; do kill -0 $p 2>/dev/null && echo "alive" || echo "dead"; done
 for p in $A1 $A2 $A3 $LATE; do kill -0 $p 2>/dev/null && echo "agent-alive" || echo "agent-dead"; done
+for p in $X1 $X2 $X3; do kill -0 $p 2>/dev/null && echo "desktop-name-alive" || echo "desktop-name-dead"; done
+pgrep -fx 'sleep 310' >/dev/null && echo "desktop-child-alive" || echo "desktop-child-dead"
 kill -0 $OWN 2>/dev/null && echo "own-alive" || echo "own-dead"
 kill -0 $SHORT 2>/dev/null && echo "short-alive" || echo "short-dead"
 kill -0 $OTHER 2>/dev/null && echo "other-alive" || echo "other-dead"
@@ -425,6 +439,10 @@ pgrep -P $BR -x sleep >/dev/null && echo "late-child-alive" || echo "late-child-
     expect(run.stdout.match(/agent-up/g)).toHaveLength(4);
     expect(run.stdout.match(/agent-dead/g)).toHaveLength(4);
     expect(run.stdout).not.toContain('agent-alive');
+    // The desktop's program names are no cover: another screen, a window manager running a command, and what it starts all go
+    expect(run.stdout.match(/desktop-name-dead/g)).toHaveLength(3);
+    expect(run.stdout).not.toContain('desktop-name-alive');
+    expect(run.stdout).toContain('desktop-child-dead');
     // What was running before the note is the computer's own, whatever it is called
     expect(run.stdout).toContain('own-alive');
     // A short sleep is left, and does not count as something the agent has running

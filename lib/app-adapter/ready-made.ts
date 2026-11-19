@@ -341,8 +341,11 @@ function linkJson(body: string, id?: number | string): Record<string, unknown> |
       return null;
     }
   };
+  // An answer is for the question asked: one that carries another id is somebody else's, never taken for this one. (A reply with no id,
+  // or a null one, is how a server answers a request it could not read, and is kept.)
+  const answers = (message: Record<string, unknown>) => id === undefined || message.id === undefined || message.id === null || String(message.id) === String(id);
   const whole = attempt(body.trim());
-  if (whole) return whole;
+  if (whole) return answers(whole) ? whole : null;
   // An event stream may carry notifications before the answer: the message that answers the question asked (its id) is the one wanted
   const messages: Record<string, unknown>[] = [];
   for (const line of body.split('\n')) {
@@ -352,7 +355,7 @@ function linkJson(body: string, id?: number | string): Record<string, unknown> |
     }
   }
   if (id === undefined) return messages[0] ?? null;
-  return messages.find((message) => message.id === id) ?? messages.find((message) => 'result' in message || 'error' in message) ?? null;
+  return messages.find((message) => message.id !== undefined && message.id !== null && String(message.id) === String(id)) ?? messages.find((message) => (message.id === undefined || message.id === null) && 'error' in message) ?? null;
 }
 
 /** The text of a JSON-RPC error carried in an answer that came with a 2xx status, or null when there is none. */
@@ -382,6 +385,8 @@ export async function testReadyMade(connection: { id: string; source: string; se
     if (opened.status >= 400) return failed(`The app answered ${opened.status}.`, opened.status);
     const openError = rpcError(opened.body, 1);
     if (openError) return failed(`Initialize error: ${openError}`, opened.status);
+    // An answer to something else (another id, or no answer at all) is not an answer to this: an error in it would pass unseen, and the list below could then make the app look like it works
+    if (!linkJson(opened.body, 1)) return failed('The app did not answer the start of a session.', opened.status);
     await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId: opened.sessionId });
     // Every page of the list of tools (ids 2, 3, ...): a long list comes in pages, each with the cursor of the next
     const names: string[] = [];

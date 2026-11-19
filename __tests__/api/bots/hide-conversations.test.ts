@@ -683,3 +683,29 @@ describe('the universe switch', () => {
     expect(db.universe.update).not.toHaveBeenCalled();
   });
 });
+
+describe("someone else's Brick: its chats, memory and emotions are its owner's, a super admin included (game #1992)", () => {
+  const brickOf = (ownerId: string) =>
+    db.bot.findUnique.mockImplementation(async () => ({ roomId: null, ownerId, deletedAt: null, hideConversations: null, room: null }));
+  const root = () => session.mockResolvedValue({ id: 'u-root', email: 'root@example.com', isSuperAdmin: true });
+
+  it.each([
+    ['transcripts', getConversations],
+    ['emotions', getEmotions],
+    ['memory', getMemory],
+  ])('a super admin who is not the owner is refused the %s of a Brick', async (_what, handler) => {
+    root();
+    brickOf('u-sara');
+    expect((await call(handler)).status).toBe(403);
+    expect(db.botsConversation.findMany).not.toHaveBeenCalled();
+    expect(db.botsMemory.findMany).not.toHaveBeenCalled();
+  });
+
+  it('a super admin reading a room bot, and the admin token reading a Brick, are not shut out', async () => {
+    root();
+    expect((await call(getConversations)).status).toBe(200);
+    session.mockResolvedValue(null);
+    brickOf('u-sara');
+    expect((await call(getConversations, 'GET', { token: 'admin-secret' })).status).toBe(200);
+  });
+});

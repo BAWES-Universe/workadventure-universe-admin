@@ -1,10 +1,10 @@
 import { EventEmitter } from 'events';
 import https from 'https';
-import { lookup } from 'dns/promises';
+import { resolveHost } from '@/lib/name-lookup';
 import { AddressError, checkPublicHttpsUrl, isPublicAddress, parsePublicHttpsUrl, safeGet, safeRequest } from '@/lib/ai-key-fetch';
 
-jest.mock('dns/promises', () => ({ lookup: jest.fn() }));
-const lookupMock = lookup as unknown as jest.Mock;
+jest.mock('@/lib/name-lookup', () => ({ resolveHost: jest.fn() }));
+const lookupMock = resolveHost as unknown as jest.Mock;
 
 function problem(run: () => unknown): Promise<string | null> {
   return Promise.resolve()

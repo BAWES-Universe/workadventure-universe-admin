@@ -140,7 +140,10 @@ export const usd = (micros: number): string => {
 
 /** Dollars typed by a person, to millionths: null for anything that is not a positive amount, so nothing is guessed. */
 export function microsOfDollars(text: string): number | null {
-  const cleaned = text.trim().replace(/^\$/, '').replace(/,/g, '');
+  const typed = text.trim().replace(/^\$/, '');
+  // Commas only as thousands groups ("1,234.50"): "1,50" is not $150, it is refused
+  if (typed.includes(',') && !/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(typed)) return null;
+  const cleaned = typed.replace(/,/g, '');
   if (!/^\d+(\.\d{1,6})?$/.test(cleaned)) return null;
   const micros = Math.round(Number(cleaned) * 1_000_000);
   return micros > 0 && Number.isSafeInteger(micros) ? micros : null;

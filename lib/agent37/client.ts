@@ -111,6 +111,8 @@ export interface ExecResult {
 export type NetworkPolicy = 'allow-all' | 'deny-all' | { allow: string[] };
 
 const REQUEST_TIMEOUT_MS = 30_000;
+/** The whole of a folder's archive, from the request to the last byte: a machine that stops answering ends the save at this. */
+const ARCHIVE_TIMEOUT_MS = 20 * 60_000;
 const RETRY_WAITS_MS = [1_000, 3_000, 8_000];
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -141,7 +143,7 @@ export class Agent37Client {
   }
 
   /** One call, one answer. Throws Agent37Error for an answer that is not a success and Agent37Unreached when there was none. */
-  private async call<T>(method: string, url: string, headers: Record<string, string>, body?: unknown, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+  private async call<T>(method: string, url: string, headers: Record<string, string>, body?: unknown, timeoutMs = REQUEST_TIMEOUT_MS, jsonRequired = false): Promise<T> {
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
@@ -161,15 +163,21 @@ export class Agent37Client {
     // An answer whose body could not be read says nothing: it is not read as an empty one (a check would take it for "idle")
     if (unreadable && response.ok) throw new Agent37Unreached('body');
     let json: unknown = null;
+    // Text that does not parse is malformed, whatever it holds (a page, a cut-off answer, only whitespace); no text at all is no answer either
+    let malformed = text.trim() === '';
     try {
-      json = text ? JSON.parse(text) : null;
+      json = text.trim() ? JSON.parse(text) : null;
     } catch {
       json = null;
+      malformed = true;
     }
     if (!response.ok) {
       const { code, message } = describe(json);
       throw new Agent37Error(response.status, code, message || `Agent37 answered ${response.status}`);
     }
+    // A success whose body is not the JSON that was asked for says nothing (a gateway's page, a cut-off answer): for a question where
+    // "no answer" would read as an answer, it is not reached, never taken for an empty one
+    if (jsonRequired && malformed) throw new Agent37Unreached('body');
     return json as T;
   }
 
@@ -248,10 +256,11 @@ export class Agent37Client {
    * The home folder as a tar.gz, streamed. Any request to a machine's address wakes it: only call this for one that is awake.
    * Returns the response so the caller streams it; a non-200 throws.
    */
-  async archive(instanceUrl: string): Promise<Response> {
+  async archive(instanceUrl: string, signal: AbortSignal = AbortSignal.timeout(ARCHIVE_TIMEOUT_MS)): Promise<Response> {
     let response: Response;
     try {
-      response = await this.fetchImpl(`${instanceUrl.replace(/\/+$/, '')}/v1/files/archive`, { method: 'GET', headers: this.own() });
+      // The signal stays on the body as it streams: a machine that stops answering halfway ends the save instead of holding it for ever
+      response = await this.fetchImpl(`${instanceUrl.replace(/\/+$/, '')}/v1/files/archive`, { method: 'GET', headers: this.own(), signal });
     } catch (error) {
       throw new Agent37Unreached(error instanceof Error ? error.name : 'unknown');
     }
@@ -317,7 +326,7 @@ export class Agent37Client {
 
   /** The id of the turn running in a session, or null when it is idle (or the session is new). */
   async activeTurn(instanceUrl: string, sessionId: string): Promise<string | null> {
-    const answer = await this.again(() => this.call<{ active_response_id?: string | null }>('GET', `${instanceUrl.replace(/\/+$/, '')}/v1/sessions/${encodeURIComponent(sessionId)}`, this.own(), undefined, 20_000));
+    const answer = await this.again(() => this.call<{ active_response_id?: string | null }>('GET', `${instanceUrl.replace(/\/+$/, '')}/v1/sessions/${encodeURIComponent(sessionId)}`, this.own(), undefined, 20_000, true));
     return typeof answer?.active_response_id === 'string' && answer.active_response_id ? answer.active_response_id : null;
   }
 
