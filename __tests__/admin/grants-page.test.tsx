@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 /**
  * The Grants page (spec v3 O3): the defaults for Universe AI, Instant Apps and computers, the exceptions, the gifts, and the
@@ -182,8 +182,18 @@ describe('gifts', () => {
     await waitFor(() => expect(screen.getByTestId('grants-preview')).toHaveTextContent('This person gets one $5'));
     const give = await screen.findByRole('button', { name: 'Give $5 each' });
     await waitFor(() => expect(give).not.toBeDisabled());
+    // The first POST stays pending (no answer yet), and a second tap meanwhile makes no second request
+    const original = fetchMock.getMockImplementation()!;
+    let answerFirst: (response: Response) => void = () => undefined;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => (url === '/api/admin/grants/gifts' ? new Promise<Response>((resolve) => { answerFirst = resolve; }) : original(url, init)));
     fireEvent.click(give);
-    await waitFor(() => expect(calls('POST', '/gifts').length).toBeGreaterThan(0));
+    await waitFor(() => expect(calls('POST', '/gifts')).toHaveLength(1));
+    fireEvent.click(screen.getAllByRole('button', { name: /^Give \$5 each|Giving/ })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: /^Give \$5 each|Giving/ })[0]);
+    expect(calls('POST', '/gifts')).toHaveLength(1);
+    await act(async () => {
+      answerFirst({ ok: true, status: 201, json: async () => ({}) } as Response);
+    });
     const first = body(calls('POST', '/gifts')[0]);
     expect(first).toMatchObject({ audience: { kind: 'people', userIds: ['omar'] }, scope: 'both', amountMicros: 5_000_000, shared: false, settlement: 'gift' });
     expect(typeof first.grantKey).toBe('string');
