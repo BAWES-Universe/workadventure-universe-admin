@@ -6,6 +6,7 @@ import { ownsBrick } from '@/lib/brick';
 import { listBricks, type BrickCard } from '@/lib/brick-default';
 import { placeOfRoomId, placeOfRoomUrl } from '@/lib/brick-visit';
 import { homeBehaviorConfig, resolvePlayUriFromRoomId } from '@/lib/bot-config-helpers';
+import { homeBehaviorForPlacement, type HomeBehavior } from '@/lib/brick-home-behavior';
 
 /**
  * A Brick that lives in a room (game #2005, "Add one of your Bricks").
@@ -39,7 +40,7 @@ export type PlaceAnswer =
   | { ok: true; home: HomeCard; keyNote: 'not_lent' | null }
   | { ok: false; reason: 'not_found' | 'no_room' | 'no_access' };
 
-export type HomeBehavior = { behaviorType?: 'idle' | 'patrol' | 'social'; behaviorConfig?: Record<string, unknown> };
+export type { HomeBehavior };
 
 async function homeCardOf(roomId: string): Promise<HomeCard | null> {
   const [place, room] = await Promise.all([
@@ -61,13 +62,16 @@ export async function placeBrick(input: { brickId: string; ownerId: string; room
   const place = await placeOfRoomUrl(input.roomUrl);
   if (!place) return { ok: false, reason: 'no_room' };
   if (!(await canManageBots(input.ownerId, place.roomId))) return { ok: false, reason: 'no_access' };
-  const data = { roomId: place.roomId, placedById: input.ownerId, behaviorType: input.behaviorType ?? 'idle', behaviorConfig: homeBehaviorConfig(input.behaviorConfig) as object };
   // The Brick's row is held while the home is written, as deleting it does: a Brick deleted a moment ago gets no home that
   // Undo would bring back. It stands in one place only, so a live visit of it ends here: placing it is the later word.
   const placed = await prisma.$transaction(async (tx) => {
     const held = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT "id" FROM "bots" WHERE "id" = ${brick.id} AND "deleted_at" IS NULL AND "room_id" IS NULL FOR UPDATE`);
     if (held.length === 0) return false;
     await tx.brickVisit.deleteMany({ where: { botId: brick.id } });
+    // Placing it again where it already stands moves it: how it behaves there stays unless the request says otherwise
+    const existing = await tx.brickHome.findUnique({ where: { botId: brick.id }, select: { roomId: true, behaviorType: true, behaviorConfig: true } });
+    const behavior = homeBehaviorForPlacement(existing, place.roomId, input);
+    const data = { roomId: place.roomId, placedById: input.ownerId, behaviorType: behavior.behaviorType, behaviorConfig: behavior.behaviorConfig as object };
     await tx.brickHome.upsert({ where: { botId: brick.id }, create: { botId: brick.id, ...data }, update: data });
     return true;
   });
