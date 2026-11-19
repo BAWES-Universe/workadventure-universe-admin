@@ -13,6 +13,7 @@ const session = { user: null as { id: string; email: string | null } | null };
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => session.user) }));
 
 import { prisma } from '@/lib/db';
+import { controlTheDate } from '../helpers/waits';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { readMeterSettings } from '@/lib/meter-values';
 import { GET as getOverview } from '@/app/api/admin/grants/route';
@@ -48,6 +49,10 @@ async function person(name: string, createdAt?: Date): Promise<string> {
 
 const envBefore = process.env.SUPER_ADMINS;
 
+/**
+ * Empties the books whole: the screens under test read the whole books (their overview adds up everything), so this suite owns the database it runs
+ * in. It runs one after the other with every other real-database suite (npm run test:db, docs/DB_TESTS.md), never at the same time as one of them.
+ */
 async function wipeBooks() {
   await prisma.$executeRawUnsafe('DELETE FROM credit_refunds');
   await prisma.$executeRawUnsafe('DELETE FROM credit_allocations');
@@ -144,19 +149,30 @@ run('the grants routes, on the real books', () => {
 
   it('keeps the allowance as it is until the 1st when the computers default starts on the 1st, then follows it, and a save now replaces the wait', async () => {
     await saveMeterSettings({ memberAllowanceMicros: 5 * MILLION }, admin.id);
-    const next = await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 8 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'next' } }, ctx({ category: 'computers' }));
-    expect(next.status).toBe(200);
-    expect((await getMeterSettings()).memberAllowanceMicros).toBe(5 * MILLION);
-    // The default shows as saved, like every default that starts on the 1st; the allowance computers follow waits
-    expect((await overview()).money.computers).toMatchObject({ amountMicros: 8 * MILLION, interval: 'monthly' });
-    const row = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
-    const later = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1));
-    expect((row?.value as any).memberAllowanceLater).toEqual({ micros: 8 * MILLION, from: later.toISOString() });
-    expect(readMeterSettings(row?.value, later).memberAllowanceMicros).toBe(8 * MILLION);
-    // Saving an allowance now (here or from the Limits page) replaces the one that was waiting
-    await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 6 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'now' } }, ctx({ category: 'computers' }));
-    expect((await getMeterSettings()).memberAllowanceMicros).toBe(6 * MILLION);
-    expect(readMeterSettings((await prisma.appSetting.findUnique({ where: { key: 'meter' } }))?.value, later).memberAllowanceMicros).toBe(6 * MILLION);
+    // One clock for the whole test, fixed before the save: a save a moment before midnight on the last day of a month cannot be checked against a
+    // 1st that was worked out a moment after it
+    controlTheDate(Date.UTC(2031, 0, 31, 23, 59, 59));
+    try {
+      const next = await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 8 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'next' } }, ctx({ category: 'computers' }));
+      expect(next.status).toBe(200);
+      expect((await getMeterSettings()).memberAllowanceMicros).toBe(5 * MILLION);
+      // The default shows as saved, like every default that starts on the 1st; the allowance computers follow waits
+      expect((await overview()).money.computers).toMatchObject({ amountMicros: 8 * MILLION, interval: 'monthly' });
+      const row = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
+      const later = new Date(Date.UTC(2031, 1, 1));
+      expect((row?.value as any).memberAllowanceLater).toEqual({ micros: 8 * MILLION, from: later.toISOString() });
+      // The clock moves on to the scheduled day: from then on the saved allowance is the one that applies
+      jest.setSystemTime(later);
+      expect(readMeterSettings(row?.value, new Date()).memberAllowanceMicros).toBe(8 * MILLION);
+      expect(readMeterSettings(row?.value, new Date(later.getTime() - 1)).memberAllowanceMicros).toBe(5 * MILLION);
+      // Saving an allowance now (here or from the Limits page) replaces the one that was waiting
+      jest.setSystemTime(Date.UTC(2031, 0, 31, 23, 59, 59));
+      await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 6 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'now' } }, ctx({ category: 'computers' }));
+      expect((await getMeterSettings()).memberAllowanceMicros).toBe(6 * MILLION);
+      expect(readMeterSettings((await prisma.appSetting.findUnique({ where: { key: 'meter' } }))?.value, later).memberAllowanceMicros).toBe(6 * MILLION);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('refuses a computers default that the monthly allowance could not follow, rather than saving one that does nothing', async () => {

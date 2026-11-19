@@ -145,7 +145,7 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await prisma.spendRule.count({ where: { ownerPersonId: sara.id } })).toBe(1);
       // Only meanings are columns: there is no place for the words a person wrote
       const columns = Object.keys((await prisma.spendRule.findFirst({ where: { ownerPersonId: sara.id } })) ?? {});
-      expect(columns).not.toEqual(expect.arrayContaining(['text', 'message', 'said']));
+      for (const forbidden of ['text', 'message', 'said']) expect(columns).not.toContain(forbidden);
     });
 
     it('the same message id said by two people is two rules: a replay never finds or shows another person\'s rule', async () => {
@@ -310,11 +310,18 @@ run('rules said in chat and task receipts, in a real database', () => {
       const refused = await step(`instant-a-${tag}`, 50_000);
       expect(refused).toEqual({ ok: false, reason: 'rule', ruleId: expect.any(String), why: 'cap', leftMicros: 10_000, words: expect.stringContaining('No more than $0.01 a month') });
       expect(await prisma.creditHold.count({ where: { personId: sara.id } })).toBe(0);
-      // Within the rule it goes on to the books (here nothing is funded, so the books answer, not the rule)
-      expect(await step(`instant-b-${tag}`, 5_000)).not.toMatchObject({ reason: 'rule' });
-      // A hold that is already there is asked about again: it is that hold, not a new step
-      await hold(sara.id, sara.brickId, 'instant-c', { state: 'held', amount: 10_000 });
-      expect(await step(`instant-c-${tag}`, 10_000)).not.toMatchObject({ reason: 'rule' });
+      // Within the rule it goes on to the books, which are funded here, and takes the whole of the rule's room in one hold
+      const account = await prisma.fundingAccount.create({ data: { kind: 'person', ownerKey: sara.id, name: 'Sara', budgetMicros: BigInt(100_000_000) } });
+      await prisma.creditLot.create({
+        data: { slotKey: 'base:instant_apps', subjectKey: `person:${sara.id}`, periodKey: '2026-11', fundingAccountId: account.id, personId: sara.id, source: 'default', amountMicros: BigInt(1_000_000), covers: ['instant_apps'], startsAt: new Date('2026-11-01T00:00:00Z') },
+      });
+      const key = `instant-b-${tag}`;
+      expect(await step(key, 10_000)).toMatchObject({ ok: true });
+      expect(await prisma.creditHold.count({ where: { personId: sara.id, state: 'held' } })).toBe(1);
+      // A hold that is already there is asked about again: it is that hold, not a new step (as a new one it would be over the rule's room, which is all used)
+      expect(await step(key, 10_000)).toMatchObject({ ok: true, created: false });
+      expect(await prisma.creditHold.count({ where: { personId: sara.id, state: 'held' } })).toBe(1);
+      expect(await step(`instant-new-${tag}`, 10_000)).toMatchObject({ ok: false, reason: 'rule' });
     });
 
     it('two Instant steps asked at the same moment meet at the person’s lock: a cap with room for one lets exactly one through', async () => {
@@ -712,6 +719,9 @@ run('rules said in chat and task receipts, in a real database', () => {
       });
       // Another person's task with the same key shows nothing of it here
       await spend(sara.id, sara.brickId, 777_000, { jobId: 'other-task', instant: true });
+      // And another person's step under the very same task key on the same Brick is not Sara's either: the receipt is by person as well as by task
+      const omar = await person('omar');
+      await spend(omar.id, sara.brickId, 888_000, { jobId: 'trip', instant: true });
       expect(await closeReceipt({ botId: sara.brickId, taskKey: 'trip', personId: sara.id, state: 'done', chargedMicros: 60_000 }, NOW)).toMatchObject({ ok: true, state: 'done' });
       const [item] = await activityFor(sara.id);
       expect(item).toMatchObject({
