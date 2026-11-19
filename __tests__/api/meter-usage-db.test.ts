@@ -163,6 +163,28 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await memberUsage(sara.id, NOW)).chat.left).toBe(1);
     });
 
+    it('keeps the chat bar and the credit when the computer part cannot be read, and says the computer part is unavailable', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 300);
+      const spy = jest.spyOn(prisma.meterReservation, 'aggregate').mockRejectedValueOnce(new Error('database hiccup'));
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const usage = await memberUsage(sara.id, NOW);
+        expect(usage.computer).toMatchObject({ unavailable: true, canAskForMore: false });
+        expect(usage.chat).toMatchObject({ left: 1, words: 'plenty' });
+        expect(usage.credit).toEqual([]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('has no time to wait for in a window that started before any reply was counted', async () => {
+      const sara = await person('sara');
+      await prisma.replyWindow.create({ data: { key: `ua:person:${sara.id}`, startedAt: hours(-1) } });
+      expect((await memberUsage(sara.id, NOW)).chat).toMatchObject({ left: 1, fullAgainAt: null, replies: { running: true } });
+    });
+
     it('shows computer time and storage only to someone whose Brick uses a computer, in plain words about this month', async () => {
       await setUp();
       const sara = await person('sara');

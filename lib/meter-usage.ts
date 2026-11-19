@@ -54,7 +54,8 @@ export interface ComputerBar {
   totalMicros?: number;
   inProgressMicros?: number;
   renewsAt?: string;
-  unavailable?: false;
+  /** The numbers could not be read: the part says so rather than show a made-up bar. */
+  unavailable?: boolean;
 }
 
 export interface MemberUsage {
@@ -93,7 +94,8 @@ export async function chatBar(personId: string, now: Date, extra: RunningExtra |
   return {
     left,
     words: left >= 1 ? 'plenty' : chatWords(left),
-    fullAgainAt: endsAt.toISOString(),
+    // A window a reply check started before any reply was counted is full and has nothing to wait for
+    fullAgainAt: used === 0 ? null : endsAt.toISOString(),
     replies: { available: Math.max(0, total - used), total, running: true, windowHours: limits.windowHours },
     ...(extraWords ? { extra: extraWords } : {}),
   };
@@ -133,6 +135,8 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
   const money = await creditUsage(personId, now);
   let computer: ComputerBar | null = null;
   let storage: MemberUsage['storage'] = null;
+  // A computer part that cannot be read says so and leaves the others as they are: the bar and the credit above are what the person came for
+  try {
   if (await usesComputer(personId)) {
     const settings = await getMeterSettings();
     const allowance = await memberAllowance(personId, now, settings);
@@ -157,6 +161,11 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
       };
     }
     storage = { bytes: await storedBytes(personId) };
+  }
+  } catch (error) {
+    console.error('[Usage] Could not read the computer part:', error instanceof Error ? error.message : 'unknown');
+    computer = { left: 0, words: 'out', startsAgainAt: nextMonthStart(now).toISOString(), unlimited: false, asked: false, canAskForMore: false, unavailable: true };
+    storage = null;
   }
   // A receipt that cannot be read leaves the list empty, never the whole page: the bars above are what the person came for
   const activity = await activityFor(personId).catch((error) => {
