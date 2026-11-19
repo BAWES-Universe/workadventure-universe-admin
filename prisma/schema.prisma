@@ -1340,6 +1340,8 @@ model BotMcpServer {
   signInLostStatus   Int?      @map("sign_in_lost_status")
   noAnswerAt         DateTime? @map("no_answer_at")
   reconnectedAt      DateTime? @map("reconnected_at")
+  // Set with a change of the sign-in state, cleared once the person's card follows: a card that could not be made is tried again
+  noticesPendingAt   DateTime? @map("notices_pending_at")
   // Who connected it last (a sign-in, a key or a token), the person told when its sign-in expires. Null for connections
   // made before this was kept: the bot's maker is told instead.
   connectedById      String?   @map("connected_by_id")
@@ -1400,6 +1402,10 @@ model AppConnection {
   signInLostStatus   Int?      @map("sign_in_lost_status")
   noAnswerAt         DateTime? @map("no_answer_at")
   reconnectedAt      DateTime? @map("reconnected_at")
+  // When a call with the current key last worked (written at most once a minute): a refusal seen before it is old news
+  lastWorkedAt       DateTime? @map("last_worked_at")
+  // Set with a change of the sign-in state, cleared once the cards of every Brick that uses it follow: a fan-out that failed is tried again
+  noticesPendingAt   DateTime? @map("notices_pending_at")
   connectedById      String?   @map("connected_by_id")
   // A key app (game #2044): kind = direct. The definition is the data it runs from (one HTTPS origin, its operations, where the key goes),
   // the key is kept encrypted in its own column and is never copied to a grant, a screen or the bot server; only its last characters are shown.

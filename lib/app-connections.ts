@@ -14,7 +14,7 @@ import { getManagedConnection, managesConnection } from '@/lib/app-team-access';
 import { findUserByIdentifier } from '@/lib/user-identifier';
 import { createMcpServerSchema } from '@/lib/mcp/server-input';
 import { isReconnectRequired, parseOAuthConfig, refreshBlockedReason } from '@/lib/mcp/oauth-token';
-import { syncToolSignInNotices } from '@/lib/tool-signin';
+import { syncToolSignInNotices, finishConnectionNotices } from '@/lib/tool-signin';
 import { revokeAtApp } from '@/lib/mcp/revoke';
 import { holdRefreshLease } from '@/lib/mcp/oauth-refresh';
 import { checkSharedUse, isAppShareable } from '@/lib/app-share';
@@ -529,14 +529,15 @@ export async function markConnectionReconnected(connectionId: string, personId: 
     const wasDown = !!connection.signInLostAt || !!connection.noAnswerAt;
     await prisma.appConnection.update({
       where: { id: connectionId },
-      data: wasDown ? { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date() } : { reconnectedAt: new Date() },
+      data: wasDown ? { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date(), ...(connection.signInLostAt ? { noticesPendingAt: new Date() } : {}) } : { reconnectedAt: new Date() },
     });
     // Only the owner (or a manager of a universe's own app) can have signed it in; remembering who can fail (that account may be gone)
     // and never undoes the clear. A team app signed in again names the one who did it, so it no longer depends on whoever left.
     if (personId && (await managesConnection(personId, { id: connectionId, ownerId: connection.ownerId, universeId: connection.universeId }))) {
       await prisma.appConnection.update({ where: { id: connectionId }, data: { connectedById: personId } }).catch(() => undefined);
     }
-    if (connection.signInLostAt) for (const botId of new Set(connection.grants.map((grant) => grant.botId))) await syncToolSignInNotices(botId);
+    // The cards of every Brick that uses it; one that could not be finished now is finished by the next report for this connection
+    if (connection.signInLostAt) await finishConnectionNotices(connectionId);
   } catch (error) {
     console.error('[AppConnection] Could not clear the lost sign-in:', error instanceof Error ? error.message : 'unknown');
   }
