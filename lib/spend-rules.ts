@@ -13,6 +13,7 @@ import {
   type ChargeClass,
   type DraftInput,
   type RuleDraft,
+  ruleApplies,
   type Refused,
   type RuleCovers,
   type RulePeriod,
@@ -379,7 +380,8 @@ export async function checkSpend(attempt: SpendAttempt, now: Date = new Date(), 
   const rules = rows.map(viewOf);
   const spent = new Map<string, SpentSoFar>();
   for (const rule of rules) {
-    if (rule.capMicros !== null) spent.set(rule.id, await spentFor(db, rule, attempt, now));
+    // A rule that is not about this step (another kind of charge, another bot or task) is never held to, so its totals are never read
+    if (rule.capMicros !== null && ruleApplies(rule, attempt)) spent.set(rule.id, await spentFor(db, rule, attempt, now));
   }
   return holdToRules(rules, attempt, (rule) => spent.get(rule.id) ?? { spentMicros: 0, heldMicros: 0 }, now);
 }
