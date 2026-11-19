@@ -320,6 +320,8 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
   tools?: McpToolShape[];
   /** True when the app has more pages of tools than are read: the list is the first pages, not everything. */
   incomplete?: boolean;
+  /** Something to say beside a result that worked (an app that names a protocol version this check does not know). */
+  note?: string;
   error?: string;
   status?: number | null;
   statusText?: string | null;
@@ -394,6 +396,7 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
 
   let session: { id: string; origin: string; url: string } | null = null;
   let protocolVersion: string | null = null;
+  let unknownVersion: string | null = null;
   try {
     // SSRF guard: reject internal/private addresses before making network request
     if (!isAllowedServerUrl(server.serverUrl)) {
@@ -562,15 +565,12 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
     const initResultBody = initResult.data?.result && typeof initResult.data.result === 'object' ? (initResult.data.result as { sessionId?: unknown; protocolVersion?: unknown }) : undefined;
     const sessionId = initResult.headers?.['mcp-session-id'] || (typeof initResultBody?.sessionId === 'string' ? initResultBody.sessionId : undefined);
     if (sessionId) session = { id: sessionId, origin: new URL(initResult.from ?? server.serverUrl).origin, url: initResult.from ?? server.serverUrl };
-    // The version the app chose, when it is one this check knows; else none is sent and the app applies its own default
+    // The version the app chose, when it is one this check knows; else none is sent and the app applies its own default. A version this check does
+    // not know does not stop the check (the Test button is not what lets a Brick use the app, and what the app can do is still read): it is said
+    // plainly beside the result, never passed over
     if (typeof initResultBody?.protocolVersion === 'string') {
-      // A version the app names that this check does not know is not a compatibility it can vouch for: said plainly, and the session just
-      // opened is closed below. An app that names none is left to apply its own default.
-      if (!KNOWN_PROTOCOL_VERSIONS.has(initResultBody.protocolVersion)) {
-        const named = truncateDetail(withoutSecrets(initResultBody.protocolVersion, secrets), 40) ?? 'unknown';
-        return { success: false, toolCount: 0, toolNames: [], error: `The app answered with a protocol version this check does not know (${named}), so it cannot say the app works.` };
-      }
-      protocolVersion = initResultBody.protocolVersion;
+      if (KNOWN_PROTOCOL_VERSIONS.has(initResultBody.protocolVersion)) protocolVersion = initResultBody.protocolVersion;
+      else unknownVersion = truncateDetail(withoutSecrets(initResultBody.protocolVersion, secrets), 40) ?? 'unknown';
     }
 
     // The session is open: the server is told so (a server may wait for this before it lists anything). Its answer is empty
@@ -651,6 +651,7 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
       toolNames,
       tools: shapes,
       ...(incomplete ? { incomplete: true } : {}),
+      ...(unknownVersion ? { note: `The app answered with protocol version ${unknownVersion}, which this check does not know. What it can do was read anyway.` } : {}),
     };
   } catch (error: unknown) {
     const err = error as Record<string, unknown>;

@@ -159,6 +159,7 @@ export async function POST(
             toolCount: result.toolCount,
             toolNames: result.toolNames,
             ...(result.incomplete ? { incomplete: true } : {}),
+            ...(result.note ? { note: result.note } : {}),
             error: result.error || null,
             // Captured from the failure path (#186) so a stored result names the
             // cause instead of only the status text.

@@ -323,6 +323,8 @@ export interface ReadyMadeTestResult {
   toolNames: string[];
   /** True when the app has more pages of tools than are read: the list is the first pages, not everything. */
   incomplete?: boolean;
+  /** Said beside a result that worked (the MCP check: a protocol version it does not know). */
+  note?: string;
   error?: string;
   status?: number | null;
   statusText?: string | null;

@@ -24,6 +24,8 @@ export interface McpTestResult {
   toolNames: string[];
   /** True when the app has more pages of tools than are read. */
   incomplete?: boolean;
+  /** Said beside a result that worked, e.g. a protocol version the check does not know. */
+  note?: string | null;
   error?: string | null;
   /** Captured from the failure path; absent on results stored before #186. */
   status?: number | null;
@@ -242,7 +244,8 @@ export function summarizeTestResult(
             : `token expired ${shortTimestamp(expiry!)} — re-authorize to reconnect${lastTested}`,
       };
     }
-    return { tone: 'ok', label, detail: age ? `tested ${age}` : undefined };
+    const detail = [age ? `tested ${age}` : null, result.note || null].filter(Boolean).join(' · ');
+    return { tone: 'ok', label, detail: detail || undefined };
   }
 
   const parts: string[] = [];

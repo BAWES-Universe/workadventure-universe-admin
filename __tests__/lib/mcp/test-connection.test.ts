@@ -276,19 +276,24 @@ describe('testMcpConnection', () => {
       jest.dontMock('@/lib/encryption');
     });
 
-    it('does not say an app works when it names a protocol version this check does not know, and closes the session it opened', async () => {
+    it('says plainly that an app names a protocol version this check does not know, still reads what it can do, and closes the session it opened', async () => {
       const sent = pretend(({ message }) => {
         if (message.method === 'initialize') return json({ jsonrpc: '2.0', id: 'init', result: { protocolVersion: '2099-01-01' } }, { 'mcp-session-id': 'sess-v' });
         if (message.method === 'tools/list') return json({ jsonrpc: '2.0', id: '1', result: { tools: [{ name: 'a' }] } });
         return new Response(null, { status: 202 });
       });
       const result = await testMcpConnection(base);
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('2099-01-01');
-      expect(sent.map((one) => one.message.method)).toEqual(['initialize', 'DELETE']);
-      // An app that names none still passes (it applies its own default)
+      // The app is not called broken: its tools are read, and the version is said beside the result
+      expect(result).toMatchObject({ success: true, toolCount: 1, toolNames: ['a'] });
+      expect(result.note).toContain('2099-01-01');
+      expect(sent.map((one) => one.message.method)).toEqual(['initialize', 'notifications/initialized', 'tools/list', 'DELETE']);
+      // A version the check does not know is not sent back as the one in force
+      expect(sent.find((one) => one.message.method === 'tools/list')!.headers).not.toHaveProperty('MCP-Protocol-Version');
+      // An app that names none passes with no note (it applies its own default)
       pretend(({ message }) => (message.method === 'initialize' ? json({ jsonrpc: '2.0', id: 'init', result: {} }) : message.method === 'tools/list' ? json({ jsonrpc: '2.0', id: '1', result: { tools: [{ name: 'a' }] } }) : new Response(null, { status: 202 })));
-      expect(await testMcpConnection(base)).toMatchObject({ success: true });
+      const none = await testMcpConnection(base);
+      expect(none).toMatchObject({ success: true });
+      expect(none.note).toBeUndefined();
     });
 
     it('closes the session at the address that opened it, with the sign-in on the configured origin only', async () => {
