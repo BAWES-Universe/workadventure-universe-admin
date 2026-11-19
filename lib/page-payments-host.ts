@@ -139,17 +139,20 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
 
   /** The recovery code of this browser for this page: made once, kept, and never given to the page. */
   const recoveryCode = (): string => {
+    // A code already made in this page's life is the code, whether or not the browser would keep it (no storage, or storage that refuses)
+    if (memoryCode) return memoryCode;
     try {
       const stored = options.storage?.getItem(storageKey);
-      if (stored && /^[A-Za-z0-9_-]{32,128}$/.test(stored)) return stored;
-      const made = random(43);
-      options.storage?.setItem(storageKey, made);
-      memoryCode = made;
-      return made;
+      if (stored && /^[A-Za-z0-9_-]{32,128}$/.test(stored)) {
+        memoryCode = stored;
+        return stored;
+      }
+      memoryCode = random(43);
+      options.storage?.setItem(storageKey, memoryCode);
     } catch {
       memoryCode = memoryCode ?? random(43);
-      return memoryCode;
     }
+    return memoryCode;
   };
 
   const receiptFor = (): string | null => (guest && options.origin ? `${options.origin}/pay/receipt/${encodeURIComponent(options.artifactId)}#${recoveryCode()}` : null);

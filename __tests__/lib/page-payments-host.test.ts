@@ -9,7 +9,7 @@ const ART = 'art-1';
 
 type Call = { url: string; init: RequestInit | undefined; body: Record<string, unknown> };
 
-function setup(answers: (call: Call) => { status?: number; body: Record<string, unknown> } | 'lost') {
+function setup(answers: (call: Call) => { status?: number; body: Record<string, unknown> } | 'lost', withStorage = true) {
   jest.useFakeTimers();
   const frame = { postMessage: jest.fn() } as unknown as Window;
   const calls: Call[] = [];
@@ -29,7 +29,7 @@ function setup(answers: (call: Call) => { status?: number; body: Record<string, 
     frame: () => frame,
     openWindow: () => popup,
     fetch: fetchMock as unknown as typeof fetch,
-    storage: { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => void store.set(key, value) },
+    storage: withStorage ? { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => void store.set(key, value) } : null,
     randomId: (length) => `${'r'.repeat(length - String(++n).length)}${n}`,
     origin: ORIGIN,
   });
@@ -248,6 +248,23 @@ describe('a paying page on the public share link', () => {
     expect(JSON.stringify(told())).not.toContain(code);
     expect(lines.at(-1)?.receipt).toBe(`${ORIGIN}/pay/receipt/${ART}#${code}`);
     host.destroy();
+  });
+
+  it('keeps the same recovery code for the whole page life when the browser has no storage, so retries, checks and the receipt link agree', async () => {
+    const { tap, calls, lines, host } = setup((call) => (call.init?.method === 'POST' && !call.body.check ? { body: started } : { body: { status: 'checking' } }), false);
+    tap({ request: 'a' });
+    await flush();
+    host.destroy();
+    const again = setup((call) => (call.body.intentId && !call.body.check ? 'lost' : { body: { status: 'paid', testPayment: false } }), false);
+    again.tap({ request: 'a' });
+    await jest.advanceTimersByTimeAsync(10_000);
+    again.host.checkPayment();
+    await flush();
+    const codes = new Set(again.calls.map((call) => call.body.recoveryCode));
+    expect(codes.size).toBe(1);
+    expect(calls[0].body.recoveryCode).toMatch(/^[A-Za-z0-9_-]{32,128}$/);
+    expect(lines.at(-1)?.receipt).toBe(`${ORIGIN}/pay/receipt/${ART}#${calls[0].body.recoveryCode}`);
+    again.host.destroy();
   });
 
   it('offers no receipt link to a signed-in buyer, who has an account to get back to', async () => {
