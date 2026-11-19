@@ -222,7 +222,8 @@ export function summarizeTestResult(
 
   if (result.success) {
     // What an app brings reads "it can do 3 things" (I1): the word tool is never shown to a person
-    const label = `Connected — it can do ${result.toolCount} thing${result.toolCount !== 1 ? 's' : ''}`;
+    // A list that was not read to its end is not the whole of what the app can do: the count says "at least"
+    const label = `Connected — it can do ${result.incomplete ? 'at least ' : ''}${result.toolCount} thing${result.toolCount !== 1 ? 's' : ''}`;
     const lastTested = age ? ` (last tested ${age})` : '';
     if (opts.reconnectRequired === true) {
       return {
