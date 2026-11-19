@@ -1,243 +1,135 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPagePaymentsHost, NO_PAY_LINE, type PagePaymentsHost, type PayLine } from '@/lib/page-payments-host';
+import { describeLine, PAY_WORDS, type PayAction } from '@/components/page-payments-words';
 
 /**
- * The bridge between a page that takes payments and Universe (game #2044). The page is in a locked frame on another address and can
- * only post one kind of message: `{ universe: 'use-app', app, job }`, asking for the checkout its owner set up. Everything real is
- * decided here and on the server: only the frame this component watches is listened to, the amount and the service are the owner's
- * (the message carries neither), and the page hears back only a status, never an address, a key or an order.
+ * The bridge between a page that takes payments and Universe, on the public share link (game #2044). All of what it does with the page lives
+ * in `lib/page-payments-host.ts` (the same protocol as the game's window: a request id on every message and every answer, busy per request,
+ * never a bare "paid"); this only draws the line under the page, as mock M1 shows it. The words are in `page-payments-words.ts`.
+ *
+ * A guest's receipt link is this page's own address with `#receipt=<code>`: the code is adopted from the address when the page opens and then
+ * taken out of it, so it is never in the history or sent to a server.
  */
-
-type Status = 'checking' | 'paid' | 'not_paid' | 'cant_confirm' | 'unavailable' | 'limit' | 'started';
-
-const WORDS: Record<string, string> = {
-  unavailable: 'Payments unavailable',
-  limit: 'Too many tries for now. Try again in a little while.',
-  // A closed checkout can still be paid for a while at the service: this never says that nothing was taken
-  not_paid: 'We have not received this payment yet. If you already paid, it can take a little while to show.',
-  cant_confirm: 'We could not confirm the payment',
-};
-
-const POLL_MS = 3_000;
-const POLL_FOR_MS = 20 * 60_000;
-
 export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
-  const [line, setLine] = useState<string | null>(null);
-  const [resume, setResume] = useState<{ url: string; app: string } | null>(null);
-  /** An order that was not paid when the watch ended: it can be looked at again, because paying at the service late still counts. */
-  const [recheck, setRecheck] = useState<string | null>(null);
-  const busy = useRef(false);
-  /** Which watch is current: an answer that comes back for an older page (or after cleanup) is dropped unread. */
-  const current = useRef(0);
-  /** The order the buyer is looking at now. Earlier orders keep being looked at, but only to hear that one of them was paid. */
-  const primary = useRef<string | null>(null);
-  const watchers = useRef(new Map<string, () => void>());
-  /** Orders whose watch ran out while they were still unpaid: a payment at the service can still arrive for them, so they are looked at again with "Check again". */
-  const expired = useRef(new Set<string>());
-
-  const tell = useCallback((status: Status) => {
-    const frame = document.querySelector<HTMLIFrameElement>('iframe[data-artifact-frame]');
-    // Opaque origin of the locked frame: it can only be addressed with "*", which is why the message holds nothing but a status
-    frame?.contentWindow?.postMessage({ universe: 'app-result', status }, '*');
-  }, []);
-
-  /** Any order that ran out unpaid: what "Check again" is offered for when the order the buyer was on cannot be asked about again. */
-  const firstExpired = useCallback((): string | null => Array.from(expired.current)[0] ?? null, []);
-
-  const stopAll = useCallback(() => {
-    watchers.current.forEach((stop) => stop());
-    watchers.current.clear();
-    expired.current.clear();
-  }, []);
-
-  const watch = useCallback(
-    (orderId: string, asPrimary = true) => {
-      watchers.current.get(orderId)?.();
-      expired.current.delete(orderId);
-      // A new checkout takes over the screen, but an earlier one is not dropped: a buyer who paid it late must still be heard
-      if (asPrimary) primary.current = orderId;
-      const page = current.current;
-      const until = Date.now() + POLL_FOR_MS;
-      let toldNotPaid = false;
-      let stopped = false;
-      let timer: ReturnType<typeof setTimeout> | null = null;
-      const stop = () => {
-        stopped = true;
-        if (timer) clearTimeout(timer);
-      };
-      watchers.current.set(orderId, stop);
-      const alive = () => !stopped && page === current.current;
-      const finish = () => {
-        stop();
-        if (watchers.current.get(orderId) === stop) watchers.current.delete(orderId);
-      };
-      const poll = async () => {
-        if (!alive()) return;
-        try {
-          const response = await fetch(`/api/pay/${encodeURIComponent(artifactId)}?order=${encodeURIComponent(orderId)}`, { cache: 'no-store' });
-          const body = response.ok ? ((await response.json()) as { status: Status }) : null;
-          if (!alive()) return;
-          if (body?.status === 'paid') {
-            // Paid wins whichever order it is: everything else stops, and a checkout still on its way is dropped
-            stopAll();
-            primary.current = null;
-            current.current += 1;
-            busy.current = false;
-            setResume(null);
-            setRecheck(null);
-            setLine(null);
-            tell('paid');
-            return;
-          }
-          const mine = primary.current === orderId;
-          if (body?.status === 'cant_confirm') {
-            finish();
-            if (!mine) return;
-            busy.current = false;
-            setResume(null);
-            // Older orders that ran out are still worth asking about
-            setRecheck(firstExpired());
-            setLine(WORDS.cant_confirm);
-            tell('cant_confirm');
-            return;
-          }
-          if (body?.status === 'not_paid' && mine && !toldNotPaid) {
-            // Said once, and the order goes on being looked at until the time is up: a payment made at the service after the checkout closed still arrives
-            toldNotPaid = true;
-            busy.current = false;
-            setResume(null);
-            // Older orders that ran out while this checkout was being looked at can be asked about again now
-            setRecheck((now) => now ?? firstExpired());
-            setLine(WORDS.not_paid);
-            tell('not_paid');
-          }
-        } catch {
-          // Try again on the next turn
-        }
-        if (!alive()) return;
-        if (Date.now() < until) {
-          timer = setTimeout(poll, POLL_MS);
-          return;
-        }
-        finish();
-        // The look ran out with the order unpaid: "Check again" can ask about it once more
-        expired.current.add(orderId);
-        // An older order's look ends without a word while the buyer is on a newer one; if there is none to be on (it ended, or never
-        // started), the button is how the older one can be asked about again
-        if (primary.current !== orderId) {
-          if (!busy.current) setRecheck((now) => now ?? orderId);
-          return;
-        }
-        if (toldNotPaid) {
-          // The look ends here, and the buyer can ask for another one
-          setRecheck(orderId);
-        } else {
-          // Twenty minutes without an answer: said plainly, never a silent end. The order may still be counted later.
-          busy.current = false;
-          setResume(null);
-          setLine(WORDS.cant_confirm);
-          setRecheck(orderId);
-          tell('cant_confirm');
-        }
-      };
-      timer = setTimeout(poll, POLL_MS);
-    },
-    [artifactId, tell, stopAll, firstExpired],
-  );
+  const [line, setLine] = useState<PayLine>(NO_PAY_LINE);
+  // The receipt link that was copied (or that could not be), never a bare yes: another page's receipt, or an earlier copy that finishes late, is never "copied"
+  const [copied, setCopied] = useState<string | null>(null);
+  const [copyFailed, setCopyFailed] = useState<string | null>(null);
+  const host = useRef<PagePaymentsHost | null>(null);
 
   useEffect(() => {
-    busy.current = false;
-    const onMessage = async (event: MessageEvent) => {
-      const frame = document.querySelector<HTMLIFrameElement>('iframe[data-artifact-frame]');
-      if (!frame || event.source !== frame.contentWindow) return;
-      const data = event.data as { universe?: unknown; app?: unknown } | null;
-      if (!data || data.universe !== 'use-app' || typeof data.app !== 'string' || busy.current) return;
-      busy.current = true;
-      setRecheck(null);
-      // The earlier order stops being what the screen is about the moment a new checkout begins, not when its answer comes: from here it
-      // can only report that it was paid
-      const before = primary.current;
-      primary.current = null;
-      // A checkout that never started leaves the screen about the order it was about
-      const restore = () => {
-        if (primary.current === null) primary.current = before;
-        // The button for orders that ran out, which this tap cleared, comes back
-        setRecheck(firstExpired());
-      };
-      const generation = current.current;
-      // Open the window now, in the tap's own moment, so a blocked pop-up is the only thing left that can go wrong
-      const popup = window.open('about:blank', '_blank');
-      if (popup) popup.opener = null;
+    const frame = () => document.querySelector<HTMLIFrameElement>('iframe[data-artifact-frame]');
+    let storage: Storage | null = null;
+    try {
+      storage = window.localStorage;
+    } catch {
+      storage = null;
+    }
+    // This tab's own storage: only a code that nothing could coordinate lives there (it survives a reload of the tab, and is never shared with another)
+    let tabStorage: Storage | null = null;
+    try {
+      tabStorage = window.sessionStorage;
+    } catch {
+      tabStorage = null;
+    }
+    const made = createPagePaymentsHost({
+      artifactId,
+      frame: () => frame()?.contentWindow,
+      openWindow: () => window.open('about:blank', '_blank'),
+      storage,
+      tabStorage,
+      pageUrl: `${window.location.origin}${window.location.pathname}${window.location.search}`,
+    });
+    host.current = made;
+    // A receipt link brings its code here before the page can ask for its purchase
+    const receipt = new URLSearchParams(window.location.hash.replace(/^#/, '')).get('receipt');
+    if (receipt) {
+      made.useReceiptCode(receipt);
       try {
-        const response = await fetch(`/api/pay/${encodeURIComponent(artifactId)}`, { method: 'POST', cache: 'no-store' });
-        const body = (await response.json().catch(() => null)) as { orderId?: string; checkoutUrl?: string; app?: string; code?: string } | null;
-        // The page changed while this was on its way: its answer is not for the page that is here now
-        if (generation !== current.current) {
-          popup?.close();
-          return;
-        }
-        if (!response.ok || !body?.orderId || !body.checkoutUrl) {
-          popup?.close();
-          busy.current = false;
-          restore();
-          const status: Status = body?.code === 'limit' ? 'limit' : 'unavailable';
-          setLine(WORDS[status]);
-          tell(status);
-          return;
-        }
-        setLine(null);
-        if (popup) popup.location.href = body.checkoutUrl;
-        // The link stays whether or not the window opened: a buyer who closes it unpaid can open the same checkout again
-        setResume({ url: body.checkoutUrl, app: body.app ?? 'the payment page' });
-        tell('started');
-        watch(body.orderId);
+        window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}`);
       } catch {
-        popup?.close();
-        if (generation !== current.current) return;
-        busy.current = false;
-        restore();
-        setLine(WORDS.unavailable);
-        tell('unavailable');
+        // The address stays as it is
       }
-    };
+    }
+    const unsubscribe = made.subscribe(setLine);
+    const onMessage = (event: MessageEvent) => made.onMessage(event);
     window.addEventListener('message', onMessage);
     return () => {
       window.removeEventListener('message', onMessage);
-      // Everything still in flight belongs to a page that is gone, and so do its line, its link and its busy tap
-      current.current += 1;
-      busy.current = false;
-      primary.current = null;
-      stopAll();
-      setLine(null);
-      setResume(null);
-      setRecheck(null);
+      unsubscribe();
+      made.destroy();
+      host.current = null;
+      setLine(NO_PAY_LINE);
     };
-  }, [artifactId, tell, watch, stopAll, firstExpired]);
+  }, [artifactId]);
 
-  if (!line && !resume && !recheck) return null;
+  const view = describeLine(line, { copied: !!line.receipt && copied === line.receipt });
+  // Only a line that offers the copy (a purchase made in this browser) can show the link a failed copy leaves to select: a purchase found through
+  // someone's receipt link is "back", and this browser's own link would not bring it back
+  const failed = !!line.receipt && copyFailed === line.receipt && !!view?.actions.some((action) => action.kind === 'copy');
+  if (!view) return null;
+
+  const press = (action: PayAction) => {
+    if (action.kind === 'check') host.current?.checkPayment();
+    else if (action.kind === 'restore') host.current?.restorePurchase();
+    else if (action.kind === 'copy' && line.receipt) {
+      // The link holds the recovery code in its fragment: it goes to the clipboard, and nowhere else
+      const receipt = line.receipt;
+      const fail = () => {
+        setCopied((now) => (now === receipt ? null : now));
+        setCopyFailed(receipt);
+      };
+      if (!navigator.clipboard?.writeText) return fail();
+      void navigator.clipboard.writeText(receipt).then(
+        () => {
+          setCopyFailed(null);
+          setCopied(receipt);
+        },
+        fail,
+      );
+    }
+  };
+  const button = 'inline-flex h-11 items-center justify-center gap-2 rounded-full px-[18px] text-[14px] font-bold text-white no-underline';
+  const styleOf = (action: PayAction) =>
+    action.style === 'primary'
+      ? `${button} border-0 bg-[linear-gradient(90deg,#8629fc,#4156f6)] shadow-[0_8px_24px_-10px_rgba(134,41,252,.7)]`
+      : `${button} border border-white/[.12] bg-white/[.06]`;
+
   return (
-    <div role="status" data-testid="pagePayments" className="fixed bottom-[max(3.25rem,env(safe-area-inset-bottom))] left-1/2 z-10 grid -translate-x-1/2 gap-2 rounded-2xl border border-[#2a2638] bg-[#15121f] px-4 py-3 text-center text-[14px] text-[#f3f1fa] shadow-[0_8px_24px_rgba(0,0,0,.45)] [font-family:var(--font-inter),system-ui,sans-serif]">
-      {line ? <p>{line}</p> : null}
-      {resume ? (
-        <a href={resume.url} target="_blank" rel="noopener noreferrer" className="rounded-full bg-[#f3f1fa] px-4 py-2 font-semibold text-[#0A0814] no-underline">
-          Open {resume.app} again
-        </a>
-      ) : null}
-      {recheck ? (
-        <button
-          type="button"
-          onClick={() => {
-            setRecheck(null);
-            setLine(null);
-            // Every order that ran out is asked about again; the one the buyer was on stays the one the screen is about
-            for (const older of Array.from(expired.current)) if (older !== recheck) watch(older, false);
-            watch(recheck);
-          }}
-          className="rounded-full bg-[#f3f1fa] px-4 py-2 font-semibold text-[#0A0814]"
-        >
-          Check again
+    <div
+      role="status"
+      data-testid="pagePayments"
+      className={`fixed bottom-[max(3.25rem,env(safe-area-inset-bottom))] left-1/2 z-10 grid w-max max-w-[min(440px,calc(100%-24px))] -translate-x-1/2 gap-1.5 rounded-2xl border border-[#2a2638] bg-[#15121f] px-4 py-3.5 text-center text-[14px] text-[#f3f1fa] shadow-[0_8px_24px_rgba(0,0,0,.45)] [font-family:var(--font-inter),system-ui,sans-serif] ${view.closable ? 'pr-10' : ''}`}
+    >
+      {view.closable ? (
+        <button type="button" aria-label="Close" onClick={() => host.current?.dismiss()} className="absolute right-1 top-1 grid size-8 place-items-center border-0 bg-transparent text-[18px] text-white/60">
+          ×
         </button>
+      ) : null}
+      <p className="m-0 font-semibold">{view.title}</p>
+      {view.sub ? <p className="m-0 text-[13px] leading-[1.4] text-[#b3acc7]">{view.sub}</p> : null}
+      {failed && line.receipt ? (
+        <>
+          <p className="m-0 text-[13px] leading-[1.4] text-[#b3acc7]">{PAY_WORDS.copyFailed}</p>
+          <input readOnly value={line.receipt} aria-label="Receipt link" onFocus={(event) => event.currentTarget.select()} className="h-11 w-full min-w-0 rounded-full border border-white/[.12] bg-white/[.06] px-4 text-[13px] text-[#f3f1fa]" />
+        </>
+      ) : null}
+      {view.actions.length ? (
+        <div className="mt-1 flex flex-wrap justify-center gap-2">
+          {view.actions.map((action) =>
+            action.kind === 'resume' ? (
+              <a key={action.kind} href={action.url} target="_blank" rel="noopener noreferrer" className={styleOf(action)}>
+                {action.label}
+              </a>
+            ) : (
+              <button key={action.kind} type="button" disabled={action.kind === 'copy' && action.disabled} onClick={() => press(action)} className={styleOf(action)}>
+                {action.label}
+              </button>
+            ),
+          )}
+        </div>
       ) : null}
     </div>
   );

@@ -196,6 +196,8 @@ export class ArtifactError extends Error {
     public readonly code: string,
     public readonly status: number,
     message?: string,
+    /** Extra fields for the refusal's body (a refusal that tells the caller what it can do next). */
+    public readonly extra?: Record<string, unknown>,
   ) {
     super(message ?? code);
   }
