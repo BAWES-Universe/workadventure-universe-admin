@@ -240,11 +240,11 @@ export async function dropOrphanedToolSignInNotices(userId: string): Promise<voi
 export async function reportKeyWorked(connectionId: string, keyVersion: number): Promise<void> {
   const now = await prisma.appConnection.findUnique({ where: { id: connectionId }, select: { keyVersion: true, signInLostAt: true } });
   if (!now || now.keyVersion !== keyVersion || !now.signInLostAt) return;
-  await reportConnectionSignIn(connectionId, { state: 'ok' }, new Date());
+  await reportConnectionSignIn(connectionId, { state: 'ok' }, new Date(), keyVersion);
 }
 
 /** The same report, for the connection a grant belongs to: its fields move, and the cards of every Brick that uses it follow. */
-export async function reportConnectionSignIn(connectionId: string, report: ToolSignInReport, at: Date): Promise<{ changed: boolean }> {
+export async function reportConnectionSignIn(connectionId: string, report: ToolSignInReport, at: Date, onlyKeyVersion?: number): Promise<{ changed: boolean }> {
   const afterLastReconnect = { OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: at } }] };
   const botsOf = async () => (await prisma.botMcpServer.findMany({ where: { connectionId }, select: { id: true, botId: true } }));
 
@@ -263,12 +263,15 @@ export async function reportConnectionSignIn(connectionId: string, report: ToolS
     });
     return { changed: result.count === 1 };
   }
-  await prisma.appConnection.updateMany({ where: { id: connectionId, ...afterLastReconnect }, data: { reconnectedAt: at } });
+  // A success of one key says nothing about another: when it names the key it used, only that key's connection is written (the owner
+  // may have replaced it, and the new key may have a refusal of its own, since the success was read)
+  const ofKey = onlyKeyVersion === undefined ? {} : { keyVersion: onlyKeyVersion };
+  await prisma.appConnection.updateMany({ where: { id: connectionId, ...ofKey, ...afterLastReconnect }, data: { reconnectedAt: at } });
   const lost = await prisma.appConnection.updateMany({
-    where: { id: connectionId, signInLostAt: { lte: at } },
+    where: { id: connectionId, ...ofKey, signInLostAt: { lte: at } },
     data: { signInLostAt: null, signInLostStatus: null, noAnswerAt: null },
   });
-  const unanswered = lost.count === 1 ? { count: 0 } : await prisma.appConnection.updateMany({ where: { id: connectionId, noAnswerAt: { lte: at } }, data: { noAnswerAt: null } });
+  const unanswered = lost.count === 1 ? { count: 0 } : await prisma.appConnection.updateMany({ where: { id: connectionId, ...ofKey, noAnswerAt: { lte: at } }, data: { noAnswerAt: null } });
   if (lost.count === 1) for (const row of await botsOf()) await syncToolSignInNotices(row.botId);
   return { changed: lost.count === 1 || unanswered.count === 1 };
 }
