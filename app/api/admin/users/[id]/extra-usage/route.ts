@@ -88,7 +88,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         // What was saved stands, with the times it was saved with; a new grant needs an end in the future
         const endsAt = saved ? saved.endsAt : endsAtOf(body.endsAt, now);
         if (!endsAt) return { status: 400 as const };
-        return recordGrant(
+        const result = await recordGrant(
           {
             grantKey: key,
             personId: id,
@@ -102,17 +102,19 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           },
           tx,
         );
+        // The ask is answered in this same transaction, so a grant that is saved has always answered what it was for, and a retry has nothing
+        // left to answer. A new grant answers every ask made up to now (one made while it was being recorded waits for this lock); a replay
+        // answers only what was asked before that grant began, never a newer ask.
+        const answeredAt = new Date();
+        await answerRequests(id, key, answeredAt, result.recorded ? answeredAt : result.grant.startsAt, 'computer', tx);
+        return result;
       },
       { timeout: 30_000, maxWait: 10_000 },
     );
     if ('status' in outcome) {
       return NextResponse.json({ error: outcome.status === 404 ? 'Person not found' : 'endsAt must be a date in the future, within a year' }, { status: outcome.status });
     }
-    const { recorded, grant } = outcome;
-    // A new grant answers every ask made up to now, including one made while it was being recorded. A replay answers only what was
-    // asked before that grant began, never a newer ask.
-    const answeredAt = new Date();
-    await answerRequests(id, key, answeredAt, recorded ? answeredAt : grant.startsAt, 'computer');
+    const { recorded } = outcome;
     return NextResponse.json({ recorded, usage: await personUsage(id, new Date(), admin.id) }, { status: recorded ? 201 : 200 });
   } catch (error) {
     // Something is saved under this key, with other figures than these (changed since, most likely): not a refusal, so the sheet
