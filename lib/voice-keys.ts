@@ -441,6 +441,9 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
     }
     if (input.address !== undefined) endpoint = await movedAddress(current, input.address, input.apiKey);
   }
+  // The server's limits are read before the write begins (that read uses the shared connection, and one made while the write's own is held waits
+  // for a second one), and only when the owner is changing limits
+  const serverLimits = input.limits !== undefined ? (await getVoiceLimits()).limits : null;
   await prisma.$transaction(async (tx) => {
     // The row is held until this is saved, as model discovery holds it: one waits for the other, so neither saves over the other's models
     await tx.$queryRaw`SELECT 1 FROM "voice_providers" WHERE "id" = ${id} AND "owner_id" = ${ownerId} FOR UPDATE`;
@@ -464,7 +467,7 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
     if (input.limits !== undefined) {
       const checked = checkVoiceKeyLimits(input.limits);
       if (!checked.ok) throw new VoiceKeyRefused(checked.error);
-      const server = (await getVoiceLimits()).limits;
+      const server = serverLimits!;
       const next: Record<string, number> = { ...savedVoiceKeyLimits(row.voiceLimits), ...checked.value } as Record<string, number>;
       for (const name of VOICE_KEY_LIMIT_NAMES) if (name in checked.value && next[name] === server[name]) delete next[name];
       voiceLimits = Object.keys(next).length > 0 ? next : Prisma.DbNull;
