@@ -226,6 +226,24 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect((await getGitHubApp())?.appId).toBe(124);
   });
 
+  it('the setup replaces the app it saw, and never one that another setup saved after it looked: the app and its id come from one read', async () => {
+    mockUser.current = { id: sara, isSuperAdmin: true };
+    forgetGitHubApp();
+    await prisma.appSetting.create({ data: { key: 'github-app', value: { appId: 55, slug: 'other', clientId: 'Iv1.other', htmlUrl: 'https://github.com/apps/other', secrets: 'cannot-be-decrypted' } } });
+    // The first look finds nothing (nothing was kept yet); another setup then saves its app. A second look would see that app and name it as the one to replace
+    const real = prisma.appSetting.findUnique.bind(prisma.appSetting);
+    const spy = jest.spyOn(prisma.appSetting, 'findUnique').mockImplementationOnce((() => Promise.resolve(null)) as never).mockImplementation(real as never);
+    let form: { action: string };
+    try {
+      form = await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: { again: true } }))).json();
+    } finally {
+      spy.mockRestore();
+    }
+    const state = JSON.parse(decryptApiKey(new URL(form.action).searchParams.get('state') as string)) as { replaces: number | null };
+    // Set out to make the first app: the return then refuses it (another setup finished first) instead of replacing that one
+    expect(state.replaces).toBeNull();
+  });
+
   it('connects once, signs in on GitHub with PKCE, keeps the token in Orbit and sends a person with no install on to pick where it works', async () => {
     await makeApp();
     mockUser.current = { id: sara };
