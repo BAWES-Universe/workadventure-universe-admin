@@ -822,6 +822,8 @@ export interface Restored {
   testPayment: boolean;
   orderId: string | null;
   pollAfterMs: number;
+  /** Only when paid: when it was paid, so the host can say "your purchase from 19 Nov is back". */
+  paidAt?: string | null;
   /** Only when checking, for an order that is open at the service: where the buyer pays, so a reload or a lost pop-up can go on with the SAME order. */
   checkoutUrl?: string | null;
 }
@@ -850,10 +852,10 @@ export async function restorePurchase(input: { artifactId: string; buyerKeys: st
     where: { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, status: 'paid', ...(offer ? { amountMinor: offer.amountMinor, currency: offer.currency } : {}) },
     orderBy: { paidAt: 'desc' },
     take: 20,
-    select: { id: true, mode: true },
+    select: { id: true, mode: true, paidAt: true },
   });
   const chosen = paid.find((order) => order.mode !== 'test') ?? paid[0];
-  if (chosen) return { status: 'paid', testPayment: chosen.mode === 'test', orderId: chosen.id, pollAfterMs: 3_000 };
+  if (chosen) return { status: 'paid', testPayment: chosen.mode === 'test', orderId: chosen.id, pollAfterMs: 3_000, paidAt: chosen.paidAt?.toISOString() ?? null };
   const waiting = await prisma.appPageOrder.findFirst({ where: { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, status: { in: ['creating', 'pending'] } }, orderBy: { createdAt: 'desc' }, select: { id: true, createdAt: true, status: true, checkoutUrl: true } });
   return waiting ? { status: 'checking', testPayment: false, orderId: waiting.id, pollAfterMs: pollAfterMs(waiting.createdAt), checkoutUrl: waiting.status === 'pending' ? waiting.checkoutUrl : null } : none();
 }

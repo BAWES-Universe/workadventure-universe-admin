@@ -1,26 +1,85 @@
-import type { PayProblem } from '@/lib/page-payments-host';
+import type { PayLine } from '@/lib/page-payments-host';
 
 /**
- * Every word a buyer reads on the host's own line under a paying page (and on the receipt page), in ONE place. PLACEHOLDER WORDING: the
- * screens and the button wording come from mock M1 (and M2 for the wording), which is a separate piece of work. When it is approved, only this
- * file changes; nothing else in the payment code has user-facing text.
+ * Every word a buyer reads on the host's own line under a paying page, in ONE place: the wording of the approved mock M1 (19 Nov). The same
+ * lines are in the game's window (the game keeps its own copy of this wording: the two must say the same). Nothing else in the payment code has
+ * user-facing text. No payment service is named.
  */
 export const PAY_WORDS = {
-  checking: 'Checking your payment…',
-  slow: 'This is taking longer than usual…',
-  paid: 'Payment received',
-  paidTest: 'Test payment received. No real money was taken.',
-  needsUpdate: 'This page’s pay button needs an update.',
-  resume: (app: string) => `Open ${app || 'the payment page'} again`,
-  checkPayment: 'Check payment',
-  saveReceipt: 'Save your receipt link',
-  receiptCopied: 'Receipt link copied',
-  problem: {
-    unavailable: 'Payments unavailable',
-    limit: 'Too many tries for now. Try again in a little while.',
-    // A closed checkout can still be paid for a while at the service: this never says that nothing was taken
-    not_paid: 'We have not received this payment yet. If you already paid, it can take a little while to show.',
-    cant_confirm: 'We could not confirm the payment',
-    none: 'No payment found for this browser',
-  } satisfies Record<PayProblem, string>,
+  checking: { title: 'Checking your payment…', sub: 'Asking the payment service directly.' },
+  slow: { title: 'This is taking longer than usual…', sub: 'Your payment is still being checked.' },
+  paidAccount: { title: 'Paid. Thank you.', sub: 'It’s saved to your account, so it comes back whenever you open this page.' },
+  paidGuest: { title: 'Paid. Thank you.', sub: 'Save your receipt link. It brings this purchase back on any device.' },
+  paidTest: { title: 'Test payment received. No money moved.', sub: 'Only a live payment counts as a purchase.' },
+  restored: (date: string | null) => ({ title: date ? `Your purchase from ${date} is back.` : 'Your purchase is back.', sub: null }),
+  receiptCopied: { title: 'Receipt link copied.', sub: 'Keep it somewhere safe, like your notes or email.' },
+  notHeard: { title: 'We haven’t heard back about your payment yet.', sub: 'If you paid, it still counts. You can check now.' },
+  notPaid: { title: 'Not paid yet.', sub: 'If you just paid, it can take a few minutes to show.' },
+  needsUpdate: { title: 'This page’s pay button needs an update.', sub: 'If you already paid, you can check it here.' },
+  unavailable: { title: 'Payments unavailable', sub: null },
+  limit: { title: 'Too many tries for now.', sub: 'Try again in a little while.' },
+  boughtBefore: { title: 'Bought this before?', sub: null },
+  noneGuest: { title: 'No purchase found in this browser.', sub: 'Open the receipt link you saved when you paid. It brings your purchase back here.' },
+  noneAccount: { title: 'No purchase found on your account for this page.', sub: 'If you paid as a guest, open the receipt link you saved.' },
+  buttons: {
+    checkPayment: 'Check payment',
+    restorePurchase: 'Restore purchase',
+    copyReceipt: 'Copy receipt link',
+    copied: 'Copied',
+    close: 'Close',
+    resume: (app: string) => `Open ${app || 'the payment page'} again`,
+  },
 } as const;
+
+export type PayAction =
+  | { kind: 'check'; label: string; style: 'primary' | 'secondary' }
+  | { kind: 'restore'; label: string; style: 'primary' | 'secondary' }
+  | { kind: 'copy'; label: string; style: 'primary' | 'secondary'; disabled?: boolean }
+  | { kind: 'resume'; label: string; url: string; style: 'primary' | 'secondary' };
+
+export interface PayView {
+  title: string;
+  sub: string | null;
+  actions: PayAction[];
+  /** The line can be closed (a quiet offer, or "no purchase found"); a payment on its way never can. */
+  closable: boolean;
+}
+
+/** "19 Nov": the day a purchase was made, in the buyer's own browser language, never a time zone dump. */
+export function shortDate(iso: string | null): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
+
+/**
+ * What the line says, and what can be pressed, for the state the host is in. A pure function so every screen of the mock is tested on its own.
+ * Order: a payment that ended well, then a problem, then a page that cannot ask, then a payment on its way, then the quiet offers.
+ */
+export function describeLine(line: PayLine, state: { copied: boolean }): PayView | null {
+  const check: PayAction = { kind: 'check', label: PAY_WORDS.buttons.checkPayment, style: 'primary' };
+  const resume: PayAction[] = line.resume ? [{ kind: 'resume', label: PAY_WORDS.buttons.resume(line.resume.app), url: line.resume.url, style: 'secondary' }] : [];
+
+  if (line.paid) {
+    if (line.paid.test) return { ...PAY_WORDS.paidTest, actions: [], closable: false };
+    if (line.restored) return { ...PAY_WORDS.restored(shortDate(line.restored.paidAt)), actions: [], closable: false };
+    if (line.receipt) {
+      return state.copied
+        ? { ...PAY_WORDS.receiptCopied, actions: [{ kind: 'copy', label: PAY_WORDS.buttons.copied, style: 'secondary', disabled: true }], closable: false }
+        : { ...PAY_WORDS.paidGuest, actions: [{ kind: 'copy', label: PAY_WORDS.buttons.copyReceipt, style: 'primary' }], closable: false };
+    }
+    return { ...PAY_WORDS.paidAccount, actions: [], closable: false };
+  }
+  if (line.problem === 'none') return { ...(line.buyer === 'account' ? PAY_WORDS.noneAccount : PAY_WORDS.noneGuest), actions: [], closable: true };
+  if (line.problem === 'not_paid') return { ...PAY_WORDS.notPaid, actions: [check], closable: false };
+  if (line.problem === 'cant_confirm') return { ...PAY_WORDS.notHeard, actions: [check], closable: false };
+  // A start whose answer was lost: an order may or may not exist, so it is said like any other payment not heard back about
+  if (line.problem === 'unavailable') return line.canCheck ? { ...PAY_WORDS.notHeard, actions: [check], closable: false } : { ...PAY_WORDS.unavailable, actions: [], closable: false };
+  if (line.problem === 'limit') return { ...PAY_WORDS.limit, actions: [], closable: false };
+  if (line.needsUpdate) return { ...PAY_WORDS.needsUpdate, actions: line.checking ? [] : [check], closable: false };
+  if (line.checking) return { ...(line.slow ? PAY_WORDS.slow : PAY_WORDS.checking), actions: resume, closable: false };
+  if (line.offerRestore) return { ...PAY_WORDS.boughtBefore, actions: [{ kind: 'restore', label: PAY_WORDS.buttons.restorePurchase, style: 'secondary' }], closable: true };
+  if (line.canCheck) return { ...PAY_WORDS.notHeard, actions: [check], closable: false };
+  return null;
+}

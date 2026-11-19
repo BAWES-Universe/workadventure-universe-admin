@@ -4,7 +4,7 @@
  */
 import { createPagePaymentsHost, safeCheckout, type PayLine } from '@/lib/page-payments-host';
 
-const ORIGIN = 'https://orbit.example.org';
+const PAGE = 'https://orbit.example.org/a/k7Qm2xR9';
 const ART = 'art-1';
 
 type Call = { url: string; init: RequestInit | undefined; body: Record<string, unknown> };
@@ -31,7 +31,7 @@ function setup(answers: (call: Call) => { status?: number; body: Record<string, 
     fetch: fetchMock as unknown as typeof fetch,
     storage: withStorage ? { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => void store.set(key, value) } : null,
     randomId: (length) => `${'r'.repeat(length - String(++n).length)}${n}`,
-    origin: ORIGIN,
+    pageUrl: PAGE,
   });
   const lines: PayLine[] = [];
   host.subscribe((line) => lines.push(line));
@@ -283,7 +283,7 @@ describe('a paying page on the public share link', () => {
     const code = [...codes][0] as string;
     expect(store.get(`universe-pay-recovery:${ART}`)).toBe(code);
     expect(JSON.stringify(told())).not.toContain(code);
-    expect(lines.at(-1)?.receipt).toBe(`${ORIGIN}/pay/receipt/${ART}#${code}`);
+    expect(lines.at(-1)?.receipt).toBe(`${PAGE}#receipt=${code}`);
     host.destroy();
   });
 
@@ -300,7 +300,7 @@ describe('a paying page on the public share link', () => {
     const codes = new Set(again.calls.map((call) => call.body.recoveryCode));
     expect(codes.size).toBe(1);
     expect(calls[0].body.recoveryCode).toMatch(/^[A-Za-z0-9_-]{32,128}$/);
-    expect(lines.at(-1)?.receipt).toBe(`${ORIGIN}/pay/receipt/${ART}#${calls[0].body.recoveryCode}`);
+    expect(lines.at(-1)?.receipt).toBe(`${PAGE}#receipt=${calls[0].body.recoveryCode}`);
     again.host.destroy();
   });
 
@@ -325,7 +325,7 @@ describe('a paying page on the public share link', () => {
         },
       },
       randomId: (length) => `${'q'.repeat(length - String(++n).length)}${n}`,
-      origin: ORIGIN,
+      pageUrl: PAGE,
     });
     host.onMessage({ source: frame, data: { universe: 'use-app', app: 'shop', request: 'r1', restore: true } });
     await flush();
@@ -378,6 +378,65 @@ describe('a paying page on the public share link', () => {
     expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'paid', request: 'a' });
     // Never a status without a request id
     expect(told().every((message) => typeof message.request === 'string' && message.request.length > 0)).toBe(true);
+    host.destroy();
+  });
+  it('marks a purchase found again as "back" (with its date) and one made just now as not, and offers Restore purchase when a page’s restore finds nothing', async () => {
+    const back = setup(() => ({ body: { status: 'paid', testPayment: false, orderId: 'o-9', buyer: 'account', paidAt: '2026-11-19T08:00:00.000Z' } }));
+    back.tap({ request: 'r1', restore: true });
+    await flush();
+    expect(back.lines.at(-1)).toMatchObject({ paid: { test: false }, restored: { paidAt: '2026-11-19T08:00:00.000Z' }, buyer: 'account', offerRestore: false });
+    back.host.destroy();
+    const fresh = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
+    fresh.tap({ request: 'r1' });
+    await flush();
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(fresh.lines.at(-1)).toMatchObject({ paid: { test: false }, restored: null });
+    fresh.host.destroy();
+    const none = setup(() => ({ body: { status: 'none', testPayment: false, orderId: null, buyer: 'guest' } }));
+    none.tap({ request: 'r1', restore: true });
+    await flush();
+    expect(none.lines.at(-1)).toMatchObject({ offerRestore: true, buyer: 'guest', paid: null, problem: null });
+    none.host.destroy();
+  });
+
+  it('Restore purchase asks as the buyer, tells the page under its last restore request when it finds the purchase, and says "none" plainly when it does not', async () => {
+    let found = false;
+    const { tap, host, lines, told, calls } = setup((call) => ({ body: call.body.restore && found ? { status: 'paid', testPayment: false, buyer: 'guest', paidAt: '2026-11-18T08:00:00.000Z' } : { status: 'none', testPayment: false, buyer: 'guest' } }));
+    tap({ request: 'r1', restore: true });
+    await flush();
+    host.restorePurchase();
+    await flush();
+    expect(calls.at(-1)?.body).toMatchObject({ restore: true });
+    expect(lines.at(-1)).toMatchObject({ problem: 'none', buyer: 'guest', canCheck: false });
+    host.dismiss();
+    expect(lines.at(-1)).toMatchObject({ problem: null, offerRestore: false, paid: null });
+    found = true;
+    host.restorePurchase();
+    await flush();
+    expect(lines.at(-1)).toMatchObject({ paid: { test: false }, restored: { paidAt: '2026-11-18T08:00:00.000Z' } });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'paid', request: 'r1' });
+    host.destroy();
+  });
+
+  it('never closes a payment that is on its way', async () => {
+    const { tap, host, lines } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'checking' } }));
+    tap({ request: 'a' });
+    await flush();
+    host.dismiss();
+    expect(lines.at(-1)?.checking).toBe(true);
+    host.destroy();
+  });
+
+  it('adopts the code of a receipt link as this browser’s recovery code, and refuses anything that is not one', async () => {
+    const { host, tap, calls, store } = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }));
+    const code = 'R'.repeat(43);
+    expect(host.useReceiptCode('short')).toBe(false);
+    expect(host.useReceiptCode('x'.repeat(40) + '!')).toBe(false);
+    expect(host.useReceiptCode(code)).toBe(true);
+    expect(store.get(`universe-pay-recovery:${ART}`)).toBe(code);
+    tap({ request: 'r1', restore: true });
+    await flush();
+    expect(calls[0].body.recoveryCode).toBe(code);
     host.destroy();
   });
 });

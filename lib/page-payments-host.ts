@@ -41,9 +41,27 @@ export interface PayLine {
   canCheck: boolean;
   /** For a guest: the link to keep, which holds the recovery code (in its fragment, so no server ever receives it). */
   receipt: string | null;
+  /** Who the buyer is as far as Orbit has said: signed in, or a guest of this browser (or its receipt link). */
+  buyer: 'account' | 'guest' | null;
+  /** The payment was found again (a reload, a new device, a receipt link) and was not made just now; `paidAt` says when, when known. */
+  restored: { paidAt: string | null } | null;
+  /** The page asked for its purchase back and nothing was found by itself: Restore purchase is offered, quietly (it can be closed). */
+  offerRestore: boolean;
 }
 
-export const NO_PAY_LINE: PayLine = { checking: false, slow: false, problem: null, resume: null, paid: null, needsUpdate: false, canCheck: false, receipt: null };
+export const NO_PAY_LINE: PayLine = {
+  checking: false,
+  slow: false,
+  problem: null,
+  resume: null,
+  paid: null,
+  needsUpdate: false,
+  canCheck: false,
+  receipt: null,
+  buyer: null,
+  restored: null,
+  offerRestore: false,
+};
 
 /** How an order is asked about, and for how long. The server's own `pollAfterMs` hint says how far apart (3 seconds at first, slowing to 15). */
 const FIRST_POLL_MS = 3_000;
@@ -98,8 +116,8 @@ export interface PagePaymentsHostOptions {
   storage?: Pick<Storage, 'getItem' | 'setItem'> | null;
   /** Random plain characters of a length (for wishes and recovery codes). */
   randomId?: (length: number) => string;
-  /** This host's own address, for the receipt link. */
-  origin?: string;
+  /** The address of the shared page, for the receipt link (the code rides in its fragment: `#receipt=<code>`). */
+  pageUrl?: string;
 }
 
 export interface PagePaymentsHost {
@@ -110,8 +128,16 @@ export interface PagePaymentsHost {
   frameLoaded: () => void;
   /** The buyer pressed Check payment. */
   checkPayment: () => void;
+  /** The buyer pressed Restore purchase. */
+  restorePurchase: () => void;
+  /** The buyer closed a line that can be closed (Restore purchase, or "no purchase found"). */
+  dismiss: () => void;
+  /** The shared page was opened with a receipt link: its code is this browser's recovery code from now on. False when the code is not one. */
+  useReceiptCode: (code: string) => boolean;
   destroy: () => void;
 }
+
+const RECOVERY_CODE = /^[A-Za-z0-9_-]{32,128}$/;
 
 const defaultRandom = (length: number): string => {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
@@ -141,11 +167,13 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   let startInFlight: { abort: AbortController; clear: () => void } | undefined;
   /** What Check payment asks about: the wish of the last checkout (when there is one), and who asked for it. */
   let target: { intentId: string | null; request: string; ticket: Ticket } | null = null;
-  let guest = false;
+  let buyer: 'account' | 'guest' | null = null;
+  /** The last restore the page itself asked for: a Restore purchase that finds the purchase is told to the page under it. */
+  let lastRestore: { request: string; ticket: Ticket } | null = null;
   let memoryCode: string | null = null;
 
   const publish = (update: Partial<PayLine>, keep = false) => {
-    line = { ...(keep ? line : { ...NO_PAY_LINE, receipt: line.receipt }), ...update };
+    line = { ...(keep ? line : { ...NO_PAY_LINE, receipt: line.receipt }), buyer, ...update };
     listeners.forEach((run) => run(line));
   };
 
@@ -155,7 +183,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     if (memoryCode) return memoryCode;
     try {
       const stored = options.storage?.getItem(storageKey);
-      if (stored && /^[A-Za-z0-9_-]{32,128}$/.test(stored)) {
+      if (stored && RECOVERY_CODE.test(stored)) {
         memoryCode = stored;
         return stored;
       }
@@ -173,13 +201,14 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     return url ? { url, app: '', popup: null } : null;
   };
 
-  const receiptFor = (): string | null => (guest && options.origin ? `${options.origin}/pay/receipt/${encodeURIComponent(options.artifactId)}#${recoveryCode()}` : null);
+  const restoredOf = (body: Record<string, unknown> | null): { paidAt: string | null } => ({ paidAt: typeof body?.paidAt === 'string' ? body.paidAt : null });
+
+  const receiptFor = (): string | null => (buyer === 'guest' && options.pageUrl ? `${options.pageUrl.split('#')[0]}#receipt=${recoveryCode()}` : null);
 
   const post = async (body: Record<string, unknown>, signal?: AbortSignal): Promise<Answer> => {
     const response = await ask(base, { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, recoveryCode: recoveryCode() }), signal });
     const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-    if (json && json.buyer === 'guest') guest = true;
-    if (json && json.buyer === 'account') guest = false;
+    if (json && (json.buyer === 'guest' || json.buyer === 'account')) buyer = json.buyer;
     return { ok: response.ok, status: response.status, body: json };
   };
 
@@ -324,13 +353,15 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     busy = true;
     activeRequest = request;
     activeTicket = ticket;
+    lastRestore = { request, ticket };
     void (async () => {
       try {
         const answer = await post({ restore: true });
         if (destroyed) return;
         const status = answer.body?.status;
-        if (answer.ok && status === 'paid') return end({ paid: { test: answer.body?.testPayment === true } }, 'paid', request, ticket, answer.body?.testPayment === true);
-        if (answer.ok && status === 'none') return end({}, 'none', request, ticket);
+        if (answer.ok && status === 'paid') return end({ paid: { test: answer.body?.testPayment === true }, restored: restoredOf(answer.body) }, 'paid', request, ticket, answer.body?.testPayment === true);
+        // Nothing found by itself (a new phone, a cleared browser): the page is told so, and the buyer is offered Restore purchase, quietly
+        if (answer.ok && status === 'none') return end({ offerRestore: true }, 'none', request, ticket);
         if (answer.ok && status === 'checking' && typeof answer.body?.orderId === 'string') {
           // An order of theirs is still open: it is watched like a new checkout, and the page hears how it ends under this request. Its own
           // link is offered, so a reload or a lost pop-up goes on with the SAME order and does not need a second one
@@ -366,16 +397,19 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     begin(data.request, ticket);
   };
 
-  const checkPayment = () => {
+  /**
+   * Asks Orbit again. Check payment asks about the wish of the last checkout when there is one; otherwise (a reload, or a page that cannot ask)
+   * about whatever this buyer has bought, which is also all Restore purchase asks. A purchase found that way is "back", not made just now.
+   */
+  const askAgain = (restoring: boolean) => {
     if (destroyed || busy) return;
-    const asked = target ?? { intentId: null, request: '', ticket: { from: -1, at: 0 } };
+    const asked = restoring ? (lastRestore ? { intentId: null, ...lastRestore } : { intentId: null, request: '', ticket: { from: -1, at: 0 } }) : target ?? { intentId: null, request: '', ticket: { from: -1, at: 0 } };
     busy = true;
     activeRequest = asked.request;
     activeTicket = asked.ticket;
     publish({ checking: true });
     void (async () => {
       try {
-        // The wish of the last checkout when there is one; otherwise (a page that cannot ask, or a reload) whatever this buyer has bought
         const answer = await post(asked.intentId ? { check: true, intentId: asked.intentId } : { restore: true });
         if (destroyed) return;
         const status = answer.body?.status;
@@ -387,11 +421,11 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
           publish({ ...update, receipt: receiptFor() });
           if (request && opening === asked.ticket.from) tellRequest(told, request, isTest);
         };
-        if (answer.ok && status === 'paid') return done({ paid: { test } }, 'paid', test);
+        if (answer.ok && status === 'paid') return done({ paid: { test }, restored: asked.intentId ? null : restoredOf(answer.body) }, 'paid', test);
         if (answer.ok && status === 'checking' && typeof answer.body?.orderId === 'string') return adopt(answer.body.orderId, resumeOf(answer.body), request, asked.ticket);
         if (answer.ok && (status === 'not_paid' || status === 'cant_confirm')) return done({ problem: status, canCheck: true }, status);
-        if (answer.ok && status === 'none') return done({ problem: 'none', canCheck: true }, 'none');
-        if (answer.status === 404) return done({ problem: 'none', canCheck: true }, 'none');
+        if (answer.ok && status === 'none') return done({ problem: 'none', canCheck: !restoring }, 'none');
+        if (answer.status === 404) return done({ problem: 'none', canCheck: !restoring }, 'none');
         done({ problem: 'unavailable', canCheck: true }, 'unavailable');
       } catch {
         if (destroyed) return;
@@ -416,7 +450,23 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
       opening += 1;
       if (busy && activeTicket && Date.now() - activeTicket.at < LOADING_MS) activeTicket.from = opening;
     },
-    checkPayment,
+    checkPayment: () => askAgain(false),
+    restorePurchase: () => askAgain(true),
+    dismiss() {
+      // Only a line that says nothing is going on can be closed: a payment on its way is never hidden
+      if (destroyed || busy) return;
+      publish({});
+    },
+    useReceiptCode(code) {
+      if (destroyed || !RECOVERY_CODE.test(code)) return false;
+      memoryCode = code;
+      try {
+        options.storage?.setItem(storageKey, code);
+      } catch {
+        // Kept for this page's life only
+      }
+      return true;
+    },
     destroy() {
       destroyed = true;
       startInFlight?.abort.abort();

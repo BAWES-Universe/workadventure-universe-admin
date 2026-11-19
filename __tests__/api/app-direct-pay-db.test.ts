@@ -1399,7 +1399,10 @@ run('payments for pages, in a real database', () => {
         // Paid at the service while nobody was watching: Restore asks about the open order first
         gateway({ record: (order) => paidRecord(order) });
         await old(made.orderId);
-        expect(await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] })).toMatchObject({ status: 'paid', orderId: made.orderId, testPayment: true });
+        const restored = await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] });
+        expect(restored).toMatchObject({ status: 'paid', orderId: made.orderId, testPayment: true });
+        // When it was paid, so the host can say "your purchase from 19 Nov is back"
+        expect(Math.abs(new Date(restored.paidAt as string).getTime() - Date.now())).toBeLessThan(60_000);
         expect(await restorePurchase({ artifactId, buyerKeys: [buyerOf(word())] })).toMatchObject({ status: 'none', orderId: null });
         expect(await restorePurchase({ artifactId: await makeArtifact(), buyerKeys: [buyerOf(code)] })).toMatchObject({ status: 'none' });
       });
