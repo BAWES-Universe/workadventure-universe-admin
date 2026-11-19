@@ -195,9 +195,12 @@ function refusal(answer: GitHubAnswer, what: string): ToolResult {
  * owner of what was asked for is an organization, and the app is added on none of the places the person reaches it from under that
  * name. Null in every other case, and when GitHub cannot say (a pasted key has no installs to list): the plain refusal stands then.
  */
-async function organizationThatHasNotAllowed(request: Request, owner: string, repo: string | null, status: number): Promise<string | null> {
+async function organizationThatHasNotAllowed(request: Request, owner: string, repo: string | null, status: number, appIsOn?: AppIsOn): Promise<string | null> {
   const who = await request<{ type?: string; login?: string }>(`/users/${encodeURIComponent(owner)}`);
   if (!who.ok || who.data.type !== 'Organization' || !who.data.login) return null;
+  // The app itself can say whether it is added on the organization, which the person's own list of installations cannot for someone
+  // who is not a member (it shows only what they may see): added there means this is not about approval
+  if ((await appIsOn?.(who.data.login).catch(() => null)) === true) return null;
   // A 404 on a repository the person can read is a missing file or branch, which the organization's approval does not fix
   if (status === 404 && repo) {
     const readable = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
@@ -227,8 +230,11 @@ function ownerOfCall(name: string, args: Record<string, unknown>): string | null
 
 type Request = <T = unknown>(path: string, init?: { method?: string; body?: unknown; accept?: string }) => Promise<GitHubAnswer<T>>;
 
+/** Whether Universe's GitHub app is added on an organization, asked as the app itself: true, false, or null when it cannot be told. */
+export type AppIsOn = (organization: string) => Promise<boolean | null>;
+
 /** Runs one tool as the person whose token this is. Never throws: a failure is a result the Brick reads. */
-export async function runGitHubTool(token: string, name: string, args: Record<string, unknown>, fetchImpl: FetchLike = fetch): Promise<ToolResult> {
+export async function runGitHubTool(token: string, name: string, args: Record<string, unknown>, fetchImpl: FetchLike = fetch, appIsOn?: AppIsOn): Promise<ToolResult> {
   // Whether a change may have happened: set once a change is sent and GitHub does not plainly turn it down
   let mayHaveChanged = false;
   const request: Request = async <T = unknown>(path: string, init?: { method?: string; body?: unknown; accept?: string }) => {
@@ -264,7 +270,7 @@ export async function runGitHubTool(token: string, name: string, args: Record<st
   if (result.isError && !result.unauthorized && (result.status === 403 || result.status === 404)) {
     const owner = ownerOfCall(name, args ?? {});
     const repoName = typeof args?.repo === 'string' && args.repo.includes('/') && name !== 'github_create_repo' ? args.repo.split('/')[1]?.trim() || null : null;
-    const org = owner ? await organizationThatHasNotAllowed(request, owner, repoName, result.status).catch(() => null) : null;
+    const org = owner ? await organizationThatHasNotAllowed(request, owner, repoName, result.status, appIsOn).catch(() => null) : null;
     if (org) {
       const where = typeof args?.repo === 'string' ? args.repo : org;
       result = {

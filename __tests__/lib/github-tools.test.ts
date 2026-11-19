@@ -327,6 +327,33 @@ describe('what a Brick can do on GitHub', () => {
       expect(github.calls.some((call) => call.url.includes('/user/installations'))).toBe(false);
     });
 
+    it('keeps the plain refusal when the app itself says it is added on the organization, though the person\'s own list does not show it', async () => {
+      const github = fakeGitHub([
+        ['GET', '/repos/acme-corp/website', 404, { message: 'Not Found' }],
+        ['GET', '/users/acme-corp', 200, { type: 'Organization', login: 'acme-corp' }],
+        ['GET', '/user/installations?per_page=100&page=1', 200, { installations: [] }],
+      ]);
+      const result = await runGitHubTool('t', 'github_get_repo', { repo: 'acme-corp/website' }, github.impl, async () => true);
+      expect(result.orgNeedsOk).toBeUndefined();
+      expect(github.calls.some((call) => call.url.includes('/user/installations'))).toBe(false);
+      // Not added there, or the app cannot say: the person's own list decides, as before
+      for (const answer of [false, null]) {
+        const again = fakeGitHub([
+          ['GET', '/repos/acme-corp/website', 404, { message: 'Not Found' }],
+          ['GET', '/users/acme-corp', 200, { type: 'Organization', login: 'acme-corp' }],
+          ['GET', '/user/installations?per_page=100&page=1', 200, { installations: [] }],
+        ]);
+        expect((await runGitHubTool('t', 'github_get_repo', { repo: 'acme-corp/website' }, again.impl, async () => answer)).orgNeedsOk).toBe('acme-corp');
+      }
+      // A check that fails is the same as one that cannot say
+      const broken = fakeGitHub([
+        ['GET', '/repos/acme-corp/website', 404, { message: 'Not Found' }],
+        ['GET', '/users/acme-corp', 200, { type: 'Organization', login: 'acme-corp' }],
+        ['GET', '/user/installations?per_page=100&page=1', 200, { installations: [] }],
+      ]);
+      expect((await runGitHubTool('t', 'github_get_repo', { repo: 'acme-corp/website' }, broken.impl, async () => { throw new Error('down'); })).orgNeedsOk).toBe('acme-corp');
+    });
+
     it('reads every page of a person\'s installations before saying the organization is missing', async () => {
       const filler = Array.from({ length: 100 }, (_, i) => ({ account: { login: `org-${i}` } }));
       const onSecond = fakeGitHub([

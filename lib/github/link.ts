@@ -3,8 +3,10 @@ import { recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
 import type { LinkAnswer } from '@/lib/app-adapter/types';
 import type { FetchLike } from '@/lib/github/api';
+import { appJwt, getGitHubApp } from '@/lib/github/app';
+import { gitHubRequest } from '@/lib/github/api';
 import { gitHubToken, gitHubTokenRefused, GITHUB_SOURCE } from '@/lib/github/connection';
-import { GITHUB_TOOLS, isGitHubTool, runGitHubTool } from '@/lib/github/tools';
+import { GITHUB_TOOLS, isGitHubTool, runGitHubTool, type AppIsOn } from '@/lib/github/tools';
 
 /**
  * A person's GitHub, answered by Orbit itself as an app link (game #2041): the bot server sends it the same messages it sends any
@@ -14,6 +16,16 @@ import { GITHUB_TOOLS, isGitHubTool, runGitHubTool } from '@/lib/github/tools';
 export type GitHubLinkOutcome = { status: 'done'; answer: LinkAnswer } | { status: 'gone' | 'not_owner' | 'already_asked' | 'unavailable' | 'refused' };
 
 const METHODS = new Set(['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
+
+/** Whether the app is added on an organization, asked as the app itself (true, false, or null when it cannot be told). */
+function appIsOnWith(fetchImpl: FetchLike): AppIsOn {
+  return async (organization) => {
+    const app = await getGitHubApp();
+    if (!app) return null;
+    const answer = await gitHubRequest(appJwt(app), `/orgs/${encodeURIComponent(organization)}/installation`, {}, fetchImpl);
+    return answer.ok ? true : answer.status === 404 ? false : null;
+  };
+}
 
 const eventIdOf = (botId: string, callId: string) => `github:${botId}:${callId}`;
 
@@ -101,7 +113,7 @@ export async function linkGitHub(
         return { status: 'already_asked' };
       }
       const args = params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments) ? (params.arguments as Record<string, unknown>) : {};
-      const result = await runGitHubTool(token.token, params.name, args, fetchImpl);
+      const result = await runGitHubTool(token.token, params.name, args, fetchImpl, appIsOnWith(fetchImpl));
       // Certain that nothing changed on GitHub (only looked, answered or not, or GitHub turned the change down): the call is let
       // go, so the same call may be asked again. A change GitHub made or may have made stays asked, so it is never made twice.
       if (result.changedNothing) await prisma.meterEvent.deleteMany({ where: { eventId: eventIdOf(input.botId, input.callId) } });
