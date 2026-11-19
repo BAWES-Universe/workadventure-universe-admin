@@ -707,6 +707,9 @@ async function applyLateEvidence(run: Row, line: InstantLog, tx: Prisma.Transact
   const detail = isObject(run.detail) ? run.detail : {};
   const estimated = asNumber(run.providerMicros);
   const verified = line.chargeMicros;
+  // A line that says the tool worked but carries no charge yet (it may be posted later) is not the evidence: nothing is written, so the run is looked for again
+  // until a charge turns up or the days run out. A failed or unknown line is the answer as it is, and is written down once.
+  if (verified === null && line.status === 'success') return;
   const next = { ...detail, lateEvidence: { status: line.status, chargeMicros: verified, at: now.toISOString() }, ...(verified !== null ? { adjustment: { estimatedMicros: estimated, verifiedMicros: verified } } : {}) };
   await tx.instantRun.update({
     where: { id: run.id },

@@ -2413,6 +2413,23 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await getInstantPause()).toMatchObject({ paused: true, reason: 'price_over_top' });
     });
 
+    it('a late success line that has no charge yet is not the evidence: it is looked for again, and the charge found later replaces the estimate', async () => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const { rowId, at, row } = await released(p, f);
+      p.setLogsDown(false);
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', null)]);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
+      expect((await runOf(rowId)).detail).not.toHaveProperty('lateEvidence');
+      expect(Number((await runOf(rowId)).providerMicros)).toBe(TOP);
+      // The charge is posted
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', TOP - 1_000)]);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 120 * MIN) });
+      const after = await runOf(rowId);
+      expect(Number(after.providerMicros)).toBe(TOP - 1_000);
+      expect(after.providerBasis).toBe('measured');
+    });
+
     it('a late failure changes nothing for the person and keeps the estimate when the line has no charge; it is written down once', async () => {
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
