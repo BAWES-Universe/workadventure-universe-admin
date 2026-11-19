@@ -15,6 +15,8 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
 import { prisma } from '@/lib/db';
+import { snapshotSettings } from '../helpers/shared-settings';
+import { getBrickLimits } from '@/lib/bot-limits';
 import { getSessionUser } from '@/lib/auth-session';
 import { createBrick } from '@/lib/brick-create';
 import { checkBotAccess } from '@/lib/bot-access';
@@ -51,6 +53,7 @@ const universes: Record<'open' | 'closed' | 'second', { id: string; roomId: stri
 };
 let brickId = '';
 let secondBrickId = '';
+let putLimitsBack: () => Promise<void> = async () => {};
 let roomBotId = '';
 let serverProviderId = '';
 const keyId = `key-${tag}`;
@@ -98,12 +101,18 @@ run('bringing a Brick along, in a real database', () => {
     serverProviderId = `srv-${tag}`;
     await prisma.botsAiProvider.create({ data: { providerId: serverProviderId, name: `Server ${tag}`, type: 'openai', enabled: true, isDefault: true, model: 'server-model' } });
     await prisma.botsAiProvider.create({ data: { providerId: keyId, name: 'Sara key', type: 'openai', enabled: true, ownerId: sara.id, model: 'key-model' } });
+    // The timed cases below assume a visit that ends after ten minutes (a 9-minute-old one is live, an 11-minute-old one is over): the
+    // limit is put at what a database that never changed it has, read back to be sure, and put back as it was afterwards
+    putLimitsBack = await snapshotSettings(['bot-limits']);
+    await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
+    expect((await getBrickLimits()).visitEndsMinutes).toBe(10);
     brickId = (await createBrick({ ownerId: sara.id, name: 'Brick' })).id;
     secondBrickId = (await createBrick({ ownerId: sara.id, name: 'Recipe Brick' })).id;
     roomBotId = (await prisma.bot.create({ data: { roomId: universes.open.roomId, name: 'Nora', createdById: host.id, behaviorConfig: {} } })).id;
   });
 
   afterAll(async () => {
+    await putLimitsBack();
     await prisma.botsAiProvider.deleteMany({ where: { providerId: { in: [serverProviderId, keyId] } } });
     await prisma.universe.deleteMany({ where: { id: { in: Object.values(universes).map((one) => one.id) } } });
     await prisma.user.deleteMany({ where: { id: { in: [sara.id, omar.id, host.id] } } });
@@ -116,7 +125,9 @@ run('bringing a Brick along, in a real database', () => {
 
   beforeEach(async () => {
     await prisma.brickVisit.deleteMany({ where: { userId: { in: [sara.id, omar.id] } } });
-    await prisma.bot.update({ where: { id: brickId }, data: { aiProviderRef: UNIVERSE_AI_REF, aiModel: null, enabled: true } });
+    // Both Bricks as a test found the first one: a test that failed halfway through deleting one cannot leave it deleted for the next
+    await prisma.bot.update({ where: { id: brickId }, data: { aiProviderRef: UNIVERSE_AI_REF, aiModel: null, enabled: true, deletedAt: null, goneAt: null, enabledBeforeDelete: null } });
+    await prisma.bot.update({ where: { id: secondBrickId }, data: { enabled: true, deletedAt: null, goneAt: null, enabledBeforeDelete: null } });
     await prisma.aiKeyLend.deleteMany({ where: { providerId: keyId } });
     await prisma.universe.update({ where: { id: universes.open.id }, data: { allowVisitingBricks: true } });
     as(sara);
@@ -186,8 +197,11 @@ run('bringing a Brick along, in a real database', () => {
       as(sara);
       expect((await postVisit(call('POST', `/api/bricks/${roomBotId}/visit`, { roomUrl: universes.open.roomUrl }), ids(roomBotId))).status).toBe(404);
       await prisma.bot.update({ where: { id: secondBrickId }, data: { deletedAt: NOW, goneAt: new Date(NOW.getTime() + 86_400_000), enabledBeforeDelete: true, enabled: false } });
-      expect((await postVisit(call('POST', `/api/bricks/${secondBrickId}/visit`, { roomUrl: universes.open.roomUrl }), ids(secondBrickId))).status).toBe(404);
-      await prisma.bot.update({ where: { id: secondBrickId }, data: { deletedAt: null, goneAt: null, enabledBeforeDelete: null, enabled: true } });
+      try {
+        expect((await postVisit(call('POST', `/api/bricks/${secondBrickId}/visit`, { roomUrl: universes.open.roomUrl }), ids(secondBrickId))).status).toBe(404);
+      } finally {
+        await prisma.bot.update({ where: { id: secondBrickId }, data: { deletedAt: null, goneAt: null, enabledBeforeDelete: null, enabled: true } });
+      }
       as(null);
       expect((await postVisit(call('POST', `/api/bricks/${brickId}/visit`, { roomUrl: universes.open.roomUrl }), ids(brickId))).status).toBe(401);
       expect(await prisma.brickVisit.count({ where: { userId: omar.id } })).toBe(0);
@@ -538,9 +552,14 @@ run('bringing a Brick along, in a real database', () => {
         for (const ref of [UNIVERSE_AI_REF, keyId]) {
           await prisma.bot.update({ where: { id: brickId }, data: { aiProviderRef: ref } });
           await prisma.aiKeyLend.upsert({ where: { providerId_universeId: { providerId: keyId, universeId: universes.open.id } }, update: {}, create: { providerId: keyId, universeId: universes.open.id } });
-          const body = await (await credentials(omar.uuid)).json();
+          const answer = await credentials(omar.uuid);
+          expect(answer.status).toBe(200);
+          const body = await answer.json();
+          expect(body.source).toBe(ref === keyId ? 'own-key' : 'universe-ai');
           expect(body.providerId).not.toBe(`key-omar-${tag}`);
-          expect(body.keyOwnerId ?? sara.id).toBe(sara.id);
+          // On the Brick's own key it is Sara's, said outright; on Universe AI it is nobody's of Omar's
+          if (ref === keyId) expect(body).toMatchObject({ providerId: keyId, keyOwnerId: sara.id });
+          else expect(body.keyOwnerId).not.toBe(omar.id);
         }
       } finally {
         await prisma.botsAiProvider.delete({ where: { providerId: `key-omar-${tag}` } });
@@ -574,7 +593,11 @@ run('bringing a Brick along, in a real database', () => {
       expect(await (await credentials('unknown')).json()).toMatchObject({ forOthers: true });
       // Its owner is never flagged, by WorkAdventure id, email or Orbit id
       for (const asker of [sara.uuid, sara.email, sara.id]) {
-        expect((await (await credentials(asker)).json()).forOthers).toBeUndefined();
+        const answer = await credentials(asker);
+        expect(answer.status).toBe(200);
+        const body = await answer.json();
+        expect(body).toMatchObject({ source: 'own-key', providerId: keyId });
+        expect(body.forOthers).toBeUndefined();
       }
     });
 
@@ -819,7 +842,9 @@ run('bringing a Brick along, in a real database', () => {
     it('goes with the Brick, the person or the room it was last seen in, and deletes nothing of the owner’s', async () => {
       const leaving = await prisma.user.create({ data: { uuid: `leaving-${tag}`, name: 'leaving' } });
       const theirs = await createBrick({ ownerId: leaving.id, name: 'Brick' });
-      await startVisit(theirs.id, leaving.id, universes.open.roomUrl);
+      // The visit exists before its person goes, so the zero afterwards is the cleanup and not a refusal
+      expect((await startVisit(theirs.id, leaving.id, universes.open.roomUrl)).ok).toBe(true);
+      expect(await prisma.brickVisit.count({ where: { botId: theirs.id, userId: leaving.id } })).toBe(1);
       await prisma.user.delete({ where: { id: leaving.id } });
       expect(await prisma.brickVisit.count({ where: { botId: theirs.id } })).toBe(0);
 
