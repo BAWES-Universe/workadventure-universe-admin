@@ -159,6 +159,22 @@ describe('taking a thing out', () => {
     expect(shortOne.conversationHistory.map((line) => line.message)).toContain('I am 31');
   });
 
+  it('looks for the words of a fact as whole words in the chat: "Rome" takes "I live in Rome" and leaves "Chrome keeps crashing"', () => {
+    const memory = saved();
+    memory.personalInfo.facts.push(['home_city', 'Rome']);
+    memory.conversationHistory.push({ sender: 'person', message: 'I live in Rome', timestamp: T0 + 3 * DAY }, { sender: 'person', message: 'Chrome keeps crashing', timestamp: T0 + 3 * DAY + 1 }, { sender: 'person', message: 'Rome, again', timestamp: T0 + 3 * DAY + 2 });
+    const after = withoutItems(memory, new Set([memoryItemKey('fact', 'home_city', 'Rome')])).data as typeof memory;
+    const lines = after.conversationHistory.map((line) => line.message);
+    expect(lines).not.toContain('I live in Rome');
+    expect(lines).not.toContain('Rome, again');
+    expect(lines).toContain('Chrome keeps crashing');
+    // Words that end in a symbol or hold spaces still match as before
+    memory.personalInfo.facts.push(['employer', 'Acme Corp.']);
+    memory.conversationHistory.push({ sender: 'person', message: 'I work at Acme Corp. now', timestamp: T0 + 4 * DAY });
+    const employer = withoutItems(memory, new Set([memoryItemKey('fact', 'employer', 'Acme Corp.')])).data as typeof memory;
+    expect(employer.conversationHistory.map((line) => line.message)).not.toContain('I work at Acme Corp. now');
+  });
+
   it('does nothing for a key it does not hold, or an empty set', () => {
     const memory = saved();
     expect(withoutItems(memory, new Set(['0'.repeat(32)])).removed).toBe(0);
