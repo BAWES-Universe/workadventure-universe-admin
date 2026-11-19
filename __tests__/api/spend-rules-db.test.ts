@@ -5,7 +5,7 @@
  *
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/spend-rules-db.test.ts --runInBand
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { NextRequest } from 'next/server';
 
@@ -437,6 +437,48 @@ run('rules said in chat and task receipts, in a real database', () => {
       release();
       await other;
       expect(await renewing).toEqual({ ok: false, reason: 'closed' });
+    });
+
+    it('a message id that reads like a hashed key never makes the same rule as the long id it was made from', async () => {
+      const sara = await person('sara');
+      const long = 'x'.repeat(300);
+      const digest = createHash('sha256').update(long).digest('hex');
+      const first = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: long, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+      const second = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `sha256:${digest}`, scope: 'bot', period: 'month', capMicros: 5_000_000 });
+      expect(first).toMatchObject({ ok: true, created: true });
+      expect(second).toMatchObject({ ok: true, created: true });
+    });
+
+    it('a call priced between the two reads of a check is never missed: its cost or its room is counted, whichever read ran first', async () => {
+      const sara = await person('sara');
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+      const jobId = randomUUID();
+      const eventId = `computer:${jobId}:call:c1`;
+      await prisma.meterEvent.create({
+        data: { eventId, kind: 'model_call', pool: 'computer', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId, quantity: BigInt(1), unit: 'call', costMicros: null, basis: 'measured' },
+      });
+      await prisma.meterReservation.create({
+        data: { reservationKey: `computer:call:${jobId}:c1`, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, jobId, amountMicros: BigInt(90_000), settledMicros: BigInt(90_000), state: 'settled', expiresAt: NOW },
+      });
+      // The price is written (as settleModelCall does for a call reported after the sweep wrote it unknown) right after the first of the two reads
+      let priced = false;
+      const price = async () => {
+        if (priced) return;
+        priced = true;
+        await prisma.meterEvent.updateMany({ where: { eventId, costMicros: null }, data: { costMicros: BigInt(90_000), basis: 'measured' } });
+      };
+      const realAggregate = prisma.meterEvent.aggregate.bind(prisma.meterEvent) as (args: unknown) => Promise<unknown>;
+      const realFind = prisma.meterEvent.findMany.bind(prisma.meterEvent) as (args: unknown) => Promise<unknown>;
+      const aggregate = jest.spyOn(prisma.meterEvent, 'aggregate').mockImplementation(((args: unknown) => realAggregate(args).then(async (row) => (await price(), row))) as never);
+      const find = jest.spyOn(prisma.meterEvent, 'findMany').mockImplementation(((args: unknown) => realFind(args).then(async (row) => (await price(), row))) as never);
+      try {
+        // 90,000 of the 100,000 was spent, so 20,000 more is over the cap
+        expect(await checkSpend(attemptOf(sara, 20_000), NOW)).toMatchObject({ ok: false, why: 'cap' });
+        expect(priced).toBe(true);
+      } finally {
+        aggregate.mockRestore();
+        find.mockRestore();
+      }
     });
 
     it('a model call whose id holds ":call:" still finds the room it settled', async () => {

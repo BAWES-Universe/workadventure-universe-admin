@@ -348,6 +348,16 @@ async function lockedItem(tx: Tx, where: { id: string; ownerId?: string; botId?:
   return found.length ? tx.brickItem.findUnique({ where: { id: where.id } }) : null;
 }
 
+/**
+ * Whether the Brick a notice is for is still the person's own and on, held (shared) to the end of the transaction so it cannot be switched off, deleted or
+ * handed to another owner while the notice is being handed out. Taken BEFORE the item's own row, in the order a Brick's deletion takes them (the Brick, then its items).
+ */
+async function holdOwnBrick(tx: Tx, botId: string, ownerId: string): Promise<boolean> {
+  const found = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+    SELECT "id" FROM "bots" WHERE "id" = ${botId} AND "enabled" = true AND "deleted_at" IS NULL AND "room_id" IS NULL AND "owner_id" = ${ownerId} FOR SHARE`);
+  return found.length === 1;
+}
+
 /** Gives the checks a goal set the goal's own change (pause, resume, done, delete), in the same transaction. */
 async function moveChecks(tx: Tx, goalId: string, from: ItemState[], data: Prisma.BrickItemUpdateManyMutationInput, now: Date, recompute: boolean, onlyPausedBy?: string[]) {
   const checks = await tx.brickItem.findMany({ where: { parentId: goalId, state: { in: from }, ...(onlyPausedBy ? { pausedBy: { in: onlyPausedBy } } : {}) } });
@@ -1129,8 +1139,8 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
 
   // A held notice handed out and never confirmed is handed out again once the retry interval is over: the item itself is not due until its
   // usage is back, so it is found here, not above
-  const owing = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
-    SELECT i."id" FROM "brick_items" i
+  const owing = await prisma.$queryRaw<{ id: string; bot_id: string; owner_id: string }[]>(Prisma.sql`
+    SELECT i."id", i."bot_id", i."owner_id" FROM "brick_items" i
     JOIN "bots" b ON b."id" = i."bot_id"
     WHERE i."state" = 'on' AND i."held_since" IS NOT NULL AND i."held_told_at" IS NULL AND i."next_due_at" > ${now}
       AND (i."held_notice_at" IS NULL OR i."held_notice_at" <= ${new Date(now.getTime() - noticeRetry)})
@@ -1138,9 +1148,11 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
       ${ofKinds}
     ORDER BY i."held_since" ASC, i."id" ASC
     LIMIT ${limit}`);
-  for (const { id } of owing) {
+  for (const { id, bot_id: botId, owner_id: ownerId } of owing) {
     try {
       const notice = await prisma.$transaction(async (tx) => {
+        // The Brick is looked at again under a lock held to the end: it may have been switched off, deleted or handed over since it was chosen
+        if (!(await holdOwnBrick(tx, botId, ownerId))) return null;
         const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
           SELECT i."id" FROM "brick_items" i
           WHERE i."id" = ${id} AND i."state" = 'on' AND i."held_since" IS NOT NULL AND i."held_told_at" IS NULL AND i."next_due_at" > ${now}
@@ -1160,19 +1172,22 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
 
   // A failure notice handed out and never confirmed is handed out again once the retry interval is over. Only the ones this call made up
   // (`failure_notice_at` is set), never a tell a run's own report asked for
-  const unTold = await prisma.$queryRaw<{ id: string; tell_run_id: string }[]>(Prisma.sql`
-    SELECT i."id", i."tell_run_id" FROM "brick_items" i
+  const unTold = await prisma.$queryRaw<{ id: string; tell_run_id: string; bot_id: string; owner_id: string }[]>(Prisma.sql`
+    SELECT i."id", i."tell_run_id", i."bot_id", i."owner_id" FROM "brick_items" i
     JOIN "bots" b ON b."id" = i."bot_id"
-    WHERE i."tell_run_id" IS NOT NULL AND i."failure_told" = false AND i."failure_notice_at" IS NOT NULL AND i."failure_notice_at" <= ${new Date(now.getTime() - noticeRetry)}
+    WHERE i."state" <> 'deleted' AND i."tell_run_id" IS NOT NULL AND i."failure_told" = false AND i."failure_notice_at" IS NOT NULL AND i."failure_notice_at" <= ${new Date(now.getTime() - noticeRetry)}
       AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
       ${ofKinds}
     ORDER BY i."failure_notice_at" ASC, i."id" ASC
     LIMIT ${limit}`);
-  for (const { id, tell_run_id: runId } of unTold) {
+  for (const { id, tell_run_id: runId, bot_id: botId, owner_id: ownerId } of unTold) {
     try {
       const notice = await prisma.$transaction(async (tx) => {
+        // The Brick is looked at again under a lock held to the end: it may have been switched off, deleted or handed over since it was chosen
+        if (!(await holdOwnBrick(tx, botId, ownerId))) return null;
         const item = await lockedItem(tx, { id });
-        if (!item || item.tellRunId !== runId || item.failureTold || !item.failureNoticeAt || item.failureNoticeAt.getTime() > now.getTime() - noticeRetry) return null;
+        // A deleted item is told of no more (a done one still is: it finished with a failure the person has not been told of)
+        if (!item || item.state === 'deleted' || item.botId !== botId || item.ownerId !== ownerId || item.tellRunId !== runId || item.failureTold || !item.failureNoticeAt || item.failureNoticeAt.getTime() > now.getTime() - noticeRetry) return null;
         const [run, owner] = await Promise.all([tx.brickItemRun.findUnique({ where: { id: runId }, select: { error: true } }), tx.user.findUnique({ where: { id: item.ownerId }, select: { uuid: true, matrixChatId: true } })]);
         if (!owner) return null;
         await tx.brickItem.update({ where: { id }, data: { failureNoticeAt: now } });

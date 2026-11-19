@@ -686,6 +686,18 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(JSON.stringify(streamed)).not.toContain('SOMEONE_ELSES');
     });
 
+    it('an answer to the start of a session that is for another id, or not an answer at all, is a failed test: a good list after it never makes the app look like it works', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      for (const opening of ['{"jsonrpc":"2.0","id":99,"error":{"code":-32000,"message":"no session"}}', '{"jsonrpc":"2.0","id":99,"result":{}}', '<html>maintenance</html>']) {
+        adapter.callLink.mockReset();
+        adapter.callLink
+          .mockResolvedValueOnce(answerOf(200, opening, 's1'))
+          .mockResolvedValueOnce(answerOf(202, ''))
+          .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"A"}]}}', 's1'));
+        expect(await (await test(serverId)).json()).toMatchObject({ success: false, toolCount: 0 });
+      }
+    });
+
     it('reads every page of a long list of tools', async () => {
       const { adapter, serverId } = await connectedAndGranted();
       adapter.callLink

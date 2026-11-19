@@ -463,6 +463,29 @@ describe('the strict outgoing guard', () => {
     expect(timeLeft).toBeGreaterThan(0);
   });
 
+  it('counts a name lookup as in flight until it settles, not until its caller gave up: only so many wait at once, and one that settles frees its place', async () => {
+    const releases: Array<() => void> = [];
+    const hang = () => new Promise<{ address: string; family: number }[]>((resolve) => releases.push(() => resolve([{ address: '93.184.216.34', family: 4 }])));
+    const asked = jest.fn(hang);
+    // Each caller gives up at its deadline, but its lookup is still waiting for the system's resolver
+    for (let n = 0; n < 16; n += 1) {
+      await expect(guardedRequest({ ...request('https://api.example.com/'), timeoutMs: 5 }, { resolve: asked, send: async () => answer })).rejects.toMatchObject({ code: 'timeout' });
+    }
+    expect(asked).toHaveBeenCalledTimes(16);
+    // The next one is refused without a lookup being made: the places are all taken by lookups that have not settled
+    await expect(guardedRequest({ ...request('https://api.example.com/'), timeoutMs: 5 }, { resolve: asked, send: async () => answer })).rejects.toMatchObject({ code: 'unreachable' });
+    expect(asked).toHaveBeenCalledTimes(16);
+    // One lookup settles and its place is free again
+    releases[0]();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await expect(guardedRequest({ ...request('https://api.example.com/'), timeoutMs: 5 }, { resolve: asked, send: async () => answer })).rejects.toMatchObject({ code: 'timeout' });
+    expect(asked).toHaveBeenCalledTimes(17);
+    for (const release of releases) release();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // All settled: lookups work as before
+    await expect(guardedRequest(request('https://api.example.com/'), { resolve: async () => [{ address: '93.184.216.34', family: 4 }], send: async () => answer })).resolves.toBeDefined();
+  });
+
   it('hands a redirect back as an answer, never follows it', async () => {
     const got = await guardedRequest(request('https://api.example.com/'), { resolve: async () => [{ address: '93.184.216.34', family: 4 }], send: async () => ({ ...answer, status: 302, redirected: true, body: '' }) });
     expect(got.redirected).toBe(true);

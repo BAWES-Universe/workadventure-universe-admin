@@ -141,6 +141,23 @@ run('more Bricks, deleting one and Undo, in a real database', () => {
     expect((await bricksForChat(brick!.id, uma.uuid))!.map((card) => card.name)).toEqual(['Brick', 'Bolt']);
   });
 
+  it('when the Brick found is missing from the list three times, it makes none outside the name lock: the ask ends with a 409 to ask again, and no second Brick of the name exists', async () => {
+    const ines = await person('ines');
+    const { brick } = await ensureDefaultBrick(ines.id);
+    const there = await makeBrickFromChat(brick!.id, { userId: ines.uuid, name: 'Bolt' });
+    if (!there.ok) throw new Error('expected an answer');
+    // Every list read leaves out the Brick that was found (as if it were deleted again each time)
+    mockListHook.current = async (read) => ((await read()) as Array<{ id: string }>).filter((card) => card.id !== there.brick.id);
+    let answer: Awaited<ReturnType<typeof makeBrickFromChat>>;
+    try {
+      answer = await makeBrickFromChat(brick!.id, { userId: ines.uuid, name: 'Bolt' });
+    } finally {
+      mockListHook.current = null;
+    }
+    expect(answer).toMatchObject({ ok: false, status: 409 });
+    expect((await bricksForChat(brick!.id, ines.uuid))!.map((card) => card.name)).toEqual(['Brick', 'Bolt']);
+  });
+
   it('makes one from the person’s own chat with their Brick, opens the one of that name instead of making it twice, and makes none for anyone else', async () => {
     const omar = await person('omar');
     const lina = await person('lina');

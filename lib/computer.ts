@@ -1154,6 +1154,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     const held = job.status === 'running' || job.status === 'waiting';
     const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
     seconds = job.secondsRun + stretch;
+    // The seconds were worked out from what was read: the end lands only on that same snapshot. A take-over and a hand-back in between leave the status as
+    // it was but move the seconds and the stretch, and an end written from the old read would put the smaller count over the newer one
     const endData = {
       status,
       endedBy,
@@ -1178,13 +1180,14 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       // moment the job is over (one commit with the end), so no other job or turn starts beside that turn until the machine is proved asleep
       const botId = job.botId;
       const status0 = job.status;
+      const { secondsRun: secondsSeen, stretchStarted: stretchSeen } = job;
       ended = await prisma.$transaction(async (tx) => {
-        const done = await tx.computerJob.updateMany({ where: { id: jobId, status: status0 }, data: endData });
+        const done = await tx.computerJob.updateMany({ where: { id: jobId, status: status0, secondsRun: secondsSeen, stretchStarted: stretchSeen }, data: endData });
         if (done.count === 1) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
         return done;
       });
     } else {
-      ended = await prisma.computerJob.updateMany({ where: { id: jobId, status: job.status }, data: endData });
+      ended = await prisma.computerJob.updateMany({ where: { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted }, data: endData });
     }
   }
   // Someone else ended it between the read and the write: that one counts and settles

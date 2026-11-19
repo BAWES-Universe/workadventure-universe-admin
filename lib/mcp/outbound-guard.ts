@@ -6,7 +6,7 @@
  * (the authorization callback and the server-side refresh) apply the same check,
  * including the DNS resolution step, before sending credentials anywhere.
  */
-import { lookup } from 'dns/promises';
+import { resolveHost } from '@/lib/name-lookup';
 import http from 'node:http';
 import https from 'node:https';
 import { Readable } from 'node:stream';
@@ -153,7 +153,7 @@ export async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: b
       // IP literal that passed all checks — still resolve it to catch CNAME-based bypasses
     }
 
-    const addresses = await lookup(hostname, { all: true });
+    const addresses = await resolveHost(hostname);
     for (const addr of addresses) {
       const ip = addr.address;
       // Reject private and loopback ranges
@@ -239,6 +239,17 @@ function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
 }
 
 /**
+ * The socket's own name look-up, answered from the addresses that were checked: all of them (in the order they came) when the socket asks for all, the
+ * first when it asks for one. Nothing is ever resolved here, so an address that was not checked can never be reached.
+ */
+export function pinnedLookup(addresses: ReadonlyArray<{ address: string; family: number }>) {
+  return (_name: string, options: { all?: boolean } | undefined, callback: (...args: unknown[]) => void): void => {
+    if (options && options.all) callback(null, addresses.map(({ address, family }) => ({ address, family })));
+    else callback(null, addresses[0].address, addresses[0].family);
+  };
+}
+
+/**
  * A request made to the address that was checked, never to a second look-up of the name. `fetch` resolves the host again after the
  * check, so a name that answers with a public address for the check and an internal one a moment later (DNS rebinding) would reach
  * the internal one. Here the name is resolved once, every address is checked, and the connection is made to the one checked (the
@@ -251,13 +262,13 @@ export async function pinnedFetch(url: string, init: { method?: string; headers?
   // A stalled resolver never holds a caller that has given up: the wait ends with the signal, and a look-up that answers late starts nothing
   const checked = await untilAborted(isAllowedServerIp(url), init.signal);
   if (!checked.allowed || !checked.addresses || checked.addresses.length === 0) throw new Error(checked.error || 'Server URL resolves to a blocked address');
-  // Every address that was checked stays available to the connector (it may try the next when one does not answer), and no other does
-  const pinned = checked.addresses;
+  const addresses = checked.addresses;
   const useHttps = target.protocol === 'https:';
   const hostname = target.hostname.startsWith('[') ? target.hostname.slice(1, -1) : target.hostname;
   return new Promise<Response>((resolve, reject) => {
     const headers: Record<string, string> = { 'accept-encoding': 'identity' };
-    for (const [name, value] of Object.entries(init.headers ?? {})) if (!['host', 'content-length', 'transfer-encoding'].includes(name.toLowerCase())) headers[name] = value;
+    // The answer is read as it comes, never decoded: a caller's own accept-encoding would let a server send it compressed and the bytes would be handed on as they are
+    for (const [name, value] of Object.entries(init.headers ?? {})) if (!['host', 'content-length', 'transfer-encoding', 'accept-encoding'].includes(name.toLowerCase())) headers[name] = value;
     const request = (useHttps ? https : http).request(
       {
         host: hostname,
@@ -267,28 +278,27 @@ export async function pinnedFetch(url: string, init: { method?: string; headers?
         headers,
         signal: init.signal,
         agent: false,
-        // The name is never resolved again: the socket goes to the address that was checked
-        lookup: ((_name: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {
-          if (options && options.all) callback(null, pinned.map((one) => ({ address: one.address, family: one.family })));
-          else callback(null, pinned[0].address, pinned[0].family);
-        }) as never,
-      },
+        // The name is never resolved again: the socket goes to the addresses that were checked, and to no other. When the first does not answer (a
+        // name with an IPv6 and an IPv4 address on a machine with no IPv6 way out) the socket tries the next checked one, as an ordinary connection would
+        lookup: pinnedLookup(addresses) as never,
+        autoSelectFamily: true,
+      } as import('node:http').RequestOptions,
       (incoming) => {
-        const status = incoming.statusCode ?? 0;
-        const responseHeaders = new Headers();
-        for (const [name, value] of Object.entries(incoming.headers)) {
-          if (Array.isArray(value)) for (const one of value) responseHeaders.append(name, one);
-          else if (typeof value === 'string') responseHeaders.set(name, value);
-        }
-        const noBody = [101, 204, 205, 304].includes(status);
-        // A server can answer with a status `Response` refuses (0, 1xx, 600 and up): that ends this request with an error, never an uncaught one
+        // This runs when the answer arrives, long after the request was made: what it throws is not seen by any caller's catch, so it ends the request here
         try {
-          const response = new Response(noBody ? null : (Readable.toWeb(incoming) as ReadableStream), { status, statusText: incoming.statusMessage ?? '', headers: responseHeaders });
+          const status = incoming.statusCode ?? 0;
+          const responseHeaders = new Headers();
+          for (const [name, value] of Object.entries(incoming.headers)) {
+            if (Array.isArray(value)) for (const one of value) responseHeaders.append(name, one);
+            else if (typeof value === 'string') responseHeaders.set(name, value);
+          }
+          const noBody = [101, 204, 205, 304].includes(status);
           if (noBody) incoming.resume();
-          resolve(response);
+          // A status outside 200-599 (a server that answers 600) is refused by Response itself
+          resolve(new Response(noBody ? null : (Readable.toWeb(incoming) as ReadableStream), { status, statusText: incoming.statusMessage ?? '', headers: responseHeaders }));
         } catch (error) {
           incoming.destroy();
-          reject(error instanceof Error ? error : new Error('The server answered with a status that cannot be read'));
+          reject(error);
         }
       },
     );

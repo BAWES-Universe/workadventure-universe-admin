@@ -254,9 +254,15 @@ run('what a bot remembers about a person (real database)', () => {
     // Said once more and forgotten again: the bot server is told again
     expect(kept.droppedAt).toBeNull();
     await prisma.botMemoryItemForget.update({ where: { id: kept.id }, data: { droppedAt: new Date() } });
+    // The thing is in her saved row again (said after even the Forget that is ahead of the clock), so the Forget of everything really meets it
+    await save(asBotServer(`/api/bots/memory/${melodyId}`, { memories: [{ userUuid: people.sara.uuid, isGuest: false, memories: memoryOf({ drawnFrom: { [`pref:${COFFEE}`]: ahead.getTime() + 60_000 } }) }] }), params(melodyId));
+    await settle();
+    expect(prefsOf(await rows(melodyId, people.sara.uuid))).toContain(COFFEE);
     expect((await forgetMine(as('sara', `/api/bots/${melodyId}/my-memory/forget`, { everything: true }), params(melodyId))).status).toBe(200);
     const again = await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, userUuid: people.sara.uuid, itemKey: id } });
     expect(again.createdAt.getTime()).toBe(ahead.getTime());
+    // It was said again, so the bot server is told again
+    expect(again.droppedAt).toBeNull();
   });
 
   const prefsOf = (row: { memories: unknown } | null | undefined) => ((row?.memories as { personalInfo?: { preferences?: string[] } } | null)?.personalInfo?.preferences ?? []);

@@ -107,7 +107,9 @@ export async function ruleOwnerFor(botId: string, speakerId: string, scope: Rule
  */
 export function chatRuleKey(botId: string, speakerId: string, sayingKey: string): string {
   const whole = `chat:${botId}:${speakerId}:${sayingKey}`;
-  return whole.length <= 255 ? whole : `chat:${botId}:${speakerId}:sha256:${createHash('sha256').update(sayingKey).digest('hex')}`.slice(0, 255);
+  // A hashed key has a top-level name of its own: under "chat:" a literal message id that reads "sha256:<digest>" would make the same key as the long id
+  // that digest was made from
+  return whole.length <= 255 ? whole : `chat-sha256:${botId}:${speakerId}:${createHash('sha256').update(sayingKey).digest('hex')}`.slice(0, 255);
 }
 
 /** What a message proposed, normalized: the same words give the same hash, a different amount, period or reach another. */
@@ -352,11 +354,14 @@ async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Dat
   // careful), never missed (a cap passed). Reading them together could miss it.
   if (wantsComputer(rule.covers)) {
     const held = await db.meterReservation.findMany({ where: { AND: holds }, select: { amountMicros: true, renewals: true, createdAt: true, expiresAt: true, terms: true } });
+    // The calls with no price are read BEFORE what was priced: a call priced in between (its room settled earlier, its price written later, under no lock
+    // of this check) is then counted twice, at its room and at its price (a step too careful), never missed (a cap passed). The other way round, it
+    // is in neither: not yet priced when the sums were read, no longer unpriced when its room was looked for.
+    const unpriced = await unpricedCallRoom(db, events);
     // What crossed into the period is read before the total it comes off: an event that lands between the two reads is then counted whole (a step
     // too careful), never taken off without having been added (a cap passed)
     const crossed = start ? await crossedBefore(db, events, start) : 0;
     const taken = await db.meterEvent.aggregate({ where: { AND: events }, _sum: { costMicros: true } });
-    const unpriced = await unpricedCallRoom(db, events);
     const settings = await getMeterSettings(db);
     spentMicros += toNumber(taken._sum.costMicros) + unpriced - crossed;
     heldMicros += exposureOf(held, settings.renewMinutes, now, start);

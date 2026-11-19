@@ -95,3 +95,61 @@ it('a look that fails just before the end of the watch is not asked again after 
   expect(lookTimes.length).toBe(looks);
   expect(Math.max(...lookTimes)).toBeLessThanOrEqual(20 * MIN);
 });
+
+it('never starts a look at the order once the watch\'s time is up, even when the looks before it answered at once', async () => {
+  const starts: number[] = [];
+  let began = 0;
+  fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    if (init?.method === 'POST') return Promise.resolve({ ok: true, json: () => Promise.resolve({ orderId: 'o1', checkoutUrl: 'https://pay.example/c', app: 'Pay' }) });
+    starts.push(Date.now());
+    // Every look answers at once: the next one is only the poll timer's
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'pending' }) });
+  });
+  render(
+    <div>
+      <iframe data-artifact-frame="" title="page" />
+      <PagePaymentsBridge artifactId="a1" />
+    </div>,
+  );
+  const frame = document.querySelector('iframe')!;
+  began = Date.now();
+  await act(async () => {
+    window.dispatchEvent(new MessageEvent('message', { data: { universe: 'use-app', app: 'pay' }, source: frame.contentWindow }));
+  });
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(20 * MIN + 10_000);
+  });
+  expect(starts.length).toBeGreaterThan(10);
+  // The last look began before the end of the twenty minutes, never at it or after it
+  expect(starts.filter((at) => at - began >= 20 * MIN)).toEqual([]);
+  expect(screen.getByText('We could not confirm the payment')).toBeTruthy();
+});
+
+it('ends the watch at the moment its twenty minutes are up, not at the next poll after it, when the last look answers just before the end', async () => {
+  let began = 0;
+  fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    if (init?.method === 'POST') return Promise.resolve({ ok: true, json: () => Promise.resolve({ orderId: 'o1', checkoutUrl: 'https://pay.example/c', app: 'Pay' }) });
+    const left = began + 20 * MIN - Date.now();
+    const answer = { ok: true, json: () => Promise.resolve({ status: 'pending' }) };
+    if (left > 4_000) return Promise.resolve(answer);
+    // The last look before the end answers half a second before it, and the next poll would only come three seconds after that
+    return new Promise((resolve) => setTimeout(() => resolve(answer), left - 500));
+  });
+  render(
+    <div>
+      <iframe data-artifact-frame="" title="page" />
+      <PagePaymentsBridge artifactId="a1" />
+    </div>,
+  );
+  const frame = document.querySelector('iframe')!;
+  const told = jest.spyOn(frame.contentWindow!, 'postMessage');
+  began = Date.now();
+  await act(async () => {
+    window.dispatchEvent(new MessageEvent('message', { data: { universe: 'use-app', app: 'pay' }, source: frame.contentWindow }));
+  });
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(20 * MIN + 100);
+  });
+  expect(screen.getByText('We could not confirm the payment')).toBeTruthy();
+  expect(told).toHaveBeenCalledWith({ universe: 'app-result', status: 'cant_confirm' }, '*');
+});

@@ -124,6 +124,17 @@ export function memoryItemsOf(memoryData: unknown): MemoryItem[] {
 /** The shortest a phrase may be for lines of the chat to be taken out by the words they hold, when no line was noted. */
 const MIN_PHRASE = 4;
 
+/**
+ * Finds the words of a thing in a line: a letter or digit at an edge of the words must not touch another one, so "Rome" is not found inside "Chrome"
+ * (an edge that is a symbol or a space has nothing to touch). Words are matched as written, in any case (both are lower case when this is used).
+ */
+function wordsIn(words: string): RegExp {
+  const escaped = words.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const before = /^[\p{L}\p{N}]/u.test(words) ? '(?<![\\p{L}\\p{N}])' : '';
+  const after = /[\p{L}\p{N}]$/u.test(words) ? '(?![\\p{L}\\p{N}])' : '';
+  return new RegExp(`${before}${escaped}${after}`, 'u');
+}
+
 function copy<T>(value: T): T {
   return value === undefined ? value : (JSON.parse(JSON.stringify(value)) as T);
 }
@@ -145,7 +156,7 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
   const history = Array.isArray(data.conversationHistory) ? (data.conversationHistory as unknown[]) : null;
   const events = isObject(data.relationship) && Array.isArray(data.relationship.importantEvents) ? (data.relationship.importantEvents as unknown[]) : null;
   const doomedLines = new Set<unknown>();
-  const phrases: { text: string; anySender: boolean; forgotAt: number | null }[] = [];
+  const phrases: { text: RegExp; anySender: boolean; forgotAt: number | null }[] = [];
   let removed = 0;
 
   const goes = (id: string, drawn: number | null) => {
@@ -161,7 +172,7 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
     // The bot's own lines that say it back go too. When no line was noted for it (what the bot kept before this), the
     // person's lines that hold its words go as well.
     // A line said after the Forget is the person's again, so the phrase only takes out the lines from before it
-    if (phrase.trim().length >= MIN_PHRASE) phrases.push({ text: phrase.trim().toLowerCase(), anySender: drawn === null, forgotAt: onlyOlderThan?.get(id)?.getTime() ?? null });
+    if (phrase.trim().length >= MIN_PHRASE) phrases.push({ text: wordsIn(phrase.trim().toLowerCase()), anySender: drawn === null, forgotAt: onlyOlderThan?.get(id)?.getTime() ?? null });
   };
   const dropEventsOf = (prefix: string) => {
     if (!events) return;
@@ -231,7 +242,7 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
       const text = isObject(line) && typeof line.message === 'string' ? line.message.toLowerCase() : '';
       const fromBot = isObject(line) && line.sender === 'bot';
       const said = isObject(line) && typeof line.timestamp === 'number' ? line.timestamp : null;
-      return !phrases.some((phrase) => (phrase.anySender || fromBot) && text.includes(phrase.text) && !(phrase.forgotAt !== null && said !== null && said > phrase.forgotAt));
+      return !phrases.some((phrase) => (phrase.anySender || fromBot) && phrase.text.test(text) && !(phrase.forgotAt !== null && said !== null && said > phrase.forgotAt));
     });
   }
   return { data, removed };

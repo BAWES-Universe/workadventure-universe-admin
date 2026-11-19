@@ -907,11 +907,12 @@ run('the bounded Instant executor, in a real database', () => {
     });
 
     it('a give-back the books never confirmed, and a give-back for a run outside the window, are not failures', async () => {
-      await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 2 });
+      await setLimits({ pauseFailureRateBps: 3_000, pauseMinRuns: 2 });
       const p = fakeProvider();
       const f = fakeFunds(10_000_000);
       const ids: string[] = [];
-      for (const n of [1, 2]) {
+      // Three runs: when the first leaves the window two are still counted, so the minimum is met and only the give-back decides
+      for (const n of [1, 2, 3]) {
         const key = callId();
         await runInstant(ask({ callId: key, arguments: { query: `gw${n}` } }), { adapter: p.adapter, funds: f.funds });
         ids.push(await runIdOf(key));
@@ -1012,6 +1013,30 @@ run('the bounded Instant executor, in a real database', () => {
       const after = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${id}` } });
       expect((after.detail as { customerMicros: number }).customerMicros).toBe(Number((await runOf(id)).customerMicros));
       expect(Number((await runOf(id)).customerMicros)).toBeGreaterThan(0);
+    });
+    it('a meter event update that fails does not leave a run charged without its customer charge in the event: the run stays held, and the next sweep writes both', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const key = callId();
+      await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION instant_update_refused() RETURNS trigger AS $$ BEGIN IF NEW.event_id LIKE 'instant:%' AND (NEW.detail::jsonb ? 'customerMicros') THEN RAISE EXCEPTION 'refused'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql`);
+      await prisma.$executeRawUnsafe('CREATE TRIGGER instant_update_refused BEFORE UPDATE ON meter_events FOR EACH ROW EXECUTE FUNCTION instant_update_refused()');
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let id = '';
+      try {
+        await runInstant(ask({ callId: key }), { adapter: p.adapter, funds: f.funds }).catch(() => undefined);
+        id = await runIdOf(key);
+        expect((await runOf(id)).customerState).toBe('held');
+        expect(((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${id}` } })).detail as { customerMicros?: number | null }).customerMicros ?? null).toBeNull();
+      } finally {
+        quiet.mockRestore();
+        await prisma.$executeRawUnsafe('DROP TRIGGER instant_update_refused ON meter_events');
+        await prisma.$executeRawUnsafe('DROP FUNCTION instant_update_refused()');
+      }
+      await reconcileRun(id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect((await runOf(id)).customerState).toBe('charged');
+      const event = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${id}` } });
+      expect((event.detail as { customerMicros: number }).customerMicros).toBe(Number((await runOf(id)).customerMicros));
     });
   });
 

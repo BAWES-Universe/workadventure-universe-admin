@@ -52,6 +52,13 @@ jest.mock('@/lib/encryption', () => ({
   decryptApiKey: (value: string) => value.replace('encrypted:', ''),
 }));
 
+// The request itself goes through the pretend fetch (the pinned connection has its own test); the address check is the allow-list's own
+jest.mock('@/lib/mcp/outbound-guard', () => ({
+  ...jest.requireActual('@/lib/mcp/outbound-guard'),
+  isAllowedServerIp: jest.fn(async () => ({ allowed: true })),
+  pinnedFetch: jest.fn(async (url: string, init?: RequestInit) => global.fetch(url, init)),
+}));
+
 jest.mock('dns/promises', () => ({
   lookup: jest.fn(async () => [{ address: '93.184.216.34', family: 4 }]),
 }));

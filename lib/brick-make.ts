@@ -86,7 +86,7 @@ export const chatBrickSchema = newBrickSchema
 
 export type ChatBrickAnswer =
   | { ok: true; made: boolean; brick: BrickCard; bricks: BrickCard[] }
-  | { ok: false; status: 403 | 404; error: string };
+  | { ok: false; status: 403 | 404 | 409; error: string };
 
 /**
  * The owner of the Brick that asks, when `userId` is that owner: a signed-in person, found by the name the bot server

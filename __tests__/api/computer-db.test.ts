@@ -249,6 +249,35 @@ run('a Brick’s computer, in a real database', () => {
       expect(view?.month?.leftFraction).toBeCloseTo(0.97, 2);
     });
 
+    it('an end that finds the job\'s seconds moved since it read them (a take-over and a hand-back) is worked out again on what is there, and never writes the smaller count over the newer', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      await prisma.computerJob.update({ where: { id: job.job.id }, data: { secondsRun: 100 } });
+      const real = prisma.computerJob.updateMany.bind(prisma.computerJob) as (args: { data?: Record<string, unknown> }) => Promise<{ count: number }>;
+      let moved = false;
+      const spy = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation(((args: { data?: Record<string, unknown> }) => {
+        // After the end read the job and before it wrote: a take-over recorded 300 seconds and a hand-back put it running again (the status is as it was)
+        if (!moved && args?.data?.status === 'done') {
+          moved = true;
+          return prisma.computerJob.update({ where: { id: job.job.id }, data: { secondsRun: 300, stretchStarted: minutes(1) } }).then(() => real(args));
+        }
+        return real(args);
+      }) as never);
+      try {
+        await finishJob(job.job.id, 'done', minutes(2));
+      } finally {
+        spy.mockRestore();
+      }
+      const ended = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.job.id } });
+      expect(ended.status).toBe('done');
+      // The 300 recorded, and the minute since the stretch began: never the 100 and the two minutes from the first read
+      expect(ended.secondsRun).toBe(360);
+      const events = await prisma.meterEvent.findMany({ where: { eventId: `computer:${job.job.id}:time` } });
+      expect(events[0]?.quantity).toBe(BigInt(360));
+    });
+
     it('rests the machine when the last job is over, and keeps the disk: nothing is removed or reset', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);

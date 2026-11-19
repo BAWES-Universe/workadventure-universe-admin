@@ -25,14 +25,17 @@ const SETTING_KEY = 'bot-limits';
  * The super admin's limits as saved, the recommended value for anything never changed. A read that fails is logged and
  * gives the recommended values, so a reply or a save never fails over its limits alone.
  */
-export async function getServerLimits(db: Pick<Prisma.TransactionClient, 'appSetting'> = prisma): Promise<ServerLimits> {
+export async function getServerLimits(db: Pick<Prisma.TransactionClient, 'appSetting'> & { $executeRaw?: Prisma.TransactionClient['$executeRaw'] } = prisma): Promise<ServerLimits> {
+  // In a caller's transaction a failed statement leaves the whole transaction aborted, and every statement after it fails too. The read is made inside a
+  // savepoint, rolled back to when it fails, so the caller's work goes on with the recommended values (on the caller's own connection: never through the pool)
+  const savepoint = db !== prisma && typeof db.$executeRaw === 'function' ? db.$executeRaw.bind(db) : null;
+  if (savepoint) await savepoint`SAVEPOINT bot_limits_read`;
   try {
     const row = await db.appSetting.findUnique({ where: { key: SETTING_KEY } });
+    if (savepoint) await savepoint`RELEASE SAVEPOINT bot_limits_read`;
     return readServerLimits(row?.value);
   } catch (error) {
-    // Inside a transaction a failed read has already aborted it: carrying on would only end in "transaction aborted" on the next statement, hiding
-    // what went wrong. The caller gets the real error; only a read on its own falls back to the recommended values
-    if (db !== prisma) throw error;
+    if (savepoint) await savepoint`ROLLBACK TO SAVEPOINT bot_limits_read`.catch(() => undefined);
     console.error('[BotLimits] Could not read the saved limits:', error instanceof Error ? error.message : 'unknown');
     return readServerLimits(null);
   }

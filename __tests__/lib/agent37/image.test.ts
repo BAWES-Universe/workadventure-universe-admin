@@ -463,7 +463,9 @@ X1=$!
 cp /bin/sh ${dir}/bin/openbox && chown 65534:65534 ${dir}/bin/openbox
 ${dir}/bin/openbox -c 'sleep 309; true' --startup 'sleep 1' &
 X2=$!
-${dir}/bin/openbox -c 'sleep 310 & wait; true' &
+# what a window manager the agent made starts: a program of its own (not root's), so the fence has no reason to keep it
+cp /bin/sh ${dir}/agent/openbox && chown 65534:65534 ${dir}/agent/openbox
+${dir}/agent/openbox -c 'sleep 310 & wait; true' &
 X3=$!
 # Xvfb ignores everything after -I: a root-owned program of that name run as Xvfb -I :99 is not on the supervisor's display, so it is not part of the desktop,
 # while the same program on :99 itself is

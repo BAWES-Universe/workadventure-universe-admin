@@ -404,6 +404,8 @@ export async function testReadyMade(connection: { id: string; source: string; se
     if (opened.status >= 400) return failed(`The app answered ${opened.status}.`, opened.status);
     const openError = rpcError(opened.body, 1);
     if (openError) return failed(`Initialize error: ${openError}`, opened.status);
+    // An answer to something else (another id, or no answer at all) is not an answer to this: an error in it would pass unseen, and the list below could then make the app look like it works
+    if (!linkJson(opened.body, 1)) return failed('The app did not answer the start of a session.', opened.status);
     await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId: opened.sessionId });
     // Every page of the list of tools (ids 2, 3, ...): a long list comes in pages, each with the cursor of the next
     const names: string[] = [];

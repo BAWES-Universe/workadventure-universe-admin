@@ -340,6 +340,42 @@ run('goals and tasks, in a real database', () => {
     expect(after.failureNoticeAt?.getTime()).toBe(before.failureNoticeAt!.getTime());
   });
 
+  it('a failed notice is not handed out again for an item that was deleted, nor for a Brick that is off, deleted or handed over since; a done item still is', async () => {
+    const thora = await person('thora');
+    const pending = async (label: string) => {
+      const item = await set(thora, { kind: 'reminder', words: label, cadence: { type: 'once', at: at(HOUR).toISOString() } });
+      const [first] = (await claimWork(at(HOUR + MIN))).runs.filter((one) => one.itemId === item.id);
+      await claimWork(at(HOUR + 20 * MIN));
+      await claimWork(at(HOUR + 40 * MIN));
+      const lapsed = await claimWork(at(HOUR + 60 * MIN));
+      expect(lapsed.failed.filter((one) => one.itemId === item.id)).toHaveLength(1);
+      return { item, first };
+    };
+    const deleted = await pending('deleted one');
+    const done = await pending('done one');
+    // The person deletes one of them after its notice went out and was never confirmed
+    await prisma.brickItem.update({ where: { id: deleted.item.id }, data: { state: 'deleted' } });
+    const retry = await claimWork(at(HOUR + 60 * MIN + 2 * DAY));
+    expect(retry.failed.map((one) => one.itemId)).toEqual([done.item.id]);
+    // The Brick is switched off while a retry is on its way: it hands out nothing (the Brick predicates are read again under a lock, after it was chosen)
+    const real = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+    let switchedOff = false;
+    const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
+      if (!switchedOff && typeof args[0] === 'function') {
+        switchedOff = true;
+        return prisma.bot.update({ where: { id: thora.brickId }, data: { enabled: false } }).then(() => real(...args));
+      }
+      return real(...args);
+    }) as never);
+    try {
+      const again = await claimWork(at(HOUR + 60 * MIN + 4 * DAY));
+      expect(again.failed.map((one) => one.itemId)).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      await prisma.bot.update({ where: { id: thora.brickId }, data: { enabled: true } });
+    }
+  });
+
   it('a one-off whose run fails, or is never reported, ends instead of staying on with nothing due', async () => {
     const odin = await person('odin');
     const reported = await set(odin);

@@ -465,6 +465,29 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(await prisma.appConnection.count({ where: { ownerId: sara, catalogKey: '@github' } })).toBe(0);
   });
 
+  it('never saves a key beside a sign-in that still holds the connection: it says it could not, and the key is not written', async () => {
+    await makeApp();
+    mockUser.current = { id: sara };
+    pretendGitHub({ 'GET https://api.github.com/user': { body: { login: 'sara-gh', id: 501 } } });
+    const first = await saveKey(request('/api/me/apps/github/key', { method: 'POST', body: { key: 'ghp_good_key_123' } }));
+    const { id } = await first.json();
+    const before = (await prisma.appConnection.findUniqueOrThrow({ where: { id } })).authConfig;
+    // A sign-in callback is waiting on GitHub and holds the lease for as long as a lease lasts
+    await prisma.appConnection.update({ where: { id }, data: { refreshLeaseUntil: new Date(Date.now() + 3_600_000) } });
+    const realNow = Date.now.bind(Date);
+    let calls = 0;
+    // The wait for the lease is as long as a lease: time moves on past it at once
+    const now = jest.spyOn(Date, 'now').mockImplementation(() => realNow() + (++calls > 4 ? 120_000 : 0));
+    let blocked;
+    try {
+      blocked = await saveKey(request('/api/me/apps/github/key', { method: 'POST', body: { key: 'ghp_other_key_456' } }));
+    } finally {
+      now.mockRestore();
+    }
+    expect(blocked.status).toBe(502);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).authConfig).toBe(before);
+  });
+
   it('Disconnect takes the sign-in back at GitHub with the app’s own secret', async () => {
     await makeApp();
     const id = await signedIn();

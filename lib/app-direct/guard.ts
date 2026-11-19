@@ -1,5 +1,5 @@
 import https from 'node:https';
-import { lookup as dnsLookup } from 'node:dns/promises';
+import { resolveHost } from '@/lib/name-lookup';
 import { BlockList, isIP } from 'node:net';
 import { isAllowedServerUrl } from '@/lib/mcp/outbound-guard';
 
@@ -100,7 +100,7 @@ export interface GuardDeps {
   send?: Send;
 }
 
-const defaultResolve: Resolve = (host) => dnsLookup(host, { all: true, verbatim: true });
+const defaultResolve: Resolve = (host) => resolveHost(host);
 
 /**
  * The checked address the connection is made to. Passing `lookup` to the request replaces name resolution, so the socket goes to
@@ -193,15 +193,35 @@ export function targetOf(url: string): { host: string; path: string } {
   return { host, path: `${parsed.pathname}${parsed.search}` };
 }
 
+/** Name lookups still waiting for the system's resolver, including ones whose caller has already given up. */
+let lookupsInFlight = 0;
+const MAX_LOOKUPS_IN_FLIGHT = 16;
+
 export async function guardedRequest(request: GuardedRequest, deps: GuardDeps = {}): Promise<GuardedAnswer> {
   const { host, path } = targetOf(request.url);
   // One deadline for the whole call: the name is asked for inside it, and the request gets only what is left
   const startedAt = Date.now();
   let addresses: { address: string; family: number }[];
   let stopWaiting: ReturnType<typeof setTimeout> | undefined;
+  // A name lookup cannot be cancelled: after the deadline it goes on until the resolver gives up (it ends each try by itself, and uses no worker thread that
+  // other work needs). So it counts as in flight until it SETTLES, not until the caller gave up, and only so many run at once: a service whose name never
+  // answers cannot pile lookups up
+  if (lookupsInFlight >= MAX_LOOKUPS_IN_FLIGHT) throw new GuardError('unreachable', 'Too many name lookups are waiting');
+  lookupsInFlight += 1;
+  let lookup: Promise<{ address: string; family: number }[]>;
+  try {
+    lookup = (deps.resolve ?? defaultResolve)(host);
+  } catch (error) {
+    lookupsInFlight -= 1;
+    throw error;
+  }
+  void lookup.then(
+    () => (lookupsInFlight -= 1),
+    () => (lookupsInFlight -= 1),
+  );
   try {
     addresses = await Promise.race([
-      (deps.resolve ?? defaultResolve)(host),
+      lookup,
       new Promise<never>((_resolve, reject) => {
         stopWaiting = setTimeout(() => reject(new GuardError('timeout', 'No answer in time')), request.timeoutMs);
       }),
