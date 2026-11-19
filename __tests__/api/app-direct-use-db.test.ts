@@ -610,16 +610,22 @@ run('using a key app, in a real database', () => {
       mockSend.current = () => new Promise<Answer>((resolve) => arrived.push(resolve));
       const first = call(saraBrick, app.serverId, app.definitionHash);
       const second = call(saraBrick, app.serverId, app.definitionHash);
-      for (let wait = 0; wait < 400 && arrived.length < 2; wait += 1) await new Promise((resolve) => setTimeout(resolve, 25));
-      expect(arrived).toHaveLength(2);
-      arrived[0]({ status: 401 });
-      const refused = await Promise.race([first, second]);
-      expect(refused.status).toBe(502);
-      expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).not.toBeNull();
-      arrived[1]({ status: 200 });
-      const accepted = await Promise.all([first, second]).then((both) => both.find((one) => one !== refused)!);
-      expect(accepted.status).toBe(200);
-      expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
+      try {
+        for (let wait = 0; wait < 400 && arrived.length < 2; wait += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+        expect(arrived).toHaveLength(2);
+        arrived[0]({ status: 401 });
+        const refused = await Promise.race([first, second]);
+        expect(refused.status).toBe(502);
+        expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).not.toBeNull();
+        arrived[1]({ status: 200 });
+        const accepted = await Promise.all([first, second]).then((both) => both.find((one) => one !== refused)!);
+        expect(accepted.status).toBe(200);
+        expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
+      } finally {
+        // Whatever failed above: every request still held is answered and both calls are joined, so nothing is left running over the clean-up of the rows
+        for (const answer of arrived) answer({ status: 200 });
+        await Promise.allSettled([first, second]);
+      }
     });
 
     it('keeps what was used this hour when the app is disconnected and connected again', async () => {

@@ -673,7 +673,8 @@ run('a Brick’s computer, in a real database', () => {
       expect(settled.status).toBe('running');
       expect(settled.reservationKey).not.toBeNull();
       expect(await prisma.meterReservation.count({ where: { jobId: b.job.id } })).toBe(1);
-      expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: settled.reservationKey as string } })).state).toBe('held');
+      // The room that is held is the winner's own for this job: a sweep that lost and gave its room back must not have taken the shared one with it
+      expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: settled.reservationKey as string } })).toMatchObject({ state: 'held', jobId: b.job.id });
     });
 
     it('a Brick turned off while its machine was still being made does not end up awake with nobody holding it', async () => {

@@ -67,8 +67,12 @@ run('goals and tasks, in a real database', () => {
   });
   afterAll(async () => {
     try {
-      await prisma.user.deleteMany({ where: { id: { in: people } } });
-      await putLimitsBack();
+      // The settings are put back even when the clean-up of the people fails; the connection is let go last of all
+      try {
+        await prisma.user.deleteMany({ where: { id: { in: people } } });
+      } finally {
+        await putLimitsBack();
+      }
     } finally {
       await prisma.$disconnect();
     }

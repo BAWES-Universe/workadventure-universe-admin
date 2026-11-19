@@ -225,26 +225,42 @@ run('apps a person connects once, in a real database', () => {
     // Another server holds the lease and stores a fresh token a moment later
     await prisma.appConnection.update({ where: { id: connection.id }, data: { refreshLeaseUntil: new Date(Date.now() + LEASE_MS) } });
     const before = (await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).authConfig!;
-    const waiting = ensureFreshOAuthConfig({ serverId: 'unused', connectionId: connection.id, authConfig: before });
-    // The other server's write is a promise of its own, joined with the waiting call before anything else: a failed write is the failure
-    // of this test (not an unhandled rejection), and it cannot land after the teardown has begun
-    const theirs = new Promise<void>((resolve, reject) => {
-      setTimeout(() => {
-        prisma.appConnection
-          .update({
-            where: { id: connection.id },
-            data: { authConfig: encryptApiKey(oauthConfig({ accessToken: 'theirs', refreshToken: 'refresh-2', expiresAt: nowSeconds() + 3600 })), refreshLeaseUntil: null },
-          })
-          .then(() => resolve(), reject);
-      }, 400);
-    });
-    const [done, wrote] = await Promise.allSettled([waiting, theirs]);
-    if (wrote.status === 'rejected') {
-      // The lease is let go, so nothing else waits behind a write that never happened
-      await prisma.appConnection.update({ where: { id: connection.id }, data: { refreshLeaseUntil: null } }).catch(() => undefined);
-      throw wrote.reason;
+    // The waiting call's attempts to take the lease are seen: the answer of each claim of a lease that is held is a count of 0
+    const realUpdateMany = prisma.appConnection.updateMany.bind(prisma.appConnection) as (args: { where?: Record<string, unknown> }) => Promise<{ count: number }>;
+    let failedClaims = 0;
+    const claims = jest.spyOn(prisma.appConnection, 'updateMany').mockImplementation(((args: { where?: Record<string, unknown> }) =>
+      realUpdateMany(args).then((result) => {
+        if (args?.where && 'OR' in args.where && result.count === 0) failedClaims += 1;
+        return result;
+      })) as never);
+    let waiting: Promise<Awaited<ReturnType<typeof ensureFreshOAuthConfig>>> | null = null;
+    let theirs: Promise<void> | null = null;
+    let done: PromiseSettledResult<Awaited<ReturnType<typeof ensureFreshOAuthConfig>>> | undefined;
+    let wrote: PromiseSettledResult<void> | undefined;
+    try {
+      waiting = ensureFreshOAuthConfig({ serverId: 'unused', connectionId: connection.id, authConfig: before });
+      // The other server writes only after the waiting call was seen to try the lease and be refused (bounded: it fails the test if it never tries),
+      // so the lease cannot end before the call looked at it
+      for (let wait = 0; wait < 400 && failedClaims === 0; wait += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(failedClaims).toBeGreaterThan(0);
+      // Its write is a promise of its own, joined with the waiting call before anything else: a failed write is the failure of this test
+      // (not an unhandled rejection), and it cannot land after the teardown has begun
+      theirs = prisma.appConnection
+        .update({
+          where: { id: connection.id },
+          data: { authConfig: encryptApiKey(oauthConfig({ accessToken: 'theirs', refreshToken: 'refresh-2', expiresAt: nowSeconds() + 3600 })), refreshLeaseUntil: null },
+        })
+        .then(() => undefined);
+      [done, wrote] = await Promise.allSettled([waiting, theirs]);
+    } finally {
+      // Whatever failed above: the lease is let go (nothing else waits behind a write that never happened), both calls are joined, and the spy goes
+      await prisma.appConnection.updateMany({ where: { id: connection.id }, data: { refreshLeaseUntil: null } }).catch(() => undefined);
+      await Promise.allSettled([waiting, theirs]);
+      claims.mockRestore();
     }
-    if (done.status === 'rejected') throw done.reason;
+    if (wrote?.status === 'rejected') throw wrote.reason;
+    if (done?.status === 'rejected') throw done.reason;
+    if (!done) throw new Error('the waiting call was not run');
     const outcome = done.value;
     expect(fetchMock).not.toHaveBeenCalled();
     expect(outcome.status).toBe('fresh');

@@ -72,8 +72,12 @@ run('the Composio bill report', () => {
   });
   afterAll(async () => {
     try {
-      await prisma.user.deleteMany({ where: { id: { in: [sara, boss] } } });
-      await putBillingBack();
+      // The settings are put back even when the clean-up of the people fails; the connection is let go last of all
+      try {
+        await prisma.user.deleteMany({ where: { id: { in: [sara, boss] } } });
+      } finally {
+        await putBillingBack();
+      }
     } finally {
       await prisma.$disconnect();
     }
