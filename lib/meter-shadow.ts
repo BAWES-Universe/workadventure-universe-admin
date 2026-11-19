@@ -41,14 +41,15 @@ export interface ModelCallComparison {
  * event id is two usage rows today and one event in the books: that shows up here as a row without an event, which is the point.
  */
 export async function compareModelCalls(from: Date, to: Date): Promise<ModelCallComparison> {
-  const [rows, missing, events] = await Promise.all([
-    prisma.botsAiUsage.aggregate({ where: { timestamp: { gte: from, lt: to } }, _count: { _all: true }, _sum: { apiCalls: true } }),
-    prisma.$queryRaw<{ count: bigint }[]>(Prisma.sql`
+  // One snapshot for all three reads: a usage row and its event that commit between two of them would otherwise show as a difference that never was
+  const [rows, missing, events] = await prisma.$transaction(async (tx) => [
+    await tx.botsAiUsage.aggregate({ where: { timestamp: { gte: from, lt: to } }, _count: { _all: true }, _sum: { apiCalls: true } }),
+    await tx.$queryRaw<{ count: bigint }[]>(Prisma.sql`
       SELECT count(*)::bigint AS count FROM bots_ai_usage u
       WHERE u."timestamp" >= ${from} AND u."timestamp" < ${to}
         AND NOT EXISTS (SELECT 1 FROM meter_events e WHERE e.source_ref = 'bots_ai_usage:' || u.id::text)`),
-    prisma.meterEvent.aggregate({ where: { kind: 'model_call', sourceRef: { startsWith: 'bots_ai_usage:' }, occurredAt: { gte: from, lt: to } }, _count: { _all: true }, _sum: { quantity: true } }),
-  ]);
+    await tx.meterEvent.aggregate({ where: { kind: 'model_call', sourceRef: { startsWith: 'bots_ai_usage:' }, occurredAt: { gte: from, lt: to } }, _count: { _all: true }, _sum: { quantity: true } }),
+  ] as const, { isolationLevel: 'RepeatableRead' });
   return {
     usageRows: rows._count._all,
     ledgerEvents: events._count._all,
@@ -77,9 +78,10 @@ export async function compareReplyWindow(personId: string, now: Date = new Date(
   const limits = await getUniverseAiReplyLimits();
   if (!window || window.startedAt.getTime() + limits.windowHours * 3_600_000 <= now.getTime()) return { since: null, today: 0, books: 0, replies: compareFigures(0, 0) };
   const since = window.startedAt;
-  const [today, books] = await Promise.all([
-    prisma.botsAiUsage.count({ where: { talkedPersonId: personId, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } } }),
-    prisma.meterEvent.count({
+  // Both counts from one snapshot, so a reply that is counted on one side the moment before the other is never a difference
+  const [today, books] = await prisma.$transaction(async (tx) => [
+    await tx.botsAiUsage.count({ where: { talkedPersonId: personId, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } } }),
+    await tx.meterEvent.count({
       where: {
         personKey: `person:${personId}`,
         kind: 'model_call',
@@ -89,6 +91,6 @@ export async function compareReplyWindow(personId: string, now: Date = new Date(
         occurredAt: { gte: since },
       },
     }),
-  ]);
+  ] as const, { isolationLevel: 'RepeatableRead' });
   return { since, today, books, replies: compareFigures(books, today) };
 }
