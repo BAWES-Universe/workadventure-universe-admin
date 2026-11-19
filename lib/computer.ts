@@ -1215,7 +1215,60 @@ async function fenceControl(botId: string, now: Date = new Date()): Promise<void
   }
 }
 
-export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' };
+/** A take-over's fence is claimed for this long at most: a fence claimed by a server that stopped is made again by the next take-over. */
+const FENCE_STALE_MS = 6 * 60 * 1000;
+/** How long a repeated take-over waits for the fence another one is making, and how often it looks. */
+const FENCE_WAIT_MS = 5 * 60 * 1000;
+const FENCE_LOOK_MS = 250;
+
+/**
+ * The whole take-over fence, with its completion kept in the machine's row (`fencingSince`) apart from who has control: the person's
+ * control is published the moment they take over, but the screen's input and the details tap wait until this has finished. One take-over
+ * makes the fence; a second one at the same moment waits for it and finds it done, never "already theirs" while the agent is still being
+ * stopped. A fence claimed more than FENCE_STALE_MS ago (the server that made it is gone) is made again. Returns false when it timed out waiting.
+ */
+async function fenceTakeOver(botId: string): Promise<boolean> {
+  const deadline = Date.now() + FENCE_WAIT_MS;
+  for (;;) {
+    const started = new Date();
+    const claimed = await prisma.brickComputer.updateMany({ where: { botId, OR: [{ fencingSince: null }, { fencingSince: { lt: new Date(started.getTime() - FENCE_STALE_MS) } }] }, data: { fencingSince: started } });
+    if (claimed.count === 1) {
+      try {
+        // The fence: every key the computer held ends and the number moves, so a call the agent had in flight is refused from here on
+        await fenceControl(botId);
+        // Then the machine itself: the turn is cancelled and what the agent started is stopped and proved gone, before the person has the screen
+        await fenceMachine(botId);
+      } finally {
+        await prisma.brickComputer.updateMany({ where: { botId, fencingSince: started }, data: { fencingSince: null } });
+      }
+      return true;
+    }
+    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { fencingSince: true } });
+    // No machine to fence: only the keys
+    if (!row) {
+      await fenceControl(botId);
+      return true;
+    }
+    if (!row.fencingSince) continue;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, FENCE_LOOK_MS));
+  }
+}
+
+/** Waits for the fence a take-over is making now (a repeated take-over must not answer before it is done). False when it did not finish in time. */
+async function waitForFence(botId: string): Promise<boolean> {
+  const deadline = Date.now() + FENCE_WAIT_MS;
+  for (;;) {
+    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { fencingSince: true } });
+    if (!row?.fencingSince) return true;
+    // A claim that went stale is made again, here, rather than waited on forever
+    if (row.fencingSince.getTime() < Date.now() - FENCE_STALE_MS) return fenceTakeOver(botId);
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, FENCE_LOOK_MS));
+  }
+}
+
+export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' | 'fencing' };
 
 /**
  * Take over: the person has the mouse and keyboard. Offered while the job waits for them, and while it works too (the mock lets
@@ -1243,9 +1296,10 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
   }
   // The fence: every key the computer held ends and the number moves, so a call the agent had in flight is refused from here on
   if (changed.count > 0 || moved > 0) {
-    await fenceControl(botId);
-    // Then the machine itself: the turn is cancelled and what the agent started is stopped and proved gone, before the person has the screen
-    await fenceMachine(botId);
+    if (!(await fenceTakeOver(botId))) return { ok: false, reason: 'fencing' };
+  } else if (!(await waitForFence(botId))) {
+    // Asked again while the first is still making the fence: it is answered only when that is done
+    return { ok: false, reason: 'fencing' };
   }
   const job = await prisma.computerJob.findFirst({ where: { botId, status: 'waiting' }, orderBy: [{ writes: 'desc' }, { createdAt: 'asc' }], include: JOB_INCLUDE });
   // Asked twice it is the same: already theirs is still theirs
@@ -1304,6 +1358,8 @@ export async function fillInDetails(botId: string, ownerId: string, shown?: { wh
   // tap is for is the one that named something to fill in, found by what the screen showed, never by which came first from the database
   const held = await prisma.computerJob.findMany({ where: { botId, status: 'waiting', control: 'person' }, orderBy: [{ writes: 'desc' }, { createdAt: 'asc' }] });
   if (held.length === 0) return { ok: false, reason: 'not_in_control' };
+  // Not before the fence on the machine is proved: the agent may still be acting
+  if ((await prisma.brickComputer.count({ where: { botId, fencingSince: { not: null } } })) > 0) return { ok: false, reason: 'not_in_control' };
   const named = held.filter((candidate) => candidate.readyWhat && candidate.readyWhere);
   if (named.length === 0) return { ok: false, reason: 'nothing_ready' };
   // The tap approves what the person was looking at, so the screen must say what it showed: a page that sent nothing, or opened before
