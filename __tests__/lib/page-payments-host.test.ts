@@ -208,6 +208,28 @@ describe('a paying page on the public share link', () => {
     other.host.destroy();
   });
 
+  it('a Restore turned away during a Check payment that then gives up is not told a later purchase', async () => {
+    let check: 'hang' | 'paid' = 'hang';
+    const { tap, host, told } = setup((call) => {
+      if (call.body.check) return check === 'hang' ? 'hang' : { body: { status: 'paid', testPayment: false, orderId: 'o-1' } };
+      return 'lost';
+    });
+    tap({ request: 'a', session: 's-one' });
+    await jest.advanceTimersByTimeAsync(10_000);
+    host.checkPayment();
+    await flush();
+    // Another document asks to restore while the check is waiting: turned away
+    tap({ request: 'r2', restore: true, session: 's-two' });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'busy', request: 'r2', session: 's-two' });
+    // The check gives up (30 s), and a later check finds the purchase
+    await jest.advanceTimersByTimeAsync(31_000);
+    check = 'paid';
+    host.checkPayment();
+    await flush();
+    expect(told().filter((message) => message.status === 'paid')).toEqual([]);
+    host.destroy();
+  });
+
   it('answers the document that asked, and no other: the same document tapping again is the same request', async () => {
     const { tap, told, host } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
     tap({ request: 'a', session: 's-one' });

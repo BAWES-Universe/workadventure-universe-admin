@@ -701,6 +701,8 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         activeRequest = '';
         publish({ problem: 'unavailable', canCheck: true });
         if (asked.request && isAsker(asked.ticket)) tellRequest('unavailable', asked.request, false, asked.ticket.session);
+        // A Restore turned away during this ask is owed nothing now: it is not told a later purchase under a request it has long moved on from
+        tellOwed(false, false, { request: asked.request, ticket: asked.ticket });
       }
     };
     void attempt(Date.now());
