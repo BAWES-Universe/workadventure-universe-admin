@@ -733,6 +733,23 @@ run('voice notes for every bot, in a real database', () => {
       expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
     });
 
+    it('keeps a note that was delivered a moment after it was answered counted as on its way for the same short while', async () => {
+      const capped = await newBot('Capped delivered');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 1 } });
+      const person = `del-${randomUUID()}`;
+      const first = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+      // Answered 20 seconds ago, then delivered at once: the usage row has not landed
+      await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { state: 'answered', generation: 1, buffer: null, bufferUntil: new Date(Date.now() + 15 * 60_000 - 20_000) } });
+      await recordVoiceNote(first.id, { event: 'delivered' });
+      const delivered = await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: first.id } });
+      expect(delivered.state).toBe('delivered');
+      expect(delivered.bufferUntil).not.toBeNull();
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
+      // Delivered long after it was answered it holds nothing
+      await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { bufferUntil: new Date(Date.now() + 15 * 60_000 - 10 * 60_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+    });
+
     it('never lets a second note through while the first is being completed at the same moment: its row and its answer land under the lock the reservation counts under', async () => {
       const providerId = `completing-${tag}`;
       await prisma.botsAiProvider.upsert({ where: { providerId }, create: { providerId, name: 'Completing', type: 'openai', enabled: true }, update: {} });

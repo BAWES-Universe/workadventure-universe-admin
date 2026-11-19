@@ -18,6 +18,7 @@ import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
 import { POST as writeEvents } from '@/app/api/meter/events/route';
 import { recordMeterEvent, saveMeterSettings, scheduleMemberAllowance, settleEventsThrough } from '@/lib/meter';
 import { currentEnvelope, memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
+import { termsOf } from '@/lib/spend-rules-values';
 import { GrantRefused, markGrantBilled, recordGrant } from '@/lib/meter-grants';
 import { compareModelCalls, compareReplyWindow } from '@/lib/meter-shadow';
 import { getMeterSettings } from '@/lib/meter';
@@ -263,7 +264,8 @@ run('the meter, in a real database', () => {
       expect((await currentEnvelope(NOW)).unsettledMicros).toBe(900);
       const december = new Date('2026-12-02T09:00:00Z');
       expect((await reserveRoom({ key: `next-month-${tag}`, personId: sara.id, amountMicros: 1_000 }, december)).ok).toBe(true);
-      expect((await currentEnvelope(new Date('2026-12-02T10:00:00Z'))).unsettledMicros).toBe(0);
+      // Only the room taken in December counts there (it starts when it was authorized): the 900 from November never does
+      expect((await currentEnvelope(new Date('2026-12-02T10:00:00Z'))).unsettledMicros).toBe(1_000);
     });
 
     it('answers the same reservation for the same key and takes nothing more', async () => {
@@ -372,6 +374,29 @@ run('the meter, in a real database', () => {
       // 700 held, 300 left: 400 more is not there, and nothing changes
       expect(await renewRoom({ key: `job-${tag}`, moreMicros: 400 }, minutes(9))).toMatchObject({ ok: false, reason: 'allowance' });
       expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: `job-${tag}` } })).renewals).toBe(1);
+    });
+
+    it('starts a lease at the moment it was authorized, not at the moment the row happened to be inserted', async () => {
+      const sara = await person('sara');
+      await setUp({ renewMinutes: 10 });
+      await reserveRoom({ key: `created-${tag}`, personId: sara.id, amountMicros: 100 }, minutes(-60));
+      const row = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: `created-${tag}` } });
+      expect(row.createdAt).toEqual(minutes(-60));
+      expect(termsOf(row.terms)?.[0].at).toBe(minutes(-60).getTime());
+    });
+
+    it('a renewal stamped before the last stretch on record changes nothing: the lease keeps its history in order and its end', async () => {
+      const sara = await person('sara');
+      await setUp({ memberAllowanceMicros: 10_000, renewMinutes: 5 });
+      await reserveRoom({ key: `order-${tag}`, personId: sara.id, amountMicros: 400 }, NOW);
+      expect(await renewRoom({ key: `order-${tag}`, moreMicros: 300 }, minutes(4))).toMatchObject({ ok: true, reservation: { amountMicros: 700, renewals: 1 } });
+      // The one that was asked first reaches the lock second
+      const late = await renewRoom({ key: `order-${tag}`, moreMicros: 300 }, minutes(3));
+      expect(late).toMatchObject({ ok: true, created: false, reservation: { amountMicros: 700, renewals: 1, expiresAt: minutes(9) } });
+      const row = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: `order-${tag}` } });
+      expect(row.amountMicros).toBe(BigInt(700));
+      expect(row.expiresAt).toEqual(minutes(9));
+      expect(termsOf(row.terms)).toHaveLength(2);
     });
 
     it('does not renew room that lapsed, or that was settled or released: the job saves its work and stops', async () => {

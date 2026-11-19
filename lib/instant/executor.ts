@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { getAdapter } from '@/lib/app-adapter';
 import type { InstantAdapter, InstantCall, InstantLog, ReadyMadeAdapter } from '@/lib/app-adapter/types';
 import { recordMeterEvent } from '@/lib/meter';
-import { monthOf } from '@/lib/meter-values';
+import { monthOf, type MeterEventInput } from '@/lib/meter-values';
 import { brickHasApp } from '@/lib/instant/asker';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 import { getInstantLimits, getInstantPause, pauseInstant } from '@/lib/instant/state';
@@ -488,9 +488,14 @@ async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'>): Promise<R
       console.error('[Instant] The credit books could not settle:', error instanceof Error ? error.message : 'unknown');
     }
     if (confirmed === null) return run;
-    await prisma.instantRun.updateMany({ where: { id: runId, customerState: 'held' }, data: { customerState: 'charged', customerMicros: BigInt(confirmed) } });
-    // The meter event of the run says what the person was charged only from here, at the amount the books confirmed
-    await prisma.$executeRaw`UPDATE meter_events SET detail = jsonb_set(COALESCE(detail::jsonb, '{}'::jsonb), '{customerMicros}', to_jsonb(${confirmed}::bigint)) WHERE event_id = ${`instant:${run.id}`}`;
+    // The run is marked charged and the meter event says so in one step: when the event cannot be updated, the run stays held, and the next
+    // sweep asks the books again (they answer with the same first amount) and writes both. Marked charged first, a failure here would leave the
+    // event saying "not known" for good, as nothing looks at a charged run again.
+    await prisma.$transaction(async (tx) => {
+      await tx.instantRun.updateMany({ where: { id: runId, customerState: 'held' }, data: { customerState: 'charged', customerMicros: BigInt(confirmed) } });
+      // The meter event of the run says what the person was charged only from here, at the amount the books confirmed
+      await tx.$executeRaw`UPDATE meter_events SET detail = jsonb_set(COALESCE(detail::jsonb, '{}'::jsonb), '{customerMicros}', to_jsonb(${confirmed}::bigint)) WHERE event_id = ${`instant:${run.id}`}`;
+    });
   } else if (run.state === 'failed' || run.state === 'refused') {
     let gone = false;
     try {
@@ -517,42 +522,74 @@ async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'>): Promise<R
  */
 const customerChargedMicros = (run: Row): number | null => (run.customerMicros === null ? (run.state === 'failed' ? 0 : null) : Number(run.customerMicros));
 
+/** The meter event of a settled run: one per run, under its own id, so writing it twice is one event. */
+function instantMeterEvent(run: Row, micros: number, basis: 'measured' | 'estimated', occurredAt: Date): MeterEventInput {
+  return {
+    eventId: `instant:${run.id}`,
+    kind: 'app_use',
+    pool: 'chat',
+    occurredAt,
+    personKey: `person:${run.personId}`,
+    personId: run.personId,
+    botId: run.botId,
+    brick: true,
+    payerKind: 'universe',
+    payerPersonId: null,
+    route: 'instant',
+    jobId: null,
+    quantity: 1,
+    unit: 'use',
+    costMicros: micros,
+    basis,
+    sourceRef: `instant_runs:${run.id}`,
+    detail: { instant: true, provider: INSTANT_PROVIDER, ...(run.taskKey ? { taskKey: run.taskKey } : {}), tool: run.toolSlug, toolkit: run.toolkit, runId: run.id, customerMicros: customerChargedMicros(run), basis, state: run.state },
+  };
+}
+
 async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: number, basis: 'measured' | 'estimated', now: Date): Promise<void> {
   if (run.providerState === 'settled') return;
   await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt: run.finishedAt ?? now } });
-  // The meter event is a copy for the books: if it cannot be written, the settlement still stands. It is written inside a savepoint,
-  // because a failed statement otherwise leaves the whole transaction aborted, and the settlement above would fail with it
+  // The meter event is a copy for the books: if it cannot be written, the settlement still stands (and `backfillMeterEvents` writes it later). It is
+  // written inside a savepoint, because a failed statement otherwise leaves the whole transaction aborted, and the settlement above would fail with it
   await tx.$executeRaw`SAVEPOINT instant_meter_event`;
   try {
-    await recordMeterEvent(
-      {
-        eventId: `instant:${run.id}`,
-        kind: 'app_use',
-        pool: 'chat',
-        occurredAt: now,
-        personKey: `person:${run.personId}`,
-        personId: run.personId,
-        botId: run.botId,
-        brick: true,
-        payerKind: 'universe',
-        payerPersonId: null,
-        route: 'instant',
-        jobId: null,
-        quantity: 1,
-        unit: 'use',
-        costMicros: micros,
-        basis,
-        sourceRef: `instant_runs:${run.id}`,
-        detail: { instant: true, provider: INSTANT_PROVIDER, ...(run.taskKey ? { taskKey: run.taskKey } : {}), tool: run.toolSlug, toolkit: run.toolkit, runId: run.id, customerMicros: customerChargedMicros(run), basis, state: run.state },
-      },
-      tx,
-    );
+    await recordMeterEvent(instantMeterEvent(run, micros, basis, now), tx);
     await tx.$executeRaw`RELEASE SAVEPOINT instant_meter_event`;
   } catch (error) {
     await tx.$executeRaw`ROLLBACK TO SAVEPOINT instant_meter_event`;
     console.error('[Instant] Could not write the meter event:', error instanceof Error ? error.message : 'unknown');
   }
   if (micros > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
+}
+
+/** How far back a settled run with no meter event is looked for: past it the books of that month are closed. */
+const BACKFILL_DAYS = 35;
+
+/**
+ * Settled runs whose meter event was never written (the write failed inside its savepoint, and the run's settlement stood without it): written
+ * here, a few a sweep, from what the run says (its provider cost and basis, and what the person was charged if that is known). The event id is
+ * the run's own, so a run that has one, or one written twice, is still one event. Returns how many were written.
+ */
+export async function backfillMeterEvents(now: Date = new Date(), batch = 25): Promise<number> {
+  const since = new Date(now.getTime() - BACKFILL_DAYS * 24 * 60 * 60 * 1000);
+  const missing = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT r."id" FROM "instant_runs" r
+    WHERE r."provider_state" = 'settled' AND r."provider_micros" IS NOT NULL AND r."finished_at" >= ${since}
+      AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'instant:' || r."id")
+    ORDER BY r."finished_at" ASC LIMIT ${batch}`;
+  let written = 0;
+  for (const { id } of missing) {
+    const run = await prisma.instantRun.findUnique({ where: { id } });
+    if (!run || run.providerState !== 'settled' || run.providerMicros === null) continue;
+    const basis = run.providerBasis === 'measured' ? 'measured' : 'estimated';
+    try {
+      await recordMeterEvent(instantMeterEvent(run, asNumber(run.providerMicros), basis, run.finishedAt ?? now));
+      written += 1;
+    } catch (error) {
+      console.error('[Instant] Could not write the meter event again:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+  return written;
 }
 
 /**
@@ -676,6 +713,8 @@ async function applyLateEvidence(run: Row, line: InstantLog, tx: Prisma.Transact
     data: { detail: next as Prisma.InputJsonValue, ...(verified !== null ? { providerMicros: BigInt(verified), providerBasis: 'measured', providerLogId: run.providerLogId ?? line.id } : {}) },
   });
   if (verified !== null) await tx.meterEvent.updateMany({ where: { eventId: `instant:${run.id}` }, data: { costMicros: BigInt(verified), basis: 'measured' } });
+  // A figure found late that is above the top price means the table is too low, as for one found on time: Instant stops (the person's side is not touched)
+  if (verified !== null && verified > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
 }
 
 /**
@@ -798,14 +837,20 @@ export async function evaluatePause(now: Date = new Date()): Promise<boolean> {
   const since = new Date(Math.max(windowStart, resumedAt ? Date.parse(resumedAt) || 0 : 0));
   // Details Composio would not take are the caller's, not the provider's: they are not runs the failure rate is about
   const notInvalid = { OR: [{ reason: null }, { reason: { not: 'invalid_request' } }] };
-  const [done, failed, refunded] = await Promise.all([
-    prisma.instantRun.count({ where: { state: { in: ['succeeded', 'failed'] }, finishedAt: { gte: since }, ...notInvalid } }),
-    prisma.instantRun.count({ where: { state: 'failed', finishedAt: { gte: since }, ...notInvalid } }),
-    // Only a give-back the books confirmed, and only for a run that is itself in this window: a give-back for an older run, or one
-    // the books never made, is not a failure of the runs being counted
-    prisma.instantRefund.findMany({ where: { kind: 'goodwill', confirmedAt: { not: null, gte: since } }, select: { runId: true } }),
-  ]);
-  const givenBack = refunded.length === 0 ? 0 : await prisma.instantRun.count({ where: { id: { in: refunded.map((one) => one.runId) }, state: 'succeeded', finishedAt: { gte: since }, ...notInvalid } });
+  // All the counts are read from one snapshot: a run that finishes, or a give-back the books confirm, while they are being read is in all of them or in none,
+  // so a rate is never made of a count from before it and another from after
+  const { done, failed, givenBack } = await prisma.$transaction(
+    async (tx) => {
+      const done = await tx.instantRun.count({ where: { state: { in: ['succeeded', 'failed'] }, finishedAt: { gte: since }, ...notInvalid } });
+      const failed = await tx.instantRun.count({ where: { state: 'failed', finishedAt: { gte: since }, ...notInvalid } });
+      // Only a give-back the books confirmed, and only for a run that is itself in this window: a give-back for an older run, or one
+      // the books never made, is not a failure of the runs being counted
+      const refunded = await tx.instantRefund.findMany({ where: { kind: 'goodwill', confirmedAt: { not: null, gte: since } }, select: { runId: true } });
+      const givenBack = refunded.length === 0 ? 0 : await tx.instantRun.count({ where: { id: { in: refunded.map((one) => one.runId) }, state: 'succeeded', finishedAt: { gte: since }, ...notInvalid } });
+      return { done, failed, givenBack };
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  );
   if (done < limits.pauseMinRuns) return false;
   const rate = Math.floor(((failed + givenBack) * 10_000) / done);
   if (rate < limits.pauseFailureRateBps) return false;
@@ -848,8 +893,9 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
       if (earlier) return { go: { amount: asNumber(earlier.amountMicros), runId: run.id, personId: run.personId } };
       if (!limitsSet) return { done: { status: 'refused', reason: 'not_set' } };
       const [person, everyone] = await Promise.all([
-        tx.instantRefund.count({ where: { personId: input.personId, kind: 'goodwill', createdAt: { gte: month.start, lt: month.end } } }),
-        tx.instantRefund.aggregate({ where: { kind: 'goodwill', createdAt: { gte: month.start, lt: month.end } }, _sum: { amountMicros: true } }),
+        // A give-back let go of (the books never confirmed it) no longer counts: only the ones that stand or may still stand
+        tx.instantRefund.count({ where: { personId: input.personId, kind: 'goodwill', releasedAt: null, createdAt: { gte: month.start, lt: month.end } } }),
+        tx.instantRefund.aggregate({ where: { kind: 'goodwill', releasedAt: null, createdAt: { gte: month.start, lt: month.end } }, _sum: { amountMicros: true } }),
       ]);
       if (person >= limits.goodwillPerPersonPerMonth!) return { done: { status: 'refused', reason: 'person_limit' } };
       const amount = Math.min(asNumber(run.customerMicros) - asNumber(run.refundedMicros), limits.goodwillMaxMicros!);
@@ -881,7 +927,7 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
   // Step 3: recorded at what the books confirm (a give-back made before and said again answers with its first amount)
   const given = typeof answer.refundedMicros === 'number' && Number.isSafeInteger(answer.refundedMicros) && answer.refundedMicros > 0 ? answer.refundedMicros : planned.go.amount;
   const outcome = await prisma.$transaction(async (tx): Promise<GiveBackOutcome> => {
-    const { count } = await tx.instantRefund.updateMany({ where: { refundKey, confirmedAt: null }, data: { confirmedAt: now, amountMicros: BigInt(given) } });
+    const { count } = await tx.instantRefund.updateMany({ where: { refundKey, confirmedAt: null }, data: { confirmedAt: now, releasedAt: null, amountMicros: BigInt(given) } });
     if (count === 1) await tx.instantRun.update({ where: { id: planned.go.runId }, data: { refundedMicros: { increment: BigInt(given) } } });
     return { status: 'given', amountMicros: given };
   });
@@ -891,6 +937,8 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
 
 /** How long a give-back the books have not confirmed is left before the sweep asks again, in minutes. Pacing only: nothing is decided by it. */
 const GOODWILL_RETRY_AFTER_MINUTES = 5;
+/** A give-back let go of is asked about again this slowly, and for as long as late evidence about a run is looked for. */
+const GOODWILL_RELEASED_RETRY_HOURS = 6;
 
 export interface GoodwillSweep {
   looked: number;
@@ -904,17 +952,26 @@ export interface GoodwillSweep {
  * Gives goodwill give-backs that the books never confirmed another try, and lets go of the ones the books could not be reached about for
  * the whole wait. An intent is saved before the books are asked, so one that failed in between stays "unconfirmed" and keeps counting
  * against the month's give-back budget. The books answer a key they have seen with its first amount, so asking again is safe: a retry
- * finishes it (confirmed, or dropped when the books say no). One still unconfirmed after `unreachableWaitMinutes` is released: if the
- * books did act, the person's next ask, or this sweep's next look, finds it again under the same key and records the first amount.
+ * finishes it (confirmed, or dropped when the books say no). One still unconfirmed after `unreachableWaitMinutes` is released: marked
+ * (the row stays), so it no longer counts against the month's budget or the person's limit. It is still asked about, slowly, for as long
+ * as late evidence about a run is looked for: if the books did make the give-back, the answer carries their first amount and it is
+ * confirmed and recorded then, at that amount, whatever the limits are by now.
  */
 export async function sweepGoodwill(deps: Deps & { batch?: number } = {}): Promise<GoodwillSweep> {
   const now = deps.now ?? new Date();
   const limits = await getInstantLimits();
   const open = await prisma.instantRefund.findMany({
-    where: { kind: 'goodwill', confirmedAt: null, createdAt: { lte: new Date(now.getTime() - GOODWILL_RETRY_AFTER_MINUTES * MINUTE) } },
-    orderBy: { createdAt: 'asc' },
+    where: {
+      kind: 'goodwill',
+      confirmedAt: null,
+      OR: [
+        { releasedAt: null, createdAt: { lte: new Date(now.getTime() - GOODWILL_RETRY_AFTER_MINUTES * MINUTE) } },
+        { releasedAt: { lte: new Date(now.getTime() - GOODWILL_RELEASED_RETRY_HOURS * 60 * MINUTE) }, createdAt: { gte: new Date(now.getTime() - LATE_EVIDENCE_DAYS * 24 * 60 * MINUTE) } },
+      ],
+    },
+    orderBy: [{ releasedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
     take: deps.batch ?? 50,
-    select: { refundKey: true, runId: true, personId: true, createdAt: true },
+    select: { id: true, refundKey: true, runId: true, personId: true, createdAt: true, releasedAt: true },
   });
   const result: GoodwillSweep = { looked: open.length, settled: 0, released: 0 };
   for (const intent of open) {
@@ -922,13 +979,18 @@ export async function sweepGoodwill(deps: Deps & { batch?: number } = {}): Promi
       console.error('[Instant] Could not finish a give-back:', error instanceof Error ? error.message : 'unknown');
       return { status: 'refused', reason: 'unavailable' };
     });
-    const stillThere = await prisma.instantRefund.findUnique({ where: { refundKey: intent.refundKey }, select: { confirmedAt: true } });
+    // The row looked at, not whichever row has its key by now: a row that was dropped and made again under the same key is not this one
+    const stillThere = await prisma.instantRefund.findUnique({ where: { id: intent.id }, select: { confirmedAt: true } });
     if (!stillThere || stillThere.confirmedAt) {
       result.settled += 1;
       continue;
     }
-    if (outcome.status === 'refused' && now.getTime() - intent.createdAt.getTime() >= limits.unreachableWaitMinutes * MINUTE) {
-      const { count } = await prisma.instantRefund.deleteMany({ where: { refundKey: intent.refundKey, confirmedAt: null } });
+    if (outcome.status !== 'refused') continue;
+    if (intent.releasedAt) {
+      // Let go before and still not confirmed: asked again after another stretch
+      await prisma.instantRefund.updateMany({ where: { id: intent.id, confirmedAt: null, releasedAt: { not: null } }, data: { releasedAt: now } });
+    } else if (now.getTime() - intent.createdAt.getTime() >= limits.unreachableWaitMinutes * MINUTE) {
+      const { count } = await prisma.instantRefund.updateMany({ where: { id: intent.id, confirmedAt: null, releasedAt: null }, data: { releasedAt: now } });
       if (count > 0) {
         result.released += 1;
         console.error('[Instant] Let go of a give-back the books never confirmed:', intent.refundKey);

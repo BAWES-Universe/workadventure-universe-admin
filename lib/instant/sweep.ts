@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { getAdapter } from '@/lib/app-adapter';
 import type { ReadyMadeAdapter } from '@/lib/app-adapter/types';
-import { evaluatePause, reconcileRun, sweepGoodwill, type GoodwillSweep } from '@/lib/instant/executor';
+import { backfillMeterEvents, evaluatePause, reconcileRun, sweepGoodwill, type GoodwillSweep } from '@/lib/instant/executor';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 import { denyInstantOnSessions, type SessionSweep } from '@/lib/instant/sessions';
 import { pauseInstant } from '@/lib/instant/state';
@@ -99,6 +99,8 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
   for (const row of [...open, ...lateRuns.filter((late) => !open.some((one) => one.id === late.id))]) {
     await reconcileRun(row.id, { funds, adapter, now }).catch((error) => console.error('[Instant] Could not look a run up:', error instanceof Error ? error.message : 'unknown'));
   }
+  // A settled run whose meter event could not be written when it settled gets it here, so the books and the Costs page never stay short of it
+  await backfillMeterEvents(now).catch((error) => console.error('[Instant] The meter event check failed:', error instanceof Error ? error.message : 'unknown'));
   // A receipt still in checking whose runs have all ended is settled here too, so one the run's own pass could not move (a crash, a failed
   // write) never stays behind. Nothing here is asked of a person or a model.
   const receipts = await settleCheckingReceipts(BATCH, now).catch((error) => {

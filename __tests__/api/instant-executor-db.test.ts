@@ -306,6 +306,15 @@ run('the bounded Instant executor, in a real database', () => {
         quiet.mockRestore();
         await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT instant_event_refused');
       }
+      // Once the database takes it, the next sweep writes the event the run missed: one event, at the provider cost, with what the person was charged
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date() });
+      const events = await prisma.meterEvent.findMany({ where: { personId: sara } });
+      expect(events).toHaveLength(1);
+      expect(Number(events[0].costMicros)).toBe(7_000);
+      expect(events[0].detail).toMatchObject({ customerMicros: 7_000, runId: (await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } })).id });
+      // And a sweep after that writes nothing more
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect(await prisma.meterEvent.count({ where: { personId: sara } })).toBe(1);
     });
 
     it('applies the markup a super admin set to what the person pays, never past the hold', async () => {
@@ -930,16 +939,58 @@ run('the bounded Instant executor, in a real database', () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       // Two more failures after that resume; the counts are read, then a super admin resumes again before the pause is taken
       await prisma.instantRun.updateMany({ where: { state: 'failed' }, data: { finishedAt: new Date() } });
-      const real = prisma.instantRun.count.bind(prisma.instantRun);
-      const spy = jest.spyOn(prisma.instantRun, 'count').mockImplementation(((args: never) => {
-        const answer = real(args);
+      // The counts are read in one transaction: the resume comes as it ends, before the pause is taken
+      const realTx = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, ...rest: unknown[]) => {
         spy.mockRestore();
-        return answer.then(async (count) => {
+        return realTx(fn, ...rest).then(async (answer) => {
           await resumeInstant(sara);
-          return count;
+          return answer;
         });
       }) as never);
       expect(await evaluatePause()).toBe(false);
+      expect((await getInstantPause()).paused).toBe(false);
+    });
+
+    it('reads all its counts from one snapshot: a run that fails while they are being read is in all of them or in none', async () => {
+      await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 2 });
+      const make = (state: 'succeeded' | 'failed') =>
+        prisma.instantRun.create({ data: { runKey: `k-${randomUUID()}`, botId: brick, personId: sara, toolSlug: 'EXA_SEARCH', toolkit: 'exa', argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v', topMicros: BigInt(TOP), holdMicros: BigInt(TOP), state, customerState: state === 'failed' ? 'released' : 'charged', providerUserId: `u-${randomUUID().slice(0, 6)}`, finishedAt: new Date() } as never });
+      await make('succeeded');
+      await make('succeeded');
+      await make('failed');
+      // One failure in three is under the half a super admin set. A second failure lands after the first count is read (the later counts wait for it, so
+      // that is the order whichever way they are asked): read apart, the rate is two in three, a count of runs from before a run and a count of failures from after it
+      let asked = 0;
+      let landed: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (landed = resolve));
+      const interleaved = (count: (args: unknown) => Promise<number>) => async (args: unknown) => {
+        const mine = ++asked;
+        if (mine > 1) await gate;
+        const answer = await count(args);
+        if (mine === 1) {
+          await make('failed');
+          landed();
+        }
+        return answer;
+      };
+      const realCount = prisma.instantRun.count.bind(prisma.instantRun) as (args: unknown) => Promise<number>;
+      const countSpy = jest.spyOn(prisma.instantRun, 'count').mockImplementation(interleaved(realCount) as never);
+      const realTx = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+      const txSpy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, ...rest: unknown[]) => {
+        txSpy.mockRestore();
+        if (typeof fn !== 'function') return realTx(fn, ...rest);
+        return realTx(async (tx: { instantRun: { count: (args: unknown) => Promise<number> } }) => {
+          const counted = new Proxy(tx.instantRun, { get: (target, key) => (key === 'count' ? interleaved((args) => target.count(args)) : Reflect.get(target, key)) });
+          return (fn as (tx: unknown) => Promise<unknown>)(new Proxy(tx, { get: (target, key) => (key === 'instantRun' ? counted : Reflect.get(target, key)) }));
+        }, ...rest);
+      }) as never);
+      try {
+        expect(await evaluatePause()).toBe(false);
+      } finally {
+        countSpy.mockRestore();
+        txSpy.mockRestore();
+      }
       expect((await getInstantPause()).paused).toBe(false);
     });
 
@@ -959,6 +1010,36 @@ run('the bounded Instant executor, in a real database', () => {
       const after = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${id}` } });
       expect((after.detail as { customerMicros: number }).customerMicros).toBe(Number((await runOf(id)).customerMicros));
       expect(Number((await runOf(id)).customerMicros)).toBeGreaterThan(0);
+    });
+  });
+
+  describe('charging a run and telling the meter event, in one step', () => {
+    it('a meter event that cannot be updated leaves the run held, and the next sweep charges it and writes the amount', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const key = callId();
+      await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION instant_test_refuse_event_update() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'cannot update the event for the test'; END $$ LANGUAGE plpgsql`);
+      await prisma.$executeRawUnsafe(`CREATE TRIGGER instant_test_refuse_event_update BEFORE UPDATE ON meter_events FOR EACH ROW WHEN (NEW.event_id LIKE 'instant:%') EXECUTE FUNCTION instant_test_refuse_event_update()`);
+      const silenced = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let id = '';
+      try {
+        await runInstant(ask({ callId: key }), { adapter: p.adapter, funds: f.funds }).catch(() => undefined);
+        id = await runIdOf(key);
+        // Not marked charged: nothing about the run says it is done while the event does not
+        expect((await runOf(id)).customerState).toBe('held');
+      } finally {
+        silenced.mockRestore();
+        await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS instant_test_refuse_event_update ON meter_events');
+        await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS instant_test_refuse_event_update()');
+      }
+      // The books answer again with the same amount, and both are written
+      await reconcileRun(id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      const run = await runOf(id);
+      expect(run.customerState).toBe('charged');
+      expect(Number(run.customerMicros)).toBeGreaterThan(0);
+      const event = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${id}` } });
+      expect((event.detail as { customerMicros: number }).customerMicros).toBe(Number(run.customerMicros));
     });
   });
 
@@ -1127,7 +1208,60 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 20 * MIN) })).toEqual({ looked: 1, settled: 0, released: 0 });
       expect(await prisma.instantRefund.count({ where: { runId: second, confirmedAt: null } })).toBe(1);
       expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN) })).toEqual({ looked: 1, settled: 0, released: 1 });
-      expect(await prisma.instantRefund.count({ where: { runId: second } })).toBe(0);
+      // Let go of, not deleted: the row stays (marked), and no longer counts against the budget
+      const rows = await prisma.instantRefund.findMany({ where: { runId: second } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].releasedAt).not.toBeNull();
+      expect(rows[0].confirmedAt).toBeNull();
+    });
+
+    it('a give-back let go of that the books did make is found again by the sweep and recorded at their amount, even with the budget now at 1', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 600 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const runId = await charged(f, p);
+      const { sweepGoodwill } = await import('@/lib/instant/executor');
+      // The books give it back and then fail to answer: the intent stays, and the wait runs out
+      const real = f.funds.refund.getMockImplementation()!;
+      f.funds.refund.mockImplementationOnce((async (input: never) => {
+        await real(input);
+        throw new Error('connection reset');
+      }) as never);
+      expect(await giveBack({ personId: sara, runId }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'unavailable' });
+      f.funds.refund.mockImplementation((async () => ({ ok: false, refundedMicros: 0, reason: 'unavailable' })) as never);
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN) })).toEqual({ looked: 1, settled: 0, released: 1 });
+      // It is not in the month's budget while let go of: another person's give-back is not refused for it
+      expect(await prisma.instantRefund.count({ where: { runId, releasedAt: null } })).toBe(0);
+      // Later the books answer again (they already gave it): confirmed at their first amount, whatever the limits say now
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 1, goodwillPerPersonPerMonth: 1, unreachableWaitMinutes: 600 });
+      f.funds.refund.mockImplementation(real as never);
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN + 7 * 60 * MIN) })).toEqual({ looked: 1, settled: 1, released: 0 });
+      const row = await prisma.instantRefund.findFirstOrThrow({ where: { runId } });
+      expect(row.confirmedAt).not.toBeNull();
+      expect(row.releasedAt).toBeNull();
+      expect(Number((await runOf(runId)).refundedMicros)).toBe(5_000);
+    });
+
+    it('a row dropped and made again under the same key while the sweep waits on the books is not let go of by the sweep', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 600 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const runId = await charged(f, p);
+      const { sweepGoodwill } = await import('@/lib/instant/executor');
+      f.funds.refund.mockResolvedValueOnce({ ok: false, refundedMicros: 0, reason: 'unavailable' });
+      expect(await giveBack({ personId: sara, runId }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'unavailable' });
+      const first = await prisma.instantRefund.findFirstOrThrow({ where: { runId } });
+      // While the sweep asks the books, the row is dropped and a new one is made under the same key (a plain no, then a new ask)
+      f.funds.refund.mockImplementationOnce((async () => {
+        await prisma.instantRefund.delete({ where: { id: first.id } });
+        await prisma.instantRefund.create({ data: { refundKey: first.refundKey, runId, personId: sara, kind: 'goodwill', amountMicros: BigInt(5_000) } });
+        return { ok: false, refundedMicros: 0, reason: 'unavailable' };
+      }) as never);
+      const result = await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN) });
+      expect(result.released).toBe(0);
+      const rows = await prisma.instantRefund.findMany({ where: { runId } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].releasedAt).toBeNull();
     });
 
     it('when the books fail after they gave it back, the intent stays and a later ask finishes it at the books amount, even if the limits moved', async () => {
@@ -1562,19 +1696,14 @@ run('the bounded Instant executor, in a real database', () => {
       await prisma.instantRun.update({ where: { id: row.id }, data: { sentAt: new Date(Date.now() - 600 * MIN) } });
       p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', 7_000, 'log-roll')]);
       p.script.logs.set('log-roll', p.line(row.providerUserId, 'success', 7_000, 'log-roll'));
-      // The books take the charge, and writing it down here fails once (a lost connection)
-      const real = prisma.instantRun.updateMany.bind(prisma.instantRun);
-      const lost = jest.spyOn(prisma.instantRun, 'updateMany').mockImplementation(((args: { data?: { customerState?: string } }) => {
-        if (args?.data?.customerState === 'charged') {
-          lost.mockRestore();
-          throw new Error('database went away');
-        }
-        return real(args as never);
-      }) as never);
+      // The books take the charge, and writing it down here fails once (the step that records it, in the database, is refused)
+      await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION instant_test_lost_write() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'database went away'; END $$ LANGUAGE plpgsql`);
+      await prisma.$executeRawUnsafe(`CREATE TRIGGER instant_test_lost_write BEFORE UPDATE ON instant_runs FOR EACH ROW WHEN (NEW.customer_state = 'charged') EXECUTE FUNCTION instant_test_lost_write()`);
       try {
         await expect(reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() })).rejects.toThrow();
       } finally {
-        lost.mockRestore();
+        await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS instant_test_lost_write ON instant_runs');
+        await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS instant_test_lost_write()');
       }
       expect(f.holds.get(`instant:${row.id}`)).toMatchObject({ state: 'charged', charged: 7_000 });
       expect(await runOf(row.id)).toMatchObject({ state: 'succeeded', providerState: 'settled', customerState: 'held' });
@@ -2263,6 +2392,8 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await prisma.meterEvent.count({ where: { eventId: `instant:${rowId}` } })).toBe(1);
       expect(f.left()).toBe(1_000_000);
       expect(p.sent).toHaveLength(1);
+      // A late figure below the top price stops nothing
+      expect((await getInstantPause()).paused).toBe(false);
     });
 
     it('a vendor charge above the estimate is the real one: our cost follows it, the person still pays nothing', async () => {
@@ -2278,6 +2409,8 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await eventOf(rowId)).toMatchObject({ costMicros: BigInt(TOP + 2_000), basis: 'measured' });
       expect(after.customerState).toBe('released');
       expect(f.left()).toBe(1_000_000);
+      // A late figure above the top price says the table is too low, as one found on time does: Instant stops
+      expect(await getInstantPause()).toMatchObject({ paused: true, reason: 'price_over_top' });
     });
 
     it('a late failure changes nothing for the person and keeps the estimate when the line has no charge; it is written down once', async () => {

@@ -62,10 +62,12 @@ export async function saveMeterSettings(change: Partial<MeterSettings>, userId: 
 }
 
 /** Saves a monthly computer allowance that takes the place of the current one from a later day (the 1st), and changes nothing before it. */
-export async function scheduleMemberAllowance(micros: number, from: Date, userId: string, now: Date = new Date(), within?: Prisma.TransactionClient): Promise<void> {
+export async function scheduleMemberAllowance(micros: number, from: Date, userId: string, asked?: Date, within?: Prisma.TransactionClient): Promise<void> {
   const run = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> => (within ? work(within) : prisma.$transaction(work));
   await run(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('meter:settings'))`;
+    // The time is read once the lock is held (a save that waited for it works from the time it got it), unless the caller fixed it
+    const now = asked ?? new Date();
     const row = await tx.appSetting.findUnique({ where: { key: SETTING_KEY } });
     const saved = row?.value && typeof row.value === 'object' && !Array.isArray(row.value) ? (row.value as Record<string, unknown>) : {};
     const next: Record<string, unknown> = { ...saved };

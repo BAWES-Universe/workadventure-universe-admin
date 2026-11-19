@@ -3755,6 +3755,9 @@ model InstantRefund {
   // Null while only the intent is saved (written before the books are asked, so a give-back the books made and we never recorded is
   // found again and finished by the retry); set once the books confirmed it. Both count against the limits.
   confirmedAt  DateTime? @map("confirmed_at")
+  // Set when the books stayed unreachable for the whole wait and the intent was let go of: it no longer counts against the limits, but the row stays, so a
+  // give-back the books did make is found again and recorded at their amount (the sweep asks again, slowly, and a person's next ask finishes it). Cleared when confirmed.
+  releasedAt   DateTime? @map("released_at")
   createdAt    DateTime @default(now()) @map("created_at")
 
   @@index([runId])
