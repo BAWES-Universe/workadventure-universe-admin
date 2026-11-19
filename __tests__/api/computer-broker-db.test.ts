@@ -904,26 +904,71 @@ run('the broker, the fence and keep-awake, in a real database', () => {
           expect((await machineOf(sara.brickId)).turnUnprovenSince).toBeNull();
         });
 
-        it('a job that already holds the machine opens no turn beside it: it waits while another job holds the machine too, and is told the machine is gone once it alone holds it and the machine was put to sleep', async () => {
+        const readerAndWriter = async () => {
           const { sara, jobId } = await running();
-          const { sent } = await acceptedAndLost(jobId);
+          const accepted = await acceptedAndLost(jobId);
+          // A read-only job holds the machine beside the writer, and a second one keeps it held when the writer ends
+          const readerId = await waitingJob(sara, false);
+          expect((await jobRow(readerId)).status).toBe('running');
+          const other = await waitingJob(sara, false);
+          await finishJob(jobId, 'failed', NOW);
+          expect((await machineOf(sara.brickId)).turnUnprovenSince).not.toBeNull();
+          expect((await machineOf(sara.brickId)).machine).toBe('working');
+          return { sara, readerId, other, sent: accepted.sent };
+        };
+
+        it('a job that already holds the machine opens no turn beside the unnamed one: it waits while another job holds the machine too', async () => {
+          const { readerId, sent } = await readerAndWriter();
           try {
-            // A read-only job holds the machine beside the writer
-            const readerId = await waitingJob(sara, false);
-            expect((await jobRow(readerId)).status).toBe('running');
-            // A second reader keeps the machine held when the writer ends
-            const other = await waitingJob(sara, false);
-            await finishJob(jobId, 'failed', NOW);
-            expect((await machineOf(sara.brickId)).turnUnprovenSince).not.toBeNull();
-            expect((await machineOf(sara.brickId)).machine).toBe('working');
-            // Neither reader opens a turn on a machine that may still run the other's turn: it waits while the other holds the machine
             expect(await startTurn(readerId, 'go')).toEqual({ ok: false, reason: 'starting' });
             expect(sent).toHaveBeenCalledTimes(1);
-            // The other reader ends: the one left alone is the only holder, so the machine is put to sleep and proved, and no turn is opened on it
+          } finally {
+            sent.mockRestore();
+          }
+        });
+
+        it('the job left alone as the holder has the machine put to sleep, proved and woken for it, and goes on: its turn opens, it does not fail for nothing', async () => {
+          const { sara, readerId, other, sent } = await readerAndWriter();
+          try {
             await finishJob(other, 'done', NOW);
-            expect(await startTurn(readerId, 'go')).toEqual({ ok: false, reason: 'no_machine' });
-            expect(sent).toHaveBeenCalledTimes(1);
+            fake.calls.length = 0;
+            const started = await startTurn(readerId, 'go');
+            expect(started.ok).toBe(true);
+            const names = fake.calls.map((call) => call.name);
+            expect(names).toContain('stop');
+            expect(names.indexOf('stop')).toBeLessThan(names.lastIndexOf('wake'));
+            expect(sent).toHaveBeenCalledTimes(2);
+            expect((await machineOf(sara.brickId)).machine).toBe('working');
             expect((await machineOf(sara.brickId)).turnUnprovenSince).toBeNull();
+            expect((await jobRow(readerId)).status).toBe('running');
+          } finally {
+            sent.mockRestore();
+          }
+        });
+
+        it('a machine that will not wake again ends the job as an error with its room given back (never a job left waiting on a machine that is not there)', async () => {
+          const { readerId, other, sent } = await readerAndWriter();
+          try {
+            await finishJob(other, 'done', NOW);
+            fake.failNext.wake = true;
+            expect(await startTurn(readerId, 'go')).toMatchObject({ ok: false });
+            expect(sent).toHaveBeenCalledTimes(1);
+            const ended = await jobRow(readerId);
+            expect(ended.status).toBe('stopped');
+            expect(ended.endedBy).toBe('error');
+          } finally {
+            sent.mockRestore();
+          }
+        });
+
+        it('a job that holds a named turn is told it is busy and its machine is not put to sleep by the hold', async () => {
+          const { sara, readerId, sent } = await readerAndWriter();
+          try {
+            await prisma.computerJob.update({ where: { id: readerId }, data: { agentResponseId: 'resp-own' } });
+            fake.calls.length = 0;
+            expect(await startTurn(readerId, 'go')).toMatchObject({ ok: false, reason: 'busy' });
+            expect(fake.calls.map((call) => call.name)).not.toContain('stop');
+            expect((await machineOf(sara.brickId)).machine).toBe('working');
           } finally {
             sent.mockRestore();
           }

@@ -1270,6 +1270,7 @@ export async function settleTurnHold(botId: string, exceptJobId?: string): Promi
     const lift = () => prisma.brickComputer.updateMany({ where: { botId, turnUnprovenSince: seen }, data: { turnUnprovenSince: null } });
     if (await agentCannotRun(botId)) {
       await lift();
+      await clearFirstTurnMarks(botId);
       return true;
     }
     const holders = await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] }, ...(exceptJobId ? { id: { not: exceptJobId } } : {}) } });
@@ -1278,6 +1279,8 @@ export async function settleTurnHold(botId: string, exceptJobId?: string): Promi
     if (!provider || !row.providerRef) return false;
     if (!(await stopMachine(botId, row.providerRef, provider))) return false;
     await lift();
+    // Proved asleep: no first turn of any job on this machine can still be running, so their marks go (as after a take-over fence that stopped it)
+    await clearFirstTurnMarks(botId);
     return true;
   } catch (error) {
     console.error('[Computer] Could not settle a machine’s turn hold:', error instanceof Error ? error.message : 'unknown');
@@ -1391,7 +1394,7 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
  * A take-over fence that could not be proved stops the machine (see fenceMachine). The jobs handed back need it working again, so it is
  * woken here; if it will not come back the jobs end, their room given back, rather than wait on a machine that is not there.
  */
-async function wakeIfStopped(botId: string): Promise<void> {
+export async function wakeIfStopped(botId: string): Promise<void> {
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   const provider = providerFor(row);
   if (!row?.providerRef || !provider || (row.machine !== 'stopped' && row.machine !== 'stopping')) return;

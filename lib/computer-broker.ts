@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { agentCannotRun, providerFor, fenceMachine, finishJob, settleTurnHold, underTurnHold } from '@/lib/computer';
+import { agentCannotRun, providerFor, fenceMachine, finishJob, settleTurnHold, underTurnHold, wakeIfStopped } from '@/lib/computer';
 import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
 import { Agent37Error, TurnNotSent } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
@@ -223,23 +223,26 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
     return fresh;
   }
+  if (fresh.job.responseId) {
+    await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+    return { ok: false, reason: 'busy', responseId: fresh.job.responseId };
+  }
   // A job that ended on this machine may have left its first turn running there, with nothing to cancel it by: no turn is opened beside it until the
-  // machine is proved asleep. The caller waits and asks again; the hold is lifted by the end of the jobs that hold the machine, or by the sweep
+  // machine is proved asleep. The caller waits and asks again; the hold is lifted by the end of the jobs that hold the machine, or by the sweep.
+  // (Asked after the busy answer above: a job's own named turn is never stopped by this.)
   if (await underTurnHold(fresh.job.botId)) {
     if (!(await settleTurnHold(fresh.job.botId, job.jobId))) {
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       return { ok: false, reason: 'starting' };
     }
-    // The machine was put to sleep to prove it: this job is looked at again on what it is now
+    // The machine may have been put to sleep to prove it, with this job the only one holding it: it is woken for this job (and the job ends as an error
+    // if it will not come back, its room given back), so the job goes on instead of failing for nothing
+    await wakeIfStopped(fresh.job.botId);
     fresh = await liveJob(job.jobId);
     if (!fresh.ok) {
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       return fresh;
     }
-  }
-  if (fresh.job.responseId) {
-    await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
-    return { ok: false, reason: 'busy', responseId: fresh.job.responseId };
   }
   const sessionId = fresh.job.sessionId;
   // A job's very first turn has no conversation to be found by, and the agent has no way to be asked for "the turn this request started" (a request
