@@ -125,13 +125,19 @@ run('the broker, the fence and keep-awake, in a real database', () => {
 
     it('says the job is not the runner’s to act on when the person took over while the key was being written', async () => {
       const { sara, jobId } = await running();
-      fake.execAnswer = async () => {
-        await takeOver(sara.brickId, sara.id, NOW);
+      // The command that writes the key is kept as it is sent, before the take-over adds its own commands after it
+      let relayWrite = '';
+      fake.execAnswer = async (command) => {
+        if (/"token":"cjt_/.test(command)) {
+          relayWrite = command;
+          await takeOver(sara.brickId, sara.id, NOW);
+        }
         return {};
       };
       const done = await prepareJob(jobId, RELAY, NOW);
       expect(done).toMatchObject({ ok: false });
-      const token = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(fake.commands.at(-1)?.command ?? '')?.[1] ?? '';
+      const token = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(relayWrite)?.[1] ?? '';
+      expect(token).not.toBe('');
       // and the key it wrote is refused: it is of the control number before the take-over
       expect((await verifyJobToken(token, 'model', NOW)).ok).toBe(false);
     });
@@ -509,6 +515,8 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         const { jobId } = await running(name);
         ids.push(jobId);
       }
+      // Distinct start times that are not the order they were made in (nor the order of their ids): oldest first is p3, p1, p2
+      for (const [index, startedAt] of [minutes(-5), minutes(-1), minutes(-10)].entries()) await prisma.computerJob.update({ where: { id: ids[index] }, data: { startedAt } });
       const seen: string[] = [];
       let cursor: string | null = null;
       let pages = 0;
@@ -518,7 +526,8 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         cursor = page.nextCursor;
         pages += 1;
       } while (cursor && pages < 10);
-      expect(seen.filter((id) => ids.includes(id)).sort()).toEqual([...ids].sort());
+      // In the order returned across the pages, not sorted for the comparison
+      expect(seen.filter((id) => ids.includes(id))).toEqual([ids[2], ids[0], ids[1]]);
       expect(new Set(seen).size).toBe(seen.length);
       expect(cursor).toBeNull();
       expect(pages).toBeGreaterThan(1);
