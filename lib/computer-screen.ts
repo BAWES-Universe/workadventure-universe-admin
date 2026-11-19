@@ -82,6 +82,8 @@ async function look(botId: string, personId: string, mode: ScreenMode, input?: {
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   if (!row || !row.enabled || !row.providerRef || row.machine !== 'working') return { ok: false, reason: 'resting' };
   if (mode === 'input') {
+    // No input while the take-over's fence is still being made: the agent may still be acting behind the person
+    if (row.fencingSince) return { ok: false, reason: 'not_taken_over' };
     const jobs = await prisma.computerJob.findMany({ where: { botId, status: 'waiting', control: 'person' }, select: { id: true, controlGeneration: true } });
     const mine = input ? jobs.find((job) => job.id === input.jobId && job.controlGeneration === input.generation) : jobs[0];
     return mine ? { ok: true, ref: row.providerRef, mode } : { ok: false, reason: 'not_taken_over' };

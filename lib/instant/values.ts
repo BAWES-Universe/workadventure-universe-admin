@@ -51,13 +51,19 @@ const shortText = (value: unknown): string | null => (typeof value === 'string' 
 // ---------- What arguments a run may carry ----------
 
 /** One argument's rule: true when its value cannot make the call cost more than the priced unit. */
-type ArgRule = (value: unknown) => boolean;
+type ArgRule = ((value: unknown) => boolean) & {
+  /** The same rule as a JSON Schema fragment, laid over the provider's own for that argument when the tool is offered. */
+  schema?: Record<string, unknown>;
+};
 
-const textArg: ArgRule = (v) => shortText(v) !== null;
-const flag = (only?: boolean): ArgRule => (v) => typeof v === 'boolean' && (only === undefined || v === only);
-const whole = (min: number, max: number): ArgRule => (v) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
-const oneOf = (...allowed: string[]): ArgRule => (v) => typeof v === 'string' && allowed.includes(v);
-const textList = (max: number): ArgRule => (v) => Array.isArray(v) && v.length >= 1 && v.length <= max && v.every((item) => shortText(item) !== null);
+const withSchema = (rule: (value: unknown) => boolean, schema: Record<string, unknown>): ArgRule => Object.assign(rule, { schema });
+
+const textArg: ArgRule = withSchema((v) => shortText(v) !== null, { type: 'string', minLength: 1, maxLength: MAX_TEXT });
+const flag = (only?: boolean): ArgRule => withSchema((v) => typeof v === 'boolean' && (only === undefined || v === only), only === undefined ? { type: 'boolean' } : { type: 'boolean', enum: [only] });
+const whole = (min: number, max: number): ArgRule => withSchema((v) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max, { type: 'integer', minimum: min, maximum: max });
+const oneOf = (...allowed: string[]): ArgRule => withSchema((v) => typeof v === 'string' && allowed.includes(v), { type: 'string', enum: allowed });
+const textList = (max: number): ArgRule =>
+  withSchema((v) => Array.isArray(v) && v.length >= 1 && v.length <= max && v.every((item) => shortText(item) !== null), { type: 'array', minItems: 1, maxItems: max, items: { type: 'string', minLength: 1, maxLength: MAX_TEXT } });
 
 /** A search is priced per search: the most results it may ask for. Above this the provider's own price steps up. */
 const MAX_RESULTS = 10;
@@ -103,10 +109,15 @@ function oneUnit(tool: string, args: Record<string, unknown>): number | null {
 }
 
 /** The argument names a Brick may use on a tool, or null for a tool that is not in the table; for cutting the schema it is offered. */
-export function instantAllowedArguments(tool: string): { names: string[]; required: string[] } | null {
+export function instantAllowedArguments(tool: string): { names: string[]; required: string[]; constraints: Record<string, Record<string, unknown>>; anyOf?: string[][] } | null {
   const rules = Object.prototype.hasOwnProperty.call(ALLOWED, tool) ? ALLOWED[tool] : undefined;
-  if (rules) return { names: Object.keys(rules.args), required: rules.required };
-  return tool === 'EXA_GET_CONTENTS_ACTION' ? { names: [...EXA_CONTENTS_KEYS], required: [] } : null;
+  if (rules) {
+    const constraints = Object.fromEntries(Object.entries(rules.args).flatMap(([name, rule]) => (rule.schema ? [[name, rule.schema]] : [])));
+    return { names: Object.keys(rules.args), required: rules.required, constraints };
+  }
+  // Exa's contents: pages come from `urls` or `ids` (at least one list, up to the most pages), so one of them is required, however the provider words it
+  const pages = { type: 'array', minItems: 1, maxItems: MAX_URLS, items: { type: 'string', minLength: 1, maxLength: MAX_TEXT } };
+  return tool === 'EXA_GET_CONTENTS_ACTION' ? { names: [...EXA_CONTENTS_KEYS], required: [], constraints: { urls: pages, ids: pages }, anyOf: [['urls'], ['ids']] } : null;
 }
 
 /** The arguments of Exa's contents tool that are known not to add to its price. Any other argument could, so a call with one is not bounded. */

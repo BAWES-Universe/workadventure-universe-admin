@@ -62,25 +62,37 @@ export default function GrantsPage() {
 
   // Only the latest read may show: two saves in a row each read the list again, and the earlier read finishing last must not put its older list back
   const latest = useRef(0);
-  const load = useCallback(async () => {
+  const read = useCallback(async () => {
     const mine = ++latest.current;
-    setFailed(false);
     const result = await sendJson('/api/admin/grants', 'GET');
-    if (mine !== latest.current) return;
-    if (result.status === 401 || result.status === 403) {
-      replacePage('/admin');
-      return;
-    }
-    if (!result.ok || !result.data) {
-      setFailed(true);
-      return;
-    }
-    setOverview(result.data as unknown as GrantsOverview);
-  }, [replacePage]);
+    return mine === latest.current ? result : null;
+  }, []);
+  const show = useCallback(
+    (result: Awaited<ReturnType<typeof sendJson>>) => {
+      if (result.status === 401 || result.status === 403) {
+        replacePage('/admin');
+        return;
+      }
+      if (!result.ok || !result.data) {
+        setFailed(true);
+        return;
+      }
+      setFailed(false);
+      setOverview(result.data as unknown as GrantsOverview);
+    },
+    [replacePage],
+  );
+  const load = useCallback(async () => {
+    const result = await read();
+    if (result) show(result);
+  }, [read, show]);
 
+  // The first read shows its answer in a callback, once it comes
   useEffect(() => {
-    load();
-  }, [load]);
+    void read().then((result) => {
+      if (result) show(result);
+    });
+  }, [read, show]);
 
   const saved = () => {
     setSheet(null);

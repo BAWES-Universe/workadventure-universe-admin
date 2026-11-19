@@ -35,7 +35,8 @@ export const DEFAULT_READY_MADE_APPS: { key: string; name: string }[] = [
 export const readyMadeAppSchema = z
   .object({
     name: z.string().trim().min(1).max(255).optional(),
-    authConfigId: z.string().trim().min(1).max(255).optional(),
+    // null clears a sign-in setup of their own, so the app goes back to the provider's managed one
+    authConfigId: z.string().trim().min(1).max(255).nullable().optional(),
     enabled: z.boolean().optional(),
   })
   .strict();
@@ -70,7 +71,7 @@ export async function readReadyMadeApps(): Promise<ReadyMadeApp[]> {
   return [...apps.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** A super admin's change: each key set, or removed with null (a built-in app then goes back to its built-in form). Only the keys it names change. */
+/** A super admin's change: each key set, or removed with null (a built-in app then goes back to its built-in form). Only the keys it names change, and within a key only the fields it names (null clears one). */
 export async function saveReadyMadeApps(change: z.infer<typeof readyMadeSettingsSchema>, userId: string): Promise<ReadyMadeApp[]> {
   await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('ready-made-apps'))`;
@@ -78,8 +79,14 @@ export async function saveReadyMadeApps(change: z.infer<typeof readyMadeSettings
     const saved = row?.value && typeof row.value === 'object' && !Array.isArray(row.value) ? ((row.value as { apps?: Record<string, unknown> }).apps ?? {}) : {};
     const apps: Record<string, unknown> = { ...saved };
     for (const [key, app] of Object.entries(change.apps)) {
-      if (app === null) delete apps[key];
-      else apps[key] = app;
+      if (app === null) {
+        delete apps[key];
+        continue;
+      }
+      // A change names only what it changes: the fields it leaves out keep what was saved, and a field sent as null is cleared
+      const merged: Record<string, unknown> = { ...(typeof apps[key] === 'object' && apps[key] ? (apps[key] as Record<string, unknown>) : {}), ...app };
+      for (const field of Object.keys(merged)) if (merged[field] === null) delete merged[field];
+      apps[key] = merged;
     }
     const value = { apps } as Prisma.InputJsonValue;
     await tx.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });

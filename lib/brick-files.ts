@@ -115,18 +115,25 @@ export async function listBrickFiles(botId: string, userId: string, limits: File
  * Delete a file the person sent their Brick. False when it is not one of theirs to delete: someone else's, one the Brick
  * made (those are the person's to keep, and are deleted from Your artifacts), or one that is gone. The Brick can no
  * longer find, read or send it, the text kept from it goes with it, and an uploader file waits in the removal list until
- * the bot server has taken it out of the uploader (see lib/bot-file-removals.ts).
+ * the bot server has taken it out of the uploader (see lib/bot-file-removals.ts), unless another row still opens the same stored file.
  */
 export async function deleteSentFile(botId: string, userId: string, fileId: string): Promise<boolean> {
   const row = await prisma.botFile.findFirst({ where: { id: fileId, botId, ownerId: userId, source: 'person' }, select: { id: true, bucket: true, fileId: true } });
   if (!row) return false;
-  await prisma.$transaction([
-    ...(row.bucket && row.fileId
-      ? [prisma.botFileRemoval.upsert({ where: { bucket_fileId: { bucket: row.bucket, fileId: row.fileId } }, update: {}, create: { botId, bucket: row.bucket, fileId: row.fileId } })]
-      : []),
-    prisma.botFile.deleteMany({ where: { id: row.id } }),
-  ]);
-  return true;
+  const { bucket, fileId: stored } = row;
+  return prisma.$transaction(async (tx) => {
+    // The same stored file can be named by more than one row. Rows of one stored file are deleted one at a time, so of two that delete
+    // the last two rows at the same moment, the second sees the first one gone and queues the removal; neither leaves the file behind
+    if (bucket && stored) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`bot-file:${bucket}:${stored}`}, 0))`;
+    const deleted = await tx.botFile.deleteMany({ where: { id: row.id } });
+    if (deleted.count === 0) return false;
+    if (bucket && stored) {
+      // The uploader's file goes only when no other row still opens it
+      const stillUsed = await tx.botFile.count({ where: { bucket, fileId: stored } });
+      if (stillUsed === 0) await tx.botFileRemoval.upsert({ where: { bucket_fileId: { bucket, fileId: stored } }, update: {}, create: { botId, bucket, fileId: stored } });
+    }
+    return true;
+  });
 }
 
 export interface FileRemoval {

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { corsHeaders } from '@/lib/cors';
 import { acknowledgeForgets } from '@/lib/bot-privacy';
-import { acknowledgeItemForgets } from '@/lib/bot-memory-person';
+import { ITEM_FORGET_BATCH, acknowledgeItemForgets } from '@/lib/bot-memory-person';
 
 export const runtime = 'nodejs';
 
@@ -12,11 +12,13 @@ export const runtime = 'nodejs';
 const MAX_IDS = 500;
 
 const ids = z.array(z.string().min(1).max(100)).max(MAX_IDS);
+// Things forgotten come in batches of up to ITEM_FORGET_BATCH, and a whole batch is acknowledged in one report
+const itemIds = z.array(z.string().min(1).max(100)).max(ITEM_FORGET_BATCH);
 // `ids` are Forgets of a whole person (#435), `itemIds` things one person forgot (game #2003): either, or both
 // `items` is `itemIds` with the `at` of each notice it acts on: a thing forgotten again after that moment is not marked dropped by it
-const items = z.array(z.object({ id: z.string().min(1).max(100), at: z.number().int().nonnegative() }).strict()).max(MAX_IDS);
+const items = z.array(z.object({ id: z.string().min(1).max(100), at: z.number().int().nonnegative() }).strict()).max(ITEM_FORGET_BATCH);
 const bodySchema = z
-  .object({ ids: ids.optional(), itemIds: ids.optional(), items: items.optional() })
+  .object({ ids: ids.optional(), itemIds: itemIds.optional(), items: items.optional() })
   .strict()
   .refine((body) => (body.ids?.length ?? 0) + (body.itemIds?.length ?? 0) + (body.items?.length ?? 0) > 0, { message: 'ids, itemIds or items required' });
 

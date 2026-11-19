@@ -17,6 +17,29 @@
  * fields existed (every new field is optional).
  */
 
+/** What the test route answers, read into the shape the page keeps. A list of tools that was not read to its end stays marked `incomplete`, so the page never shows it as the whole inventory. */
+export function resultFromTestAnswer(data: Record<string, unknown>): McpTestResult {
+  if (data.success) {
+    return {
+      success: true,
+      toolCount: typeof data.toolCount === 'number' ? data.toolCount : 0,
+      toolNames: Array.isArray(data.toolNames) ? (data.toolNames as string[]) : [],
+      ...(data.incomplete === true ? { incomplete: true } : {}),
+    };
+  }
+  return {
+    success: false,
+    toolCount: 0,
+    toolNames: [],
+    error: (data.error as string | undefined) || 'Connection failed',
+    status: (data.status as number | null | undefined) ?? null,
+    statusText: (data.statusText as string | null | undefined) ?? null,
+    errorCode: (data.errorCode as string | null | undefined) ?? null,
+    wwwAuthenticate: (data.wwwAuthenticate as string | null | undefined) ?? null,
+    errorBody: (data.errorBody as string | null | undefined) ?? null,
+  };
+}
+
 /** Shape stored in `BotMcpServer.lastTestResult`. */
 export interface McpTestResult {
   success: boolean;

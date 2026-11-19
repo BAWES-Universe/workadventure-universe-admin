@@ -3210,6 +3210,8 @@ model BrickComputer {
   cleanClaimedAt DateTime? @map("clean_claimed_at")
   // When the sweep last sent the machine a no-op command to keep it awake while a job holds it
   keptAwakeAt   DateTime? @map("kept_awake_at")
+  // Set while a take-over's fence on the machine is being made and proved, empty once it is: the person has no input before then, and a repeated take-over waits for it
+  fencingSince  DateTime? @map("fencing_since")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
   noticeDismissedJobId String? @map("notice_dismissed_job_id") @db.VarChar(40)
   createdAt     DateTime  @default(now()) @map("created_at")

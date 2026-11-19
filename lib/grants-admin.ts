@@ -6,11 +6,13 @@ import { wokaLayersForMany } from '@/lib/woka-avatar';
 import {
   ClashRefused,
   endProgram,
+  endProgramIfUnchanged,
   endPrograms,
   listPrograms,
   previewGrant,
   saveDefault,
   saveException,
+  saveExceptionIfUnchanged,
   createGift,
   type GrantInput,
   type Issuer,
@@ -18,7 +20,7 @@ import {
   type ProgramView,
 } from '@/lib/credit-rules';
 import { markCreditBilled } from '@/lib/credit-billing';
-import { CreditRefused, readRecipient, type MoneyCategory, type Recipient, type Schedule } from '@/lib/credit-values';
+import { CreditRefused, isCreditRefused, readRecipient, type MoneyCategory, type Recipient, type Schedule } from '@/lib/credit-values';
 import { PLATFORM_ACCOUNT_ID, exposureOf } from '@/lib/credit-funding';
 import { currentRules, idsReached, type Tx } from '@/lib/credit-store';
 import { MONEY_CATEGORIES, type AudienceView, type ClashView, type ExceptionSetting, type ExceptionView, type GiftScope, type GiftView, type GrantsOverview, type MoneyDefaultView, type PersonView, type PreviewNumbers, type PreviewRequest, type PreviewView, type Recipients } from '@/lib/grants-view';
@@ -143,7 +145,6 @@ export async function overview(now: Date = new Date()): Promise<GrantsOverview> 
     exposureOf(PLATFORM_ACCOUNT_ID, now),
   ]);
   const money = programs.filter((program) => asMoney(program.categoryId));
-  const names = await namesFor(money);
 
   const defaults = {} as Record<MoneyCategory, MoneyDefaultView>;
   for (const category of MONEY_CATEGORIES) {
@@ -157,17 +158,6 @@ export async function overview(now: Date = new Date()): Promise<GrantsOverview> 
     else defaults[category] = { set: false, amountMicros: null, interval: 'none', recipients: null };
   }
 
-  // Exceptions: the active ones, one line for each group of people
-  const groups = new Map<string, { audience: AudienceView; apps?: ProgramView; computers?: ProgramView }>();
-  for (const program of money.filter((entry) => entry.kind === 'exception' && entry.status === 'active')) {
-    const key = recipientKey(program.recipients);
-    const group = groups.get(key) ?? { audience: audienceOf(program, names) };
-    if (program.categoryId === 'instant_apps') group.apps = program;
-    else group.computers = program;
-    groups.set(key, group);
-  }
-  const exceptions: ExceptionView[] = [...groups.values()].map((group) => ({ id: exceptionId(group.apps?.programId, group.computers?.programId), audience: group.audience, instant_apps: settingOf(group.apps), computers: settingOf(group.computers) }));
-
   // Gifts: every one still running, and the ones that ended most recently (so a long history never hides a running gift)
   const endedAt = (program: ProgramView) => (program.lotExpiresAt ?? program.claimEndsAt ?? now).getTime();
   const isEnded = (program: ProgramView) => program.status === 'ended' || endedAt(program) <= now.getTime();
@@ -178,6 +168,20 @@ export async function overview(now: Date = new Date()): Promise<GrantsOverview> 
   const owed = older.length === 0 ? [] : await prisma.creditLot.findMany({ where: { programId: { in: older.map((program) => program.programId) }, settlement: 'to_bill', billedAt: null }, select: { programId: true }, distinct: ['programId'] });
   const stillOwed = new Set(owed.map((lot) => lot.programId));
   const gifts = [...allGifts.filter((program) => !isEnded(program)), ...endedGifts.filter((program, index) => index < RECENTLY_ENDED_GIFTS || stillOwed.has(program.programId))];
+  // Only the people, universes and funding accounts of what is shown are looked up: the older ended gifts are not listed, so they cost nothing here
+  const activeExceptions = money.filter((entry) => entry.kind === 'exception' && entry.status === 'active');
+  const names = await namesFor([...activeExceptions, ...gifts]);
+  // Exceptions: the active ones, one line for each group of people
+  const groups = new Map<string, { audience: AudienceView; apps?: ProgramView; computers?: ProgramView }>();
+  for (const program of activeExceptions) {
+    const key = recipientKey(program.recipients);
+    const group = groups.get(key) ?? { audience: audienceOf(program, names) };
+    if (program.categoryId === 'instant_apps') group.apps = program;
+    else group.computers = program;
+    groups.set(key, group);
+  }
+  const exceptions: ExceptionView[] = [...groups.values()].map((group) => ({ id: exceptionId(group.apps?.programId, group.computers?.programId), audience: group.audience, instant_apps: settingOf(group.apps), computers: settingOf(group.computers) }));
+
   const figures = await giftFigures(gifts.map((gift) => gift.programId));
   const giftViews: GiftView[] = gifts
     .map((gift): GiftView => {
@@ -355,6 +359,13 @@ export async function previewFor(request: PreviewRequest, now: Date = new Date()
     }
     // An exception: each money category it sets, over the same people
     const recipients = recipientOf(request.audience);
+    // The rule this save would change is never a clash with itself: the one the admin opened, or (when none was named) the one the save would
+    // find for the same people, as saving does
+    const replaced = async (category: MoneyCategory): Promise<string | undefined> => {
+      if (request.replaceId) return readExceptionId(request.replaceId)?.[category] ?? undefined;
+      const key = recipientKey(recipients);
+      return (await listPrograms(undefined, { kind: 'exception' })).find((program) => program.categoryId === category && recipientKey(program.recipients) === key)?.programId;
+    };
     let numbers: PreviewNumbers | null = null;
     let clash: ClashView | null = null;
     let most = 0;
@@ -378,7 +389,7 @@ export async function previewFor(request: PreviewRequest, now: Date = new Date()
       }
       numbers = numbers ?? first;
       // "No grant" is a figure like any other: the books refuse it too when another rule of the same rank says something else for the same people
-      if (!clash) clash = await clashOf(category, recipients, request.replaceId ? (readExceptionId(request.replaceId)?.[category] ?? undefined) : undefined, setting.mode === 'own' ? { amountMicros: setting.amountMicros, interval: setting.interval } : { amountMicros: 0, interval: 'none' });
+      if (!clash) clash = await clashOf(category, recipients, await replaced(category), setting.mode === 'own' ? { amountMicros: setting.amountMicros, interval: setting.interval } : { amountMicros: 0, interval: 'none' });
     }
     return {
       numbers: numbers ? { ...numbers, interval: ownInterval ?? numbers.interval, mostNowMicros: most > 0 ? most : null, mostOnceMicros: mostOnce > 0 ? mostOnce : null, mostMonthlyMicros: mostMonthly > 0 ? mostMonthly : null, issuedNowMicros: issuedNow > 0 ? issuedNow : null } : null,
@@ -460,9 +471,11 @@ async function undo(done: { before: ProgramView | undefined; after: ProgramView 
   let failed = 0;
   for (const { before, after } of done.reverse()) {
     try {
-      if (before) await saveException({ ...inputOfProgram(before), programId: before.programId }, issuer, now);
-      else await endProgram(after.programId, issuer, now);
+      // Only while the rule is still the one this save wrote: another admin's newer change to it is theirs, and stays
+      if (before) await saveExceptionIfUnchanged({ ...inputOfProgram(before), programId: before.programId }, after.version, issuer, now);
+      else await endProgramIfUnchanged(after.programId, after.version, issuer, now);
     } catch (error) {
+      if (isCreditRefused(error) && error.code === 'changed') continue;
       failed += 1;
       console.error('[Grants] Could not put back a rule after a refused save:', error instanceof Error ? error.message : 'unknown');
     }

@@ -6,6 +6,8 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/meter-usage-db.test.ts
  */
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Prisma } from '@prisma/client';
 import { NextRequest } from 'next/server';
 
@@ -324,6 +326,45 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(usage).toMatchObject({ allowanceSet: false, noLimit: true, allowanceMicros: null });
       expect(usage.extra?.noLimit).toBe(true);
     });
+
+    it('says what new work can still take, not the allowance less spending: 1,200 spent through a 2x grant that has ended leaves 800 of the 1,000 usual, and the bar agrees', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 1_200, days(-2));
+      await recordGrant({ grantKey: `g-${tag}-past`, personId: sara.id, settlement: 'gift', multiplier: 2, startsAt: days(-4), endsAt: days(-1), givenById: sara.id });
+      const page = await personUsage(sara.id, NOW);
+      expect(page).toMatchObject({ computerMonthMicros: 1_200, allowanceMicros: 1_000, leftMicros: 800 });
+      // A running no-limit grant and no allowance set have nothing left to say
+      await recordGrant({ grantKey: `g-${tag}-open`, personId: sara.id, settlement: 'gift', noLimit: true, startsAt: days(-1), endsAt: days(5), givenById: sara.id });
+      expect((await personUsage(sara.id, NOW)).leftMicros).toBeNull();
+    });
+
+    it('reads the whole page on the one connection its snapshot holds: with a pool of a single connection it still answers, never waiting on a second one', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await askForMore(sara.id, NOW, 'computer');
+      // A reader that is not the shared client: a pool with room for one connection only (as the funding books' own database has). A read that is not made
+      // on the snapshot's connection waits for one that never frees, and under load the same wait takes every connection of the real pool
+      const { Pool } = await import('pg');
+      const { PrismaPg } = await import('@prisma/adapter-pg');
+      const { PrismaClient } = await import('@prisma/client');
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+      const single = new PrismaClient({ adapter: new PrismaPg(pool) });
+      const shared = (globalThis as unknown as { prisma: unknown }).prisma;
+      let page: { asked: { at: string } | null } | null = null;
+      try {
+        (globalThis as unknown as { prisma: unknown }).prisma = single;
+        await jest.isolateModulesAsync(async () => {
+          const { personUsage: onOne } = await import('@/lib/meter-person');
+          page = await onOne(sara.id, NOW);
+        });
+      } finally {
+        (globalThis as unknown as { prisma: unknown }).prisma = shared;
+        await single.$disconnect();
+      }
+      expect(page).toMatchObject({ asked: { at: expect.any(String) } });
+    }, 30_000);
+
   });
 
   describe('extra usage', () => {
@@ -402,6 +443,33 @@ run('usage for people, and cost for us, in a real database', () => {
       await askForMore(sara.id);
       expect((await send()).status).toBe(200);
       expect((await openRequests()).map((request) => request.personId)).toEqual([sara.id]);
+    });
+
+    it('saves the answer with the grant: a grant whose answer could not be written is not saved, and the retry answers every ask, also one made after the first try', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 1_000, new Date());
+      await askForMore(sara.id, new Date(Date.now() - 1_000));
+      asAdmin();
+      const key = randomUUID();
+      const send = () => personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, { grantKey: key, amount: 'five', endsAt: new Date(Date.now() + 10 * 86_400_000).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id: sara.id }) });
+      // The database refuses to write the answer (here by a trigger), at the moment the grant is being saved
+      await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION refuse_answer() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'answer refused'; END; $$ LANGUAGE plpgsql`);
+      await prisma.$executeRawUnsafe(`CREATE TRIGGER refuse_answer BEFORE UPDATE ON "meter_requests" FOR EACH ROW EXECUTE FUNCTION refuse_answer()`);
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        expect((await send()).status).toBe(500);
+      } finally {
+        quiet.mockRestore();
+        await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS refuse_answer ON "meter_requests"');
+      }
+      // Nothing of the grant is saved, so the ask it was for is still open, and the person is not left with a grant that answered nothing
+      expect(await prisma.meterGrant.count({ where: { personId: sara.id } })).toBe(0);
+      // She asks again before the retry; the retry is a new grant and answers both
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await askForMore(sara.id);
+      expect((await send()).status).toBe(201);
+      expect(await openRequests()).toEqual([]);
     });
 
     describe('a grant sent again after its end date passed', () => {
@@ -951,6 +1019,29 @@ run('usage for people, and cost for us, in a real database', () => {
       const rows = await prisma.meterAllowanceChange.findMany({ orderBy: { effectiveFrom: 'asc' } });
       // Both saved figures are kept in order, the waiting ones were replaced by the later save (a save now replaces what waited)
       expect(rows.map((row) => (row.allowanceMicros === null ? null : Number(row.allowanceMicros)))).toEqual([2_000, 1_000, null]);
+    });
+
+    it('the migration saves "no allowance" too, so an allowance set later never reaches back over the months that had none', async () => {
+      const sql = readFileSync(join(__dirname, '../../prisma/migrations/20261119120000_meter_allowance_history/migration.sql'), 'utf8');
+      const fill = sql.slice(sql.indexOf('INSERT INTO "meter_allowance_changes"'));
+      const history = async (saved: Prisma.InputJsonValue | null) => {
+        await prisma.meterAllowanceChange.deleteMany({});
+        await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
+        if (saved !== null) await prisma.appSetting.create({ data: { key: 'meter', value: saved } });
+        for (const statement of fill.split(';').map((part) => part.trim()).filter((part) => part.startsWith('INSERT'))) await prisma.$executeRawUnsafe(statement);
+        return (await prisma.meterAllowanceChange.findMany({ orderBy: { effectiveFrom: 'asc' } })).map((row) => (row.allowanceMicros === null ? null : Number(row.allowanceMicros)));
+      };
+      // No allowance saved at all, no settings row, and an allowance emptied again: each starts the history with a row that has no figure
+      expect(await history(null)).toEqual([null]);
+      expect(await history({ memberAllowanceMicros: null })).toEqual([null]);
+      expect(await history({ someOtherSetting: 5 })).toEqual([null]);
+      // A saved figure is kept as it was
+      expect(await history({ memberAllowanceMicros: 2_000 })).toEqual([2_000]);
+      // The report: an allowance of 2,000 set now is not read back over a month that had none
+      await history(null);
+      await saveMeterSettings({ memberAllowanceMicros: 2_000 }, 'admin');
+      const rows = await prisma.meterAllowanceChange.findMany({ orderBy: { effectiveFrom: 'asc' } });
+      expect(rows.map((row) => (row.allowanceMicros === null ? null : Number(row.allowanceMicros)))).toEqual([null, 2_000]);
     });
 
     it('reads the computer spending once for everyone, whatever the number of people and months their grants span', async () => {

@@ -737,6 +737,42 @@ run('bringing a Brick along, in a real database', () => {
       expect(await visit(sara.id)).toMatchObject({ roomId: universes.open.roomId });
     });
 
+    it('names the late people when the bot server asks for them, so a mixed sync never reads a Brick that moved on as gone', async () => {
+      const T = Date.now() - 60_000;
+      const omarsBrick = await createBrick({ ownerId: omar.id, name: 'Omar Brick' });
+      try {
+        await startVisit(brickId, sara.id, universes.open.roomUrl);
+        await feed(universes.open.roomUrl, [sara.uuid], T);
+        await feed(universes.second.roomUrl, [sara.uuid], T + 5_000);
+        await startVisit(omarsBrick.id, omar.id, universes.open.roomUrl);
+        await feed(universes.open.roomUrl, [omar.uuid], T);
+        // Room A's sync names both, from before Sara left it: Omar's Brick stands, Sara's is late
+        const sync = (extra: Record<string, unknown>) => roomFeed(call('POST', '/api/brick-visits/room', { roomUrl: universes.open.roomUrl, people: [sara.uuid, omar.uuid], enteredAt: T + 2_000, clientId: CLIENT, ...extra }, service));
+        const plain = await sync({});
+        expect(plain.status).toBe(200);
+        // As before: the plain list, with no way to tell that Sara was left out because she is late
+        expect(((await plain.json()) as { botId: string }[]).map((row) => row.botId)).toEqual([omarsBrick.id]);
+        const aware = await sync({ withLate: true });
+        expect(aware.status).toBe(200);
+        const body = (await aware.json()) as { bricks: { botId: string }[]; late: string[] };
+        expect(body.bricks.map((row) => row.botId)).toEqual([omarsBrick.id]);
+        expect(body.late).toEqual([sara.uuid]);
+        // A sync that is only late is also a 200 for one that asks: an empty list of Bricks and who was late; the plain one is the 409 it was
+        const onlyLate = (extra: Record<string, unknown>) => roomFeed(call('POST', '/api/brick-visits/room', { roomUrl: universes.open.roomUrl, people: [sara.uuid], enteredAt: T + 2_000, clientId: CLIENT, ...extra }, service));
+        expect((await onlyLate({})).status).toBe(409);
+        const awareOnly = await onlyLate({ withLate: true });
+        expect(awareOnly.status).toBe(200);
+        expect(await awareOnly.json()).toEqual({ bricks: [], late: [sara.uuid] });
+        // Nobody late: the list is there and `late` is empty
+        const calm = await roomFeed(call('POST', '/api/brick-visits/room', { roomUrl: universes.open.roomUrl, people: [omar.uuid], withLate: true }, service));
+        expect(await calm.json()).toMatchObject({ bricks: [{ botId: omarsBrick.id }], late: [] });
+        expect(await visit(sara.id)).toMatchObject({ roomId: universes.second.roomId });
+      } finally {
+        await prisma.brickVisit.deleteMany({ where: { userId: omar.id } });
+        await prisma.bot.deleteMany({ where: { id: omarsBrick.id } });
+      }
+    });
+
     it('compares times only when the same page load said both: another device with an older clock still moves the visit (no clock of one device is held against another)', async () => {
       const T = Date.now() - 60_000;
       // The laptop's clock runs five minutes ahead: it brought the visit into room A at a time far in the future of the phone's

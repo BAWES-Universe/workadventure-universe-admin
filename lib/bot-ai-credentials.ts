@@ -131,10 +131,11 @@ export async function credentialsForBot(botId: string, options: { asker?: string
       // `roomUrl` is the room the asker is in, when the bot server knows it: a Brick with a home and a visit is then judged by that room's place
       const here = await whereIsBrick(bot.id, options.roomUrl ?? null);
       if (here) others = { universeId: here.universeId };
-      // Someone named, and not its owner, while it is not visiting anywhere: nobody to serve. Nothing named and not visiting is
-      // the Brick's own business, as it always was. A call that names a room is not that: where the Brick stands somewhere else
-      // it is answered for nobody, so the owner's key is not served to a call from a room the Brick is not in.
-      else if (options.asker || (options.roomUrl && (await whereIsBrick(bot.id, null)))) return { status: 404, error: 'Bot not found' };
+      // Someone named, and not its owner, while it is not visiting anywhere: nobody to serve. Nothing named at all (no person, no room) and
+      // not visiting is the Brick's own business, as it always was. A call that names a room is not that: the Brick is not visiting that
+      // room, so it is answered for nobody, and the owner's key is never served to a call from a room the Brick is not in. The room is
+      // judged by the one lookup above, never looked up again (a visit that ran out between two lookups would read as "nowhere" and serve the key).
+      else if (options.asker || options.roomUrl) return { status: 404, error: 'Bot not found' };
     }
   }
   const main = await mainCredentials(bot, others);

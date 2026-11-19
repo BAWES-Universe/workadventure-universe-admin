@@ -70,6 +70,17 @@ describe('cleanAskName: only an App name is kept', () => {
     expect(cleanAskName('طَلَبات')).not.toBeNull();
   });
 
+  it('turns away a short sentence, and keeps real names that read a little like one', () => {
+    for (const text of ['My project is confidential', 'Our team has a budget', 'please add Zoho', 'I want a bank app', 'Add this app to my list.', 'It was not working', 'Can you add Notion']) {
+      expect(cleanAskName(text)).toBeNull();
+    }
+    for (const text of ['You Need A Budget', 'We Heart It', 'My Fitness Pal', 'Talabat orders', 'Dr. Oetker', 'Stack Exchange.com']) {
+      expect(cleanAskName(text)).not.toBeNull();
+    }
+    // Two words are never judged
+    expect(cleanAskName('Is Down')).not.toBeNull();
+  });
+
   it('keeps nothing that is not a name', () => {
     for (const text of [null, 5, '', ' ', 'a', 'x'.repeat(61), 'one two three four five six', 'what is my balance?', 'hello, can you help', 'https://example.com', 'www.example.com', 'me@example.com', '<script>', 'a\nb\nc d e f']) {
       expect(cleanAskName(text)).toBeNull();
