@@ -1221,6 +1221,11 @@ const FENCE_STALE_MS = 6 * 60 * 1000;
 const FENCE_WAIT_MS = 5 * 60 * 1000;
 const FENCE_LOOK_MS = 250;
 
+/** The first turns of a Brick's jobs that were marked as sent and never named: gone with the fence (see fenceTakeOver). */
+async function clearFirstTurnMarks(botId: string): Promise<void> {
+  await prisma.computerJob.updateMany({ where: { botId, NOT: { firstTurnSentAt: null }, agentResponseId: null }, data: { firstTurnSentAt: null } });
+}
+
 /**
  * The whole take-over fence, with its completion kept in the machine's row (`fencingSince`) apart from who has control: the person's
  * control is published the moment they take over, but the screen's input and the details tap wait until this has finished. One take-over
@@ -1238,6 +1243,10 @@ async function fenceTakeOver(botId: string): Promise<boolean> {
         await fenceControl(botId);
         // Then the machine itself: the turn is cancelled and what the agent started is stopped and proved gone, before the person has the screen
         await fenceMachine(botId);
+        // What the agent had started and not yet named (a job's first turn, marked in its row before it was sent) is stopped by this fence: its keys are
+        // ended and every process it started is stopped and proved gone, or the machine itself is stopped. Nothing runs that nothing names, so the mark goes,
+        // and a start after the hand-back opens a turn as any other
+        await clearFirstTurnMarks(botId);
       } finally {
         await prisma.brickComputer.updateMany({ where: { botId, fencingSince: started }, data: { fencingSince: null } });
       }
@@ -1247,6 +1256,7 @@ async function fenceTakeOver(botId: string): Promise<boolean> {
     // No machine to fence: only the keys
     if (!row) {
       await fenceControl(botId);
+      await clearFirstTurnMarks(botId);
       return true;
     }
     if (!row.fencingSince) continue;

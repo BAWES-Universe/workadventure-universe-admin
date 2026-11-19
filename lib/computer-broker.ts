@@ -271,7 +271,9 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       // The agent said no (an answer that is not a stream), or the machine was never reached: no turn was opened, the mark goes and the start can be
       // asked again. Anything else (a connection that broke, a limit that ran out, a server error) may have left a turn running that nothing names:
       // the job ends, and if it cannot be ended now the mark stays, so the next start ends it and never opens a second turn
-      const notSent = error instanceof TurnNotSent || (error instanceof Agent37Error && (error.status < 500 || error.retryable));
+      // An answer below 500 is a refusal, and `try_again` is Agent37 saying so itself. A 502/503/504 is not: it can come from a gateway after the agent
+      // accepted the turn, so it ends the job rather than let a retry open a second first turn beside one that runs (the person would pay for both)
+      const notSent = error instanceof TurnNotSent || (error instanceof Agent37Error && (error.status < 500 || error.code === 'try_again'));
       if (notSent) await prisma.computerJob.updateMany({ where: { id: job.jobId }, data: { firstTurnSentAt: null } }).catch(() => undefined);
       else await endJobOfUnknownTurn(job.jobId);
     }
@@ -424,6 +426,9 @@ async function* keeping(
         if (kept.count === 0) {
           // The person took over (or the job ended) between asking and the agent starting, or another turn holds the job: this turn must not run
           await cancelOrFence(job, provider, event.id);
+          // The turn is cancelled, or the machine's own fence stopped whatever it started: nothing runs that nothing names, so the first-turn mark goes
+          // (not while the job holds another turn's id, which is what a start looks at first)
+          await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: null }, data: { firstTurnSentAt: null } }).catch(() => undefined);
           responseId = null;
           over = true;
           yield { type: 'failed', code: 'fenced', message: 'The turn was stopped because the person took over' };

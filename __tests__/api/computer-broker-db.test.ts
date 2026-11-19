@@ -722,6 +722,93 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         expect(row.firstTurnSentAt).toBeNull();
         expect(row.status).toBe('running');
       });
+
+      // A first turn that is accepted and whose id comes only later: the stream waits until the test lets it go
+      const gatedFirstTurn = () => {
+        let open: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => (open = resolve));
+        const original = FakeComputerProvider.prototype.openTurn.bind(fake);
+        let first = true;
+        fake.openTurn = async (ref, input, signal) => {
+          if (!first) return original(ref, input, signal);
+          first = false;
+          return (async function* (): AsyncGenerator<TurnEvent> {
+            await gate;
+            yield { type: 'created', id: 'resp-late', sessionId: 'sess-late' };
+            yield { type: 'completed', outputText: '', usage: null };
+          })();
+        };
+        return open;
+      };
+
+      it('a gateway error (504, or 502 or 503) may have come after the agent accepted the turn: the job ends, and a second start opens no turn', async () => {
+        for (const status of [504, 502, 503]) {
+          const { jobId } = await running(`gw${status}`);
+          const { opened, wrap } = counted();
+          fake.openTurn = wrap(async () => {
+            throw new Agent37Error(status, null, 'gateway');
+          });
+          expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'failed' });
+          expect((await jobRow(jobId)).status).toBe('failed');
+          expect(await startTurn(jobId, 'again')).toEqual({ ok: false, reason: 'not_running' });
+          expect(opened).toHaveBeenCalledTimes(1);
+        }
+      });
+
+      it('an answer that Agent37 itself says is safe to ask again (try_again, or too many asks) opened nothing: the mark goes and the start can be asked again', async () => {
+        const { jobId } = await running();
+        fake.openTurn = async () => {
+          throw new Agent37Error(503, 'try_again', 'busy');
+        };
+        expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'failed' });
+        expect((await jobRow(jobId)).firstTurnSentAt).toBeNull();
+        fake.openTurn = async () => {
+          throw new Agent37Error(429, null, 'slow down');
+        };
+        expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'failed' });
+        const row = await jobRow(jobId);
+        expect(row.status).toBe('running');
+        expect(row.firstTurnSentAt).toBeNull();
+      });
+
+      it('a first turn whose id comes after the job was fenced is cancelled, and its mark goes with it: the next start opens a turn, the job is not failed', async () => {
+        const { jobId } = await running();
+        const letGo = gatedFirstTurn();
+        const started = await startTurn(jobId, 'go');
+        if (!started.ok) throw new Error('no turn');
+        expect((await jobRow(jobId)).firstTurnSentAt).not.toBeNull();
+        const reading = drain(started.events);
+        // The control number moves (the keys of the turn are of the older one) before the agent says its id
+        await prisma.computerJob.update({ where: { id: jobId }, data: { controlGeneration: { increment: 1 } } });
+        letGo();
+        expect(await reading).toEqual([{ type: 'failed', code: 'fenced', message: expect.any(String) }]);
+        expect(fake.cancelledTurns).toContain('resp-late');
+        const after = await jobRow(jobId);
+        expect(after.firstTurnSentAt).toBeNull();
+        expect(after.status).toBe('running');
+        expect(await startTurn(jobId, 'again')).toMatchObject({ ok: true });
+      });
+
+      it('the take-over fence stops a first turn that has not said its id (its keys end, what it started is stopped and proved gone), so its mark goes at the take-over: after the hand-back a start opens a turn', async () => {
+        const { sara, jobId } = await running();
+        const letGo = gatedFirstTurn();
+        const started = await startTurn(jobId, 'go');
+        if (!started.ok) throw new Error('no turn');
+        expect((await jobRow(jobId)).firstTurnSentAt).not.toBeNull();
+        const reading = drain(started.events);
+        expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
+        // The fence ran the machine's own check, and the mark is gone with what it stopped
+        expect(fake.commands.map((one) => one.command)).toContain('universe-fence --check');
+        expect((await jobRow(jobId)).firstTurnSentAt).toBeNull();
+        // The agent says its id only now: the turn is not the job's any more
+        letGo();
+        expect(await reading).toEqual([{ type: 'failed', code: 'fenced', message: expect.any(String) }]);
+        expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
+        const back = await startTurn(jobId, 'carry on');
+        expect(back).toMatchObject({ ok: true });
+        if (back.ok) await drain(back.events);
+        expect((await jobRow(jobId)).status).toBe('running');
+      });
     });
 
     it('a turn in a conversation the agent knows: after the cap the claim lapses, and the agent itself refuses a second turn beside the first (busy, with its id)', async () => {
