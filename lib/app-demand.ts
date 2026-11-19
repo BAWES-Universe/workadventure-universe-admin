@@ -156,7 +156,9 @@ export async function demandReport(days: number = DEMAND_DEFAULT_DAYS, now: Date
         const waiting = await instantRunsUnsettled({ from, to: now }, tx);
         return [byApp, all, missing, waiting] as const;
       },
-      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+      // Four scans of the books one after the other: the 5 s a transaction gets by default is too short once the books are large, and a report that fails
+      // to draw is worse than one that takes a few seconds
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, maxWait: 10_000, timeout: 60_000 },
     ),
   ]);
 
