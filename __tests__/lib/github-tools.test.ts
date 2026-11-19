@@ -74,6 +74,9 @@ describe('what a Brick can do on GitHub', () => {
     expect(looks).toEqual(expect.arrayContaining(['github_read_file', 'github_ci_status', 'github_ci_job_log', 'github_list_repos']));
     expect(looks).not.toContain('github_merge_pull_request');
     expect(GITHUB_TOOLS.find((tool) => tool.name === 'github_merge_pull_request')?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
+    // Changing an issue can clear its text or labels, so it is marked as one that can destroy (a Brick asks first before changing someone's issue)
+    expect(GITHUB_TOOLS.find((tool) => tool.name === 'github_update_issue')?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
+    expect(GITHUB_TOOLS.find((tool) => tool.name === 'github_rerun_ci')?.annotations).toMatchObject({ destructiveHint: false });
   });
 
   it('calls only api.github.com, with the person’s token', async () => {
