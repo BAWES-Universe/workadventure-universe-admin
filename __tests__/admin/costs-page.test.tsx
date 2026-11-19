@@ -64,7 +64,7 @@ const answer = (data: CostsReport | number = report()) =>
   fetchMock.mockImplementation(() => (typeof data === 'number' ? Promise.resolve({ ok: false, status: data, json: () => Promise.resolve({}) }) : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(data) })));
 
 // The page's own "today" (its default dates, "Today at") is a fixed day, so no test here depends on the day it runs: only the clock's date is faked, never its timers
-const TODAY = new Date(2026, 10, 10, 12);
+const TODAY = new Date('2026-11-10T12:00:00Z');
 beforeEach(() => {
   jest.useFakeTimers({ now: TODAY, doNotFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'nextTick', 'queueMicrotask', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback', 'performance'] });
   fetchMock.mockReset();
