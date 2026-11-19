@@ -190,8 +190,11 @@ export interface ItemForgetNotice {
   at: number;
 }
 
+/** The most notices one report to the bot server carries; the bot server can acknowledge that many in one go. */
+export const ITEM_FORGET_BATCH = 1000;
+
 export async function takeItemForgets(botId: string): Promise<ItemForgetNotice[]> {
-  const rows = await prisma.botMemoryItemForget.findMany({ where: { botId, droppedAt: null }, select: { id: true, userUuid: true, itemKey: true, kind: true, createdAt: true }, orderBy: { createdAt: 'asc' }, take: 1000 });
+  const rows = await prisma.botMemoryItemForget.findMany({ where: { botId, droppedAt: null }, select: { id: true, userUuid: true, itemKey: true, kind: true, createdAt: true }, orderBy: { createdAt: 'asc' }, take: ITEM_FORGET_BATCH });
   return rows.map(({ createdAt, ...row }) => ({ ...row, at: createdAt.getTime() }));
 }
 

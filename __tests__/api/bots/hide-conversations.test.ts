@@ -503,6 +503,14 @@ describe('the bot server really forgets (it saves a person again whenever they t
     expect(db.botMemoryForget.deleteMany).toHaveBeenCalledWith({ where: { botId: 'bot-1', id: { in: ['f-of-another-bot', 'already-gone'] } } });
   });
 
+  it('accepts a report for as many forgotten things as one batch of notices carries, and no more', async () => {
+    const { ITEM_FORGET_BATCH } = jest.requireActual('@/lib/bot-memory-person');
+    const full = Array.from({ length: ITEM_FORGET_BATCH }, (_, index) => `item-${index}`);
+    expect((await call(forgotten, 'POST', { token: 'service-secret', body: { itemIds: full } })).status).not.toBe(400);
+    expect((await call(forgotten, 'POST', { token: 'service-secret', body: { items: full.map((id) => ({ id, at: 1 })) } })).status).not.toBe(400);
+    expect((await call(forgotten, 'POST', { token: 'service-secret', body: { itemIds: [...full, 'one-too-many'] } })).status).toBe(400);
+  });
+
   it('takes the report from the bot server only: not from the admin token, a person, or nobody', async () => {
     const body = { ids: ['f3'] };
     expect((await call(forgotten, 'POST', { token: 'admin-secret', body })).status).toBe(401);
