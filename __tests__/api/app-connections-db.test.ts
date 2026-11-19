@@ -239,9 +239,9 @@ run('apps a person connects once, in a real database', () => {
     let wrote: PromiseSettledResult<void> | undefined;
     try {
       waiting = ensureFreshOAuthConfig({ serverId: 'unused', connectionId: connection.id, authConfig: before });
-      // The other server writes only after the waiting call was seen to try the lease and be refused (bounded: it fails the test if it never tries),
+      // The other server writes only after the waiting call was seen to try the lease and be refused (bounded to 4 s, well under the test's limit: it fails the test with time left for the clean-up if it never tries),
       // so the lease cannot end before the call looked at it
-      for (let wait = 0; wait < 400 && failedClaims === 0; wait += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+      for (let wait = 0; wait < 160 && failedClaims === 0; wait += 1) await new Promise((resolve) => setTimeout(resolve, 25));
       expect(failedClaims).toBeGreaterThan(0);
       // Its write is a promise of its own, joined with the waiting call before anything else: a failed write is the failure of this test
       // (not an unhandled rejection), and it cannot land after the teardown has begun

@@ -611,7 +611,8 @@ run('using a key app, in a real database', () => {
       const first = call(saraBrick, app.serverId, app.definitionHash);
       const second = call(saraBrick, app.serverId, app.definitionHash);
       try {
-        for (let wait = 0; wait < 400 && arrived.length < 2; wait += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+        // Bounded well under the test's own limit (10 s), so a request that never comes fails the test with time left for the clean-up below
+        for (let wait = 0; wait < 160 && arrived.length < 2; wait += 1) await new Promise((resolve) => setTimeout(resolve, 25));
         expect(arrived).toHaveLength(2);
         arrived[0]({ status: 401 });
         const refused = await Promise.race([first, second]);
@@ -622,7 +623,9 @@ run('using a key app, in a real database', () => {
         expect(accepted.status).toBe(200);
         expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
       } finally {
-        // Whatever failed above: every request still held is answered and both calls are joined, so nothing is left running over the clean-up of the rows
+        // Whatever failed above: a request that reaches the service from now on is answered at once (it would otherwise wait for a resolver nobody
+        // holds), every request still held is answered, and both calls are joined, so nothing is left running over the clean-up of the rows
+        mockSend.current = () => ({ status: 200 });
         for (const answer of arrived) answer({ status: 200 });
         await Promise.allSettled([first, second]);
       }
