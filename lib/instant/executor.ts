@@ -964,21 +964,25 @@ export interface GoodwillSweep {
 export async function sweepGoodwill(deps: Deps & { batch?: number } = {}): Promise<GoodwillSweep> {
   const now = deps.now ?? new Date();
   const limits = await getInstantLimits();
+  const askedBefore = new Date(now.getTime() - GOODWILL_RETRY_AFTER_MINUTES * MINUTE);
+  // Never-asked first, then the longest ago asked: a few intents the books stay unreachable about must not fill every batch and leave the rest
+  // never asked. The pause between two asks of the same intent counts from the last time it was asked, not from when it was made.
   const open = await prisma.instantRefund.findMany({
     where: {
       kind: 'goodwill',
       confirmedAt: null,
       OR: [
-        { releasedAt: null, createdAt: { lte: new Date(now.getTime() - GOODWILL_RETRY_AFTER_MINUTES * MINUTE) } },
+        { releasedAt: null, createdAt: { lte: askedBefore }, AND: [{ OR: [{ lastTriedAt: null }, { lastTriedAt: { lte: askedBefore } }] }] },
         { releasedAt: { lte: new Date(now.getTime() - GOODWILL_RELEASED_RETRY_HOURS * 60 * MINUTE) }, createdAt: { gte: new Date(now.getTime() - LATE_EVIDENCE_DAYS * 24 * 60 * MINUTE) } },
       ],
     },
-    orderBy: [{ releasedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
+    orderBy: [{ lastTriedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
     take: deps.batch ?? 50,
     select: { id: true, refundKey: true, runId: true, personId: true, createdAt: true, releasedAt: true },
   });
   const result: GoodwillSweep = { looked: open.length, settled: 0, released: 0 };
   for (const intent of open) {
+    await prisma.instantRefund.updateMany({ where: { id: intent.id, confirmedAt: null }, data: { lastTriedAt: now } });
     const outcome = await giveBack({ personId: intent.personId, runId: intent.runId }, { ...deps, now }).catch((error): GiveBackOutcome => {
       console.error('[Instant] Could not finish a give-back:', error instanceof Error ? error.message : 'unknown');
       return { status: 'refused', reason: 'unavailable' };

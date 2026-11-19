@@ -216,7 +216,7 @@ describe('a reply other people in the chat read (game #1993)', () => {
       raw.mockRestore();
       expect(res.status).toBe(200);
       expect(res.body.artifact).toMatchObject({ copiedFromId: id });
-      expect(held.some((line) => line.includes('FROM "artifacts"') && line.includes('FOR UPDATE') && line.endsWith(`|${id}`))).toBe(true);
+      expect(held.some((line) => line.includes('FROM "artifacts"') && /FOR (UPDATE|SHARE)/.test(line) && line.endsWith(`|${id}`))).toBe(true);
     });
 
     it('does not land, from its owner either, once it became "Just you" in the same moment', async () => {

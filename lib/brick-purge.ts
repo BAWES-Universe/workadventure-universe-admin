@@ -73,6 +73,10 @@ export async function purgeBrick(id: string, now: Date = new Date()): Promise<Pu
       // The delete itself decides: a Brick Undo took back at this moment is not touched (nothing below runs for it)
       const { count } = await tx.bot.deleteMany({ where });
       if (count === 0) return false;
+      // The removal is written down in the same step that deletes the Brick, so the two are one: no record without a Brick this call removed (a delete
+      // that failed, a Brick Undo got to first), and none written over by another call that removed it first (that one returned above). The bot server hears
+      // of it on the sweeps of the next days (lib/brick-delete.ts `recentlyRemovedBricks`), so an id is never lost to a request nobody read
+      await tx.brickRemoval.upsert({ where: { botId: id }, create: { botId: id, removedAt: now }, update: { removedAt: now } });
       const botId = { botId: id };
       await tx.botsConversation.deleteMany({ where: botId });
       await tx.botsMemory.deleteMany({ where: botId });

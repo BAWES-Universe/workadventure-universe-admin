@@ -375,14 +375,14 @@ run('more Bricks, deleting one and Undo, in a real database', () => {
     // A delete that fails (the database away at that moment) leaves no record for a Brick that is still there
     const failing = await makeBrick(wren.id, { name: 'Failing Brick' });
     await deleteBrick(failing.id, wren.id, NOW);
-    const real = prisma.$queryRaw.bind(prisma) as (...args: unknown[]) => unknown;
-    const spy = jest.spyOn(prisma, '$queryRaw').mockImplementation(((...args: unknown[]) => {
-      const text = JSON.stringify((args[0] as { strings?: string[] })?.strings ?? args[0]);
-      if (text.includes('brick_removals')) throw new Error('database away');
-      return real(...args);
-    }) as never);
+    // The removal is written inside the purge's own transaction: when that write fails the delete is undone with it (the sweep looks at the Brick again later)
+    const real = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+    const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((work: unknown, options?: unknown) =>
+      typeof work === 'function'
+        ? real((tx: object) => (work as (tx: object) => unknown)(new Proxy(tx, { get: (target, key) => (key === 'brickRemoval' ? { upsert: () => { throw new Error('database away'); } } : (target as Record<string | symbol, unknown>)[key]) })), options)
+        : real(work, options)) as never);
     try {
-      await expect(removeGoneBricks(later(8), wren.id)).rejects.toThrow('database away');
+      expect(await removeGoneBricks(later(8), wren.id)).not.toContain(failing.id);
     } finally {
       spy.mockRestore();
     }

@@ -1822,7 +1822,7 @@ async function fenceControl(botId: string, now: Date = new Date()): Promise<void
 
 export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' | 'in_progress' | 'not_secured' };
 
-/** The first turns of a Brick's jobs that were marked as sent and never named: gone only when nothing can still be running them (see fenceTakeOver). */
+/** The first turns of a Brick's jobs that were marked as sent and never named: gone only when nothing can still be running them (see leadFence). */
 async function clearFirstTurnMarks(botId: string): Promise<void> {
   await prisma.computerJob.updateMany({ where: { botId, NOT: { firstTurnSentAt: null }, agentResponseId: null }, data: { firstTurnSentAt: null } });
 }

@@ -542,7 +542,7 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
 
 /** Holds an artifact's row for the rest of the transaction: a change of how it is shared writes to it, so that change waits until this ends (or has landed before the look). */
 export async function holdForCopy(tx: Prisma.TransactionClient, artifactId: string): Promise<void> {
-  await tx.$queryRaw`SELECT 1 FROM "artifacts" WHERE "id" = ${artifactId} FOR UPDATE`;
+  await tx.$queryRaw`SELECT 1 FROM "artifacts" WHERE "id" = ${artifactId} FOR SHARE`;
 }
 
 /**

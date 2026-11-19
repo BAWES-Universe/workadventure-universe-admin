@@ -41,7 +41,12 @@ describe('the schema a Brick is offered holds what admission accepts', () => {
     const cut = cutSchema('EXA_GET_CONTENTS_ACTION', { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } }, ids: { type: 'array' }, text: { type: 'boolean' }, subpages: { type: 'integer' } }, required: [], allOf: [{ not: { required: ['x'] } }] }) as Schema;
     expect(Object.keys(cut.properties).sort()).toEqual(['ids', 'text', 'urls']);
     expect(cut.properties.urls).toMatchObject({ minItems: 1, maxItems: 20 });
-    expect(cut.allOf).toEqual([{ not: { required: ['x'] } }, { anyOf: [{ required: ['urls'] }, { required: ['ids'] }] }]);
+    // Laid beside what the provider says: pages from one of the two lists, and the two lists together hold at most 20 (each as long as the room the other leaves)
+    expect(cut.allOf).toEqual([
+      { not: { required: ['x'] } },
+      { anyOf: [{ required: ['urls'] }, { required: ['ids'] }] },
+      { anyOf: Array.from({ length: 21 }, (_, used) => ({ properties: { urls: { maxItems: used }, ids: { maxItems: 20 - used } } })) },
+    ]);
   });
 
   it('leaves a tool that is not in the table as it came', () => {

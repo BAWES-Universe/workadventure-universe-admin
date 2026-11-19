@@ -356,7 +356,9 @@ run('goals and tasks, in a real database', () => {
     // The person deletes one of them after its notice went out and was never confirmed
     await prisma.brickItem.update({ where: { id: deleted.item.id }, data: { state: 'deleted' } });
     const retry = await claimWork(at(HOUR + 60 * MIN + 2 * DAY));
-    expect(retry.failed.map((one) => one.itemId)).toEqual([done.item.id]);
+    // (Notices other tests left unconfirmed are asked again two days on too: only thora's items count here)
+    const mineOnly = <T extends { itemId: string }>(list: T[]) => list.filter((one) => [deleted.item.id, done.item.id].includes(one.itemId));
+    expect(mineOnly(retry.failed).map((one) => one.itemId)).toEqual([done.item.id]);
     // The Brick is switched off while a retry is on its way: it hands out nothing (the Brick predicates are read again under a lock, after it was chosen)
     const real = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
     let switchedOff = false;
@@ -369,7 +371,7 @@ run('goals and tasks, in a real database', () => {
     }) as never);
     try {
       const again = await claimWork(at(HOUR + 60 * MIN + 4 * DAY));
-      expect(again.failed.map((one) => one.itemId)).toEqual([]);
+      expect(mineOnly(again.failed).map((one) => one.itemId)).toEqual([]);
     } finally {
       spy.mockRestore();
       await prisma.bot.update({ where: { id: thora.brickId }, data: { enabled: true } });

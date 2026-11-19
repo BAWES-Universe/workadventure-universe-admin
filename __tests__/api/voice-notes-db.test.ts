@@ -753,6 +753,77 @@ run('voice notes for every bot, in a real database', () => {
       expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
     });
 
+    it('counts a heard note for as long as its words are kept, not for a time from when it was reserved', async () => {
+      const capped = await newBot('Capped seven');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 1 } });
+      const person = `heard-${randomUUID()}`;
+      const first = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+      // Reserved a quarter of an hour ago, heard a minute later: its words are kept until 12 minutes from now, so its answer can still be made
+      const reservedAt = new Date(Date.now() - 15 * 60_000 - 5_000);
+      await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { state: 'heard', createdAt: reservedAt, bufferUntil: new Date(Date.now() + 12 * 60_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
+      // Once its words are no longer kept it can never be answered: it holds no place
+      await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { bufferUntil: new Date(Date.now() - 1_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+    });
+
+    it('counts a note whose answer is being made once when its reply is already reported: the reported reply is a row, and the note is not counted on top of it while its lease is live', async () => {
+      const capped = await newBot('Capped five');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 2 } });
+      const person = `dup-${randomUUID()}`;
+      const live = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+      await prisma.voiceNoteTurn.update({ where: { id: live.id }, data: { state: 'answering', generation: 3, leaseUntil: new Date(Date.now() + 60_000) } });
+      // Its reply is reported (a usage row) and its lease is still live: one reply is used, none is on its way, so one more is allowed
+      await prisma.botsAiUsage.create({ data: { botId: capped, providerId: 'universe-ai', talkedUserId: person, talkedGuest: true } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+      // That one is on its way: the two places are taken
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
+    });
+
+    it('counts a note whose answer is being made only while its lease is live: one a bot server dropped after its reply was reported is not counted twice', async () => {
+      const capped = await newBot('Capped three');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 2 } });
+      const person = `ans-${randomUUID()}`;
+      // A note whose answer is being made, with the bot server still holding it: it is one reply on its way
+      const live = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+      await prisma.voiceNoteTurn.update({ where: { id: live.id }, data: { state: 'answering', generation: 3, leaseUntil: new Date(Date.now() + 60_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
+      // The bot server reported the reply (its usage row) and stopped before it recorded the answer: the lease runs out, and the turn is
+      // not counted on top of its row. One reply is used and one is on its way, so one is left
+      await prisma.botsAiUsage.create({ data: { botId: capped, providerId: 'universe-ai', talkedUserId: person, talkedGuest: true } });
+      await prisma.voiceNoteTurn.updateMany({ where: { botId: capped, personKey: { not: '' }, id: { not: live.id } }, data: { state: 'answered' } });
+      await prisma.voiceNoteTurn.update({ where: { id: live.id }, data: { leaseUntil: new Date(Date.now() - 1_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+    });
+
+    it('counts a note whose answer is being made while its lease is live, however long ago it was reserved (a heard note takes its answer lease late)', async () => {
+      const capped = await newBot('Capped late');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 1 } });
+      const person = `late-${randomUUID()}`;
+      const first = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+      // Reserved 40 minutes ago, heard soon after, its answer lease taken only now: a live lease with no reply reported yet is one reply on its way
+      await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { state: 'answering', generation: 2, createdAt: new Date(Date.now() - 40 * 60_000), leaseUntil: new Date(Date.now() + 2 * 60_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
+      // The lease runs out with nothing reported: it holds no place
+      await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { leaseUntil: new Date(Date.now() - 1_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+    });
+
+    it('pairs each reported reply with one note being answered: two notes, one reply reported, leaves one on the way', async () => {
+      const capped = await newBot('Capped six');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 3 } });
+      const person = `pair-${randomUUID()}`;
+      for (let n = 0; n < 2; n += 1) {
+        const turn = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+        await prisma.voiceNoteTurn.update({ where: { id: turn.id }, data: { state: 'answering', generation: 2, leaseUntil: new Date(Date.now() + 60_000) } });
+      }
+      await prisma.botsAiUsage.create({ data: { botId: capped, providerId: 'universe-ai', talkedUserId: person, talkedGuest: true } });
+      // One used + one on its way = 2 of 3: one more is allowed, and then it is full
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
+    });
+
     it('writes a reply\'s usage row under the lock a reservation counts under, so a row never lands between its two counts (an error row is not held)', async () => {
       const counted = await newBot('Usage lock');
       const providerId = `usage-lock-${tag}`;

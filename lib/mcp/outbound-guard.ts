@@ -298,7 +298,14 @@ export async function pinnedFetch(url: string, init: { method?: string; headers?
           resolve(new Response(noBody ? null : (Readable.toWeb(incoming) as ReadableStream), { status, statusText: incoming.statusMessage ?? '', headers: responseHeaders }));
         } catch (error) {
           incoming.destroy();
-          reject(error);
+          if (error instanceof Error) reject(error);
+          else {
+            // An error made by the platform's own code in another realm (a RangeError from `Response`) is handed on as an Error of this one, with its name
+            const named = typeof error === 'object' && error !== null ? (error as { message?: unknown; name?: unknown }) : {};
+            const wrapped = new Error(typeof named.message === 'string' ? named.message : 'The server answered with a status that cannot be read');
+            wrapped.name = typeof named.name === 'string' ? named.name : 'Error';
+            reject(wrapped);
+          }
         }
       },
     );
