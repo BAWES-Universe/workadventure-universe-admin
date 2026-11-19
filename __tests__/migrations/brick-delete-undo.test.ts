@@ -17,6 +17,9 @@ type Result = {
   offers: Record<string, number | boolean>;
   offeredAtIsSet: number;
   offersAfterAccountGone: Row[];
+  keptRows: Row[];
+  keptSwitchChecks: Record<string, boolean>;
+  undoneAgain: Row;
 };
 
 let result: Result;
@@ -68,5 +71,25 @@ describe('more Bricks, and deleting one with Undo: the migration', () => {
   it('only knows people that exist, keeps a topic short, and lets a person’s suggestions go with their account', () => {
     expect(result.offers).toMatchObject({ unknownPerson: false, topicTooLong: false });
     expect(result.offersAfterAccountGone).toEqual([{ user_id: 'omar', topic: 'recipes' }]);
+  });
+
+  describe('and the one after it, which keeps the switch Undo gives back (20261119050000)', () => {
+    it('had let a deleted Brick wait with no saved switch, and no longer does', () => {
+      expect(result.keptSwitchChecks.firstCheckAllowedIt).toBe(true);
+      expect(result.keptSwitchChecks.deleteWithoutASavedSwitch).toBe(false);
+      expect(result.keptSwitchChecks.savedSwitchTakenOutOfADeletedBrick).toBe(false);
+    });
+
+    it('gives a row the first check let through the safe answer, off, and leaves a Brick that kept its switch as it was', () => {
+      expect(result.keptRows).toEqual([
+        { id: 'keep1', enabled: false, enabled_before_delete: true },
+        { id: 'legacy1', enabled: false, enabled_before_delete: false },
+      ]);
+    });
+
+    it('still lets Orbit delete a Brick, keeps it off, and gives it back with Undo, and still refuses a room bot', () => {
+      expect(result.keptSwitchChecks).toMatchObject({ deleteTheWayOrbitDoesIt: true, switchADeletedBrickOn: false, undoTheWayOrbitDoesIt: true, deleteARoomBot: false });
+      expect(result.undoneAgain).toEqual({ enabled: true, enabled_before_delete: null, deleted_at: null, gone_at: null });
+    });
   });
 });
