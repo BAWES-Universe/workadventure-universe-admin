@@ -1119,7 +1119,84 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 20 * MIN) })).toEqual({ looked: 1, settled: 0, released: 0 });
       expect(await prisma.instantRefund.count({ where: { runId: second, confirmedAt: null } })).toBe(1);
       expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN) })).toEqual({ looked: 1, settled: 0, released: 1 });
-      expect(await prisma.instantRefund.count({ where: { runId: second } })).toBe(0);
+      // Let go of the budget, but KEPT with its key and amount: the books may have given it, and only their answer to this key finishes it
+      expect(await prisma.instantRefund.count({ where: { runId: second, confirmedAt: null, releasedAt: { not: null } } })).toBe(1);
+    });
+
+    it('an intent let go after the wait is still finished when the books answer later: at its own amount, once, whatever the limits are by then', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 60 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const runId = await charged(f, p);
+      // The books gave it back, then never answered
+      const real = f.funds.refund.getMockImplementation()!;
+      f.funds.refund.mockImplementationOnce((async (input: never) => {
+        await real(input);
+        throw new Error('connection reset');
+      }) as never);
+      expect(await giveBack({ personId: sara, runId }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'unavailable' });
+      const { sweepGoodwill } = await import('@/lib/instant/executor');
+      f.funds.refund.mockResolvedValue({ ok: false, refundedMicros: 0, reason: 'unavailable' });
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 61 * MIN) })).toEqual({ looked: 1, settled: 0, released: 1 });
+      // It no longer uses up the budget or the person's count
+      await setLimits({ goodwillMaxMicros: 1_000, goodwillBudgetMicros: 1_000, goodwillPerPersonPerMonth: 1, unreachableWaitMinutes: 60 });
+      // The books are back: the sweep goes on asking about the kept intent, and it is finished at the amount the books gave, moving the run once
+      f.funds.refund.mockImplementation(real as never);
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 90 * MIN) })).toEqual({ looked: 1, settled: 1, released: 0 });
+      const intent = await prisma.instantRefund.findFirstOrThrow({ where: { runId } });
+      expect(intent.confirmedAt).not.toBeNull();
+      expect(intent.releasedAt).toBeNull();
+      expect(Number(intent.amountMicros)).toBe(5_000);
+      expect(Number((await runOf(runId)).refundedMicros)).toBe(5_000);
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 120 * MIN) })).toEqual({ looked: 0, settled: 0, released: 0 });
+      expect(Number((await runOf(runId)).refundedMicros)).toBe(5_000);
+    });
+
+    it('a few intents the books stay unreachable about cannot fill every batch: the sweep takes never-asked and longest-ago-asked ones first', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 6000 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const a = await charged(f, p, 'a');
+      const b = await charged(f, p, 'b');
+      f.funds.refund.mockResolvedValue({ ok: false, refundedMicros: 0, reason: 'unavailable' });
+      await giveBack({ personId: sara, runId: a }, { funds: f.funds });
+      await giveBack({ personId: sara, runId: b }, { funds: f.funds });
+      const { sweepGoodwill } = await import('@/lib/instant/executor');
+      const asked = () => f.funds.refund.mock.calls.map((call) => (call[0] as { key: string }).key);
+      f.funds.refund.mockClear();
+      // A batch of one: first the older one is asked, then (a later sweep, the older one just asked) the other, never the same one again
+      await sweepGoodwill({ funds: f.funds, batch: 1, now: new Date(Date.now() + 10 * MIN) });
+      await sweepGoodwill({ funds: f.funds, batch: 1, now: new Date(Date.now() + 11 * MIN) });
+      const keys = asked();
+      expect(keys).toHaveLength(2);
+      expect(new Set(keys).size).toBe(2);
+      // And the pause between two asks of the same one counts from when it was last asked
+      f.funds.refund.mockClear();
+      expect(await sweepGoodwill({ funds: f.funds, batch: 5, now: new Date(Date.now() + 12 * MIN) })).toMatchObject({ looked: 0 });
+      expect(await sweepGoodwill({ funds: f.funds, batch: 5, now: new Date(Date.now() + 17 * MIN) })).toMatchObject({ looked: 2 });
+    });
+
+    it('a sweep lets go only of the intent whose age it read: a newer intent under the same key keeps its own full wait', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 60 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const runId = await charged(f, p);
+      f.funds.refund.mockResolvedValueOnce({ ok: false, refundedMicros: 0, reason: 'unavailable' });
+      await giveBack({ personId: sara, runId }, { funds: f.funds });
+      const old = await prisma.instantRefund.findFirstOrThrow({ where: { runId } });
+      const { sweepGoodwill } = await import('@/lib/instant/executor');
+      // While the sweep waits for the books, a definitive no drops the old intent and a later ask makes a fresh one with the same key
+      f.funds.refund.mockImplementationOnce((async () => {
+        await prisma.instantRefund.delete({ where: { id: old.id } });
+        await prisma.instantRefund.create({ data: { refundKey: old.refundKey, runId, personId: sara, kind: 'goodwill', amountMicros: BigInt(5_000) } });
+        return { ok: false, refundedMicros: 0, reason: 'unavailable' };
+      }) as never);
+      const result = await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 61 * MIN) });
+      expect(result.released).toBe(0);
+      const fresh = await prisma.instantRefund.findFirstOrThrow({ where: { runId } });
+      expect(fresh.id).not.toBe(old.id);
+      expect(fresh.releasedAt).toBeNull();
+      expect(fresh.confirmedAt).toBeNull();
     });
 
     it('when the books fail after they gave it back, the intent stays and a later ask finishes it at the books amount, even if the limits moved', async () => {
