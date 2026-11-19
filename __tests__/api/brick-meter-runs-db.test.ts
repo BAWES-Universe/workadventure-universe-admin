@@ -1,6 +1,7 @@
 /**
  * Money and the run (game #2002, Brick 11) against a real database, with the PRETEND computer provider. A model call a run made is on
- * the books under the run's own id, once however many times it is reported, and only for a run that is this Brick's; a computer job
+ * the books under the id the Brick and the run key it reported make, once however many times it is reported; the run is named in the
+ * event's detail only when the run is verified as this Brick's (a foreign run key is still a key for the dedupe, never an attribution); a computer job
  * a run starts is one job for that run, ever, with its room taken once, and its computer time carries the run. Runs only with
  * ROLES_DB_TEST=yes and a DATABASE_URL to a migrated throwaway database:
  *
@@ -12,6 +13,7 @@ import { Prisma } from '@prisma/client';
 jest.mock('@/lib/tool-signin', () => ({ syncToolSignInNotices: jest.fn(async () => undefined) }));
 
 import { prisma } from '@/lib/db';
+import { snapshotSettings } from '../helpers/shared-settings';
 import { createBrick } from '@/lib/brick-create';
 import { claimDueRuns, createItem, runOfBrick } from '@/lib/brick-items';
 import { recordModelCall, runCallEventId } from '@/lib/meter';
@@ -24,6 +26,7 @@ const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const tag = randomUUID().slice(0, 8);
 const NOW = new Date('2026-11-15T12:00:00Z');
 const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
+const past = (n: number) => new Date(NOW.getTime() - 30 * 24 * 60 * 60_000 + n * 60_000);
 const people: string[] = [];
 let made = 0;
 const env = process.env.COMPUTER_PROVIDER;
@@ -39,9 +42,11 @@ async function person(name: string) {
 
 /** A goal and its first run, claimed. */
 async function goalRun(who: { uuid: string; brickId: string }) {
-  const goal = await createItem(who.brickId, { userId: who.uuid, kind: 'goal', words: 'Get my visa', outcome: 'Visa issued', cadence: { type: 'every', minutes: 60 } }, NOW);
+  // Set a month before anything else in the database: the queue is read by due time, oldest first, so this run is at its head whatever else is due
+  const goal = await createItem(who.brickId, { userId: who.uuid, kind: 'goal', words: 'Get my visa', outcome: 'Visa issued', cadence: { type: 'every', minutes: 60 } }, past(0));
   if (!goal.ok) throw new Error(goal.error);
-  const [started] = (await claimDueRuns(minutes(61))).filter((one) => one.itemId === goal.item.id);
+  const [started] = (await claimDueRuns(past(61))).filter((one) => one.itemId === goal.item.id);
+  if (!started) throw new Error('the goal was not handed out');
   return { itemId: goal.item.id, runId: started.runId };
 }
 
@@ -65,25 +70,33 @@ const call = (botId: string, over: Record<string, unknown> = {}) => ({
 });
 
 run('money and the run, in a real database', () => {
-  beforeAll(() => {
+  let putMeterBack: () => Promise<void> = async () => {};
+  beforeAll(async () => {
     process.env.COMPUTER_PROVIDER = 'fake';
+    // The meter's settings are shared with every suite of the run: read before the tests set their own, put back in afterAll
+    putMeterBack = await snapshotSettings(['meter']);
   });
   beforeEach(async () => {
     setComputerProviderForTests(new FakeComputerProvider());
     await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
   });
   afterAll(async () => {
-    const bots = (await prisma.bot.findMany({ where: { ownerId: { in: people } }, select: { id: true } })).map((bot) => bot.id);
-    await prisma.meterReservation.deleteMany({ where: { botId: { in: bots } } });
-    await prisma.meterEvent.deleteMany({ where: { botId: { in: bots } } });
-    await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
-    setComputerProviderForTests(null);
-    process.env.COMPUTER_PROVIDER = env;
-    await prisma.user.deleteMany({ where: { id: { in: people } } });
-    await prisma.$disconnect();
+    try {
+      const bots = (await prisma.bot.findMany({ where: { ownerId: { in: people } }, select: { id: true } })).map((bot) => bot.id);
+      await prisma.meterReservation.deleteMany({ where: { botId: { in: bots } } });
+      await prisma.meterEvent.deleteMany({ where: { botId: { in: bots } } });
+      await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
+      await prisma.user.deleteMany({ where: { id: { in: people } } });
+    } finally {
+      // Each of these runs whatever the clean-up above did
+      setComputerProviderForTests(null);
+      process.env.COMPUTER_PROVIDER = env;
+      await putMeterBack();
+      await prisma.$disconnect();
+    }
   });
 
-  it('puts a model call under the run’s id: once however often it is reported, and only for this Brick’s own run', async () => {
+  it('puts a model call under the id of its Brick and run key: once however often it is reported, and attributed to a run only when it is this Brick’s own', async () => {
     const sara = await person('sara');
     const omar = await person('omar');
     const mine = await goalRun(sara);
@@ -149,7 +162,8 @@ run('money and the run, in a real database', () => {
 
     // A run that is not this Brick's is booked, with no run in its detail
     await recordModelCall(call(sara.brickId, { clientEventId: 'foreign', runKey: theirs.runId, runId: await runOfBrick(sara.brickId, theirs.runId) }) as never);
-    const foreign = await prisma.meterEvent.findFirst({ where: { eventId: { endsWith: ':model:foreign' } } });
+    // This report's own event, by the full id the books make for it: an event a run before this one left under the same suffix cannot stand in
+    const foreign = await prisma.meterEvent.findUnique({ where: { eventId: runCallEventId(sara.brickId, theirs.runId, 'foreign') } });
     expect(foreign).not.toBeNull();
     expect((foreign?.detail as Record<string, unknown>).runId).toBeUndefined();
   });
