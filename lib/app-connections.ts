@@ -504,6 +504,16 @@ export async function newSignInNonce(connectionId: string): Promise<string> {
   return nonce;
 }
 
+/**
+ * A ticket only when none is waiting: a finish that already used its own ticket must not replace one that a newer sign-in made while
+ * it waited on GitHub. Null when a newer ticket stands (it is left alone).
+ */
+export async function newSignInNonceIfClear(connectionId: string): Promise<string | null> {
+  const nonce = randomBytes(24).toString('base64url');
+  const made = await prisma.appConnection.updateMany({ where: { id: connectionId, signInNonce: null }, data: { signInNonce: nonce } });
+  return made.count === 1 ? nonce : null;
+}
+
 /** Uses the ticket exactly once: true for the first return that carries the current one, false for anything else. */
 export async function takeSignInNonce(connectionId: string, nonce: string | undefined): Promise<boolean> {
   if (!nonce) return false;

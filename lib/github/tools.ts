@@ -104,6 +104,13 @@ export interface ToolResult {
    * happened.
    */
   changedNothing?: boolean;
+  /** GitHub's status when it turned the call down (a 403 or 404 is where an organization that has not allowed Universe shows). */
+  status?: number;
+  /**
+   * The organization that has not allowed Universe's GitHub app yet, when that is why GitHub said no: the Brick then offers the
+   * person the card (ask its owner, or use their own key) instead of only saying it cannot reach it.
+   */
+  orgNeedsOk?: string;
 }
 
 class ToolError extends Error {
@@ -111,6 +118,8 @@ class ToolError extends Error {
     message: string,
     /** GitHub refused the token itself, found by a step inside a tool: kept so the person is still asked to sign in again. */
     readonly unauthorized = false,
+    /** GitHub's status, when it was GitHub's refusal. */
+    readonly status?: number,
   ) {
     super(message);
   }
@@ -119,7 +128,7 @@ class ToolError extends Error {
 /** Stops the tool with GitHub's refusal, keeping whether it was the sign-in itself that GitHub turned down. */
 function refused(answer: GitHubAnswer, what: string): never {
   const result = refusal(answer, what);
-  throw new ToolError(result.text, result.unauthorized === true);
+  throw new ToolError(result.text, result.unauthorized === true, answer.status);
 }
 
 /** A list of label names: every entry must be text (an empty list is allowed and clears them). Undefined when not given. */
@@ -175,15 +184,58 @@ function refusal(answer: GitHubAnswer, what: string): ToolResult {
     return {
       text: `GitHub said no to ${what} (${answer.status}: ${message}). Either it does not exist, the owner cannot do this there, or Universe's GitHub app is not added where it lives (the owner can add it under Apps, GitHub, Where it works).`,
       isError: true,
+      status: answer.status,
     };
   }
-  return { text: `GitHub said no to ${what} (${answer.status}: ${message}).`, isError: true };
+  return { text: `GitHub said no to ${what} (${answer.status}: ${message}).`, isError: true, status: answer.status };
+}
+
+/**
+ * The organization (as GitHub names it) when GitHub's no is because that organization has not allowed Universe's GitHub app: the
+ * owner of what was asked for is an organization, and the app is added on none of the places the person reaches it from under that
+ * name. Null in every other case, and when GitHub cannot say (a pasted key has no installs to list): the plain refusal stands then.
+ */
+async function organizationThatHasNotAllowed(request: Request, owner: string, repo: string | null, status: number, appIsOn?: AppIsOn): Promise<string | null> {
+  const who = await request<{ type?: string; login?: string }>(`/users/${encodeURIComponent(owner)}`);
+  if (!who.ok || who.data.type !== 'Organization' || !who.data.login) return null;
+  // The app itself can say whether it is added on the organization, which the person's own list of installations cannot for someone
+  // who is not a member (it shows only what they may see): added there means this is not about approval
+  if ((await appIsOn?.(who.data.login).catch(() => null)) === true) return null;
+  // A 404 on a repository the person can read is a missing file or branch, which the organization's approval does not fix
+  if (status === 404 && repo) {
+    const readable = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
+    if (readable.ok) return null;
+    // GitHub could not say (a server error, a slow-down, or a 403 that may be a rate limit or a single-sign-on block): not known to be an
+    // approval problem, so the plain refusal stands. Only a 404 says the repository is hidden from this person.
+    if (readable.status !== 404) return null;
+  }
+  const login = who.data.login.toLowerCase();
+  // GitHub lists a person's installations 100 a page: every page is read before an organization is said to be missing
+  for (let page = 1; page <= MAX_INSTALLATION_PAGES; page++) {
+    const installs = await request<{ installations?: { account?: { login?: string } | null }[] }>(`/user/installations?per_page=100&page=${page}`);
+    if (!installs.ok || !Array.isArray(installs.data.installations)) return null;
+    if (installs.data.installations.some((row) => row.account?.login?.toLowerCase() === login)) return null;
+    if (installs.data.installations.length < 100) return who.data.login;
+  }
+  // So many pages that the end was not reached: unknown, so the plain refusal stands
+  return null;
+}
+
+const MAX_INSTALLATION_PAGES = 10;
+
+/** The owner a call was about: the repository's, or the organization a new repository was asked for in. */
+function ownerOfCall(name: string, args: Record<string, unknown>): string | null {
+  const given = name === 'github_create_repo' ? args.owner : typeof args.repo === 'string' ? args.repo.split('/')[0] : null;
+  return typeof given === 'string' && /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(given.trim()) ? given.trim() : null;
 }
 
 type Request = <T = unknown>(path: string, init?: { method?: string; body?: unknown; accept?: string }) => Promise<GitHubAnswer<T>>;
 
+/** Whether Universe's GitHub app is added on an organization, asked as the app itself: true, false, or null when it cannot be told. */
+export type AppIsOn = (organization: string) => Promise<boolean | null>;
+
 /** Runs one tool as the person whose token this is. Never throws: a failure is a result the Brick reads. */
-export async function runGitHubTool(token: string, name: string, args: Record<string, unknown>, fetchImpl: FetchLike = fetch): Promise<ToolResult> {
+export async function runGitHubTool(token: string, name: string, args: Record<string, unknown>, fetchImpl: FetchLike = fetch, appIsOn?: AppIsOn): Promise<ToolResult> {
   // Whether a change may have happened: set once a change is sent and GitHub does not plainly turn it down
   let mayHaveChanged = false;
   const request: Request = async <T = unknown>(path: string, init?: { method?: string; body?: unknown; accept?: string }) => {
@@ -202,14 +254,33 @@ export async function runGitHubTool(token: string, name: string, args: Record<st
   try {
     result = await run(request, name, args ?? {}, fetchImpl);
   } catch (error) {
-    if (error instanceof ToolError) result = error.unauthorized ? { text: error.message, isError: true, unauthorized: true } : { text: error.message, isError: true };
-    else {
+    if (error instanceof ToolError) {
+      result = error.unauthorized ? { text: error.message, isError: true, unauthorized: true } : { text: error.message, isError: true, ...(error.status ? { status: error.status } : {}) };
+    } else {
       console.error('[GitHub] Tool failed:', name, error instanceof Error ? error.message : 'unknown');
       result = {
         text: mayHaveChanged
           ? 'GitHub did not answer in time, so this may or may not have happened. Check on GitHub before asking for it again.'
           : 'GitHub could not be reached just now. Try again in a moment.',
         isError: true,
+      };
+    }
+  }
+  // GitHub said no where an organization is the owner: when that organization has not allowed Universe's app, the Brick says so and
+  // offers the person the card (ask the owner, or use their own key), rather than leaving them with "it does not exist"
+  if (result.isError && !result.unauthorized && (result.status === 403 || result.status === 404)) {
+    const owner = ownerOfCall(name, args ?? {});
+    const repoName = typeof args?.repo === 'string' && args.repo.includes('/') && name !== 'github_create_repo' ? args.repo.split('/')[1]?.trim() || null : null;
+    const org = owner ? await organizationThatHasNotAllowed(request, owner, repoName, result.status, appIsOn).catch(() => null) : null;
+    if (org) {
+      const where = typeof args?.repo === 'string' ? args.repo : org;
+      result = {
+        ...result,
+        orgNeedsOk: org,
+        text:
+          `GitHub said no to reaching ${where} (${result.status}). ${org} only lets in apps its owner allows, and Universe's GitHub app is not added there yet. ` +
+          `Say in one short sentence that you cannot reach ${where} yet for that reason, then call offer_github_owner_ok with org "${org}": it gives the person two ways forward on a card (ask the owner, or use their own GitHub key). ` +
+          'Do not mention the card.',
       };
     }
   }

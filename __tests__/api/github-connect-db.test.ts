@@ -23,13 +23,14 @@ import { GET as signIn } from '@/app/api/me/apps/[connectionId]/sign-in/route';
 import { GET as callback } from '@/app/api/github/callback/route';
 import { POST as finish } from '@/app/api/me/apps/github/finish/route';
 import { GET as installed } from '@/app/api/github/installed/route';
+import { GET as ownerOk } from '@/app/api/me/apps/github/owner-ok/route';
 import { POST as webhook } from '@/app/api/github/webhook/route';
 import { POST as saveKey, DELETE as dropKey } from '@/app/api/me/apps/github/key/route';
 import { POST as createPage } from '@/app/api/admin/github-app/create/route';
 import { GET as created } from '@/app/api/admin/github-app/created/route';
 import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { POST as link } from '@/app/api/ready-made/link/route';
-import { grantToBrick, readConnection, removeGrant } from '@/lib/app-connections';
+import { grantToBrick, newSignInNonceIfClear, readConnection, removeGrant } from '@/lib/app-connections';
 import { POST as gitPass } from '@/app/api/bots/[id]/git-pass/route';
 import { GET as gitGet, POST as gitPost } from '@/app/api/git/[...path]/route';
 import { checkGitPass, MAX_PUSH_BYTES, UPLOAD_GRACE_SECONDS } from '@/lib/github/git-relay';
@@ -267,6 +268,21 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(new URL(madeUp.headers.get('location') as string).searchParams.get('message')).toBe('sign_in_expired');
   });
 
+  it('makes the install page\'s ticket only when no newer sign-in\'s ticket stands', async () => {
+    await makeApp();
+    mockUser.current = { id: sara };
+    const { id } = await (await connectApp(request('/api/me/apps', { method: 'POST', body: { catalogKey: 'github' } }))).json();
+    // A newer sign-in opened while the older one waited on GitHub: its ticket is left alone
+    await prisma.appConnection.update({ where: { id }, data: { signInNonce: 'newer-ticket' } });
+    expect(await newSignInNonceIfClear(id)).toBeNull();
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInNonce).toBe('newer-ticket');
+    // With none waiting (the older one used its own), the install page gets one
+    await prisma.appConnection.update({ where: { id }, data: { signInNonce: null } });
+    const made = await newSignInNonceIfClear(id);
+    expect(made).toBeTruthy();
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInNonce).toBe(made);
+  });
+
   it('closes the window at once when the app is already installed somewhere', async () => {
     await makeApp();
     mockUser.current = { id: sara };
@@ -280,6 +296,162 @@ run('Connect GitHub for Bricks, in a real database', () => {
     const back = await callback(request(`/api/github/callback?code=abc&state=${encodeURIComponent(new URL(started.authorizeUrl).searchParams.get('state') as string)}`));
     const finished = await finishFrom(back);
     expect(await finished.json()).toEqual({ id });
+  });
+
+  describe('install and sign-in as one step (D5: "sign in during install" on)', () => {
+    /** Sign in first as the separate way does (no install yet), and take the install page's state from the answer. */
+    async function toInstallPage() {
+      await makeApp();
+      mockUser.current = { id: sara };
+      const { id } = await (await connectApp(request('/api/me/apps', { method: 'POST', body: { catalogKey: 'github' } }))).json();
+      const started = await (await signIn(request(`/api/me/apps/${id}/sign-in?redirectUrl=${encodeURIComponent(OPENER)}`), params({ connectionId: id }))).json();
+      pretendGitHub({
+        'POST https://github.com/login/oauth/access_token': { body: { access_token: 'ghu_1', refresh_token: 'ghr_1', expires_in: 28800 } },
+        'GET https://api.github.com/user': { body: { login: 'sara-gh', id: 501 } },
+        'GET https://api.github.com/user/installations': { body: { total_count: 0 } },
+      });
+      const back = await callback(request(`/api/github/callback?code=abc&state=${encodeURIComponent(new URL(started.authorizeUrl).searchParams.get('state') as string)}`));
+      const answer = await (await finishFrom(back)).json();
+      return { id, installState: new URL(answer.installUrl).searchParams.get('state') as string };
+    }
+
+    it('GitHub comes back from the install page with a code and the page’s state: it is finished like a sign-in, without PKCE, by the same person only, once', async () => {
+      const { id, installState } = await toInstallPage();
+      const calls = pretendGitHub({
+        'POST https://github.com/login/oauth/access_token': { body: { access_token: 'ghu_2', refresh_token: 'ghr_2', expires_in: 28800 } },
+        'GET https://api.github.com/user': { body: { login: 'sara-gh', id: 501 } },
+        'GET https://api.github.com/user/installations': { body: { total_count: 1 } },
+      });
+      const back = await callback(request(`/api/github/callback?code=xyz&installation_id=9&setup_action=install&state=${encodeURIComponent(installState)}`));
+      const page = new URL(back.headers.get('location') as string);
+      expect(page.origin + page.pathname).toBe('https://play.example.com/oauth-popup-callback.html');
+      expect(page.searchParams.get('oauth')).toBe('github');
+      // Still nothing exchanged at the return itself
+      expect(calls).toHaveLength(0);
+
+      const other = await prisma.user.create({ data: { uuid: `someone-else-${tag}`, email: `someone-else-${tag}@example.test`, name: 'Someone else' } });
+      const stranger = await finishFrom(back, other.id);
+      await prisma.user.delete({ where: { id: other.id } });
+      expect(stranger.status).toBe(404);
+      expect(calls).toHaveLength(0);
+
+      const finished = await finishFrom(back);
+      expect(finished.status).toBe(200);
+      // Installed now: no second install page
+      expect(await finished.json()).toEqual({ id });
+      const exchange = new URLSearchParams(String(calls[0].init.body));
+      expect(Object.fromEntries(exchange)).toMatchObject({ client_secret: 'app-secret', grant_type: 'authorization_code', code: 'xyz' });
+      expect(exchange.get('code_verifier')).toBeNull();
+      const row = await prisma.appConnection.findUniqueOrThrow({ where: { id } });
+      expect(readGitHubAuth(row)).toMatchObject({ accessToken: 'ghu_2', login: 'sara-gh', githubId: 501 });
+
+      // The same return again: the ticket was used, so GitHub is not asked
+      const asked = calls.length;
+      const again = await finishFrom(back);
+      expect(again.status).toBe(400);
+      expect(await again.json()).toMatchObject({ code: 'sign_in_expired' });
+      expect(calls).toHaveLength(asked);
+    });
+
+    it('asks again for where it works when GitHub signed the person in but the app is still on no account of theirs', async () => {
+      const { id, installState } = await toInstallPage();
+      pretendGitHub({
+        'POST https://github.com/login/oauth/access_token': { body: { access_token: 'ghu_3', expires_in: 28800 } },
+        'GET https://api.github.com/user': { body: { login: 'sara-gh', id: 501 } },
+        'GET https://api.github.com/user/installations': { body: { total_count: 0 } },
+      });
+      const finished = await finishFrom(await callback(request(`/api/github/callback?code=xyz&state=${encodeURIComponent(installState)}`)));
+      const answer = await finished.json();
+      expect(answer.id).toBe(id);
+      expect(new URL(answer.installUrl).pathname).toBe('/apps/bawes-universe/installations/new');
+    });
+
+    it('closes the window with nothing to finish when an owner’s OK is awaited, or when the install page had no ticket of ours', async () => {
+      const { installState } = await toInstallPage();
+      // A member who asked their organization's owner for the app: no code comes, and that is no error
+      const asked = await callback(request(`/api/github/callback?setup_action=request&state=${encodeURIComponent(installState)}`));
+      expect(asked.headers.get('location')).toBe('https://play.example.com/oauth-popup-callback.html?oauth=success');
+      // "Add a place" and "Ask an owner" open the install page with no state: a code may come back, and none is spent
+      const calls = pretendGitHub({});
+      const bare = await callback(request('/api/github/callback?code=abc&installation_id=9&setup_action=install'));
+      expect(new URL(bare.headers.get('location') as string).searchParams.get('oauth')).toBe('success');
+      expect(calls).toHaveLength(0);
+      // No state and no sign of an install: still turned away
+      const nothing = await callback(request('/api/github/callback?code=abc'));
+      expect(new URL(nothing.headers.get('location') as string).searchParams.get('message')).toBe('sign_in_expired');
+    });
+
+    it('an install state made before this change (no person or ticket in it) can close the window and never finish a sign-in', async () => {
+      await makeApp();
+      const old = encryptApiKey(JSON.stringify({ kind: 'github-install', connectionId: randomUUID(), redirectUrl: OPENER, exp: Math.floor(Date.now() / 1000) + 600 }));
+      const calls = pretendGitHub({});
+      const back = await callback(request(`/api/github/callback?code=abc&setup_action=install&state=${encodeURIComponent(old)}`));
+      expect(back.headers.get('location')).toBe('https://play.example.com/oauth-popup-callback.html?oauth=success');
+      expect(calls).toHaveLength(0);
+      mockUser.current = { id: sara };
+      const tried = await finish(request('/api/me/apps/github/finish', { method: 'POST', body: { state: old, code: 'abc' } }));
+      expect(tried.status).toBe(400);
+      expect(calls).toHaveLength(0);
+    });
+  });
+
+  it('gives "Ask the owner" GitHub\'s page for that organization, with a ticket that brings the window back', async () => {
+    await makeApp();
+    const id = await signedIn();
+    const calls = pretendGitHub({
+      'GET https://api.github.com/users/acme-corp': { body: { id: 4242, type: 'Organization', login: 'acme-corp' } },
+      'GET https://api.github.com/users/sara': { body: { id: 5, type: 'User', login: 'sara' } },
+      'GET https://api.github.com/users/nobody-here': { status: 404, body: { message: 'Not Found' } },
+    });
+    const ask = (org: string) => ownerOk(request(`/api/me/apps/github/owner-ok?org=${org}&redirectUrl=${encodeURIComponent(OPENER)}`));
+    mockUser.current = { id: sara };
+    const asked = await ask('acme-corp');
+    expect(asked.status).toBe(200);
+    const body = await asked.json();
+    const page = new URL(body.askUrl);
+    expect(page.origin + page.pathname).toBe('https://github.com/apps/bawes-universe/installations/new/permissions');
+    expect(page.searchParams.get('target_id')).toBe('4242');
+    expect(body.ownKeyPage).toContain('https://github.com/settings/tokens/new');
+    // The lookup of the organization goes with Sara's own sign-in, so GitHub counts it for her and not for our one address
+    expect(calls).toHaveLength(1);
+    expect(new Headers(calls[0].init.headers as Record<string, string>).get('authorization')).toBe('Bearer ghu_first');
+
+    // GitHub sends her back after the request (no code: an owner's OK is awaited): the window closes on the game
+    const back = await callback(request(`/api/github/callback?setup_action=request&state=${encodeURIComponent(page.searchParams.get('state') as string)}`));
+    expect(back.headers.get('location')).toBe('https://play.example.com/oauth-popup-callback.html?oauth=success');
+
+    // A sign-in that has lapsed still gets the card: the organization's name is public
+    const keptAuth = (await prisma.appConnection.findUniqueOrThrow({ where: { id } })).authConfig;
+    await prisma.appConnection.update({ where: { id }, data: { authConfig: null } });
+    const lapsed = await ask('acme-corp');
+    await prisma.appConnection.update({ where: { id }, data: { authConfig: keptAuth } });
+    expect(lapsed.status).toBe(200);
+    expect(new Headers(calls[calls.length - 1].init.headers as Record<string, string>).get('authorization')).toBeNull();
+
+    // A sign-in GitHub turns down (revoked before its recorded end) still gets the card: the lookup is tried again without it
+    const refused = pretendGitHub({
+      'GET https://api.github.com/users/acme-corp': (init) =>
+        new Headers(init.headers as Record<string, string>).get('authorization') ? { status: 401, body: { message: 'Bad credentials' } } : { body: { id: 4242, type: 'Organization', login: 'acme-corp' } },
+    });
+    expect((await ask('acme-corp')).status).toBe(200);
+    expect(refused.map((call) => new Headers(call.init.headers as Record<string, string>).get('authorization'))).toEqual(['Bearer ghu_first', null]);
+
+    // A person's own account is not an organization to ask; a name that does not exist neither
+    pretendGitHub({
+      'GET https://api.github.com/users/acme-corp': { body: { id: 4242, type: 'Organization', login: 'acme-corp' } },
+      'GET https://api.github.com/users/sara': { body: { id: 5, type: 'User', login: 'sara' } },
+      'GET https://api.github.com/users/nobody-here': { status: 404, body: { message: 'Not Found' } },
+    });
+    expect((await ask('sara')).status).toBe(404);
+    expect((await ask('nobody-here')).status).toBe(404);
+    expect((await ask('not%20a%20name')).status).toBe(404);
+    // Someone with no GitHub connection has nothing to ask with
+    const stranger = await prisma.user.create({ data: { uuid: `no-github-${tag}`, email: `no-github-${tag}@example.test`, name: 'No GitHub' } });
+    mockUser.current = { id: stranger.id };
+    const none = await ask('acme-corp');
+    await prisma.user.delete({ where: { id: stranger.id } });
+    expect(none.status).toBe(404);
+    expect(id).toBeTruthy();
   });
 
   it('a Brick gets GitHub through Orbit: no token is handed out, the tools are listed, a call runs once', async () => {

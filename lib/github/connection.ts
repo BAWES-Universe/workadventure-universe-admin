@@ -11,6 +11,7 @@ import {
   GITHUB_API,
   GITHUB_CALLBACK_PATH,
   GITHUB_WEB,
+  installOnUrl,
   installUrl,
   orbitBase,
   OWN_KEY_PAGE,
@@ -108,12 +109,22 @@ interface SignInState {
   exp: number;
 }
 
+/**
+ * The ticket carried through GitHub's install page. With "sign in during install" on, GitHub sends the person back to the callback
+ * with a sign-in code AND this state, so it holds everything the sign-in state does except PKCE (GitHub starts that sign-in, not us).
+ * `personId` and `nonce` are missing on a state made before that (the older two-step way): it can close the window, never finish a sign-in.
+ */
 interface InstallState {
   kind: 'github-install';
   connectionId: string;
+  personId?: string;
+  nonce?: string;
   redirectUrl: string;
   exp: number;
 }
+
+/** What a return from GitHub carries that can finish a sign-in: the sign-in's own state, or the install page's. */
+export type ReturnState = SignInState | (InstallState & { personId: string; nonce: string });
 
 /** Reads a state Orbit made, or null when it is not one, is of another kind, or is too old. */
 export function openState<T extends { kind: string; exp: number }>(token: string | null, kind: T['kind']): T | null {
@@ -179,9 +190,23 @@ export function readInstallState(token: string | null): InstallState | null {
   return openState<InstallState>(token, 'github-install');
 }
 
-/** The address of the install page, carrying where to send the person back once they picked where it works. */
-export function installPageFor(app: GitHubApp, connectionId: string, redirectUrl: string): string {
-  const state: InstallState = { kind: 'github-install', connectionId, redirectUrl, exp: Math.floor(Date.now() / 1000) + 60 * 60 };
+/**
+ * A return from GitHub that can finish a sign-in, or null. The sign-in's own state is the separate way; the install page's state
+ * (with the person and a ticket in it) is the combined way, where GitHub signs the person in at the end of the install.
+ */
+export function readReturnState(token: string | null): ReturnState | null {
+  const signIn = readSignInState(token);
+  if (signIn) return signIn;
+  const install = readInstallState(token);
+  return install && typeof install.personId === 'string' && install.personId && typeof install.nonce === 'string' && install.nonce ? (install as ReturnState) : null;
+}
+
+/**
+ * The address of the install page for this person, carrying where to send them back and a fresh one-time ticket. Install and sign-in
+ * are one step there: GitHub comes back to the callback with a code, which is finished with this ticket, only by this person.
+ */
+export function installPageFor(app: GitHubApp, connectionId: string, personId: string, nonce: string, redirectUrl: string): string {
+  const state: InstallState = { kind: 'github-install', connectionId, personId, nonce, redirectUrl, exp: Math.floor(Date.now() / 1000) + 60 * 60 };
   return installUrl(app, encryptApiKey(JSON.stringify(state)));
 }
 
@@ -243,7 +268,7 @@ export type SignInOutcome = { status: 'done'; needsInstall: boolean } | { status
  * GitHub sent the person back with a code: it is exchanged for their token (once, guarded by the connection's ticket), who they
  * are is kept, and whether they installed the app anywhere yet. `needsInstall` sends them on to pick where it works.
  */
-export async function finishGitHubSignIn(state: SignInState, code: string, fetchImpl: FetchLike = fetch): Promise<SignInOutcome> {
+export async function finishGitHubSignIn(state: ReturnState, code: string, fetchImpl: FetchLike = fetch): Promise<SignInOutcome> {
   const app = await getGitHubApp();
   const base = orbitBase();
   if (!app || !base) return { status: 'failed' };
@@ -257,7 +282,13 @@ export async function finishGitHubSignIn(state: SignInState, code: string, fetch
     // One ticket per sign-in: a replayed return, or one a newer sign-in replaced, is refused before the code is spent
     const taken = await prisma.appConnection.updateMany({ where: { id: connection.id, signInNonce: state.nonce }, data: { signInNonce: null } });
     if (taken.count !== 1) return { status: 'expired' };
-    const answer = await tokenRequest(app, { grant_type: 'authorization_code', code, redirect_uri: `${base}${GITHUB_CALLBACK_PATH}`, code_verifier: state.codeVerifier }, fetchImpl);
+    // PKCE only where we started the sign-in: the combined way is started by GitHub at the end of the install, and the app's secret
+    // (plus the ticket and the person above) is what ties that code to us
+    const answer = await tokenRequest(
+      app,
+      { grant_type: 'authorization_code', code, redirect_uri: `${base}${GITHUB_CALLBACK_PATH}`, ...(state.kind === 'github-sign-in' ? { code_verifier: state.codeVerifier } : {}) },
+      fetchImpl,
+    );
     if (!answer?.access_token) {
       console.error('[GitHub] Sign-in exchange refused:', answer?.error ?? 'no answer');
       return { status: 'failed' };
@@ -514,6 +545,39 @@ async function waitingRequests(app: GitHubApp, githubId: number | undefined, pla
   } catch {
     return [];
   }
+}
+
+/* ------------------------------ an organization's OK ------------------------------ */
+
+export type OwnerOkPage = { status: 'ok'; askUrl: string; ownKeyPage: string } | { status: 'not_org' | 'unavailable' };
+
+/**
+ * "Ask the owner" on a Brick's card (design 14 Nov, Part 3): GitHub's own page for adding Universe's app on this organization, where
+ * an owner installs it and anyone else sends the request that GitHub emails to the owners. It carries the same ticket as the install
+ * page, so the window that opened it is closed when GitHub sends the person back. Also gives the page for a key of their own.
+ */
+export async function ownerOkPage(connection: AppConnection, organization: string, redirectUrl: string, fetchImpl: FetchLike = fetch): Promise<OwnerOkPage> {
+  const app = await getGitHubApp();
+  const personId = connection.ownerId;
+  if (!app || !personId) return { status: 'unavailable' };
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(organization)) return { status: 'not_org' };
+  // With the person's own sign-in when they have one (GitHub counts it against them, not against our one address's 60 an hour); a lapsed
+  // sign-in still gets the card, the organization's name is public.
+  const signedIn = await gitHubToken(connection.id, fetchImpl).catch(() => null);
+  const token = signedIn?.status === 'ok' ? signedIn.token : null;
+  const lookup = (using: string | null) => gitHubRequest<{ id?: number; type?: string }>(using, `/users/${encodeURIComponent(organization)}`, {}, fetchImpl).catch(() => null);
+  let who = await lookup(token);
+  // A sign-in GitHub no longer takes (revoked before its recorded end) must not stop the card: the name is public
+  if (token && who?.status === 401) who = await lookup(null);
+  if (!who) return { status: 'unavailable' };
+  if (!who.ok || who.data.type !== 'Organization' || typeof who.data.id !== 'number') return { status: who.status === 404 || who.ok ? 'not_org' : 'unavailable' };
+  // The ticket the return is finished with, once (a newer one replaces it: only the latest page can finish)
+  const nonce = crypto.randomBytes(24).toString('base64url');
+  await prisma.appConnection.update({ where: { id: connection.id }, data: { signInNonce: nonce } });
+  const state = encryptApiKey(
+    JSON.stringify({ kind: 'github-install', connectionId: connection.id, personId, nonce, redirectUrl, exp: Math.floor(Date.now() / 1000) + 60 * 60 } satisfies InstallState),
+  );
+  return { status: 'ok', askUrl: installOnUrl(app, who.data.id, state), ownKeyPage: OWN_KEY_PAGE };
 }
 
 /* ---------------------------------- disconnect ---------------------------------- */

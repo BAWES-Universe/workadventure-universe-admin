@@ -149,9 +149,11 @@ export function buildManifest(base: string) {
     public: true,
     redirect_url: `${base}${GITHUB_CREATED_PATH}`,
     callback_urls: [`${base}${GITHUB_CALLBACK_PATH}`],
-    setup_url: `${base}${GITHUB_SETUP_PATH}`,
-    setup_on_update: true,
-    request_oauth_on_install: false,
+    // Install and sign-in are one step for the person (design 14 Nov, D5): GitHub sends them back to the callback address with the
+    // sign-in code once they pressed Install & Authorize. GitHub does not use a Setup URL when this is on, so none is sent; the
+    // callback also finishes the older two-step way (sign in first, pick where it works after), which still returns to
+    // GITHUB_SETUP_PATH for an app set up that way by hand.
+    request_oauth_on_install: true,
     hook_attributes: { url: `${base}${GITHUB_WEBHOOK_PATH}`, active: true },
     default_permissions: {
       contents: 'write',
@@ -181,6 +183,17 @@ export function appJwt(app: Pick<GitHubApp, 'appId' | 'pem'>, nowMs = Date.now()
 /** Where a person installs the app (picks accounts and repos). `state` comes back to the setup address. */
 export function installUrl(app: Pick<GitHubApp, 'slug'>, state?: string): string {
   const url = new URL(`${GITHUB_WEB}/apps/${app.slug}/installations/new`);
+  if (state) url.searchParams.set('state', state);
+  return url.toString();
+}
+
+/**
+ * GitHub's own page for adding the app on ONE organization (its numeric id): an owner installs it, and a member who is not an owner
+ * sends the request, which GitHub emails to the organization's owners. `state` comes back like it does from the install page.
+ */
+export function installOnUrl(app: Pick<GitHubApp, 'slug'>, targetId: number, state?: string): string {
+  const url = new URL(`${GITHUB_WEB}/apps/${app.slug}/installations/new/permissions`);
+  url.searchParams.set('target_id', String(targetId));
   if (state) url.searchParams.set('state', state);
   return url.toString();
 }
