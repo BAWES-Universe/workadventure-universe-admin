@@ -778,6 +778,28 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(owned.lines).toEqual([expect.objectContaining({ note: 'Your own key' })]);
     });
 
+    it('a refunded Apps receipt of someone who asked is hidden when only the owner has events on its key or run, and the owner\'s own refunded receipt with books of their own still shows', async () => {
+      const sara = await person('sara');
+      const omar = await person('omar');
+      const event = (eventId: string, detail: { runId?: string; taskKey?: string; instant?: boolean }) =>
+        prisma.meterEvent.create({
+          data: { eventId: `${eventId}-${tag}`, kind: 'app_use', pool: 'chat', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(1000), basis: 'measured', detail },
+        });
+      // Omar asked and was refunded; the books hold the owner's events on the same task key and run, and nothing of Omar's
+      await openReceipt({ botId: sara.brickId, personId: omar.id, taskKey: 'omar-key', runId: 'run-omar', title: 'Omar refunded by key', category: 'apps' }, NOW);
+      await event('omar-key', { instant: true, taskKey: 'omar-key' });
+      await openReceipt({ botId: sara.brickId, personId: omar.id, taskKey: 'omar-run', runId: 'run-omar', title: 'Omar refunded by run', category: 'apps' }, new Date(NOW.getTime() + 1000));
+      await event('run-omar', { runId: 'run-omar' });
+      await closeReceipt({ botId: sara.brickId, taskKey: 'omar-key', personId: omar.id, state: 'refunded' }, NOW);
+      await closeReceipt({ botId: sara.brickId, taskKey: 'omar-run', personId: omar.id, state: 'refunded' }, new Date(NOW.getTime() + 1000));
+      // The owner's own refunded receipt with a charge of their own in the books is listed as before
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'sara-key', title: 'Sara refunded with books', category: 'apps' }, NOW);
+      await event('sara-key', { instant: true, taskKey: 'sara-key' });
+      await closeReceipt({ botId: sara.brickId, taskKey: 'sara-key', personId: sara.id, state: 'refunded' }, NOW);
+      expect((await activityFor(omar.id)).map((item) => item.title)).toEqual([]);
+      expect((await activityFor(sara.id)).map((item) => item.title)).toEqual(['Sara refunded with books']);
+    });
+
     it('a job a rule refused before it ever ran is not an Activity line, and one that ran and was stopped by a rule is', async () => {
       const sara = await person('sara');
       await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Never ran', status: 'stopped', endedBy: 'rule', endedAt: NOW } });
