@@ -16,7 +16,7 @@ import { getWokaList } from '@/lib/wokas';
 import { BRICK_LOOKS } from '@/lib/brick-make';
 import { BRICK_SPRITES, brickSpriteTextures, withBrickSprites } from '@/lib/brick-sprites';
 
-const PLAY = process.env.PLAY_URL || 'http://play.workadventure.localhost';
+const PLAY = (process.env.PLAY_URL || 'http://play.workadventure.localhost').replace(/\/$/, '');
 const roomUrl = 'http://play.test/@/uni/world-a/room';
 
 type List = { woka: { collections: { name: string; textures: { id: string; name: string; url: string }[] }[] } };
