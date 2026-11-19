@@ -42,10 +42,16 @@ describe('what a task’s receipt says it used', () => {
 });
 
 describe('what a task took from credit', () => {
-  it('the figure set when it settled wins; a refunded task took nothing, and zero reads as nothing', () => {
+  it('the settled figure stands in only when there are no priced lines; a refunded task took nothing, and zero reads as nothing', () => {
     expect(spentOf('done', 920_000, [])).toBe(920_000);
     expect(spentOf('done', 0, [])).toBeNull();
     expect(spentOf('refunded', 500_000, [{ label: 'x', amountMicros: 1 }])).toBeNull();
+  });
+
+  it('the priced lines win over a settled figure that disagrees with them: the total always agrees with the lines under it', () => {
+    expect(spentOf('done', 920_000, [{ label: 'a', amountMicros: 100_000 }])).toBe(100_000);
+    // ... and a line whose price is not known yet leaves the settled figure to stand
+    expect(spentOf('done', 920_000, [{ label: 'a', amountMicros: 100_000 }, { label: 'b', note: 'Price not known yet' }])).toBe(920_000);
   });
 
   it('without a settled figure, the charged lines added up when every one has a price', () => {

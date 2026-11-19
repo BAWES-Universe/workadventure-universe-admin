@@ -102,7 +102,7 @@ describe('what a Brick can do on GitHub', () => {
     const github = fakeGitHub([
       ['GET', '/repos/o/r/git/ref/heads/feature/x', 200, { object: { sha: 'parent' } }],
       ['GET', '/repos/o/r/git/commits/parent', 200, { tree: { sha: 'tree0' } }],
-      ['GET', '/repos/o/r/git/trees/tree0?recursive=1', 200, { tree: [{ path: 'run.sh', mode: '100755', type: 'blob' }, { path: 'a.txt', mode: '100644', type: 'blob' }] }],
+      ['GET', '/repos/o/r/git/trees/tree0?recursive=1', 200, { tree: [{ path: 'run.sh', mode: '100755', type: 'blob' }, { path: 'a.txt', mode: '100644', type: 'blob' }, { path: 'old.txt', mode: '100644', type: 'blob' }] }],
       ['POST', '/repos/o/r/git/trees', 201, { sha: 'tree1' }],
       ['POST', '/repos/o/r/git/commits', 201, { sha: 'c1', html_url: 'https://github.com/o/r/commit/c1' }],
       ['PATCH', '/repos/o/r/git/refs/heads/feature/x', 200, {}],
