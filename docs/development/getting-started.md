@@ -1,0 +1,317 @@
+# Getting started with Orbit locally
+
+Moved from the main README so the README can stay short. Start with the quick start in the [README](../../README.md); this page has the full steps.
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js 18+ and npm/yarn/pnpm
+- Docker and Docker Compose
+- WorkAdventure instance running (for OIDC mock in development)
+
+### Setup
+
+1. **Configure hosts file** (required for local development):
+   
+   Add the following entries to your hosts file to enable local domain routing:
+   
+   **Linux/macOS** (`/etc/hosts`):
+   ```bash
+   sudo nano /etc/hosts
+   ```
+   
+   **Windows** (`C:\Windows\System32\drivers\etc\hosts` - run as Administrator):
+   ```powershell
+   notepad C:\Windows\System32\drivers\etc\hosts
+   ```
+   
+   Add these lines:
+   ```
+   127.0.0.1    admin.bawes.localhost
+   127.0.0.1    traefik-admin.bawes.localhost
+   ```
+   
+   **Note**: If you're using WorkAdventure's OIDC mock, you may also need:
+   ```
+   127.0.0.1    oidc.workadventure.localhost
+   127.0.0.1    play.workadventure.localhost
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Set up environment variables:**
+   ```bash
+   cp .env.example .env
+   ```
+   
+   Edit `.env` with your configuration:
+   - `DB_USER`, `DB_PASSWORD`, `DB_NAME` - Database credentials
+   - `ADMIN_API_TOKEN` - Must match WorkAdventure's ADMIN_API_TOKEN
+   - `OIDC_ISSUER` - OIDC provider URL (use WorkAdventure's OIDC mock for dev)
+   - `DATABASE_URL` - PostgreSQL connection string (auto-constructed from DB_* vars in Docker)
+
+4. **Start services with Docker Compose:**
+   ```bash
+   docker-compose up
+   ```
+   
+   This will start:
+   - PostgreSQL database
+   - Admin API (Next.js) behind Traefik
+   - Traefik reverse proxy
+
+5. **Initialize database:**
+   ```bash
+   # For fresh install - applies existing migrations only
+   docker compose exec admin-api npx prisma migrate deploy
+   
+   # Or use the npm script (from host)
+   npm run db:migrate:deploy
+   ```
+   
+   **Migration Commands:**
+   - **`prisma migrate deploy`** - Use for:
+     - ✅ Fresh database setup (applies all existing migrations)
+     - ✅ Production deployments
+     - ✅ Applying migrations without creating new ones
+   - **`prisma migrate dev`** - Use for:
+     - ✅ Development when you've changed `schema.prisma` and need to create a new migration
+     - ❌ Never use in production (can cause data loss)
+
+6. **Seed the database (optional but recommended):**
+   ```bash
+   # Seed default universe, world, room, and templates
+   docker compose exec admin-api npx prisma db seed
+   
+   # Or use the npm script (from host)
+   npm run db:seed
+   ```
+   
+   This creates:
+   - Default universe, world, and room (accessible at `/@/default/default/default`)
+   - System user for ownership
+   - Room template categories and templates
+   - Template maps for creating rooms
+   
+   **Note:** The seed script is idempotent - it's safe to run multiple times and won't create duplicates.
+
+The Admin API will be available at:
+- **Admin Interface**: http://admin.bawes.localhost:8321
+- **Traefik Dashboard**: http://traefik-admin.bawes.localhost:8321
+- **Workadventure Env ADMIN_API_URL**: http://host.docker.internal:8321
+
+**Note**: Port `8321` is required as Traefik is configured to run on this port (configurable via `TRAEFIK_PORT` in `.env`).
+
+## Admin Interface
+
+This project includes a web-based admin interface for managing universes, worlds, rooms, and users.
+
+### Accessing the Admin Interface
+
+1. **Start services**:
+   ```bash
+   docker-compose up
+   ```
+
+2. **Access the admin interface**:
+   - Go to http://admin.bawes.localhost:8321/admin/login
+   - Get an OIDC access token from WorkAdventure (see [OIDC Authentication Testing](../testing/oidc-authentication.md))
+   - Paste the token and sign in
+
+3. **Alternative: Admin Token** (for API testing):
+   - API endpoints can use `ADMIN_API_TOKEN` for direct access
+   - Web interface uses OIDC sessions for user-specific content
+
+4. **View Traefik dashboard** (optional):
+   - Go to http://traefik-admin.bawes.localhost:8321 to see routing information
+
+### Admin Features
+
+- **Dashboard**: Overview of all entities with statistics
+- **Universes**: Create and manage universes (top-level containers)
+- **Worlds**: Create and manage worlds within universes
+- **Rooms**: Create and manage rooms within worlds
+- **Users**: View and manage users
+
+See [Admin Interface Guide](../admin/guide.md) for complete documentation on using the admin interface.
+
+## Configuration
+
+### Environment Variables
+
+Required:
+- `ADMIN_API_TOKEN` - Bearer token for API authentication
+- `OIDC_ISSUER` - OIDC provider URL
+- `OIDC_CLIENT_ID` - OIDC client ID
+- `OIDC_CLIENT_SECRET` - OIDC client secret
+- `DATABASE_URL` - PostgreSQL connection string
+
+Optional:
+- `REDIS_URL` - Redis connection (for caching/rate limiting)
+- `NODE_ENV` - Environment (development/production)
+- `LOG_LEVEL` - Logging level
+
+## Development
+
+### Database Management
+
+All Prisma commands run inside the Docker container to ensure compatibility with Prisma 7 (requires Node.js 20.19+ or 22.12+).
+
+```bash
+# Generate Prisma Client after schema changes
+npm run db:generate
+
+# Create a new migration (use when you've changed schema.prisma)
+npm run db:migrate
+
+# Deploy migrations (use for fresh install or production)
+npm run db:migrate:deploy
+
+# Push schema changes directly to database (dev only, bypasses migrations)
+npm run db:push
+
+# Reset database (drops all data and runs migrations)
+npm run db:reset
+
+# View database in Prisma Studio
+npm run db:studio
+```
+
+**When to use each command:**
+
+- **`npm run db:migrate:deploy`** (or `prisma migrate deploy`):
+  - ✅ **Fresh database setup** - Applies all existing migrations
+  - ✅ **Production deployments** - Safe, idempotent, applies pending migrations
+  - ✅ **After pulling code** - Applies any new migrations from the repo
+  - ✅ **Never creates new migrations** - Only applies existing ones
+
+- **`npm run db:migrate`** (or `prisma migrate dev`):
+  - ✅ **Development only** - When you've modified `schema.prisma` and need to create a migration
+  - ✅ **Creates new migration file** - Generates SQL migration in `prisma/migrations/`
+  - ❌ **Never use in production** - Can cause data loss, not safe for production databases
+  - ⚠️ **Will prompt for migration name** - If schema differs from database
+
+- **`npm run db:push`** (or `prisma db push`):
+  - ✅ **Quick prototyping** - Pushes schema directly without creating migrations
+  - ❌ **Development only** - Bypasses migration history
+  - ❌ **Not for production** - No migration tracking
+
+#### Prisma Studio
+
+Prisma Studio provides a visual database browser. It runs on-demand (not automatically with `docker-compose up`).
+
+**Usage:**
+1. Start your services:
+   ```bash
+   docker-compose up
+   ```
+
+2. In a separate terminal, start Prisma Studio:
+   ```bash
+   npm run db:studio
+   ```
+
+3. Open your browser and navigate to:
+   ```
+   http://localhost:5555
+   ```
+
+4. Stop Prisma Studio by pressing `Ctrl+C` in the terminal where it's running.
+
+**Note:** Port 5555 is exposed in `docker-compose.yml` to make Prisma Studio accessible from your host machine. The Studio runs inside the `admin-api-dev` container and connects to the PostgreSQL database using the `DATABASE_URL` environment variable configured in the container.
+
+## Docker Setup
+
+This project includes two Dockerfiles for different use cases:
+
+### Development Dockerfile (`Dockerfile.dev`)
+
+Used by `docker-compose.yml` for local development. Features:
+- Hot reload with volume mounts
+- Development dependencies included
+- Runs Next.js dev server (`npm run dev`)
+- Accessible via Traefik at `admin.bawes.localhost:8321`
+
+**Usage:**
+```bash
+# Build and start (via docker-compose)
+docker-compose up -d
+
+# Or build manually
+docker build -f Dockerfile.dev -t admin-api:dev .
+```
+
+**Key Features:**
+- Installs all dependencies (including dev dependencies)
+- Skips `postinstall` scripts during build to avoid Prisma generate issues
+- Generates Prisma Client by temporarily renaming `prisma.config.ts` (avoids DATABASE_URL requirement during build)
+- Volume mounts for live code changes
+- Exposes port 3333 for Traefik routing
+
+### Production Dockerfile (`Dockerfile`)
+
+Multi-stage build optimized for production deployment. Features:
+- Smaller final image (production dependencies only)
+- Code baked into image (no volume mounts)
+- Runs Next.js production server (`npm start`)
+- Optimized build layers for caching
+
+**Usage:**
+```bash
+# Build production image
+docker build -t admin-api:prod .
+
+# Run with environment variables
+docker run -p 3333:3333 \
+  --env-file .env \
+  -e DATABASE_URL="postgresql://user:pass@host:5432/db" \
+  admin-api:prod
+```
+
+**Build Stages:**
+1. **deps**: Installs production dependencies only
+2. **builder**: Installs all dependencies, generates Prisma Client, builds Next.js app
+3. **runner**: Minimal runtime image with only production files
+
+**Key Features:**
+- Uses `npm ci` for faster, reproducible builds
+- Multi-stage build reduces final image size
+- Prisma Client generated during build (bypasses config file requirement)
+- Production-optimized Next.js build
+- Only includes necessary runtime files
+
+**Note:** The production Dockerfile requires all code to compile successfully. If you encounter build errors, fix them before deploying.
+
+### Docker Compose
+
+The `docker-compose.yml` file orchestrates the development environment:
+
+**Services:**
+- `postgres`: PostgreSQL 15 database
+- `admin-api`: Admin API service (uses `Dockerfile.dev`)
+- `traefik`: Reverse proxy for routing
+
+**Configuration:**
+- Database credentials configurable via `.env` (`DB_USER`, `DB_PASSWORD`, `DB_NAME`)
+- Traefik dashboard at `traefik-admin.bawes.localhost:8321`
+- Admin API accessible at `admin.bawes.localhost:8321`
+
+**Commands:**
+```bash
+# Start all services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f admin-api
+
+# Stop services
+docker-compose down
+
+# Rebuild after changes
+docker-compose build admin-api
+docker-compose up -d
+```
