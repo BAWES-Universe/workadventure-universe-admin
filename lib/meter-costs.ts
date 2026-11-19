@@ -45,6 +45,8 @@ export interface GoesRow {
   bytes: number | null;
   /** Events with no price yet. */
   unpriced: number;
+  /** Instant runs let go unconfirmed: Composio's log could not be reached for the whole wait, so the hold went back and they were written off as failed. */
+  releasedUnconfirmed?: number;
   sure: Sure;
 }
 
@@ -308,7 +310,9 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     unpriced: 0,
     sure: perGb === null ? 'Unknown' : 'Estimated',
   };
-  const goes: GoesRow[] = [row('models', 'AI models', ['model_call']), row('voice', 'Voice', ['speech']), row('computers', 'Computers', ['computer_time', 'size_change']), row('instant', 'Instant Apps', ['app_use:instant']), row('apps', 'Apps overhead', ['app_use']), files];
+  // Runs let go unconfirmed in this range, said on the Instant row so a free run is never hidden
+  const releasedUnconfirmed = await prisma.instantRun.count({ where: { finishedAt: { gte: from, lt: until }, detail: { path: ['releasedUnconfirmed'], equals: true } } });
+  const goes: GoesRow[] = [row('models', 'AI models', ['model_call']), row('voice', 'Voice', ['speech']), row('computers', 'Computers', ['computer_time', 'size_change']), { ...row('instant', 'Instant Apps', ['app_use:instant']), releasedUnconfirmed }, row('apps', 'Apps overhead', ['app_use']), files];
 
   // Guests of a Brick are paid for from their own table, so their cost is added to the headline as well
   const costMicros = [...byKind.values()].reduce((sum, group) => sum + toNumber(group.ours), 0) + guestRows.reduce((sum, guest) => sum + toNumber(guest.cost), 0);
