@@ -207,6 +207,8 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   let durable = true;
   /** The id the document that spoke last gave itself (null when it gave none): another one speaking means another document. */
   let lastSession: string | null = null;
+  /** A Restore from a document that spoke while a checkout was on its way (it was told `busy`): if the checkout ends paid, that page hears it too. */
+  let owedRestore: { request: string; session: string } | null = null;
 
   const publish = (update: Partial<PayLine>, keep = false) => {
     line = { ...(keep ? line : { ...NO_PAY_LINE, receipt: line.receipt }), buyer, ...update };
@@ -415,12 +417,26 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
    */
   const isAsker = (ticket: Ticket) => ticket.session !== null && lastSession === ticket.session;
 
+  /**
+   * A purchase that is found paid is also told to the page whose Restore was turned away while the checkout was on its way, when that page is the
+   * one on show (it spoke last): else it would keep its pay button for a purchase that was made. Nothing else is ever told to it, and the
+   * request that asked is not told twice.
+   */
+  const tellOwed = (paid: boolean, test: boolean, asked: { request: string; ticket: Ticket }) => {
+    const owed = owedRestore;
+    owedRestore = null;
+    if (!paid || !owed || lastSession !== owed.session) return;
+    if (asked.ticket.session === owed.session && asked.request === owed.request && isAsker(asked.ticket)) return;
+    tellRequest('paid', owed.request, test, owed.session);
+  };
+
   // How a checkout ended is told to the page that asked, and to no other document that has spoken since
   const end = (update: Partial<PayLine>, status: string, request: string, ticket: Ticket, test = false) => {
     busy = false;
     activeRequest = '';
     publish({ ...update, receipt: receiptFor() });
     if (isAsker(ticket)) tellRequest(status, request, test, ticket.session);
+    tellOwed(!!update.paid, test, { request, ticket });
   };
 
   const stopTimers = () => {
@@ -621,7 +637,11 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     if (busy) {
       // The same tap heard twice, from the same document, is the same request. Anything else while a checkout is on its way (or its start is
       // still waiting for an answer, however long it takes) is told so under its own id, and the checkout on its way keeps its own
-      if (data.request !== activeRequest || !activeTicket || !isAsker(activeTicket)) tellRequest('busy', data.request, false, session);
+      if (data.request !== activeRequest || !activeTicket || !isAsker(activeTicket)) {
+        tellRequest('busy', data.request, false, session);
+        // A Restore turned away is owed the end of this checkout if it is paid (the newest one only)
+        if (data.restore === true) owedRestore = { request: data.request, session };
+      }
       return;
     }
     const ticket: Ticket = { session };
@@ -656,6 +676,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
           activeRequest = '';
           publish({ ...update, receipt: receiptFor() });
           if (request && isAsker(asked.ticket)) tellRequest(told, request, isTest, asked.ticket.session);
+          tellOwed(!!update.paid, isTest, { request, ticket: asked.ticket });
         };
         if (answer.ok && status === 'paid') return done({ paid: { test }, restored: asked.intentId ? null : restoredOf(answer.body) }, 'paid', test);
         // This browser's own start that never finished and cannot be carried on yet (it may still be in flight, or its wait is not over): Orbit

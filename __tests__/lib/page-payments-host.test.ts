@@ -182,6 +182,32 @@ describe('a paying page on the public share link', () => {
     host.destroy();
   });
 
+  it('tells a newer page whose Restore was turned away while a checkout was on its way that the purchase was made, and nothing else', async () => {
+    let order: 'paid' | 'not_paid' = 'paid';
+    const { tap, told, host } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: order, testPayment: false } }));
+    tap({ request: 'a', session: 's-one' });
+    await flush();
+    await jest.advanceTimersByTimeAsync(500);
+    // A newer document asks to restore while the checkout is on its way: turned away with `busy`, and owed the end if it is paid
+    tap({ request: 'r2', restore: true, session: 's-two' });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'busy', request: 'r2', session: 's-two' });
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'paid', request: 'r2', session: 's-two' });
+    // The older document is not told (another has spoken since), and nothing is told twice
+    expect(told().filter((message) => message.status === 'paid')).toHaveLength(1);
+    host.destroy();
+    // An ending that is not paid tells the turned-away Restore nothing: it asks again when the buyer likes
+    order = 'not_paid';
+    const other = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: order, testPayment: false } }));
+    other.tap({ request: 'a', session: 's-one' });
+    await flush();
+    await jest.advanceTimersByTimeAsync(500);
+    other.tap({ request: 'r2', restore: true, session: 's-two' });
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(other.told().filter((message) => message.request === 'r2')).toEqual([{ universe: 'app-result', status: 'busy', request: 'r2', session: 's-two' }]);
+    other.host.destroy();
+  });
+
   it('answers the document that asked, and no other: the same document tapping again is the same request', async () => {
     const { tap, told, host } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
     tap({ request: 'a', session: 's-one' });
