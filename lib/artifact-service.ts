@@ -540,6 +540,11 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   return { artifact: viewOf(fresh), version: botVersionView(row), hidden };
 }
 
+/** Holds an artifact's row (shared) for the rest of the transaction: a change of how it is shared writes to it, so that change waits until this ends. */
+export async function holdForCopy(tx: Prisma.TransactionClient, artifactId: string): Promise<void> {
+  await tx.$queryRaw`SELECT 1 FROM "artifacts" WHERE "id" = ${artifactId} FOR SHARE`;
+}
+
 /**
  * A change by a bot that did not make the artifact (game #1805, Orbit #800): the original keeps its versions as they were, and
  * the change becomes version 1 of a new artifact this bot makes for the person who asked, in the chat it is in, with the
@@ -574,6 +579,10 @@ async function changeInACopy(
       // Someone other than the owner was let in by how the original was shared when it was read: if the owner changed that meanwhile
       // (made it "Just you", or took back who may ask for changes), no copy is made, as for a change to the original itself
       if (!call.ownerAsks) {
+        // The original's row is held (shared) while this is looked at and the copy is made: a change of how it is shared writes to that row, so it waits
+        // for this copy to be saved, or has been saved before this looks. Without it, the owner could make it "Just you" between the look and the
+        // copy, and someone else would get a copy of what was just made private
+        await holdForCopy(tx, artifact.id);
         const same = await tx.artifact.count({ where: { id: artifact.id, openScope: artifact.openScope, changeScope: artifact.changeScope } });
         if (same !== 1) throw new ArtifactError('stale_version', 409, 'The owner changed how it is shared at the same moment; read it again.');
       }
