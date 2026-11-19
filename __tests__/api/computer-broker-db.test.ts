@@ -431,6 +431,59 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       expect((await takeOver(sara.brickId, sara.id, NOW)).ok).toBe(true);
     });
 
+    it('a take-over asked at the moment the first one has handed the job over, before its fence began, waits for the fence: it never answers "theirs" early, and the person has no input meanwhile', async () => {
+      const { sara } = await running();
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      fake.execAnswer = async (command) => {
+        if (command === 'universe-fence') await gate;
+        return command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {};
+      };
+      // The first take-over is held right after its write that hands the job to the person: the point between that write and the making of its fence
+      let atTheWindow: () => void = () => undefined;
+      const reached = new Promise<void>((resolve) => (atTheWindow = resolve));
+      let letThrough: () => void = () => undefined;
+      const hold = new Promise<void>((resolve) => (letThrough = resolve));
+      const real = prisma.computerJob.updateMany.bind(prisma.computerJob) as (args: { data?: { control?: string } }) => Promise<{ count: number }>;
+      let held = false;
+      const spy = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation(((args: { data?: { control?: string } }) =>
+        real(args).then(async (result) => {
+          if (!held && args?.data?.control === 'person' && result.count > 0) {
+            held = true;
+            atTheWindow();
+            await hold;
+          }
+          return result;
+        })) as never);
+      let first: Promise<Awaited<ReturnType<typeof takeOver>>> | null = null;
+      let second: Promise<Awaited<ReturnType<typeof takeOver>>> | null = null;
+      try {
+        first = takeOver(sara.brickId, sara.id, NOW);
+        await reached;
+        // The job is the person's now, and the marker says the fence is being made, although the fence itself has not begun
+        expect(await prisma.computerJob.count({ where: { botId: sara.brickId, control: 'person' } })).toBe(1);
+        expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).fencingSince).not.toBeNull();
+        expect(await screenTicket(sara.brickId, sara.id, 'input', NOW)).toEqual({ ok: false, reason: 'not_taken_over' });
+        let secondAnswered = false;
+        second = takeOver(sara.brickId, sara.id, NOW).then((answer) => {
+          secondAnswered = true;
+          return answer;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        expect(secondAnswered).toBe(false);
+      } finally {
+        letThrough();
+        release();
+        const settled = await Promise.allSettled([first, second]);
+        spy.mockRestore();
+        expect(settled.map((one) => one.status)).toEqual(['fulfilled', 'fulfilled']);
+      }
+      expect((await first)!.ok).toBe(true);
+      expect((await second)!.ok).toBe(true);
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).fencingSince).toBeNull();
+      expect((await screenTicket(sara.brickId, sara.id, 'input', NOW)).ok).toBe(true);
+    });
+
     it('a fence claimed by a server that stopped is made again by the next take-over', async () => {
       const { sara } = await running();
       await takeOver(sara.brickId, sara.id, NOW);

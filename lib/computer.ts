@@ -1227,29 +1227,48 @@ const FENCE_LOOK_MS = 250;
  * makes the fence; a second one at the same moment waits for it and finds it done, never "already theirs" while the agent is still being
  * stopped. A fence claimed more than FENCE_STALE_MS ago (the server that made it is gone) is made again. Returns false when it timed out waiting.
  */
-async function fenceTakeOver(botId: string): Promise<boolean> {
-  const deadline = Date.now() + FENCE_WAIT_MS;
+/**
+ * Claims the fence marker: the Date that is the claim (to make the fence with and let go of), 'no_machine' when the Brick has no machine row (only the keys
+ * are fenced), or null when another take-over holds it now. A claim that went stale is taken over.
+ */
+async function claimFence(botId: string): Promise<Date | 'no_machine' | null> {
   for (;;) {
     const started = new Date();
     const claimed = await prisma.brickComputer.updateMany({ where: { botId, OR: [{ fencingSince: null }, { fencingSince: { lt: new Date(started.getTime() - FENCE_STALE_MS) } }] }, data: { fencingSince: started } });
-    if (claimed.count === 1) {
-      try {
-        // The fence: every key the computer held ends and the number moves, so a call the agent had in flight is refused from here on
-        await fenceControl(botId);
-        // Then the machine itself: the turn is cancelled and what the agent started is stopped and proved gone, before the person has the screen
-        await fenceMachine(botId);
-      } finally {
-        await prisma.brickComputer.updateMany({ where: { botId, fencingSince: started }, data: { fencingSince: null } });
-      }
+    if (claimed.count === 1) return started;
+    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { fencingSince: true } });
+    if (!row) return 'no_machine';
+    // Let go between the two looks: claimed again
+    if (!row.fencingSince) continue;
+    return null;
+  }
+}
+
+/** Makes the fence under a claim, and lets the claim go whether it worked or threw. */
+async function makeFence(botId: string, claim: Date): Promise<void> {
+  try {
+    // The fence: every key the computer held ends and the number moves, so a call the agent had in flight is refused from here on
+    await fenceControl(botId);
+    // Then the machine itself: the turn is cancelled and what the agent started is stopped and proved gone, before the person has the screen
+    await fenceMachine(botId);
+  } finally {
+    await prisma.brickComputer.updateMany({ where: { botId, fencingSince: claim }, data: { fencingSince: null } });
+  }
+}
+
+async function fenceTakeOver(botId: string): Promise<boolean> {
+  const deadline = Date.now() + FENCE_WAIT_MS;
+  for (;;) {
+    const claim = await claimFence(botId);
+    if (claim instanceof Date) {
+      await makeFence(botId, claim);
       return true;
     }
-    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { fencingSince: true } });
     // No machine to fence: only the keys
-    if (!row) {
+    if (claim === 'no_machine') {
       await fenceControl(botId);
       return true;
     }
-    if (!row.fencingSince) continue;
     if (Date.now() >= deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, FENCE_LOOK_MS));
   }
@@ -1276,30 +1295,48 @@ export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_fou
  */
 export async function takeOver(botId: string, ownerId: string, now: Date = new Date()): Promise<Control> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
-  // The jobs already waiting for the person are theirs first: from here a job that starts sees the person has the machine and waits
-  const changed = await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'brick' }, data: { control: 'person' } });
-  // Every job working on the machine is the person's to step in on, the one that writes and any that only read: none is left running
-  // under Brick's hands while the person has the keyboard. Asked again until none is left: a job that began while the others were
-  // being moved is found by the next look, and one that begins after sees the person's control above.
+  // The fence is claimed BEFORE any job is handed to the person (when there is anything to hand over): the moment a job is the person's the marker is
+  // already there, so a take-over asked at that moment waits for the fence instead of answering "theirs" before it is made, and the screen's input and
+  // the details tap are refused until it is proved. A take-over with nothing to hand over (asked again) claims nothing.
+  const somethingToTake = (await prisma.computerJob.count({ where: { botId, OR: [{ status: 'running' }, { status: 'waiting', control: 'brick' }] } })) > 0;
+  const claim = somethingToTake ? await claimFence(botId) : null;
+  const ownClaim = claim instanceof Date ? claim : null;
+  let changedCount = 0;
   let moved = 0;
-  for (let round = 0; round < 5; round++) {
-    const runningJobs = await prisma.computerJob.findMany({ where: { botId, status: 'running' } });
-    if (runningJobs.length === 0) break;
-    moved += runningJobs.length;
-    for (const running of runningJobs) {
-      const stretch = running.stretchStarted ? Math.max(0, Math.round((now.getTime() - running.stretchStarted.getTime()) / SECOND)) : 0;
-      await prisma.computerJob.updateMany({
-        where: { id: running.id, status: 'running' },
-        data: { status: 'waiting', waitingFor: null, control: 'person', secondsRun: running.secondsRun + stretch, stretchStarted: now, readyWhat: null, readyWhere: null },
-      });
+  try {
+    // The jobs already waiting for the person are theirs first: from here a job that starts sees the person has the machine and waits
+    changedCount = (await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'brick' }, data: { control: 'person' } })).count;
+    // Every job working on the machine is the person's to step in on, the one that writes and any that only read: none is left running
+    // under Brick's hands while the person has the keyboard. Asked again until none is left: a job that began while the others were
+    // being moved is found by the next look, and one that begins after sees the person's control above.
+    for (let round = 0; round < 5; round++) {
+      const runningJobs = await prisma.computerJob.findMany({ where: { botId, status: 'running' } });
+      if (runningJobs.length === 0) break;
+      moved += runningJobs.length;
+      for (const running of runningJobs) {
+        const stretch = running.stretchStarted ? Math.max(0, Math.round((now.getTime() - running.stretchStarted.getTime()) / SECOND)) : 0;
+        await prisma.computerJob.updateMany({
+          where: { id: running.id, status: 'running' },
+          data: { status: 'waiting', waitingFor: null, control: 'person', secondsRun: running.secondsRun + stretch, stretchStarted: now, readyWhat: null, readyWhere: null },
+        });
+      }
     }
+  } catch (error) {
+    // A claim this call made is let go when it could not go on with it (an older one is taken over once it is stale)
+    if (ownClaim) await prisma.brickComputer.updateMany({ where: { botId, fencingSince: ownClaim }, data: { fencingSince: null } }).catch(() => undefined);
+    throw error;
   }
+  const changed = { count: changedCount };
   // The fence: every key the computer held ends and the number moves, so a call the agent had in flight is refused from here on
   if (changed.count > 0 || moved > 0) {
-    if (!(await fenceTakeOver(botId))) return { ok: false, reason: 'fencing' };
-  } else if (!(await waitForFence(botId))) {
-    // Asked again while the first is still making the fence: it is answered only when that is done
-    return { ok: false, reason: 'fencing' };
+    if (ownClaim) await makeFence(botId, ownClaim);
+    else if (claim === 'no_machine') await fenceControl(botId);
+    else if (!(await fenceTakeOver(botId))) return { ok: false, reason: 'fencing' };
+  } else {
+    // Nothing was handed over by this call: a claim made for it is let go, and what another take-over is fencing is waited for (asked again while the
+    // first is still making the fence, it is answered only when that is done)
+    if (ownClaim) await prisma.brickComputer.updateMany({ where: { botId, fencingSince: ownClaim }, data: { fencingSince: null } });
+    if (!(await waitForFence(botId))) return { ok: false, reason: 'fencing' };
   }
   const job = await prisma.computerJob.findFirst({ where: { botId, status: 'waiting' }, orderBy: [{ writes: 'desc' }, { createdAt: 'asc' }], include: JOB_INCLUDE });
   // Asked twice it is the same: already theirs is still theirs
