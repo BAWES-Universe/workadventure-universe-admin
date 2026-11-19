@@ -157,30 +157,18 @@ function readDefinition(row: { definition: unknown; definitionHash: string }): D
 const RESERVATION_GRACE_SECONDS = 30;
 
 /**
- * Refusals the service gave that could not be written yet (the database failed at that moment), by form: written before the form is
- * read or used again. This is best effort by design: it lives in this process, because the database was down when it was needed, so
- * nothing durable can hold it. Another instance does not see it, and it is lost on a restart; the worst case is one extra guess per
- * database failure that hits exactly that write.
+ * The tries a form has used. A try reserved for a call whose outcome was never written (the database failed at that moment, or the
+ * process stopped) is used once it lapses: nobody can tell whether the service refused the key, so it is counted, never given back.
+ * That is kept in the row itself, so every instance sees it and a restart loses nothing; a failed write can never give a key a free guess.
+ * The worst case is one try lost for a call that the service did not refuse AND whose write failed.
  */
-const owedRefusals = new Map<string, number>();
-
-async function settleOwedRefusals(requestId: string): Promise<void> {
-  // Taken out of the map BEFORE it is written, so two calls that settle at the same moment cannot both write it
-  const owed = owedRefusals.get(requestId);
-  if (!owed) return;
-  owedRefusals.delete(requestId);
-  try {
-    await prisma.appKeyRequest.updateMany({ where: { id: requestId }, data: { tries: { increment: owed } } });
-  } catch (error) {
-    // Not written: owed again (once), added to whatever was owed meanwhile
-    owedRefusals.set(requestId, (owedRefusals.get(requestId) ?? 0) + owed);
-    console.error('[AppDirect] Could not write a refused try:', error instanceof Error ? error.message : 'unknown');
-  }
+function usedTries(row: { tries: number; reservedTries: number; reservedAt: Date | null }, cutoff: Date): number {
+  return row.tries + (row.reservedTries > 0 && (!row.reservedAt || row.reservedAt <= cutoff) ? row.reservedTries : 0);
 }
+const lapseCutoff = (callSeconds: number) => new Date(Date.now() - (callSeconds + RESERVATION_GRACE_SECONDS) * 1000);
 
 /** What the form shows. Only the person it was opened for can read it; anyone else gets "not found". */
 export async function readKeyForm(requestId: string, ownerId: string): Promise<KeyFormView> {
-  await settleOwedRefusals(requestId);
   const row = await prisma.appKeyRequest.findFirst({ where: { id: requestId, ownerId } });
   if (!row) throw new KeyFormError(404, 'not_found', 'Form not found');
   if (row.usedAt) throw new KeyFormError(410, 'used', 'This form was already used');
@@ -209,7 +197,7 @@ export async function readKeyForm(requestId: string, ownerId: string): Promise<K
     check: checkOperation ? checkOperation.label : null,
     payments: definition.payment ? { checkoutHosts: definition.payment.checkoutHosts, paidWhen: definition.payment.lookup.successStates, testAndLive: !!definition.modes } : null,
     replacing: replacing ? { keyLast4: replacing.keyLast4, mode: replacing.keyMode } : null,
-    triesLeft: Math.max(0, limits.keyTries - row.tries),
+    triesLeft: Math.max(0, limits.keyTries - usedTries(row, lapseCutoff(limits.keyCallSeconds))),
     expiresAt: row.expiresAt,
   };
 }
@@ -226,13 +214,12 @@ export interface KeyConnected {
  * a test and a real key asks first (`mode_change`, sent again with `confirmChange`).
  */
 export async function submitKey(input: { requestId: string; ownerId: string; key: unknown; confirmChange?: boolean }, deps: GuardDeps = {}): Promise<KeyConnected> {
-  await settleOwedRefusals(input.requestId);
   const row = await prisma.appKeyRequest.findFirst({ where: { id: input.requestId, ownerId: input.ownerId } });
   if (!row) throw new KeyFormError(404, 'not_found', 'Form not found');
   if (row.usedAt) throw new KeyFormError(410, 'used', 'This form was already used');
   if (row.expiresAt.getTime() <= Date.now()) throw new KeyFormError(410, 'expired', 'This form has closed');
   const limits = await getBrickLimits();
-  if (row.tries >= limits.keyTries) throw new KeyFormError(429, 'too_many', 'Too many tries');
+  if (usedTries(row, lapseCutoff(limits.keyCallSeconds)) >= limits.keyTries) throw new KeyFormError(429, 'too_many', 'Too many tries');
   // What is wrong with the key is never said: only that it is not one this form can take
   // A pasted key often carries a trailing space or line break; that is never part of it
   const typed = typeof input.key === 'string' ? input.key.trim() : input.key;
@@ -243,33 +230,33 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
   // Prove the key with the definition's own non-changing request. A key the service refuses costs a try.
   if (definition.check) {
     // A try is reserved BEFORE the service is asked, in one step that also holds the limit: keys sent at the same moment cannot all pass
-    // a count that none of them has added to yet. It becomes a used try only when the service refuses the key. A reservation that is
-    // never released (the database failed at that moment) lapses by itself after the longest a call can take, so the form is never left
-    // shut for a service that did not refuse the key.
+    // a count that none of them has added to yet. It becomes a used try only when the service refuses the key, and is given back when it
+    // does not. A reservation that is never released (the database failed at that moment, or the process stopped) is a try whose outcome
+    // is unknown: once it lapses it is counted as used, in this same row, so it is never a free guess and every instance sees it.
     const now = new Date();
-    const cutoff = new Date(now.getTime() - (limits.keyCallSeconds + RESERVATION_GRACE_SECONDS) * 1000);
-    // The run of reservations this one joined (`reserved_epoch`) comes back with it: when the reserved tries of a form lapse and start again, the
-    // run moves on, and a call still in flight from the earlier run must not take a try away from the new one when it finishes
+    const cutoff = lapseCutoff(limits.keyCallSeconds);
+    // The run of reservations this one joined (`reserved_epoch`) comes back with it: when the reserved tries of a form lapse they are folded
+    // into `tries` and the run moves on, so a call still in flight from the earlier run neither takes a try from the new run nor counts twice
     const reserved = await prisma.$queryRaw<{ epoch: number }[]>`
       UPDATE "app_key_requests"
       SET "reserved_epoch" = CASE WHEN "reserved_at" > ${cutoff} THEN "reserved_epoch" ELSE "reserved_epoch" + 1 END,
+          "tries" = CASE WHEN "reserved_at" > ${cutoff} THEN "tries" ELSE "tries" + "reserved_tries" END,
           "reserved_tries" = CASE WHEN "reserved_at" > ${cutoff} THEN "reserved_tries" + 1 ELSE 1 END, "reserved_at" = ${now}
       WHERE "id" = ${row.id} AND "used_at" IS NULL
-        AND "tries" + (CASE WHEN "reserved_at" > ${cutoff} THEN "reserved_tries" ELSE 0 END) < ${limits.keyTries}
+        AND "tries" + "reserved_tries" < ${limits.keyTries}
       RETURNING "reserved_epoch" AS epoch`;
     if (reserved.length !== 1) throw new KeyFormError(429, 'too_many', 'Too many tries');
     const epoch = reserved[0].epoch;
     const release = async (refused: boolean) => {
       try {
+        // Only a call of the run now held releases or counts anything: a call from an earlier run was already counted as used when it lapsed
         await prisma.$executeRaw`
           UPDATE "app_key_requests"
           SET "reserved_tries" = CASE WHEN "reserved_epoch" = ${epoch} THEN GREATEST("reserved_tries" - 1, 0) ELSE "reserved_tries" END,
-              "tries" = "tries" + ${refused ? 1 : 0}
+              "tries" = "tries" + (CASE WHEN "reserved_epoch" = ${epoch} THEN ${refused ? 1 : 0}::int ELSE 0 END)
           WHERE "id" = ${row.id}`;
       } catch (error) {
-        // A reservation that is not released lapses on its own. A refusal is a try that was used: it is kept (here, in memory) until
-        // it is written, which the next look at or submit to this form does first, so a failed write never gives the key a free guess.
-        if (refused) owedRefusals.set(row.id, (owedRefusals.get(row.id) ?? 0) + 1);
+        // Nothing is kept in memory: the reservation stays in the row and counts as used once it lapses
         console.error('[AppDirect] Could not release a form try:', error instanceof Error ? error.message : 'unknown');
       }
     };
