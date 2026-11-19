@@ -61,6 +61,13 @@ const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const tag = randomUUID().slice(0, 8);
 const NOW = new Date('2026-11-15T12:00:00Z');
 const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
+/**
+ * A machine counts as idle when the database says it was last touched two minutes before the sweep's `now`, and the database's own clock is the
+ * real one: the fixed moments these tests use are in the past of it, so a test that needs an idle machine says so (a clock that has moved on is
+ * never what decides it).
+ */
+const idleBefore = (ownerId: string, sweepAt: Date) =>
+  prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = ${new Date(sweepAt.getTime() - 60 * 60_000)} WHERE "bot_id" IN (SELECT "id" FROM "bots" WHERE "owner_id" = ${ownerId})`;
 const people: string[] = [];
 let made = 0;
 let provider: FakeComputerProvider;
@@ -251,8 +258,14 @@ run('a Brick’s computer, in a real database', () => {
       expect(provider.commands.filter((entry) => entry.command === 'universe-clean')).toHaveLength(0);
       await finishJob(second.job.id, 'done', minutes(2));
       expect(provider.commands.filter((entry) => entry.command === 'universe-clean')).toHaveLength(1);
-      const names = provider.calls.map((call) => call.name);
-      expect(names.indexOf('exec')).toBeLessThan(names.indexOf('rest'));
+      // The clean-up command itself, not just any command, is run before the machine rests: its place among the provider's calls is the place of
+      // its own entry among the commands (each command is one `exec` call, in order)
+      const execPlaces = provider.calls.flatMap((call, index) => (call.name === 'exec' ? [index] : []));
+      const cleanOrder = provider.commands.findIndex((entry) => entry.command === 'universe-clean');
+      expect(cleanOrder).toBeGreaterThanOrEqual(0);
+      const rested = provider.calls.map((call) => call.name).indexOf('rest');
+      expect(rested).toBeGreaterThanOrEqual(0);
+      expect(execPlaces[cleanOrder]).toBeLessThan(rested);
     });
 
     it('lists what is on the computer when the last job ends, for the Files list, and keeps the last list when a later listing fails', async () => {
@@ -649,13 +662,17 @@ run('a Brick’s computer, in a real database', () => {
       const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW);
       if (!a.ok || !b.ok) throw new Error('no');
-      await finishJob(a.job.id, 'done', minutes(1));
+      // The first job is over without finishJob (which would start the waiting one itself): B stays queued and eligible until the two sweeps begin
+      await prisma.computerJob.update({ where: { id: a.job.id }, data: { status: 'done', endedAt: minutes(1) } });
+      const waiting = await prisma.computerJob.findUniqueOrThrow({ where: { id: b.job.id } });
+      expect(waiting.status).toBe('queued');
+      expect(await prisma.meterReservation.count({ where: { jobId: b.job.id, state: 'held' } })).toBe(0);
+      await Promise.all([sweepComputers(minutes(2)), sweepComputers(minutes(2))]);
+      // Exactly one of the two started it, and its room is held once, not taken from the one that won by the one that lost
       const settled = await prisma.computerJob.findUniqueOrThrow({ where: { id: b.job.id } });
       expect(settled.status).toBe('running');
       expect(settled.reservationKey).not.toBeNull();
-      const room = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: settled.reservationKey as string } });
-      expect(room.state).toBe('held');
-      await Promise.all([sweepComputers(minutes(2)), sweepComputers(minutes(2))]);
+      expect(await prisma.meterReservation.count({ where: { jobId: b.job.id } })).toBe(1);
       expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: settled.reservationKey as string } })).state).toBe('held');
     });
 
@@ -698,6 +715,7 @@ run('a Brick’s computer, in a real database', () => {
       // A stop that broke half way: the job is over, its time never reached the books, and the machine still works
       await prisma.computerJob.update({ where: { id: a.job.id }, data: { status: 'done', endedBy: null, endedAt: minutes(5), secondsRun: 300, stretchStarted: null } });
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+      await idleBefore(sara.id, minutes(10));
       await sweepComputers(minutes(10));
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
       const events = await prisma.meterEvent.findMany({ where: { eventId: `computer:${a.job.id}:time` } });
@@ -789,7 +807,8 @@ run('a Brick’s computer, in a real database', () => {
       }
       for (const [i, id] of bricks.entries()) {
         await deleteBrick(id, sara.id, minutes(2));
-        await prisma.bot.update({ where: { id }, data: { goneAt: new Date(minutes(3).getTime() + i) } });
+        // Marked as last looked at when it was deleted, in the test's own time (the row's automatic stamp is the real clock, which is long past these moments)
+        await prisma.bot.update({ where: { id }, data: { goneAt: new Date(minutes(3).getTime() + i), updatedAt: minutes(2) } });
       }
       // A sweep reads three Bricks, one to a page: the three that wait use all of it
       expect(await removeGoneBricks(minutes(10), sara.id, 1, 3)).toEqual([]);
@@ -806,6 +825,7 @@ run('a Brick’s computer, in a real database', () => {
       await finishJob(a.job.id, 'done', minutes(1));
       // The rest failed: the machine is still awake, so it is not marked as resting (the sweep only looks at ones that work)
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+      await idleBefore(sara.id, minutes(10));
       await sweepComputers(minutes(10));
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
       expect(provider.calls.filter((call) => call.name === 'rest')).toHaveLength(2);
@@ -818,8 +838,13 @@ run('a Brick’s computer, in a real database', () => {
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting', restClaimedAt: minutes(60) } });
       await sweepComputers(minutes(62));
       expect(provider.calls.filter((call) => call.name === 'rest')).toHaveLength(2);
+      // The claim is let go (the machine is its own again, with no claim on it); the sweep after that finds it idle and rests it
       await sweepComputers(minutes(80));
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).restClaimedAt).toBeNull();
+      await idleBefore(sara.id, minutes(85));
+      await sweepComputers(minutes(85));
       expect(provider.calls.filter((call) => call.name === 'rest')).toHaveLength(3);
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).restClaimedAt).toBeNull();
     });
 
@@ -870,12 +895,15 @@ run('a Brick’s computer, in a real database', () => {
       await finishJob(a.job.id, 'done', minutes(1));
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting', restClaimedAt: minutes(1) } });
       const original = prisma.brickComputer.findMany.bind(prisma.brickComputer);
+      const hook: { sawTarget: boolean; claimBeforeClearing: Date | null } = { sawTarget: false, claimBeforeClearing: null };
       const spy = jest.spyOn(prisma.brickComputer, 'findMany').mockImplementation(((...args: Parameters<typeof original>) => {
         const result = original(...args);
         if ((args[0]?.where as { machine?: string } | undefined)?.machine !== 'resting') return result;
         // The sweep has seen the stale claim; the rest then finishes and clears it
         return result.then(async (rows) => {
           spy.mockRestore();
+          hook.sawTarget = rows.some((row) => row.botId === sara.brickId);
+          hook.claimBeforeClearing = (await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).restClaimedAt;
           await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { restClaimedAt: null } });
           return rows;
         });
@@ -883,6 +911,9 @@ run('a Brick’s computer, in a real database', () => {
       const rests = provider.calls.filter((call) => call.name === 'rest').length;
       await sweepComputers(minutes(30));
       spy.mockRestore();
+      // The injected completion really ran: the sweep's read held this machine, with the stale claim still on it when the rest "finished"
+      expect(hook.sawTarget).toBe(true);
+      expect(hook.claimBeforeClearing).not.toBeNull();
       await sweepComputers(minutes(40));
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
       expect(provider.calls.filter((call) => call.name === 'rest').length).toBe(rests);
@@ -942,6 +973,12 @@ run('a Brick’s computer, in a real database', () => {
       expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW)).toEqual({ ok: false, reason: 'broken_start' });
       expect((await computerView(sara.brickId, sara.id))?.machine).toBe('none');
       expect((await currentEnvelope(NOW)).reservedMicros).toBe(0);
+      // And the next job really does try again: the provider makes the machine this time and the job runs
+      const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(1));
+      expect(next.ok && next.job.status).toBe('running');
+      expect(provider.calls.filter((call) => call.name === 'create')).toHaveLength(2);
+      expect((await computerView(sara.brickId, sara.id))?.machine).not.toBe('none');
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).providerRef).toBe(`fake-${sara.brickId}`);
     });
 
     it('brings a broken computer back from its last saved copy and says which day that was; nothing is made again', async () => {
@@ -1025,18 +1062,20 @@ run('a Brick’s computer, in a real database', () => {
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'running', control: 'brick' });
     });
 
-    it('a take over that found nothing running, with a job starting before it moves the waiting one, still leaves nothing under Brick’s hands', async () => {
+    it('a take over that found nothing running, then a read-only job starting once the waiting one is already the person’s, leaves nothing under Brick’s hands', async () => {
       const { sara, jobId } = await waitingJob();
       await requestHandover(jobId, 'details', minutes(1));
       // The take over has looked for running jobs and found none; a read-only job starts right then
       const original = prisma.computerJob.findMany.bind(prisma.computerJob);
       let started: Awaited<ReturnType<typeof startJob>> | null = null;
+      let observed: unknown[] | null = null;
       const spy = jest.spyOn(prisma.computerJob, 'findMany').mockImplementation(((...args: Parameters<typeof original>) => {
         const result = original(...args);
         if (started === null && (args[0]?.where as { status?: string } | undefined)?.status === 'running') {
           started = { ok: false, reason: 'off' };
           return result.then(async (rows) => {
             spy.mockRestore();
+            observed = rows;
             started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, minutes(2));
             return rows;
           });
@@ -1045,6 +1084,12 @@ run('a Brick’s computer, in a real database', () => {
       }) as typeof prisma.computerJob.findMany);
       await takeOver(sara.brickId, sara.id, minutes(2));
       spy.mockRestore();
+      // The hook ran: the take over's look found no running job, and the read-only job that started right then was accepted
+      expect(observed).toEqual([]);
+      expect(started).toMatchObject({ ok: true });
+      const readerId = (started as unknown as { job: { id: string } }).job.id;
+      const reader = await prisma.computerJob.findUniqueOrThrow({ where: { id: readerId } });
+      expect(reader.status === 'running' && reader.control === 'brick').toBe(false);
       const jobs = await prisma.computerJob.findMany({ where: { botId: sara.brickId } });
       expect(jobs.filter((job) => job.status === 'running')).toEqual([]);
       expect(jobs.find((job) => job.id === jobId)).toMatchObject({ status: 'waiting', control: 'person' });
