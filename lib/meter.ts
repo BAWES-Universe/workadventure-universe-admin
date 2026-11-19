@@ -34,8 +34,10 @@ export async function getMeterSettingsStrict(db: Pick<typeof prisma, 'appSetting
 }
 
 /** Saves a super admin's change on top of what is saved (only the names it carries change) and returns all of them. */
-export async function saveMeterSettings(change: Partial<MeterSettings>, userId: string): Promise<MeterSettings> {
-  return prisma.$transaction(async (tx) => {
+export async function saveMeterSettings(change: Partial<MeterSettings>, userId: string, within?: Prisma.TransactionClient): Promise<MeterSettings> {
+  // With `within`, the save joins the caller's transaction and commits (or fails) with it
+  const run = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> => (within ? work(within) : prisma.$transaction(work));
+  return run(async (tx) => {
     // One super admin's save at a time, so two saves of different values never undo each other
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('meter:settings'))`;
     const row = await tx.appSetting.findUnique({ where: { key: SETTING_KEY } });
@@ -54,8 +56,9 @@ export async function saveMeterSettings(change: Partial<MeterSettings>, userId: 
 }
 
 /** Saves a monthly computer allowance that takes the place of the current one from a later day (the 1st), and changes nothing before it. */
-export async function scheduleMemberAllowance(micros: number, from: Date, userId: string, now: Date = new Date()): Promise<void> {
-  await prisma.$transaction(async (tx) => {
+export async function scheduleMemberAllowance(micros: number, from: Date, userId: string, now: Date = new Date(), within?: Prisma.TransactionClient): Promise<void> {
+  const run = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> => (within ? work(within) : prisma.$transaction(work));
+  await run(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('meter:settings'))`;
     const row = await tx.appSetting.findUnique({ where: { key: SETTING_KEY } });
     const saved = row?.value && typeof row.value === 'object' && !Array.isArray(row.value) ? (row.value as Record<string, unknown>) : {};

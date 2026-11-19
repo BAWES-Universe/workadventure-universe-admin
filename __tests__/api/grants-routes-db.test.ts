@@ -159,6 +159,27 @@ run('the grants routes, on the real books', () => {
     expect(readMeterSettings((await prisma.appSetting.findUnique({ where: { key: 'meter' } }))?.value, later).memberAllowanceMicros).toBe(6 * MILLION);
   });
 
+  it('never half-saves a computers default: when the allowance cannot be saved, the default is not saved either', async () => {
+    await saveMeterSettings({ memberAllowanceMicros: 5 * MILLION }, admin.id);
+    const before = await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 5 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'now' } }, ctx({ category: 'computers' }));
+    expect(before.status).toBe(200);
+    // The second write fails at the database: the allowance row cannot change
+    await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION grants_test_refuse_meter() RETURNS trigger AS $$ BEGIN IF NEW.key = 'meter' THEN RAISE EXCEPTION 'meter settings refused for the test'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql`);
+    await prisma.$executeRawUnsafe('CREATE TRIGGER grants_test_refuse_meter BEFORE INSERT OR UPDATE ON app_settings FOR EACH ROW EXECUTE FUNCTION grants_test_refuse_meter()');
+    const silenced = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const refused = await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 9 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'now' } }, ctx({ category: 'computers' }));
+      expect(refused.status).toBeGreaterThanOrEqual(500);
+    } finally {
+      silenced.mockRestore();
+      await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS grants_test_refuse_meter ON app_settings');
+      await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS grants_test_refuse_meter()');
+    }
+    // Neither changed: the screen's "failed" is true
+    expect((await overview()).money.computers).toMatchObject({ amountMicros: 5 * MILLION, interval: 'monthly' });
+    expect((await getMeterSettings()).memberAllowanceMicros).toBe(5 * MILLION);
+  });
+
   it('refuses a computers default that the monthly allowance could not follow, rather than saving one that does nothing', async () => {
     await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 4 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'now' } }, ctx({ category: 'computers' }));
     expect((await getMeterSettings()).memberAllowanceMicros).toBe(4 * MILLION);
@@ -303,6 +324,33 @@ run('the grants routes, on the real books', () => {
     expect(gone.status).toBe(200);
     expect((await overview()).exceptions).toEqual([]);
     expect((await call(deleteException, '/x', { method: 'DELETE' }, ctx({ id: 'nope' }))).status).toBe(404);
+  });
+
+  it('ends both categories of an exception together: when the second cannot end, the first stays as it was', async () => {
+    const [omar, noor] = [await person('Omar'), await person('Noor')];
+    const saved = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } } });
+    expect(saved.status).toBe(201);
+    const o = await overview();
+    expect(o.exceptions).toHaveLength(1);
+    const computersRule = await prisma.grantProgram.findFirst({ where: { categoryId: 'computers', kind: 'exception', status: 'active' }, select: { id: true } });
+    // The second category's program cannot be ended (the database refuses it)
+    await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION grants_test_refuse_end() RETURNS trigger AS $$ BEGIN IF NEW.id = '${computersRule!.id}' AND NEW.status = 'ended' THEN RAISE EXCEPTION 'cannot end for the test'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql`);
+    await prisma.$executeRawUnsafe('CREATE TRIGGER grants_test_refuse_end BEFORE UPDATE ON grant_programs FOR EACH ROW EXECUTE FUNCTION grants_test_refuse_end()');
+    const silenced = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const refused = await call(deleteException, '/x', { method: 'DELETE' }, ctx({ id: o.exceptions[0].id }));
+      expect(refused.status).toBeGreaterThanOrEqual(500);
+    } finally {
+      silenced.mockRestore();
+      await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS grants_test_refuse_end ON grant_programs');
+      await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS grants_test_refuse_end()');
+    }
+    // An error was said, so nothing ended: both programs are still active, and the exception reads as it did
+    expect(await prisma.grantProgram.count({ where: { kind: 'exception', status: 'active' } })).toBe(2);
+    expect((await overview()).exceptions).toHaveLength(1);
+    // And ending it without the fault ends both
+    expect((await call(deleteException, '/x', { method: 'DELETE' }, ctx({ id: o.exceptions[0].id }))).status).toBe(200);
+    expect(await prisma.grantProgram.count({ where: { kind: 'exception', status: 'active' } })).toBe(0);
   });
 
   it('never half-saves an exception: if the second category is refused, the first is put back', async () => {
