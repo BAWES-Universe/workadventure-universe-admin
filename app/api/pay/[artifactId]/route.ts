@@ -47,9 +47,10 @@ const bodySchema = z.object({
  * POST /api/pay/:artifactId - start a checkout for the amount the owner set for this page, or get back to a purchase. The body carries no
  * amount on purpose: the amount, the currency and the service are the owner's, never the page's or the visitor's.
  *  - `{}` or `{ intentId, recoveryCode }`: start. The same `intentId` from the same buyer gives the SAME order (even from two tabs at once).
- *    200 { orderId, checkoutUrl, amount, currency, app, reused } · 404 · 409 unavailable (the owner stopped it or the app stopped working) · 429 too many.
- *  - `{ check: true, intentId, recoveryCode }`: Check payment, where the order that wish made stands { status, checkoutUrl, testPayment, orderId, pollAfterMs } · 404.
- *  - `{ restore: true, recoveryCode }`: Restore purchase, { status: paid | checking | none, testPayment, orderId, pollAfterMs } for this buyer.
+ *    200 { orderId, checkoutUrl, amount, currency, app, reused, buyer } · 404 · 409 unavailable (the owner stopped it or the app stopped working) · 429 too many.
+ *  - `{ check: true, intentId, recoveryCode }`: Check payment, where the order that wish made stands { status, checkoutUrl, testPayment, orderId, pollAfterMs, buyer } · 404.
+ *  - `{ restore: true, recoveryCode }`: Restore purchase, { status: paid | checking | none, testPayment, orderId, pollAfterMs, buyer } for this buyer.
+ * `buyer` is `account` or `guest`: only a guest has a receipt link to keep.
  * The buyer is the signed-in Orbit account when there is one, otherwise the guest's recovery code, kept only as a hash. A wish, a check or a
  * restore with neither is 400 `buyer_required`.
  */
@@ -62,15 +63,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const body = parsed.data;
   const session = body.restore || body.check || body.intentId ? await getSessionUser(request).catch(() => null) : null;
   const buyerKey = buyerKeyOf({ accountId: session?.id ?? null, recoveryCode: body.recoveryCode });
-  if (body.restore) return buyerKey ? respond(await restorePurchase({ artifactId, buyerKey })) : respond({ error: 'Say who is asking', code: 'buyer_required' }, 400);
+  // Who the buyer is, for the host: a guest keeps a receipt link (which holds the recovery code); an account has nothing to keep
+  const buyer = session ? 'account' : 'guest';
+  if (body.restore) return buyerKey ? respond({ ...(await restorePurchase({ artifactId, buyerKey })), buyer }) : respond({ error: 'Say who is asking', code: 'buyer_required' }, 400);
   if (body.check) {
     if (!buyerKey || !body.intentId) return respond({ error: 'Say who is asking, and about which purchase', code: 'buyer_required' }, 400);
     const view = await checkPurchase({ artifactId, buyerKey, intentId: body.intentId });
-    return view ? respond(view) : respond({ error: 'Not found' }, 404);
+    return view ? respond({ ...view, buyer }) : respond({ error: 'Not found' }, 404);
   }
   if (body.intentId && !buyerKey) return respond({ error: 'Say who is asking', code: 'buyer_required' }, 400);
   const outcome = await startCheckout({ artifactId, visitor: visitorOf(request), intentId: body.intentId, buyerKey: body.intentId ? buyerKey : null });
-  if (outcome.status === 'ok') return respond({ orderId: outcome.orderId, checkoutUrl: outcome.checkoutUrl, amount: outcome.amount, currency: outcome.currency, app: outcome.app, reused: outcome.reused });
+  if (outcome.status === 'ok') return respond({ orderId: outcome.orderId, checkoutUrl: outcome.checkoutUrl, amount: outcome.amount, currency: outcome.currency, app: outcome.app, reused: outcome.reused, buyer });
   if (outcome.status === 'limit') return respond({ error: 'Too many tries for now', code: 'limit' }, 429);
   return respond({ error: 'Payments are unavailable', code: 'unavailable' }, 409);
 }
