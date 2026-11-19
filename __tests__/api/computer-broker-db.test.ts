@@ -434,7 +434,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       expect(seen.at(-1)).toMatchObject({ type: 'completed', outputText: 'Done ' });
       // Orbit keeps none of the agent's words: nothing it stored holds the tag
       const row = await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
-      expect(JSON.stringify(row)).not.toContain('universe-job');
+      expect(JSON.stringify(row, (_key, value) => (typeof value === 'bigint' ? value.toString() : value))).not.toContain('universe-job');
       // a reconnect passes on what the agent says through the same cleaning
       await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-9', agentSessionId: 'sess-1' } });
       const reattach = jest.spyOn(fake, 'reattachTurn').mockImplementation((async () =>
@@ -615,10 +615,10 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         const { jobId } = await running();
         fake.turns = okTurn();
         const silent = quiet();
-        const real = prisma.brickComputer.findUnique.bind(prisma.brickComputer);
+        const real = prisma.computerJob.findUnique.bind(prisma.computerJob);
         let looks = 0;
-        const spy = jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementation(((args: never) => {
-          // The first look is before the claim; the second is the one made with the claim held
+        const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: never) => {
+          // The job is read once before the claim and once with the claim held (the computer's own row is read more than once by each: control is asked too)
           if (++looks === 2) throw new Error('the database did not answer');
           return real(args);
         }) as never);
