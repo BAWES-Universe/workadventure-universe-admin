@@ -24,6 +24,7 @@ import { POST as linkApp } from '@/app/api/ready-made/link/route';
 import { grantToBrick } from '@/lib/app-connections';
 import { createBrick } from '@/lib/brick-create';
 import { demandReport } from '@/lib/app-demand';
+import { snapshotSettings } from '../helpers/shared-settings';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const tag = randomUUID().slice(0, 8);
@@ -67,10 +68,12 @@ const ownVersion = (over: Partial<OwnAppVersion> = {}) => {
   return own;
 };
 
+let restoreSettings: () => Promise<void> = async () => undefined;
 run('where an App runs, and Apps: use and demand, in a real database', () => {
   beforeAll(async () => {
     process.env.BOT_SERVICE_TOKEN = SERVICE_TOKEN;
     process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'a'.repeat(64);
+    restoreSettings = await snapshotSettings(['ready-made-apps', 'composio-billing', 'composio-invoices']);
     const person = (name: string, email?: string) => prisma.user.create({ data: { uuid: `${name}-${tag}`, email: email ?? `${name}-${tag}@example.test`, name } });
     sara = (await person('sara')).id;
     omar = (await person('omar')).id;
@@ -92,6 +95,7 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
     if (envBefore.service === undefined) delete process.env.BOT_SERVICE_TOKEN; else process.env.BOT_SERVICE_TOKEN = envBefore.service;
     if (envBefore.key === undefined) delete process.env.ENCRYPTION_KEY; else process.env.ENCRYPTION_KEY = envBefore.key;
     await prisma.user.deleteMany({ where: { id: { in: [sara, omar, boss] } } });
+    await restoreSettings();
     await prisma.$disconnect();
   });
 
@@ -160,11 +164,18 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
       for (let i = 0; i < 100 && adapter.use.mock.calls.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
       expect(adapter.use).toHaveBeenCalledTimes(1);
 
-      const moved = await move('universe', 0);
-      expect(moved.status).toBe(200);
-      expect(await moved.json()).toMatchObject({ route: 'universe', version: 1 });
-      release();
-      expect((await going).status).toBe(200);
+      let moved: Response;
+      let finished: Response;
+      try {
+        moved = await move('universe', 0);
+        expect(moved.status).toBe(200);
+        expect(await moved.json()).toMatchObject({ route: 'universe', version: 1 });
+      } finally {
+        // The run that is in flight is let go and joined, also when the move failed, so no request is left pending while the fixture is reset
+        release();
+        finished = await going;
+      }
+      expect(finished.status).toBe(200);
       const first = await prisma.meterEvent.findFirstOrThrow({ where: { eventId: `app:${saraBrick}:going` } });
       expect((first.detail as { provider: string }).provider).toBe('composio');
       expect(own.use).not.toHaveBeenCalled();
@@ -287,7 +298,7 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
       status: 200,
       contentType: 'text/event-stream',
       sessionId: 'mcp-1',
-      body: ['data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}', 'data: {"jsonrpc":"2.0","id":"mail-1","error":{"code":-32000,"message":"refused"}}', ''].join('\n'),
+      body: ['data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}', '', 'data: {"jsonrpc":"2.0","id":"mail-1","error":{"code":-32000,"message":"refused"}}', '', ''].join('\n'),
     }));
     mockUser.current = { id: sara, email: `sara-${tag}@example.test` };
     const response = await linkApp(
