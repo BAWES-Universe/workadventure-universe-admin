@@ -5,6 +5,7 @@ import { adapterIsOn } from '@/lib/app-adapter';
 import { readReadyMadeApps } from '@/lib/app-adapter/settings';
 import { readRoute, type AppRouteName } from '@/lib/app-routes';
 import { ownVersionFor, whyNotReady } from '@/lib/app-routes/own-versions';
+import { instantReportingGaps, instantRunsUnsettled } from '@/lib/instant/report';
 
 /**
  * "Apps: use and demand" (spec "Paying for Apps", section 22): which Apps people use, how many people, what each costs us, how
@@ -56,11 +57,26 @@ export interface AskRow {
   people: number;
 }
 
+/**
+ * How far to trust the cost to us. `measured`: every use is priced with a figure the provider gave. `estimated`: every use is priced, some with our own estimate.
+ * `incomplete`: the total is a part of the cost: some uses have no price yet, some runs are not settled with the provider, or a usage event is missing or does not
+ * agree with its run yet (the sweep mends those). Said next to the total, so a part is never read as the whole.
+ */
+export interface CostCompleteness {
+  state: 'measured' | 'estimated' | 'incomplete';
+  /** Uses with no price yet. */
+  unpriced: number;
+  /** Uses priced with an estimate. */
+  estimated: number;
+  /** Runs the total does not hold yet or holds wrongly: not settled with the provider, with no usage event yet, or with an event that disagrees with the run. */
+  notCounted: number;
+}
+
 export interface DemandReport {
   from: string;
   to: string;
   days: number;
-  totals: { uses: number; people: number; costMicros: number; asks: number };
+  totals: { uses: number; people: number; costMicros: number; asks: number; cost: CostCompleteness };
   apps: AppRow[];
   asked: AskRow[];
   /** Asked-for Apps past the ones listed. */
@@ -87,6 +103,11 @@ type Group = {
   universe_unpriced: number;
 };
 
+function completenessOf(input: { unpriced: number; estimated: number; notCounted: number }): CostCompleteness {
+  const state = input.unpriced > 0 || input.notCounted > 0 ? 'incomplete' : input.estimated > 0 ? 'estimated' : 'measured';
+  return { state, ...input };
+}
+
 /** The report for the last `days` whole UTC days up to now (today counts). */
 export async function demandReport(days: number = DEMAND_DEFAULT_DAYS, now: Date = new Date()): Promise<DemandReport> {
   const span = Math.min(Math.max(Math.floor(days), 1), DEMAND_MAX_DAYS);
@@ -94,7 +115,7 @@ export async function demandReport(days: number = DEMAND_DEFAULT_DAYS, now: Date
   const from = new Date(today.getTime() - (span - 1) * DAY);
   const inRange = Prisma.sql`e.occurred_at >= ${from} AND e.occurred_at <= ${now}`;
 
-  const [groups, totalRows, listed] = await Promise.all([
+  const [groups, totalRows, listed, gaps, unsettled] = await Promise.all([
     // A free lookup is written with quantity 0: it is not a use, so it never counts here (the same rule as the Costs page)
     prisma.$queryRaw<Group[]>(Prisma.sql`
       SELECT e.detail->>'toolkit' AS key,
@@ -117,16 +138,22 @@ export async function demandReport(days: number = DEMAND_DEFAULT_DAYS, now: Date
       FROM meter_events e LEFT JOIN app_use_outcomes o ON o.event_id = e.event_id
       WHERE e.kind = 'app_use' AND e.quantity > 0 AND e.detail->>'toolkit' IS NOT NULL AND ${inRange}
       GROUP BY e.detail->>'toolkit'`),
-    prisma.$queryRaw<{ uses: bigint; people: number; cost: bigint }[]>(Prisma.sql`
-      SELECT COALESCE(SUM(e.quantity), 0)::bigint AS uses, (COUNT(DISTINCT e.person_key))::int AS people, COALESCE(SUM(e.cost_micros), 0)::bigint AS cost
+    prisma.$queryRaw<{ uses: bigint; people: number; cost: bigint; unpriced: number; estimated: number }[]>(Prisma.sql`
+      SELECT COALESCE(SUM(e.quantity), 0)::bigint AS uses, (COUNT(DISTINCT e.person_key))::int AS people, COALESCE(SUM(e.cost_micros), 0)::bigint AS cost,
+        (COUNT(*) FILTER (WHERE e.cost_micros IS NULL))::int AS unpriced, (COUNT(*) FILTER (WHERE e.cost_micros IS NOT NULL AND e.basis = 'estimated'))::int AS estimated
       FROM meter_events e WHERE e.kind = 'app_use' AND e.quantity > 0 AND ${inRange}`),
-    // The App list people can pick from, so an App with no use yet still shows and can still be moved (only while Apps are on at all)
-    adapterIsOn() ? readReadyMadeApps() : Promise.resolve([]),
+    // The App list: the names a use is shown under (always, so the use of an App keeps its name while Apps are off), and the Apps people can pick from
+    // (only while Apps are on at all, below)
+    readReadyMadeApps(),
+    // Instant runs the books do not hold (yet) or hold wrongly: an event no row can show is missing from the count above, so it is looked for in the runs themselves
+    instantReportingGaps({ from, to: now }),
+    instantRunsUnsettled({ from, to: now }),
   ]);
 
   // Asks for an App that is there now (it was asked for while Apps were off, or before it was added) are not demand any more: they are
   // taken out first, in the query, so what is listed, counted and "more" are all about Apps that are not there (the rule appExists keeps)
-  const there = await availableAsks(listed);
+  const pickable = adapterIsOn() ? listed : [];
+  const there = await availableAsks(pickable);
   const [askRows, askTotals] = await Promise.all([
     prisma.$queryRaw<{ name: string; times: bigint; people: number }[]>(Prisma.sql`
       SELECT (ARRAY_AGG(name ORDER BY day DESC))[1] AS name, SUM(times)::bigint AS times, (COUNT(DISTINCT person_key))::int AS people
@@ -139,7 +166,7 @@ export async function demandReport(days: number = DEMAND_DEFAULT_DAYS, now: Date
 
   const names = new Map(listed.map((app) => [app.key, app.name]));
   const byKey = new Map(groups.map((group) => [group.key, group]));
-  const keys = new Set<string>([...byKey.keys(), ...listed.filter((app) => app.enabled).map((app) => app.key)]);
+  const keys = new Set<string>([...byKey.keys(), ...pickable.filter((app) => app.enabled).map((app) => app.key)]);
 
   const apps: AppRow[] = [];
   for (const key of keys) {
@@ -180,7 +207,7 @@ export async function demandReport(days: number = DEMAND_DEFAULT_DAYS, now: Date
     from: from.toISOString().slice(0, 10),
     to: today.toISOString().slice(0, 10),
     days: span,
-    totals: { uses: toNumber(totals?.uses), people: totals?.people ?? 0, costMicros: toNumber(totals?.cost), asks: toNumber(askTotals[0]?.times) },
+    totals: { uses: toNumber(totals?.uses), people: totals?.people ?? 0, costMicros: toNumber(totals?.cost), asks: toNumber(askTotals[0]?.times), cost: completenessOf({ unpriced: totals?.unpriced ?? 0, estimated: totals?.estimated ?? 0, notCounted: gaps.missing + gaps.wrong + unsettled }) },
     apps,
     asked,
     askedMore: Math.max((askTotals[0]?.names ?? 0) - asked.length, 0),

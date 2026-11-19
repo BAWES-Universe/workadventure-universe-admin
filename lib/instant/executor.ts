@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { getAdapter } from '@/lib/app-adapter';
 import type { InstantAdapter, InstantCall, InstantLog, ReadyMadeAdapter } from '@/lib/app-adapter/types';
 import { recordMeterEvent } from '@/lib/meter';
+import { instantEventOf, reportInstantRun } from '@/lib/instant/report';
 import { monthOf } from '@/lib/meter-values';
 import { brickHasApp } from '@/lib/instant/asker';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
@@ -495,49 +496,28 @@ async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'>): Promise<R
     // Still going: nothing is decided on the person's side yet
     return run;
   }
-  return prisma.instantRun.findUnique({ where: { id: runId } });
+  const done = await prisma.instantRun.findUnique({ where: { id: runId } });
+  // The usage event says what the books just confirmed (it was written pending): if this write fails the sweep mends it from the run's own rows
+  if (done) await reportInstantRun(done).catch((error) => console.error('[Instant] Could not update the meter event:', error instanceof Error ? error.message : 'unknown'));
+  return done;
 }
 
 /**
  * Composio's charge is known: written on the run (provider side) and once to the meter's books. A charge above the top price
  * means the table is too low: the run still settles, the excess is ours, and Instant stops.
  */
-/**
- * What the person was charged, as the meter event records it. A failed run released its hold, so the person paid nothing: that is a
- * zero, not "not known" (which would show as "Price not known yet" on the task's receipt for good). A run still held is not known yet.
- */
-const customerChargedMicros = (run: Row): number | null => (run.customerMicros === null ? (run.state === 'failed' ? 0 : null) : Number(run.customerMicros));
-
 async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: number, basis: 'measured' | 'estimated', now: Date): Promise<void> {
   if (run.providerState === 'settled') return;
-  await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt: run.finishedAt ?? now } });
-  // The meter event is a copy for the books: if it cannot be written, the settlement still stands. It is written inside a savepoint,
-  // because a failed statement otherwise leaves the whole transaction aborted, and the settlement above would fail with it
+  const finishedAt = run.finishedAt ?? now;
+  await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt } });
+  // The meter event is a copy for the books: if it cannot be written, the settlement still stands (the sweep mends it from the run's own rows, see
+  // `repairInstantReporting`). It is written inside a savepoint, because a failed statement otherwise leaves the whole transaction aborted, and the
+  // settlement above would fail with it. What the person was charged is whatever the credit books have confirmed by now (pending until they have): the
+  // amount the hold would be settled at is a calculation, never written as a charge
   await tx.$executeRaw`SAVEPOINT instant_meter_event`;
   try {
-    await recordMeterEvent(
-      {
-        eventId: `instant:${run.id}`,
-        kind: 'app_use',
-        pool: 'chat',
-        occurredAt: now,
-        personKey: `person:${run.personId}`,
-        personId: run.personId,
-        botId: run.botId,
-        brick: true,
-        payerKind: 'universe',
-        payerPersonId: null,
-        route: 'instant',
-        jobId: null,
-        quantity: 1,
-        unit: 'use',
-        costMicros: micros,
-        basis,
-        sourceRef: `instant_runs:${run.id}`,
-        detail: { instant: true, provider: INSTANT_PROVIDER, ...(run.taskKey ? { taskKey: run.taskKey } : {}), tool: run.toolSlug, toolkit: run.toolkit, runId: run.id, customerMicros: customerChargedMicros(run), basis, state: run.state },
-      },
-      tx,
-    );
+    const event = instantEventOf({ ...run, providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt });
+    if (event) await recordMeterEvent(event, tx);
     await tx.$executeRaw`RELEASE SAVEPOINT instant_meter_event`;
   } catch (error) {
     await tx.$executeRaw`ROLLBACK TO SAVEPOINT instant_meter_event`;
@@ -552,7 +532,7 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
  */
 async function settleSuccess(run: Row, tx: Prisma.TransactionClient, providerMicros: number, basis: 'measured' | 'estimated', limits: InstantLimits, ctx: Ctx): Promise<number> {
   const charged = customerChargeFor(providerMicros, asNumber(run.holdMicros), run.markupBps ?? limits.markupBps);
-  await settleProvider({ ...run, customerMicros: run.customerMicros ?? BigInt(charged) }, tx, providerMicros, basis, ctx.now);
+  await settleProvider(run, tx, providerMicros, basis, ctx.now);
   return charged;
 }
 

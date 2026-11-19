@@ -1,5 +1,5 @@
 import { dollars } from '@/lib/costs-words';
-import type { AppRow } from '@/lib/app-demand';
+import type { AppRow, CostCompleteness } from '@/lib/app-demand';
 
 /** The plain words of the "Apps: use and demand" page, written once. Wording is only "Apps": never tool, MCP or connector. */
 
@@ -55,3 +55,19 @@ export function byRouteLine(app: AppRow): string | null {
 export const askedLine = (row: { times: number; people: number }): string => `${plural(row.times, 'time', 'times')} · by ${plural(row.people, 'person', 'people')}`;
 
 export const dayWords = (iso: string): string => new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+
+/** The label under the headline cost: a total that is a part of the cost says so, and one built on estimates says that. Never the plain label for a part. */
+export function costTotalLabel(cost: CostCompleteness): string {
+  if (cost.state === 'incomplete') return 'cost to us so far';
+  return cost.state === 'estimated' ? 'cost to us (partly estimated)' : 'cost to us';
+}
+
+/** What the headline leaves out or has estimated, in words, or null when it is whole and measured. */
+export function costTotalNote(cost: CostCompleteness): string | null {
+  const parts: string[] = [];
+  if (cost.unpriced > 0) parts.push(`${plural(cost.unpriced, 'use has', 'uses have')} no price yet`);
+  if (cost.notCounted > 0) parts.push(`${plural(cost.notCounted, 'run is', 'runs are')} not in this total yet (still being settled)`);
+  if (parts.length > 0) return `The cost so far is only part of it: ${parts.join(' and ')}.`;
+  if (cost.estimated > 0) return `${plural(cost.estimated, 'use is', 'uses are')} priced with our estimate until the provider’s own figure is in.`;
+  return null;
+}
