@@ -28,7 +28,8 @@ jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const tag = randomUUID().slice(0, 8);
 const MIN = 60 * 1000;
-const START = new Date('2026-11-19T08:00:00Z');
+// A day ahead of the real clock: the sweeps here are told a time past every row's own (database-clock) updated_at and Orbit's real-clock lease, whenever the suite runs
+const START = new Date(Date.now() + 24 * 60 * MIN);
 const at = (minutes: number) => new Date(START.getTime() + minutes * MIN);
 
 /** A pretend credit source: a balance, holds by key, and the same idempotence the real books promise. */
