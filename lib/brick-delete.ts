@@ -144,7 +144,10 @@ export async function removeGoneBricks(now: Date = new Date(), ownerId?: string,
       await prisma.brickRemoval.upsert({ where: { botId: id }, create: { botId: id, removedAt: now }, update: { removedAt: now } });
       const { count } = await deleteWithHiddenBotData(where, () => prisma.bot.deleteMany({ where }));
       if (count === 0) {
-        await prisma.brickRemoval.deleteMany({ where: { botId: id } });
+        // Nothing was removed by this call. If the Brick is still there (Undo got to it, or its time is not here), the record written above is taken back. If it is
+        // GONE, another call removed it (the sweep and the owner's page can pick the same Brick), and the record is theirs: it is kept, or the bot server would never
+        // hear of the removal
+        if (await prisma.bot.findUnique({ where: { id }, select: { id: true } })) await prisma.brickRemoval.deleteMany({ where: { botId: id } });
         waiting.push(id);
         await markWaiting(id, now);
         continue;

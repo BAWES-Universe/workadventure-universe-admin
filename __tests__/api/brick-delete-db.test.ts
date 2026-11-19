@@ -307,6 +307,43 @@ run('more Bricks, deleting one and Undo, in a real database', () => {
     expect(await prisma.brickRemoval.count({ where: { botId: brick.id } })).toBe(0);
   });
 
+  it('a second call that picked the same Brick, and found it already removed by the first, leaves the removal the first wrote down, while one that finds the Brick undone takes its own record back', async () => {
+    const twice = await person('twice');
+    const brick = await makeBrick(twice.id, { name: 'Twice Brick' });
+    await deleteBrick(brick.id, twice.id, NOW);
+    // The second call picked the Brick before the first removed it: its list still names it
+    const stale = jest.spyOn(prisma.bot, 'findMany').mockResolvedValueOnce([{ id: brick.id }] as never);
+    try {
+      // The first call (the owner's page) removes it for good and writes it down
+      expect(await removeGoneBricks(later(8), twice.id)).toEqual([brick.id]);
+    } finally {
+      stale.mockRestore();
+    }
+    expect(await row(brick.id)).toBeNull();
+    const again = jest.spyOn(prisma.bot, 'findMany').mockResolvedValueOnce([{ id: brick.id }] as never);
+    try {
+      // The second call finds nothing to remove (count 0, the Brick is gone): the record stays
+      expect(await removeGoneBricks(later(8))).toEqual([]);
+    } finally {
+      again.mockRestore();
+    }
+    expect(await recentlyRemovedBricks(later(8))).toContain(brick.id);
+
+    // A Brick that was undone before the second call reached it is still there: no record is left for it
+    const undone = await makeBrick(twice.id, { name: 'Undone Brick' });
+    await deleteBrick(undone.id, twice.id, NOW);
+    expect(await undoBrickDelete(undone.id, twice.id, later(1))).not.toBeNull();
+    const picked = jest.spyOn(prisma.bot, 'findMany').mockResolvedValueOnce([{ id: undone.id }] as never);
+    try {
+      expect(await removeGoneBricks(later(8))).toEqual([]);
+    } finally {
+      picked.mockRestore();
+    }
+    expect(await row(undone.id)).not.toBeNull();
+    expect(await recentlyRemovedBricks(later(8))).not.toContain(undone.id);
+    expect(await prisma.brickRemoval.count({ where: { botId: undone.id } })).toBe(0);
+  });
+
   it('never makes the Brick everyone gets again: not while it waits deleted, not after Undo twice, and not after it is gone for good', async () => {
     const dana = await person('dana');
     const { brick } = await ensureDefaultBrick(dana.id);
