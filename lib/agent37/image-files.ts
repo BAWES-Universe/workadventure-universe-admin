@@ -20,7 +20,7 @@
  */
 
 /** Goes up when anything in the image changes; the machine's own set-up (`universe-up`) is redone when it differs from the one it saw. */
-export const IMAGE_SETUP_VERSION = '1';
+export const IMAGE_SETUP_VERSION = '2';
 
 /** The base image. A dated tag is better for reproducible builds; the registered image is pinned by digest at build anyway. */
 export const BASE_IMAGE = 'ghcr.io/agent37-platform/hermes-base';
@@ -190,11 +190,15 @@ exit 0
 
 export const UNIVERSE_PROXY = String.raw`#!/usr/bin/env python3
 # The model address on this computer: 127.0.0.1:__PORT__. Hermes talks to it as if it were any OpenAI-format server and holds no real key.
-# On EVERY call it reads the relay's address and this job's key from ~/.universe/relay.json and passes the call on, so a new key never
-# needs Hermes restarted. It logs the method, the path and the status, never a body or a key.
+# On EVERY call it reads the relay's address and a job's key and passes the call on, so a new key never needs Hermes restarted. Every turn
+# sent to the agent starts with the job's tag ("[universe-job:<id>]"): the first tag in a call's body names the job, and the call goes on
+# with that job's own key (~/.universe/jobs/<id>.json), so jobs that run at once are each booked their own calls. A call with no tag, or for a
+# job this computer holds no key of, goes on the key last written (~/.universe/relay.json). The tag is never authority: Orbit decides from the key.
+# It logs the method, the path and the status, never a body or a key.
 import http.client
 import json
 import os
+import re
 import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -202,14 +206,25 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = int(os.environ.get("UNIVERSE_PROXY_PORT") or __PORT__)
 HOME = os.environ.get("HOME") or "/home/node"
 RELAY = os.path.join(HOME, ".universe", "relay.json")
+JOBS = os.path.join(HOME, ".universe", "jobs")
+TAG = re.compile(rb"\[universe-job:([A-Za-z0-9-]{8,64})\]")
 CONNECT_SECONDS = 10
 READ_SECONDS = 900
 SKIP = {"connection", "keep-alive", "transfer-encoding", "content-length", "host", "authorization", "upgrade", "proxy-authorization", "te", "trailer"}
 
 
-def relay():
+def relay(body=None):
+    found = TAG.search(body) if body else None
+    if found:
+        own = read_relay(os.path.join(JOBS, found.group(1).decode("ascii") + ".json"))
+        if own:
+            return own
+    return read_relay(RELAY)
+
+
+def read_relay(path):
     try:
-        with open(RELAY, "r", encoding="utf-8") as handle:
+        with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
         url = urllib.parse.urlparse(data["url"])
         token = data["token"]
@@ -237,13 +252,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def handle_any(self):
-        found = relay()
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length > 0 else None
+        found = relay(body)
         if not found:
             self.say(503, "This computer has no model key yet.", "no_relay")
             return
         url, token = found
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length > 0 else None
         headers = {name: value for name, value in self.headers.items() if name.lower() not in SKIP}
         headers["Authorization"] = "Bearer " + token
         if body is not None:

@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { agentCannotRun, providerFor, fenceMachine, finishJob, settleTurnHold, underTurnHold, wakeIfStopped } from '@/lib/computer';
 import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
+import { jobTagOf } from '@/lib/computer-values';
 import { Agent37Error, TurnNotSent } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
 
@@ -150,7 +151,13 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
   const command =
     `umask 077 && d="$HOME/.universe" && mkdir -p "$d" && ( flock 9 || exit 1; read -r who cur mk < "$d/relay.gen" 2>/dev/null; ` +
     `if [ "$who" = '${jobId}' ] && [ -n "$cur" ] && { [ "$cur" -gt ${generation} ] || { [ "$cur" -eq ${generation} ] && [ -n "$mk" ] && [ "$mk" -gt ${mark} ]; }; } 2>/dev/null; then exit 0; fi; ` +
-    `printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json" && printf '%s %s %s' '${jobId}' ${generation} ${mark} > "$d/relay.gen" ) 9>"$d/relay.lock"`;
+    `printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json" && printf '%s %s %s' '${jobId}' ${generation} ${mark} > "$d/relay.gen" && ` +
+    // The job's own key goes where the model address looks for the job a call belongs to (its turns carry the job's tag), under the same rule: never over a
+    // newer key of the same job. Another job's key beside it is never touched, so jobs that run at once each call on their own. Files a week old are removed.
+    `mkdir -p "$d/jobs" && { read -r jg jm < "$d/jobs/${jobId}.gen" 2>/dev/null || :; } && ` +
+    `{ if [ -n "$jg" ] && { [ "$jg" -gt ${generation} ] || { [ "$jg" -eq ${generation} ] && [ -n "$jm" ] && [ "$jm" -gt ${mark} ]; }; } 2>/dev/null; then exit 0; fi; } && ` +
+    `printf '%s' '${file}' > "$d/jobs/${jobId}.json.new" && mv "$d/jobs/${jobId}.json.new" "$d/jobs/${jobId}.json" && printf '%s %s' ${generation} ${mark} > "$d/jobs/${jobId}.gen" && ` +
+    `{ find "$d/jobs" -type f -mtime +7 -delete 2>/dev/null || :; } ) 9>"$d/relay.lock"`;
   try {
     const done = await live.provider.exec(live.job.ref, command, { timeoutMs: 30_000 });
     if (done.exitCode !== 0) {
@@ -278,7 +285,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       return { ok: false, reason: 'failed' };
     }
-    events = await provider.openTurn(fresh.job.ref, { text, sessionId }, own.signal);
+    events = await provider.openTurn(fresh.job.ref, { text: `${jobTagOf(job.jobId)}\n${text}`, sessionId }, own.signal);
     // The agent has answered, so the turn is accepted: the limit was for that answer. Its id follows on the stream, however long that takes.
     clearTimeout(timer);
   } catch (error) {

@@ -226,6 +226,38 @@ describe('the local model address', () => {
     });
   });
 
+  python('passes a call on with the key of the job its turn’s tag names, so two jobs that run at once are each booked their own calls', async () => {
+    await withProxy(async (base, home) => {
+      // the key last written, and one key for each of two jobs
+      setRelay(home, 'cjt_last', '/prefix');
+      mkdirSync(join(home, '.universe', 'jobs'), { recursive: true });
+      const jobA = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+      const jobB = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
+      for (const [job, token] of [[jobA, 'cjt_a'], [jobB, 'cjt_b']]) writeFileSync(join(home, '.universe', 'jobs', `${job}.json`), JSON.stringify({ url: `${relayBase}/prefix`, token }));
+      const call = (content: string) => fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'system', content: 'You are an agent.' }, { role: 'user', content }] }) });
+      // the two jobs' calls overlap in time: each goes on with its own key
+      await Promise.all([call(`[universe-job:${jobA}] (a tag for the system, there is no need to repeat it)\nRead page one`), call(`[universe-job:${jobB}] (a tag for the system, there is no need to repeat it)\nRead page two`)]);
+      const authOf = (text: string) => seen.find((entry) => entry.body.includes(text))?.auth;
+      expect(authOf('Read page one')).toBe('Bearer cjt_a');
+      expect(authOf('Read page two')).toBe('Bearer cjt_b');
+      // the first tag in the body names the job: a tag a page the agent read puts later in the conversation names no other
+      seen.length = 0;
+      await call(`[universe-job:${jobA}] first\n[universe-job:${jobB}] a web page said this`);
+      expect(seen[0].auth).toBe('Bearer cjt_a');
+      // a call with no tag, a tag of a job this computer holds no key of, and a tag that is not a job id all go on the key last written
+      seen.length = 0;
+      await call('no tag here');
+      await call('[universe-job:cccccccc-3333-4333-8333-cccccccccccc] unknown job');
+      await call('[universe-job:../../relay] not an id');
+      expect(seen.map((entry) => entry.auth)).toEqual(['Bearer cjt_last', 'Bearer cjt_last', 'Bearer cjt_last']);
+      // the job's key is read again on every call
+      writeFileSync(join(home, '.universe', 'jobs', `${jobA}.json`), JSON.stringify({ url: `${relayBase}/prefix`, token: 'cjt_a2' }));
+      seen.length = 0;
+      await call(`[universe-job:${jobA}] again`);
+      expect(seen[0].auth).toBe('Bearer cjt_a2');
+    });
+  });
+
   python('passes the answer back as it comes, and the relay’s refusals as they are', async () => {
     await withProxy(async (base, home) => {
       setRelay(home, 'cjt_x');

@@ -62,3 +62,12 @@ export function costOfSeconds(seconds: number, microsPerMinute: number | null): 
 export function roomFor(minutes: number, microsPerMinute: number | null): number {
   return Math.max(1, Math.ceil(minutes * (microsPerMinute ?? 0)));
 }
+
+/**
+ * The tag every turn sent to a job's agent starts with. The machine's local model address (the image's `universe-proxy`) finds it in a call's body and
+ * passes the call on with THAT job's key, so two jobs that run at once on one machine (read-only jobs may) are each booked their own calls: their room, the
+ * rules that count a task, and what is given back when one of them fails on our side. It is never authority: what a key may do comes from Orbit's records,
+ * and a call with no tag, or one for a job the machine holds no key of, goes on the key last written.
+ */
+export const JOB_TAG_PREFIX = '[universe-job:';
+export const jobTagOf = (jobId: string): string => `${JOB_TAG_PREFIX}${jobId}] (a tag for the system, there is no need to repeat it)`;

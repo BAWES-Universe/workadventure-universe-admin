@@ -129,6 +129,33 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       }
     });
 
+    it('writes the job’s own key in a file of its own, never over another job’s, and a write delayed past a later one of the same job leaves the later key', async () => {
+      const { jobId } = await running();
+      await prepareJob(jobId, RELAY, NOW);
+      const command = fake.commands.at(-1)?.command ?? '';
+      const mark = Number(/ (\d+) > "\$d\/relay\.gen"/.exec(command)?.[1]);
+      const token = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(command)?.[1] ?? '';
+      const home = mkdtempSync(join(tmpdir(), 'universe-relay-'));
+      const runIt = (text: string) => spawnSync('sh', ['-c', text], { env: { ...process.env, HOME: home }, encoding: 'utf8' });
+      const keyIn = (path: string) => (JSON.parse(readFileSync(join(home, '.universe', path), 'utf8')) as { token: string }).token;
+      try {
+        // another job of the same machine writes its key first
+        const other = command.replaceAll(jobId, 'another-job').replaceAll(token, 'cjt_other');
+        expect(runIt(other).status).toBe(0);
+        expect(runIt(command).status).toBe(0);
+        expect(keyIn(`jobs/${jobId}.json`)).toBe(token);
+        expect(keyIn('jobs/another-job.json')).toBe('cjt_other');
+        // a later write of this job (a later claim) replaces its file; a delayed write of the earlier claim then changes nothing
+        const later = command.replaceAll(new RegExp(`\\b${mark}\\b`, 'g'), String(mark + 1_000)).replaceAll(token, 'cjt_later');
+        expect(runIt(later).status).toBe(0);
+        expect(runIt(command.replaceAll(token, 'cjt_delayed')).status).toBe(0);
+        expect(keyIn(`jobs/${jobId}.json`)).toBe('cjt_later');
+        expect(keyIn('jobs/another-job.json')).toBe('cjt_other');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
     it('a write delayed past its claim never puts its ended key over the one the claim after it wrote, though both are of the same control number', async () => {
       const { jobId } = await running();
       await prepareJob(jobId, RELAY, NOW);
@@ -374,7 +401,8 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       }
       expect(seen.map((event) => event.type)).toEqual(['created', 'text', 'completed']);
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ agentSessionId: 'sess-1', agentResponseId: null });
-      expect(fake.openedTurns[0].input).toEqual({ text: 'Fill the form', sessionId: null });
+      // the agent is told which job the turn is for: its model calls carry the tag, so the machine's model address calls on that job's key
+      expect(fake.openedTurns[0].input).toEqual({ text: `[universe-job:${jobId}] (a tag for the system, there is no need to repeat it)\nFill the form`, sessionId: null });
     });
 
     it('keeps the turn’s id when the reader goes away before it ends, so it can be reconnected or cancelled', async () => {
