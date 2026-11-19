@@ -539,7 +539,9 @@ async function carryOn(orderId: string, limits: Awaited<ReturnType<typeof getBri
   // An order exists for this wish: the buyer can be told to ask about it
   const maybeMade = { status: 'unavailable', unsure: true } as const;
   const patience = limits.keyCallSeconds * 1000 + START_GRACE_MS;
-  const lastTried = (order: { createdAt: Date; checkedAt: Date | null }) => Math.max(order.createdAt.getTime(), order.checkedAt?.getTime() ?? 0);
+  // The last time an attempt held the order: when it was made, until an attempt writes `checkedAt` (a takeover sets it to now; an unsure start sets it
+  // earlier, so the next ask may carry on soon). It is not the later of the two: a start that failed quickly has a recent `createdAt` and must not hold it.
+  const lastTried = (order: { createdAt: Date; checkedAt: Date | null }) => (order.checkedAt ?? order.createdAt).getTime();
   for (let round = 0; round < 2; round += 1) {
     const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, include: { connection: true, job: { include: { connection: true, artifact: { select: { expiresAt: true } } } } } });
     if (!order) return unavailable;
@@ -568,7 +570,7 @@ async function carryOn(orderId: string, limits: Awaited<ReturnType<typeof getBri
     }
     const cut = new Date(Date.now() - patience);
     const tookAt = new Date();
-    const taken = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'creating', createdAt: { lt: cut }, OR: [{ checkedAt: null }, { checkedAt: { lt: cut } }] }, data: { checkedAt: tookAt } });
+    const taken = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'creating', OR: [{ checkedAt: null, createdAt: { lt: cut } }, { checkedAt: { lt: cut } }] }, data: { checkedAt: tookAt } });
     if (taken.count !== 1) continue;
     const origin = ownOrigin();
     // What the page was set up with when the wish was made must still hold: a stopped page, an app that is gone, a changed definition or a key

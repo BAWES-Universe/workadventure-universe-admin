@@ -1444,6 +1444,28 @@ run('payments for pages, in a real database', () => {
         expect((await orders(artifactId)).find((row) => row.intentId === refused)).toMatchObject({ status: 'not_paid' });
       });
 
+      it('a start that failed quickly can be carried on a few seconds later, not after a whole start time, and by one request only', async () => {
+        const { artifactId } = await pending();
+        const code = word();
+        const intentId = wish();
+        mockSend.current = () => {
+          throw new GuardError('timeout', 'no answer');
+        };
+        expect(await begin(artifactId, intentId, code)).toMatchObject({ status: 'unavailable', unsure: true });
+        const sent = gateway();
+        // Six seconds on (the order was only just made): the same wish goes on with the same order, and a second ask at that moment waits for it
+        const real = Date.now();
+        const clock = jest.spyOn(Date, 'now').mockReturnValue(real + 6_000);
+        try {
+          const [first, second] = await Promise.all([begin(artifactId, intentId, code), begin(artifactId, intentId, code)]);
+          expect(first.status).toBe('ok');
+          expect(second.status).toBe('ok');
+        } finally {
+          clock.mockRestore();
+        }
+        expect(POSTS(sent)).toHaveLength(1);
+      });
+
       it('says `unsure` in the 409 of both routes when an order may exist, and not when nothing was made', async () => {
         const { artifactId } = await pending();
         mockSend.current = () => {
