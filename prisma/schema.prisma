@@ -2056,6 +2056,16 @@ model MeterReservation {
   @@map("meter_reservations")
 }
 
+// A grant key an admin was told "was not saved" about (the read-only check made after a try that got no answer). Written under the key's own lock, in the
+// same step that looked for a grant: a try under that key that reaches the server afterwards is refused, so the admin who then gives under a new key
+// can never end up with both. Nothing here is ever a grant.
+model MeterGrantClosedKey {
+  grantKey String   @id @map("grant_key") @db.VarChar(255)
+  closedAt DateTime @default(now()) @map("closed_at")
+
+  @@map("meter_grant_closed_keys")
+}
+
 // Extra usage given to a member (game #1998): recorded once under its key, so a retry or a second super admin never gives
 // it twice. A gift is free to the person and never owed; extra usage to be billed records something agreed with the person
 // before it was given, outside the product, and says when it was billed. The two are never the same row kind.

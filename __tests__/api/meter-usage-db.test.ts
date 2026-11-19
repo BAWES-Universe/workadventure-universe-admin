@@ -28,6 +28,7 @@ import { GET as usageGet } from '@/app/api/me/usage/route';
 import { POST as askPost } from '@/app/api/me/usage/ask-for-more/route';
 import { GET as costsGet } from '@/app/api/admin/meter-costs/route';
 import { GET as personGet, PATCH as personPatch, POST as personPost } from '@/app/api/admin/users/[id]/extra-usage/route';
+import { waitForLockWait } from '../helpers/wait-for-lock';
 import { GET as statusGet } from '@/app/api/admin/users/[id]/extra-usage/status/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -167,14 +168,23 @@ run('usage for people, and cost for us, in a real database', () => {
 
     it('a grant that answers while an ask is still being written waits for it, so the ask is answered', async () => {
       const sara = await person('sara');
+      let written!: () => void;
+      let finish!: () => void;
+      const wasWritten = new Promise<void>((resolve) => (written = resolve));
+      const mayFinish = new Promise<void>((resolve) => (finish = resolve));
       const holder = prisma.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`meter_request:${sara.id}:computer`}))`;
         await tx.meterRequest.create({ data: { personId: sara.id, what: 'computer', createdAt: hours(-1) } });
-        await new Promise((resolve) => setTimeout(resolve, 600));
+        written();
+        await mayFinish;
       });
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await wasWritten;
       // The ask is not committed yet: an answer that did not wait would see nothing to answer
-      expect(await answerRequests(sara.id, 'grant-x', NOW, NOW, 'computer')).toBe(1);
+      const answering = answerRequests(sara.id, 'grant-x', NOW, NOW, 'computer');
+      // Let go of the ask only once the answer is seen waiting for the lock the ask holds
+      await waitForLockWait(prisma, '%pg_advisory_xact_lock%');
+      finish();
+      expect(await answering).toBe(1);
       await holder;
       expect(await prisma.meterRequest.count({ where: { personId: sara.id, answeredAt: null } })).toBe(0);
     });
@@ -736,24 +746,63 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await patch(sara.id, { grantKey: gift.grant.grantKey, action: 'billed' })).status).toBe(400);
     });
 
-    it('say whether a give was saved under a key, without giving anything: saved only for that person, and a key nobody used is not saved', async () => {
+    it('say whether a give was saved under a key, without giving anything: a give made through the route is found under the key the sheet sent, only for that person, and a key nobody used is not saved', async () => {
       asAdmin();
       const sara = await person('sara');
       const omar = await person('omar');
-      const real = (n: number) => new Date(Date.now() + n * 86_400_000);
       const ask = (id: string, key?: string) => statusGet(adminCall(`/api/admin/users/${id}/extra-usage/status${key === undefined ? '' : `?grantKey=${encodeURIComponent(key)}`}`), { params: Promise.resolve({ id }) });
+      const give = (id: string, key: string) => personPost(body('POST', `/api/admin/users/${id}/extra-usage`, { grantKey: key, amount: 'double', endsAt: new Date(Date.now() + 5 * 86_400_000).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id }) });
       expect((await ask(sara.id)).status).toBe(400);
-      expect((await ask(sara.id, 'x'.repeat(256))).status).toBe(400);
+      // The route stores `<person>:<key>` (255 at most): a key too long for that is refused the same way here, never cut short
+      expect((await ask(sara.id, 'x'.repeat(255 - sara.id.length))).status).toBe(400);
+      expect((await ask(sara.id, 'x'.repeat(255 - sara.id.length - 1))).status).toBe(200);
       const before = await prisma.meterGrant.count({});
-      const none = await ask(sara.id, `g-${tag}-s`);
-      expect(await none.json()).toEqual({ saved: false });
+      expect(await (await ask(sara.id, `g-${tag}-never`)).json()).toEqual({ saved: false });
       expect(await prisma.meterGrant.count({})).toBe(before);
-      const { grant } = await recordGrant({ grantKey: `g-${tag}-s`, personId: sara.id, settlement: 'gift', multiplier: 2, startsAt: real(-1), endsAt: real(5), givenById: sara.id });
-      const saved = await (await ask(sara.id, grant.grantKey)).json();
-      expect(saved).toEqual({ saved: true, startsAt: grant.startsAt.toISOString(), endsAt: grant.endsAt.toISOString() });
+      // Given through the route, found by the key the sheet sent
+      expect((await give(sara.id, `g-${tag}-s`)).status).toBe(201);
+      const stored = await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: `${sara.id}:g-${tag}-s` } });
+      expect(await (await ask(sara.id, `g-${tag}-s`)).json()).toEqual({ saved: true, startsAt: stored.startsAt.toISOString(), endsAt: stored.endsAt.toISOString() });
       // The same key under another person's name says nothing about them
-      expect(await (await ask(omar.id, grant.grantKey)).json()).toEqual({ saved: false });
+      expect(await (await ask(omar.id, `g-${tag}-s`)).json()).toEqual({ saved: false });
       expect(await prisma.meterGrant.count({})).toBe(before + 1);
+    });
+
+    it('"not saved" is the last word on a key: the check waits for a try still running under it, and a try that reaches the server after it is refused, so a give under a new key is never doubled', async () => {
+      asAdmin();
+      const sara = await person('sara');
+      const ask = (key: string) => statusGet(adminCall(`/api/admin/users/${sara.id}/extra-usage/status?grantKey=${encodeURIComponent(key)}`), { params: Promise.resolve({ id: sara.id }) });
+      const give = (key: string) => personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, { grantKey: key, amount: 'double', endsAt: new Date(Date.now() + 5 * 86_400_000).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id: sara.id }) });
+      // 1. A try is still running under the key (it holds the key's lock and has not written yet): the check waits, then finds what the try came to
+      const stored = `${sara.id}:g-${tag}-slow`;
+      let ready!: () => void;
+      let finish!: () => void;
+      const holding = new Promise<void>((resolve) => (ready = resolve));
+      const mayFinish = new Promise<void>((resolve) => (finish = resolve));
+      const original = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`grant:${stored}`}))`;
+        ready();
+        await mayFinish;
+        await recordGrant({ grantKey: stored, personId: sara.id, settlement: 'gift', multiplier: 2, startsAt: new Date(), endsAt: new Date(Date.now() + 5 * 86_400_000), givenById: sara.id }, tx);
+      });
+      await holding;
+      const asking = ask(`g-${tag}-slow`);
+      await waitForLockWait(prisma, '%pg_advisory_xact_lock%');
+      finish();
+      await original;
+      expect(await (await asking).json()).toMatchObject({ saved: true });
+      // 2. Nothing was saved: the check says so, once and for all. A try that only now arrives under that key is refused and gives nothing
+      expect(await (await ask(`g-${tag}-late`)).json()).toEqual({ saved: false });
+      const late = await give(`g-${tag}-late`);
+      expect(late.status).toBe(409);
+      expect(await late.json()).toMatchObject({ code: 'key_closed' });
+      expect(await prisma.meterGrant.count({ where: { personId: sara.id, grantKey: `${sara.id}:g-${tag}-late` } })).toBe(0);
+      // The new key the admin goes on with is given once
+      expect((await give(`g-${tag}-new`)).status).toBe(201);
+      // 3. A key that was saved stays saved, and the check does not close it
+      expect((await give(`g-${tag}-done`)).status).toBe(201);
+      expect(await (await ask(`g-${tag}-done`)).json()).toMatchObject({ saved: true });
+      expect((await give(`g-${tag}-done`)).status).toBe(200);
     });
 
     it('turn down dates that are not dates, run backwards, or ask for more than a year of figures', async () => {

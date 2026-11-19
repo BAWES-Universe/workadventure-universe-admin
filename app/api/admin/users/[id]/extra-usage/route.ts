@@ -85,6 +85,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         const person = await tx.user.findUnique({ where: { id }, select: { id: true, isGuest: true } });
         if (!person || person.isGuest) return { status: 404 as const };
         const saved = await tx.meterGrant.findUnique({ where: { grantKey: key }, select: { startsAt: true, endsAt: true } });
+        // The admin was told, by the read-only check, that nothing was saved under this key and has gone on with another: a try that only now arrives
+        // is refused, so the two can never both be given
+        if (!saved && (await tx.meterGrantClosedKey.findUnique({ where: { grantKey: key }, select: { grantKey: true } }))) return { status: 409 as const };
         // What was saved stands, with the times it was saved with; a new grant needs an end in the future
         const endsAt = saved ? saved.endsAt : endsAtOf(body.endsAt, now);
         if (!endsAt) return { status: 400 as const };
@@ -106,6 +109,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       { timeout: 30_000, maxWait: 10_000 },
     );
     if ('status' in outcome) {
+      if (outcome.status === 409) return NextResponse.json({ error: 'That try was dropped after it was checked. Give it again.', code: 'key_closed' }, { status: 409 });
       return NextResponse.json({ error: outcome.status === 404 ? 'Person not found' : 'endsAt must be a date in the future, within a year' }, { status: outcome.status });
     }
     const { recorded, grant } = outcome;
