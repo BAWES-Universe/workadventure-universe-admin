@@ -601,7 +601,13 @@ export async function recordVoiceNote(id: string, input: Record<string, unknown>
       const value = { transcript: kept?.transcript ?? '', answer: input.answer };
       if (Buffer.byteLength(JSON.stringify(value)) > BUFFER_MAX_BYTES) throw new VoiceNoteError(`The answer and its words are over ${BUFFER_MAX_BYTES / 1024} KB`, 400);
       const buffer = sealBuffer(turn.id, value);
-      fenced((await moveOn(turn, { state: 'answered', buffer, bufferUntil: new Date(now.getTime() + BUFFER_MS), leaseUntil: null })).count);
+      // Under the lock every reservation counts under (as is the reply's usage row, app/api/bots/ai-usage/route.ts): a reservation reads the notes
+      // on their way and then the replies used inside one hold of it, so a note is never answered between those two reads
+      const answered = await prisma.$transaction(async (tx) => {
+        await lockSpeech(tx);
+        return tx.voiceNoteTurn.updateMany({ where: { id: turn.id, state: turn.state, generation: turn.generation }, data: { state: 'answered', buffer, bufferUntil: new Date(now.getTime() + BUFFER_MS), leaseUntil: null } });
+      }, SPEECH_LOCK);
+      fenced(answered.count);
       return ok('answered');
     }
     case 'answer-failed': {

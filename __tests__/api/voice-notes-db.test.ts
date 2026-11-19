@@ -72,13 +72,17 @@ jest.mock('@/lib/voice-note-hearing', () => {
   };
 });
 
+jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
+
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { saveVoiceLimits } from '@/lib/voice-limits';
 import { saveMeterSettings } from '@/lib/meter';
 import { leaseVoiceNoteStage, recordVoiceNote, reserveVoiceNote, sweepStaleReservations, type Reservation } from '@/lib/voice-note-turns';
 import { checkVoiceAllowance, releaseVoiceReply } from '@/lib/voice-allowance';
-import { speechReserved } from '@/lib/speech-reserved';
+import { lockSpeech, speechReserved, SPEECH_LOCK } from '@/lib/speech-reserved';
+import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
+import { NextRequest } from 'next/server';
 import { addVoiceNoteCleanup, claimVoiceNoteCleanups, settleVoiceNoteCleanup } from '@/lib/voice-note-cleanups';
 import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 
@@ -674,6 +678,67 @@ run('voice notes for every bot, in a real database', () => {
       // Once its text is no longer kept, it is not
       await prisma.voiceNoteTurn.update({ where: { id: heard.id }, data: { bufferUntil: new Date(Date.now() - 60_000) } });
       expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+    });
+
+    it('writes a reply\'s usage row under the lock a reservation counts under, so a row never lands between its two counts (an error row is not held)', async () => {
+      const counted = await newBot('Usage lock');
+      const providerId = `usage-lock-${tag}`;
+      await prisma.botsAiProvider.upsert({ where: { providerId }, create: { providerId, name: 'Usage lock', type: 'openai', enabled: true }, update: {} });
+      const report = (extra: Record<string, unknown>) =>
+        trackUsage(new NextRequest('http://localhost:3333/api/bots/ai-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botId: counted, providerId, userId: `u-${randomUUID()}`, isGuest: true, ...extra }) }));
+      const rows = () => prisma.botsAiUsage.count({ where: { botId: counted } });
+      const until = async (check: () => Promise<boolean>) => {
+        for (let wait = 0; wait < 200 && !(await check()); wait++) await new Promise((resolve) => setTimeout(resolve, 25));
+        expect(await check()).toBe(true);
+      };
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let locked: () => void = () => undefined;
+      const taken = new Promise<void>((resolve) => (locked = resolve));
+      // A reservation is in the middle of counting
+      const reservation = prisma.$transaction(
+        async (tx) => {
+          await lockSpeech(tx);
+          locked();
+          await held;
+        },
+        SPEECH_LOCK,
+      );
+      await taken;
+      try {
+        expect(await (await report({})).json()).toEqual({ status: 'tracked' });
+        await waitUntilBlockedOnLock();
+        expect(await rows()).toBe(0);
+        // An error is no reply: it is written at once, the lock or not
+        await report({ error: true });
+        await until(async () => (await rows()) === 1);
+        expect(await prisma.botsAiUsage.count({ where: { botId: counted, error: false } })).toBe(0);
+      } finally {
+        release();
+        await reservation;
+      }
+      await until(async () => (await rows()) === 2);
+    });
+
+    it('never lets a second note through while the first is being completed at the same moment: its row and its answer land under the lock the reservation counts under', async () => {
+      const providerId = `completing-${tag}`;
+      await prisma.botsAiProvider.upsert({ where: { providerId }, create: { providerId, name: 'Completing', type: 'openai', enabled: true }, update: {} });
+      for (let round = 0; round < 6; round++) {
+        const capped = await newBot(`Completing ${round}`);
+        await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 1 } });
+        const person = `done-${randomUUID()}`;
+        const first = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+        // Being answered by a bot server that holds it
+        await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { state: 'answering', generation: 1, leaseUntil: new Date(Date.now() + 60_000) } });
+        const complete = async () => {
+          // The reply's usage row, then the answer, as the bot server reports them
+          await trackUsage(new NextRequest('http://localhost:3333/api/bots/ai-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botId: capped, providerId, userId: person, isGuest: true }) }));
+          for (let wait = 0; wait < 200 && (await prisma.botsAiUsage.count({ where: { botId: capped } })) === 0; wait++) await new Promise((resolve) => setTimeout(resolve, 10));
+          await recordVoiceNote(first.id, { event: 'answered', generation: 1, answer: 'done' });
+        };
+        const [, second] = await Promise.all([complete(), reserveFor(capped, person, { seconds: 10 })]);
+        expect(second).toMatchObject({ ok: false, reason: 'reply-limit' });
+      }
     });
 
     it('stops at the hour\'s minutes and the notes heard at once, for everyone, with "busy"', async () => {

@@ -461,6 +461,26 @@ run('using a key app, in a real database', () => {
     expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(429);
   });
 
+  it('counts the page orders of the last hour under everyone\'s ceiling, as a checkout counts key calls: key calls cannot fill what orders already hold', async () => {
+    await connectGateway();
+    const [app] = await keyAppsOf(saraBrick);
+    mockSend.current = () => ({ status: 200 });
+    await saveServerLimits({ bricks: { keyCallsPerPerson: 100, keyCallsPlatform: 2 } }, sara);
+    // One order started in the last hour holds one of the two places
+    const order = await prisma.appPageOrder.create({ data: { ownerId: sara, artifactId: `art-${randomUUID()}`, definitionHash: 'h'.repeat(64), amountMinor: 100, currency: 'USD', visitorHash: 'v' } });
+    try {
+      expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
+      const over = await call(saraBrick, app.serverId, app.definitionHash);
+      expect(over.status).toBe(429);
+      expect((await over.json()).code).toBe('limit');
+      // An order from before the last hour holds nothing
+      await prisma.appPageOrder.update({ where: { id: order.id }, data: { createdAt: new Date(Date.now() - 2 * 3_600_000) } });
+      expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
+    } finally {
+      await prisma.appPageOrder.delete({ where: { id: order.id } }).catch(() => undefined);
+    }
+  });
+
   it('never hands the model a raw error answer, a redirect, or a service that is down', async () => {
     await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
