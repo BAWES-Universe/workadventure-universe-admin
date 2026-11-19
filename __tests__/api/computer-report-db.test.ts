@@ -179,26 +179,45 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     expect(await prisma.computerJob.findMany({ where: { id: { in: [a, b.job.id] } }, select: { endToldAt: true } })).toEqual([{ endToldAt: expect.any(Date) }, { endToldAt: expect.any(Date) }]);
   });
 
-  it('tells that it could not finish with its one sentence cleaned of links and markup, and says nothing of a month it cannot prove given back', async () => {
+  it('tells that it could not finish with its one sentence cleaned of links and markup, and never gives back a run the agent gave up on', async () => {
     const sara = await person('sara');
     const id = await started(sara);
+    // The agent's own [[failed]] is the runner's `failed` with no cause: the job ran, so its minutes stay the person's and nothing is told as given back
     await finishJob(id, 'failed', minutes(6), 'The site kept failing at the **passport upload**, see [help](https://evil.example/pay) https://evil.example/x [[failed]]');
+    expect(await prisma.meterEvent.findFirstOrThrow({ where: { eventId: `computer:${id}:time` } })).toMatchObject({ personId: sara.id, personKey: `person:${sara.id}` });
     const [failed] = await mine([id]);
     expect(failed).toMatchObject({ kind: 'failed', why: 'The site kept failing at the passport upload, see help', givenBack: false });
     expect(failed.why).not.toMatch(/http|\[|\*/);
+    // The same words with the cause the runner gives for the agent's own ending, or the turn cap, change nothing
+    const capped = await started(sara, 'Capped');
+    await finishJob(capped, 'failed', minutes(6), 'Out of turns', 'agent');
+    expect(await prisma.meterEvent.findFirstOrThrow({ where: { eventId: `computer:${capped}:time` } })).toMatchObject({ personId: sara.id });
+    expect((await mine([capped]))[0].givenBack).toBe(false);
+  });
+
+  it('gives back a run the runner says failed on our side, and tells it so', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    await finishJob(id, 'failed', minutes(6), 'The relay was not there', 'ours');
+    expect(await prisma.meterEvent.findFirstOrThrow({ where: { eventId: `computer:${id}:time` } })).toMatchObject({ personId: null, personKey: 'unknown' });
+    expect((await mine([id]))[0]).toMatchObject({ kind: 'failed', givenBack: true });
   });
 
   it('says a try is given back only when the books show it written against nobody, or no minutes were counted', async () => {
     const sara = await person('sara');
     const id = await started(sara);
-    await finishJob(id, 'failed', minutes(6));
+    await finishJob(id, 'failed', minutes(6), null, 'ours');
+    // The books as a failed job writes them now: minutes against nobody, marked, so it is told as given back
+    expect((await mine([id]))[0].givenBack).toBe(true);
+    // A line the books wrote against the person (nothing given back) is never told as given back
+    await prisma.meterEvent.updateMany({ where: { eventId: `computer:${id}:time` }, data: { personId: sara.id, personKey: `person:${sara.id}`, detail: {} } });
     expect((await mine([id]))[0].givenBack).toBe(false);
     // The books as a given-back try writes them (minutes against nobody, marked)
     await prisma.meterEvent.updateMany({ where: { eventId: `computer:${id}:time` }, data: { personId: null, personKey: 'unknown', detail: { givenBack: true, forPersonId: sara.id } } });
     expect((await mine([id]))[0].givenBack).toBe(true);
     // No minutes counted at all
     const other = await started(await person('omar'), 'Quick');
-    await finishJob(other, 'failed', NOW);
+    await finishJob(other, 'failed', NOW, null, 'ours');
     await prisma.meterEvent.deleteMany({ where: { eventId: `computer:${other}:time` } });
     await prisma.computerJob.update({ where: { id: other }, data: { secondsRun: 0 } });
     expect((await mine([other]))[0].givenBack).toBe(true);

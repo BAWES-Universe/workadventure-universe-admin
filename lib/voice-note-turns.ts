@@ -1,6 +1,9 @@
 import crypto from 'crypto';
 import { Prisma, type VoiceNoteTurn } from '@prisma/client';
 import { prisma } from '@/lib/db';
+import { recordSpeechHeard } from '@/lib/meter-speech';
+import { checkSpeechCap } from '@/lib/speech-cap';
+import { lockSpeech, speechReserved, SPEECH_LOCK, NOTE_START_MS } from '@/lib/speech-reserved';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { VOICE_RANGES, savedVoiceKeyLimits } from '@/lib/voice-limit-values';
 import { checkReplyAllowance, type ReplyAllowance } from '@/lib/reply-limits';
@@ -50,13 +53,7 @@ export const LEASE_MS = 2 * 60_000;
 export const BUFFER_MS = 15 * 60_000;
 export const BUFFER_MAX_BYTES = 64 * 1024;
 /** A note reserved this long ago and never started is no longer "being heard" for the notes-at-once count. */
-const STARTING_MS = LEASE_MS;
-
-/**
- * For a transaction that takes the reservations' lock: how long it may wait for a connection, and for the lock and its few reads
- * (each indexed). Past that it fails, and the bot server is told to try again, rather than holding a connection.
- */
-const LOCKED = { maxWait: 5_000, timeout: 15_000 };
+const STARTING_MS = NOTE_START_MS;
 
 const HOUR = 60 * 60_000;
 const DAY = 24 * HOUR;
@@ -266,7 +263,7 @@ export async function reserveVoiceNote(
 
   return prisma.$transaction(async (tx): Promise<Reservation> => {
     // One lock for every reservation: they are short and few, and nothing can take the last minute twice
-    await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext('voice-note-reserve'))`);
+    await lockSpeech(tx);
     if (scope === 'bot' && personKey.startsWith('guest:') && signedIn) {
       // A signed-in person Orbit had no account for a moment ago: looked up again under the lock, so an ask that found the account
       // in the meantime and reserved this note under it is found here, and the note is never two turns
@@ -285,6 +282,12 @@ export async function reserveVoiceNote(
     const fits = (used: number, minutes: number) => used + seconds <= minutes * 60;
 
     if (universeAi) {
+      // The month's spending stop on speech Universe AI pays for (lib/speech-cap.ts): a note is held back whole, before it is heard. What
+      // notes and replies already let through may still take, and have not written to the books yet, is added (lib/speech-reserved.ts): read
+      // under this lock, where a note's event is written too, so each use is counted once and the last minutes of a Limit are never given twice
+      const inFlight = await speechReserved(tx, { personKey, replySeconds: limits.replySeconds, now });
+      const stop = await checkSpeechCap({ personId: personKey.startsWith('person:') ? personKey.slice('person:'.length) : null, seconds, inFlight }, now, tx);
+      if (stop) return { ok: false, reason: 'note-minutes', limit: stop.stopped === 'person' ? 'person' : 'universe', resetsAt: stop.resetsAt };
       if (scope === 'bot') {
         if (!fits(await sum({ scope: 'bot', personKey, payer: 'universe-ai', createdAt: { gte: day } }), limits.noteMinutesPerPerson)) return { ok: false, reason: 'note-minutes', limit: 'person', resetsAt: tomorrow };
       } else {
@@ -322,7 +325,7 @@ export async function reserveVoiceNote(
       data: { scope, personKey, target, botId, universeKey, clientTurnId, fingerprint, payer: hearing.payer!, providerId: hearing.provider?.id ?? null, seconds, state: 'reserved', createdAt: now },
     });
     return { ok: true, turn: view(turn), replay: false };
-  }, LOCKED);
+  }, SPEECH_LOCK);
 }
 
 /** Gives back a reservation that was never used: its seconds stop counting, on the bot's day too. */
@@ -419,13 +422,13 @@ export async function leaseVoiceNoteStage(id: string, input: { stage?: unknown; 
       // Started under the reservations' lock, still young enough at that moment (the clock moved on while the hearing was looked
       // up): a reservation counts as being heard until it is too old, then never starts, so nothing passes the notes at once
       const started = await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext('voice-note-reserve'))`);
+        await lockSpeech(tx);
         const at = now.getTime() + (Date.now() - entered);
         return tx.voiceNoteTurn.updateMany({
           where: { id: turn.id, state: 'reserved', generation: turn.generation, createdAt: { gt: new Date(at - STARTING_MS) } },
           data: { state: 'hearing', generation, leaseUntil },
         });
-      }, LOCKED);
+      }, SPEECH_LOCK);
       if (started.count === 0) {
         const after = await findTurn(turn.id);
         if (after.state !== 'reserved') return { granted: false, reason: 'held' };
@@ -503,7 +506,19 @@ export async function recordVoiceNote(id: string, input: Record<string, unknown>
       const heardSeconds = input.seconds === undefined ? turn.seconds : Math.min(turn.seconds, wholeOf(input.seconds, 'seconds', 0, LENGTH_CEILING));
       const costMicros = input.costMicros === undefined ? null : wholeOf(input.costMicros, 'costMicros', 0, 2_000_000_000);
       const buffer = sealBuffer(turn.id, { transcript: input.transcript.slice(0, 20_000) });
-      fenced((await moveOn(turn, { state: 'heard', heardSeconds, costMicros, buffer, bufferUntil: new Date(now.getTime() + BUFFER_MS), leaseUntil: null })).count);
+      // The note moves to heard and its event goes into the books in one transaction, under the lock every speech reservation reads under
+      // (lib/speech-reserved.ts): a reservation sees the note as waiting (no event) or as spent (the event), never both and never neither.
+      // If the books can't be written nothing moved, the note is still being heard, and the same report can be sent again. What was heard
+      // is in the books once (the turn's id is the event's), whoever pays; hearing that was done stays counted
+      await prisma.$transaction(async (tx) => {
+        await lockSpeech(tx);
+        const done = await tx.voiceNoteTurn.updateMany({
+          where: { id: turn.id, state: 'hearing', generation },
+          data: { state: 'heard', heardSeconds, costMicros, buffer, bufferUntil: new Date(now.getTime() + BUFFER_MS), leaseUntil: null },
+        });
+        fenced(done.count);
+        await recordSpeechHeard(turn, heardSeconds, costMicros, now, tx);
+      }, SPEECH_LOCK);
       return ok('heard');
     }
     case 'hearing-failed': {

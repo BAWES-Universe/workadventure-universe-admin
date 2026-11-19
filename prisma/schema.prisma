@@ -1973,6 +1973,9 @@ model VoiceReplyUse {
   turnId    String   @map("turn_id") @db.VarChar(255)
   // "person:<user id>" or "guest:<their id>", the same words the Universe AI reply window is kept under
   personKey String   @map("person_key") @db.VarChar(320)
+  // The longest this reply may be, as it was when it was admitted: what it holds of the month's speech Limit until its usage arrives. A later
+  // change of that setting never changes what an admitted reply holds. Empty only for a row from before this was kept.
+  seconds   Int?
   createdAt DateTime @default(now()) @map("created_at")
 
   bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
@@ -3216,6 +3219,9 @@ model BrickComputer {
   provider      String    @default("fake") @db.VarChar(10)
   providerRef   String?   @map("provider_ref") @db.VarChar(255)
   madeAt        DateTime? @map("made_at")
+  // Written when a machine was first asked for, before the provider is called and never cleared: a record without one never had a machine made for it,
+  // so a purge has nothing to look for (a failed or timed-out make may still have left one at the provider)
+  makeTriedAt   DateTime? @map("make_tried_at")
   lastWorkedAt  DateTime? @map("last_worked_at")
   // The last saved copy of its home folder: what Files shows when Computer is off, and which day a restore came from
   filesBytes    BigInt    @default(0) @map("files_bytes")
@@ -3231,14 +3237,157 @@ model BrickComputer {
   filesClaimedAt DateTime? @map("files_claimed_at")
   // When the sweep last sent the machine a no-op command to keep it awake while a job holds it
   keptAwakeAt   DateTime? @map("kept_awake_at")
+  // Who may act on the computer, one durable state for it (lib/computer-control.ts): agent, fencing, human_ready or returning. The epoch goes up with
+  // each transition that begins, the lease is the leader's (a transition whose leader is gone is finished by the next request), and humanInputUntil is how
+  // long the person's screen input, once authorized, may still be open: a hand back waits it out before Brick resumes.
+  controlState      String    @default("agent") @map("control_state") @db.VarChar(12)
+  controlEpoch      Int       @default(0) @map("control_epoch")
+  controlLeaseUntil DateTime? @map("control_lease_until")
+  humanInputUntil   DateTime? @map("human_input_until")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
   noticeDismissedJobId String? @map("notice_dismissed_job_id") @db.VarChar(40)
+  // Cold storage (the machine is packed into our own storage after idle days and made again on the next use): when it was packed, and how a
+  // pack-away that is under way stands. `machine` is "packing" while one runs and "cold" once the computer is gone and only the copies remain.
+  packedAt      DateTime? @map("packed_at")
+  packClaimedAt DateTime? @map("pack_claimed_at")
+  // claimed, stored (the copy is written whole), verified (restored on a clean computer and checked), removing (the computer is being deleted)
+  packStage     String?   @map("pack_stage") @db.VarChar(10)
+  packArchiveId String?   @map("pack_archive_id") @db.VarChar(40)
+  // Who holds the pack-away: one value per claim, new at each take-over, so a run that was taken over can change nothing of the run that replaced it
+  packClaimId   String?   @map("pack_claim_id") @db.VarChar(36)
+  // What the stored state was before the pack-away took the machine, so a pack-away that gives up puts it back as it was
+  packPrevious  String?   @map("pack_previous") @db.VarChar(10)
+  // A pack-away that failed is not tried again at once: when it was last tried and how many times in a row it failed
+  packTriedAt   DateTime? @map("pack_tried_at")
+  packFailures  Int       @default(0) @map("pack_failures")
+  // How the last return from cold storage went: when it came back, how long it took (milliseconds), and whether an older copy had to be used
+  returnedAt    DateTime? @map("returned_at")
+  returnMs      Int?      @map("return_ms")
+  olderCopyUsed Boolean   @default(false) @map("older_copy_used")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
   bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
 
   @@map("brick_computers")
+}
+
+// One versioned, encrypted copy of a Brick computer's home folder, made when the computer is packed away into cold storage. The newest two that were
+// restored on a clean computer and checked ("verified") are kept; everything else is cleaned up on a schedule. The object holds the folder's
+// tar.gz (encrypted, lib/agent37/saved-copies.ts); the manifest says what is in it and where it came from.
+model ComputerArchive {
+  id            String    @id @default(uuid())
+  botId         String    @map("bot_id")
+  generation    Int
+  // staging (being written), stored (written whole, not yet proved), verified (restored on a clean computer and checked), failed (a check failed: never restored from), superseded (replaced by two newer verified ones, waiting to be deleted)
+  state         String    @db.VarChar(10)
+  objectKey     String    @map("object_key") @db.VarChar(255)
+  // The folder's tar.gz size (not counting the encryption's 32 bytes), and its SHA-256
+  bytes         BigInt    @default(0)
+  sha256        String?   @db.VarChar(64)
+  // What is in it: file count and size of the home folder, what was found outside the home folder, the image revision it came from, the key version
+  manifest      Json?
+  keyVersion    Int       @default(1) @map("key_version")
+  imageRevision Int?      @map("image_revision")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  verifiedAt    DateTime? @map("verified_at")
+  // How long the proving restore took, in milliseconds (the number the wake time target is measured from)
+  proofMs       Int?      @map("proof_ms")
+  // Why it failed, in a few plain words
+  failure       String?   @db.VarChar(200)
+
+  @@unique([botId, generation])
+  @@index([botId, state])
+  @@index([state, createdAt])
+  @@map("computer_archives")
+}
+
+// Awake time the computer provider bills that no job holds: a pack-away, a return from cold storage, a restore drill, and the throwaway computer
+// a restore is proved on. Kept so the daily check of the books counts it (it is not an "unbooked time" finding) and the cost is on the books.
+model ComputerColdRun {
+  id         String    @id @default(uuid())
+  // pack, return, drill
+  kind       String    @db.VarChar(8)
+  botId      String?   @map("bot_id")
+  // Whose computer was awake: the Brick's own, or the throwaway one
+  machineRef String?   @map("machine_ref") @db.VarChar(255)
+  scratch    Boolean   @default(false)
+  startedAt  DateTime  @default(now()) @map("started_at")
+  endedAt    DateTime? @map("ended_at")
+  seconds    Int       @default(0)
+  // ok, failed, or open while it runs
+  outcome    String    @default("open") @db.VarChar(8)
+  detail     String?   @db.VarChar(200)
+
+  @@index([botId, startedAt])
+  @@index([kind, startedAt])
+  @@map("computer_cold_runs")
+}
+
+// What is left to do outside Orbit after a Brick was purged for good, and the proof that it was (audit F08). Written in the SAME
+// transaction that deletes the Brick, so a Brick that is gone always has this row, and a Brick that is not gone never does. It holds
+// no content, no name and no text: only where the machine is (so a failed deletion can be tried again after the Brick's own rows
+// are gone) and what is still to delete. It has no foreign key on purpose. After both outside deletions are confirmed the row stays
+// as a marker with `doneAt` set (the machine reference is cleared), so a bot server that still holds the Brick cannot write its
+// memory or chats back; the sweep removes the marker after a while.
+model BrickPurge {
+  botId          String    @id @map("bot_id") @db.VarChar(255)
+  // Whose Brick it was, only so the books can still say who the kept-storage lines belong to
+  ownerId        String?   @map("owner_id")
+  // Which provider holds the machine ("fake" or "real") and its reference there; null when there was none
+  provider       String?   @db.VarChar(10)
+  providerRef    String?   @map("provider_ref") @db.VarChar(255)
+  // Still to delete outside: the machine at its provider (also any made for this Brick that was never written down), the saved files in our bucket
+  machinePending Boolean   @default(false) @map("machine_pending")
+  copyPending    Boolean   @default(false) @map("copy_pending")
+  // Its chat rooms (Matrix) still to clear: the bot server holds the chat account, so it asks for this list and confirms each Brick it cleared
+  chatPending    Boolean   @default(false) @map("chat_pending")
+  attempts       Int       @default(0)
+  nextTryAt      DateTime  @default(now()) @map("next_try_at")
+  lastTriedAt    DateTime? @map("last_tried_at")
+  purgedAt       DateTime  @default(now()) @map("purged_at")
+  // Set when nothing is left to delete outside
+  doneAt         DateTime? @map("done_at")
+
+  @@index([doneAt, nextTryAt])
+  @@map("brick_purges")
+}
+
+// A save of a Brick's computer folder that is under way (lib/agent37/saved-copies.ts), written down BEFORE it starts and removed once it is
+// finished and checked against the purge marker. No foreign key on purpose, like BrickPurge: a purge that finds one cannot call the saved
+// files gone, so a copy that lands late (or a server that stopped after it landed) is still found and deleted. `expiresAt` is the longest a
+// save may run; past it the row is stale (its server is gone) and the purge deletes once more after it, and then removes it.
+model SavedCopyWrite {
+  id        String   @id @default(uuid())
+  botId     String   @map("bot_id") @db.VarChar(255)
+  startedAt DateTime @default(now()) @map("started_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@index([botId])
+  @@map("saved_copy_writes")
+}
+
+// The daily check of our books against the computer provider's own bill (one row per UTC day, never changed once written): what the provider
+// charged, what we booked, and what does not match. Reading it never changes any money; the reserves are what stop overspend.
+model ComputerReconcile {
+  id               String   @id @default(uuid())
+  // The UTC day compared, as YYYY-MM-DD
+  day              String   @unique @db.VarChar(10)
+  checkedAt        DateTime @default(now()) @map("checked_at")
+  // What the provider billed that day in all, and how much of it was machines of ours
+  agentTotalMicros BigInt   @map("agent_total_micros")
+  agentBrickMicros BigInt   @map("agent_brick_micros")
+  // What our books say the same machines were awake, in minutes, and the provider's count
+  ourMinutes       Int      @map("our_minutes")
+  agentMinutes     Int      @map("agent_minutes")
+  // ok, or drift when something below did not match
+  status           String   @db.VarChar(5)
+  // What the findings add up to, in micros
+  gapMicros        BigInt   @map("gap_micros")
+  // [{ kind, ref, botId, detail... }], never a key or a person's words
+  findings         Json
+
+  @@map("computer_reconciles")
 }
 
 // One job on a Brick's computer (game #2000). Jobs for a Brick queue; the database holds at most one WRITING job running or
@@ -3287,6 +3436,12 @@ model ComputerJob {
   agentResponseId   String? @map("agent_response_id") @db.VarChar(120)
   // What the person asked for in more words than the title, for the agent only: never shown, never sent anywhere else, and cleared when the job ends
   brief             String? @db.VarChar(4000)
+  // The way this job took and what the whole task was expected to cost when it was chosen, in micros (the real cost is on the books under the job's id)
+  route             String  @default("computer") @db.VarChar(10)
+  expectedMicros    BigInt? @map("expected_micros")
+  // How well the record of where the computer's browser went (computer_job_visits) was taken when the job ended: complete, partial (a gap or a cut
+  // in what the computer recorded, or more than is kept), unread (the computer could not be read), none (the computer has no recorder). Empty until the job ends.
+  visitsState       String? @map("visits_state") @db.VarChar(8)
 
   // Brick tells the person how a job went, in their chat with it (the report back). Each ending is said once: `endToldAt` is empty until it was
   // said, and set at once for the endings that are never said (the person's own Stop, turned off, deleted). Each time the job waits for its person
@@ -3321,6 +3476,7 @@ model ComputerJob {
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
   tokens  ComputerJobToken[]
+  visits  ComputerJobVisit[]
   files   ComputerJobFile[]
 
   @@unique([botId, runId])
@@ -3328,6 +3484,34 @@ model ComputerJob {
   @@index([personId, status])
   @@index([status, endToldAt])
   @@map("computer_jobs")
+}
+
+// Where a job's computer browsed, for the owner to look at later (R06, handoff v2 section 4: "every navigation and form post is recorded"). Taken
+// from the browser's DevTools on the computer when the job ends. HOST AND PATH ONLY, never a query string, a fragment, a sign-in name in the address,
+// a header or a body, and a path part that looks like a one-time code is not kept. `hands` rows are Orbit's own notes of when the person took the
+// computer and gave it back, so a page the person opened is told apart from one Brick did. Goes with the job (and so with a purged Brick).
+model ComputerJobVisit {
+  id     String   @id @default(uuid())
+  jobId  String   @map("job_id")
+  // visit (a page the browser opened), post (a post it sent, a page's form or a script's), hands (Orbit's note of who has the computer from `at`)
+  kind   String   @db.VarChar(5)
+  at     DateTime
+  // brick or person; on a `hands` note, who has the computer from then on
+  by     String   @default("brick") @db.VarChar(6)
+  method String?  @db.VarChar(8)
+  host   String?  @db.VarChar(255)
+  path   String?  @db.VarChar(300)
+  // The same thing again right after is one row with a count
+  count  Int      @default(1)
+  // A page that did not load
+  failed Boolean  @default(false)
+  // A post that was a page's own form
+  form   Boolean  @default(false)
+
+  job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, at])
+  @@map("computer_job_visits")
 }
 
 // The delivery ledger of the files a computer job made. The file itself is the person's own result in `owned_results` (the one place results are kept, the same as a

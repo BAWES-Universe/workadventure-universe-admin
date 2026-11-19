@@ -5,6 +5,7 @@ import { botContentReadDenied } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
 import { saveMemoryRow, takeItemForgets, withoutForgottenFor, withoutForgottenOne } from '@/lib/bot-memory-person';
 import { dropForgottenFrom, forgetNotice, isBotHidden, memoryTally, takeForgets } from '@/lib/bot-privacy';
+import { isPurged } from '@/lib/brick-purge';
 
 export const runtime = 'nodejs';
 
@@ -164,6 +165,12 @@ export async function POST(
       );
     }
 
+    // A Brick that was deleted for good keeps nothing, and nothing a bot server still holds for it is written back (audit F08). The save is
+    // answered as done, so the bot server does not try it again.
+    if (await isPurged(botId)) {
+      return NextResponse.json({ status: 'saved', saveType, gone: true }, { headers: corsHeaders(request) });
+    }
+
     // People the owner asked the bot to forget (#435): their entries are not saved, and the bot server is told to drop
     // them from what it keeps in memory. A bot that nobody asked to forget anything has no rows here, so this changes
     // nothing for it. If the rows cannot be read, the save fails and the bot server tries again, rather than saving
@@ -198,6 +205,9 @@ export async function POST(
             console.warn('Skipping memory entry without userUuid:', memory);
             continue; // Skip invalid entries
           }
+
+          // Purged while this save was running: nothing more is written
+          if (await isPurged(botId)) break;
 
           // Determine if user is logged in
           const userIsLogged = isGuest === false || isLogged === true;
@@ -268,7 +278,7 @@ export async function POST(
           // Always store userUuid (even for guests with no match)
           // This allows us to track ephemeral guest sessions
           // Under the lock every Forget takes, taking out what was forgotten as it is now (game #2003)
-          await saveMemoryRow(botId, userUuid, memoryData, (tx, clean) =>
+          const saved = await saveMemoryRow(botId, userUuid, memoryData, (tx, clean) =>
             tx.botsMemory.upsert({
               where: {
                 botId_userUuid: {
@@ -297,6 +307,8 @@ export async function POST(
               },
             }),
           );
+          // Purged while this save was running: nothing was written, and nothing more is
+          if (saved === null) break;
           written.push(userUuid);
         }
 
@@ -389,7 +401,7 @@ export async function POST(
           fullMemoryData = (await withoutForgottenOne(botId, body.userUuid, fullMemoryData)) as typeof fullMemoryData;
 
           // Under the lock every Forget takes, taking out what was forgotten as it is now (game #2003)
-          await saveMemoryRow(botId, body.userUuid, fullMemoryData, (tx, clean) =>
+          const savedNow = await saveMemoryRow(botId, body.userUuid, fullMemoryData, (tx, clean) =>
             tx.botsMemory.upsert({
               where: {
                 botId_userUuid: {
@@ -421,7 +433,7 @@ export async function POST(
               },
             }),
           );
-          written.push(body.userUuid);
+          if (savedNow !== null) written.push(body.userUuid);
         }
       } catch (err) {
         // Log error but don't block response (fire-and-forget)

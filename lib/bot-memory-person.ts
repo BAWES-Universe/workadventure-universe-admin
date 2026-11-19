@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
+import { purgedUnderLock } from '@/lib/brick-purge-lock';
 import { memoryItemsOf, withoutForgotten, withoutItems, MEMORY_ITEM_KINDS, type ForgottenKey, type MemoryItem, type MemoryItemKind } from '@/lib/bot-memory-items';
 
 /**
@@ -68,13 +69,16 @@ export async function lockPeople(tx: MemoryTx, botId: string, userUuids: string[
  * takes out what was forgotten as it is when it writes, not as it was when the save began. Whatever a Forget wrote before
  * the lock was given is read here; whatever comes after waits until the save is written, and then takes it out.
  */
-export async function saveMemoryRow<T>(botId: string, userUuid: string, memories: unknown, write: (tx: MemoryTx, memories: unknown) => Promise<T>): Promise<T> {
+export async function saveMemoryRow<T>(botId: string, userUuid: string, memories: unknown, write: (tx: MemoryTx, memories: unknown) => Promise<T>): Promise<T | null> {
   return prisma.$transaction(async (tx) => {
+    // Under the lock a purge takes, after looking for its marker again: nothing is written for a Brick that was purged while this save ran, and a
+    // purge that begins now waits for this write and deletes it. null: purged, nothing was written.
+    if (await purgedUnderLock(tx, botId)) return null;
     await lockPeople(tx, botId, [userUuid]);
     const rows = memories ? await tx.botMemoryItemForget.findMany({ where: { botId, userUuid }, select: { userUuid: true, itemKey: true, createdAt: true } }) : [];
     const keys: ForgottenKey[] = rows.map(({ itemKey, createdAt }) => ({ itemKey, createdAt }));
     return write(tx, keys.length > 0 ? withoutForgotten(memories, keys) : memories);
-  });
+  }, { timeout: 70_000, maxWait: 10_000 });
 }
 
 /**

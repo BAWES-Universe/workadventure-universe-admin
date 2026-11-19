@@ -3,8 +3,8 @@ import { checkOutboundUrl } from '@/lib/mcp/outbound-guard';
 import { INSTANT_ACCOUNT, readInstantCharge } from '@/lib/instant/values';
 
 /**
- * The real adapter, written from the provider's live docs (docs.composio.dev, read 12 Nov 2026), wired but never switched on
- * here. It is built only when COMPOSIO_API_KEY is set in Orbit's environment (lib/app-adapter/index.ts), and nothing sets it.
+ * The real adapter, written from the provider's live docs (docs.composio.dev, read 12 Nov 2026), switched on by setting
+ * COMPOSIO_API_KEY in Orbit's environment (lib/app-adapter/index.ts); without it there is no adapter and the routes answer 404.
  *
  *  - API: https://backend.composio.dev/api/v3.1, header `x-api-key`.
  *  - Connect: POST /connected_accounts/link { auth_config_id, user_id, callback_url } -> { redirect_url, connected_account_id, expires_at }.

@@ -18,7 +18,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests, type TurnEvent } from '@/lib/computer-provider';
 import { Agent37Error } from '@/lib/agent37/client';
-import { fenceMachine, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { fenceMachine, setLeaderStopTimesForTests, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { verifyJobToken } from '@/lib/computer-token';
 import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
 
@@ -125,9 +125,14 @@ run('the broker, the fence and keep-awake, in a real database', () => {
 
     it('says the job is not the runner’s to act on when the person took over while the key was being written', async () => {
       const { sara, jobId } = await running();
-      fake.execAnswer = async () => {
-        await takeOver(sara.brickId, sara.id, NOW);
-        return {};
+      let taken = false;
+      fake.execAnswer = async (command) => {
+        // Once, while the key is being written (the take over's own fence commands go through here too)
+        if (!taken && !command.startsWith('universe-fence')) {
+          taken = true;
+          await takeOver(sara.brickId, sara.id, NOW);
+        }
+        return command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {};
       };
       const done = await prepareJob(jobId, RELAY, NOW);
       expect(done).toMatchObject({ ok: false });
@@ -414,6 +419,37 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       fake.failExec = true;
       expect(await fenceMachine(other.sara.brickId)).toBe('failed');
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: other.sara.brickId } })).machine).toBe('stopped');
+    });
+
+    describe('a stop that takes too long while the computer’s row is held', () => {
+      afterEach(() => setLeaderStopTimesForTests(null));
+      const slowStop = (ms: number) => {
+        const stop = fake.stop.bind(fake);
+        fake.stop = async (ref: string) => {
+          await new Promise((resolve) => setTimeout(resolve, ms));
+          return stop(ref);
+        };
+      };
+      const machineOf = async (botId: string) => (await prisma.brickComputer.findUniqueOrThrow({ where: { botId } })).machine;
+
+      it('is not proved when the provider is slower than the time given it, and is written `stopping` for the sweep, never left `working`', async () => {
+        const { sara } = await running();
+        fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
+        setLeaderStopTimesForTests({ deadlineMs: 150, transactionMs: 10_000 });
+        slowStop(1_000);
+        expect(await fenceMachine(sara.brickId)).toBe('failed');
+        expect(await machineOf(sara.brickId)).toBe('stopping');
+      });
+
+      it('writes `stopping` again when the transaction itself ran out of time after the stop was sent, so a stopped machine is never left `working`', async () => {
+        const { sara } = await running();
+        fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
+        // The stop is allowed longer than the transaction: the transaction is rolled back, with the record in it
+        setLeaderStopTimesForTests({ deadlineMs: 5_000, transactionMs: 300 });
+        slowStop(900);
+        expect(await fenceMachine(sara.brickId)).toBe('failed');
+        expect(await machineOf(sara.brickId)).toBe('stopping');
+      });
     });
 
     it('does not call the machine stopped when the stop was refused: it is blocked and tried again until proved asleep', async () => {

@@ -25,7 +25,7 @@ import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
 import { GET as getPaidBy } from '@/app/api/bots/[id]/paid-by/route';
 import { POST as postJob } from '@/app/api/bots/[id]/computer-jobs/route';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { giveComputer, renewJob, startJob } from '@/lib/computer';
+import { finishJob, giveComputer, renewJob, startJob } from '@/lib/computer';
 import { mintJobToken } from '@/lib/computer-token';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { createInstantFunds } from '@/lib/funding/instant-funds';
@@ -567,9 +567,10 @@ run('rules said in chat and task receipts, in a real database', () => {
       if (!minted.ok) throw new Error('no key');
       const refused = await authorizeModelCall({ token: minted.token, callId: 'call-1', estimateMicros: 50_000, payer: 'universe' }, NOW);
       expect(refused).toEqual({ ok: false, reason: 'rule', ruleId: expect.any(String), why: 'cap', leftMicros: 40_000, words: expect.stringContaining('No more than $0.10 a month') });
-      // Nothing was held for it, and a call that fits is let through
+      // Nothing was held for it, and the job is over as "rule" (as a refused renewal ends it): its key is no longer good, so no call goes after it
       expect(await prisma.meterReservation.count({ where: { jobId: started.job.id, reservationKey: { contains: 'call' } } })).toBe(0);
-      expect(await authorizeModelCall({ token: minted.token, callId: 'call-2', estimateMicros: 30_000, payer: 'universe' }, NOW)).toMatchObject({ ok: true, reservedMicros: 30_000 });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'rule' });
+      expect(await authorizeModelCall({ token: minted.token, callId: 'call-2', estimateMicros: 30_000, payer: 'universe' }, NOW)).toEqual({ ok: false, reason: 'refused' });
     });
 
     it('a try refused by a rule leaves alone a job another try put on the machine at the same moment', async () => {
@@ -637,6 +638,25 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(renewed).toEqual({ ok: false, reason: 'rule', words: expect.stringContaining('No more than $0.10 a month') });
       const ended = await prisma.computerJob.findUnique({ where: { id: started.job.id } });
       expect(ended).toMatchObject({ status: 'stopped', endedBy: 'rule' });
+    });
+
+    it('a model call a rule refuses ends the job right there as "rule", so a later "failed, ours" from the runner changes nothing and nothing is given back', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 100_000 });
+      if (!made.ok) throw new Error('not made');
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Long job' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      const minted = await mintJobToken(started.job.id, 'model', NOW);
+      if (!minted.ok) throw new Error('no key');
+      // 60,000 is the job's own room; a call for 30,000 fits under 100,000, and the next for 30,000 does not
+      expect(await authorizeModelCall({ token: minted.token, callId: 'c1', estimateMicros: 30_000, payer: 'universe' }, NOW)).toMatchObject({ ok: true });
+      await settleModelCall(started.job.id, 'c1', { costMicros: 30_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW);
+      expect(await authorizeModelCall({ token: minted.token, callId: 'c2', estimateMicros: 30_000, payer: 'universe' }, NOW)).toMatchObject({ ok: false, reason: 'rule' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'rule', endNote: expect.stringContaining('No more than $0.10 a month') });
+      await finishJob(started.job.id, 'failed', NOW, 'Three turns failed', 'ours');
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'rule' });
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${started.job.id}:call:c1` } })).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
     });
   });
 
