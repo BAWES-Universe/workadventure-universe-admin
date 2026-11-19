@@ -1790,13 +1790,16 @@ async function moveJobsToPerson(botId: string, now: Date): Promise<{ changed: nu
   // The jobs already waiting for the person are theirs first: from here a job that starts sees the person has the machine and waits
   const changed = await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'brick' }, data: { control: 'person' } });
   let moved = 0;
-  for (;;) {
-    if (!(await takeable())) {
-      // Nothing to hand over now (asked again, or nothing waits): what another take-over is fencing is waited for. A job that became takeable while
-      // waiting is looked at again; nothing is ever handed over without a claim of this call's own, so none is the person's before the marker stands
-      if (!(await waitForFence(botId))) return { ok: false, reason: 'fencing' };
-      if (!(await takeable())) break;
-      continue;
+  for (let round = 0; round < 5; round++) {
+    const runningJobs = await prisma.computerJob.findMany({ where: { botId, status: 'running' } });
+    if (runningJobs.length === 0) break;
+    moved += runningJobs.length;
+    for (const running of runningJobs) {
+      const stretch = running.stretchStarted ? Math.max(0, Math.round((now.getTime() - running.stretchStarted.getTime()) / SECOND)) : 0;
+      await prisma.computerJob.updateMany({
+        where: { id: running.id, status: 'running' },
+        data: { status: 'waiting', waitingFor: null, control: 'person', secondsRun: running.secondsRun + stretch, stretchStarted: now, readyWhat: null, readyWhere: null },
+      });
     }
   }
   return { changed: changed.count, moved };

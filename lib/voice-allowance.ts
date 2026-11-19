@@ -72,18 +72,6 @@ async function servedFor(served: Served, person: { personId: string | null }, no
   return { ...served, window: { ...served.window, signedIn: { replies, textReserve: textReserve(replies, served.limits.textReserveShare), voiceReplies: voiceReplies(replies, served.limits, false) } } };
 }
 
-/**
- * The windows a person is served: a signed-in person's own number of replies when a super admin's exception sets one (or gives none, so
- * a spoken reply is no place either), the usual one when it does not. The text limit reads it the same way (lib/reply-limits.ts).
- */
-async function servedFor(served: Served, person: { personId: string | null }, now: Date): Promise<Served> {
-  if (!person.personId) return served;
-  const base = served.window.signedIn.replies;
-  const replies = await repliesPerWindowFor(person.personId, base, now);
-  if (replies === base) return served;
-  return { ...served, window: { ...served.window, signedIn: { replies, textReserve: textReserve(replies, served.limits.textReserveShare), voiceReplies: voiceReplies(replies, served.limits, false) } } };
-}
-
 /** The extra usage running for a signed-in person now, if any; a guest has none. */
 const extraFor = (person: { personId: string | null }, now: Date) => (person.personId ? runningExtra(person.personId, now) : Promise.resolve(null));
 

@@ -617,23 +617,6 @@ async function endProgramIn(tx: Tx, programId: string, issuer: Issuer, now: Date
   return 'ended';
 }
 
-async function endProgramIn(tx: Tx, programId: string, issuer: Issuer, now: Date): Promise<'ended' | 'already_ended' | 'not_found'> {
-  // Under the funding account's lock and the category's rules lock (issuing holds the rules lock shared, and may still be issuing from a
-  // version waiting to be replaced that another account funds): an issuing that read the rule before this ends it sees it ended and gives nothing
-  const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true, program: { select: { categoryId: true } } } });
-  if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId), lockOfRules(peek.program.categoryId)]);
-  const program = await tx.grantProgram.findUnique({ where: { id: programId }, include: { rules: { where: { state: 'current' }, take: 1 } } });
-  if (!program) return 'not_found';
-  if (program.status === 'ended') return 'already_ended';
-  const rule = program.rules[0];
-  if (rule) {
-    await checkMayFundFrom(tx, rule.fundingAccountId, issuer, 'You cannot end this one');
-  }
-  await tx.grantProgram.update({ where: { id: programId }, data: { status: 'ended', endedAt: now } });
-  await tx.grantRule.updateMany({ where: { programId, state: 'current' }, data: { state: 'ended', supersededAt: now } });
-  return 'ended';
-}
-
 // ---------- The preview, before any save (spec 7a) ----------
 
 export interface Preview {
