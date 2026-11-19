@@ -2659,6 +2659,16 @@ model BotFile {
 // A file its person deleted from a Brick's list (game #2003), waiting for the bot server to remove it from the uploader.
 // Orbit cannot reach the uploader, so the row stays until the bot server has confirmed, and a restart never forgets one.
 // Only where the file is, never what it was called or said.
+// A deleted Brick that was removed for good, kept for a few days so the bot server that closes its chats hears of it on its next sweep,
+// whoever's request removed it (the owner opening their Bricks page removes theirs too) and whether or not an answer got through
+model BrickRemoval {
+  botId     String   @id @map("bot_id") @db.VarChar(255)
+  removedAt DateTime @map("removed_at")
+
+  @@index([removedAt])
+  @@map("brick_removals")
+}
+
 model BotFileRemoval {
   id        String   @id @default(uuid())
   botId     String   @map("bot_id") @db.VarChar(255)

@@ -11,6 +11,7 @@ import { POST as ensureMine } from '@/app/api/bricks/default/route';
 import { DELETE as deleteMine, PATCH as changeBrick } from '@/app/api/bricks/[id]/route';
 import { POST as undoMine } from '@/app/api/bricks/[id]/undo/route';
 import { POST as sweep } from '@/app/api/bricks/sweep/route';
+import { recentlyRemovedBricks } from '@/lib/brick-delete';
 import { GET as getConfiguration } from '@/app/api/bots/configuration/[id]/route';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
@@ -39,7 +40,7 @@ jest.mock('@/lib/brick-default', () => ({
   listDeletedBricks: jest.fn(),
   isDefaultBrick: jest.fn(),
 }));
-jest.mock('@/lib/brick-delete', () => ({ deleteBrick: jest.fn(), undoBrickDelete: jest.fn(), removeGoneBricks: jest.fn() }));
+jest.mock('@/lib/brick-delete', () => ({ deleteBrick: jest.fn(), undoBrickDelete: jest.fn(), removeGoneBricks: jest.fn(), recentlyRemovedBricks: jest.fn(async () => []) }));
 jest.mock('@/lib/brick-visit', () => ({ endStaleVisits: jest.fn(async () => 0) }));
 jest.mock('@/lib/brick-home', () => ({ dropHomesWithoutAccess: jest.fn(async () => 0) }));
 jest.mock('@/lib/brick-make', () => ({ ...jest.requireActual('@/lib/brick-make'), makeBrick: jest.fn() }));
@@ -445,12 +446,23 @@ describe('DELETE /api/bricks/:id and POST /api/bricks/:id/undo: deleting a Brick
 describe('POST /api/bricks/sweep: what waited long enough is removed for good (game #1996)', () => {
   it('removes for everyone when the bot server asks, and names what went so their chats can be closed', async () => {
     removeGone.mockResolvedValue([MADE_ID]);
+    (recentlyRemovedBricks as jest.Mock).mockResolvedValueOnce([MADE_ID]);
     const asked = request('/api/bricks/sweep', null, { method: 'POST' });
     asked.headers.set('authorization', `Bearer ${SERVICE_TOKEN}`);
     const response = await sweep(asked);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ removed: [MADE_ID] });
     expect(removeGone).toHaveBeenCalledWith();
+  });
+
+  it('still names the Bricks already removed when the sweep fails part way, and those removed by someone opening their page', async () => {
+    removeGone.mockRejectedValue(new Error('database went away'));
+    (recentlyRemovedBricks as jest.Mock).mockResolvedValueOnce(['gone-1', 'gone-2']);
+    const asked = request('/api/bricks/sweep', null, { method: 'POST' });
+    asked.headers.set('authorization', `Bearer ${SERVICE_TOKEN}`);
+    const response = await sweep(asked);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ removed: ['gone-1', 'gone-2'] });
   });
 
   it('is for the bot server only: a person, a super admin included, starts no sweep, and neither does the admin token', async () => {

@@ -91,6 +91,21 @@ async function markWaiting(brickId: string, now: Date): Promise<void> {
   await prisma.bot.updateMany({ where: { id: brickId, roomId: null, deletedAt: { not: null } }, data: { updatedAt: now } });
 }
 
+/** How long a removal is kept for the bot server to hear of it. */
+const REMOVAL_KEPT_DAYS = 7;
+
+/**
+ * The Bricks removed for good in the last days, whoever removed them: what the bot server is told on each sweep so it can close their
+ * chats. Telling it again is harmless (a chat already closed stays closed), and an answer that never got through loses nothing.
+ * Older ones are let go of here.
+ */
+export async function recentlyRemovedBricks(now: Date = new Date()): Promise<string[]> {
+  const cutoff = new Date(now.getTime() - REMOVAL_KEPT_DAYS * DAY_MS);
+  await prisma.brickRemoval.deleteMany({ where: { removedAt: { lt: cutoff } } });
+  const rows = await prisma.brickRemoval.findMany({ where: { removedAt: { gte: cutoff } }, select: { botId: true }, orderBy: { removedAt: 'asc' }, take: 5_000 });
+  return rows.map((row) => row.botId);
+}
+
 /**
  * The second step: every deleted Brick whose days are over is removed for good, with its saved chats and what it
  * remembers (a Brick's are always hidden, so they go in the same transaction, see deleteWithHiddenBotData). For one
@@ -124,8 +139,12 @@ export async function removeGoneBricks(now: Date = new Date(), ownerId?: string,
       }
       // Still only one whose time has passed: the condition is asked again in the delete itself
       const where = { id, roomId: null, goneAt: { lte: now } };
+      // Written down BEFORE the delete: whoever asked for this (the owner opening their Bricks page counts), the bot server hears of the
+      // removal on its next sweep, and an id is never lost to a request that failed or whose answer was never read
+      await prisma.brickRemoval.upsert({ where: { botId: id }, create: { botId: id, removedAt: now }, update: { removedAt: now } });
       const { count } = await deleteWithHiddenBotData(where, () => prisma.bot.deleteMany({ where }));
       if (count === 0) {
+        await prisma.brickRemoval.deleteMany({ where: { botId: id } });
         waiting.push(id);
         await markWaiting(id, now);
         continue;

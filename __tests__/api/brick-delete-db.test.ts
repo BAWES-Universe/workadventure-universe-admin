@@ -20,7 +20,7 @@ jest.mock('@/lib/brick-default', () => {
 
 import { prisma } from '@/lib/db';
 import { ensureDefaultBrick, listBricks, listDeletedBricks } from '@/lib/brick-default';
-import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
+import { deleteBrick, recentlyRemovedBricks, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
 import { BRICK_LOOKS, makeBrick, makeBrickFromChat, bricksForChat } from '@/lib/brick-make';
 import { answerOffer, claimOffer, offersSoFar } from '@/lib/brick-offers';
 import { endAllApprovals, ENDED_BY_DELETE } from '@/lib/bot-actions';
@@ -290,6 +290,21 @@ run('more Bricks, deleting one and Undo, in a real database', () => {
     // For everyone, when the bot server asks
     expect(await removeGoneBricks(later(13))).toContain(waiting.id);
     expect(await row(waiting.id)).toBeNull();
+  });
+
+  it('tells the bot server of a Brick removed by its owner opening their page, and keeps telling it for a few days, so no id is lost to a request nobody read', async () => {
+    const lena = await person('lena');
+    const brick = await makeBrick(lena.id, { name: 'Page Brick' });
+    await deleteBrick(brick.id, lena.id, NOW);
+    // The owner's own page clears it, and the answer to that request goes to the page, not to the bot server
+    expect(await removeGoneBricks(later(8), lena.id)).toEqual([brick.id]);
+    expect(await recentlyRemovedBricks(later(8))).toContain(brick.id);
+    // The sweep that comes later finds nothing more to remove, and still names it
+    expect(await removeGoneBricks(later(9))).not.toContain(brick.id);
+    expect(await recentlyRemovedBricks(later(9))).toContain(brick.id);
+    // A few days on it is let go of
+    expect(await recentlyRemovedBricks(later(20))).not.toContain(brick.id);
+    expect(await prisma.brickRemoval.count({ where: { botId: brick.id } })).toBe(0);
   });
 
   it('never makes the Brick everyone gets again: not while it waits deleted, not after Undo twice, and not after it is gone for good', async () => {
