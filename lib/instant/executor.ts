@@ -647,6 +647,37 @@ async function lookUp(run: Row, instant: InstantAdapter, now: Date): Promise<{ l
   }
 }
 
+/** How long after it was released a run let go unconfirmed is still looked for in Composio's log (late evidence), in days. */
+const LATE_EVIDENCE_DAYS = 35;
+
+/**
+ * A run let go unconfirmed whose vendor cost is still the estimate and whose late evidence has not been read yet. Only its own log is asked,
+ * for a bounded time: what it finds changes the vendor side only (see `applyLateEvidence`).
+ */
+function awaitsLateEvidence(run: Row, now: Date): boolean {
+  if (run.state !== 'failed' || run.providerBasis !== 'estimated' || !isObject(run.detail) || run.detail.releasedUnconfirmed !== true || run.detail.lateEvidence !== undefined) return false;
+  return !run.finishedAt || now.getTime() - run.finishedAt.getTime() <= LATE_EVIDENCE_DAYS * 24 * 60 * MINUTE;
+}
+
+/**
+ * What a log found after a run was let go unconfirmed does. The person's side never moves: their hold went back, they are not charged
+ * later whatever the log says (a late success is theirs free, a late failure changes nothing for them), and the App is never run again. The
+ * run keeps its own outcome (released unconfirmed, not "worked" and not "did not work"); what the log said is written down on it. The vendor
+ * side: a charge on the line replaces the estimate (the books and the meter event say measured, with the estimate and the verified figure kept
+ * on the run), so a vendor charge above or below the estimate is the real one, once.
+ */
+async function applyLateEvidence(run: Row, line: InstantLog, tx: Prisma.TransactionClient, now: Date): Promise<void> {
+  const detail = isObject(run.detail) ? run.detail : {};
+  const estimated = asNumber(run.providerMicros);
+  const verified = line.chargeMicros;
+  const next = { ...detail, lateEvidence: { status: line.status, chargeMicros: verified, at: now.toISOString() }, ...(verified !== null ? { adjustment: { estimatedMicros: estimated, verifiedMicros: verified } } : {}) };
+  await tx.instantRun.update({
+    where: { id: run.id },
+    data: { detail: next as Prisma.InputJsonValue, ...(verified !== null ? { providerMicros: BigInt(verified), providerBasis: 'measured', providerLogId: run.providerLogId ?? line.id } : {}) },
+  });
+  if (verified !== null) await tx.meterEvent.updateMany({ where: { eventId: `instant:${run.id}` }, data: { costMicros: BigInt(verified), basis: 'measured' } });
+}
+
 /**
  * Settles what can be settled on a run that has not finished honestly: one still "sent" past its wait, one with no answer, a worked
  * run whose charge is not known, a failed one whose charge is not known. Looks Composio's log up BY THE RUN'S OWN ID.
@@ -665,7 +696,8 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
   if (!seen) return;
   // Tried now: the sweep goes oldest attempt first, so runs that cannot be settled never keep the rest from being tried
   await prisma.instantRun.updateMany({ where: { id: runId }, data: { checkedAt: new Date() } });
-  const looked = instant && needsLookup(seen, ctx.now, limits) ? await lookUp(seen, instant, ctx.now) : null;
+  const late = awaitsLateEvidence(seen, ctx.now);
+  const looked = instant && (late || needsLookup(seen, ctx.now, limits)) ? await lookUp(seen, instant, ctx.now) : null;
   await withRun(runId, async (run, tx) => {
     const now = ctx.now;
     const waitedPast = (from: Date | null, minutes: number) => !from || now.getTime() - from.getTime() >= minutes * MINUTE;
@@ -679,6 +711,11 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
       return;
     }
 
+    // A run let go unconfirmed: a log found later only corrects the vendor side and says what it said; nothing else about the run moves
+    if (awaitsLateEvidence(run, now)) {
+      if (looked?.line) await applyLateEvidence(run, looked.line, tx, now);
+      return;
+    }
     // A run that just went out is still in flight: it is not looked up (and never called unclear) until its wait is over
     if (!needsLookup(run, now, limits)) return;
     if (!looked) {

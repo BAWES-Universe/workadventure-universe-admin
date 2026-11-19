@@ -89,7 +89,14 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
     take: BATCH,
     select: { id: true },
   });
-  for (const row of open) {
+  // Runs let go unconfirmed are looked for in Composio's log a little longer (bounded days, a few a sweep): what turns up corrects the vendor cost only
+  const lateRuns = await prisma.instantRun.findMany({
+    where: { state: 'failed', providerBasis: 'estimated', finishedAt: { gte: new Date(now.getTime() - 35 * 24 * 60 * 60 * 1000) }, detail: { path: ['releasedUnconfirmed'], equals: true } },
+    orderBy: [{ checkedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
+    take: 25,
+    select: { id: true },
+  });
+  for (const row of [...open, ...lateRuns.filter((late) => !open.some((one) => one.id === late.id))]) {
     await reconcileRun(row.id, { funds, adapter, now }).catch((error) => console.error('[Instant] Could not look a run up:', error instanceof Error ? error.message : 'unknown'));
   }
   // A receipt still in checking whose runs have all ended is settled here too, so one the run's own pass could not move (a crash, a failed
