@@ -263,7 +263,8 @@ async function run(request: Request, name: string, args: Record<string, unknown>
       const all: Repo[] = [...answer.data];
       for (let page = 2; query && page <= 5 && all.length === (page - 1) * 100; page += 1) {
         const more = await request<Repo[]>(`/user/repos?per_page=100&sort=pushed&page=${page}`);
-        if (!more.ok) break;
+        // A page that could not be read is an unavailable search, never "nothing matches" from the pages that were read
+        if (!more.ok) return refusal(more, 'listing repositories');
         all.push(...more.data);
       }
       const rows = all.filter((repo) => !query || repo.full_name.toLowerCase().includes(query));
@@ -340,10 +341,11 @@ async function run(request: Request, name: string, args: Record<string, unknown>
       type Comment = { user: { login: string } | null; body: string; created_at: string };
       const last = Math.max(1, Math.ceil(issue.comments / 30));
       const pageOf = (page: number) => request<Comment[]>(`${repo}/issues/${number}/comments?per_page=30&page=${page}`);
-      let comments: { ok: true; data: Comment[] } | { ok: false } | null = null;
+      // Whether every page it needs was read: a page that failed leaves what the other gave, and says so
+      let comments: { complete: boolean; data: Comment[] } | null = null;
       if (issue.comments) {
         const [before, end] = await Promise.all([last > 1 && issue.comments % 30 !== 0 ? pageOf(last - 1) : null, pageOf(last)]);
-        comments = end.ok ? { ok: true, data: [...(before?.ok ? before.data : []), ...end.data].slice(-30) } : { ok: false };
+        comments = { complete: end.ok && (before === null || before.ok), data: [...(before?.ok ? before.data : []), ...(end.ok ? end.data : [])].slice(-30) };
       }
       return out({
         number: issue.number,
@@ -353,9 +355,9 @@ async function run(request: Request, name: string, args: Record<string, unknown>
         by: issue.user?.login,
         url: issue.html_url,
         body: issue.body,
-        comments: comments?.ok ? comments.data.map((comment) => ({ by: comment.user?.login, at: comment.created_at, body: comment.body })) : [],
-        // Comments that could not be read are not an issue with none
-        ...(comments && !comments.ok ? { commentsUnavailable: true } : {}),
+        comments: comments ? comments.data.map((comment) => ({ by: comment.user?.login, at: comment.created_at, body: comment.body })) : [],
+        // Comments that could not be read, in whole or in part, are not an issue with none (or with only some)
+        ...(comments && !comments.complete ? { commentsUnavailable: true } : {}),
       });
     }
     case 'github_ci_status': {
