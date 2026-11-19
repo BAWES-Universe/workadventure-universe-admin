@@ -224,6 +224,17 @@ export async function checkOutboundUrl(url: string): Promise<{ allowed: boolean;
 }
 
 /**
+ * The socket's own name look-up, answered from the addresses that were checked: all of them (in the order they came) when the socket asks for all, the
+ * first when it asks for one. Nothing is ever resolved here, so an address that was not checked can never be reached.
+ */
+export function pinnedLookup(addresses: ReadonlyArray<{ address: string; family: number }>) {
+  return (_name: string, options: { all?: boolean } | undefined, callback: (...args: unknown[]) => void): void => {
+    if (options && options.all) callback(null, addresses.map(({ address, family }) => ({ address, family })));
+    else callback(null, addresses[0].address, addresses[0].family);
+  };
+}
+
+/**
  * A request made to the address that was checked, never to a second look-up of the name. `fetch` resolves the host again after the
  * check, so a name that answers with a public address for the check and an internal one a moment later (DNS rebinding) would reach
  * the internal one. Here the name is resolved once, every address is checked, and the connection is made to the one checked (the
@@ -235,7 +246,7 @@ export async function pinnedFetch(url: string, init: { method?: string; headers?
   if (target.protocol !== 'https:' && target.protocol !== 'http:') throw new Error('Only http and https addresses are allowed');
   const checked = await isAllowedServerIp(url);
   if (!checked.allowed || !checked.addresses || checked.addresses.length === 0) throw new Error(checked.error || 'Server URL resolves to a blocked address');
-  const pinned = checked.addresses[0];
+  const addresses = checked.addresses;
   const useHttps = target.protocol === 'https:';
   const hostname = target.hostname.startsWith('[') ? target.hostname.slice(1, -1) : target.hostname;
   return new Promise<Response>((resolve, reject) => {
@@ -250,12 +261,11 @@ export async function pinnedFetch(url: string, init: { method?: string; headers?
         headers,
         signal: init.signal,
         agent: false,
-        // The name is never resolved again: the socket goes to the address that was checked
-        lookup: ((_name: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {
-          if (options && options.all) callback(null, [{ address: pinned.address, family: pinned.family }]);
-          else callback(null, pinned.address, pinned.family);
-        }) as never,
-      },
+        // The name is never resolved again: the socket goes to the addresses that were checked, and to no other. When the first does not answer (a
+        // name with an IPv6 and an IPv4 address on a machine with no IPv6 way out) the socket tries the next checked one, as an ordinary connection would
+        lookup: pinnedLookup(addresses) as never,
+        autoSelectFamily: true,
+      } as import('node:http').RequestOptions,
       (incoming) => {
         const status = incoming.statusCode ?? 0;
         const responseHeaders = new Headers();

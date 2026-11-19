@@ -30,7 +30,8 @@ jest.mock('node:https', () => {
   };
 });
 
-import { pinnedFetch } from '@/lib/mcp/outbound-guard';
+import { createServer, connect, type AddressInfo } from 'node:net';
+import { pinnedFetch, pinnedLookup } from '@/lib/mcp/outbound-guard';
 
 beforeEach(() => {
   requests.length = 0;
@@ -53,6 +54,45 @@ describe('pinnedFetch', () => {
     expect(await answer(true)).toEqual([null, [{ address: '93.184.216.34', family: 4 }]]);
     // The caller's Host header is never sent
     expect(Object.keys(options.headers as object).map((name) => name.toLowerCase())).not.toContain('host');
+  });
+
+  it('hands the socket every checked address, in order, so a first one that does not answer falls back to the next, and never an address that was not checked', async () => {
+    lookupMock.mockResolvedValueOnce([
+      { address: '2606:4700::6810:84e5', family: 6 },
+      { address: '93.184.216.34', family: 4 },
+    ]);
+    await pinnedFetch('https://dual.example.com/mcp', { method: 'POST', body: '{}' });
+    const { options } = requests[0];
+    const answer = (all: boolean) => new Promise<unknown>((resolve) => (options.lookup as (n: string, o: { all?: boolean }, cb: (...a: unknown[]) => void) => void)('dual.example.com', { all }, (...args: unknown[]) => resolve(args)));
+    expect(await answer(true)).toEqual([null, [{ address: '2606:4700::6810:84e5', family: 6 }, { address: '93.184.216.34', family: 4 }]]);
+    expect(await answer(false)).toEqual([null, '2606:4700::6810:84e5', 6]);
+    // The socket is allowed to try the next address of those it was given
+    expect(options).toMatchObject({ autoSelectFamily: true });
+    expect(lookupMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a real socket given a first address that refuses and a second that answers connects to the second, through the same look-up', async () => {
+    const server = createServer((socket) => socket.end('hi'));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      // ::1 has nothing listening on this port (or no IPv6 at all): the first address fails and the second is the one that answers
+      const lookup = pinnedLookup([
+        { address: '::1', family: 6 },
+        { address: '127.0.0.1', family: 4 },
+      ]);
+      const got = await new Promise<string>((resolve, reject) => {
+        const socket = connect({ host: 'pinned.example.com', port, lookup: lookup as never, autoSelectFamily: true });
+        socket.setEncoding('utf8');
+        let text = '';
+        socket.on('data', (chunk) => (text += chunk));
+        socket.on('end', () => resolve(text));
+        socket.on('error', reject);
+      });
+      expect(got).toBe('hi');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it('sends nothing when any address of the name is not allowed', async () => {
