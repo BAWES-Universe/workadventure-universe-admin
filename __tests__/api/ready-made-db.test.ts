@@ -262,6 +262,21 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect((await connectReadyMadeApp(request('/api/me/apps/ready-made', { method: 'POST', body: { key: 'gmail' } }))).status).toBe(201);
   });
 
+  it('a change that names only some fields of an app keeps the rest, and null clears a sign-in setup of their own', async () => {
+    await saveReadyMadeApps({ apps: { [KEY]: { name: 'Gmail', authConfigId: 'ac_1', enabled: true } } }, boss);
+    // Turning it off names only `enabled`: the name and the sign-in setup stay
+    await saveReadyMadeApps({ apps: { [KEY]: { enabled: false } } }, boss);
+    expect((await saveReadyMadeApps({ apps: {} }, boss)).find((app) => app.key === KEY)).toEqual({ key: KEY, name: 'Gmail', authConfigId: 'ac_1', enabled: false });
+    // Sent as null, the sign-in setup is cleared and the provider's managed one is used again
+    const cleared = await saveReadyMadeApps({ apps: { [KEY]: { authConfigId: null } } }, boss);
+    expect(cleared.find((app) => app.key === KEY)).toEqual({ key: KEY, name: 'Gmail', authConfigId: null, enabled: false });
+    // The route takes null too
+    setAdapterForTests(fake());
+    mockUser.current = { id: boss, email: 'boss@example.test' };
+    const put = await adminPut(request('/api/admin/ready-made-apps', { method: 'PUT', body: { apps: { [KEY]: { authConfigId: null } } } }));
+    expect(put.status).toBe(200);
+  });
+
   it('restarts a sign-in that was lost after it had been confirmed, and reads connected again only when the provider confirms the new one', async () => {
     const adapter = fake();
     adapter.startConnect
