@@ -452,6 +452,127 @@ run('payments for pages, in a real database', () => {
 
   /* ------------------------- is it paid ------------------------- */
 
+  /**
+   * A start whose answer never reached the buyer (the game's server drops an unanswered start after 120 s, so the order Orbit may already have
+   * made has its link only in the answer that was dropped). The server's side of that: a start is always a NEW order with its own provider
+   * reference, a link is only ever given with its own order id, and only the order the buyer holds can be paid through the buyer's flow.
+   */
+  describe('a checkout start whose answer was lost', () => {
+    /** A service that makes a new charge for every create (its own id and its own link), and says CAPTURED only for the charges in `paid`. */
+    function chargesThatDiffer() {
+      const orderOf = new Map<string, string>();
+      const paid = new Set<string>();
+      const sent: Sent[] = [];
+      let made = 0;
+      mockSend.current = (target) => {
+        sent.push(target);
+        if (target.method === 'POST') {
+          made += 1;
+          const order = JSON.parse(target.body ?? '{}').reference.order as string;
+          const id = `chg_LOST${made}`;
+          orderOf.set(id, order);
+          return { status: 200, body: { id, status: 'INITIATED', amount: 4.5, currency: 'KWD', transaction: { url: `https://checkout.examplepay.com/?mode=page&token=tok${made}` }, reference: { order } } };
+        }
+        const id = target.path.split('/').pop() as string;
+        return { status: 200, body: { id, status: paid.has(id) ? 'CAPTURED' : 'INITIATED', amount: 4.5, currency: 'KWD', live_mode: false, reference: { order: orderOf.get(id) } } };
+      };
+      return { orderOf, paid, sent };
+    }
+
+    it('starts a new order the second time, never the first one again: two orders, each with its own provider reference, and each counted', async () => {
+      await saveServerLimits({ bricks: { checkoutsPerVisitor: 2 } }, sara);
+      const { artifactId } = await pending();
+      const service = chargesThatDiffer();
+      // The first start: its answer is lost, so nothing from it is used below (its order is found in the books)
+      expect((await start(artifactId, '203.0.113.7')).status).toBe(200);
+      const second = await checkout(artifactId, '203.0.113.7');
+      const orders = await prisma.appPageOrder.findMany({ where: { artifactId }, orderBy: { createdAt: 'asc' } });
+      expect(orders).toHaveLength(2);
+      const [first, later] = orders;
+      expect(later.id).toBe(second.orderId);
+      expect(first.id).not.toBe(later.id);
+      expect(first.providerRef).toBe('chg_LOST1');
+      expect(later.providerRef).toBe('chg_LOST2');
+      expect(first.checkoutUrl).not.toBe(later.checkoutUrl);
+      // The service was asked twice, each time with its own order as the reference and the idempotency key
+      expect(service.sent.filter((one) => one.method === 'POST').map((one) => JSON.parse(one.body as string).reference)).toEqual([
+        { order: first.id, idempotent: first.id },
+        { order: later.id, idempotent: later.id },
+      ]);
+      expect(second.checkoutUrl).toBe(later.checkoutUrl);
+      // The lost one still stands as a try of that visitor: both count against the hour, so a third is turned away
+      expect((await start(artifactId, '203.0.113.7')).status).toBe(429);
+    });
+
+    it('gives a link only with its own order id: a caller who holds the second order never meets the first one’s link, reference or id', async () => {
+      const { artifactId } = await pending();
+      chargesThatDiffer();
+      await start(artifactId, '203.0.113.7');
+      const second = await checkout(artifactId, '203.0.113.7');
+      const [first] = await prisma.appPageOrder.findMany({ where: { artifactId, NOT: { id: second.orderId } } });
+      const everything: string[] = [];
+      const read = async (response: Response) => {
+        const text = JSON.stringify(await response.json());
+        everything.push(text);
+        return text;
+      };
+      // What the buyer's page may ask, with the second order only: the page's own state, and that order
+      expect(await read(await publicGet(request(`/api/pay/${artifactId}`), params({ artifactId })))).toBe('{"enabled":true}');
+      const own = await publicGet(request(`/api/pay/${artifactId}?order=${second.orderId}`), params({ artifactId }));
+      expect(own.status).toBe(200);
+      expect(await read(own)).toContain(second.checkoutUrl);
+      // The return page and the notice route take an order id and answer for that order alone
+      expect(JSON.stringify(await verifyOrder(second.orderId))).not.toContain(first.checkoutUrl as string);
+      // (just looked at, so it may be asked to come back: either way its answer says nothing of another order)
+      const noticed = await notice(request(`/api/app-pay/notice/${second.orderId}`, { method: 'POST', body: {} }), params({ orderId: second.orderId }));
+      expect([200, 429]).toContain(noticed.status);
+      everything.push(await noticed.text());
+      // The first one is not found by anything but its own id: not by a made-up one, an empty one, the page, the visitor's address or the owner's list
+      for (const guess of [randomUUID(), '', first.providerRef as string, `${second.orderId.slice(0, 20)}`, `${first.id.slice(0, 20)}`]) {
+        const asked = await publicGet(request(`/api/pay/${artifactId}?order=${encodeURIComponent(guess)}`), params({ artifactId }));
+        if (guess === '') expect(await read(asked)).toBe('{"enabled":true}');
+        else expect(asked.status).toBe(404);
+      }
+      mockUser.current = { id: sara };
+      const pages = await listPages(request('/api/me/apps/pages'));
+      everything.push(JSON.stringify(await pages.json()));
+      mockUser.current = null;
+      expect(everything.join('\n')).not.toContain(first.checkoutUrl as string);
+      expect(everything.join('\n')).not.toContain(first.id);
+      expect(everything.join('\n')).not.toContain(first.providerRef as string);
+      // Another page's id does not open it either
+      const other = await makeArtifact();
+      expect((await publicGet(request(`/api/pay/${other}?order=${first.id}`), params({ artifactId: other }))).status).toBe(404);
+      // And nothing about starting again hands back the earlier order: the answer of every start is a new order
+      const again = await checkout(artifactId, '203.0.113.8');
+      expect([first.id, second.orderId]).not.toContain(again.orderId);
+      expect(again.checkoutUrl).not.toBe(first.checkoutUrl);
+    });
+
+    it('can be paid only as the order the buyer holds: the second is marked paid, the first stays pending, and a payment of the first is never taken for the second', async () => {
+      const { artifactId } = await pending();
+      const service = chargesThatDiffer();
+      await start(artifactId, '203.0.113.7');
+      const second = await checkout(artifactId, '203.0.113.7');
+      const [first] = await prisma.appPageOrder.findMany({ where: { artifactId, NOT: { id: second.orderId } } });
+      // The service says the buyer paid the second charge
+      service.paid.add('chg_LOST2');
+      expect(await settle(second.orderId)).toMatchObject({ status: 'paid', checkoutUrl: null });
+      const after = await prisma.appPageOrder.findMany({ where: { artifactId }, orderBy: { createdAt: 'asc' } });
+      expect(after.map((order) => [order.id, order.status])).toEqual([[first.id, 'pending'], [second.orderId, 'paid']]);
+      // Looking at the first order (the notice or its page) finds the service saying nothing was paid: it stays pending with its own link
+      expect(await settle(first.id)).toMatchObject({ status: 'checking', checkoutUrl: first.checkoutUrl });
+      expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ status: 'pending', providerRef: 'chg_LOST1' });
+      // One payment tells the owner once, and it is the second order's
+      const found = await notices();
+      expect(found).toHaveLength(1);
+      // The reverse: a payment of the first charge only ever moves the first order
+      service.paid.add('chg_LOST1');
+      expect(await settle(first.id)).toMatchObject({ status: 'paid' });
+      expect((await prisma.appPageOrder.findMany({ where: { artifactId }, orderBy: { createdAt: 'asc' } })).map((order) => order.status)).toEqual(['paid', 'paid']);
+    });
+  });
+
   describe('deciding that it is paid', () => {
     it('writes paid only when the service’s own record says completed for this order, amount, currency and mode, and tells the owner once', async () => {
       const { artifactId } = await pending();
