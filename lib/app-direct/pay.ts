@@ -252,6 +252,9 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
     // The platform's own limit counts every owner's orders, so checkouts of different owners take turns at counting and writing the order,
     // or two of them at the same moment could both find room for the last one. Always after the owner's lock, in this one order
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('page-orders:platform', 0))`;
+    // The count of key calls below is the one every key call takes its turn on (lib/app-direct/use.ts): without this lock a call and a checkout could both
+    // count one under the platform's limit and both take it. After the platform lock and before the counts; use.ts takes no page-orders lock, so no cycle
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('key-calls:everyone', 0))`;
     // Holding both rows keeps the owner from replacing the terms, the app or its key until this order is written; what they hold NOW is what
     // the order and the request use, never what was read before the lock
     const held = await tx.$queryRaw<{ connectionId: string }[]>`SELECT "connection_id" AS "connectionId" FROM "app_page_jobs" WHERE "id" = ${first.job.id} AND "status" = 'active' FOR SHARE`;

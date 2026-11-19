@@ -211,6 +211,28 @@ describe('testMcpConnection', () => {
       jest.dontMock('@/lib/encryption');
     });
 
+    it('never returns a credential that has a quote, a backslash or a slash in it, in JSON’s own spelling or as read out of it', async () => {
+      const keyed = { ...base, authType: 'api-key' };
+      jest.resetModules();
+      const key = 'ab"cd\\ef/gh12345';
+      jest.doMock('@/lib/encryption', () => ({ decryptApiKey: () => key }));
+      const { testMcpConnection: run } = await import('@/lib/mcp/test-connection');
+      const spellings = [key, JSON.stringify(key).slice(1, -1), JSON.stringify(key).slice(1, -1).replace(/\//g, '\\/')];
+      const none = (result: unknown) => spellings.forEach((spelling) => expect(JSON.stringify(result)).not.toContain(JSON.stringify(spelling).slice(1, -1)));
+      pretend(() => new Response(JSON.stringify({ error: `rejected ${key}` }), { status: 401, headers: { 'content-type': 'application/json' } }));
+      const refused = await run({ ...keyed, authConfig: 'x' });
+      none(refused);
+      expect(refused).toMatchObject({ success: false, status: 401 });
+      expect(refused.error).toContain('rejected');
+      // The same in the body as the server wrote it, with the slash escaped too
+      pretend(() => new Response(`{"error":"rejected ${spellings[2]}"}`, { status: 401 }));
+      none(await run({ ...keyed, authConfig: 'x' }));
+      // An answer to the request itself that is an error object with no message
+      pretend(({ message }) => (message.method === 'initialize' ? json({ jsonrpc: '2.0', id: 'init', error: { code: -1, data: key } }) : new Response(null, { status: 202 })));
+      none(await run({ ...keyed, authConfig: 'x' }));
+      jest.dontMock('@/lib/encryption');
+    });
+
     it('sends fixed protocol headers, not custom ones, to another origin on a redirect', async () => {
       const custom = { ...base, headers: { Accept: 'text/plain; secret=1', 'Content-Type': 'text/plain; secret=2' } };
       const other = pretend((one) => (one.url.startsWith('https://app.example.com') ? new Response(null, { status: 307, headers: { location: 'https://elsewhere.example.net/mcp' } }) : new Response('no', { status: 401 })));

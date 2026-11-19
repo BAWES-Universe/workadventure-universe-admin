@@ -116,10 +116,14 @@ export async function syncToolSignInNotices(botId: string, fresh?: { serverId: s
         const fields = { title: words.title.slice(0, 200), body: words.body.slice(0, 1000), badge: words.badge, href, data: data as unknown as Prisma.InputJsonValue };
         if (existing) {
           await tx.userNotice.update({ where: { id: existing.id }, data: fields });
-        } else if (fresh && servers.some((server) => server.id === fresh.serverId)) {
-          await tx.userNotice.create({
-            data: { userId, kind: TOOL_SIGNIN_KIND, dedupeKey: `${TOOL_SIGNIN_KIND}:${botId}:${fresh.at.toISOString()}`, ...fields },
-          });
+        } else if (fresh && servers.some((server) => server.id === fresh.serverId && (server.signInLostAt as Date).getTime() === fresh.at.getTime())) {
+          // Only for the outage that is still the current one: a tool that was connected again (or went down again) since `fresh` was read
+          // is a different story and makes no card for this one
+          const dedupeKey = `${TOOL_SIGNIN_KIND}:${botId}:${fresh.at.toISOString()}`;
+          // A card of this outage that is already there (one the person dismissed too) is never made again. It is looked for under the
+          // lock instead of letting the insert fail: a failed insert would undo every other change of this transaction
+          const already = await tx.userNotice.findFirst({ where: { userId, dedupeKey }, select: { id: true } });
+          if (!already) await tx.userNotice.create({ data: { userId, kind: TOOL_SIGNIN_KIND, dedupeKey, ...fields } });
         }
       }
     });
@@ -307,7 +311,10 @@ export async function reportConnectionSignIn(connectionId: string, report: ToolS
 
 async function applyConnectionReport(connectionId: string, report: ToolSignInReport, at: Date, onlyKeyVersion?: number): Promise<{ changed: boolean }> {
   // A failure is old news when the tool was connected again, or a call with the current key worked, after it was seen
-  const afterLastReconnect = { AND: [{ OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: at } }] }, { OR: [{ lastWorkedAt: null }, { lastWorkedAt: { lt: at } }] }] };
+  // A good call is written down at most once a minute, so the time kept can be up to a minute older than the latest good call: a failure
+  // that started within that minute of the kept time may be older than a good call that was not written down, and is old news too
+  const workedBefore = new Date(at.getTime() - LAST_WORKED_EVERY_MS);
+  const afterLastReconnect = { AND: [{ OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: at } }] }, { OR: [{ lastWorkedAt: null }, { lastWorkedAt: { lt: workedBefore } }] }] };
 
   if (report.state === 'expired') {
     const result = await prisma.appConnection.updateMany({

@@ -192,6 +192,22 @@ describe('what was forgotten stays gone', () => {
     expect(memoryItemsOf(withoutForgotten(before, [{ itemKey: coffee, createdAt: forgotAt }])).map((item) => item.value)).not.toContain('coffee, no sugar');
   });
 
+  it('takes out the lines that say it from before the Forget, and keeps the ones said after it', () => {
+    const forgotAt = new Date(T0 + 5 * DAY);
+    const memory = saved();
+    // What was kept before this carries no moment for it, so the person's own lines holding its words go too, but only the ones from before
+    memory.personalInfo.drawnFrom = {};
+    memory.conversationHistory.push(
+      { sender: 'person', message: 'I still like coffee, no sugar', timestamp: forgotAt.getTime() + 1000 },
+      { sender: 'bot', message: 'Coffee, no sugar, got it', timestamp: forgotAt.getTime() + 2000 },
+    );
+    const after = withoutForgotten(memory, [{ itemKey: coffee, createdAt: forgotAt }]) as typeof memory;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['What is the weather', 'I still like coffee, no sugar', 'Coffee, no sugar, got it']);
+    // Without a Forget time (taking it out by hand) every line goes
+    const all = withoutItems(memory, new Set([coffee])).data as typeof memory;
+    expect(all.conversationHistory.map((line) => line.message)).toEqual(['What is the weather']);
+  });
+
   it('a thing forgotten twice keeps the later Forget', () => {
     const memory = saved();
     memory.personalInfo.drawnFrom = { 'pref:coffee, no sugar': T0 + 6 * DAY };

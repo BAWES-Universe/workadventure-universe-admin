@@ -30,6 +30,9 @@ export async function getServerLimits(db: Pick<Prisma.TransactionClient, 'appSet
     const row = await db.appSetting.findUnique({ where: { key: SETTING_KEY } });
     return readServerLimits(row?.value);
   } catch (error) {
+    // Inside a transaction a failed read has already aborted it: carrying on would only end in "transaction aborted" on the next statement, hiding
+    // what went wrong. The caller gets the real error; only a read on its own falls back to the recommended values
+    if (db !== prisma) throw error;
     console.error('[BotLimits] Could not read the saved limits:', error instanceof Error ? error.message : 'unknown');
     return readServerLimits(null);
   }

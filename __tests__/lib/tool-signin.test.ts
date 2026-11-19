@@ -18,7 +18,7 @@ jest.mock('@/lib/db', () => {
     bot: { findUnique: jest.fn(), findMany: jest.fn() },
     user: { findUnique: jest.fn() },
     botMcpServer: { findFirst: jest.fn(), findUnique: jest.fn(), findMany: jest.fn(), updateMany: jest.fn(), update: jest.fn() },
-    userNotice: { findMany: jest.fn(), update: jest.fn(), create: jest.fn(), updateMany: jest.fn() },
+    userNotice: { findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), create: jest.fn(), updateMany: jest.fn() },
     $executeRaw: jest.fn(),
   };
   prisma.$transaction = jest.fn((work: (tx: unknown) => unknown) => work(prisma));
@@ -29,7 +29,7 @@ const db = prisma as unknown as {
   bot: { findUnique: jest.Mock; findMany: jest.Mock };
   user: { findUnique: jest.Mock };
   botMcpServer: Record<'findFirst' | 'findUnique' | 'findMany' | 'updateMany' | 'update', jest.Mock>;
-  userNotice: Record<'findMany' | 'update' | 'create' | 'updateMany', jest.Mock>;
+  userNotice: Record<'findMany' | 'findFirst' | 'update' | 'create' | 'updateMany', jest.Mock>;
   $executeRaw: jest.Mock;
   $transaction: jest.Mock;
 };
@@ -48,6 +48,7 @@ beforeEach(() => {
   jest.resetAllMocks();
   db.bot.findUnique.mockResolvedValue(BOT);
   db.userNotice.findMany.mockResolvedValue([]);
+  db.userNotice.findFirst.mockResolvedValue(null);
   db.$transaction.mockImplementation((work: (tx: unknown) => unknown) => work(prisma));
   db.userNotice.create.mockResolvedValue({});
   db.botMcpServer.update.mockResolvedValue({});

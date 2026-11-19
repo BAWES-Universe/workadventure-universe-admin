@@ -439,6 +439,16 @@ describe('with extra usage running (game #1999)', () => {
     expect(await checkVoiceAllowance('bot-1', again('c'), NOW)).toMatchObject({ allowed: false });
   });
 
+  it('works the reserve and the spoken places out from the window the person really has: a 1-reply exception with a 2x grant leaves one place, as the text limit does', async () => {
+    exceptionFor.mockResolvedValue(1);
+    grant({ multiplier: 2 });
+    // The window is 2 replies; 1 is kept for text and 1 can be heard (the usual window's own 1 reply and its 1 kept, doubled, would leave none)
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toMatchObject({ allowed: true, left: 0 });
+    spokenBefore(1);
+    expect(await checkVoiceAllowance('bot-1', again('b'), NOW)).toMatchObject({ allowed: false });
+    exceptionFor.mockImplementation(async (_personId: string, base: number) => base);
+  });
+
   it('raises the text side with a multiple too: typed replies past the usual 30 no longer refuse a spoken one', async () => {
     grant({ multiplier: 2 });
     // 31 typed is past the usual window (30), so before this fix byText went below zero and voice was refused outright

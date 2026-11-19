@@ -18,12 +18,18 @@ const hearingDown = new Set<string>();
 let duringHearing: (() => Promise<void>) | null = null;
 // Runs right after who sent a note is first looked up, to make something happen in the middle of a reservation
 let afterWho: (() => Promise<void>) | null = null;
+// How many lookups pass before afterWho runs (0: right after the first)
+let afterWhoSkip = 0;
 jest.mock('@/lib/usage-person', () => {
   const actual = jest.requireActual('@/lib/usage-person');
   return {
     ...actual,
     resolveUsagePerson: async (...args: unknown[]) => {
       const found = await actual.resolveUsagePerson(...args);
+      if (afterWho && afterWhoSkip > 0) {
+        afterWhoSkip -= 1;
+        return found;
+      }
       const run = afterWho;
       afterWho = null;
       if (run) await run();
@@ -636,6 +642,38 @@ run('voice notes for every bot, in a real database', () => {
       expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
       // Another person is not counted against it
       expect(await reserveFor(capped, `other-${randomUUID()}`, { seconds: 10 })).toMatchObject({ ok: true });
+    });
+
+    it('counts a person whose account turned up after the reply limits were read under the account, not under the guest they were filed as', async () => {
+      const capped = await newBot('Capped late account');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 1 } });
+      const uuid = `late-cap-${randomUUID()}`;
+      // The first lookup (the reservation's) and the second (the reply limits') both find no account; it appears right after, with its one reply
+      // already given today: the guest this person was filed as has none
+      afterWhoSkip = 1;
+      afterWho = async () => {
+        const person = await prisma.user.create({ data: { uuid, email: `${uuid}@example.test`, name: 'Late cap' } });
+        people.push(person.id);
+        await prisma.botsAiUsage.create({ data: { botId: capped, providerId: 'universe-ai', talkedUserId: uuid, talkedPersonId: person.id, talkedGuest: false } });
+      };
+      const result = await reserveFor(capped, uuid, { isGuest: false, source: 'own-key', seconds: 10 });
+      afterWhoSkip = 0;
+      expect(result).toMatchObject({ ok: false, reason: 'reply-limit', allowance: { allowed: false, limit: 'bot' } });
+      expect(await prisma.voiceNoteTurn.count({ where: { botId: capped } })).toBe(0);
+    });
+
+    it('counts a heard note as on its way until its text stops being kept, not only for 15 minutes', async () => {
+      const capped = await newBot('Capped heard');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 1 } });
+      const person = `heard-${randomUUID()}`;
+      const heard = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+      const long = new Date(Date.now() - 40 * 60_000);
+      // Heard 40 minutes ago, its text kept for another hour: the person can still be answered, so the reply is spoken for
+      await prisma.voiceNoteTurn.update({ where: { id: heard.id }, data: { state: 'heard', createdAt: long, bufferUntil: new Date(Date.now() + 60 * 60_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
+      // Once its text is no longer kept, it is not
+      await prisma.voiceNoteTurn.update({ where: { id: heard.id }, data: { bufferUntil: new Date(Date.now() - 60_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
     });
 
     it('stops at the hour\'s minutes and the notes heard at once, for everyone, with "busy"', async () => {

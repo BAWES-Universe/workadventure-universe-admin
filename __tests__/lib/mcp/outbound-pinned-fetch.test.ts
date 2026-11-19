@@ -7,6 +7,8 @@ const lookupMock = jest.fn();
 jest.mock('dns/promises', () => ({ lookup: (...args: unknown[]) => lookupMock(...args) }));
 
 const requests: { options: Record<string, unknown>; body?: string }[] = [];
+let answerStatus = 200;
+let destroyed = 0;
 jest.mock('node:https', () => {
   const { EventEmitter } = jest.requireActual('node:events') as typeof import('node:events');
   const { PassThrough } = jest.requireActual('node:stream') as typeof import('node:stream');
@@ -18,7 +20,12 @@ jest.mock('node:https', () => {
         request.end = (body?: string) => {
           requests.push({ options, body });
           const incoming = new PassThrough() as import('node:stream').PassThrough & { statusCode?: number; statusMessage?: string; headers?: Record<string, string> };
-          incoming.statusCode = 200;
+          incoming.statusCode = answerStatus;
+          const destroy = incoming.destroy.bind(incoming);
+          incoming.destroy = ((...args: Parameters<typeof destroy>) => {
+            destroyed += 1;
+            return destroy(...args);
+          }) as typeof incoming.destroy;
           incoming.statusMessage = 'OK';
           incoming.headers = { 'content-type': 'application/json' };
           onResponse(incoming);
@@ -34,6 +41,8 @@ import { pinnedFetch } from '@/lib/mcp/outbound-guard';
 
 beforeEach(() => {
   requests.length = 0;
+  answerStatus = 200;
+  destroyed = 0;
   lookupMock.mockReset();
 });
 
@@ -61,6 +70,46 @@ describe('pinnedFetch', () => {
       { address: '10.0.0.5', family: 4 },
     ]);
     await expect(pinnedFetch('https://mixed.example.com/mcp', { method: 'POST', body: '{}' })).rejects.toThrow(/private/);
+    expect(requests).toHaveLength(0);
+  });
+
+  it('keeps every checked address for the socket to try, and no other', async () => {
+    lookupMock.mockResolvedValue([
+      { address: '2606:2800:220:1:248:1893:25c8:1946', family: 6 },
+      { address: '93.184.216.34', family: 4 },
+    ]);
+    await pinnedFetch('https://two.example.com/mcp', { method: 'POST', body: '{}' });
+    const { options } = requests[0];
+    const answer = (all: boolean) => new Promise<unknown>((resolve) => (options.lookup as (n: string, o: { all?: boolean }, cb: (...a: unknown[]) => void) => void)('two.example.com', { all }, (...args: unknown[]) => resolve(args)));
+    expect(await answer(true)).toEqual([
+      null,
+      [
+        { address: '2606:2800:220:1:248:1893:25c8:1946', family: 6 },
+        { address: '93.184.216.34', family: 4 },
+      ],
+    ]);
+    expect(await answer(false)).toEqual([null, '2606:2800:220:1:248:1893:25c8:1946', 6]);
+  });
+
+  it.each([600, 0, 101])('rejects, and closes the answer, when a server answers with a status that cannot be read (%i)', async (status) => {
+    lookupMock.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+    answerStatus = status;
+    await expect(pinnedFetch('https://hostile.example.com/mcp', { method: 'POST', body: '{}' })).rejects.toBeInstanceOf(Error);
+    expect(destroyed).toBe(1);
+  });
+
+  it('stops waiting for a stalled look-up when the caller gives up, and starts nothing when it answers late', async () => {
+    let answerLate: (value: unknown) => void = () => undefined;
+    lookupMock.mockReturnValue(new Promise((resolve) => (answerLate = resolve)));
+    const stop = new AbortController();
+    const pending = pinnedFetch('https://slow.example.com/mcp', { method: 'DELETE', signal: stop.signal });
+    stop.abort();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    answerLate([{ address: '93.184.216.34', family: 4 }]);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(requests).toHaveLength(0);
+    // Already given up before it began
+    await expect(pinnedFetch('https://slow.example.com/mcp', { signal: AbortSignal.abort() })).rejects.toMatchObject({ name: 'AbortError' });
     expect(requests).toHaveLength(0);
   });
 });
