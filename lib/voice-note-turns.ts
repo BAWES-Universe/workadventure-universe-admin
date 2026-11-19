@@ -53,6 +53,8 @@ export const BUFFER_MAX_BYTES = 64 * 1024;
 const STARTING_MS = LEASE_MS;
 /** A note that has not become an answer after this long is no longer counted as a reply on its way. */
 const ON_THE_WAY_MS = 15 * 60 * 1000;
+/** A reservation that has to be made again from the start (see reserveVoiceNote). */
+const RESTART = Symbol('restart');
 
 /**
  * For a transaction that takes the reservations' lock: how long it may wait for a connection, and for the lock and its few reads
@@ -188,6 +190,43 @@ async function ownerKeyDayLimitSeconds(hearing: NoteHearing): Promise<number | n
 const onBotDay = (turn: Pick<VoiceNoteTurn, 'botId' | 'payer'>) => Boolean(turn.botId) && turn.payer === 'owner';
 
 /**
+ * The replies still to come from notes already reserved, for one limit, counted under the reservations' lock (their usage rows do not exist yet):
+ * - a note not yet heard counts for the time it is expected to take;
+ * - a note heard counts for as long as its words are kept (the answer stage can still run from them), not for a time from when it was reserved;
+ * - a note whose answer is being made counts only while its lease is live, and not when its reply was already reported: that reply is a usage row
+ *   (counted by the caller), made after the answer stage began. Each such row is matched to one note, the earliest started first, so two notes being
+ *   answered with one reply reported leave one on the way.
+ */
+async function notesOnTheWay(tx: Prisma.TransactionClient, slot: ReplySlot, now: Date): Promise<number> {
+  const mine: Prisma.VoiceNoteTurnWhereInput = {
+    scope: 'bot',
+    released: false,
+    personKey: slot.pending.guestsOnly ? { startsWith: 'guest:' } : slot.pending.personKey,
+    ...(slot.pending.botId ? { botId: slot.pending.botId } : {}),
+    ...(slot.pending.notOwnKey ? { replySource: { in: ['universe-ai', 'provider'] } } : {}),
+  };
+  const recently = { gt: new Date(now.getTime() - ON_THE_WAY_MS) };
+  const waiting = await tx.voiceNoteTurn.count({
+    where: { ...mine, OR: [{ state: { in: ['reserved', 'hearing'] }, createdAt: recently }, { state: 'heard', bufferUntil: { gt: now } }] },
+  });
+  const answering = await tx.voiceNoteTurn.findMany({
+    where: { ...mine, state: 'answering', leaseUntil: { gt: now }, createdAt: recently },
+    select: { updatedAt: true },
+    orderBy: { updatedAt: 'asc' },
+  });
+  if (answering.length === 0) return waiting;
+  const reported = await tx.botsAiUsage.findMany({ where: { AND: [slot.usage, { timestamp: { gte: answering[0].updatedAt } }] }, select: { timestamp: true }, orderBy: { timestamp: 'asc' } });
+  let next = 0;
+  let unreported = 0;
+  for (const turn of answering) {
+    while (next < reported.length && reported[next].timestamp < turn.updatedAt) next += 1;
+    if (next < reported.length) next += 1;
+    else unreported += 1;
+  }
+  return waiting + unreported;
+}
+
+/**
  * Reserves one voice note before anything is paid. `seconds` is the length the bot server measured from the audio itself (never the
  * header or the device's number). `contentHash` is the bot server's hash of what the turn holds (the note's file and version, the
  * text, the history it was sent with): the same `clientTurnId` with another hash is refused.
@@ -272,7 +311,8 @@ export async function reserveVoiceNote(
   const tomorrow = new Date(day.getTime() + DAY).toISOString();
   const universeAi = hearing.payer === 'universe-ai';
 
-  return prisma.$transaction(async (tx): Promise<Reservation> => {
+  const reserved = await prisma.$transaction(async (tx): Promise<Reservation | typeof RESTART> => {
+    let changedWho = false;
     // One lock for every reservation: they are short and few, and nothing can take the last minute twice
     await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext('voice-note-reserve'))`);
     if (scope === 'bot' && personKey.startsWith('guest:') && signedIn) {
@@ -283,30 +323,20 @@ export async function reserveVoiceNote(
       if (again.personId) {
         personKey = `person:${again.personId}`;
         asked = askedFor(personKey);
+        changedWho = true;
       }
     }
     const raced = await tx.voiceNoteTurn.findFirst({ where: asked, orderBy: { createdAt: 'asc' } });
     if (raced) return same(raced);
+    // The limits above were collected for a guest (their usage rows, their notes on the way), and the account has its own: the reservation starts
+    // over, outside this lock, now that the account is known from the first look (one more connection is never taken while the lock is held)
+    if (changedWho && scope === 'bot') return RESTART;
 
     // The reply slot is taken under the lock: two notes at the same instant never both see the last reply free. What is counted is the
     // replies already used plus the notes reserved and not yet answered (they have no usage row yet), from the same limits the check above read
     for (const slot of slots) {
       const used = await tx.botsAiUsage.count({ where: slot.usage });
-      const onTheWay = await tx.voiceNoteTurn.count({
-        where: {
-          scope: 'bot',
-          released: false,
-          // An answer being made counts only while its lease is live. The model's reply is reported as a usage row (counted above) before the
-          // answer is recorded, and a bot server that stopped between the two leaves the turn "answering" for good: counted here as well it
-          // would be counted twice, for as long as it stays on the way. Once its lease ran out the model has either run (its row is counted)
-          // or it never will, on its own (the turn goes to "uncertain" when it is asked for again)
-          OR: [{ state: { in: ['reserved', 'hearing', 'heard'] } }, { state: 'answering', leaseUntil: { gt: now } }],
-          createdAt: { gt: new Date(now.getTime() - ON_THE_WAY_MS) },
-          personKey: slot.pending.guestsOnly ? { startsWith: 'guest:' } : slot.pending.personKey,
-          ...(slot.pending.botId ? { botId: slot.pending.botId } : {}),
-          ...(slot.pending.notOwnKey ? { replySource: { in: ['universe-ai', 'provider'] } } : {}),
-        },
-      });
+      const onTheWay = await notesOnTheWay(tx, slot, now);
       if (used + onTheWay >= slot.limit) {
         await tx.botReplyLimitHit.createMany({ data: [slot.hit], skipDuplicates: true });
         return { ok: false, reason: 'reply-limit', allowance: { allowed: false, limit: slot.kind, resetsAt: slot.resetsAt, who: slot.who } };
@@ -356,6 +386,8 @@ export async function reserveVoiceNote(
     });
     return { ok: true, turn: view(turn), replay: false };
   }, LOCKED);
+  // Once more at most: the second time the account is found by the first look, so the limits are collected for it
+  return reserved === RESTART ? reserveVoiceNote(input, now) : reserved;
 }
 
 /** Gives back a reservation that was never used: its seconds stop counting, on the bot's day too. */

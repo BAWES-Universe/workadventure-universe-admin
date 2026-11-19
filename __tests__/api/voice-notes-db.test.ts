@@ -20,6 +20,9 @@ let duringHearing: (() => Promise<void>) | null = null;
 let atEveryHearing: (() => Promise<void>) | null = null;
 // Runs right after who sent a note is first looked up, to make something happen in the middle of a reservation
 let afterWho: (() => Promise<void>) | null = null;
+// Runs right after the reply limits looked who sent a note up (the second look of a reservation), to make something happen between collecting them and reserving
+let afterLimitsLook: (() => Promise<void>) | null = null;
+let looks = 0;
 jest.mock('@/lib/usage-person', () => {
   const actual = jest.requireActual('@/lib/usage-person');
   return {
@@ -29,6 +32,12 @@ jest.mock('@/lib/usage-person', () => {
       const run = afterWho;
       afterWho = null;
       if (run) await run();
+      looks += 1;
+      if (afterLimitsLook && looks === 2) {
+        const second = afterLimitsLook;
+        afterLimitsLook = null;
+        await second();
+      }
       return found;
     },
   };
@@ -468,6 +477,65 @@ run('voice notes for every bot, in a real database', () => {
       await prisma.voiceNoteTurn.updateMany({ where: { botId: capped, personKey: { not: '' }, id: { not: live.id } }, data: { state: 'answered' } });
       await prisma.voiceNoteTurn.update({ where: { id: live.id }, data: { leaseUntil: new Date(Date.now() - 1_000) } });
       expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+    });
+
+    it('counts a note whose answer is being made once when its reply is already reported: the reported reply is a row, and the note is not counted on top of it while its lease is live', async () => {
+      const capped = await newBot('Capped five');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 2 } });
+      const person = `dup-${randomUUID()}`;
+      const live = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+      await prisma.voiceNoteTurn.update({ where: { id: live.id }, data: { state: 'answering', generation: 3, leaseUntil: new Date(Date.now() + 60_000) } });
+      // Its reply is reported (a usage row) and its lease is still live: one reply is used, none is on its way, so one more is allowed
+      await prisma.botsAiUsage.create({ data: { botId: capped, providerId: 'universe-ai', talkedUserId: person, talkedGuest: true } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+      // That one is on its way: the two places are taken
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
+    });
+
+    it('pairs each reported reply with one note being answered: two notes, one reply reported, leaves one on the way', async () => {
+      const capped = await newBot('Capped six');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 3 } });
+      const person = `pair-${randomUUID()}`;
+      for (let n = 0; n < 2; n += 1) {
+        const turn = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+        await prisma.voiceNoteTurn.update({ where: { id: turn.id }, data: { state: 'answering', generation: 2, leaseUntil: new Date(Date.now() + 60_000) } });
+      }
+      await prisma.botsAiUsage.create({ data: { botId: capped, providerId: 'universe-ai', talkedUserId: person, talkedGuest: true } });
+      // One used + one on its way = 2 of 3: one more is allowed, and then it is full
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
+    });
+
+    it('counts a heard note for as long as its words are kept, not for a time from when it was reserved', async () => {
+      const capped = await newBot('Capped seven');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 1 } });
+      const person = `heard-${randomUUID()}`;
+      const first = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+      // Reserved a quarter of an hour ago, heard a minute later: its words are kept until 12 minutes from now, so its answer can still be made
+      const reservedAt = new Date(Date.now() - 15 * 60_000 - 5_000);
+      await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { state: 'heard', createdAt: reservedAt, bufferUntil: new Date(Date.now() + 12 * 60_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
+      // Once its words are no longer kept it can never be answered: it holds no place
+      await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { bufferUntil: new Date(Date.now() - 1_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+    });
+
+    it('counts the places an account already holds when it appears after the limits were collected for the guest it was taken for', async () => {
+      const capped = await newBot('Capped account');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 1 } });
+      const uuid = `acct-${randomUUID()}`;
+      // The ask finds no account when it collects the limits; the account appears (with a note of its own being answered, the one reply) before it reserves
+      looks = 0;
+      afterLimitsLook = async () => {
+        const person = await prisma.user.create({ data: { uuid, email: `${uuid}@example.test`, name: 'Account' } });
+        people.push(person.id);
+        await prisma.voiceNoteTurn.create({
+          data: { scope: 'bot', personKey: `person:${person.id}`, target: capped, botId: capped, clientTurnId: turnId(), fingerprint: randomUUID(), payer: 'owner', seconds: 10, state: 'answering', generation: 1, leaseUntil: new Date(Date.now() + 60_000), replySource: 'own-key' },
+        });
+      };
+      const result = await reserveFor(capped, uuid, { isGuest: false, seconds: 10 });
+      expect(result).toMatchObject({ ok: false, reason: 'reply-limit' });
+      expect(await prisma.voiceNoteTurn.count({ where: { botId: capped } })).toBe(1);
     });
 
     it('stops at the hour\'s minutes and the notes heard at once, for everyone, with "busy"', async () => {
