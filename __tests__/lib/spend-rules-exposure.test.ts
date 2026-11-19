@@ -52,4 +52,54 @@ describe('exposureOf', () => {
       expect(exposureOf([{ amountMicros: BigInt(0.1 * MIL), renewals: 0, createdAt: new Date(Date.UTC(2026, 10, 19, 23, 58)), expiresAt: new Date(Date.UTC(2026, 10, 20, 0, 8)) }], 10, undefined, midnight)).toBe(0.1 * MIL);
     });
   });
+
+  describe('each stretch counted at the price it was taken at (a price that changed in the middle of a lease)', () => {
+    const at = (n: number) => min(n).getTime();
+    const TEN = 10 * 60_000;
+
+    it('$0.10 for ten minutes, then renewed at minute 5 at $0.20 for ten minutes: the lease through minute 15 can cost $0.25, not the $0.225 an average gives', () => {
+      const lease = {
+        amountMicros: BigInt(0.3 * MIL),
+        renewals: 1,
+        createdAt: min(0),
+        expiresAt: min(15),
+        terms: [{ at: at(0), micros: 0.1 * MIL, stretchMs: TEN }, { at: at(5), micros: 0.2 * MIL, stretchMs: TEN }],
+      };
+      expect(exposureOf([lease], 10)).toBe(0.25 * MIL);
+      // The same lease with no terms recorded (an older row) is counted as equal stretches
+      expect(exposureOf([{ ...lease, terms: undefined }], 10)).toBe(0.225 * MIL);
+    });
+
+    it('a price that fell is counted at what the earlier stretch cost, and never more than was held', () => {
+      const lease = { amountMicros: BigInt(0.25 * MIL), renewals: 1, createdAt: min(0), expiresAt: min(15), terms: [{ at: at(0), micros: 0.2 * MIL, stretchMs: TEN }, { at: at(5), micros: 0.05 * MIL, stretchMs: TEN }] };
+      // 5 minutes at $0.20 per ten, 10 minutes at $0.05 per ten
+      expect(exposureOf([lease], 10)).toBe(0.15 * MIL);
+      expect(exposureOf([{ ...lease, amountMicros: BigInt(0.12 * MIL) }], 10)).toBe(0.12 * MIL);
+    });
+
+    it('is never less than one stretch at the latest price while the lease still covers time', () => {
+      const lease = { amountMicros: BigInt(0.3 * MIL), renewals: 1, createdAt: min(0), expiresAt: min(6), terms: [{ at: at(0), micros: 0.1 * MIL, stretchMs: TEN }, { at: at(5), micros: 0.2 * MIL, stretchMs: TEN }] };
+      expect(exposureOf([lease], 10)).toBe(0.2 * MIL);
+    });
+
+    it('counts from the start of a period by the terms of the time inside it', () => {
+      // A lease from 23:50, renewed at 23:55 at twice the price, ending 00:05: from midnight only the second price applies, for 5 minutes
+      const day = new Date(Date.UTC(2026, 10, 20, 0, 0));
+      const t = (h: number, m: number) => Date.UTC(2026, 10, h < 24 ? 19 : 20, h % 24, m);
+      const lease = { amountMicros: BigInt(0.3 * MIL), renewals: 1, createdAt: new Date(t(23, 50)), expiresAt: new Date(t(24, 5)), terms: [{ at: t(23, 50), micros: 0.1 * MIL, stretchMs: TEN }, { at: t(23, 55), micros: 0.2 * MIL, stretchMs: TEN }] };
+      expect(exposureOf([lease], 10, undefined, day)).toBe(0.2 * MIL);
+      expect(exposureOf([lease], 10)).toBe(0.25 * MIL);
+    });
+
+    it('rounds up once for the lease, in whole micros', () => {
+      const lease = { amountMicros: BigInt(1000), renewals: 1, createdAt: min(0), expiresAt: min(12), terms: [{ at: at(0), micros: 333, stretchMs: TEN }, { at: at(7), micros: 99, stretchMs: TEN }] };
+      // 7 minutes at 333 per ten, 5 at 99 per ten: 233.1 + 49.5 = 282.6, rounded up once
+      expect(exposureOf([lease], 10)).toBe(283);
+    });
+
+    it('terms that are not whole or not in order are ignored (counted as equal stretches)', () => {
+      const lease = { amountMicros: BigInt(0.2 * MIL), renewals: 1, createdAt: min(0), expiresAt: min(15), terms: [{ at: at(5), micros: 0.1 * MIL, stretchMs: TEN }, { at: at(0), micros: 0.1 * MIL, stretchMs: TEN }] };
+      expect(exposureOf([lease], 10)).toBe(0.15 * MIL);
+    });
+  });
 });

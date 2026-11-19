@@ -2092,6 +2092,10 @@ model MeterReservation {
   state          String    @db.VarChar(10)
   expiresAt      DateTime  @map("expires_at")
   renewals       Int       @default(0)
+  // What each authorized stretch of a lease was priced at, as it was taken: [{ at: ms, micros: the room held for one stretch, stretchMs }], one entry
+  // for the first stretch and one for each renewal. A lease is counted by these (what each stretch can cost under its own price), so a price that
+  // changed in the middle of a lease never re-prices the stretches already authorized. Empty on older rows, which are counted as equal stretches.
+  terms          Json?
   settledMicros  BigInt?   @map("settled_micros")
   createdAt      DateTime  @default(now()) @map("created_at")
   closedAt       DateTime? @map("closed_at")

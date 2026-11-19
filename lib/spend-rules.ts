@@ -347,7 +347,7 @@ async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Dat
   // Room still held is read BEFORE what was settled: a step that settles between the two reads is then counted twice (a step too
   // careful), never missed (a cap passed). Reading them together could miss it.
   if (wantsComputer(rule.covers)) {
-    const held = await db.meterReservation.findMany({ where: { AND: holds }, select: { amountMicros: true, renewals: true, createdAt: true, expiresAt: true } });
+    const held = await db.meterReservation.findMany({ where: { AND: holds }, select: { amountMicros: true, renewals: true, createdAt: true, expiresAt: true, terms: true } });
     const taken = await db.meterEvent.aggregate({ where: { AND: events }, _sum: { costMicros: true } });
     const unpriced = await unpricedCallRoom(db, events);
     const settings = await getMeterSettings(db);
