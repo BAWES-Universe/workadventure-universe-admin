@@ -1481,6 +1481,28 @@ run('payments for pages, in a real database', () => {
         expect(JSON.parse(POSTS(sent)[0].body as string)).toMatchObject({ reference: { order: lost.id } });
       });
 
+      it('an early reload: Restore says it is still going on (no link, its own), asks nothing, and the same Restore after the wait carries it on', async () => {
+        const { artifactId } = await pending();
+        const code = word();
+        // The server stopped a moment ago: the start is too recent to be taken over
+        const lost = await lostOrder(artifactId, code, wish(), { createdAt: new Date(Date.now() - 2_000), checkedAt: new Date(Date.now() - 1_000) });
+        const sent = gateway();
+        const early = await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] });
+        expect(early).toMatchObject({ status: 'checking', orderId: lost.id, via: 'own', checkoutUrl: null });
+        expect(early.pollAfterMs).toBeGreaterThan(0);
+        expect(POSTS(sent)).toHaveLength(0);
+        // The wait is over: asked again, the same order goes on with the same id and the link comes back
+        await prisma.appPageOrder.update({ where: { id: lost.id }, data: { createdAt: new Date(Date.now() - 120_000), checkedAt: new Date(Date.now() - 120_000) } });
+        const later = await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] });
+        expect(later).toMatchObject({ status: 'checking', orderId: lost.id, via: 'own' });
+        expect(later.checkoutUrl).toBe('https://checkout.examplepay.com/?mode=page&token=abc');
+        expect(POSTS(sent)).toHaveLength(1);
+        // A receipt code alone never gets that far
+        const other = word();
+        await lostOrder(artifactId, other, wish());
+        expect((await restorePurchase({ artifactId, buyerKeys: [buyerOf(other)], ownKeys: [buyerOf(code)] })).checkoutUrl ?? null).toBeNull();
+      });
+
       it('refuses to carry on a start for an offer the owner has changed since, and sends the description the order was made with', async () => {
         const { artifactId, connectionId } = await pending();
         const code = word();

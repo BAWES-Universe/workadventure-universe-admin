@@ -431,17 +431,31 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   };
 
   /** A page asking for a purchase this buyer already made (a reload, a reopened version): found by the buyer, never by anything the page chose. */
+  /** An answer for this browser's own start that never finished and cannot be carried on yet: no link, and Restore has to be asked again later. */
+  const stillStarting = (body: Record<string, unknown> | null): boolean => body?.status === 'checking' && body.via === 'own' && !body.checkoutUrl && typeof body.orderId === 'string';
+  const askAgainIn = (body: Record<string, unknown> | null): number =>
+    typeof body?.pollAfterMs === 'number' && Number.isFinite(body.pollAfterMs) ? Math.min(MOST_POLL_MS, Math.max(LEAST_POLL_MS, body.pollAfterMs)) : FIRST_POLL_MS;
+
   const restore = (request: string, ticket: Ticket) => {
     busy = true;
     activeRequest = request;
     activeTicket = ticket;
     lastRestore = { request, ticket };
-    void (async () => {
+    stopTimers();
+    const attempt = async (since: number): Promise<void> => {
       try {
         const answer = await bounded((signal) => post({ restore: true }, signal));
         if (destroyed) return;
         const status = answer.body?.status;
         if (answer.ok && status === 'paid') return end({ paid: { test: answer.body?.testPayment === true }, restored: restoredOf(answer.body) }, 'paid', request, ticket, answer.body?.testPayment === true);
+        // Their own start that never finished, not yet ready to be carried on: Orbit only does that when Restore is asked again after its wait,
+        // so it is asked again, at the pace it gives, until the link comes, the purchase is found, or twenty minutes have passed
+        if (answer.ok && stillStarting(answer.body)) {
+          if (Date.now() - since >= POLL_FOR_MS) return end({ problem: 'cant_confirm', canCheck: true }, 'cant_confirm', request, ticket);
+          publish({ checking: true });
+          timer = setTimeout(() => void attempt(since), askAgainIn(answer.body));
+          return;
+        }
         // Nothing found by itself (a new phone, a cleared browser): the page is told so, and the buyer is offered Restore purchase, quietly
         if (answer.ok && status === 'none') return end({ offerRestore: true }, 'none', request, ticket);
         if (answer.ok && status === 'checking' && typeof answer.body?.orderId === 'string') {
@@ -454,7 +468,8 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
       } catch {
         if (!destroyed) end({ problem: 'unavailable', canCheck: true }, 'unavailable', request, ticket);
       }
-    })();
+    };
+    void attempt(Date.now());
   };
 
   const onMessage = (event: { source: unknown; data: unknown }) => {
@@ -490,7 +505,8 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     activeRequest = asked.request;
     activeTicket = asked.ticket;
     publish({ checking: true });
-    void (async () => {
+    stopTimers();
+    const attempt = async (since: number): Promise<void> => {
       try {
         const answer = await bounded((signal) => post(asked.intentId ? { check: true, intentId: asked.intentId } : { restore: true }, signal));
         if (destroyed) return;
@@ -504,6 +520,14 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
           if (request && opening === asked.ticket.from) tellRequest(told, request, isTest);
         };
         if (answer.ok && status === 'paid') return done({ paid: { test }, restored: asked.intentId ? null : restoredOf(answer.body) }, 'paid', test);
+        // This browser's own start that never finished and cannot be carried on yet (it may still be in flight, or its wait is not over): Orbit
+        // resumes it only when Restore is asked again after the wait, never when an order is polled. So Restore is asked again, at the pace the
+        // server gives, until the link comes (then it is adopted as any other), the purchase is found, or twenty minutes pass
+        if (answer.ok && !asked.intentId && stillStarting(answer.body)) {
+          if (Date.now() - since >= POLL_FOR_MS) return done({ problem: 'cant_confirm', canCheck: true }, 'cant_confirm');
+          timer = setTimeout(() => void attempt(since), askAgainIn(answer.body));
+          return;
+        }
         if (answer.ok && status === 'checking' && typeof answer.body?.orderId === 'string') return adopt(answer.body.orderId, resumeOf(answer.body), request, asked.ticket, answer.body.via === 'receipt');
         if (answer.ok && (status === 'not_paid' || status === 'cant_confirm')) return done({ problem: status, canCheck: true }, status);
         if (answer.ok && status === 'none') return done({ problem: 'none', canCheck: !restoring }, 'none');
@@ -518,7 +542,8 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         publish({ problem: 'unavailable', canCheck: true });
         if (asked.request && opening === asked.ticket.from) tellRequest('unavailable', asked.request);
       }
-    })();
+    };
+    void attempt(Date.now());
   };
 
   return {

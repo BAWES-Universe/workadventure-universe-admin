@@ -528,6 +528,40 @@ describe('a paying page on the public share link', () => {
     unsure.host.destroy();
   });
 
+  it('keeps asking Restore, not the order, while the buyer’s own unfinished start cannot be carried on yet, and takes its link when it comes', async () => {
+    let restores = 0;
+    const { tap, host, lines, calls } = setup((call) => {
+      if (call.body.restore) {
+        restores += 1;
+        // An early reload: twice "still going on" with no link, then the wait is over and Orbit hands back the link
+        return restores < 3 ? { body: { status: 'checking', orderId: 'o-7', via: 'own', checkoutUrl: null, pollAfterMs: 3000, buyer: 'guest' } } : { body: { status: 'checking', orderId: 'o-7', via: 'own', checkoutUrl: 'https://checkout.examplepay.com/?t=7', pollAfterMs: 3000, buyer: 'guest' } };
+      }
+      return { body: { status: 'checking', pollAfterMs: 3000 } };
+    });
+    tap({ request: 'r1', restore: true });
+    await flush();
+    expect(restores).toBe(1);
+    expect(lines.at(-1)).toMatchObject({ checking: true, resume: null });
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(restores).toBe(2);
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(restores).toBe(3);
+    // The link is on the line now, and the order is watched from here (it is asked about, never started again)
+    expect(lines.at(-1)).toMatchObject({ checking: true, resume: { url: 'https://checkout.examplepay.com/?t=7' } });
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(calls.some((call) => call.url.includes('order=o-7'))).toBe(true);
+    host.destroy();
+  });
+
+  it('gives up asking Restore for an unfinished start after twenty minutes and offers Check payment', async () => {
+    const { tap, host, lines } = setup((call) => ({ body: call.body.restore ? { status: 'checking', orderId: 'o-8', via: 'own', checkoutUrl: null, pollAfterMs: 30000, buyer: 'guest' } : { status: 'checking' } }));
+    tap({ request: 'r1', restore: true });
+    await flush();
+    await jest.advanceTimersByTimeAsync(21 * 60_000);
+    expect(lines.at(-1)).toMatchObject({ problem: 'cant_confirm', canCheck: true });
+    host.destroy();
+  });
+
   it('offers no receipt of its own for a purchase a receipt link found: it is "back", and this browser’s code would not bring it back', async () => {
     const { tap, host, lines } = setup((call) => (call.body.restore ? { body: { status: 'checking', orderId: 'o-5', via: 'receipt', buyer: 'guest' } } : { body: { status: 'paid', testPayment: false } }));
     tap({ request: 'r1', restore: true });
@@ -536,7 +570,7 @@ describe('a paying page on the public share link', () => {
     expect(lines.at(-1)).toMatchObject({ paid: { test: false }, restored: { paidAt: null } });
     host.destroy();
     // Found with its own proof, the buyer's purchase is a normal one with a receipt
-    const own = setup((call) => (call.body.restore ? { body: { status: 'checking', orderId: 'o-6', via: 'own', buyer: 'guest' } } : { body: { status: 'paid', testPayment: false } }));
+    const own = setup((call) => (call.body.restore ? { body: { status: 'checking', orderId: 'o-6', via: 'own', checkoutUrl: 'https://checkout.examplepay.com/?t=6', buyer: 'guest' } } : { body: { status: 'paid', testPayment: false } }));
     own.tap({ request: 'r1', restore: true });
     await flush();
     await jest.advanceTimersByTimeAsync(3_000);
