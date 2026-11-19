@@ -163,6 +163,12 @@ export const nameList = (names: string[], max = 3): string => {
   return `${names.slice(0, max - 1).join(', ')} and ${rest} others`;
 };
 
+/** A day as the person reading it has it: in their own time zone, which is the zone the end of a gift is picked in. Null for what is not a date. */
+export function localDay(iso: string): string | null {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
+
 const plural = (value: number, one: string, many: string) => `${value.toLocaleString('en')} ${value === 1 ? one : many}`;
 
 /** "Instant Apps $10 once", "Computers $5 a month": one default or one exception setting, said in a few words. */
@@ -211,7 +217,7 @@ export function exceptionLines(exception: ExceptionView): string[] {
 export function giftLines(gift: GiftView): string[] {
   const scope = gift.scope === 'both' ? 'Instant Apps and computers' : gift.scope === 'apps' ? 'Instant Apps' : 'Computers';
   const amount = gift.shared ? `${usd(gift.amountMicros)} shared in total` : `${usd(gift.amountMicros)} each, ${usd(gift.totalMicros)} in total`;
-  return [amount, scope, `${gift.ended ? 'ended' : 'until'} ${new Date(gift.endsAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' })}`];
+  return [amount, scope, `${gift.ended ? 'ended' : 'until'} ${localDay(gift.endsAt) ?? ''}`.trim()];
 }
 
 export function giftMeta(gift: GiftView): string[] {
@@ -276,7 +282,9 @@ export function previewRows(request: PreviewRequest, numbers: PreviewNumbers | n
       ? [n.people === 1 ? 'This person has ' : `The ${n.people} share `, { b: `one ${amount}` }, ` for ${scopeWords(request.scope)}. Whoever uses it first uses it. Two people can never spend the same dollar at once.`]
       : [n.people === 1 ? 'This person gets ' : `Each of the ${n.people} gets `, { b: `one ${amount}` }, ` for ${scopeWords(request.scope)}${request.scope === 'both' ? `, not ${amount} for each` : ''}. ${only}`],
   ]);
-  rows.push(['Most credit issued', [{ b: `${usd(total)} in total` }, n.endsOn ? `, ending ${n.endsOn}. Used before their own credit, because it ends sooner.` : '.']]);
+  // The day the admin picked is the day in their own zone (the box takes it that way), so the preview says it in that zone too, never the server's
+  const endsOn = localDay(request.endsAt) ?? n.endsOn;
+  rows.push(['Most credit issued', [{ b: `${usd(total)} in total` }, endsOn ? `, ending ${endsOn}. Used before their own credit, because it ends sooner.` : '.']]);
   rows.push(cost);
   const funding = fundingRow(n);
   if (funding) rows.push(funding);
