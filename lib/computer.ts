@@ -921,6 +921,26 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
   for (const job of ended) {
     await recordComputerTime(job, job.secondsRun, job.endedAt ?? now, { endedBy: job.endedBy as EndedBy | null, status: job.status });
   }
+  await giveBackMissingComputerCredit(batch, botId);
+}
+
+/**
+ * A job that failed on our side has the credit it drew given back when it ends. If that give-back did not go through (the books were out of reach
+ * for a moment, and it never throws), the next sweep finds the job still holding drawn credit and gives it back. Safe to run twice. Never throws.
+ */
+async function giveBackMissingComputerCredit(batch: number, botId?: string): Promise<void> {
+  const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
+  try {
+    const jobs = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT DISTINCT j."id"
+      FROM "computer_jobs" j
+      WHERE j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error' ${only}
+        AND EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros")
+      LIMIT ${batch}`);
+    for (const job of jobs) await giveBackComputerCredit(job.id);
+  } catch (error) {
+    console.error('[Computer] Could not look for a failed job’s credit:', error instanceof Error ? error.message : 'unknown');
+  }
 }
 
 /**

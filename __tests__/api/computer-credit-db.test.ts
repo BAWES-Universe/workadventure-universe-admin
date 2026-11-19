@@ -7,6 +7,11 @@
  */
 import { randomUUID } from 'node:crypto';
 
+// The give-back can be made to fail once (the books unreachable for a moment); everything else in the funding books is the real one
+jest.mock('@/lib/credit-spend', () => {
+  const actual = jest.requireActual('@/lib/credit-spend');
+  return { ...actual, refundHold: jest.fn(actual.refundHold) };
+});
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
@@ -15,7 +20,7 @@ import { createBrick } from '@/lib/brick-create';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { memberAllowance } from '@/lib/meter-allowance';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { finishJob, giveComputer, startJob, stopJobFor } from '@/lib/computer';
+import { finishJob, giveComputer, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
 import { mintJobToken } from '@/lib/computer-token';
 import * as calls from '@/lib/computer-calls';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
@@ -24,6 +29,7 @@ import { computerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
 import { createGiftFor, saveDefaultFor } from '@/lib/grants-admin';
 import { endGift } from '@/lib/grants-admin';
 import { saveException } from '@/lib/credit-rules';
+import * as creditSpend from '@/lib/credit-spend';
 import { holdCredit, settleHold } from '@/lib/credit-spend';
 import { ensureIssued } from '@/lib/credit-issue';
 import { personUsage } from '@/lib/meter-person';
@@ -298,6 +304,33 @@ run('credit for computers, on the real books', () => {
       await settleModelCall(jobId, 'late', { costMicros: 10_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW).catch(() => undefined);
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
       if (givesBack) expect((await month(sara.id, new Date(NOW.getTime() + 10 * 60_000))).leftMicros).toBe(BASE + 1_000_000);
+    });
+
+    it('is found again by the sweep when its give-back failed once: the person is not left without the credit of a job that failed on our side', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      await call(token, 'b', 50_000, 20_000);
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(950_000);
+      // The give-back throws for the first draw only (the books were not reachable for a moment): the job still ends, and nothing is lost for good
+      (creditSpend.refundHold as jest.Mock).mockImplementationOnce(async () => {
+        throw new Error('books unreachable');
+      });
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        await failedOnOurSide(jobId, new Date(NOW.getTime() + 10 * 60_000));
+      } finally {
+        quiet.mockRestore();
+      }
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBeLessThan(1_000_000);
+      // The sweep, later, finds the job still holding drawn credit and gives it back; asked again it gives nothing more
+      await sweepComputers(new Date(NOW.getTime() + 30 * 60_000));
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      await sweepComputers(new Date(NOW.getTime() + 40 * 60_000));
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      const holds = await prisma.creditHold.findMany({ where: { jobKey: jobId } });
+      expect(holds.map((hold) => Number(hold.refundedMicros)).sort()).toEqual([20_000, 30_000]);
     });
 
     it('is not given back for a job that ran fine, or that the person stopped: what it drew stays drawn', async () => {
