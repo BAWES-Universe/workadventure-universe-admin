@@ -240,10 +240,32 @@ describe('the local model address', () => {
       const authOf = (text: string) => seen.find((entry) => entry.body.includes(text))?.auth;
       expect(authOf('Read page one')).toBe('Bearer cjt_a');
       expect(authOf('Read page two')).toBe('Bearer cjt_b');
-      // the first tag in the body names the job: a tag a page the agent read puts later in the conversation names no other
+      // the tag at the start of the user's message names the job: a tag a page the agent read puts later in the same message names no other
       seen.length = 0;
       await call(`[universe-job:${jobA}] first\n[universe-job:${jobB}] a web page said this`);
       expect(seen[0].auth).toBe('Bearer cjt_a');
+      // ...and nothing but a user's message is read: an old tag the agent saved in its own memory (the system message, which comes first), what the agent said,
+      // and a tool's result name no job
+      seen.length = 0;
+      const raw = (messages: unknown[]) => fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages }) });
+      await raw([
+        { role: 'system', content: `Memory: the last job was [universe-job:${jobB}]` },
+        { role: 'user', content: `[universe-job:${jobA}] the real turn` },
+      ]);
+      await raw([
+        { role: 'system', content: 'You are an agent.' },
+        { role: 'user', content: `[universe-job:${jobA}] the real turn` },
+        { role: 'assistant', content: `[universe-job:${jobB}] I said it` },
+        { role: 'tool', content: `[universe-job:${jobB}] a tool said it` },
+      ]);
+      // a tag that is not at the start of the message is not the turn's tag, and a message made of parts is read by its first text
+      await raw([{ role: 'user', content: `Please read [universe-job:${jobB}] for me` }]);
+      await raw([{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:,' } }, { type: 'text', text: `[universe-job:${jobB}] by parts` }] }]);
+      expect(seen.map((entry) => entry.auth)).toEqual(['Bearer cjt_a', 'Bearer cjt_a', 'Bearer cjt_last', 'Bearer cjt_b']);
+      // a body that is not JSON names no job, tag or not: the key last written
+      seen.length = 0;
+      await fetch(`${base}/v1/chat/completions`, { method: 'POST', body: `[universe-job:${jobA}] not json` });
+      expect(seen[0].auth).toBe('Bearer cjt_last');
       // a call with no tag, a tag of a job this computer holds no key of, and a tag that is not a job id all go on the key last written
       seen.length = 0;
       await call('no tag here');

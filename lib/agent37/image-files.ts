@@ -191,7 +191,7 @@ exit 0
 export const UNIVERSE_PROXY = String.raw`#!/usr/bin/env python3
 # The model address on this computer: 127.0.0.1:__PORT__. Hermes talks to it as if it were any OpenAI-format server and holds no real key.
 # On EVERY call it reads the relay's address and a job's key and passes the call on, so a new key never needs Hermes restarted. Every turn
-# sent to the agent starts with the job's tag ("[universe-job:<id>]"): the first tag in a call's body names the job, and the call goes on
+# sent to the agent starts with the job's tag ("[universe-job:<id>]"): the tag at the start of a user message in a call's body names the job, and the call goes on
 # with that job's own key (~/.universe/jobs/<id>.json), so jobs that run at once are each booked their own calls. A call with no tag, or for a
 # job this computer holds no key of, goes on the key last written (~/.universe/relay.json). The tag is never authority: Orbit decides from the key.
 # It logs the method, the path and the status, never a body or a key.
@@ -207,16 +207,45 @@ PORT = int(os.environ.get("UNIVERSE_PROXY_PORT") or __PORT__)
 HOME = os.environ.get("HOME") or "/home/node"
 RELAY = os.path.join(HOME, ".universe", "relay.json")
 JOBS = os.path.join(HOME, ".universe", "jobs")
-TAG = re.compile(rb"\[universe-job:([A-Za-z0-9-]{8,64})\]")
+TAG = re.compile(r"^\[universe-job:([A-Za-z0-9-]{8,64})\]")
 CONNECT_SECONDS = 10
 READ_SECONDS = 900
 SKIP = {"connection", "keep-alive", "transfer-encoding", "content-length", "host", "authorization", "upgrade", "proxy-authorization", "te", "trailer"}
 
 
+def tag_of(body):
+    # The tag is read only from the START of a user message's text: the system message (the agent's own memory and skills), the agent's own
+    # answers and the tools' results are never where a job's tag is looked for. A body that is not JSON names no job.
+    try:
+        data = json.loads(body)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    items = []
+    for key in ("messages", "input"):
+        value = data.get(key)
+        if isinstance(value, list):
+            items.extend(value)
+        elif isinstance(value, str) and key == "input":
+            items.append({"role": "user", "content": value})
+    for item in items:
+        if not isinstance(item, dict) or item.get("role") != "user":
+            continue
+        content = item.get("content")
+        if isinstance(content, list):
+            content = next((part.get("text") for part in content if isinstance(part, dict) and isinstance(part.get("text"), str)), None)
+        if isinstance(content, str):
+            found = TAG.match(content)
+            if found:
+                return found.group(1)
+    return None
+
+
 def relay(body=None):
-    found = TAG.search(body) if body else None
-    if found:
-        own = read_relay(os.path.join(JOBS, found.group(1).decode("ascii") + ".json"))
+    job = tag_of(body) if body else None
+    if job:
+        own = read_relay(os.path.join(JOBS, job + ".json"))
         if own:
             return own
     return read_relay(RELAY)
