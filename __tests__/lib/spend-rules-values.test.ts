@@ -87,7 +87,10 @@ describe('a rule in plain words', () => {
     expect(ruleWords({ scope: 'task', period: 'task', capMicros: 1_200_000, onlyOwnAccounts: false, covers: 'apps' })).toBe('No more than $1.20 from your Instant Apps credit for this task');
     expect(ruleWords({ scope: 'person', period: 'day', capMicros: 500_000, onlyOwnAccounts: false, covers: 'computer' })).toBe('No more than $0.50 a day from your computer credit for all your Bricks');
     expect(ruleWords({ scope: 'bot', period: 'task', capMicros: 250_000, onlyOwnAccounts: false, covers: 'all' }, 'Scout')).toBe('No more than $0.25 from your credit for each task, for Scout');
-    expect(ruleWords({ scope: 'person', period: null, capMicros: null, onlyOwnAccounts: true, covers: 'all' })).toBe('Only your own accounts: nothing is taken from your credit');
+    expect(ruleWords({ scope: 'person', period: null, capMicros: null, onlyOwnAccounts: true, covers: 'all' })).toBe('Only your own accounts, for all your Bricks: nothing is taken from your credit');
+    // One task, one Brick and all of them are told apart
+    expect(ruleWords({ scope: 'task', period: null, capMicros: null, onlyOwnAccounts: true, covers: 'all' })).toBe('Only your own accounts, for this task: nothing is taken from your credit');
+    expect(ruleWords({ scope: 'bot', period: null, capMicros: null, onlyOwnAccounts: true, covers: 'all' }, 'Scout')).toBe('Only your own accounts, for Scout: nothing is taken from your credit');
     expect(ruleWords({ scope: 'bot', period: 'month', capMicros: 0, onlyOwnAccounts: false, covers: 'all' })).toContain('No more than $0');
   });
 

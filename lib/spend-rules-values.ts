@@ -88,7 +88,8 @@ export function ruleWords(rule: Pick<SpendRule, 'scope' | 'period' | 'capMicros'
   const who = rule.scope === 'person' ? 'all your Bricks' : (botName?.trim() || 'this Brick');
   const parts: string[] = [];
   if (rule.onlyOwnAccounts) {
-    parts.push(`Only your own accounts: nothing is taken from your ${coversWords(rule.covers)}`);
+    // Where it applies is said too: the same words for one task, one Brick and all of them would not tell which the person saved
+    parts.push(`Only your own accounts, ${rule.scope === 'task' ? 'for this task' : `for ${who}`}: nothing is taken from your ${coversWords(rule.covers)}`);
   }
   if (rule.capMicros !== null) {
     const amount = amountWords(rule.capMicros);
