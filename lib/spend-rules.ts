@@ -334,8 +334,9 @@ async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Dat
   const start = rule.period ? periodStart(rule.period, now) : null;
   if (start) {
     events.push({ occurredAt: { gte: start } });
-    // Room that lapsed without being settled still counts, in the period it was taken in
-    holds.push({ createdAt: { gte: start } });
+    // Room that lapsed without being settled still counts, in the period it was taken in, and in the period of its last renewal (a renewal
+    // across the end of a period was held to the new period's cap, so the next step must count it there)
+    holds.push({ OR: [{ createdAt: { gte: start } }, { lastRenewedAt: { gte: start } }] });
     credit.push({ createdAt: { gte: start } });
   }
   let spentMicros = 0;

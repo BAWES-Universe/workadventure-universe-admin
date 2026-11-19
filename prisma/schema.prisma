@@ -2046,6 +2046,9 @@ model MeterReservation {
   renewals       Int       @default(0)
   settledMicros  BigInt?   @map("settled_micros")
   createdAt      DateTime  @default(now()) @map("created_at")
+  // When a renewal last held more of it. A cap counts room held in its period by this as well as by createdAt, so room taken in October and renewed in
+  // November is counted in November too (the renewal was checked against November's cap, and the next step must see it).
+  lastRenewedAt  DateTime? @map("last_renewed_at")
   closedAt       DateTime? @map("closed_at")
 
   @@index([personKey, state])

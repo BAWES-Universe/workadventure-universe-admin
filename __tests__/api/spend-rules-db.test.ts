@@ -561,6 +561,25 @@ run('rules said in chat and task receipts, in a real database', () => {
       await releaseRoom({ key }, NOW);
     });
 
+    it('room renewed across the end of a month counts in the new month: the next step may take only what is left of the cap, not the whole cap', async () => {
+      const sara = await person('sara');
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+      if (!made.ok) throw new Error('not made');
+      const key = `k-${tag}-boundary-after`;
+      expect((await reserveRoom({ key, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: 'jb2' }, NOW)).ok).toBe(true);
+      // Taken last month (its createdAt is before this month began), lease still running
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: new Date(NOW.getTime() - 40 * 86_400_000), expiresAt: new Date(NOW.getTime() + 300_000) } });
+      // Renewed by 20,000 this month: passes (80,000 of the 100,000)
+      expect(await renewRoom({ key, moreMicros: 20_000 }, NOW)).toMatchObject({ ok: true });
+      // The renewal is now part of this month: a new step of 30,000 is over what is left (20,000), and one of 20,000 is not
+      const attempt = (amountMicros: number) => ({ payerPersonId: sara.id, botId: sara.brickId, taskKey: 'other', chargeClass: 'computer' as const, amountMicros });
+      expect(await checkSpend(attempt(30_000), NOW)).toMatchObject({ ok: false, why: 'cap', leftMicros: 20_000 });
+      expect(await checkSpend(attempt(20_000), NOW)).toMatchObject({ ok: true });
+      // A second renewal in the same month is asked for the difference only (the room is already counted)
+      expect(await renewRoom({ key, moreMicros: 10_000 }, new Date(NOW.getTime() + 60_000))).toMatchObject({ ok: true });
+      await releaseRoom({ key }, NOW);
+    });
+
     it('renewing often does not stop a job early: a rule counts what the job can really cost, not the room stacked up by every renewal', async () => {
       const sara = await person('sara');
       // $0.15 is 25 minutes of a computer at 6,000 a minute: with one stretch (10 minutes, 60,000) of lease on top, the job may use 15 minutes

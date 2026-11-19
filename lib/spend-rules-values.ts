@@ -186,7 +186,7 @@ export interface SpendAttempt {
   /** What it would take, millionths of a dollar. Use 1 to ask whether anything more may be taken at all; 0 asks only whether the rule is already past (a renewal that adds nothing). */
   amountMicros: number;
   /**
-   * Set for the renewal of room already held: what the room could cost before and after, and when it was first taken. A rule that
+   * Set for the renewal of room already held: what the room could cost before and after, and when it was last counted (its last renewal, or when it was first taken). A rule that
    * already counts this room (it was taken in the rule's own period) is asked for the difference; a rule that does not count it (taken
    * in an earlier day or month) is asked for all of it, since nothing of it is in what that rule has counted.
    */
