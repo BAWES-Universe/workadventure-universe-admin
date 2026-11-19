@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
 import { allowanceNow, missingSettings, monthOf, type AllowanceState, type MeterSettings } from '@/lib/meter-values';
 import { checkSpend, exposureOf } from '@/lib/spend-rules';
-import type { ChargeClass } from '@/lib/spend-rules-values';
+import { termsOf, type ChargeClass } from '@/lib/spend-rules-values';
 
 /**
  * One allowance per member, shared by all their Bricks, and the envelope around everything we pay for (game #1998, Brick 7).
@@ -87,7 +87,7 @@ export async function memberAllowance(personId: string, now: Date, settings: Met
       where: { pool: 'computer', payerKind: 'universe', personKey: `person:${personId}`, costMicros: { not: null }, occurredAt: { gte: month.start, lt: month.end } },
       select: { occurredAt: true, costMicros: true },
     }),
-    db.meterGrant.findMany({ where: { personId, endsAt: { gt: month.start }, startsAt: { lt: month.end } }, select: { grantKey: true, startsAt: true, endsAt: true, multiplier: true, noLimit: true } }),
+    db.meterGrant.findMany({ where: { personId, cancelledAt: null, endsAt: { gt: month.start }, startsAt: { lt: month.end } }, select: { grantKey: true, startsAt: true, endsAt: true, multiplier: true, noLimit: true } }),
   ]);
   return allowanceNow(
     settings.memberAllowanceMicros,
@@ -223,12 +223,14 @@ const wholeMicros = (value: number, what: string): void => {
  */
 export async function reserveRoom(
   input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; /** False for a step inside a job that already holds its place (a model call): it is not another job at once. */ newJob?: boolean },
-  now: Date = new Date(),
+  asked?: Date,
 ): Promise<Room> {
   wholeMicros(input.amountMicros, 'amountMicros');
   if (!input.key || input.key.length > 255) throw new RangeError('key is required (up to 255 characters)');
   return prisma.$transaction(async (tx): Promise<Room> => {
     await lockPool(tx);
+    // The time is read once the lock is held, unless the caller fixed it
+    const now = asked ?? new Date();
     const already = await tx.meterReservation.findUnique({ where: { reservationKey: input.key } });
     if (already) {
       if (already.personKey !== `person:${input.personId}`) return { ok: false, reason: 'key_reused' };
@@ -251,6 +253,8 @@ export async function reserveRoom(
         amountMicros: BigInt(input.amountMicros),
         state: 'held',
         expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE),
+        // The first stretch, at the price it was taken at (see `terms` on the schema)
+        terms: [{ at: now.getTime(), micros: input.amountMicros, stretchMs: settings.renewMinutes * MINUTE }],
       },
     });
     return { ok: true, reservation: viewOf(row), created: true };
@@ -292,23 +296,33 @@ export async function reserveDiskRoom(input: { botId: string; jobId: string; byt
  * it. The extra passes the same checks as new room (the member's allowance and the pool); if it does not, nothing changes and the
  * job saves its work and stops safely. A reservation that already lapsed, was settled or released is not renewed.
  */
-export async function renewRoom(input: { key: string; moreMicros?: number }, now: Date = new Date()): Promise<Room> {
+export async function renewRoom(input: { key: string; moreMicros?: number }, asked?: Date): Promise<Room> {
   const more = input.moreMicros ?? 0;
   if (more !== 0) wholeMicros(more, 'moreMicros');
   return prisma.$transaction(async (tx): Promise<Room> => {
     await lockPool(tx);
+    // The time is read once the lock is held (a renewal that waited for the lock past the end of its lease is a lapsed hold), unless the caller fixed it
+    const now = asked ?? new Date();
     const row = await tx.meterReservation.findUnique({ where: { reservationKey: input.key } });
     if (!row || row.state !== 'held' || row.expiresAt <= now) return { ok: false, reason: 'closed' };
     const settings = await getMeterSettings(tx);
+    const stretchMs = settings.renewMinutes * MINUTE;
+    // Each stretch keeps the price it was taken at: this renewal's stretch is priced at the room it holds (one that adds no room keeps the price the
+    // lease last had). A lease with no terms (an older row) stays without, and is counted as equal stretches.
+    const terms = termsOf(row.terms);
+    const nextTerms = terms ? [...terms, { at: now.getTime(), micros: more > 0 ? more : terms[terms.length - 1].micros, stretchMs }] : null;
     if (more > 0) {
       // More room for a job that runs is a new step for the rules too: the same ones that let it start decide whether it may take more.
       // The rules count what the job can still cost (the time used and the stretch its lease covers, see spend-rules), so the question is
       // what the renewal adds to that. What the renewal adds to what the job can still cost: its exposure through the new lease, less what it counts now (at minute five a
       // first stretch counts whole; renewed, it counts the five minutes used and the stretch the new lease covers)
-      const before = exposureOf([row], settings.renewMinutes, now);
-      const after = exposureOf([{ amountMicros: row.amountMicros + BigInt(more), renewals: row.renewals + 1, createdAt: row.createdAt, expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE) }], settings.renewMinutes, now);
+      const lease = { amountMicros: row.amountMicros, renewals: row.renewals, createdAt: row.createdAt, expiresAt: row.expiresAt, terms: row.terms };
+      const renewed = { amountMicros: row.amountMicros + BigInt(more), renewals: row.renewals + 1, createdAt: row.createdAt, expiresAt: new Date(now.getTime() + stretchMs), terms: nextTerms };
+      const before = exposureOf([lease], settings.renewMinutes, now);
+      const after = exposureOf([renewed], settings.renewMinutes, now);
       const ruled = await checkSpend(
-        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: 'computer', amountMicros: Math.max(1, after - before) },
+        // What the renewal adds, and nothing when exposure does not grow (a job exactly at its cap may go on to the end of the lease it holds)
+        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: 'computer', amountMicros: Math.max(0, after - before), renewal: { before: lease, after: renewed, renewMinutes: settings.renewMinutes } },
         now,
         tx,
       );
@@ -318,7 +332,7 @@ export async function renewRoom(input: { key: string; moreMicros?: number }, now
     }
     const next = await tx.meterReservation.update({
       where: { id: row.id },
-      data: { amountMicros: row.amountMicros + BigInt(more), expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE), renewals: { increment: 1 } },
+      data: { amountMicros: row.amountMicros + BigInt(more), expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE), renewals: { increment: 1 }, ...(nextTerms ? { terms: nextTerms.map((term) => ({ at: term.at, micros: term.micros, stretchMs: term.stretchMs })) } : {}) },
     });
     return { ok: true, reservation: viewOf(next), created: false };
   });

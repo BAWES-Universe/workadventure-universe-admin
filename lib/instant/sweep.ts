@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { getAdapter } from '@/lib/app-adapter';
 import type { ReadyMadeAdapter } from '@/lib/app-adapter/types';
-import { evaluatePause, reconcileRun } from '@/lib/instant/executor';
+import { evaluatePause, reconcileRun, sweepGoodwill, type GoodwillSweep } from '@/lib/instant/executor';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 import { denyInstantOnSessions, type SessionSweep } from '@/lib/instant/sessions';
 import { pauseInstant } from '@/lib/instant/state';
@@ -65,6 +65,8 @@ export interface SweepResult {
   looked: number;
   /** Receipts that left "checking" in this pass. */
   receipts: number;
+  /** Goodwill give-backs the books never confirmed: tried again, or let go after the wait. */
+  goodwill: GoodwillSweep;
   paused: boolean;
   sessions: SessionSweep;
   drift: DriftReport | null;
@@ -87,7 +89,14 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
     take: BATCH,
     select: { id: true },
   });
-  for (const row of open) {
+  // Runs let go unconfirmed are looked for in Composio's log a little longer (bounded days, a few a sweep): what turns up corrects the vendor cost only
+  const lateRuns = await prisma.instantRun.findMany({
+    where: { state: 'failed', providerBasis: 'estimated', finishedAt: { gte: new Date(now.getTime() - 35 * 24 * 60 * 60 * 1000) }, detail: { path: ['releasedUnconfirmed'], equals: true } },
+    orderBy: [{ checkedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
+    take: 25,
+    select: { id: true },
+  });
+  for (const row of [...open, ...lateRuns.filter((late) => !open.some((one) => one.id === late.id))]) {
     await reconcileRun(row.id, { funds, adapter, now }).catch((error) => console.error('[Instant] Could not look a run up:', error instanceof Error ? error.message : 'unknown'));
   }
   // A receipt still in checking whose runs have all ended is settled here too, so one the run's own pass could not move (a crash, a failed
@@ -95,6 +104,10 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
   const receipts = await settleCheckingReceipts(BATCH, now).catch((error) => {
     console.error('[Instant] The receipt check failed:', error instanceof Error ? error.message : 'unknown');
     return 0;
+  });
+  const goodwill = await sweepGoodwill({ funds, adapter, now }).catch((error): GoodwillSweep => {
+    console.error('[Instant] The give-back check failed:', error instanceof Error ? error.message : 'unknown');
+    return { looked: 0, settled: 0, released: 0 };
   });
   const paused = await evaluatePause(now).catch(() => false);
   const sessions = await denyInstantOnSessions(BATCH, adapter).catch((error): SessionSweep => {
@@ -110,7 +123,7 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
     // The clock starts only when the check finished and Composio answered for every tool (and any pause it needed was made): a failed or partial check is tried again by the next sweep
     if (drift && drift.unreachable.length === 0) lastDriftAt = Date.now();
   }
-  return { looked: open.length, receipts, paused, sessions, drift };
+  return { looked: open.length, receipts, goodwill, paused, sessions, drift };
 }
 
 /** For tests. */
