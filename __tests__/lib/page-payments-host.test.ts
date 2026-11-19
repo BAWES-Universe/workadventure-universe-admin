@@ -210,6 +210,24 @@ describe('a paying page on the public share link', () => {
     host.destroy();
   });
 
+  it('Check payment after a load restore that failed tells a purchase it finds to the page that asked, under its request and session', async () => {
+    let answerAs: 'lost' | 'paid' = 'lost';
+    const { tap, host, told, lines, calls } = setup(() => (answerAs === 'lost' ? 'lost' : { body: { status: 'paid', testPayment: false, orderId: 'o-1', paidAt: null, via: 'own', buyer: 'guest' } }));
+    // The page's own load restore cannot be answered (offline), so it hears `unavailable` and nothing is on record for a wish
+    tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(40_000);
+    expect(told()).toEqual([{ universe: 'app-result', session: 's1', status: 'unavailable', request: 'r1' }]);
+    expect(lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: true });
+    // The buyer presses Check payment: the purchase is found, and the page that asked hears it (else it would keep its pay button)
+    answerAs = 'paid';
+    host.checkPayment();
+    await flush();
+    expect(calls.at(-1)?.body).toMatchObject({ restore: true });
+    expect(lines.at(-1)).toMatchObject({ paid: { test: false } });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'paid', request: 'r1' });
+    host.destroy();
+  });
+
   it('a message without a valid request or session never replaces the line of a checkout that is on its way', async () => {
     const { host, frame, tap, lines, told } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'checking', pollAfterMs: 3000 } }));
     tap({ request: 'a' });

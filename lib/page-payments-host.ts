@@ -635,7 +635,10 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
    */
   const askAgain = (restoring: boolean) => {
     if (destroyed || busy) return;
-    const asked = restoring ? (lastRestore ? { intentId: null, ...lastRestore } : { intentId: null, request: '', ticket: { session: null } }) : target ?? { intentId: null, request: '', ticket: { session: null } };
+    // Check payment asks about the wish of the last checkout; with none (a load restore that failed, a reload) it asks as Restore does, and a
+    // purchase it finds is told under that restore's request and session, so the page that asked hears it and does not keep its pay button
+    const lastAsk = lastRestore ? { intentId: null, ...lastRestore } : { intentId: null, request: '', ticket: { session: null } };
+    const asked = restoring ? lastAsk : target ?? lastAsk;
     busy = true;
     activeRequest = asked.request;
     activeTicket = asked.ticket;
