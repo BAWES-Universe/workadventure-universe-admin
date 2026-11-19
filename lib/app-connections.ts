@@ -507,6 +507,19 @@ export async function newSignInNonce(connectionId: string): Promise<string> {
   return nonce;
 }
 
+/**
+ * A sign-in begins: the generation moves up and the new number goes into its state. Whichever sign-in began last is the only one whose
+ * tokens may be stored, so a slow older sign-in that finishes after a newer one never writes over it.
+ */
+export async function newSignInGeneration(target: { connectionId: string } | { serverId: string }): Promise<number> {
+  const data = { signInGeneration: { increment: 1 } };
+  const select = { signInGeneration: true } as const;
+  const row = 'connectionId' in target
+    ? await prisma.appConnection.update({ where: { id: target.connectionId }, data, select })
+    : await prisma.botMcpServer.update({ where: { id: target.serverId }, data, select });
+  return row.signInGeneration;
+}
+
 /** Uses the ticket exactly once: true for the first return that carries the current one, false for anything else. */
 export async function takeSignInNonce(connectionId: string, nonce: string | undefined): Promise<boolean> {
   if (!nonce) return false;

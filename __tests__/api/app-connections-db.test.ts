@@ -523,6 +523,37 @@ run('apps a person connects once, in a real database', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('an older sign-in still being exchanged when a newer one begins and finishes never writes its tokens over the newer one', async () => {
+    const connection = await newOAuthApp(sara);
+    mockUser.current = { id: sara };
+    const start = async () => new URL((await (await signInStart(request(`/api/me/apps/${connection.id}/sign-in?redirectUrl=${encodeURIComponent('http://localhost/admin')}`), params({ connectionId: connection.id }))).json()).authorizeUrl).searchParams.get('state')!;
+    const back = (s: string) => signInReturn(request(`/api/oauth/mcp-callback?code=abc&state=${encodeURIComponent(s)}`));
+    const tokens = (access: string) => new Response(JSON.stringify({ access_token: access, refresh_token: `r-${access}`, expires_in: 3600 }), { status: 200 });
+    // The first sign-in's token request is slow: it waits until the test lets it go
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let calls = 0;
+    global.fetch = jest.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        await gate;
+        return tokens('older');
+      }
+      return tokens('newer');
+    }) as unknown as typeof fetch;
+    const older = back(await start());
+    for (let wait = 0; wait < 100 && calls === 0; wait++) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls).toBe(1);
+    // A newer sign-in begins, and finishes first
+    const newer = await back(await start());
+    expect(newer.headers.get('location')).toContain('oauth=success');
+    release();
+    const late = await older;
+    // The older one is refused, and what is stored is the newer one's
+    expect(late.headers.get('location')).toContain('message=sign_in_expired');
+    expect(JSON.parse(decryptApiKey((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).authConfig!))).toMatchObject({ accessToken: 'newer', refreshToken: 'r-newer' });
+  });
+
   it('refuses a return that carries someone else’s sign-in for a person’s connection', async () => {
     const connection = await newOAuthApp(sara);
     mockUser.current = { id: omar };

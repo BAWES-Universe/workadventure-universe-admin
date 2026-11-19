@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { decryptApiKey } from '@/lib/encryption';
-import { newSignInNonce, NOT_FOUND } from '@/lib/app-connections';
+import { newSignInGeneration, newSignInNonce, NOT_FOUND } from '@/lib/app-connections';
 import { getManagedConnection } from '@/lib/app-team-access';
 import { startOAuth } from '@/lib/mcp/oauth-start';
 import { gitHubSignInUrl } from '@/lib/github/connection';
@@ -42,7 +42,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       oauthConfig,
       serverUrl: connection.serverUrl,
       fallbackPath: '/admin',
-      state: { botId: '', serverId: '', connectionId, nonce: await newSignInNonce(connectionId), personId: user.id },
+      state: { botId: '', serverId: '', connectionId, nonce: await newSignInNonce(connectionId), generation: await newSignInGeneration({ connectionId }), personId: user.id },
     });
     if (!started.ok) return respond({ error: started.error }, started.status);
     return respond({ authorizeUrl: started.authorizeUrl });

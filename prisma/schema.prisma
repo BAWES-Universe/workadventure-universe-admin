@@ -1316,6 +1316,8 @@ model BotMcpServer {
   authConfig  String?  @map("auth_config") @db.Text                          // encrypted JSON
   headers     Json?                                                          // extra headers key-value pairs
   enabled     Boolean  @default(true)
+  // Moves up each time a sign-in starts: a sign-in that finishes after a newer one began is refused, so an older return never writes over a newer one
+  signInGeneration Int   @default(0) @map("sign_in_generation")
   lastTestedAt   DateTime?  @map("last_tested_at")
   lastTestResult Json?      @map("last_test_result")
   // Servers that existed before tools were checked (#738) keep working as they do in text, shown as "Not checked yet",
@@ -1395,6 +1397,8 @@ model AppConnection {
   // The one ticket a sign-in page may bring back: set when a sign-in starts, cleared when it is used, so a replayed return, or
   // one from a sign-in that a newer start replaced, is refused
   signInNonce        String?   @map("sign_in_nonce") @db.VarChar(64)
+  // Moves up each time a sign-in starts: a sign-in that finishes after a newer one began is refused, so an older return never writes over a newer one
+  signInGeneration   Int       @default(0) @map("sign_in_generation")
   // Held while one request renews the token, so two never spend the same refresh token (a rotating one would sign the person out)
   refreshLeaseUntil  DateTime? @map("refresh_lease_until")
   // What the bot server last saw (the same fields a bot's server has, game #1819); a reconnect clears them
