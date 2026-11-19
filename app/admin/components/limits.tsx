@@ -131,8 +131,8 @@ export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone
   const rangeLine = range ? `Between ${range.min.toLocaleString('en')} and ${most.toLocaleString('en')} ${limit.unit}.` : null;
   const outOfRange = picked === 'other' && other.trim() !== '' && !!range && (Number.isNaN(value) || value < range.min || value > range.max || (!!range.whole && !Number.isInteger(value)));
   const aboveOther = !!limit.atMost && value > limit.atMost.value;
-  // "Never" (0) is a choice of its own; an empty or 0 "Other" is not
-  const ready = (picked === 'other' ? value > 0 : true) && !outOfRange && !aboveOther;
+  // "Never" (0) is a choice of its own; an empty "Other" is not, and a 0 typed in one is only where the limit's own range starts at 0
+  const ready = (picked === 'other' ? typed !== '' && (value > 0 || (!!range && range.min <= 0 && value === 0)) : true) && !outOfRange && !aboveOther;
   return (
     <div className="grid gap-4">
       {limit.cap?.line && (
@@ -1111,7 +1111,9 @@ export function readInstantLimits(answer: unknown): InstantLimitViews | null {
   const limits = (answer as { limits?: unknown } | null)?.limits;
   if (!limits || typeof limits !== 'object') return null;
   const entries = Object.entries(limits as Record<string, Partial<InstantLimitView>>);
-  const valid = entries.length > 0 && entries.every(([, view]) => view && typeof view.label === 'string' && typeof view.hint === 'string' && view.range && typeof view.range.min === 'number' && typeof view.range.max === 'number' && ['micros', 'bps', 'count', 'minutes'].includes(view.unit as string));
+  // Every field a row is drawn from is checked: a row without its value, its recommendation or whether it is required would come out as NaN
+  const numberOrNull = (field: unknown) => field === null || (typeof field === 'number' && Number.isFinite(field));
+  const valid = entries.length > 0 && entries.every(([, view]) => view && typeof view.label === 'string' && typeof view.hint === 'string' && view.range && typeof view.range.min === 'number' && typeof view.range.max === 'number' && ['micros', 'bps', 'count', 'minutes'].includes(view.unit as string) && numberOrNull(view.value) && numberOrNull(view.recommended) && typeof view.required === 'boolean');
   return valid ? (limits as InstantLimitViews) : null;
 }
 
