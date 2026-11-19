@@ -1,4 +1,5 @@
 import {
+  resultFromTestAnswer,
   extractErrorCode,
   formatResultAge,
   readBodyWithLimit,
@@ -288,5 +289,19 @@ describe('summarizeTestResult', () => {
     expect(summarizeTestResult(null).tone).toBe('none');
     expect(summarizeTestResult(null).label).toBe('Not tested');
     expect(summarizeTestResult(undefined).tone).toBe('none');
+  });
+});
+
+describe('resultFromTestAnswer', () => {
+  it('keeps the incomplete mark of a list that was not read to its end, so the page says "at least"', () => {
+    const answer = { success: true, toolCount: 20, toolNames: ['a', 'b'], incomplete: true };
+    const result = resultFromTestAnswer(answer);
+    expect(result).toEqual({ success: true, toolCount: 20, toolNames: ['a', 'b'], incomplete: true });
+    expect(summarizeTestResult(result, { now: new Date('2026-11-19T00:00:00Z') }).label).toBe('Connected — it can do at least 20 things');
+  });
+
+  it('leaves a complete list unmarked, and keeps what a failure captured', () => {
+    expect(resultFromTestAnswer({ success: true, toolCount: 3, toolNames: ['a'] })).toEqual({ success: true, toolCount: 3, toolNames: ['a'] });
+    expect(resultFromTestAnswer({ success: false, error: 'Nope', status: 401, errorCode: 'invalid_token' })).toMatchObject({ success: false, error: 'Nope', status: 401, errorCode: 'invalid_token', wwwAuthenticate: null });
   });
 });

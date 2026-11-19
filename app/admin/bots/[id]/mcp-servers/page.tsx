@@ -25,7 +25,7 @@ import {
 } from '@/components/ui/select';
 import { EmptyCard, Figure, Figures, LoadError, LoadingRows, PageHeader, SectionHeader, SettingSwitch } from '../../../components/ds';
 import { Pill } from '../../bots-ui';
-import { summarizeTestResult, type McpTestResult } from '@/lib/mcp/test-result';
+import { resultFromTestAnswer, summarizeTestResult, type McpTestResult } from '@/lib/mcp/test-result';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -369,23 +369,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
 
       // Keep the failure detail the API captured (error code, WWW-Authenticate)
       // so the row shows the cause immediately, not just the status text (#186).
-      const result: McpTestResult = data.success
-        ? {
-            success: true,
-            toolCount: data.toolCount ?? 0,
-            toolNames: data.toolNames ?? [],
-          }
-        : {
-            success: false,
-            toolCount: 0,
-            toolNames: [],
-            error: data.error || 'Connection failed',
-            status: data.status ?? null,
-            statusText: data.statusText ?? null,
-            errorCode: data.errorCode ?? null,
-            wwwAuthenticate: data.wwwAuthenticate ?? null,
-            errorBody: data.errorBody ?? null,
-          };
+      const result: McpTestResult = resultFromTestAnswer(data);
 
       if (isCurrent()) {
         setTestResults((prev) => ({ ...prev, [server.id]: { result, testedAt: new Date() } }));
