@@ -4,19 +4,20 @@ import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { getBrickLimits } from '@/lib/bot-limits';
-import { drawComputerCredit, endedOnOurSide, giveBackComputerCredit } from '@/lib/computer-credit';
+import { drawComputerCredit } from '@/lib/computer-credit';
 import { memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
-import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
+import { callRoomKey, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
   PERSON_ONLY,
   costOfSeconds,
+  givenBackJob,
   isOver,
   roomFor,
   type EffectKind,
@@ -840,9 +841,10 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // The job is over either way: the machine still rests and the line still moves, and the sweep gives the room back
     console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown');
   }
-  // A job that failed on our side takes nothing from the person's credit either: what it drew (its calls, its time) goes back into the lots it came from.
-  // Every way a job ends as failed on our side comes through here (a failure the runner reports, a first turn nobody can name, a lost worker, a key that closed)
-  if (endedOnOurSide(status, endedBy)) await giveBackComputerCredit(job.id, now);
+  // A job that failed on our side takes nothing from the person's month, and neither do the model calls it made, nor the credit they drew (the sweep tries again if this fails)
+  if (givenBackJob(status, endedBy)) {
+    await giveBackModelCalls(job.id, job.personId).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
+  }
 
   if (held) {
     await closeOutIfUnheld(job.botId);
@@ -862,16 +864,19 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
   const cost = costOfSeconds(seconds, provider ? provider.microsPerMinute() : null);
-  // Credit given on purpose (a gift for computers) is drawn first, before the event is written, so the allowance never counts what credit paid
-  // (never for a job that failed on our side: it takes nothing from the person's credit, and this may be the sweep writing it late, after the end gave the rest back)
-  if (!endedOnOurSide(why.status, why.endedBy) && cost !== null && cost > 0) await drawComputerCredit({ eventId: `computer:${job.id}:time`, personId: job.personId, botId: job.botId, jobId: job.id, costMicros: cost, chargeClass: 'computer_job' }, at);
+  // A job that failed on our side (the machine would not start or could not be reached, the agent's turn broke, the worker was lost) is not
+  // the person's: what it ran stays in the books as our own cost (the provider still bills it), but is not written against them, so it
+  // never draws from their month. A job that ran and ended any other way (done, stopped by them, out of room, nobody answered) is theirs.
+  const givenBack = givenBackJob(why.status, why.endedBy);
+  // Credit given on purpose (a gift for computers) is drawn first, before the event is written, so the allowance never counts what credit paid. Never for a job that failed on our side: it takes nothing from the person
+  if (!givenBack && cost !== null && cost > 0) await drawComputerCredit({ eventId: `computer:${job.id}:time`, personId: job.personId, botId: job.botId, jobId: job.id, costMicros: cost, chargeClass: 'computer_job' }, at);
   await recordMeterEvent({
     eventId: `computer:${job.id}:time`,
     kind: 'computer_time',
     pool: 'computer',
     occurredAt: at,
-    personKey: `person:${job.personId}`,
-    personId: job.personId,
+    personKey: givenBack ? 'unknown' : `person:${job.personId}`,
+    personId: givenBack ? null : job.personId,
     botId: job.botId,
     brick: true,
     payerKind: 'universe',
@@ -885,7 +890,7 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
     basis: cost === null ? 'unknown' : provider && provider.kind === 'real' ? 'measured' : 'estimated',
     sourceRef: `computer_jobs:${job.id}`,
     // The run of a goal or task that started the job, when one did, so its computer time is on the books with its model calls
-    detail: { endedBy: why.endedBy, status: why.status, ...(job.runId ? { runId: job.runId } : {}) },
+    detail: { endedBy: why.endedBy, status: why.status, ...(job.runId ? { runId: job.runId } : {}), ...(givenBack ? { givenBack: true, forPersonId: job.personId } : {}) },
   }).catch((error) => console.error('[Computer] Could not record computer time:', error instanceof Error ? error.message : 'unknown'));
   return cost;
 }
@@ -921,25 +926,29 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
   for (const job of ended) {
     await recordComputerTime(job, job.secondsRun, job.endedAt ?? now, { endedBy: job.endedBy as EndedBy | null, status: job.status });
   }
-  await giveBackMissingComputerCredit(batch, botId);
+  await giveBackMissingModelCalls(batch, botId);
 }
 
 /**
- * A job that failed on our side has the credit it drew given back when it ends. If that give-back did not go through (the books were out of reach
- * for a moment, and it never throws), the next sweep finds the job still holding drawn credit and gives it back. Safe to run twice. Never throws.
+ * A job that failed on our side has its model calls, and the credit it drew, given back when it ends. If that write did not go through, or a call was recorded
+ * in the same moment, the next sweep finds the call still written against the person (or credit the job still holds drawn) and gives it back too. Never throws.
  */
-async function giveBackMissingComputerCredit(batch: number, botId?: string): Promise<void> {
+async function giveBackMissingModelCalls(batch: number, botId?: string): Promise<void> {
   const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
   try {
-    const jobs = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-      SELECT DISTINCT j."id"
+    const jobs = await prisma.$queryRaw<Array<{ id: string; personId: string }>>(Prisma.sql`
+      SELECT DISTINCT j."id", j."person_id" AS "personId"
       FROM "computer_jobs" j
-      WHERE j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error' ${only}
-        AND EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros")
+      WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error') ${only}
+        AND (
+          EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
+          -- ...or credit the job drew that has not gone back (a give-back that failed once is found again: giving back is safe to repeat)
+          OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros")
+        )
       LIMIT ${batch}`);
-    for (const job of jobs) await giveBackComputerCredit(job.id);
+    for (const job of jobs) await giveBackModelCalls(job.id, job.personId);
   } catch (error) {
-    console.error('[Computer] Could not look for a failed job’s credit:', error instanceof Error ? error.message : 'unknown');
+    console.error('[Computer] Could not look for a failed job’s model calls:', error instanceof Error ? error.message : 'unknown');
   }
 }
 

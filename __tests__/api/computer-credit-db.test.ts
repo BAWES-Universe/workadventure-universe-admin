@@ -333,6 +333,46 @@ run('credit for computers, on the real books', () => {
       expect(holds.map((hold) => Number(hold.refundedMicros)).sort()).toEqual([20_000, 30_000]);
     });
 
+    it('a job that failed on our side counts nothing against the month and keeps nothing drawn from credit: calls, time, a late call, and asked twice is once', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      // Credit covers 20,000 of the 50,000 the calls cost: the other 30,000 would fall on the month
+      await gift([sara.id], 'computers', 20_000);
+      await call(token, 'a', 10_000, 30_000);
+      await call(token, 'b', 10_000, 20_000);
+      expect((await month(sara.id)).leftMicros).toBe(BASE - 30_000);
+      const later = new Date(NOW.getTime() + 10 * 60_000);
+      await failedOnOurSide(jobId, later);
+      // The month is as it was before the job, and the credit is whole again
+      expect((await month(sara.id, later)).leftMicros).toBe(BASE + 20_000);
+      expect((await computerCredit(prisma as never, sara.id, later)).availableMicros).toBe(20_000);
+      // Our own cost stays in the books, written against nobody
+      const events = await prisma.meterEvent.findMany({ where: { jobId } });
+      expect(events.length).toBeGreaterThanOrEqual(3);
+      expect(events.every((event) => event.personKey === 'unknown' && event.personId === null)).toBe(true);
+      expect(events.reduce((sum, event) => sum + Number(event.costMicros ?? 0), 0)).toBeGreaterThanOrEqual(50_000);
+      // A call that reports after the end, and the end said again: still nothing on the month, nothing drawn, nothing given twice
+      await settleModelCall(jobId, 'late', { costMicros: 10_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, later).catch(() => undefined);
+      await failedOnOurSide(jobId, new Date(later.getTime() + 60_000));
+      await giveBackComputerCredit(jobId);
+      expect((await month(sara.id, later)).leftMicros).toBe(BASE + 20_000);
+      expect((await computerCredit(prisma as never, sara.id, later)).availableMicros).toBe(20_000);
+    });
+
+    it('a job that ran fine, or that the person stopped, keeps counting against the month', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await call(token, 'a', 10_000, 30_000);
+      await finishJob(jobId, 'done', new Date(NOW.getTime() + 10 * 60_000));
+      // 30,000 for the call and 60,000 for ten minutes of the machine
+      expect((await month(sara.id, new Date(NOW.getTime() + 10 * 60_000))).leftMicros).toBe(BASE - 90_000);
+      const other = await running('omar');
+      const second = await job(other);
+      await call(second.token, 'a', 10_000, 30_000);
+      await stopJobFor(other.brickId, other.id, new Date(NOW.getTime() + 10 * 60_000));
+      expect((await month(other.id, new Date(NOW.getTime() + 10 * 60_000))).leftMicros).toBe(BASE - 90_000);
+    });
+
     it('is not given back for a job that ran fine, or that the person stopped: what it drew stays drawn', async () => {
       const sara = await running();
       const { jobId, token } = await job(sara);

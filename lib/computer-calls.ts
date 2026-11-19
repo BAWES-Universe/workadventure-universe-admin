@@ -1,8 +1,10 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { recordMeterEvent } from '@/lib/meter';
 import { releaseRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
 import { verifyJobToken } from '@/lib/computer-token';
-import { drawComputerCredit, giveBackCreditIfJobFailed } from '@/lib/computer-credit';
+import { givenBackJob } from '@/lib/computer-values';
+import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
 
 /**
  * A model call a Brick's computer makes (build handoff v2, section 5): room is taken BEFORE the call, and what it really cost is
@@ -82,10 +84,26 @@ export interface CallFacts {
   cutShort?: boolean;
 }
 
+/**
+ * A job that failed on our side (see `givenBackJob`) takes nothing from the person's month, and that includes the model calls it made:
+ * they ran and the provider bills them, so each stays in the books as our own cost (the pool and the envelope still count it), but is
+ * written against nobody, like the job's minutes. Calls on the owner's own key cost the platform nothing and are not touched.
+ * Safe to say twice (a call already given back no longer matches), and for a job that ran fine or that the person stopped it is never called.
+ */
+export async function giveBackModelCalls(jobId: string, personId: string): Promise<void> {
+  await prisma.$executeRaw(Prisma.sql`
+    UPDATE meter_events
+    SET "person_key" = 'unknown', "person_id" = NULL,
+        "detail" = COALESCE("detail", '{}'::jsonb) || jsonb_build_object('givenBack', true, 'forPersonId', ${personId}::text)
+    WHERE "job_id" = ${jobId} AND "kind" = 'model_call' AND "pool" = 'computer' AND "payer_kind" = 'universe' AND "person_key" = ${`person:${personId}`}`);
+  // What the job drew from credit given for computers goes back into the lots it came from (each draw once: asked again it gives nothing more)
+  await giveBackComputerCredit(jobId);
+}
+
 /** The figures of a finished call go to the books once, and its room is settled. Safe to say twice. Not for a call nobody authorized. */
 export async function settleModelCall(jobId: string, callId: string, facts: CallFacts, now: Date = new Date()): Promise<{ ok: true } | { ok: false; reason: 'unknown_call' }> {
   if (!CALL_ID.test(callId)) return { ok: false, reason: 'unknown_call' };
-  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, botId: true, personId: true } });
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, botId: true, personId: true, status: true, endedBy: true } });
   if (!job) return { ok: false, reason: 'unknown_call' };
   const reservation = await prisma.meterReservation.findUnique({ where: { reservationKey: callRoomKey(job.id, callId) } });
   // A call on the owner's own key took no room, so there is none to find: it is still recorded. Anything else with no room was never authorized
@@ -93,18 +111,20 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
   const cost = facts.costMicros === null ? null : Math.max(0, Math.min(MAX_MICROS, Math.round(facts.costMicros)));
   const paidByOther = facts.payer.kind === 'person';
   const eventId = `computer:${job.id}:call:${callId}`;
+  // A call that reports after its job failed on our side is written against nobody from the start (a call on the owner's own key is not the person's to give back)
+  const givenBack = !paidByOther && givenBackJob(job.status, job.endedBy);
+  const givenBackDetail = givenBack ? { givenBack: true, forPersonId: job.personId } : {};
+  const reportedDetail = { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}), ...givenBackDetail };
   // Credit given on purpose (a gift for computers) is drawn first, before the event is written, so the allowance never counts what credit paid:
-  // asked twice it is the same draw. A call on the owner's own key, or with no price known, draws nothing
-  if (!paidByOther && cost !== null && cost > 0) await drawComputerCredit({ eventId, personId: job.personId, botId: job.botId, jobId: job.id, costMicros: cost, chargeClass: 'computer_model' }, now);
-  // The job may have failed on our side while this call ran: what it drew, this call's draw too, goes back
-  if (!paidByOther && cost !== null && cost > 0) await giveBackCreditIfJobFailed(job.id, now);
+  // asked twice it is the same draw. A call on the owner's own key, with no price known, or on a job that failed on our side draws nothing
+  if (!givenBack && !paidByOther && cost !== null && cost > 0) await drawComputerCredit({ eventId, personId: job.personId, botId: job.botId, jobId: job.id, costMicros: cost, chargeClass: 'computer_model' }, now);
   const written = await recordMeterEvent({
     eventId,
     kind: 'model_call',
     pool: 'computer',
     occurredAt: now,
-    personKey: `person:${job.personId}`,
-    personId: job.personId,
+    personKey: givenBack ? 'unknown' : `person:${job.personId}`,
+    personId: givenBack ? null : job.personId,
     botId: job.botId,
     brick: true,
     payerKind: paidByOther ? 'person' : 'universe',
@@ -116,15 +136,21 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
     costMicros: cost,
     basis: paidByOther ? 'paid_by_other' : cost === null ? 'unknown' : facts.basis,
     sourceRef: `computer_jobs:${job.id}`,
-    detail: { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}) },
+    detail: reportedDetail,
   });
   // The sweep writes a call that never reported as unknown. A report that comes after it carries the real figure, which replaces the
   // unknown one (only an unknown figure is ever replaced: a figure that was written stays as it was)
   if (!written.recorded && cost !== null) {
     await prisma.meterEvent.updateMany({
       where: { eventId, costMicros: null },
-      data: { costMicros: BigInt(cost), basis: paidByOther ? 'paid_by_other' : facts.basis, route: facts.route, detail: { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}) } },
+      data: { costMicros: BigInt(cost), basis: paidByOther ? 'paid_by_other' : facts.basis, route: facts.route, detail: reportedDetail },
     });
+  }
+  // The job may have failed while this call was being written: its calls are given back when it ends, and this one was written after that
+  // looked. Look again (the answer is only ever "failed on our side" once, so this is cheap and settles the race either way)
+  if (!givenBack && !paidByOther) {
+    const now2 = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { status: true, endedBy: true } });
+    if (now2 && givenBackJob(now2.status, now2.endedBy)) await giveBackModelCalls(job.id, job.personId);
   }
   // The room settles at what the books hold for this call, never at what this report says: a report sent again after a first one that wrote
   // the event but did not settle (or with another figure) must settle at the event's own cost. A price that is not known settles at the
