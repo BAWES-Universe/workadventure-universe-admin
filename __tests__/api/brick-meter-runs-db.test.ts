@@ -145,6 +145,8 @@ run('money and the run, in a real database', () => {
     // One event, under the id made from what the bot server sent, whatever the lookups said
     const events = await prisma.meterEvent.findMany({ where: { eventId: `run:${sara.brickId}:${mine.runId.length}:${mine.runId}:model:again` } });
     expect(events).toHaveLength(1);
+    // The retry that could name the run gives it to the stored event, so the task's receipt finds it; nothing else about the event changes
+    expect(events[0].detail).toMatchObject({ runId: mine.runId });
     expect(await prisma.meterEvent.count({ where: { eventId: `model:${sara.brickId}:again` } })).toBe(0);
 
     // A run that is not this Brick's is booked, with no run in its detail

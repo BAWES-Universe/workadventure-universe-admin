@@ -180,6 +180,23 @@ export function runCallEventId(botId: string, runKey: string, callId: string): s
   return whole.length <= 255 ? whole : `run:${createHash('sha256').update(whole).digest('hex')}`;
 }
 
+/** The id a model call is written under: a run's call by its own run key, so a retried report is still one event. */
+function eventIdOf(facts: ModelCallFacts): string {
+  return facts.runKey
+    ? runCallEventId(facts.botId, facts.runKey, facts.clientEventId ?? `row-${facts.usageRowId}`)
+    : facts.clientEventId
+      ? `model:${facts.botId}:${facts.clientEventId}`.slice(0, 255)
+      : `ai-usage:${facts.usageRowId}`;
+}
+
+/** Adds the run to a stored event that has none (and only then): nothing else about the event changes. */
+async function addRunTo(eventId: string, runId: string, db: Pick<typeof prisma, 'meterEvent'>): Promise<void> {
+  const first = await db.meterEvent.findUnique({ where: { eventId }, select: { detail: true } });
+  const detail = first?.detail;
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail) || (detail as Record<string, unknown>).runId) return;
+  await db.meterEvent.updateMany({ where: { eventId }, data: { detail: { ...(detail as Record<string, Prisma.InputJsonValue>), runId } } });
+}
+
 /**
  * Writes a model call from the place it is already counted (the usage row of POST /api/bots/ai-usage). The person is who talked
  * (a Brick's own person when nobody did), the payer is whoever's key ran it or us, and the figure says how sure its cost is.
@@ -193,14 +210,10 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
     const guestId = !personId && facts.talkedGuest !== false ? facts.talkedUserId : null;
     const paidByOther = facts.keyOwnerId !== null;
     const route = facts.sentProviderId === UNIVERSE_AI_REF ? 'universe-ai' : paidByOther ? 'own-key' : 'provider';
-    return await recordMeterEvent(
+    const recorded = await recordMeterEvent(
       {
         // A call a run made is under the run's own id as the bot server sent it (never as a lookup answered it), so a retried report is still one event
-        eventId: facts.runKey
-          ? runCallEventId(facts.botId, facts.runKey, facts.clientEventId ?? `row-${facts.usageRowId}`)
-          : facts.clientEventId
-            ? `model:${facts.botId}:${facts.clientEventId}`.slice(0, 255)
-            : `ai-usage:${facts.usageRowId}`,
+        eventId: eventIdOf(facts),
         kind: 'model_call',
         pool: 'chat',
         occurredAt: facts.occurredAt,
@@ -232,6 +245,10 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
       },
       db,
     );
+    // A retried report that carries the run the first one could not name: the stored event keeps its identity and figures and only
+    // gains the run, so the task's receipt finds it (receipts attach a run's events by the run id in the detail)
+    if (!recorded.recorded && !recorded.conflict && facts.runId) await addRunTo(eventIdOf(facts), facts.runId, db);
+    return recorded;
   } catch (error) {
     console.error('[Meter] Could not record a model call:', error instanceof Error ? error.message : 'unknown');
     return null;
@@ -240,9 +257,10 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
 
 /**
  * The provider's settlement covered everything recorded up to this moment: those events are settled and no longer "not yet
- * settled" in the envelope. Safe to say twice. Returns how many it settled.
+ * settled" in the envelope. Safe to say twice. Returns how many it settled. Events are chosen by when they entered the books, never by
+ * when they happened: one that happened before the moment and was written after the provider's pass is not covered by it.
  */
 export async function settleEventsThrough(through: Date, db: Db = prisma): Promise<number> {
-  const { count } = await db.meterEvent.updateMany({ where: { settledAt: null, occurredAt: { lte: through } }, data: { settledAt: new Date() } });
+  const { count } = await db.meterEvent.updateMany({ where: { settledAt: null, recordedAt: { lte: through } }, data: { settledAt: new Date() } });
   return count;
 }
