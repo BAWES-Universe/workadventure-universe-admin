@@ -19,7 +19,7 @@ import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { POST as useApp } from '@/app/api/ready-made/use/route';
 import { POST as linkApp } from '@/app/api/ready-made/link/route';
 import { POST as testServer } from '@/app/api/bots/[id]/mcp-servers/[serverId]/test/route';
-import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
+import { POST as checkUseRoute } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { POST as connectApp } from '@/app/api/me/apps/route';
 import { grantToBrick, createConnection, readConnection, listConnections } from '@/lib/app-connections';
 import { saveMeterSettings } from '@/lib/meter';
@@ -339,11 +339,11 @@ run('ready-made apps through the adapter, in a real database', () => {
 
   it('says on the use check that the universe pays for a ready-made app, and not for a person’s own', async () => {
     const { serverId } = await connectedAndGranted();
-    const verdict = await (await useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `sara-${tag}` } }), params({ id: saraBrick, serverId }))).json();
+    const verdict = await (await checkUseRoute(request(`/api/bots/${saraBrick}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `sara-${tag}` } }), params({ id: saraBrick, serverId }))).json();
     expect(verdict).toMatchObject({ allowed: true, readyMade: true });
     const own = await createConnection(sara, { name: 'Own', serverUrl: 'https://own.example.com/mcp', authType: 'none', source: 'link' });
     const ownGrant = await grantToBrick(sara, own.id, saraBrick);
-    const ownVerdict = await (await useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${(ownGrant as { id: string }).id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `sara-${tag}` } }), params({ id: saraBrick, serverId: (ownGrant as { id: string }).id }))).json();
+    const ownVerdict = await (await checkUseRoute(request(`/api/bots/${saraBrick}/mcp-servers/${(ownGrant as { id: string }).id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `sara-${tag}` } }), params({ id: saraBrick, serverId: (ownGrant as { id: string }).id }))).json();
     expect(ownVerdict.allowed).toBe(true);
     expect(ownVerdict.readyMade).toBeUndefined();
   });
