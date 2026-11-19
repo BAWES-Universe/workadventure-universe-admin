@@ -664,7 +664,7 @@ run('the grants routes, on the real books', () => {
       expect((await refused.json()).error).toMatch(/Nobody would be left/);
     });
 
-    it('does not keep a computers rule "as it was" when the clash choice takes people out of the rule: the save is refused and nothing changes', async () => {
+    it('a computers rule sent back with the rest when the clash choice takes people out of the rule is saved for the people who stay, like any other category (computers carry credit now, so nothing is refused)', async () => {
       const [omar, noor, faisal] = [await person('Omar'), await person('Noor'), await person('Faisal')];
       const { saveException } = await import('@/lib/credit-rules');
       const who = { userId: admin.id, superAdmin: true };
@@ -673,16 +673,16 @@ run('the grants routes, on the real books', () => {
       await saveException({ categoryId: 'computers', amount: 5 * MILLION, schedule: 'monthly', recipients: { kind: 'people', userIds: [noor, faisal] }, claimStartsAt: new Date() }, who);
       await saveException({ categoryId: 'instant_apps', amount: 25 * MILLION, schedule: 'monthly', recipients: { kind: 'people', userIds: [omar, noor] }, claimStartsAt: new Date() }, who);
       const opened = (await overview()).exceptions.find((e: any) => e.instant_apps.amountMicros === 25 * MILLION);
-      // Saved again with another figure, which now disagrees for Noor, with "the other rule keeps Noor": Noor leaves this rule, so its computers rule
-      // (sent back as it was) would be for other people than it was made for
+      // Saved again with another figure, which now disagrees for Noor, with "the other rule keeps Noor": Noor leaves this rule
       const answer = await call<any>(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [noor, faisal] }, replaceId: opened.id, instant_apps: { mode: 'own', amountMicros: 30 * MILLION, interval: 'monthly' }, computers: opened.computers, clashChoice: 'other' } });
-      expect(answer.status).toBe(400);
-      expect((await answer.json()).code).toBe('computers_not_yet');
+      expect(answer.status).toBe(201);
       const after = await overview();
-      const mine = after.exceptions.find((e: any) => e.instant_apps.amountMicros === 25 * MILLION);
-      expect(mine.audience.people.map((p: any) => p.name).sort()).toEqual(['Faisal', 'Noor']);
-      expect(mine.computers).toMatchObject({ mode: 'own', amountMicros: 5 * MILLION });
-      expect(after.exceptions.find((e: any) => e.instant_apps.amountMicros === 30 * MILLION)).toBeUndefined();
+      // Faisal alone is on the new rule, with the computers figure that was sent; Noor stays with the other rule, as chosen
+      const faisalsRule = after.exceptions.find((e: any) => e.instant_apps.amountMicros === 30 * MILLION);
+      expect(faisalsRule.audience.people.map((p: any) => p.name)).toEqual(['Faisal']);
+      expect(faisalsRule.computers).toMatchObject({ mode: 'own', amountMicros: 5 * MILLION });
+      const others = after.exceptions.find((e: any) => e.instant_apps.amountMicros === 25 * MILLION);
+      expect(others.audience.people.map((p: any) => p.name).sort()).toEqual(['Noor', 'Omar']);
       expect(after.exceptions).toHaveLength(2);
     });
 

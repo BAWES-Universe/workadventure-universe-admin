@@ -1421,7 +1421,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(Number((await runOf(a)).refundedMicros)).toBe(5_000);
     });
 
-    it('a give-back let go of is asked about again five minutes after the last ask (not hours), for as long as late evidence is looked for, and no longer', async () => {
+    it('a give-back let go of is asked about again 90 minutes after the last ask, never before, for as long as late evidence is looked for, and no longer', async () => {
       await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 600 });
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
@@ -1432,11 +1432,11 @@ run('the bounded Instant executor, in a real database', () => {
       const base = Date.now() + 601 * MIN;
       expect(await sweepGoodwill({ funds: f.funds, now: new Date(base) })).toEqual({ looked: 1, settled: 0, released: 1 });
       f.funds.refundLookup.mockResolvedValue({ status: 'unavailable' });
-      // It was just asked: left alone for five minutes, then asked again, and again five minutes after that
-      expect(await sweepGoodwill({ funds: f.funds, now: new Date(base + 4 * MIN) })).toMatchObject({ looked: 0 });
-      expect(await sweepGoodwill({ funds: f.funds, now: new Date(base + 6 * MIN) })).toMatchObject({ looked: 1 });
-      expect(await sweepGoodwill({ funds: f.funds, now: new Date(base + 9 * MIN) })).toMatchObject({ looked: 0 });
-      expect(await sweepGoodwill({ funds: f.funds, now: new Date(base + 12 * MIN) })).toMatchObject({ looked: 1 });
+      // It was just asked: not asked before 90 minutes have passed (not at 5, 60 or 89), asked after, and the 90 count from that ask
+      for (const minutes of [5, 60, 89]) expect(await sweepGoodwill({ funds: f.funds, now: new Date(base + minutes * MIN) })).toMatchObject({ looked: 0 });
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(base + 91 * MIN) })).toMatchObject({ looked: 1 });
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(base + 91 * MIN + 89 * MIN) })).toMatchObject({ looked: 0 });
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(base + 91 * MIN + 91 * MIN) })).toMatchObject({ looked: 1 });
       // Past the days late evidence is looked for it is no longer asked about
       expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 36 * 24 * 60 * MIN) })).toMatchObject({ looked: 0 });
       expect(await prisma.instantRefund.count({ where: { runId: a, confirmedAt: null, releasedAt: { not: null } } })).toBe(1);

@@ -335,6 +335,35 @@ run('credit for computers, on the real books', () => {
       expect(holds.map((hold) => Number(hold.refundedMicros)).sort()).toEqual([20_000, 30_000]);
     });
 
+    it('a Brick is not purged while a failed job still holds credit that has not gone back: the job is what finds it again, so purging first would lose that credit', async () => {
+      const { purgeBrick } = jest.requireActual('@/lib/brick-purge');
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      // The books cannot be reached when the job fails, nor when the purge tries the give-back itself
+      (creditSpend.refundHold as jest.Mock).mockImplementation(async () => {
+        throw new Error('books unreachable');
+      });
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const at = new Date(NOW.getTime() + 10 * 60_000);
+      const later = new Date(NOW.getTime() + 60 * 60_000);
+      try {
+        await failedOnOurSide(jobId, at);
+        expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(970_000);
+        await prisma.bot.update({ where: { id: sara.brickId }, data: { deletedAt: at, goneAt: at, enabled: false, enabledBeforeDelete: true } });
+        expect(await purgeBrick(sara.brickId, later)).toBe('books');
+        expect(await prisma.computerJob.count({ where: { id: jobId } })).toBe(1);
+      } finally {
+        quiet.mockRestore();
+      }
+      // The books answer again: the sweep gives the credit back, and only then is the Brick purged
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(jest.requireActual('@/lib/credit-spend').refundHold);
+      await sweepComputers(new Date(later.getTime() + 30 * 60_000));
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      expect(await purgeBrick(sara.brickId, new Date(later.getTime() + 31 * 60_000))).toBe('purged');
+    });
+
     it('the sweep takes the oldest and the newest of the jobs it must give back, so jobs whose give-back never works cannot keep a newer one out', async () => {
       // Seven people, each with a job that drew credit; the give-back of the first six never works (their books are out of reach), the last one's works from the sweep
       const jobs: Array<{ sara: Awaited<ReturnType<typeof running>>; jobId: string }> = [];

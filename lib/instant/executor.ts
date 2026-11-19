@@ -1004,6 +1004,8 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
 
 /** How long a give-back the books have not confirmed is left before the sweep asks again, in minutes. Pacing only: nothing is decided by it. */
 const GOODWILL_RETRY_AFTER_MINUTES = 5;
+/** A give-back let go of (the books stayed unreachable for the whole wait) is asked about again this long after the last ask, and for as long as late evidence about a run is looked for. */
+const GOODWILL_RELEASED_RETRY_MINUTES = 90;
 
 export interface GoodwillSweep {
   looked: number;
@@ -1026,18 +1028,21 @@ export async function sweepGoodwill(deps: Deps & { batch?: number } = {}): Promi
   const now = deps.now ?? new Date();
   const limits = await getInstantLimits();
   const askedBefore = new Date(now.getTime() - GOODWILL_RETRY_AFTER_MINUTES * MINUTE);
+  const releasedAskedBefore = new Date(now.getTime() - GOODWILL_RELEASED_RETRY_MINUTES * MINUTE);
   // Never-asked first, then the longest ago asked: a few intents the books stay unreachable about must not fill every batch and leave the rest
-  // never asked. The pause between two asks of the same intent counts from the last time it was asked, not from when it was made.
+  // never asked. The pause between two asks of the same intent counts from the last time it was asked, not from when it was made: 5 minutes for one
+  // still held, 90 for one let go of (kept, and asked about only inside the days late evidence is looked for).
   const open = await prisma.instantRefund.findMany({
     where: {
       kind: 'goodwill',
       confirmedAt: null,
-      // The same pause from the last ask for every unconfirmed intent (4b's design). One let go of is kept and asked about for as long as late
-      // evidence about a run is looked for (#1017), never for ever.
-      AND: [{ OR: [{ lastTriedAt: null }, { lastTriedAt: { lte: askedBefore } }] }],
       OR: [
-        { releasedAt: null, createdAt: { lte: askedBefore } },
-        { releasedAt: { lte: askedBefore }, createdAt: { gte: new Date(now.getTime() - LATE_EVIDENCE_DAYS * 24 * 60 * MINUTE) } },
+        { releasedAt: null, createdAt: { lte: askedBefore }, AND: [{ OR: [{ lastTriedAt: null }, { lastTriedAt: { lte: askedBefore } }] }] },
+        {
+          releasedAt: { lte: releasedAskedBefore },
+          createdAt: { gte: new Date(now.getTime() - LATE_EVIDENCE_DAYS * 24 * 60 * MINUTE) },
+          AND: [{ OR: [{ lastTriedAt: null }, { lastTriedAt: { lte: releasedAskedBefore } }] }],
+        },
       ],
     },
     orderBy: [{ lastTriedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],

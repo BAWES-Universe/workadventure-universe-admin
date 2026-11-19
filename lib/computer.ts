@@ -2373,11 +2373,15 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
     WHERE j."bot_id" = ${botId} AND j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
   if (Number(unwritten[0]?.n ?? 0) !== 0) return false;
-  // A failed job's model calls that are still written against the person are not in the books as given back yet (the give-back above never throws, so
+  // A failed job's model calls that are still written against the person (or credit it drew that has not gone back) are not in the books as given back yet (the give-back above never throws, so
   // a write that failed shows here). Once the jobs are gone nothing can find those calls to give them back, so the Brick waits for the next sweep
   const owed = await prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
     SELECT COUNT(*)::bigint AS "n" FROM "computer_jobs" j
     WHERE j."bot_id" = ${botId} AND (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error')
-      AND EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")`);
+      AND (
+        EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
+        -- ...or credit the job drew that has not gone back (the sweep's own check): found only by way of the job, so a purge must not delete the job first
+        OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros")
+      )`);
   return Number(owed[0]?.n ?? 0) === 0;
 }
