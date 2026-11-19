@@ -115,13 +115,19 @@ const RETRY_WAITS_MS = [1_000, 3_000, 8_000];
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** Agent37's error body is not documented to one shape: a code and a message can be at the top or under `error`. Only short plain words are kept. */
-function describe(body: unknown): { code: string | null; message: string } {
+/** The configured key, and any bearer value, never travel into an error: an upstream message that echoes either keeps its words and loses the secret. */
+export function redactSecrets(text: string, key: string): string {
+  const withoutKey = key ? text.split(key).join('[removed]') : text;
+  return withoutKey.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [removed]');
+}
+
+/** Agent37's error body is not documented to one shape: a code and a message can be at the top or under `error`. Only short plain words are kept, with the key taken out first (before the cut, so a key that straddles it cannot leave a piece behind). */
+function describe(body: unknown, key = ''): { code: string | null; message: string } {
   const record = (body && typeof body === 'object' ? (body as Record<string, unknown>) : {}) as Record<string, unknown>;
   const inner = record.error && typeof record.error === 'object' ? (record.error as Record<string, unknown>) : record;
   const code = typeof inner.code === 'string' ? inner.code : typeof record.error === 'string' ? record.error : null;
   const message = typeof inner.message === 'string' ? inner.message : typeof record.message === 'string' ? record.message : '';
-  return { code: code ? code.slice(0, 60) : null, message: message.slice(0, 200) };
+  return { code: code ? redactSecrets(code, key).slice(0, 60) : null, message: redactSecrets(message, key).slice(0, 200) };
 }
 
 export class Agent37Client {
@@ -167,7 +173,7 @@ export class Agent37Client {
       json = null;
     }
     if (!response.ok) {
-      const { code, message } = describe(json);
+      const { code, message } = describe(json, this.key);
       throw new Agent37Error(response.status, code, message || `Agent37 answered ${response.status}`);
     }
     return json as T;
@@ -263,7 +269,7 @@ export class Agent37Client {
       } catch {
         json = null;
       }
-      const { code, message } = describe(json);
+      const { code, message } = describe(json, this.key);
       throw new Agent37Error(response.status, code, message || `Agent37 answered ${response.status}`);
     }
     return response;
@@ -398,7 +404,7 @@ export class Agent37Client {
       } catch {
         json = null;
       }
-      const { code, message } = describe(json);
+      const { code, message } = describe(json, this.key);
       // `session_busy` names the turn that is running, so a caller can reattach to it
       const running = json && typeof json === 'object' && typeof (json as { error?: { response_id?: unknown } }).error?.response_id === 'string' ? (json as { error: { response_id: string } }).error.response_id : null;
       throw new Agent37Error(response.status, code, message || `Agent37 answered ${response.status}`, running);
