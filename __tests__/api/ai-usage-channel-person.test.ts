@@ -11,7 +11,7 @@ import { recordModelCall } from '@/lib/meter';
 jest.mock('@/lib/db', () => ({
   prisma: {
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn() },
-    botsAiUsage: { create: jest.fn(async () => ({})) },
+    botsAiUsage: { create: jest.fn(async () => ({})), findUnique: jest.fn(async () => null) },
     user: { findUnique: jest.fn() },
     bot: { findUnique: jest.fn() },
     // A reply row is written under the voice reservation lock, in a transaction (the stand-in hands this same object over as the transaction)
@@ -23,7 +23,7 @@ jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/meter', () => ({ recordModelCall: jest.fn(async () => null) }));
 
 const provider = prisma.botsAiProvider as unknown as Record<'findUnique', jest.Mock>;
-const usage = prisma.botsAiUsage as unknown as Record<'create', jest.Mock>;
+const usage = prisma.botsAiUsage as unknown as Record<'create' | 'findUnique', jest.Mock>;
 const users = prisma.user as unknown as Record<'findUnique', jest.Mock>;
 const bots = prisma.bot as unknown as Record<'findUnique', jest.Mock>;
 
@@ -237,6 +237,60 @@ describe('the meter’s books (game #1998)', () => {
 
 describe('a reply row written under the voice lock', () => {
   const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  it('is not written a second time when the transaction failed after the row was committed (the answer to the commit was lost): the second write meets the report key, exactly', async () => {
+    const log = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      usage.create.mockReset().mockResolvedValue({ id: 77, botId: 'b1' });
+      usage.findUnique.mockReset();
+      // The first write went through and its commit answer was lost: the transaction rejects, and the plain write meets the key already there
+      (prisma.$transaction as jest.Mock).mockImplementationOnce(async (work: (tx: unknown) => Promise<unknown>) => {
+        await work({ $executeRaw: jest.fn(async () => 1), botsAiUsage: { create: usage.create } });
+        throw new Error('Connection terminated before the commit was acknowledged');
+      });
+      usage.create.mockResolvedValueOnce({ id: 77, botId: 'b1' }).mockRejectedValueOnce(Object.assign(new Error('Unique constraint failed on report_key'), { code: 'P2002' }));
+      usage.findUnique.mockResolvedValueOnce({ id: 77, botId: 'b1' });
+      const answer = await track({ channel: 'dm', userId: 'wa-guest', isGuest: true, eventId: 'turn-1' });
+      expect(await answer.json()).toEqual({ status: 'tracked' });
+      await settle();
+      // Both writes carried the same key, and the second one answered with the row that was there instead of making another
+      expect(usage.create).toHaveBeenCalledTimes(2);
+      const first = usage.create.mock.calls[0][0].data.reportKey;
+      expect(first).toEqual(expect.any(String));
+      expect(usage.create.mock.calls[1][0].data.reportKey).toBe(first);
+      expect(usage.findUnique).toHaveBeenCalledWith({ where: { reportKey: first } });
+    } finally {
+      usage.create.mockReset().mockResolvedValue({});
+      usage.findUnique.mockReset().mockResolvedValue(null);
+      log.mockRestore();
+    }
+  });
+
+  it('gives every report its own key, made by Orbit and never taken from the request', async () => {
+    usage.create.mockReset().mockResolvedValue({ id: 77, botId: 'b1' });
+    await track({ reportKey: 'from-the-request', eventId: 'turn-9' });
+    await track({ reportKey: 'from-the-request', eventId: 'turn-9' });
+    await settle();
+    const [one, two] = usage.create.mock.calls.map((call) => call[0].data.reportKey);
+    expect(one).not.toBe('from-the-request');
+    expect(two).not.toBe('from-the-request');
+    expect(one).not.toBe(two);
+  });
+
+  it('a different database error on the second write is not taken for a row already written', async () => {
+    const log = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      usage.create.mockReset().mockRejectedValue(Object.assign(new Error('boom'), { code: 'P1001' }));
+      usage.findUnique.mockReset().mockResolvedValue(null);
+      await track({ channel: 'dm', userId: 'wa-guest', isGuest: true });
+      await settle();
+      expect(usage.findUnique).not.toHaveBeenCalled();
+    } finally {
+      usage.create.mockReset().mockResolvedValue({});
+      usage.findUnique.mockReset().mockResolvedValue(null);
+      log.mockRestore();
+    }
+  });
 
   it('is still written, without the lock, when the transaction cannot be had: logged, never lost from the counts and the books', async () => {
     const log = jest.spyOn(console, 'error').mockImplementation(() => undefined);

@@ -407,6 +407,19 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await prisma.spendRule.count({ where: { ownerPersonId: sara.id } })).toBe(1);
     });
 
+    it('a cut legacy key is not an identity: an ended rule under it is not replayed for another message that starts the same', async () => {
+      const sara = await person('sara');
+      const long = `m-${'z'.repeat(300)}`;
+      const first = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-a`, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+      if (!first.ok) throw new Error('not made');
+      const old = `chat:${sara.brickId}:${sara.id}:${long}-a`.slice(0, 255);
+      await prisma.spendRule.update({ where: { id: first.rule.id }, data: { ruleKey: old, state: 'ended' } });
+      // Another message, the same words: it must have a rule of its own, not be told the ended one is its rule
+      const second = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-b`, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+      expect(second).toMatchObject({ ok: true, created: true });
+      expect(await prisma.spendRule.count({ where: { ownerPersonId: sara.id, state: 'active' } })).toBe(1);
+    });
+
     it('a renewal at the exact cap goes on when the job can cost no more than it already could', async () => {
       const sara = await person('sara');
       // 100 millionths for a 10-minute stretch: a first stretch renewed with 33 more, five minutes in, can still cost 100
@@ -696,6 +709,17 @@ run('rules said in chat and task receipts, in a real database', () => {
         expect(await later(10_000)).toEqual({ ok: true });
         expect(await later(10_001)).toMatchObject({ ok: false, why: 'cap', leftMicros: 10_000 });
         void ask;
+      });
+
+      it('splits a job that was charged for seconds after it ended (a hand over) over all the seconds charged', async () => {
+        const sara = await person('vic');
+        await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 });
+        // Held from 23:59:50 to 00:00:10 (20 seconds) and 20 more seconds handing over files: 40 seconds, 400,000. A quarter of it, 100,000, is October's
+        await prisma.meterEvent.create({
+          data: { eventId: `rules-${tag}-handover`, kind: 'computer_time', pool: 'computer', occurredAt: new Date('2026-11-01T00:00:10Z'), personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId: 'jh', quantity: 40, unit: 'second', costMicros: BigInt(400_000), basis: 'measured', detail: { startedMs: Date.parse('2026-10-31T23:59:50Z') } },
+        });
+        const answer = await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'apps', amountMicros: 700_001 }, new Date('2026-11-01T00:16:00Z'));
+        expect(answer).toMatchObject({ ok: false, why: 'cap', leftMicros: 700_000 });
       });
 
       it('counts a job event written without its start (older) whole in the month it ended in', async () => {

@@ -162,12 +162,20 @@ export async function proposeRule(input: DraftInput & { speakerId: string; sayin
   // The speaker is in the key: the same message id said by two people (on a Brick they both talk to) is two different rules, and one
   // person's replay never finds, or shows, another person's rule
   const ruleKey = input.sayingKey ? chatRuleKey(input.botId, input.speakerId, input.sayingKey) : null;
-  // Rules made before long ids were hashed were saved under the whole key cut to the column's 255 characters: the same message said again
-  // finds that rule too, and is not made twice
+  // Rules made before long ids were hashed were saved under the whole key cut to the column's 255 characters. Several long ids that start the same
+  // share that one cut key, so it is not an identity: such a rule is taken as this message's only while it is as it was made (active, never changed)
+  // and says what this message says. Any other hit is left alone, and the message makes its own rule under the hashed key.
   const whole = input.sayingKey ? `chat:${input.botId}:${input.speakerId}:${input.sayingKey}` : '';
-  const keys = ruleKey ? (whole.length > 255 ? [ruleKey, whole.slice(0, 255)] : [ruleKey]) : [];
+  const legacyKey = ruleKey && whole.length > 255 ? whole.slice(0, 255) : null;
+  const findSeen = async (): Promise<Prisma.SpendRuleGetPayload<object> | null> => {
+    if (!ruleKey) return null;
+    const canonical = await prisma.spendRule.findUnique({ where: { ruleKey } });
+    if (canonical || !legacyKey) return canonical;
+    const old = await prisma.spendRule.findUnique({ where: { ruleKey: legacyKey } });
+    return old && old.state === 'active' && old.version === 1 && isReplayOf(old, draft, owner.ownerPersonId) ? old : null;
+  };
   if (ruleKey) {
-    const seen = await prisma.spendRule.findFirst({ where: { ruleKey: { in: keys } } });
+    const seen = await findSeen();
     if (seen) return isReplayOf(seen, draft, owner.ownerPersonId) ? { ok: true, rule: await cardOf(seen), created: false } : { ok: false, reason: 'key_reused' };
   }
   try {
@@ -193,7 +201,7 @@ export async function proposeRule(input: DraftInput & { speakerId: string; sayin
     // Two sends of the same message at once: the first made the rule, the second finds it
     const code = (error as { code?: string } | null)?.code;
     if (ruleKey && code === 'P2002') {
-      const winner = await prisma.spendRule.findFirst({ where: { ruleKey: { in: keys } } });
+      const winner = await findSeen();
       if (winner) return isReplayOf(winner, draft, owner.ownerPersonId) ? { ok: true, rule: await cardOf(winner), created: false } : { ok: false, reason: 'key_reused' };
     }
     throw error;
@@ -301,13 +309,15 @@ export { exposureOf };
 async function crossedBefore(db: Db, events: Prisma.MeterEventWhereInput[], start: Date): Promise<number> {
   const crossed = await db.meterEvent.findMany({
     where: { AND: [...events, { kind: 'computer_time', costMicros: { not: null }, detail: { path: ['startedMs'], lt: start.getTime() } }] },
-    select: { costMicros: true, occurredAt: true, detail: true },
+    select: { costMicros: true, occurredAt: true, detail: true, quantity: true },
   });
   let before = BigInt(0);
   for (const event of crossed) {
     const startedMs = (event.detail as { startedMs?: unknown } | null)?.startedMs;
     if (typeof startedMs !== 'number' || event.costMicros === null) continue;
-    const span = BigInt(Math.max(0, event.occurredAt.getTime() - startedMs));
+    // The time the cost covers: the run, and any seconds held after it ended (a hand over of the files) that are charged too, so the split never
+    // gives the earlier period more than its share of what was charged
+    const span = BigInt(Math.max(0, event.occurredAt.getTime() - startedMs, Math.round(Number(event.quantity) * 1000)));
     const earlier = BigInt(Math.max(0, start.getTime() - startedMs));
     // The part before the boundary: cost x (time before it) / (time in all), rounded down
     before += span === BigInt(0) ? BigInt(0) : (event.costMicros * (earlier > span ? span : earlier)) / span;
