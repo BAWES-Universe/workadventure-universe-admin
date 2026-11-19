@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { recordMeterEvent, type RecordedEvent } from '@/lib/meter';
 import type { MeterEventInput } from '@/lib/meter-values';
@@ -157,16 +158,18 @@ export interface ReportingGaps {
   costWrong: number;
   /** When the oldest of them was settled, or null when there is none. */
   oldestAt: Date | null;
+  /** When the oldest run with no event at all was settled, or null when none lacks one. */
+  oldestMissingAt: Date | null;
 }
 
 /** How many gaps there are now (or among the runs settled in a span of days) and how old the oldest is. */
 export async function instantReportingGaps(span?: { from: Date; to: Date }, db: Prisma.TransactionClient = prisma): Promise<ReportingGaps> {
   const within = span ? Prisma.sql`AND r.finished_at >= ${span.from} AND r.finished_at <= ${span.to}` : Prisma.empty;
-  const [row] = await db.$queryRaw<{ missing: number; wrong: number; cost_wrong: number; oldest: Date | null }[]>(Prisma.sql`
+  const [row] = await db.$queryRaw<{ missing: number; wrong: number; cost_wrong: number; oldest: Date | null; oldest_missing: Date | null }[]>(Prisma.sql`
     SELECT (COUNT(*) FILTER (WHERE e.id IS NULL))::int AS missing, (COUNT(*) FILTER (WHERE e.id IS NOT NULL))::int AS wrong,
       (COUNT(*) FILTER (WHERE e.id IS NOT NULL AND (e.cost_micros IS DISTINCT FROM r.provider_micros OR e.basis IS DISTINCT FROM ${BASIS_SQL})))::int AS cost_wrong,
-      MIN(r.finished_at) AS oldest ${gapsSql} ${within}`);
-  return { missing: row?.missing ?? 0, wrong: row?.wrong ?? 0, costWrong: row?.cost_wrong ?? 0, oldestAt: row?.oldest ?? null };
+      MIN(r.finished_at) AS oldest, (MIN(r.finished_at) FILTER (WHERE e.id IS NULL)) AS oldest_missing ${gapsSql} ${within}`);
+  return { missing: row?.missing ?? 0, wrong: row?.wrong ?? 0, costWrong: row?.cost_wrong ?? 0, oldestAt: row?.oldest ?? null, oldestMissingAt: row?.oldest_missing ?? null };
 }
 
 /**
@@ -217,7 +220,7 @@ export async function repairInstantReporting(opts: { limit?: number; now?: Date 
   let ids = await pick(cursor);
   // The end was reached: go back to the top (once, in this same pass)
   if (ids.length === 0 && cursor !== null) ids = await pick(null);
-  const out: ReportingRepair = { looked: ids.length, written: 0, corrected: 0, failed: 0, remaining: { missing: 0, wrong: 0, costWrong: 0, oldestAt: null } };
+  const out: ReportingRepair = { looked: ids.length, written: 0, corrected: 0, failed: 0, remaining: { missing: 0, wrong: 0, costWrong: 0, oldestAt: null, oldestMissingAt: null } };
   for (const { id } of ids) {
     try {
       const run = await prisma.instantRun.findUnique({ where: { id } });
@@ -232,5 +235,16 @@ export async function repairInstantReporting(opts: { limit?: number; now?: Date 
   // The place moves past what was looked at, mended or not (the ones that failed come round again); with nothing left to look at it goes back to the top
   await writeCursor(ids.length >= limit ? ids[ids.length - 1].id : null).catch((error) => console.error('[Instant] Could not keep the place of the meter repair:', error instanceof Error ? error.message : 'unknown'));
   out.remaining = await instantReportingGaps();
+  // A run with no meter event for more than a day is something to look at, whatever the repair did this time: said once per pass, with the counts
+  if (out.remaining.missing > 0 && out.remaining.oldestMissingAt && now.getTime() - out.remaining.oldestMissingAt.getTime() > MISSING_EVENT_ALERT_MS) {
+    Sentry.captureMessage('Instant runs have been without a meter event for more than a day', {
+      level: 'warning',
+      tags: { area: 'instant', step: 'reporting_repair' },
+      extra: { missing: out.remaining.missing, wrong: out.remaining.wrong, oldestMissingAt: out.remaining.oldestMissingAt.toISOString(), failed: out.failed },
+    });
+  }
   return out;
 }
+
+/** How long a run may be without its meter event before the repair says so to Sentry. */
+export const MISSING_EVENT_ALERT_MS = 24 * 60 * 60_000;

@@ -5,6 +5,9 @@
 import { randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import { NextRequest } from 'next/server';
+import * as Sentry from '@sentry/nextjs';
+
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn() }));
 
 import { prisma } from '@/lib/db';
 import { setAdapterForTests, type InstantAdapter, type InstantCall, type InstantLog, type ReadyMadeAdapter } from '@/lib/app-adapter';
@@ -525,12 +528,21 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await prisma.appSetting.findUnique({ where: { key: 'instant-reporting-cursor' } })).toMatchObject({ value: { after: null } });
       // A run whose event cannot be written stays a gap that is counted, with the age of the oldest, and the rest are still mended
       await prisma.meterEvent.deleteMany({ where: { personId: sara } });
+      (Sentry.captureMessage as jest.Mock).mockClear();
       const refuse = await refuseEvents();
       const quiet2 = jest.spyOn(console, 'error').mockImplementation(() => undefined);
       try {
         const stuck = await repairInstantReporting({ limit: 10 });
         expect(stuck).toMatchObject({ looked: 5, written: 0, failed: 5, remaining: { missing: 5 } });
         expect(stuck.remaining.oldestAt).toBeInstanceOf(Date);
+        expect(stuck.remaining.oldestMissingAt).toBeInstanceOf(Date);
+        // Not a day old yet: Sentry hears nothing
+        expect(Sentry.captureMessage).not.toHaveBeenCalled();
+        // More than a day without an event: said once for the pass, with the counts
+        const later = await repairInstantReporting({ limit: 10, now: new Date(Date.now() + 25 * 60 * 60_000) });
+        expect(later).toMatchObject({ failed: 5, remaining: { missing: 5 } });
+        expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+        expect(Sentry.captureMessage).toHaveBeenCalledWith('Instant runs have been without a meter event for more than a day', expect.objectContaining({ level: 'warning', extra: expect.objectContaining({ missing: 5 }) }));
       } finally {
         quiet2.mockRestore();
         await refuse();
