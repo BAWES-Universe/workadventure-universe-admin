@@ -180,12 +180,15 @@ function grantSpan(grants: GrantRow[], now: Date): { first: Date; last: Date } {
  * it, month by month (the usual allowance starts again each month), worked out by the same walk the allowance uses. `events` are
  * that person's computer costs over the whole span of their grants, read once for everyone (see `costsReport`).
  */
-function aboveUsual(base: number | null, grants: GrantRow[], events: { occurredAt: Date; costMicros: bigint | number | null }[], now: Date): number[] {
-  if (base === null || grants.length === 0) return grants.map(() => 0);
+function aboveUsual(allowanceOf: (month: { start: Date; end: Date }) => number | null, grants: GrantRow[], events: { occurredAt: Date; costMicros: bigint | number | null }[], now: Date): number[] {
+  if (grants.length === 0) return grants.map(() => 0);
   const windows = grants.map(grantWindow);
   const { first, last } = grantSpan(grants, now);
   const totals = grants.map(() => 0);
   for (let month = monthOf(first); month.start <= last; month = monthOf(month.end)) {
+    // The allowance that applied in that month, never today's
+    const base = allowanceOf(month);
+    if (base === null) continue;
     const inMonth = events.filter((event) => event.occurredAt >= month.start && event.occurredAt < month.end);
     const drawn = extraDrawn(base, inMonth.map((event) => ({ at: event.occurredAt, micros: toNumber(event.costMicros) })), windows);
     drawn.forEach((micros, index) => (totals[index] += micros));
@@ -399,11 +402,26 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     else byPerson.set(grant.personId, [grant]);
   }
   const above = new Map<string, number>();
+  // The allowance for each member as it was over time: a month is worked out with the one that applied in it. With no history at all
+  // (nothing saved since it began), what is saved now is all there is
+  const changes = await prisma.meterAllowanceChange.findMany({ orderBy: { effectiveFrom: 'asc' }, select: { effectiveFrom: true, allowanceMicros: true } });
+  const figureOf = (change: { allowanceMicros: bigint | null }): number | null => (change.allowanceMicros === null ? null : Number(change.allowanceMicros));
+  const allowanceOf = (month: { start: Date; end: Date }): number | null => {
+    if (changes.length === 0) return settings.memberAllowanceMicros;
+    // A month before the first saved figure is worked out with that first figure: it is all that is known of it, and what every month used until now
+    let applied = figureOf(changes[0]);
+    for (const change of changes) {
+      if (change.effectiveFrom >= month.end) break;
+      applied = figureOf(change);
+    }
+    return applied;
+  };
+  const anyAllowance = settings.memberAllowanceMicros !== null || changes.some((change) => change.allowanceMicros !== null);
   // One read for everyone, not one per person and month: the spending of all of them over the whole span of their grants, sorted out
   // by person and month here
   const spans = [...byPerson.values()].filter((list) => list.some((grant) => !grant.cancelledAt)).map((list) => grantSpan(list.filter((grant) => !grant.cancelledAt), now));
   const spending =
-    settings.memberAllowanceMicros === null || spans.length === 0
+    !anyAllowance || spans.length === 0
       ? []
       : await prisma.meterEvent.findMany({
           where: {
@@ -424,7 +442,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
   for (const [personId, list] of byPerson) {
     // A grant taken back before it started never ran: it has no window, and the others are worked out as if it was never given
     const ran = list.filter((grant) => !grant.cancelledAt);
-    const figures = aboveUsual(settings.memberAllowanceMicros, ran, spendingOf.get(`person:${personId}`) ?? [], now);
+    const figures = aboveUsual(allowanceOf, ran, spendingOf.get(`person:${personId}`) ?? [], now);
     ran.forEach((grant, index) => above.set(grant.grantKey, figures[index]));
   }
   const given: GivenRow[] = shownGrants.map((grant) => ({

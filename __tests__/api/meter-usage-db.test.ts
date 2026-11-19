@@ -16,7 +16,7 @@ jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn((email: string | n
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { createBrick } from '@/lib/brick-create';
-import { recordMeterEvent, saveMeterSettings } from '@/lib/meter';
+import { recordMeterEvent, saveMeterSettings, scheduleMemberAllowance } from '@/lib/meter';
 import { GrantRefused, changeGrant, endGrantNow, markGrantBilled, recordGrant, runningExtra } from '@/lib/meter-grants';
 import { answerRequests, askForMore, openRequests } from '@/lib/meter-requests';
 import { memberUsage } from '@/lib/meter-usage';
@@ -62,6 +62,7 @@ const spendComputer = (who: { id: string; brickId: string }, micros: number, at:
   recordMeterEvent(event({ personKey: `person:${who.id}`, personId: who.id, botId: who.brickId, brick: true, costMicros: micros, occurredAt: at }));
 
 const wipe = async () => {
+  await prisma.meterAllowanceChange.deleteMany({});
   await prisma.meterEvent.deleteMany({});
   await prisma.meterReservation.deleteMany({});
   await prisma.meterGrant.deleteMany({});
@@ -901,6 +902,33 @@ run('usage for people, and cost for us, in a real database', () => {
       const row = report.given.find((item) => item.grantKey === `g-${tag}-later`)!;
       expect(row).toMatchObject({ ended: true, aboveUsualMicros: 0 });
       expect(report.people.rows.find((item) => item.name === 'sara')?.extraUntil).toBeNull();
+    });
+
+    it('works a past month out with the allowance that applied in it, not with today’s', async () => {
+      await setUp();
+      const sara = await person('sara');
+      const faisal = await person('faisal');
+      // The usual was 2,000 until the 10th of this month and is 1,000 since
+      await prisma.meterAllowanceChange.deleteMany({});
+      await prisma.meterAllowanceChange.createMany({ data: [{ effectiveFrom: new Date('1970-01-01T00:00:00Z'), allowanceMicros: BigInt(2_000) }, { effectiveFrom: new Date('2026-11-10T00:00:00Z'), allowanceMicros: BigInt(1_000) }] });
+      await recordGrant({ grantKey: `g-${tag}-sara`, personId: sara.id, settlement: 'to_bill', multiplier: 2, startsAt: days(-30), endsAt: days(10), givenById: faisal.id, note: 'Agreed' });
+      // Double gives one more usual, drawn first: October's extra could carry 2,000 and drew 2,000 of the 3,000; November's could carry 1,000 and drew 1,000
+      await spendComputer(sara, 3_000, days(-20));
+      await spendComputer(sara, 3_000, days(-2));
+      const report = await costsReport(range.from, range.to, NOW);
+      expect(report.given.find((row) => row.grantKey === `g-${tag}-sara`)?.aboveUsualMicros).toBe(3_000);
+    });
+
+    it('keeps the allowance of each month as it was saved: saving a new one later never rewrites an earlier month', async () => {
+      await prisma.meterAllowanceChange.deleteMany({});
+      await saveMeterSettings({ memberAllowanceMicros: 2_000 }, 'admin');
+      await saveMeterSettings({ memberAllowanceMicros: 1_000 }, 'admin');
+      await scheduleMemberAllowance(7_000, new Date('2099-01-01T00:00:00Z'), 'admin');
+      await scheduleMemberAllowance(8_000, new Date('2099-02-01T00:00:00Z'), 'admin');
+      await saveMeterSettings({ memberAllowanceMicros: null }, 'admin');
+      const rows = await prisma.meterAllowanceChange.findMany({ orderBy: { effectiveFrom: 'asc' } });
+      // Both saved figures are kept in order, the waiting ones were replaced by the later save (a save now replaces what waited)
+      expect(rows.map((row) => (row.allowanceMicros === null ? null : Number(row.allowanceMicros)))).toEqual([2_000, 1_000, null]);
     });
 
     it('reads the computer spending once for everyone, whatever the number of people and months their grants span', async () => {

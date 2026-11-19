@@ -2075,6 +2075,20 @@ model MeterGrant {
   @@map("meter_grants")
 }
 
+// The monthly computer allowance for each member as it was at each change, so the Costs page works a past month out with the allowance
+// that applied in it, never with today's. `effectiveFrom` is when a figure begins (a later day for one that was scheduled); an empty
+// `allowanceMicros` means there was no allowance from then.
+model MeterAllowanceChange {
+  id             String   @id @default(uuid())
+  effectiveFrom  DateTime @map("effective_from")
+  allowanceMicros BigInt? @map("allowance_micros")
+  createdById    String?  @map("created_by_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([effectiveFrom])
+  @@map("meter_allowance_changes")
+}
+
 // A member's "Ask for more" (game #1999): what a person tapped when their computer time ran out. Only a request: it is not a
 // debt and not a grant, and it makes nothing for anyone to pay. One is open for a person at a time (a second tap finds it);
 // giving extra usage answers it. Nothing a person says is kept here, only that they asked and when.
