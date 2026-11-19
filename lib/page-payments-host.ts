@@ -561,7 +561,8 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
 
   /** A page asking for a purchase this buyer already made (a reload, a reopened version): found by the buyer, never by anything the page chose. */
   /** An answer for this browser's own start that never finished and cannot be carried on yet: no link, and Restore has to be asked again later. */
-  const stillStarting = (body: Record<string, unknown> | null): boolean => body?.status === 'checking' && body.via === 'own' && !body.checkoutUrl && typeof body.orderId === 'string';
+  const stillStarting = (body: Record<string, unknown> | null, byWish = false): boolean =>
+    body?.status === 'checking' && (byWish || body.via === 'own') && !body.checkoutUrl && typeof body.orderId === 'string';
   const askAgainIn = (body: Record<string, unknown> | null): number =>
     typeof body?.pollAfterMs === 'number' && Number.isFinite(body.pollAfterMs) ? Math.min(MOST_POLL_MS, Math.max(LEAST_POLL_MS, body.pollAfterMs)) : FIRST_POLL_MS;
 
@@ -653,9 +654,10 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         };
         if (answer.ok && status === 'paid') return done({ paid: { test }, restored: asked.intentId ? null : restoredOf(answer.body) }, 'paid', test);
         // This browser's own start that never finished and cannot be carried on yet (it may still be in flight, or its wait is not over): Orbit
-        // resumes it only when Restore is asked again after the wait, never when an order is polled. So Restore is asked again, at the pace the
-        // server gives, until the link comes (then it is adopted as any other), the purchase is found, or twenty minutes pass
-        if (answer.ok && !asked.intentId && stillStarting(answer.body)) {
+        // resumes it only when it is asked about again by its wish (Check payment) or by Restore, never when an order is polled. So the same ask is
+        // made again, at the pace the server gives, until the link comes (then it is adopted as any other), the purchase is found, or twenty
+        // minutes pass. Check payment answers by the wish, so what it says carries no `via`: the wish is the buyer's own proof
+        if (answer.ok && stillStarting(answer.body, !!asked.intentId)) {
           if (Date.now() - since >= POLL_FOR_MS) return done({ problem: 'cant_confirm', canCheck: true }, 'cant_confirm');
           timer = setTimeout(() => void attempt(since), askAgainIn(answer.body));
           return;

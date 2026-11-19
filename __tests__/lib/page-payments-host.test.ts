@@ -608,6 +608,47 @@ describe('a paying page on the public share link', () => {
     host.destroy();
   });
 
+  it('keeps asking Check payment (by its wish) while a start that was unsure cannot be carried on yet, and takes the link when it comes', async () => {
+    let checks = 0;
+    const { tap, host, lines, calls } = setup((call) => {
+      if (call.body.check) {
+        checks += 1;
+        // The resume itself was unsure twice (the order stays "being made"), then it goes through and the link comes
+        return checks < 3 ? { body: { status: 'checking', orderId: 'o-9', checkoutUrl: null, pollAfterMs: 3000, buyer: 'guest' } } : { body: { status: 'checking', orderId: 'o-9', checkoutUrl: 'https://checkout.examplepay.com/?t=9', pollAfterMs: 3000, buyer: 'guest' } };
+      }
+      return call.init?.method === 'POST' ? 'lost' : { body: { status: 'checking' } };
+    });
+    tap({ request: 'a' });
+    await jest.advanceTimersByTimeAsync(10_000);
+    expect(lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: true });
+    host.checkPayment();
+    await flush();
+    expect(checks).toBe(1);
+    expect(lines.at(-1)).toMatchObject({ checking: true, resume: null });
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(checks).toBe(2);
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(checks).toBe(3);
+    expect(lines.at(-1)).toMatchObject({ checking: true, resume: { url: 'https://checkout.examplepay.com/?t=9' } });
+    // Always the same wish, and from here the order is only asked about
+    const wish = calls[0].body.intentId;
+    expect(calls.filter((call) => call.body.check).every((call) => call.body.intentId === wish)).toBe(true);
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(calls.some((call) => call.url.includes('order=o-9'))).toBe(true);
+    host.destroy();
+  });
+
+  it('gives up asking Check payment for an unfinished start after twenty minutes and offers it again', async () => {
+    const { tap, host, lines } = setup((call) => (call.body.check ? { body: { status: 'checking', orderId: 'o-10', checkoutUrl: null, pollAfterMs: 30000, buyer: 'guest' } } : 'lost'));
+    tap({ request: 'a' });
+    await jest.advanceTimersByTimeAsync(10_000);
+    host.checkPayment();
+    await flush();
+    await jest.advanceTimersByTimeAsync(21 * 60_000);
+    expect(lines.at(-1)).toMatchObject({ problem: 'cant_confirm', canCheck: true });
+    host.destroy();
+  });
+
   it('gives up asking Restore for an unfinished start after twenty minutes and offers Check payment', async () => {
     const { tap, host, lines } = setup((call) => ({ body: call.body.restore ? { status: 'checking', orderId: 'o-8', via: 'own', checkoutUrl: null, pollAfterMs: 30000, buyer: 'guest' } : { status: 'checking' } }));
     tap({ request: 'r1', restore: true });
