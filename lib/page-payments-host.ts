@@ -127,6 +127,8 @@ export interface PagePaymentsHostOptions {
   randomId?: (length: number) => string;
   /** The address of the shared page, for the receipt link (the code rides in its fragment: `#receipt=<code>`). */
   pageUrl?: string;
+  /** Where tabs take turns when the browser has no Web Locks (IndexedDB: a transaction is atomic across tabs); none means this browser has no such place. */
+  indexedDB?: Pick<IDBFactory, 'open'> | null;
 }
 
 export interface PagePaymentsHost {
@@ -228,12 +230,55 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     return memoryCode;
   };
 
+  /** The first code of this browser for this page, claimed atomically (the winner of the race, whichever tab); null when IndexedDB is not there or refuses. */
+  const claimFirstCode = (candidate: string): Promise<string | null> =>
+    new Promise((resolve) => {
+      const factory = options.indexedDB === undefined ? (globalThis as { indexedDB?: IDBFactory }).indexedDB : options.indexedDB;
+      if (!factory) return resolve(null);
+      try {
+        const open = factory.open('universe-pay', 1);
+        open.onupgradeneeded = () => void open.result.createObjectStore('codes');
+        open.onerror = () => resolve(null);
+        open.onblocked = () => resolve(null);
+        open.onsuccess = () => {
+          const db = open.result;
+          let winner: string | null = null;
+          try {
+            const tx = db.transaction('codes', 'readwrite');
+            const store = tx.objectStore('codes');
+            const read = store.get(storageKey);
+            read.onsuccess = () => {
+              const kept: unknown = read.result;
+              if (typeof kept === 'string' && RECOVERY_CODE.test(kept)) winner = kept;
+              else {
+                winner = candidate;
+                store.put(candidate, storageKey);
+              }
+            };
+            tx.oncomplete = () => {
+              db.close();
+              resolve(winner);
+            };
+            tx.onerror = tx.onabort = () => {
+              db.close();
+              resolve(null);
+            };
+          } catch {
+            db.close();
+            resolve(null);
+          }
+        };
+      } catch {
+        resolve(null);
+      }
+    });
+
   let codeReady: Promise<string> | null = null;
   /**
    * Settles this browser's code before anything is sent with it. Two tabs that both find the storage empty would each make a code and the last
    * write would win, leaving the other tab buying under a code that is no longer kept: so the making is serialised across tabs (Web Locks,
    * where the browser has them) and the storage is read again inside the lock, so every tab ends up with the one that was written first. A
-   * browser without locks writes, waits a moment, then reads back what the storage holds and uses that.
+   * browser without locks claims the first code in IndexedDB (atomic across tabs); one with neither writes, waits a moment, then reads back what the storage holds and uses that.
    */
   const settleCode = (): Promise<string> => {
     if (memoryCode) return Promise.resolve(memoryCode);
@@ -246,15 +291,27 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
           return recoveryCode();
         }
       }
-      // No locks: nothing can make two tabs take turns, so they are given time to settle. One that finds a code kept uses it; one that finds
-      // none writes its own, waits a moment (long enough for another tab that read the empty storage at the same time to have written its own)
-      // and uses what the storage holds then, which is the same for every tab that was in the race
+      // No locks: a code kept is used as it is. When none is kept, the first code is claimed in IndexedDB, whose transaction (read, and write only
+      // if empty) is atomic across tabs, so a tab that is slow to write can never replace the code another tab has already bought under
       try {
         const existing = options.storage?.getItem(storageKey);
         if (existing && RECOVERY_CODE.test(existing)) return (memoryCode = existing);
       } catch {
         return recoveryCode();
       }
+      const claimed = await claimFirstCode(random(43));
+      if (claimed) {
+        memoryCode = claimed;
+        try {
+          if (options.storage?.getItem(storageKey) !== claimed) options.storage?.setItem(storageKey, claimed);
+        } catch {
+          // The code lives in this page and in IndexedDB
+        }
+        return claimed;
+      }
+      // Neither Web Locks nor IndexedDB: nothing in this browser can make tabs take turns, so this is the best that can be done. Each tab writes
+      // its own, waits a moment (long enough for another tab that read the empty storage at the same time to have written) and uses what the
+      // storage holds then
       const made = recoveryCode();
       if (!options.storage) return made;
       await waitFor(SETTLE_MS);

@@ -9,7 +9,7 @@ const ART = 'art-1';
 
 type Call = { url: string; init: RequestInit | undefined; body: Record<string, unknown> };
 
-function setup(answers: (call: Call) => { status?: number; body: Record<string, unknown> } | 'lost' | 'hang', withStorage = true, shared?: Map<string, string>, withLocks = true, fill = 'r') {
+function setup(answers: (call: Call) => { status?: number; body: Record<string, unknown> } | 'lost' | 'hang', withStorage = true, shared?: Map<string, string>, withLocks = true, fill = 'r', indexedDB?: Pick<IDBFactory, 'open'> | null) {
   jest.useFakeTimers();
   // A browser with Web Locks (one tab at a time per name) unless the test is about one without
   if (withLocks && !(globalThis as { navigator?: { locks?: unknown } }).navigator?.locks) {
@@ -39,12 +39,51 @@ function setup(answers: (call: Call) => { status?: number; body: Record<string, 
     storage: withStorage ? { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => void store.set(key, value) } : null,
     randomId: (length) => `${fill.repeat(length - String(++n).length)}${n}`,
     pageUrl: PAGE,
+    indexedDB,
   });
   const lines: PayLine[] = [];
   host.subscribe((line) => lines.push(line));
   const told = () => (frame.postMessage as jest.Mock).mock.calls.map((call) => call[0]);
   const tap = (data: Record<string, unknown>, source: unknown = frame) => host.onMessage({ source, data: { universe: 'use-app', app: 'shop', ...data } });
   return { host, frame, calls, lines, told, tap, popup, store, fetchMock };
+}
+
+/** A stand-in for IndexedDB, shared by every tab of a test: its transactions run one at a time, as the real ones do across tabs. */
+function fakeIndexedDB() {
+  const data = new Map<string, unknown>();
+  const open = () => {
+    const request = {} as { result: unknown; onupgradeneeded?: () => void; onsuccess?: () => void; onerror?: () => void; onblocked?: () => void };
+    const db = {
+      createObjectStore: () => undefined,
+      close: () => undefined,
+      transaction: () => {
+        const tx = {} as { oncomplete?: () => void; onerror?: () => void; onabort?: () => void; objectStore: () => unknown };
+        let pending = 0;
+        const settle = () => {
+          if (--pending === 0) void Promise.resolve().then(() => tx.oncomplete?.());
+        };
+        const run = (work: () => unknown) => {
+          const req = {} as { result: unknown; onsuccess?: () => void };
+          pending++;
+          void Promise.resolve().then(() => {
+            req.result = work();
+            req.onsuccess?.();
+            settle();
+          });
+          return req;
+        };
+        tx.objectStore = () => ({ get: (key: string) => run(() => data.get(key)), put: (value: unknown, key: string) => run(() => void data.set(key, value)) });
+        return tx;
+      },
+    };
+    request.result = db;
+    void Promise.resolve().then(() => {
+      request.onupgradeneeded?.();
+      request.onsuccess?.();
+    });
+    return request;
+  };
+  return { open } as unknown as Pick<IDBFactory, 'open'>;
 }
 
 const started = { orderId: 'o-1', checkoutUrl: 'https://checkout.examplepay.com/?t=1', app: 'ExamplePay', buyer: 'guest' };
@@ -586,6 +625,36 @@ describe('a paying page on the public share link', () => {
     expect(shared.get(key)).toBe(codeOne);
     one.host.destroy();
     two.host.destroy();
+  });
+
+  it('without Web Locks, a tab that is slow to write its first code can never replace the code another tab has bought under: IndexedDB decides', async () => {
+    const shared = new Map<string, string>();
+    const key = `universe-pay-recovery:${ART}`;
+    const idb = fakeIndexedDB();
+    // Tab one makes its code and buys under it before tab two even looks: tab two's view of the storage is old (it read it empty) and its write comes last
+    let wrote = false;
+    const staleView = { get: (name: string) => (wrote ? shared.get(name) : undefined), set: (name: string, value: string) => { wrote = true; shared.set(name, value); } } as unknown as Map<string, string>;
+    const one = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, shared, false, 'a', idb);
+    one.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(5_000);
+    const codeOne = one.calls[0].body.recoveryCode;
+    expect(codeOne).toBeDefined();
+    const two = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, staleView, false, 'b', idb);
+    two.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(two.calls[0].body.recoveryCode).toBe(codeOne);
+    expect(shared.get(key)).toBe(codeOne);
+    one.host.destroy();
+    two.host.destroy();
+  });
+
+  it('without Web Locks and without IndexedDB, falls back to settling through the storage', async () => {
+    const shared = new Map<string, string>();
+    const one = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, shared, false, 'a', null);
+    one.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(400);
+    expect(one.calls[0].body.recoveryCode).toBe(shared.get(`universe-pay-recovery:${ART}`));
+    one.host.destroy();
   });
 
   it('does not stay busy for ever when another tab holds the recovery code lock: the 30 s deadline covers the wait too', async () => {
