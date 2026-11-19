@@ -59,6 +59,7 @@ export const dayWords = (iso: string): string => new Date(iso).toLocaleDateStrin
 /** The label under the headline cost: a total that is a part of the cost says so, and one built on estimates says that. Never the plain label for a part. */
 export function costTotalLabel(cost: CostCompleteness): string {
   if (cost.state === 'incomplete') return 'cost to us so far';
+  if (cost.state === 'correcting') return 'cost to us (being corrected)';
   return cost.state === 'estimated' ? 'cost to us (partly estimated)' : 'cost to us';
 }
 
@@ -67,7 +68,10 @@ export function costTotalNote(cost: CostCompleteness): string | null {
   const parts: string[] = [];
   if (cost.unpriced > 0) parts.push(`${plural(cost.unpriced, 'use has', 'uses have')} no price yet`);
   if (cost.notCounted > 0) parts.push(`${plural(cost.notCounted, 'run is', 'runs are')} not in this total yet (still being settled)`);
-  if (parts.length > 0) return `The cost so far is only part of it: ${parts.join(' and ')}.`;
+  const fixing = cost.mismatched > 0 ? `${plural(cost.mismatched, 'run is', 'runs are')} counted at a figure that differs from the provider’s own, and will be corrected` : null;
+  // Runs that are counted at a wrong figure are in the total, so they never make it "only part of it": that is said of the ones that are not in it
+  if (parts.length > 0) return `The cost so far is only part of it: ${parts.join(' and ')}.${fixing ? ` Also, ${fixing}.` : ''}`;
+  if (fixing) return `${fixing[0].toUpperCase()}${fixing.slice(1)}.`;
   if (cost.estimated > 0) return `${plural(cost.estimated, 'use is', 'uses are')} priced with our estimate until the provider’s own figure is in.`;
   return null;
 }

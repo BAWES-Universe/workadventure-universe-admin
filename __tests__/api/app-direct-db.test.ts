@@ -478,16 +478,30 @@ run('key apps, in a real database', () => {
       await saveServerLimits({ bricks: { keyFormMinutes: 5, keyTries: 2 } }, sara);
       const id = await open();
       let asked = 0;
+      // Both looks are held on an explicit gate, not a timer, until the four blocked submissions have been told to wait: one that reloaded the row after the
+      // looks were recorded would rightly be told there are no tries left
+      let letGo!: () => void;
+      const gate = new Promise<void>((resolve) => (letGo = resolve));
       const slow: GuardDeps = {
         resolve: async () => [{ address: '93.184.216.34', family: 4 }],
         send: async () => {
           asked += 1;
-          // Every look is still on its way while the others start: none has added to the count yet
-          await new Promise((resolve) => setTimeout(resolve, 50));
+          await gate;
           return { status: 401, redirected: false, body: '{}', truncated: false, contentType: 'application/json' };
         },
       };
-      const results = await Promise.allSettled(Array.from({ length: 6 }, () => submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow)));
+      let told = 0;
+      const all = Array.from({ length: 6 }, () =>
+        submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow).catch((error: { code?: string }) => {
+          if (error.code === 'check_in_progress') told += 1;
+          throw error;
+        }),
+      );
+      const settled = Promise.allSettled(all);
+      for (const end = Date.now() + 15_000; told < 4 && Date.now() < end; ) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(told).toBe(4);
+      letGo();
+      const results = await settled;
       expect(asked).toBe(2);
       expect(results.filter((r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'rejected')).toHaveLength(2);
       // The two checks under way hold the room: the others are told to wait, which is not the same as having no tries left

@@ -15,6 +15,7 @@ import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
 import { setOwnVersionsForTests, type OwnAppVersion } from '@/lib/app-routes/own-versions';
 import { recordMeterEvent, saveMeterSettings } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
+import { instantEventOf } from '@/lib/instant/report';
 import { GET as demandGet } from '@/app/api/admin/apps-demand/route';
 import { PUT as routePut } from '@/app/api/admin/app-routes/[appKey]/route';
 import { POST as asked } from '@/app/api/apps/asked/route';
@@ -375,7 +376,7 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
       const base = (await demand()).totals.cost;
       await event('priced', sara, { cost: 500 });
       // An estimate (the helper writes estimates): the total is priced, but not measured
-      expect((await demand()).totals.cost).toEqual({ state: base.state === 'incomplete' ? 'incomplete' : 'estimated', unpriced: base.unpriced, estimated: base.estimated + 1, notCounted: base.notCounted });
+      expect((await demand()).totals.cost).toEqual({ state: base.state === 'incomplete' ? 'incomplete' : 'estimated', unpriced: base.unpriced, estimated: base.estimated + 1, notCounted: base.notCounted, mismatched: base.mismatched });
       await event('unpriced', omar, { cost: null });
       const unpriced = (await demand()).totals.cost;
       expect(unpriced).toMatchObject({ state: 'incomplete', unpriced: base.unpriced + 1 });
@@ -392,10 +393,17 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
         // An Instant run Composio has not settled yet is not in the total either
         await prisma.instantRun.update({ where: { id: run.id }, data: { providerState: 'pending', providerMicros: null, providerBasis: null } });
         expect((await demand()).totals.cost).toMatchObject({ state: 'incomplete', notCounted: base.notCounted + 1 });
+        // Settled again, and its event is there but holds another cost: it IS in the total (at the wrong figure), so it is being corrected, never "not in the total"
+        await prisma.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(7000), providerBasis: 'measured' } });
+        const wanted = instantEventOf(await prisma.instantRun.findUniqueOrThrow({ where: { id: run.id } }));
+        await recordMeterEvent({ ...wanted!, costMicros: 9000 });
+        const fixing = (await demand()).totals.cost;
+        expect(fixing).toMatchObject({ state: base.state === 'incomplete' ? 'incomplete' : 'correcting', notCounted: base.notCounted, mismatched: base.mismatched + 1 });
       } finally {
         await prisma.instantRun.deleteMany({ where: { id: run.id } });
       }
-      expect((await demand()).totals.cost).toMatchObject({ unpriced: base.unpriced, notCounted: base.notCounted });
+      await prisma.meterEvent.deleteMany({ where: { eventId: `instant:${run.id}` } });
+      expect((await demand()).totals.cost).toMatchObject({ unpriced: base.unpriced, notCounted: base.notCounted, mismatched: base.mismatched });
     });
 
     it('says a failed run was refunded only when a refund is recorded for every failed run', async () => {

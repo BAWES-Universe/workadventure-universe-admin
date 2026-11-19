@@ -11,7 +11,7 @@ import { evaluatePause, exposureIn, giveBack, instantRunKey, reconcileRun, runIn
 import { setInstantFunds, shutFunds, type InstantFunds } from '@/lib/instant/funds';
 import { getInstantPause, resumeInstant, saveInstantLimits } from '@/lib/instant/state';
 import { checkPriceDrift, forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
-import { instantReportingGaps, repairInstantReporting } from '@/lib/instant/report';
+import { instantReportingGaps, instantRunsUnsettled, reportInstantRun, repairInstantReporting } from '@/lib/instant/report';
 import { denyInstantOnSessions } from '@/lib/instant/sessions';
 import { admitInstantTool } from '@/lib/instant/values';
 import { instantRulesAndReceipts } from '@/lib/instant/rules-and-receipts';
@@ -411,6 +411,66 @@ run('the bounded Instant executor, in a real database', () => {
       const fixed = await eventOf(row.id);
       expect(Number(fixed?.costMicros)).toBe(7_000);
       expect(fixed?.basis).toBe('measured');
+    });
+
+    it('a repair that picked a run while it was still held does not write "pending" over a charge the books confirmed in the meantime: the run is locked and read again first', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.state.settleOk = false;
+      await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      expect(row.customerState).toBe('held');
+      expect(customerOf(await eventOf(row.id))).toBeNull();
+      // The books confirm the charge while the repair waits for the run (the repair was handed the held row)
+      let locked!: () => void;
+      let release!: () => void;
+      const hasLock = new Promise<void>((resolve) => (locked = resolve));
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const settling = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 FROM instant_runs WHERE id = ${row.id} FOR UPDATE`;
+          locked();
+          await gate;
+          await tx.instantRun.update({ where: { id: row.id }, data: { customerState: 'charged', customerMicros: BigInt(6_000) } });
+          await tx.meterEvent.update({ where: { eventId: `instant:${row.id}` }, data: { detail: { ...((await eventOf(row.id))?.detail as object), customerMicros: 6_000 } } });
+        },
+        { timeout: 20_000 },
+      );
+      await hasLock;
+      const repair = reportInstantRun(row);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      release();
+      await settling;
+      const result = await repair;
+      expect(result).toBe('same');
+      expect(customerOf(await eventOf(row.id))).toBe(6_000);
+      const kept = (await eventOf(row.id))?.detail as { corrections?: unknown };
+      expect(kept.corrections).toBeUndefined();
+      expect(await instantReportingGaps()).toMatchObject({ missing: 0, wrong: 0, costWrong: 0 });
+    });
+
+    it('a pending run is counted on the day it finished (the day its event will have), by when it began only while it has not finished', async () => {
+      await setLimits();
+      const day = 24 * 60 * MIN;
+      const now = Date.now();
+      const base = (offset: number) => ({ from: new Date(now + offset - 60 * MIN), to: new Date(now + offset + 60 * MIN) });
+      const make = async (data: { createdAt: Date; finishedAt: Date | null }) =>
+        prisma.instantRun.create({
+          data: { runKey: `pending-${randomUUID()}`, botId: brick, personId: sara, toolSlug: 'EXA_SEARCH', toolkit: 'exa', argsHash: 'b'.repeat(64), priceVersion: 'v', topMicros: BigInt(TOP), holdMicros: BigInt(TOP), state: 'succeeded', customerState: 'held', providerState: 'pending', providerUserId: `u-${tag}`, ...data },
+        });
+      const before = await instantRunsUnsettled(base(0));
+      const beforeBeginDay = await instantRunsUnsettled(base(-day));
+      // Began the day before, finished now: counted in the span of its finish, and not in the span it began in
+      const across = await make({ createdAt: new Date(now - day), finishedAt: new Date(now) });
+      expect(await instantRunsUnsettled(base(0))).toBe(before + 1);
+      expect(await instantRunsUnsettled(base(-day))).toBe(beforeBeginDay);
+      await prisma.instantRun.delete({ where: { id: across.id } });
+      // Not finished: counted by when it began
+      const open = await make({ createdAt: new Date(now), finishedAt: null });
+      expect(await instantRunsUnsettled(base(0))).toBe(before + 1);
+      await prisma.instantRun.delete({ where: { id: open.id } });
+      expect(await instantRunsUnsettled(base(0))).toBe(before);
     });
 
     it('a run that failed and gave the hold back is a zero charge on its event, and a run the repair has nothing to say about is not a gap', async () => {

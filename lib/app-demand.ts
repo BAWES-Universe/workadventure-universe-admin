@@ -63,13 +63,15 @@ export interface AskRow {
  * agree with its run yet (the sweep mends those). Said next to the total, so a part is never read as the whole.
  */
 export interface CostCompleteness {
-  state: 'measured' | 'estimated' | 'incomplete';
+  state: 'measured' | 'estimated' | 'incomplete' | 'correcting';
   /** Uses with no price yet. */
   unpriced: number;
   /** Uses priced with an estimate. */
   estimated: number;
-  /** Runs the total does not hold yet or holds wrongly: not settled with the provider, with no usage event yet, or with an event that disagrees with the run. */
+  /** Runs the total does not hold yet: not settled with the provider, or settled with no usage event yet. */
   notCounted: number;
+  /** Runs the total holds at another cost than the run's own: counted, and being corrected by the sweep. */
+  mismatched: number;
 }
 
 export interface DemandReport {
@@ -103,8 +105,8 @@ type Group = {
   universe_unpriced: number;
 };
 
-function completenessOf(input: { unpriced: number; estimated: number; notCounted: number }): CostCompleteness {
-  const state = input.unpriced > 0 || input.notCounted > 0 ? 'incomplete' : input.estimated > 0 ? 'estimated' : 'measured';
+function completenessOf(input: { unpriced: number; estimated: number; notCounted: number; mismatched: number }): CostCompleteness {
+  const state = input.unpriced > 0 || input.notCounted > 0 ? 'incomplete' : input.mismatched > 0 ? 'correcting' : input.estimated > 0 ? 'estimated' : 'measured';
   return { state, ...input };
 }
 
@@ -115,9 +117,16 @@ export async function demandReport(days: number = DEMAND_DEFAULT_DAYS, now: Date
   const from = new Date(today.getTime() - (span - 1) * DAY);
   const inRange = Prisma.sql`e.occurred_at >= ${from} AND e.occurred_at <= ${now}`;
 
-  const [groups, totalRows, listed, gaps, unsettled] = await Promise.all([
-    // A free lookup is written with quantity 0: it is not a use, so it never counts here (the same rule as the Costs page)
-    prisma.$queryRaw<Group[]>(Prisma.sql`
+  // The uses, the total and what the total is missing are read from ONE snapshot: a repair that lands between them must not show a cost that was
+  // counted before it with a completeness that was read after it (it would read as whole while it is not). All of it is before the repair, or all after.
+  const [listed, [groups, totalRows, gaps, unsettled]] = await Promise.all([
+    // The App list: the names a use is shown under (always, so the use of an App keeps its name while Apps are off), and the Apps people can pick from
+    // (only while Apps are on at all, below)
+    readReadyMadeApps(),
+    prisma.$transaction(
+      async (tx) => {
+        // A free lookup is written with quantity 0: it is not a use, so it never counts here (the same rule as the Costs page)
+        const byApp = await tx.$queryRaw<Group[]>(Prisma.sql`
       SELECT e.detail->>'toolkit' AS key,
         COALESCE(SUM(e.quantity), 0)::bigint AS uses,
         (COUNT(DISTINCT e.person_key))::int AS people,
@@ -137,17 +146,18 @@ export async function demandReport(days: number = DEMAND_DEFAULT_DAYS, now: Date
         (COUNT(*) FILTER (WHERE e.detail->>'provider' = 'universe' AND e.cost_micros IS NULL))::int AS universe_unpriced
       FROM meter_events e LEFT JOIN app_use_outcomes o ON o.event_id = e.event_id
       WHERE e.kind = 'app_use' AND e.quantity > 0 AND e.detail->>'toolkit' IS NOT NULL AND ${inRange}
-      GROUP BY e.detail->>'toolkit'`),
-    prisma.$queryRaw<{ uses: bigint; people: number; cost: bigint; unpriced: number; estimated: number }[]>(Prisma.sql`
+      GROUP BY e.detail->>'toolkit'`);
+        const all = await tx.$queryRaw<{ uses: bigint; people: number; cost: bigint; unpriced: number; estimated: number }[]>(Prisma.sql`
       SELECT COALESCE(SUM(e.quantity), 0)::bigint AS uses, (COUNT(DISTINCT e.person_key))::int AS people, COALESCE(SUM(e.cost_micros), 0)::bigint AS cost,
         (COUNT(*) FILTER (WHERE e.cost_micros IS NULL))::int AS unpriced, (COUNT(*) FILTER (WHERE e.cost_micros IS NOT NULL AND e.basis = 'estimated'))::int AS estimated
-      FROM meter_events e WHERE e.kind = 'app_use' AND e.quantity > 0 AND ${inRange}`),
-    // The App list: the names a use is shown under (always, so the use of an App keeps its name while Apps are off), and the Apps people can pick from
-    // (only while Apps are on at all, below)
-    readReadyMadeApps(),
-    // Instant runs the books do not hold (yet) or hold wrongly: an event no row can show is missing from the count above, so it is looked for in the runs themselves
-    instantReportingGaps({ from, to: now }),
-    instantRunsUnsettled({ from, to: now }),
+      FROM meter_events e WHERE e.kind = 'app_use' AND e.quantity > 0 AND ${inRange}`);
+        // Instant runs the books do not hold (yet) or hold wrongly: an event no row can show is missing from the count above, so it is looked for in the runs themselves
+        const missing = await instantReportingGaps({ from, to: now }, tx);
+        const waiting = await instantRunsUnsettled({ from, to: now }, tx);
+        return [byApp, all, missing, waiting] as const;
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    ),
   ]);
 
   // Asks for an App that is there now (it was asked for while Apps were off, or before it was added) are not demand any more: they are
@@ -207,7 +217,7 @@ export async function demandReport(days: number = DEMAND_DEFAULT_DAYS, now: Date
     from: from.toISOString().slice(0, 10),
     to: today.toISOString().slice(0, 10),
     days: span,
-    totals: { uses: toNumber(totals?.uses), people: totals?.people ?? 0, costMicros: toNumber(totals?.cost), asks: toNumber(askTotals[0]?.times), cost: completenessOf({ unpriced: totals?.unpriced ?? 0, estimated: totals?.estimated ?? 0, notCounted: gaps.missing + gaps.wrong + unsettled }) },
+    totals: { uses: toNumber(totals?.uses), people: totals?.people ?? 0, costMicros: toNumber(totals?.cost), asks: toNumber(askTotals[0]?.times), cost: completenessOf({ unpriced: totals?.unpriced ?? 0, estimated: totals?.estimated ?? 0, notCounted: gaps.missing + unsettled, mismatched: gaps.costWrong }) },
     apps,
     asked,
     askedMore: Math.max((askTotals[0]?.names ?? 0) - asked.length, 0),

@@ -72,25 +72,28 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 /**
  * Makes the event of this run say what the run says: writes it when it is missing, corrects it when its amounts differ. A correction keeps what the event
  * said before in its own detail (`corrections`, the latest few), so it stays auditable. Safe to say twice and from two places at once: the event row is
- * held while it is compared, and a second say finds nothing to change. It touches only the event: no App is called, nothing is debited, and a use is counted once
+ * held while it is compared, and a second say finds nothing to change. The run is locked and read again first, so a charge the books confirmed in the meantime is never written over. It touches only the event: no App is called, nothing is debited, and a use is counted once
  * (the event id is the run's own).
  */
-export async function reportInstantRun(run: Row, now: Date = new Date()): Promise<ReportResult> {
-  const wanted = instantEventOf(run);
-  if (!wanted) return 'skipped';
-  const first = await prisma.meterEvent.findUnique({ where: { eventId: wanted.eventId }, select: { id: true } });
-  if (!first) {
-    const done: RecordedEvent = await recordMeterEvent(wanted);
-    // Written by someone else between the look and the write: that one is compared like any other below
-    if (done.recorded) return 'written';
-  }
+export async function reportInstantRun(run: Pick<Row, 'id'>, now: Date = new Date()): Promise<ReportResult> {
   return prisma.$transaction(async (tx) => {
+    // The run is locked first and read again, so what is written is what the run says now, never what it said when it was picked up (the same order the
+    // settlement writers use: the run, then its event). A confirmation that lands while this waits is seen, not overwritten with "pending".
+    await tx.$queryRaw`SELECT 1 FROM instant_runs WHERE id = ${run.id} FOR UPDATE`;
+    const current = await tx.instantRun.findUnique({ where: { id: run.id } });
+    const wanted = current ? instantEventOf(current) : null;
+    if (!current || !wanted) return 'skipped' as const;
+    const first = await tx.meterEvent.findUnique({ where: { eventId: wanted.eventId }, select: { id: true } });
+    if (!first) {
+      const done: RecordedEvent = await recordMeterEvent(wanted, tx);
+      if (done.recorded) return 'written' as const;
+    }
     await tx.$queryRaw`SELECT 1 FROM meter_events WHERE event_id = ${wanted.eventId} FOR UPDATE`;
     const event = await tx.meterEvent.findUnique({ where: { eventId: wanted.eventId } });
     if (!event) return 'skipped' as const;
     const detail = isRecord(event.detail) ? event.detail : {};
     const was = { customerMicros: typeof detail.customerMicros === 'number' ? detail.customerMicros : null, costMicros: event.costMicros === null ? null : Number(event.costMicros), basis: event.basis };
-    const becomes = { customerMicros: customerAmountOf(run), costMicros: wanted.costMicros, basis: wanted.basis };
+    const becomes = { customerMicros: customerAmountOf(current), costMicros: wanted.costMicros, basis: wanted.basis };
     if (was.customerMicros === becomes.customerMicros && was.costMicros === becomes.costMicros && was.basis === becomes.basis) return 'same' as const;
     // The books saying what the person was charged, where the event said pending, is the event being filled in; anything else that changes is a correction and is kept
     const fillingIn = was.customerMicros === null && was.costMicros === becomes.costMicros && was.basis === becomes.basis;
@@ -111,13 +114,14 @@ export async function reportInstantRun(run: Row, now: Date = new Date()): Promis
  * The settled runs whose event is missing or says something other than the run: the run's own rows are the record of it, so a gap cannot be forgotten.
  * Each part must read the same as `instantEventOf` and `customerAmountOf` (the tests keep them together).
  */
+const BASIS_SQL = Prisma.sql`(CASE WHEN r.provider_basis = 'measured' THEN 'measured' ELSE 'estimated' END)`;
 const gapsSql = Prisma.sql`
   FROM instant_runs r LEFT JOIN meter_events e ON e.event_id = 'instant:' || r.id
   WHERE r.provider_state = 'settled' AND r.provider_micros IS NOT NULL AND r.finished_at IS NOT NULL
     AND (
       e.id IS NULL
       OR e.cost_micros IS DISTINCT FROM r.provider_micros
-      OR e.basis IS DISTINCT FROM (CASE WHEN r.provider_basis = 'measured' THEN 'measured' ELSE 'estimated' END)
+      OR e.basis IS DISTINCT FROM ${BASIS_SQL}
       OR (e.detail->>'customerMicros') IS DISTINCT FROM (CASE WHEN r.customer_state = 'charged' AND r.customer_micros IS NOT NULL THEN r.customer_micros::text WHEN r.customer_state = 'released' OR r.state = 'failed' THEN '0' ELSE NULL END)
     )`;
 
@@ -126,21 +130,29 @@ export interface ReportingGaps {
   missing: number;
   /** Settled runs whose event says other amounts than the run. */
   wrong: number;
+  /** Of those, the ones whose event holds another cost or basis than the run's (the total already counts them, at the wrong figure). */
+  costWrong: number;
   /** When the oldest of them was settled, or null when there is none. */
   oldestAt: Date | null;
 }
 
 /** How many gaps there are now (or among the runs settled in a span of days) and how old the oldest is. */
-export async function instantReportingGaps(span?: { from: Date; to: Date }): Promise<ReportingGaps> {
+export async function instantReportingGaps(span?: { from: Date; to: Date }, db: Prisma.TransactionClient = prisma): Promise<ReportingGaps> {
   const within = span ? Prisma.sql`AND r.finished_at >= ${span.from} AND r.finished_at <= ${span.to}` : Prisma.empty;
-  const [row] = await prisma.$queryRaw<{ missing: number; wrong: number; oldest: Date | null }[]>(Prisma.sql`
-    SELECT (COUNT(*) FILTER (WHERE e.id IS NULL))::int AS missing, (COUNT(*) FILTER (WHERE e.id IS NOT NULL))::int AS wrong, MIN(r.finished_at) AS oldest ${gapsSql} ${within}`);
-  return { missing: row?.missing ?? 0, wrong: row?.wrong ?? 0, oldestAt: row?.oldest ?? null };
+  const [row] = await db.$queryRaw<{ missing: number; wrong: number; cost_wrong: number; oldest: Date | null }[]>(Prisma.sql`
+    SELECT (COUNT(*) FILTER (WHERE e.id IS NULL))::int AS missing, (COUNT(*) FILTER (WHERE e.id IS NOT NULL))::int AS wrong,
+      (COUNT(*) FILTER (WHERE e.id IS NOT NULL AND (e.cost_micros IS DISTINCT FROM r.provider_micros OR e.basis IS DISTINCT FROM ${BASIS_SQL})))::int AS cost_wrong,
+      MIN(r.finished_at) AS oldest ${gapsSql} ${within}`);
+  return { missing: row?.missing ?? 0, wrong: row?.wrong ?? 0, costWrong: row?.cost_wrong ?? 0, oldestAt: row?.oldest ?? null };
 }
 
-/** Runs of a span of days that Composio has not settled yet: they cost us, and nothing is on the books for them until it does. */
-export async function instantRunsUnsettled(span: { from: Date; to: Date }): Promise<number> {
-  return prisma.instantRun.count({ where: { providerState: 'pending', createdAt: { gte: span.from, lte: span.to } } });
+/**
+ * Runs of a span of days that Composio has not settled yet: they cost us, and nothing is on the books for them until it does. A run belongs to the day its event
+ * will have (the day it finished), so one that ran across midnight is counted on the new day; one that has not finished is counted by when it began.
+ */
+export async function instantRunsUnsettled(span: { from: Date; to: Date }, db: Prisma.TransactionClient = prisma): Promise<number> {
+  const within = { gte: span.from, lte: span.to };
+  return db.instantRun.count({ where: { providerState: 'pending', OR: [{ finishedAt: within }, { finishedAt: null, createdAt: within }] } });
 }
 
 const CURSOR_KEY = 'instant-reporting-cursor';
@@ -182,7 +194,7 @@ export async function repairInstantReporting(opts: { limit?: number; now?: Date 
   let ids = await pick(cursor);
   // The end was reached: go back to the top (once, in this same pass)
   if (ids.length === 0 && cursor !== null) ids = await pick(null);
-  const out: ReportingRepair = { looked: ids.length, written: 0, corrected: 0, failed: 0, remaining: { missing: 0, wrong: 0, oldestAt: null } };
+  const out: ReportingRepair = { looked: ids.length, written: 0, corrected: 0, failed: 0, remaining: { missing: 0, wrong: 0, costWrong: 0, oldestAt: null } };
   for (const { id } of ids) {
     try {
       const run = await prisma.instantRun.findUnique({ where: { id } });
