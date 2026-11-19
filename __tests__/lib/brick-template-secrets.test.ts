@@ -34,6 +34,14 @@ describe('the secret check of the look before sharing', () => {
     expect(kinds(`Call https://api.example.com/data?sig=${key}`)).toEqual(['secret:a long key-like string']);
   });
 
+  it('finds a long value of a credential-named query parameter in any letters (all lowercase, or hex), and still leaves a path alone', () => {
+    const hex = '0f3a9c1d7b2e4a6c8d0e1f2a3b4c5d6e7f8a9b0c';
+    expect(kinds(`Call https://api.example.com/data?access_token=${hex}`)).toEqual(['secret:a long key-like string']);
+    expect(kinds(`Call https://api.example.com/data?city=Kuwait&sig=${hex}`)).toEqual(['secret:a long key-like string']);
+    expect(kinds(`Call https://api.example.com/data/${hex}`)).toEqual([]);
+    expect(kinds(`Call https://api.example.com/data?city=${hex}`)).toEqual([]);
+  });
+
   it('says a secret once, under its most specific name', () => {
     const found = findInText('sk-proj-abcdefghijklmnopqrstuvwxyz123456abcdefghij', 'instructions');
     expect(found).toHaveLength(1);

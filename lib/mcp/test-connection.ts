@@ -1,6 +1,6 @@
 import { decryptApiKey } from '@/lib/encryption';
 import { extractErrorCode, readBodyWithLimit, truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
-import { isAllowedServerIp, isAllowedServerUrl } from '@/lib/mcp/outbound-guard';
+import { isAllowedServerUrl, pinnedFetch } from '@/lib/mcp/outbound-guard';
 import { headerProblem } from '@/lib/mcp/header-text';
 
 interface McpToolDescriptor {
@@ -23,6 +23,13 @@ export interface McpToolShape {
 
 export const MAX_SHAPE_FIELDS = 100;
 
+/** The protocol headers of every request, and the only ones a request to another origin carries. */
+const FIXED_HEADERS: Readonly<Record<string, string>> = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' };
+
+/** The version asked for, and the versions this check can speak: the one the app answers with is sent on every later request. */
+const REQUESTED_PROTOCOL_VERSION = '2025-06-18';
+const KNOWN_PROTOCOL_VERSIONS = new Set(['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25']);
+
 const allPropertyNames = (schema: unknown): string[] => {
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return [];
   const properties = (schema as { properties?: unknown }).properties;
@@ -43,7 +50,9 @@ export function shapeOfTool(tool: McpToolDescriptor, name: string): McpToolShape
   const description = typeof tool.description === 'string' ? tool.description : typeof tool.function?.description === 'string' ? tool.function.description : null;
   // The size cut never drops a required input: a job that cannot be given what it must have could never be asked for. The required
   // ones come first, then as many of the others as fit.
-  const all = allPropertyNames(input);
+  // A schema may require a field it does not declare in its properties: it is still an input the job must be given
+  const declared = allPropertyNames(input);
+  const all = [...declared, ...required.filter((field) => !declared.includes(field))];
   const mustHave = all.filter((field) => required.includes(field));
   const rest = all.filter((field) => !required.includes(field)).slice(0, Math.max(0, MAX_SHAPE_FIELDS - mustHave.length));
   const kept = new Set([...mustHave, ...rest]);
@@ -73,7 +82,7 @@ function answerIn(frame: string, expectedId: string): Record<string, unknown> | 
   if (data === null) return null;
   try {
     const message = JSON.parse(data) as unknown;
-    if (message && typeof message === 'object' && !Array.isArray(message) && String((message as { id?: unknown }).id) === expectedId) {
+    if (message && typeof message === 'object' && !Array.isArray(message) && (message as { id?: unknown }).id === expectedId) {
       return message as Record<string, unknown>;
     }
   } catch {
@@ -99,17 +108,28 @@ async function parseMcpResponseBody(response: Response, expectedId: string): Pro
     const decoder = new TextDecoder();
     let buffer = '';
     let read = 0;
+    // A \r ends a line at once; a \n that follows it (in this chunk or the next) is the second half of \r\n and is dropped
+    let afterCr = false;
     try {
       for (;;) {
         const { done, value } = await reader.read();
+        let piece = '';
         if (value) {
           read += value.byteLength;
-          buffer += decoder.decode(value, { stream: true });
+          // The limit is kept before a chunk is decoded or split: a chunk that crosses it is not read at all
+          if (read > MAX_STREAM_BYTES) break;
+          piece = decoder.decode(value, { stream: true });
         }
-        if (done) buffer += decoder.decode();
-        // A \r at the very end may be the first half of \r\n: it waits for the next chunk
-        const hold = !done && buffer.endsWith('\r');
-        const frames = normalizeNewlines(hold ? buffer.slice(0, -1) : buffer).split('\n\n');
+        if (done) piece += decoder.decode();
+        if (afterCr && piece.startsWith('\n')) {
+          piece = piece.slice(1);
+          afterCr = false;
+        }
+        if (piece) {
+          afterCr = piece.endsWith('\r');
+          buffer += normalizeNewlines(piece);
+        }
+        const frames = buffer.split('\n\n');
         // The last piece is an event not finished yet (or, at the end of the stream, the last one)
         const tail = frames.pop() ?? '';
         for (const frame of frames) {
@@ -121,8 +141,7 @@ async function parseMcpResponseBody(response: Response, expectedId: string): Pro
           if (last) return last;
           break;
         }
-        buffer = tail + (hold ? '\r' : '');
-        if (read > MAX_STREAM_BYTES) break;
+        buffer = tail;
       }
     } finally {
       await reader.cancel().catch(() => undefined);
@@ -130,7 +149,9 @@ async function parseMcpResponseBody(response: Response, expectedId: string): Pro
     throw new Error('No answer to the request found in the event stream');
   }
 
-  const text = await response.text();
+  // Read through the byte limit, not in full: an answer larger than it is refused, not parsed
+  const text = await readBodyWithLimit(response, MAX_STREAM_BYTES + 1);
+  if (Buffer.byteLength(text) > MAX_STREAM_BYTES) throw new Error('The answer of the app is larger than this check reads');
   // An event stream sent without its content type
   if (text.trimStart().startsWith('event:') || text.trimStart().startsWith('data:')) {
     for (const frame of normalizeNewlines(text).split('\n\n')) {
@@ -139,7 +160,27 @@ async function parseMcpResponseBody(response: Response, expectedId: string): Pro
     }
     throw new Error('No answer to the request found in the event stream');
   }
-  return JSON.parse(text) as Record<string, unknown>;
+  // Fixed words for anything that is not the answer to this request: the body of a reply that is not JSON is never quoted back
+  let message: unknown;
+  try {
+    message = JSON.parse(text);
+  } catch {
+    throw new Error('The app did not answer in JSON');
+  }
+  if (!message || typeof message !== 'object' || Array.isArray(message) || (message as { id?: unknown }).id !== expectedId) {
+    throw new Error('The app did not answer this request');
+  }
+  return message as Record<string, unknown>;
+}
+
+/** The credentials this test sends: the sign-in and the values of the custom headers. Whatever an app sends back is cleaned of them before anything is read from it, kept or cut. */
+type Secrets = readonly string[];
+
+function withoutSecrets(text: string, secrets: Secrets): string {
+  let out = text;
+  // Longest first, so a secret that holds another is removed whole
+  for (const secret of [...secrets].sort((a, b) => b.length - a.length)) out = out.split(secret).join('[removed]');
+  return out;
 }
 
 /** Diagnostic fields carried from a failing HTTP response into the stored result. */
@@ -176,6 +217,7 @@ function failureFields(source: McpTestFailureDetail) {
  */
 async function describeFailure(
   response: Response,
+  secrets: Secrets,
   responseBody?: string
 ): Promise<{
   success: false;
@@ -190,13 +232,13 @@ async function describeFailure(
   // control, and a failing endpoint that streams megabytes would otherwise be buffered
   // in full before truncateDetail ever sees it. Covers both failure call sites, the
   // direct response and the followed redirect, which both land here without a body.
-  const rawBody = responseBody ?? (await readBodyWithLimit(response));
+  const rawBody = withoutSecrets(responseBody ?? (await readBodyWithLimit(response)), secrets);
   const errorCode = extractErrorCode(rawBody);
   // The reason phrase is chosen by the server, so it is stored text like any other and
   // goes through the same redact-then-truncate as the body and the challenge header: an
   // endpoint can echo credential material there, and it can be arbitrarily long. This
   // also sanitises the value embedded in `error`, which is what the panel displays.
-  const statusText = truncateDetail(response.statusText) || '';
+  const statusText = truncateDetail(withoutSecrets(response.statusText, secrets)) || '';
   return {
     success: false,
     error: `HTTP ${response.status}${statusText ? `: ${statusText}` : ''}${errorCode ? ` \u2014 ${errorCode}` : ''}`,
@@ -205,15 +247,15 @@ async function describeFailure(
     errorCode,
     // Redact-then-truncate, like the body: the stored field is documented as redacted
     // and, unlike the body, it previously had no length cap either.
-    wwwAuthenticate: truncateDetail(response.headers.get('www-authenticate')),
+    wwwAuthenticate: truncateDetail(withoutSecrets(response.headers.get('www-authenticate') ?? '', secrets) || null),
     errorBody: truncateDetail(rawBody),
   };
 }
 
 /** What a server's error answer says, redacted and cut like every other text a server sends back: it may echo the credentials it was sent. */
-function rpcErrorText(error: unknown): string {
+function rpcErrorText(error: unknown, secrets: Secrets): string {
   const message = error && typeof error === 'object' ? (error as { message?: unknown }).message : undefined;
-  return truncateDetail(typeof message === 'string' && message ? message : JSON.stringify(error)) ?? 'unknown error';
+  return truncateDetail(withoutSecrets(typeof message === 'string' && message ? message : JSON.stringify(error), secrets)) ?? 'unknown error';
 }
 
 /** Calls initialize and tools/list on an app's link with its stored sign-in (decrypted here only), through the same address guards at every hop. */
@@ -273,10 +315,7 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
   }
 
   // Build headers
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json, text/event-stream',
-  };
+  const headers: Record<string, string> = { ...FIXED_HEADERS };
   if ((server.authType === 'bearer' || server.authType === 'oauth') && authValue) {
     headers['Authorization'] = `Bearer ${authValue}`;
   } else if (server.authType === 'api-key' && authValue) {
@@ -292,12 +331,16 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
     }
   }
 
+  const secrets: string[] = [authValue, ...Object.values(server.headers ?? {})].filter((value): value is string => typeof value === 'string' && value.length > 0);
+
   // Something saved earlier (or pasted before this check) with text that cannot be sent names the field, instead of the raw fetch error
   const unsendable = headerProblem({ authType: server.authType === 'oauth' ? 'bearer' : server.authType, authValue, headers: server.headers });
   if (unsendable) {
     return { success: false, toolCount: 0, toolNames: [], error: unsendable };
   }
 
+  let session: { id: string; origin: string } | null = null;
+  let protocolVersion: string | null = null;
   try {
     // SSRF guard: reject internal/private addresses before making network request
     if (!isAllowedServerUrl(server.serverUrl)) {
@@ -309,31 +352,32 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
       };
     }
 
-    // DNS-level SSRF guard: resolve hostname and verify resolved IPs are not private
-    const ipCheck = await isAllowedServerIp(server.serverUrl);
-    if (!ipCheck.allowed) {
-      return {
-        success: false,
-        toolCount: 0,
-        toolNames: [],
-        error: ipCheck.error || 'Server URL resolves to a blocked address',
-      };
-    }
+    // The DNS-level guard is part of every request (pinnedFetch): the name is resolved once, the addresses are checked, and the connection
+    // is made to the checked address, so a name that changes its answer between a check and the request reaches nothing internal
 
     // The headers a redirect gets: all of them on the same origin (an authenticated /mcp that redirects to /mcp/ still needs its
     // sign-in), only the two that carry no secret and no session on any other origin (prevents leaking bearer tokens, API keys,
     // session ids and custom credential headers such as a Cloudflare service token to a redirect target)
+    // The two that go everywhere are the fixed protocol values, not whatever a custom header replaced them with
     function headersForRedirect(from: string, to: string, h: Record<string, string>): Record<string, string> {
       if (new URL(from).origin === new URL(to).origin) return { ...h };
-      const safe: Record<string, string> = {};
-      for (const [key, value] of Object.entries(h)) {
-        if (key.toLowerCase() === 'content-type' || key.toLowerCase() === 'accept') safe[key] = value;
+      return { ...FIXED_HEADERS };
+    }
+
+    // The session id goes only to the origin that issued it (the origin the answer to the first request came from), the negotiated
+    // protocol version to every request: it carries nothing secret
+    function withSession(url: string, h: Record<string, string>): Record<string, string> {
+      const out = { ...h };
+      for (const key of Object.keys(out)) {
+        if (key.toLowerCase() === 'mcp-session-id' || key.toLowerCase() === 'mcp-protocol-version') delete out[key];
       }
-      return safe;
+      if (protocolVersion) out['MCP-Protocol-Version'] = protocolVersion;
+      if (session && new URL(url).origin === session.origin) out['Mcp-Session-Id'] = session.id;
+      return out;
     }
 
     // Helper to follow a redirect manually with SSRF validation before each hop
-    async function followRedirect(url: string, headers: Record<string, string>, body: string, redirectCount = 0): Promise<Response> {
+    async function followRedirect(url: string, headers: Record<string, string>, body: string, redirectCount = 0): Promise<{ response: Response; url: string }> {
       if (redirectCount > 5) {
         throw new Error('Too many redirects');
       }
@@ -341,16 +385,11 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
       if (!isAllowedServerUrl(url)) {
         throw new Error('Server redirected to an internal or private address');
       }
-      const redirectIpCheck = await isAllowedServerIp(url);
-      if (!redirectIpCheck.allowed) {
-        throw new Error(redirectIpCheck.error || 'Redirect target resolves to a blocked address');
-      }
-      const res = await fetch(url, {
+      const res = await pinnedFetch(url, {
         method: 'POST',
-        headers,
+        headers: withSession(url, headers),
         body,
         signal: AbortSignal.timeout(10000),
-        redirect: 'manual',
       });
       if (res.status >= 300 && res.status < 400) {
         const location = res.headers.get('location');
@@ -361,7 +400,7 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
         const redirectUrl = new URL(location, url).toString();
         return followRedirect(redirectUrl, headersForRedirect(url, redirectUrl, headers), body, redirectCount + 1);
       }
-      return res;
+      return { response: res, url };
     }
 
     // Helper to send a single MCP JSON-RPC POST request to the server URL,
@@ -370,6 +409,8 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
       success: boolean;
       data?: Record<string, unknown>;
       headers?: Record<string, string>;
+      /** The address the answer came from: after a redirect, not the address that was asked. */
+      from?: string;
       error?: string;
       status?: number;
       statusText?: string;
@@ -377,12 +418,11 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
       wwwAuthenticate?: string | null;
       errorBody?: string | null;
     }> {
-      const res = await fetch(server.serverUrl, {
+      const res = await pinnedFetch(server.serverUrl, {
         method: 'POST',
-        headers,
+        headers: withSession(server.serverUrl, headers),
         body,
         signal: AbortSignal.timeout(10000),
-        redirect: 'manual',
       });
 
       // Handle redirect via the same SSRF-safe followRedirect
@@ -402,27 +442,28 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
           };
         }
         const redirectUrl = new URL(location, server.serverUrl).toString();
-        const followed = await followRedirect(redirectUrl, headersForRedirect(server.serverUrl, redirectUrl, headers), body).catch((err: unknown) => {
+        const reached = await followRedirect(redirectUrl, headersForRedirect(server.serverUrl, redirectUrl, headers), body).catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : 'Redirect failure';
-          return new Response(null, { status: 502, statusText: msg });
+          return { response: new Response(null, { status: 502, statusText: msg }), url: redirectUrl };
         });
+        const followed = reached.response;
         if (!followed.ok) {
-          return await describeFailure(followed);
+          return await describeFailure(followed, secrets);
         }
         const resHeaders: Record<string, string> = {};
         followed.headers.forEach((v: string, k: string) => { resHeaders[k] = v; });
         if (expectedId === null) await followed.body?.cancel().catch(() => undefined);
-        return { success: true, data: expectedId === null ? {} : await parseMcpResponseBody(followed, expectedId), headers: resHeaders };
+        return { success: true, data: expectedId === null ? {} : await parseMcpResponseBody(followed, expectedId), headers: resHeaders, from: reached.url };
       }
 
       if (!res.ok) {
-        return await describeFailure(res);
+        return await describeFailure(res, secrets);
       }
 
       const resHeaders: Record<string, string> = {};
       res.headers.forEach((v: string, k: string) => { resHeaders[k] = v; });
       if (expectedId === null) await res.body?.cancel().catch(() => undefined);
-      return { success: true, data: expectedId === null ? {} : await parseMcpResponseBody(res, expectedId), headers: resHeaders };
+      return { success: true, data: expectedId === null ? {} : await parseMcpResponseBody(res, expectedId), headers: resHeaders, from: server.serverUrl };
     }
 
     // Step 1: Initialize MCP session (required by MCP Streamable HTTP spec)
@@ -432,7 +473,7 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
         id: 'init',
         method: 'initialize',
         params: {
-          protocolVersion: '2024-11-05',
+          protocolVersion: REQUESTED_PROTOCOL_VERSION,
           capabilities: {},
           clientInfo: {
             name: 'workadventure-mcp-test',
@@ -458,20 +499,18 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
         success: false,
         toolCount: 0,
         toolNames: [],
-        error: `Initialize error: ${rpcErrorText(initResult.data.error)}`,
+        error: `Initialize error: ${rpcErrorText(initResult.data.error, secrets)}`,
         ...failureFields(initResult),
       };
     }
 
-    // Per MCP Streamable HTTP spec, session ID is transmitted in the
-    // Mcp-Session-Id HTTP response header, not in the JSON body.
-    // Check header first, then fall back to body for non-spec servers.
-    const sessionId =
-        (initResult.headers?.['mcp-session-id']) ||
-        (initResult.data as any)?.result?.sessionId as string | undefined;
-    if (sessionId) {
-      headers['Mcp-Session-Id'] = sessionId;
-    }
+    // Per MCP Streamable HTTP spec, session ID is transmitted in the Mcp-Session-Id HTTP response header, not in the JSON body.
+    // Check header first, then fall back to body for non-spec servers. It belongs to the origin the answer came from.
+    const initResultBody = initResult.data?.result && typeof initResult.data.result === 'object' ? (initResult.data.result as { sessionId?: unknown; protocolVersion?: unknown }) : undefined;
+    const sessionId = initResult.headers?.['mcp-session-id'] || (typeof initResultBody?.sessionId === 'string' ? initResultBody.sessionId : undefined);
+    if (sessionId) session = { id: sessionId, origin: new URL(initResult.from ?? server.serverUrl).origin };
+    // The version the app chose, when it is one this check knows; else none is sent and the app applies its own default
+    if (typeof initResultBody?.protocolVersion === 'string' && KNOWN_PROTOCOL_VERSIONS.has(initResultBody.protocolVersion)) protocolVersion = initResultBody.protocolVersion;
 
     // The session is open: the server is told so (a server may wait for this before it lists anything). Its answer is empty
     // (202); one that refuses it is left to the list below, which shows any real refusal.
@@ -512,7 +551,7 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
           success: false,
           toolCount: 0,
           toolNames: [],
-          error: `MCP error: ${rpcErrorText(data.error)}`,
+          error: `MCP error: ${rpcErrorText(data.error, secrets)}`,
           ...failureFields(resultResponse),
         };
       }
@@ -566,7 +605,14 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
       success: false,
       toolCount: 0,
       toolNames: [],
-      error: typeof err.message === 'string' ? err.message : 'Connection failed',
+      error: typeof err.message === 'string' ? truncateDetail(withoutSecrets(err.message, secrets)) ?? 'Connection failed' : 'Connection failed',
     };
+  } finally {
+    // The session that was opened is closed, so an app that keeps sessions until they expire does not keep one for every test. A short
+    // try, sent only to the origin that issued it, with the sign-in only because that origin is the one the app was configured with.
+    if (session && new URL(server.serverUrl).origin === session.origin) {
+      const closing = { ...headers, 'Mcp-Session-Id': session.id, ...(protocolVersion ? { 'MCP-Protocol-Version': protocolVersion } : {}) };
+      await pinnedFetch(server.serverUrl, { method: 'DELETE', headers: closing, signal: AbortSignal.timeout(3000) }).then((res) => res.body?.cancel().catch(() => undefined), () => undefined);
+    }
   }
 }

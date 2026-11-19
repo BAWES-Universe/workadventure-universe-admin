@@ -21,6 +21,8 @@ const WORDS: Record<string, string> = {
 
 const POLL_MS = 3_000;
 const POLL_FOR_MS = 20 * 60_000;
+/** One look at an order may take this long; and never past the end of the watch, whatever the network does. */
+const LOOK_MS = 15_000;
 
 export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
   const [line, setLine] = useState<string | null>(null);
@@ -62,9 +64,12 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
       let toldNotPaid = false;
       let stopped = false;
       let timer: ReturnType<typeof setTimeout> | null = null;
+      /** The look that is in flight, so ending the watch ends it too. */
+      let looking: AbortController | null = null;
       const stop = () => {
         stopped = true;
         if (timer) clearTimeout(timer);
+        looking?.abort();
       };
       watchers.current.set(orderId, stop);
       const alive = () => !stopped && page === current.current;
@@ -74,8 +79,13 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
       };
       const poll = async () => {
         if (!alive()) return;
+        // A look that hangs (a request that never answers, or an answer that never finishes) is ended at its own limit, and never
+        // later than the end of the watch: the deadline is kept by this timer, not by being checked between requests
+        const controller = new AbortController();
+        looking = controller;
+        const cutoff = setTimeout(() => controller.abort(), Math.max(0, Math.min(LOOK_MS, until - Date.now())));
         try {
-          const response = await fetch(`/api/pay/${encodeURIComponent(artifactId)}?order=${encodeURIComponent(orderId)}`, { cache: 'no-store' });
+          const response = await fetch(`/api/pay/${encodeURIComponent(artifactId)}?order=${encodeURIComponent(orderId)}`, { cache: 'no-store', signal: controller.signal });
           const body = response.ok ? ((await response.json()) as { status: Status }) : null;
           if (!alive()) return;
           if (body?.status === 'paid') {
@@ -114,6 +124,9 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
           }
         } catch {
           // Try again on the next turn
+        } finally {
+          clearTimeout(cutoff);
+          if (looking === controller) looking = null;
         }
         if (!alive()) return;
         if (Date.now() < until) {

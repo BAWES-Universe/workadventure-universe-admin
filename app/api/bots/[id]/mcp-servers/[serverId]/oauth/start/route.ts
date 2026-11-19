@@ -83,6 +83,10 @@ export async function GET(
       if (server.connection && !(await managesConnection(userId!, server.connection))) {
         return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
       }
+    } else if (server.connection) {
+      // The admin token is no person: the return of a sign-in on a connection is accepted only for the person who manages it (the
+      // callback checks), so this one could never finish, and starting it would replace the sign-in its owner may be in the middle of
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
     }
 
     if (effective.authType !== 'oauth') {

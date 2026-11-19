@@ -9,6 +9,7 @@ const copySignals: Array<AbortSignal | undefined> = [];
 const openBodies = new Map<string, Readable>();
 let abortCalled = false;
 let failUpload = false;
+let failCopy = false;
 
 let purged = false;
 const writes = new Map<string, { botId: string; expiresAt: Date }>();
@@ -37,6 +38,7 @@ jest.mock('@/lib/artifact-storage', () => ({
         if (kind === 'CopyObjectCommand') {
           copySignals.push(options?.abortSignal);
           if (copyTimesOut) throw Object.assign(new Error('The operation was aborted'), { name: 'TimeoutError' });
+          if (failCopy) throw new Error('bucket could not copy');
           stored.set(command.input.Key, stored.get((command.input.CopySource as string).replace('b/', '')) as Buffer);
           return {};
         }
@@ -98,6 +100,7 @@ beforeEach(() => {
   writes.clear();
   failDeletes = false;
   copyTimesOut = false;
+  failCopy = false;
 });
 
 describe('the saved copy of a Brick computer’s files', () => {
@@ -219,6 +222,15 @@ describe('the saved copy of a Brick computer’s files', () => {
     const before = Buffer.from(stored.get(savedCopyKey('bot-1')) as Buffer);
     await expect(storeSavedCopy('bot-1', webStream(archive.subarray(0, archive.length - 40)))).rejects.toThrow();
     expect(abortCalled).toBe(true);
+    expect([...stored.keys()]).toEqual([savedCopyKey('bot-1')]);
+    expect((stored.get(savedCopyKey('bot-1')) as Buffer).equals(before)).toBe(true);
+  });
+
+  it('a copy step that throws leaves no staging object behind, and the earlier copy stays', async () => {
+    await storeSavedCopy('bot-1', webStream(archive));
+    const before = Buffer.from(stored.get(savedCopyKey('bot-1')) as Buffer);
+    failCopy = true;
+    await expect(storeSavedCopy('bot-1', webStream(archive))).rejects.toThrow('bucket could not copy');
     expect([...stored.keys()]).toEqual([savedCopyKey('bot-1')]);
     expect((stored.get(savedCopyKey('bot-1')) as Buffer).equals(before)).toBe(true);
   });

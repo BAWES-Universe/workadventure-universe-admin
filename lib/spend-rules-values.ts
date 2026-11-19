@@ -88,7 +88,8 @@ export function ruleWords(rule: Pick<SpendRule, 'scope' | 'period' | 'capMicros'
   const who = rule.scope === 'person' ? 'all your Bricks' : (botName?.trim() || 'this Brick');
   const parts: string[] = [];
   if (rule.onlyOwnAccounts) {
-    parts.push(`Only your own accounts: nothing is taken from your ${coversWords(rule.covers)}`);
+    // Where it applies is said too: the same words for one task, one Brick and all of them would not tell which the person saved
+    parts.push(`Only your own accounts, ${rule.scope === 'task' ? 'for this task' : `for ${who}`}: nothing is taken from your ${coversWords(rule.covers)}`);
   }
   if (rule.capMicros !== null) {
     const amount = amountWords(rule.capMicros);
@@ -147,8 +148,14 @@ export function draftRule(input: DraftInput): Drafted {
 
   let period: RulePeriod | null = null;
   if (hasCap) {
-    if (scope === 'task') period = 'task';
-    else if (isOne(RULE_PERIODS, input.period)) period = input.period;
+    if (scope === 'task') {
+      // A cap on one task counts that task. A recurring period said with it is a different rule (a Brick's month): never quietly
+      // turned into a one-task cap that later tasks do not inherit
+      if (input.period === 'day' || input.period === 'month') {
+        return { ok: false, reason: 'invalid', error: 'A cap on one task counts that task. For a day or a month, say it for the Brick or for everything' };
+      }
+      period = 'task';
+    } else if (isOne(RULE_PERIODS, input.period)) period = input.period;
     else {
       return {
         ok: false,
@@ -176,8 +183,14 @@ export interface SpendAttempt {
   /** The task it belongs to (a computer job, an Instant run): what "for each task" counts. */
   taskKey: string | null;
   chargeClass: ChargeClass;
-  /** What it would take, millionths of a dollar. Use 1 to ask whether anything more may be taken at all. */
+  /** What it would take, millionths of a dollar. Use 1 to ask whether anything more may be taken at all; 0 asks only whether the rule is already past (a renewal that adds nothing). */
   amountMicros: number;
+  /**
+   * Set for the renewal of room already held: what the room could cost before and after, and when it was first taken. A rule that
+   * already counts this room (it was taken in the rule's own period) is asked for the difference; a rule that does not count it (taken
+   * in an earlier day or month) is asked for all of it, since nothing of it is in what that rule has counted.
+   */
+  renewal?: { exposureBeforeMicros: number; exposureAfterMicros: number; startedAt: Date };
 }
 
 /** What is already taken or held, for the rule's own scope and period (see `spentFor`). */
@@ -203,7 +216,7 @@ export function ruleApplies(rule: SpendRule, attempt: SpendAttempt): boolean {
  * `spent` is asked for each cap by the caller, because what counts depends on the rule's own scope and period. Of several refusals
  * the one with the least left is told, so the person hears the real limit they hit.
  */
-export function holdToRules(rules: readonly SpendRule[], attempt: SpendAttempt, spent: (rule: SpendRule) => SpentSoFar): Allowed | Refused {
+export function holdToRules(rules: readonly SpendRule[], attempt: SpendAttempt, spent: (rule: SpendRule) => SpentSoFar, now: Date = new Date()): Allowed | Refused {
   let worst: Refused | null = null;
   for (const rule of rules) {
     if (!ruleApplies(rule, attempt)) continue;
@@ -213,12 +226,24 @@ export function holdToRules(rules: readonly SpendRule[], attempt: SpendAttempt, 
     if (rule.capMicros !== null) {
       const so = spent(rule);
       const left = Math.max(0, rule.capMicros - so.spentMicros - so.heldMicros);
-      if (attempt.amountMicros > left && (worst === null || left < (worst.leftMicros ?? 0))) {
+      const asked = amountFor(rule, attempt, now);
+      // An ask for nothing more (a renewal that adds no exposure) passes a job that is at its cap, and stops one that is past it
+      const over = so.spentMicros + so.heldMicros > rule.capMicros;
+      if ((asked > left || (asked === 0 && over)) && (worst === null || left < (worst.leftMicros ?? 0))) {
         worst = { ok: false, ruleId: rule.id, why: 'cap', leftMicros: left, words: rule.words };
       }
     }
   }
   return worst ?? { ok: true };
+}
+
+/** What a step asks of one rule: for a renewal, the growth of what the rule already counts of that room (all of it when the rule does not count it). */
+function amountFor(rule: SpendRule, attempt: SpendAttempt, now: Date): number {
+  const renewal = attempt.renewal;
+  if (!renewal) return attempt.amountMicros;
+  const start = rule.period ? periodStart(rule.period, now) : null;
+  const counted = start === null || renewal.startedAt.getTime() >= start.getTime();
+  return Math.max(0, renewal.exposureAfterMicros - (counted ? renewal.exposureBeforeMicros : 0));
 }
 
 /** The first moment a cap with this period starts counting, UTC. A task has no calendar: it counts what that task did. */

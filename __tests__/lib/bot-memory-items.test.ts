@@ -146,6 +146,19 @@ describe('taking a thing out', () => {
     expect(afterName.conversationHistory).toHaveLength(memory.conversationHistory.length);
   });
 
+  it('takes the lines that hold an ordinary fact too, when no line was noted for it', () => {
+    const memory = saved();
+    memory.personalInfo.facts.push(['employer', 'Acme Corp'], ['age', '31']);
+    memory.conversationHistory.push({ sender: 'person', message: 'I work at Acme Corp', timestamp: T0 + 3 * DAY }, { sender: 'person', message: 'I am 31', timestamp: T0 + 3 * DAY + 1 });
+    const after = withoutItems(memory, new Set([memoryItemKey('fact', 'employer', 'Acme Corp')])).data as typeof memory;
+    expect(after.personalInfo.facts.map(([name]) => name)).not.toContain('employer');
+    expect(after.conversationHistory.map((line) => line.message)).not.toContain('I work at Acme Corp');
+    expect(after.conversationHistory.map((line) => line.message)).toContain('I am 31');
+    // A short value is never searched for in the chat
+    const shortOne = withoutItems(memory, new Set([memoryItemKey('fact', 'age', '31')])).data as typeof memory;
+    expect(shortOne.conversationHistory.map((line) => line.message)).toContain('I am 31');
+  });
+
   it('does nothing for a key it does not hold, or an empty set', () => {
     const memory = saved();
     expect(withoutItems(memory, new Set(['0'.repeat(32)])).removed).toBe(0);

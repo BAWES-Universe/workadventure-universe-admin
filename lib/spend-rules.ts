@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
@@ -13,6 +13,7 @@ import {
   type ChargeClass,
   type DraftInput,
   type RuleDraft,
+  ruleApplies,
   type Refused,
   type RuleCovers,
   type RulePeriod,
@@ -66,8 +67,8 @@ export interface RuleCard {
   at: string;
 }
 
-async function cardOf(row: Row): Promise<RuleCard> {
-  const bot = row.botId ? await prisma.bot.findUnique({ where: { id: row.botId }, select: { name: true } }) : null;
+async function cardOf(row: Row, db: Pick<typeof prisma, 'bot'> = prisma): Promise<RuleCard> {
+  const bot = row.botId ? await db.bot.findUnique({ where: { id: row.botId }, select: { name: true } }) : null;
   return {
     id: row.id,
     words: ruleWords(viewOf(row), bot?.name),
@@ -99,6 +100,20 @@ export async function ruleOwnerFor(botId: string, speakerId: string, scope: Rule
   return payer && payer === speakerId ? { ownerPersonId: speakerId, botName: bot.name } : null;
 }
 
+/**
+ * The key a message makes its rule under. A long message id is shortened by a hash of the whole of it, never by cutting it: two long ids
+ * that start the same are still two messages.
+ */
+export function chatRuleKey(botId: string, speakerId: string, sayingKey: string): string {
+  const whole = `chat:${botId}:${speakerId}:${sayingKey}`;
+  return whole.length <= 255 ? whole : `chat:${botId}:${speakerId}:sha256:${createHash('sha256').update(sayingKey).digest('hex')}`.slice(0, 255);
+}
+
+/** What a message proposed, normalized: the same words give the same hash, a different amount, period or reach another. */
+export function fingerprintOf(draft: RuleDraft): string {
+  return createHash('sha256').update(JSON.stringify([draft.scope, draft.botId, draft.taskKey, draft.period, draft.capMicros, draft.onlyOwnAccounts, draft.covers])).digest('hex');
+}
+
 export type Proposed =
   | { ok: true; rule: RuleCard; created: boolean }
   | { ok: false; reason: 'invalid'; error: string }
@@ -113,6 +128,8 @@ export type Proposed =
  */
 function isReplayOf(row: Prisma.SpendRuleGetPayload<object>, draft: RuleDraft, ownerPersonId: string): boolean {
   if (row.ownerPersonId !== ownerPersonId) return false;
+  // Against what the message first said, however the rule was corrected after: the same id with another amount is another message
+  if (row.proposalFingerprint) return row.proposalFingerprint === fingerprintOf(draft);
   if (row.version > 1) return true;
   return (
     row.scope === draft.scope &&
@@ -141,7 +158,7 @@ export async function proposeRule(input: DraftInput & { speakerId: string; sayin
   const words = ruleWords(draft, owner.botName);
   // The speaker is in the key: the same message id said by two people (on a Brick they both talk to) is two different rules, and one
   // person's replay never finds, or shows, another person's rule
-  const ruleKey = input.sayingKey ? `chat:${input.botId}:${input.speakerId}:${input.sayingKey}`.slice(0, 255) : null;
+  const ruleKey = input.sayingKey ? chatRuleKey(input.botId, input.speakerId, input.sayingKey) : null;
   if (ruleKey) {
     const seen = await prisma.spendRule.findUnique({ where: { ruleKey } });
     if (seen) return isReplayOf(seen, draft, owner.ownerPersonId) ? { ok: true, rule: await cardOf(seen), created: false } : { ok: false, reason: 'key_reused' };
@@ -150,6 +167,7 @@ export async function proposeRule(input: DraftInput & { speakerId: string; sayin
     const row = await prisma.spendRule.create({
       data: {
         ruleKey: ruleKey ?? `chat:${input.botId}:${randomUUID()}`,
+        proposalFingerprint: fingerprintOf(draft),
         ownerPersonId: owner.ownerPersonId,
         scope: draft.scope,
         botId: draft.botId,
@@ -180,7 +198,7 @@ export async function listRules(personId: string, opts: { botId?: string | null 
   const where: Prisma.SpendRuleWhereInput = { ownerPersonId: personId, state: 'active' };
   if (opts.botId) where.OR = [{ scope: 'person' }, { botId: opts.botId }];
   const rows = await prisma.spendRule.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] });
-  return Promise.all(rows.map(cardOf));
+  return Promise.all(rows.map((row) => cardOf(row)));
 }
 
 export type Changed = { ok: true; rule: RuleCard } | { ok: false; reason: 'not_found' | 'invalid'; error?: string };
@@ -206,7 +224,10 @@ export async function changeRule(
     if (change.period !== undefined) next.period = change.period;
     if (next.capMicros !== null && (!Number.isSafeInteger(next.capMicros) || next.capMicros < 0)) return { ok: false, reason: 'invalid', error: 'A cap is a whole number of millionths of a dollar, 0 or more' };
     // A cap on one task counts that task; a cap on a Brick or on everything needs to say how long
-    if (next.capMicros !== null && next.scope === 'task') next.period = 'task';
+    if (next.capMicros !== null && next.scope === 'task') {
+      if (change.period === 'day' || change.period === 'month') return { ok: false, reason: 'invalid', error: 'A cap on one task counts that task. For a day or a month, say it for the Brick or for everything' };
+      next.period = 'task';
+    }
     if (next.capMicros !== null && next.period === null) return { ok: false, reason: 'invalid', error: 'A cap needs to say how long it counts' };
     if (next.capMicros === null) next.period = null;
     if (next.capMicros === null && !next.onlyOwnAccounts) return { ok: false, reason: 'invalid', error: 'A rule needs a cap or "only my own accounts"' };
@@ -223,16 +244,20 @@ export async function changeRule(
         version: { increment: 1 },
       },
     });
-    return { ok: true, rule: await cardOf(saved) };
+    return { ok: true, rule: await cardOf(saved, tx) };
   });
 }
 
 /** Ends a rule; it stays in the books as ended. Only the person it protects. Asked twice it is the same. */
 export async function endRule(ruleId: string, ownerId: string, now: Date = new Date()): Promise<{ ok: true } | { ok: false; reason: 'not_found' }> {
-  const row = await prisma.spendRule.findUnique({ where: { id: ruleId } });
-  if (!row || row.ownerPersonId !== ownerId) return { ok: false, reason: 'not_found' };
-  if (row.state === 'active') await prisma.spendRule.updateMany({ where: { id: ruleId, state: 'active' }, data: { state: 'ended', endedAt: now, endedById: ownerId, version: { increment: 1 } } });
-  return { ok: true };
+  // Under the same lock a correction takes, so an edit is never saved onto a rule that was ended while it was being read
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`spend-rule:${ruleId}`}))`;
+    const row = await tx.spendRule.findUnique({ where: { id: ruleId } });
+    if (!row || row.ownerPersonId !== ownerId) return { ok: false as const, reason: 'not_found' as const };
+    if (row.state === 'active') await tx.spendRule.updateMany({ where: { id: ruleId, state: 'active' }, data: { state: 'ended', endedAt: now, endedById: ownerId, version: { increment: 1 } } });
+    return { ok: true as const };
+  });
 }
 
 /**
@@ -250,7 +275,7 @@ const wantsApps = (covers: RuleCovers): boolean => covers === 'apps' || covers =
 async function unpricedCallRoom(db: Db, events: Prisma.MeterEventWhereInput[]): Promise<number> {
   const unpriced = await db.meterEvent.findMany({ where: { AND: [...events, { kind: 'model_call', costMicros: null }] }, select: { eventId: true } });
   const keys = unpriced
-    .map((row) => /^computer:(.+):call:(.+)$/.exec(row.eventId))
+    .map((row) => /^computer:(.+?):call:(.+)$/.exec(row.eventId))
     .filter((found): found is RegExpExecArray => found !== null)
     .map((found) => `computer:call:${found[1]}:${found[2]}`);
   if (keys.length === 0) return 0;
@@ -264,7 +289,7 @@ async function unpricedCallRoom(db: Db, events: Prisma.MeterEventWhereInput[]): 
  * task can really cost, so it counts the time already used plus the one stretch the lease still covers, never the whole of what was
  * stacked up: a cap of $1 must not stop a job at $0.40. Room taken once (a model call, a first stretch) has no renewals and counts whole.
  */
-export function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals: number; createdAt: Date; expiresAt: Date }>, renewMinutes: number, now: Date): number {
+export function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals: number; createdAt: Date; expiresAt: Date }>, renewMinutes: number, _now?: Date): number {
   const stretchMs = renewMinutes * 60_000;
   let total = 0;
   for (const row of rows) {
@@ -274,8 +299,11 @@ export function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals:
       continue;
     }
     const oneStretch = amount / (row.renewals + 1);
-    const usedMs = Math.max(0, Math.min(now.getTime(), row.expiresAt.getTime()) - row.createdAt.getTime());
-    total += Math.min(amount, Math.ceil(oneStretch * (1 + usedMs / stretchMs)));
+    // The most the lease can cost is the whole time it covers, from when it began to when it now ends (what was used and what it still
+    // covers): that moves only when a renewal moves the end, never with the clock, so waiting inside one lease does not make a job look dearer.
+    // Never less than one stretch, never more than what was held.
+    const coveredMs = Math.max(0, row.expiresAt.getTime() - row.createdAt.getTime());
+    total += Math.min(amount, Math.max(Math.ceil(oneStretch), Math.ceil(oneStretch * (coveredMs / stretchMs))));
   }
   return total;
 }
@@ -313,21 +341,19 @@ async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Dat
   }
   let spentMicros = 0;
   let heldMicros = 0;
+  // Room still held is read BEFORE what was settled: a step that settles between the two reads is then counted twice (a step too
+  // careful), never missed (a cap passed). Reading them together could miss it.
   if (wantsComputer(rule.covers)) {
-    const [taken, held, unpriced, settings] = await Promise.all([
-      db.meterEvent.aggregate({ where: { AND: events }, _sum: { costMicros: true } }),
-      db.meterReservation.findMany({ where: { AND: holds }, select: { amountMicros: true, renewals: true, createdAt: true, expiresAt: true } }),
-      unpricedCallRoom(db, events),
-      getMeterSettings(db),
-    ]);
+    const held = await db.meterReservation.findMany({ where: { AND: holds }, select: { amountMicros: true, renewals: true, createdAt: true, expiresAt: true } });
+    const taken = await db.meterEvent.aggregate({ where: { AND: events }, _sum: { costMicros: true } });
+    const unpriced = await unpricedCallRoom(db, events);
+    const settings = await getMeterSettings(db);
     spentMicros += toNumber(taken._sum.costMicros) + unpriced;
     heldMicros += exposureOf(held, settings.renewMinutes, now);
   }
   if (wantsApps(rule.covers)) {
-    const [settled, held] = await Promise.all([
-      db.creditHold.aggregate({ where: { AND: [...credit, { state: 'settled' }] }, _sum: { customerMicros: true, refundedMicros: true } }),
-      db.creditHold.aggregate({ where: { AND: [...credit, { state: 'held' }] }, _sum: { amountMicros: true } }),
-    ]);
+    const held = await db.creditHold.aggregate({ where: { AND: [...credit, { state: 'held' }] }, _sum: { amountMicros: true } });
+    const settled = await db.creditHold.aggregate({ where: { AND: [...credit, { state: 'settled' }] }, _sum: { customerMicros: true, refundedMicros: true } });
     spentMicros += Math.max(0, toNumber(settled._sum.customerMicros) - toNumber(settled._sum.refundedMicros));
     heldMicros += toNumber(held._sum.amountMicros);
   }
@@ -340,22 +366,24 @@ async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Dat
  * Never throws for "no": a refusal is an answer, and it carries the rule's own sentence.
  */
 export async function checkSpend(attempt: SpendAttempt, now: Date = new Date(), db: Db = prisma): Promise<Allowed | Refused> {
+  // One rule can cover both computers and Instant Apps, whose rooms are taken under different locks (the meter's pool, the person's
+  // credit). Every step that is held to a rule meets here first, on the paying person, so two of them never read the same totals
+  // and both pass. The lock lasts to the end of the caller's transaction, which also writes the room, so the next one sees it.
+  // Always taken after the caller's own lock and never before it, so it cannot make a cycle. It is taken BEFORE the rules are read
+  // (a cap lowered, or a first rule added, while this step waited is the cap it is held to), and even when the person has no rule yet.
+  if (db !== prisma && db.$executeRaw) await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`spend-check:${attempt.payerPersonId}`}))`;
   const where: Prisma.SpendRuleWhereInput = { ownerPersonId: attempt.payerPersonId, state: 'active', OR: [{ scope: 'person' }] };
   if (attempt.botId) (where.OR as Prisma.SpendRuleWhereInput[]).push({ scope: 'bot', botId: attempt.botId });
   if (attempt.taskKey) (where.OR as Prisma.SpendRuleWhereInput[]).push({ scope: 'task', taskKey: attempt.taskKey });
   const rows = await db.spendRule.findMany({ where });
   if (rows.length === 0) return { ok: true };
   const rules = rows.map(viewOf);
-  // One rule can cover both computers and Instant Apps, whose rooms are taken under different locks (the meter's pool, the person's
-  // credit). Every step that is held to a rule meets here first, on the paying person, so two of them never read the same totals
-  // and both pass. The lock lasts to the end of the caller's transaction, which also writes the room, so the next one sees it.
-  // Always taken after the caller's own lock and never before it, so it cannot make a cycle.
-  if (db !== prisma && db.$executeRaw) await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`spend-check:${attempt.payerPersonId}`}))`;
   const spent = new Map<string, SpentSoFar>();
   for (const rule of rules) {
-    if (rule.capMicros !== null) spent.set(rule.id, await spentFor(db, rule, attempt, now));
+    // A rule that is not about this step (another kind of charge, another bot or task) is never held to, so its totals are never read
+    if (rule.capMicros !== null && ruleApplies(rule, attempt)) spent.set(rule.id, await spentFor(db, rule, attempt, now));
   }
-  return holdToRules(rules, attempt, (rule) => spent.get(rule.id) ?? { spentMicros: 0, heldMicros: 0 });
+  return holdToRules(rules, attempt, (rule) => spent.get(rule.id) ?? { spentMicros: 0, heldMicros: 0 }, now);
 }
 
 /**

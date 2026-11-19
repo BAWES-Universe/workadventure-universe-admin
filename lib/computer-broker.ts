@@ -156,7 +156,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   }
   // The runner's connection must not cut the turn off before its id is kept: once the agent has accepted it, it runs on the machine, and
   // an id that was never stored leaves nothing to cancel or reconnect to. So the request's own signal is not handed on; the start has its
-  // own limit instead, lifted when the id is known.
+  // own limit instead, for the agent's answer only: once it has accepted the turn the limit is lifted, because cutting the stream before its id arrived would leave a turn running on the machine with nothing to cancel.
   const own = new AbortController();
   const timer = setTimeout(() => own.abort(), TURN_START_LIMIT_MS);
   let events: AsyncGenerator<TurnEvent>;

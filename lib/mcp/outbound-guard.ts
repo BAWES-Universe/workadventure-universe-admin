@@ -7,6 +7,9 @@
  * including the DNS resolution step, before sending credentials anywhere.
  */
 import { lookup } from 'dns/promises';
+import http from 'node:http';
+import https from 'node:https';
+import { Readable } from 'node:stream';
 import { isIP } from 'net';
 
 /**
@@ -91,7 +94,7 @@ export function isAllowedServerUrl(url: string): boolean {
  * Resolve a hostname to its IP addresses and verify none are private.
  * Catches DNS-based SSRF bypasses (domain → private IP).
  */
-export async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: boolean; error?: string }> {
+export async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: boolean; error?: string; addresses?: { address: string; family: number }[] }> {
   try {
     const parsed = new URL(serverUrl);
     let hostname = parsed.hostname.toLowerCase();
@@ -201,7 +204,8 @@ export async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: b
         if (ip === '::1') return { allowed: false, error: 'Server resolves to IPv6 loopback' };
       }
     }
-    return { allowed: true };
+    // The addresses that were checked, so a request can be made to exactly these and never to a second look-up of the name
+    return { allowed: true, addresses };
   } catch (dnsError: unknown) {
     const message = dnsError instanceof Error ? dnsError.message : 'Unknown error';
     return { allowed: false, error: `DNS resolution failed: ${message}` };
@@ -217,4 +221,54 @@ export async function checkOutboundUrl(url: string): Promise<{ allowed: boolean;
     return { allowed: false, error: 'URL points to an internal or private address' };
   }
   return isAllowedServerIp(url);
+}
+
+/**
+ * A request made to the address that was checked, never to a second look-up of the name. `fetch` resolves the host again after the
+ * check, so a name that answers with a public address for the check and an internal one a moment later (DNS rebinding) would reach
+ * the internal one. Here the name is resolved once, every address is checked, and the connection is made to the one checked (the
+ * certificate is still checked against the name). It never follows a redirect: the caller asks again for each hop and checks it.
+ * An unchecked name or an address that is not allowed throws before anything is sent.
+ */
+export async function pinnedFetch(url: string, init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal } = {}): Promise<Response> {
+  const target = new URL(url);
+  if (target.protocol !== 'https:' && target.protocol !== 'http:') throw new Error('Only http and https addresses are allowed');
+  const checked = await isAllowedServerIp(url);
+  if (!checked.allowed || !checked.addresses || checked.addresses.length === 0) throw new Error(checked.error || 'Server URL resolves to a blocked address');
+  const pinned = checked.addresses[0];
+  const useHttps = target.protocol === 'https:';
+  const hostname = target.hostname.startsWith('[') ? target.hostname.slice(1, -1) : target.hostname;
+  return new Promise<Response>((resolve, reject) => {
+    const headers: Record<string, string> = { 'accept-encoding': 'identity' };
+    for (const [name, value] of Object.entries(init.headers ?? {})) if (!['host', 'content-length', 'transfer-encoding'].includes(name.toLowerCase())) headers[name] = value;
+    const request = (useHttps ? https : http).request(
+      {
+        host: hostname,
+        port: target.port ? Number(target.port) : useHttps ? 443 : 80,
+        method: init.method ?? 'GET',
+        path: `${target.pathname}${target.search}`,
+        headers,
+        signal: init.signal,
+        agent: false,
+        // The name is never resolved again: the socket goes to the address that was checked
+        lookup: ((_name: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {
+          if (options && options.all) callback(null, [{ address: pinned.address, family: pinned.family }]);
+          else callback(null, pinned.address, pinned.family);
+        }) as never,
+      },
+      (incoming) => {
+        const status = incoming.statusCode ?? 0;
+        const responseHeaders = new Headers();
+        for (const [name, value] of Object.entries(incoming.headers)) {
+          if (Array.isArray(value)) for (const one of value) responseHeaders.append(name, one);
+          else if (typeof value === 'string') responseHeaders.set(name, value);
+        }
+        const noBody = [101, 204, 205, 304].includes(status);
+        if (noBody) incoming.resume();
+        resolve(new Response(noBody ? null : (Readable.toWeb(incoming) as ReadableStream), { status, statusText: incoming.statusMessage ?? '', headers: responseHeaders }));
+      },
+    );
+    request.on('error', reject);
+    request.end(init.body);
+  });
 }

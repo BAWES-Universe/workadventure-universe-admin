@@ -23,6 +23,7 @@ const usage = (over: Partial<PersonUsage> = {}): PersonUsage => ({
   bricks: 2,
   computerMonthMicros: 3_100_000,
   allowanceMicros: 5_000_000,
+  leftMicros: 1_900_000,
   noLimit: false,
   allowanceSet: true,
   keptBytes: 1_200_000_000,
@@ -68,28 +69,28 @@ describe('what a person uses', () => {
     render(<ExtraUsage userId="sara" name="Sara" />);
     expect(await screen.findByText('Usage')).toBeTruthy();
     expect(screen.getByText('Chat and voice · $6.12 in the last 7 days · 2 Bricks')).toBeTruthy();
-    expect(screen.getByText('Computer · $3.10 of $5.00 this month · 1.2 GB kept')).toBeTruthy();
+    expect(screen.getByText('Computer · $3.10 this month, $1.90 left of $5.00 · 1.2 GB kept')).toBeTruthy();
     expect(screen.getByText('On the usual allowance, like every member.')).toBeTruthy();
   });
 
   it('counts against the raised allowance while extra usage runs, and says no limit when it has none', async () => {
-    answer(usage({ allowanceMicros: 25_000_000, extra: running() }));
+    answer(usage({ allowanceMicros: 25_000_000, leftMicros: 21_900_000, extra: running() }));
     const { unmount } = render(<ExtraUsage userId="sara" name="Sara" />);
-    expect(await screen.findByText('Computer · $3.10 of $25.00 this month · 1.2 GB kept')).toBeTruthy();
+    expect(await screen.findByText('Computer · $3.10 this month, $21.90 left of $25.00 · 1.2 GB kept')).toBeTruthy();
     unmount();
-    answer(usage({ allowanceMicros: null, noLimit: true, extra: running({ multiplier: null, noLimit: true }) }));
+    answer(usage({ allowanceMicros: null, leftMicros: null, noLimit: true, extra: running({ multiplier: null, noLimit: true }) }));
     render(<ExtraUsage userId="sara" name="Sara" />);
     expect(await screen.findByText('Computer · $3.10 this month, no limit · 1.2 GB kept')).toBeTruthy();
   });
 
   it('says no limit first when a no-limit grant runs and the usual allowance is not set', async () => {
-    answer(usage({ allowanceSet: false, allowanceMicros: null, noLimit: true, extra: running({ multiplier: null, noLimit: true }) }));
+    answer(usage({ allowanceSet: false, allowanceMicros: null, leftMicros: null, noLimit: true, extra: running({ multiplier: null, noLimit: true }) }));
     render(<ExtraUsage userId="sara" name="Sara" />);
     expect(await screen.findByText('Computer · $3.10 this month, no limit · 1.2 GB kept')).toBeTruthy();
   });
 
   it('shows no allowance to count against until one is set', async () => {
-    answer(usage({ allowanceSet: false, allowanceMicros: null }));
+    answer(usage({ allowanceSet: false, allowanceMicros: null, leftMicros: null }));
     render(<ExtraUsage userId="sara" name="Sara" />);
     expect(await screen.findByText('Computer · $3.10 this month · 1.2 GB kept')).toBeTruthy();
   });
@@ -188,20 +189,26 @@ describe('giving extra usage', () => {
   });
 
   describe('when an answer never came back and the admin changes what they give', () => {
-    /** The first try gets no answer (`first`); the same thing sent again gets `again`, and anything after that is saved. */
-    const setUpOffline = (first: { status: number } | 'offline', again: { ok: boolean; status: number } | { status: number; unreadable: true } | 'offline') => {
+    /** The first try gets no answer (`first`); the status of its key is then asked (`status`), and anything given after that is saved. */
+    const setUpOffline = (first: { status: number } | 'offline', status: { saved: boolean } | { status: number } | 'offline') => {
       let attempt = 0;
-      fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
+      fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+        if (String(url).includes('/extra-usage/status')) {
+          if (status === 'offline') return Promise.reject(new Error('offline'));
+          if ('saved' in status) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ saved: status.saved }) });
+          return Promise.resolve({ ok: false, status: status.status, json: () => Promise.resolve({ error: 'No' }) });
+        }
         if (init?.method !== 'POST') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(usage()) });
         attempt += 1;
-        const turn = attempt === 1 ? first : attempt === 2 ? again : null;
-        if (turn === 'offline') return Promise.reject(new Error('offline'));
-        if (turn && 'unreadable' in turn) return Promise.resolve({ ok: false, status: turn.status, json: () => Promise.reject(new Error('not json')) });
-        if (turn) return Promise.resolve({ ok: 'ok' in turn ? turn.ok : false, status: turn.status, json: () => Promise.resolve('ok' in turn && turn.ok ? { usage: usage({ extra: running({ grantKey: 'sara:key-1', multiplier: 5 }) }) } : { error: 'No', ...(turn.status === 409 ? { code: 'key_used' } : {}) }) });
+        if (attempt === 1) {
+          if (first === 'offline') return Promise.reject(new Error('offline'));
+          return Promise.resolve({ ok: false, status: first.status, json: () => Promise.resolve({ error: 'No' }) });
+        }
         return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ usage: usage({ extra: running({ grantKey: 'sara:key-2' }) }) }) });
       });
     };
     const posts = () => fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST').map(([, init]) => JSON.parse(String((init as RequestInit).body)));
+    const statusAsks = () => fetchMock.mock.calls.map(([url]) => String(url)).filter((url) => url.includes('/extra-usage/status'));
     const tryAndChange = async () => {
       render(<ExtraUsage userId="sara" name="Sara" />);
       fireEvent.click(await screen.findByTestId('extra-usage-give'));
@@ -212,57 +219,50 @@ describe('giving extra usage', () => {
       fireEvent.click(screen.getByTestId('extra-usage-confirm'));
     };
 
-    it('sends the first one again, with the same key and the same words, before anything else, and gives nothing more once it went through', async () => {
-      setUpOffline({ status: 503 }, { ok: true, status: 200 });
+    it('asks whether the first one was saved, under its own key, without sending it again, and gives nothing more once it was', async () => {
+      setUpOffline({ status: 503 }, { saved: true });
       await tryAndChange();
       await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'The last try went through. Use Change if that is not what you want now.' })));
-      expect(posts()).toHaveLength(2);
-      expect(posts()[1]).toEqual(posts()[0]);
-      expect(posts()[1].amount).toBe('five');
+      expect(posts()).toHaveLength(1);
+      expect(statusAsks()).toEqual([`/api/admin/users/sara/extra-usage/status?grantKey=${encodeURIComponent(posts()[0].grantKey)}`]);
     });
 
-    it('counts the first one as given when the server says that key is already used (changed since by another admin), and gives nothing more', async () => {
-      setUpOffline({ status: 503 }, { ok: false, status: 409 });
-      await tryAndChange();
-      await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'The last try went through. Use Change if that is not what you want now.' })));
-      expect(posts()).toHaveLength(2);
-      expect(posts()[1].grantKey).toBe(posts()[0].grantKey);
-    });
-
-    it('keeps the key and gives nothing else when a 409 comes back whose words cannot be read', async () => {
-      setUpOffline({ status: 503 }, { status: 409, unreadable: true });
+    it('gives the new one with a new key when the first one was never saved, without ever sending the first one again', async () => {
+      setUpOffline({ status: 503 }, { saved: false });
       await tryAndChange();
       await waitFor(() => expect(posts()).toHaveLength(2));
-      await waitFor(() => expect((screen.getByTestId('extra-usage-confirm') as HTMLButtonElement).disabled).toBe(false));
-      // Nothing else was sent, and the key is still the first one's
-      expect(posts()).toHaveLength(2);
-      expect(posts()[1].grantKey).toBe(posts()[0].grantKey);
+      expect(posts()[1].grantKey).not.toBe(posts()[0].grantKey);
+      expect(posts()[1].amount).toBe('double');
+      expect(posts()[0].amount).toBe('five');
     });
 
-    it('gives nothing else while the first one still gets no answer, so it can never be given twice', async () => {
+    it('gives nothing else when the status could not be read, and keeps the key', async () => {
+      setUpOffline({ status: 503 }, { status: 500 });
+      await tryAndChange();
+      await waitFor(() => expect(statusAsks()).toHaveLength(1));
+      await waitFor(() => expect((screen.getByTestId('extra-usage-confirm') as HTMLButtonElement).disabled).toBe(false));
+      expect(posts()).toHaveLength(1);
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'error' }));
+    });
+
+    it('gives nothing else while the status cannot be reached, so it can never be given twice, and asks again on the next try', async () => {
       setUpOffline('offline', 'offline');
       await tryAndChange();
-      await waitFor(() => expect(posts()).toHaveLength(2));
-      expect(posts()[1].grantKey).toBe(posts()[0].grantKey);
-      // Still nothing else sent, and it can be tried again
+      await waitFor(() => expect(statusAsks()).toHaveLength(1));
       await waitFor(() => expect((screen.getByTestId('extra-usage-confirm') as HTMLButtonElement).disabled).toBe(false));
-      expect(posts()).toHaveLength(2);
+      expect(posts()).toHaveLength(1);
+      fireEvent.click(screen.getByTestId('extra-usage-confirm'));
+      await waitFor(() => expect(statusAsks()).toHaveLength(2));
+      expect(statusAsks()[1]).toBe(statusAsks()[0]);
+      expect(posts()).toHaveLength(1);
     });
 
-    it('gives the new one with a new key once the server has clearly turned the first one down', async () => {
-      setUpOffline({ status: 503 }, { ok: false, status: 400 });
+    it('treats a session that ran out like an answer that never came: the first one is looked up, never dropped', async () => {
+      setUpOffline({ status: 403 }, { saved: true });
       await tryAndChange();
-      await waitFor(() => expect(posts()).toHaveLength(3));
-      expect(posts()[2].grantKey).not.toBe(posts()[0].grantKey);
-      expect(posts()[2].amount).toBe('double');
-    });
-
-    it('treats a session that ran out like an answer that never came: the first one is sent again, never dropped', async () => {
-      setUpOffline({ status: 403 }, { ok: true, status: 200 });
-      await tryAndChange();
-      await waitFor(() => expect(posts()).toHaveLength(2));
-      expect(posts()[1].grantKey).toBe(posts()[0].grantKey);
+      await waitFor(() => expect(statusAsks()).toHaveLength(1));
       await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'The last try went through. Use Change if that is not what you want now.' })));
+      expect(posts()).toHaveLength(1);
     });
   });
 

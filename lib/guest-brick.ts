@@ -146,16 +146,17 @@ export async function claimGuestBrickReply(input: { guestId?: unknown; turnId?: 
   const turnId = idOf(input.turnId, 'turnId');
   const [{ universeKey }, limits] = await Promise.all([placeFor(input.roomUrl), getBrickLimits()]);
 
-  const [guestSince, poolSince] = await Promise.all([
-    windowStart(`gb:guest:${guestKey}`, FAIR_USAGE_WINDOW_HOURS, now),
-    windowStart(`gb:pool:${universeKey}`, FAIR_USAGE_WINDOW_HOURS, now),
-  ]);
   const ends = (since: Date) => new Date(since.getTime() + FAIR_USAGE_WINDOW_HOURS * HOUR).toISOString();
 
   return prisma.$transaction(async (tx) => {
     // Always the guest's lock first, then the universe's: two claims never wait on each other in a circle
     await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${`gb:guest:${guestKey}`}))`);
     await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${`gb:pool:${universeKey}`}))`);
+    // The windows are read once both locks are held: a claim that waited for the locks while another one opened a new window counts in that window
+    const [guestSince, poolSince] = [
+      await windowStart(`gb:guest:${guestKey}`, FAIR_USAGE_WINDOW_HOURS, now, tx),
+      await windowStart(`gb:pool:${universeKey}`, FAIR_USAGE_WINDOW_HOURS, now, tx),
+    ];
 
     const same = await tx.guestBrickReply.findUnique({ where: { turnId }, select: { guestKey: true, failed: true } });
     if (same && same.guestKey !== guestKey) throw new GuestBrickError('turnId belongs to another guest', 409);
@@ -173,7 +174,8 @@ export async function claimGuestBrickReply(input: { guestId?: unknown; turnId?: 
     await tx.guestBrickReply.upsert({
       where: { turnId },
       create: { turnId, guestKey, universeKey, createdAt: at },
-      update: { failed: false, createdAt: at },
+      // Counted in the universe whose pool was just checked: a retry of a failed turn from another universe moves it there
+      update: { failed: false, createdAt: at, universeKey },
     });
     return { allowed: true, turnId, counted: true };
   });

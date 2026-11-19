@@ -30,6 +30,7 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { decryptApiKey } from '@/lib/encryption';
 import { disconnect, effectiveServer, listConnections, WITH_CONNECTION } from '@/lib/app-connections';
+import { grantKeyAppToBricks } from '@/lib/app-direct/grants';
 import { openKeyForm, readKey, readKeyForm, submitKey, KeyFormError } from '@/lib/app-direct/connect';
 import type { GuardDeps } from '@/lib/app-direct/guard';
 import { GET as listServices } from '@/app/api/me/apps/key-services/route';
@@ -287,6 +288,29 @@ run('key apps, in a real database', () => {
     expect(forged).toMatchObject({ authType: 'none', authConfig: null, headers: null });
   });
 
+  it('goes on to the owner’s other Bricks when one of them could not be given the app', async () => {
+    const second = (await createBrick({ ownerId: sara, name: 'Second Brick' })).id;
+    try {
+      const made = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
+      await prisma.botMcpServer.deleteMany({ where: { connectionId: made.id } });
+      const real = prisma.$transaction.bind(prisma);
+      let calls = 0;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
+        calls += 1;
+        // The first Brick's grant fails (a dropped connection, a deadlock Postgres broke)
+        return calls === 1 ? Promise.reject(new Error('the database dropped the connection')) : (real as (...a: unknown[]) => unknown)(...args);
+      }) as never);
+      try {
+        expect(await grantKeyAppToBricks(sara, { id: made.id, name: made.name })).toMatchObject({ granted: 1 });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await prisma.botMcpServer.count({ where: { connectionId: made.id } })).toBe(1);
+    } finally {
+      await prisma.bot.deleteMany({ where: { id: second } });
+    }
+  });
+
   it('disconnect takes it away', async () => {
     const made = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
     expect(await disconnect(omar, made.id)).toBe(false);
@@ -362,6 +386,29 @@ run('key apps, in a real database', () => {
         mockSend.current = null;
       }
     });
+  });
+
+  it('takes the try before the service is asked, so keys sent at the same moment cannot get past the limit together', async () => {
+    try {
+      await saveServerLimits({ bricks: { keyFormMinutes: 5, keyTries: 2 } }, sara);
+      const id = await open();
+      let asked = 0;
+      const slow: GuardDeps = {
+        resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+        send: async () => {
+          asked += 1;
+          // Every look is still on its way while the others start: none has added to the count yet
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return { status: 401, redirected: false, body: '{}', truncated: false, contentType: 'application/json' };
+        },
+      };
+      const results = await Promise.allSettled(Array.from({ length: 6 }, () => submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow)));
+      expect(asked).toBe(2);
+      expect(results.filter((r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'rejected')).toHaveLength(2);
+      expect(results.filter((r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'too_many')).toHaveLength(4);
+    } finally {
+      await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
+    }
   });
 
   it('keeps the form time and tries as Limits settings, not numbers in the code', async () => {

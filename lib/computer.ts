@@ -1121,6 +1121,9 @@ async function untilCleaned(botId: string): Promise<void> {
   }
 }
 
+/** How many times an end is tried again when the job's state moved between reading it and writing the end. */
+const END_TRIES = 4;
+
 /**
  * Ends a job once. Whatever it ran is worked out from the seconds the machine was held for it, recorded in the meter's books as
  * one event under the job's id, and its reserved room is settled to that. Then the machine rests if no other job holds it, and
@@ -1129,37 +1132,45 @@ async function untilCleaned(botId: string): Promise<void> {
  * the machine, its browser and the agent's turn are left to the purge's own removal of the machine.
  */
 async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true): Promise<void> {
-  const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
-  if (!job || isOver(job.status)) return;
-  // A caller that saw the job in line ends it only while it still is: another try may have put it on the machine in between
-  if (only !== undefined && job.status !== only) return;
-  const held = job.status === 'running' || job.status === 'waiting';
-  const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
-  let seconds = job.secondsRun + stretch;
-  const ended = await prisma.computerJob.updateMany({
-    where: { id: jobId, status: job.status },
-    data: {
-      status,
-      endedBy,
-      endedAt: now,
-      queuedFor: null,
-      waitingFor: null,
-      readyWhat: null,
-      readyWhere: null,
-      control: 'brick',
-      stretchStarted: null,
-      secondsRun: seconds,
-      agentResponseId: null,
-      brief: null,
-      // What it waited for is kept when nobody answered, so Brick can say which step it waited at; no wait is left to tell about
-      endWaitingFor: endedBy === 'unanswered' ? job.waitingFor : null,
-      handoverUntold: false,
-      // The person's own Stop, a computer turned off and a Brick deleted are never told: they just did it
-      endToldAt: silentEnding(endedBy) ? now : null,
-    },
-  });
+  // The job can change under this (a person's answer moves it between running and waiting): the end is tried again on what it is now, and
+  // only a job that is over, or no longer the one the caller meant, is let go
+  let job: NonNullable<Awaited<ReturnType<typeof prisma.computerJob.findUnique>>> | null = null;
+  let seconds = 0;
+  let ended = { count: 0 };
+  for (let attempt = 0; attempt < END_TRIES && ended.count === 0; attempt++) {
+    job = await prisma.computerJob.findUnique({ where: { id: jobId } });
+    if (!job || isOver(job.status)) return;
+    // A caller that saw the job in line ends it only while it still is: another try may have put it on the machine in between
+    if (only !== undefined && job.status !== only) return;
+    const held = job.status === 'running' || job.status === 'waiting';
+    const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
+    seconds = job.secondsRun + stretch;
+    ended = await prisma.computerJob.updateMany({
+      where: { id: jobId, status: job.status },
+      data: {
+        status,
+        endedBy,
+        endedAt: now,
+        queuedFor: null,
+        waitingFor: null,
+        readyWhat: null,
+        readyWhere: null,
+        control: 'brick',
+        stretchStarted: null,
+        secondsRun: seconds,
+        agentResponseId: null,
+        brief: null,
+        // What it waited for is kept when nobody answered, so Brick can say which step it waited at; no wait is left to tell about
+        endWaitingFor: endedBy === 'unanswered' ? job.waitingFor : null,
+        handoverUntold: false,
+        // The person's own Stop, a computer turned off and a Brick deleted are never told: they just did it
+        endToldAt: silentEnding(endedBy) ? now : null,
+      },
+    });
+  }
   // Someone else ended it between the read and the write: that one counts and settles
-  if (ended.count === 0) return;
+  if (!job || ended.count === 0) return;
+  const held = job.status === 'running' || job.status === 'waiting';
   // The job's computer holds no key from here on: a call it makes after this is refused
   await revokeJobTokens(jobId, now).catch((error) => console.error('[Computer] Could not revoke a job’s keys:', error instanceof Error ? error.message : 'unknown'));
   // A turn the agent was still running is cancelled, so it does not go on working (and spending) for a job that is over
@@ -2120,8 +2131,17 @@ export async function planEffect(jobId: string, input: { key: string; kind: Effe
     // Approved by the person, or tried and confirmed not done: claimed in one write, so two tries at the same moment do it once
     // Details and uploads are claimed from "approved" only: a tap is spent once, so one that failed needs a new tap, never a second claim
     const states = AFTER_TAKE_OVER.includes(input.kind) ? ['approved'] : ['approved', 'failed'];
-    const claimed = await prisma.computerEffect.updateMany({ where: { id: existing.id, state: { in: states } }, data: { state: 'planned', settledAt: null } });
-    return claimed.count === 1 ? { ok: true, already: false } : { ok: false, reason: 'look_up', evidence: existing.evidence };
+    const claimed = await prisma.$transaction(async (tx) => {
+      // The person's hands: checked again here, with the job held so a hand-back (or the end of the job) waits for this claim. The read
+      // above may be old by now, and a tap is only ever spent while the person still has the machine
+      if (AFTER_TAKE_OVER.includes(input.kind)) {
+        const now = await tx.$queryRaw<{ status: string; control: string }[]>`SELECT "status", "control" FROM "computer_jobs" WHERE "id" = ${jobId} FOR SHARE`;
+        if (now.length === 0 || now[0].status !== 'waiting' || now[0].control !== 'person') return 'hand_over_first' as const;
+      }
+      return (await tx.computerEffect.updateMany({ where: { id: existing.id, state: { in: states } }, data: { state: 'planned', settledAt: null } })).count;
+    });
+    if (claimed === 'hand_over_first') return { ok: false, reason: 'hand_over_first' };
+    return claimed === 1 ? { ok: true, already: false } : { ok: false, reason: 'look_up', evidence: existing.evidence };
   }
   try {
     await prisma.computerEffect.create({ data: { jobId, effectKey: input.key.slice(0, 255), kind: input.kind, state: 'planned', evidence: input.evidence?.slice(0, 500) ?? null } });

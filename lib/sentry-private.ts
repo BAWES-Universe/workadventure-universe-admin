@@ -30,14 +30,16 @@ export function withoutPass(value: string): string {
 const MAX_DEPTH = 12;
 
 function scrub(holder: Record<string, unknown> | unknown[], depth: number, seen: WeakSet<object>): void {
-  if (depth > MAX_DEPTH || seen.has(holder)) return;
+  if (seen.has(holder)) return;
   seen.add(holder);
   const entries: [string | number, unknown][] = Array.isArray(holder) ? holder.map((value, index) => [index, value]) : Object.entries(holder);
   for (const [key, value] of entries) {
     if (typeof value === 'string') {
       if (holdsPrivateAddress(value)) (holder as Record<string | number, unknown>)[key] = withoutPass(value);
     } else if (value !== null && typeof value === 'object') {
-      scrub(value as Record<string, unknown> | unknown[], depth + 1, seen);
+      // What is too deep to be read is not sent (it could hold a pass), rather than sent unread
+      if (depth + 1 > MAX_DEPTH) (holder as Record<string | number, unknown>)[key] = '[too deep to read]';
+      else scrub(value as Record<string, unknown> | unknown[], depth + 1, seen);
     }
   }
 }
