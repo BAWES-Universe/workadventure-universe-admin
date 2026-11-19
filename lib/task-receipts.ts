@@ -313,7 +313,7 @@ async function receiptsNewest(personId: string, limit: number): Promise<ReceiptR
       AND NOT (
         r."state" = 'refunded' AND COALESCE(r."category", '') = 'apps'
         AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" <> 'refused')
-        AND NOT EXISTS (SELECT 1 FROM meter_events m WHERE m."bot_id" = r."bot_id" AND (
+        AND NOT EXISTS (SELECT 1 FROM meter_events m WHERE m."bot_id" = r."bot_id" AND (m."kind" <> 'model_call' OR COALESCE(m."cost_micros", 0) > 0) AND (
           m."job_id" = r."task_key"
           OR (m."job_id" IS NULL AND m."detail"->>'taskKey' = r."task_key")
           -- A charged use made under the task's run that names no task of its own is shown on a receipt of that run (see eventsFor): never hide it. Uncharged lines (the Brick's own thinking) are not money taken.
@@ -325,7 +325,8 @@ async function receiptsNewest(personId: string, limit: number): Promise<ReceiptR
     ORDER BY COALESCE(r."ended_at", r."started_at") DESC, r."id" DESC
     LIMIT ${limit}`);
   if (ids.length === 0) return [];
-  const rows = await prisma.taskReceipt.findMany({ where: { id: { in: ids.map((row) => row.id) } } });
+  // The state is checked again as the rows are read: a receipt that moved to checking between the two reads is not listed (it is under investigation)
+  const rows = await prisma.taskReceipt.findMany({ where: { id: { in: ids.map((row) => row.id) }, state: { notIn: ['running', 'checking'] } } });
   const order = new Map(ids.map((row, index) => [row.id, index]));
   return rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 }

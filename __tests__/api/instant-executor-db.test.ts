@@ -1159,6 +1159,20 @@ run('the bounded Instant executor, in a real database', () => {
       expect(rows.map((row) => row.state)).toEqual(['failed', 'denied', 'denied']);
     });
 
+    it('a session whose check could not be saved is not counted as checked, denied or remaining-free', async () => {
+      const p = fakeProvider();
+      await connection(`g-${tag}`, 'https://backend.composio.dev/tool_router/trs_g/mcp');
+      p.instant.sessionInstant.mockResolvedValue('allowed');
+      p.instant.denySessionInstant.mockResolvedValue('denied' as never);
+      const spy = jest.spyOn(prisma.instantSessionCheck, 'upsert').mockRejectedValueOnce(new Error('could not save'));
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        expect(await denyInstantOnSessions(50, p.adapter)).toMatchObject({ checked: 0, denied: 0, failed: 1, remaining: 1 });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('a session the provider no longer has is recorded as gone', async () => {
       const p = fakeProvider();
       await connection(`e-${tag}`, 'https://backend.composio.dev/tool_router/trs_e/mcp');
@@ -2075,6 +2089,12 @@ run('the bounded Instant executor, in a real database', () => {
         data: { eventId: `run-hide-9-${tag}`, kind: 'app_use', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(1000), basis: 'measured', detail: { runId: 'run-hide-9', taskKey: 'some-other-task' } },
       });
       await closeReceipt({ botId: brick, taskKey: 'hide-9', personId: sara, state: 'refunded' });
+      // The only event under its key is the Brick's own thinking at no cost: nothing was taken, so it is hidden
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-11', title: 'Only free thinking', category: 'apps' });
+      await prisma.meterEvent.create({
+        data: { eventId: `hide-11-${tag}`, kind: 'model_call', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'person', route: 'chat', jobId: 'hide-11', quantity: BigInt(1), unit: 'use', costMicros: BigInt(0), basis: 'measured', detail: { taskKey: 'hide-11' } },
+      });
+      await closeReceipt({ botId: brick, taskKey: 'hide-11', personId: sara, state: 'refunded' });
       // A task with no category is not an Apps task here: left as it was
       await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-5', title: 'No category', category: null });
       await closeReceipt({ botId: brick, taskKey: 'hide-5', personId: sara, state: 'refunded' });
@@ -2085,6 +2105,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(titles).not.toContain('Refused by a rule');
       expect(titles).not.toContain('No run made');
       expect(titles).not.toContain('Only thinking');
+      expect(titles).not.toContain('Only free thinking');
       expect(titles).not.toContain('Shares the run, no charge');
       expect(titles).toContain('Owns the run charge');
       expect(titles).not.toContain('Another task’s charge');
