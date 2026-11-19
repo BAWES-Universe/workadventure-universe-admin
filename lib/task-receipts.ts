@@ -233,9 +233,16 @@ export async function closeReceipt(
       await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'checking', outcome: null, endedAt: null, leaseUntil: null } });
       return { ok: true, id, state: 'checking', generation: row.generation };
     }
+    // A task whose computer job is still running is not over, whatever the word is (the job is its own record): it waits in checking, and ends
+    // when the job does (the bot server's close once the job is over, or the sweep)
+    const job = await jobOf(tx, input);
+    if (job && !isOver(job.status)) {
+      await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'checking', outcome: null, endedAt: null, leaseUntil: null } });
+      return { ok: true, id, state: 'checking', generation: row.generation };
+    }
     if (view.actions.length > 0) {
       // Every run has ended and some went out: the run records say how it went, whatever the word was
-      const state = await endReceipt(tx, row, outcomeWith(view, await jobOf(tx, input)), view.actions, now, input.chargedMicros ?? null);
+      const state = await endReceipt(tx, row, outcomeWith(view, job), view.actions, now, input.chargedMicros ?? null);
       return { ok: true, id, state, generation: row.generation };
     }
     if (input.state === 'checking') {

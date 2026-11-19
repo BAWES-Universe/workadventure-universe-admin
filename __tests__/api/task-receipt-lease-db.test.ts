@@ -283,6 +283,30 @@ run('receipts that always settle (O1)', () => {
     });
   });
 
+  describe('a close that arrives while the task’s computer job still runs', () => {
+    it('waits in checking, whatever the word, and ends when the job is over: by the bot server’s close once it is over, or by the sweep', async () => {
+      for (const word of ['done', 'refunded'] as const) {
+        const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: `Early ${word}`, status: 'running', startedAt: START } });
+        await open(job.id, { category: 'computer' });
+        expect(await closeReceipt({ botId: brick, taskKey: job.id, personId: sara, state: word }, at(2))).toMatchObject({ ok: true, state: 'checking', generation: 1 });
+        expect((await receipt(job.id)).state).toBe('checking');
+        // Sent again while it runs: still waiting
+        expect(await closeReceipt({ botId: brick, taskKey: job.id, personId: sara, state: word }, at(3))).toMatchObject({ state: 'checking' });
+        await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'failed', endedBy: 'error', endedAt: at(5) } });
+        // The close that follows the job's end settles it at once
+        expect(await closeReceipt({ botId: brick, taskKey: job.id, personId: sara, state: word }, at(6))).toMatchObject({ state: word });
+        expect(await receipt(job.id)).toMatchObject({ state: word, outcome: word, leaseUntil: null });
+      }
+      // With no word after, the sweep ends it
+      const quiet = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Early done, no second close', status: 'running', startedAt: START } });
+      await open(quiet.id, { category: 'computer' });
+      await closeReceipt({ botId: brick, taskKey: quiet.id, personId: sara, state: 'done' }, at(2));
+      await prisma.computerJob.update({ where: { id: quiet.id }, data: { status: 'done', endedAt: at(5) } });
+      expect(await settleCheckingReceipts(50, new Date(at(5).getTime() + UNWATCHED_CHECKING_WAIT_MS + MIN))).toBeGreaterThanOrEqual(1);
+      expect(await receipt(quiet.id)).toMatchObject({ state: 'done', outcome: 'done' });
+    });
+  });
+
   describe('receipts from before this existed, and computer jobs whose Apps all failed', () => {
     it('a receipt that ended before actions were written down is left as it ended: the sweep never picks it, and a repeat of its close changes nothing', async () => {
       const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Old job', status: 'done', startedAt: START, endedAt: at(5) } });
