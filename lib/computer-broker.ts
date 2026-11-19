@@ -45,6 +45,32 @@ export function relayAddressOf(value: unknown): string | null {
   return /^[A-Za-z0-9:/._-]+$/.test(address) ? address : null;
 }
 
+type Claim = 'prepareClaimedAt' | 'turnClaimedAt';
+
+/**
+ * A short claim on one thing a job does, kept in its row so it holds across servers. `waitMs` is how long to wait for a claim someone
+ * else holds (0: do not wait). A claim nobody released lapses after `staleMs`. Returns the mark to release it with, 'busy' when it is
+ * held, or 'gone' when there is no such job.
+ */
+async function claimOnJob(jobId: string, field: Claim, staleMs: number, waitMs: number): Promise<Date | 'busy' | 'gone'> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const mark = new Date();
+    const claimed = await prisma.computerJob.updateMany({ where: { id: jobId, OR: [{ [field]: null }, { [field]: { lt: new Date(mark.getTime() - staleMs) } }] }, data: { [field]: mark } });
+    if (claimed.count === 1) return mark;
+    if (!(await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } }))) return 'gone';
+    if (Date.now() >= deadline) return 'busy';
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+}
+
+const releaseOnJob = (jobId: string, field: Claim, mark: Date) => prisma.computerJob.updateMany({ where: { id: jobId, [field]: mark }, data: { [field]: null } }).catch(() => undefined);
+
+/** Writing a key takes at most the machine's own limit and a little more. */
+const PREPARE_CLAIM_STALE_MS = 90_000;
+const PREPARE_CLAIM_WAIT_MS = 60_000;
+const TURN_CLAIM_STALE_MS = 120_000;
+
 export type Prepared = { ok: true; expiresAt: Date } | NotLive | { ok: false; reason: 'bad_relay' | 'failed' };
 
 /**
@@ -55,6 +81,19 @@ export type Prepared = { ok: true; expiresAt: Date } | NotLive | { ok: false; re
 export async function prepareJob(jobId: string, relay: unknown, now: Date = new Date()): Promise<Prepared> {
   const address = relayAddressOf(relay);
   if (!address) return { ok: false, reason: 'bad_relay' };
+  // One key is made and written at a time for a job: ending the old keys, making the new one and writing it are one piece, so a second
+  // prepare at the same moment cannot end this one's key after it was written, or write an older key over a newer one
+  const claim = await claimOnJob(jobId, 'prepareClaimedAt', PREPARE_CLAIM_STALE_MS, PREPARE_CLAIM_WAIT_MS);
+  if (claim === 'gone') return { ok: false, reason: 'not_found' };
+  if (claim === 'busy') return { ok: false, reason: 'failed' };
+  try {
+    return await prepareClaimed(jobId, address, now);
+  } finally {
+    await releaseOnJob(jobId, 'prepareClaimedAt', claim);
+  }
+}
+
+async function prepareClaimed(jobId: string, address: string, now: Date): Promise<Prepared> {
   const live = await liveJob(jobId);
   if (!live.ok) return live;
   await revokeJobTokens(jobId, now);
@@ -122,6 +161,11 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     // The turn we kept is over (the stream was lost before its end reached us): it is cleared and this one goes ahead
     await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: job.responseId }, data: { agentResponseId: null } });
   }
+  // Only one turn is started at a time on a job: it is claimed before the agent is asked, so two starts at the same moment never both open
+  // one. The claim is let go when the turn's id is kept (or the start fails); one nobody released lapses by itself.
+  const claim = await claimOnJob(job.jobId, 'turnClaimedAt', TURN_CLAIM_STALE_MS, 0);
+  if (claim === 'gone') return { ok: false, reason: 'not_found' };
+  if (claim === 'busy') return { ok: false, reason: 'busy', responseId: job.responseId };
   // The runner's connection must not cut the turn off before its id is kept: once the agent has accepted it, it runs on the machine, and
   // an id that was never stored leaves nothing to cancel or reconnect to. So the request's own signal is not handed on; the start has its
   // own limit instead, for the agent's answer only: once it has accepted the turn the limit is lifted, because cutting the stream before its id arrived would leave a turn running on the machine with nothing to cancel.
@@ -131,6 +175,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   try {
     if (signal?.aborted) {
       clearTimeout(timer);
+      await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       return { ok: false, reason: 'failed' };
     }
     events = await provider.openTurn(job.ref, { text, sessionId: job.sessionId }, own.signal);
@@ -138,11 +183,12 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     clearTimeout(timer);
   } catch (error) {
     clearTimeout(timer);
+    await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
     if (error instanceof Agent37Error && error.code === 'session_busy') return { ok: false, reason: 'busy', responseId: error.runningResponseId };
     console.error('[Computer] Could not start a turn:', error instanceof Error ? error.message : 'unknown');
     return { ok: false, reason: 'failed' };
   }
-  return { ok: true, events: keeping(job, provider, events, { timer, controller: own }) };
+  return { ok: true, events: keeping(job, provider, events, { timer, controller: own, claim }) };
 }
 
 /** How long the agent has to accept a turn and say its id. */
@@ -157,7 +203,7 @@ async function* keeping(
   job: Live,
   provider: NonNullable<ReturnType<typeof providerFor>>,
   events: AsyncGenerator<TurnEvent>,
-  start?: { timer: ReturnType<typeof setTimeout>; controller: AbortController },
+  start?: { timer: ReturnType<typeof setTimeout>; controller: AbortController; claim?: Date },
 ): AsyncGenerator<TurnEvent> {
   let responseId: string | null = null;
   let over = false;
@@ -185,6 +231,8 @@ async function* keeping(
           },
           data: { agentSessionId: event.sessionId ?? job.sessionId, agentResponseId: event.id },
         });
+        // The id is kept (or the turn is refused): the start is over, and the next one is decided by the job's own turn from here
+        if (start?.claim) await releaseOnJob(job.jobId, 'turnClaimedAt', start.claim);
         if (kept.count === 0) {
           // The person took over (or the job ended) between asking and the agent starting, or another turn holds the job: this turn must not run
           await cancelOrFence(job, provider, event.id);
@@ -200,6 +248,8 @@ async function* keeping(
     }
   } finally {
     if (start) clearTimeout(start.timer);
+    // The turn's id is kept by now, or the stream ended without one: the start is over either way
+    if (start?.claim) await releaseOnJob(job.jobId, 'turnClaimedAt', start.claim);
     // The stream is let go of: the turn itself goes on on the machine unless it ended
     await events.return(undefined).catch(() => undefined);
     if (responseId && over) await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: responseId }, data: { agentResponseId: null } }).catch(() => undefined);

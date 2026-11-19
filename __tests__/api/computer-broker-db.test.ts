@@ -297,6 +297,48 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       expect(fake.openedTurns).toHaveLength(0);
     });
 
+    it('starts one turn at a time: a second start at the same moment is told it is busy, and the agent is asked once', async () => {
+      const { jobId } = await running();
+      fake.turns = [
+        [{ type: 'created', id: 'resp-a', sessionId: 'sess-1' }, { type: 'completed', outputText: '', usage: null }],
+        [{ type: 'created', id: 'resp-b', sessionId: 'sess-2' }, { type: 'completed', outputText: '', usage: null }],
+      ];
+      const [one, two] = await Promise.all([startTurn(jobId, 'one'), startTurn(jobId, 'two')]);
+      expect([one.ok, two.ok].sort()).toEqual([false, true]);
+      expect([one, two].find((turn) => !turn.ok)).toMatchObject({ ok: false, reason: 'busy' });
+      expect(fake.openedTurns).toHaveLength(1);
+      const started = [one, two].find((turn) => turn.ok);
+      if (!started || !started.ok) throw new Error('no turn');
+      expect((await drain(started.events)).map((event) => event.type)).toEqual(['created', 'completed']);
+      // Once that turn has ended, the claim is let go and the next one starts
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt).toBeNull();
+      expect((await startTurn(jobId, 'three')).ok).toBe(true);
+    });
+
+    it('writes one key at a time for a job: a second prepare at the same moment waits, so the key left on the machine is the one that is good', async () => {
+      const { jobId } = await running();
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let writes = 0;
+      fake.execAnswer = async () => {
+        writes += 1;
+        // The first write is slow; the second prepare starts while it waits
+        if (writes === 1) await gate;
+        return {};
+      };
+      const first = prepareJob(jobId, RELAY, NOW);
+      for (let wait = 0; wait < 100 && writes === 0; wait++) await new Promise((resolve) => setTimeout(resolve, 20));
+      const second = prepareJob(jobId, RELAY, minutes(1));
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      release();
+      expect(await first).toMatchObject({ ok: true });
+      expect(await second).toMatchObject({ ok: true });
+      // The last key written is the one that is good: the second prepare did not end it, and did not write before the first
+      const last = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(fake.commands.at(-1)?.command ?? '')?.[1] ?? '';
+      expect((await verifyJobToken(last, 'model', minutes(2))).ok).toBe(true);
+      expect(fake.commands.filter((entry) => entry.command.includes('relay.json'))).toHaveLength(2);
+    });
+
     it('never replaces the id of a turn the job already holds: a second turn started at the same moment is cancelled', async () => {
       const { jobId } = await running();
       fake.turns = [
@@ -304,6 +346,8 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         [{ type: 'created', id: 'resp-b', sessionId: 'sess-2' }, { type: 'completed', outputText: '', usage: null }],
       ];
       const first = await startTurn(jobId, 'one');
+      // The first start's claim has lapsed (nobody released it): the backstop still holds, a second turn never replaces the first one's id
+      await prisma.computerJob.update({ where: { id: jobId }, data: { turnClaimedAt: new Date(Date.now() - 10 * 60_000) } });
       const second = await startTurn(jobId, 'two');
       if (!first.ok || !second.ok) throw new Error('no turn');
       const firstEvent = await first.events.next();

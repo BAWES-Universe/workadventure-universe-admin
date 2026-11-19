@@ -3270,6 +3270,10 @@ model ComputerJob {
   // still going before it starts another, and the take-over fence knows which turn to cancel. Empty when no turn is running.
   agentSessionId    String? @map("agent_session_id") @db.VarChar(80)
   agentResponseId   String? @map("agent_response_id") @db.VarChar(120)
+  // Claims held for a short time, so two of the same thing on one job never run side by side: writing a new key onto the machine, and
+  // starting a turn (until its id is kept). A claim that was never released lapses by itself.
+  prepareClaimedAt  DateTime? @map("prepare_claimed_at")
+  turnClaimedAt     DateTime? @map("turn_claimed_at")
   // What the person asked for in more words than the title, for the agent only: never shown, never sent anywhere else, and cleared when the job ends
   brief             String? @db.VarChar(4000)
 
