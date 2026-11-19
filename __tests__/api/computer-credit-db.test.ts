@@ -15,7 +15,7 @@ import { createBrick } from '@/lib/brick-create';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { memberAllowance } from '@/lib/meter-allowance';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { finishJob, giveComputer, startJob } from '@/lib/computer';
+import { finishJob, giveComputer, startJob, stopJobFor } from '@/lib/computer';
 import { mintJobToken } from '@/lib/computer-token';
 import * as calls from '@/lib/computer-calls';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
@@ -276,26 +276,45 @@ run('credit for computers, on the real books', () => {
       expect(holds.map((hold) => Number(hold.refundedMicros)).sort()).toEqual([20_000, 30_000]);
     });
 
-    (givesBack ? it : it.skip)(
-      'is given back by itself when a job fails on our side: the calls it drew for are put back, its time draws none, and the month is untouched',
-      async () => {
-        const sara = await running();
-        const { jobId, token } = await job(sara);
-        await gift([sara.id], 'computers', 1_000_000);
-        await call(token, 'a', 50_000, 30_000);
-        expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(970_000);
-        await failedOnOurSide(jobId, new Date(NOW.getTime() + 10 * 60_000));
-        expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
-        // Ten minutes of the machine were held and are written against nobody, so they drew nothing either
-        expect(await prisma.creditHold.count({ where: { jobKey: jobId, chargeClass: 'computer_job' } })).toBe(0);
-        const holds = await prisma.creditHold.findMany({ where: { jobKey: jobId } });
-        expect(holds.map((hold) => Number(hold.refundedMicros))).toEqual([30_000]);
-        expect((await month(sara.id, new Date(NOW.getTime() + 10 * 60_000))).leftMicros).toBe(BASE + 1_000_000);
-        // A call that reports after the job failed is written against nobody, and draws nothing
-        await settleModelCall(jobId, 'late', { costMicros: 10_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW).catch(() => undefined);
-        expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
-      },
-    );
+    it('is given back by itself when a job fails on our side: every call it drew for is put back, its time draws none, and asked twice it is once', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      await call(token, 'b', 50_000, 20_000);
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(950_000);
+      await failedOnOurSide(jobId, new Date(NOW.getTime() + 10 * 60_000));
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      // Ten minutes of the machine were held and drew nothing, because the job failed on our side
+      expect(await prisma.creditHold.count({ where: { jobKey: jobId, chargeClass: 'computer_job' } })).toBe(0);
+      const holds = await prisma.creditHold.findMany({ where: { jobKey: jobId } });
+      expect(holds.map((hold) => Number(hold.refundedMicros)).sort()).toEqual([20_000, 30_000]);
+      // Said again (a second end, a sweep): nothing more is given
+      await failedOnOurSide(jobId, new Date(NOW.getTime() + 11 * 60_000));
+      await giveBackComputerCredit(jobId);
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(2);
+      // A call that reports after the job failed: its draw is put back too
+      await settleModelCall(jobId, 'late', { costMicros: 10_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW).catch(() => undefined);
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      if (givesBack) expect((await month(sara.id, new Date(NOW.getTime() + 10 * 60_000))).leftMicros).toBe(BASE + 1_000_000);
+    });
+
+    it('is not given back for a job that ran fine, or that the person stopped: what it drew stays drawn', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      await finishJob(jobId, 'done', new Date(NOW.getTime() + 10 * 60_000));
+      // 30,000 for the call and 60,000 for ten minutes of the machine
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000 - 90_000);
+      const other = await running('omar');
+      const second = await job(other);
+      await gift([other.id], 'computers', 1_000_000);
+      await call(second.token, 'a', 50_000, 30_000);
+      await stopJobFor(other.brickId, other.id, new Date(NOW.getTime() + 10 * 60_000));
+      expect((await computerCredit(prisma as never, other.id, NOW)).availableMicros).toBe(1_000_000 - 90_000);
+    });
 
     it('is given back as a small replacement when the gift ended before the failure was found', async () => {
       const sara = await running();

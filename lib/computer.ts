@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { getBrickLimits } from '@/lib/bot-limits';
-import { drawComputerCredit } from '@/lib/computer-credit';
+import { drawComputerCredit, endedOnOurSide, giveBackComputerCredit } from '@/lib/computer-credit';
 import { memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
@@ -840,6 +840,9 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // The job is over either way: the machine still rests and the line still moves, and the sweep gives the room back
     console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown');
   }
+  // A job that failed on our side takes nothing from the person's credit either: what it drew (its calls, its time) goes back into the lots it came from.
+  // Every way a job ends as failed on our side comes through here (a failure the runner reports, a first turn nobody can name, a lost worker, a key that closed)
+  if (endedOnOurSide(status, endedBy)) await giveBackComputerCredit(job.id, now);
 
   if (held) {
     await closeOutIfUnheld(job.botId);
@@ -860,7 +863,8 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
   const provider = providerFor(row);
   const cost = costOfSeconds(seconds, provider ? provider.microsPerMinute() : null);
   // Credit given on purpose (a gift for computers) is drawn first, before the event is written, so the allowance never counts what credit paid
-  if (cost !== null && cost > 0) await drawComputerCredit({ eventId: `computer:${job.id}:time`, personId: job.personId, botId: job.botId, jobId: job.id, costMicros: cost, chargeClass: 'computer_job' }, at);
+  // (never for a job that failed on our side: it takes nothing from the person's credit, and this may be the sweep writing it late, after the end gave the rest back)
+  if (!endedOnOurSide(why.status, why.endedBy) && cost !== null && cost > 0) await drawComputerCredit({ eventId: `computer:${job.id}:time`, personId: job.personId, botId: job.botId, jobId: job.id, costMicros: cost, chargeClass: 'computer_job' }, at);
   await recordMeterEvent({
     eventId: `computer:${job.id}:time`,
     kind: 'computer_time',
@@ -1282,6 +1286,8 @@ export async function settleTurnHold(botId: string, exceptJobId?: string): Promi
     if (holders > 0) return false;
     const provider = providerFor(row);
     if (!provider || !row.providerRef) return false;
+    // Its work is saved before it is stopped, as every other stop does (a copy that fails is not claimed and never holds the stop up; a machine that is not awake is not woken to be copied)
+    if (await provider.awake(row.providerRef).catch(() => false)) await saveCopy(botId, row.providerRef, provider);
     if (!(await stopMachine(botId, row.providerRef, provider))) return false;
     await lift();
     // Proved asleep: no first turn of any job on this machine can still be running, so their marks go (as after a take-over fence that stopped it)

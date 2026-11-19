@@ -169,3 +169,16 @@ export async function giveBackComputerCredit(jobId: string, now: Date = new Date
     console.error('[Computer] Could not give back the credit a job drew:', error instanceof Error ? error.message : 'unknown');
   }
 }
+
+/** A job that ended as failed (or was ended as lost) on our side, by its cause: what the release's `givenBackJob` says, so credit goes back with it. */
+export const endedOnOurSide = (status: string, endedBy: string | null | undefined): boolean => (status === 'failed' || status === 'stopped') && endedBy === 'error';
+
+/** After a step drew credit: when its job has failed on our side meanwhile (a call that reports after the end), what the job drew goes back, this step's draw too. */
+export async function giveBackCreditIfJobFailed(jobId: string, now: Date = new Date()): Promise<void> {
+  try {
+    const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, endedBy: true } });
+    if (job && endedOnOurSide(job.status, job.endedBy)) await giveBackComputerCredit(jobId, now);
+  } catch (error) {
+    console.error('[Computer] Could not look at a job before giving back its credit:', error instanceof Error ? error.message : 'unknown');
+  }
+}

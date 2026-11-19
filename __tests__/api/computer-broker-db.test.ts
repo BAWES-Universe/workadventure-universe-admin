@@ -959,6 +959,22 @@ run('the broker, the fence and keep-awake, in a real database', () => {
           }
         });
 
+        it('the machine’s files are saved before it is stopped, as every other stop does, so a later restore never uses an older copy', async () => {
+          const { sara, jobId } = await running();
+          const { sent } = await acceptedAndLost(jobId);
+          try {
+            fake.calls.length = 0;
+            await finishJob(jobId, 'failed', NOW);
+            const names = fake.calls.map((call) => call.name);
+            expect(names).toContain('stop');
+            expect(names).toContain('saveFiles');
+            expect(names.indexOf('saveFiles')).toBeLessThan(names.indexOf('stop'));
+            expect((await machineOf(sara.brickId)).filesSavedAt).not.toBeNull();
+          } finally {
+            sent.mockRestore();
+          }
+        });
+
         it('a stop that cannot be proved keeps the hold: the job in line stays in line, and a later sweep that proves the machine asleep lets it start', async () => {
           const { sara, jobId } = await running();
           const { sent } = await acceptedAndLost(jobId);

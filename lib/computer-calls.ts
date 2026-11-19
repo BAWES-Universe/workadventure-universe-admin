@@ -2,7 +2,7 @@ import { prisma } from '@/lib/db';
 import { recordMeterEvent } from '@/lib/meter';
 import { releaseRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
 import { verifyJobToken } from '@/lib/computer-token';
-import { drawComputerCredit } from '@/lib/computer-credit';
+import { drawComputerCredit, giveBackCreditIfJobFailed } from '@/lib/computer-credit';
 
 /**
  * A model call a Brick's computer makes (build handoff v2, section 5): room is taken BEFORE the call, and what it really cost is
@@ -96,6 +96,8 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
   // Credit given on purpose (a gift for computers) is drawn first, before the event is written, so the allowance never counts what credit paid:
   // asked twice it is the same draw. A call on the owner's own key, or with no price known, draws nothing
   if (!paidByOther && cost !== null && cost > 0) await drawComputerCredit({ eventId, personId: job.personId, botId: job.botId, jobId: job.id, costMicros: cost, chargeClass: 'computer_model' }, now);
+  // The job may have failed on our side while this call ran: what it drew, this call's draw too, goes back
+  if (!paidByOther && cost !== null && cost > 0) await giveBackCreditIfJobFailed(job.id, now);
   const written = await recordMeterEvent({
     eventId,
     kind: 'model_call',
