@@ -158,6 +158,25 @@ const defaultRandom = (length: number): string => {
 /** How long a browser without Web Locks waits, after writing its first code, before reading back which code the storage holds. */
 const SETTLE_MS = 150;
 const waitFor = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** The promise's answer, or a rejection as soon as the signal aborts (whichever comes first). */
+function untilAborted<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new Error('aborted'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error('aborted'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
 
 export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePaymentsHost {
   const ask = options.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -288,7 +307,8 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
 
   const post = async (body: Record<string, unknown>, signal?: AbortSignal): Promise<Answer> => {
     // A receipt link's code goes only with a question (Restore, Check payment), never with the start of a purchase
-    const own = await settleCode();
+    // Making the code may wait for another tab (Web Locks): that wait is part of what the deadline covers, so a held lock never keeps `busy` set
+    const own = await untilAborted(settleCode(), signal);
     const link = body.restore || body.check ? receiptCode() : null;
     const response = await ask(base, { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, recoveryCode: own, ...(link && link !== own ? { receiptCode: link } : {}) }), signal });
     const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;

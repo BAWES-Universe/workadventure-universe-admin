@@ -588,6 +588,23 @@ describe('a paying page on the public share link', () => {
     two.host.destroy();
   });
 
+  it('does not stay busy for ever when another tab holds the recovery code lock: the 30 s deadline covers the wait too', async () => {
+    // A lock that is never given: the other tab holds it
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: { request: () => new Promise(() => undefined) } } });
+    const { tap, host, lines, calls } = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }));
+    tap({ request: 'r1', restore: true });
+    await flush();
+    expect(lines.at(-1)?.checking ?? false).toBe(false);
+    expect(calls).toHaveLength(0);
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: true });
+    // Not blocked: the buyer can ask again (and it is the lock that is still held, not the host)
+    host.restorePurchase();
+    await flush();
+    expect(lines.at(-1)).toMatchObject({ checking: true });
+    host.destroy();
+  });
+
   it('offers no receipt of its own for a purchase a receipt link found: it is "back", and this browser’s code would not bring it back', async () => {
     const { tap, host, lines } = setup((call) => (call.body.restore ? { body: { status: 'checking', orderId: 'o-5', via: 'receipt', buyer: 'guest' } } : { body: { status: 'paid', testPayment: false } }));
     tap({ request: 'r1', restore: true });
