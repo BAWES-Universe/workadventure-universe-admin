@@ -11,5 +11,7 @@ export const POST = (request: NextRequest, { params }: { params: Promise<{ id: s
   asOwner(request, params, async (id, ownerId) => {
     const control = await handBack(id, ownerId);
     if (control.ok) return brickJson(request, { job: control.job });
-    return control.reason === 'not_found' ? notFound(request) : brickJson(request, { error: 'Nothing is waiting for you' }, 409);
+    if (control.reason === 'not_found') return notFound(request);
+    if (control.reason === 'in_progress') return brickJson(request, { error: 'The computer is still changing hands. Try again in a moment.', inProgress: true }, 409);
+    return brickJson(request, { error: 'Nothing is waiting for you' }, 409);
   });

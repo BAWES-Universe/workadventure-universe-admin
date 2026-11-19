@@ -18,6 +18,11 @@ const bodySchema = z
     writes: z.boolean().optional(),
     // The run of a goal or task that asks for the computer (game #2002): a run handed out again finds its job and never starts a second
     runId: z.string().min(1).max(36).optional(),
+    // The way the Brick weighed (never a price): the connected app that could seem to do the job, about how many steps it would take, and why it cannot
+    plan: z
+      .object({ app: z.string().trim().max(120).nullish(), steps: z.number().int().min(1).max(10000).nullish(), appCannot: z.string().trim().max(300).nullish() })
+      .strict()
+      .optional(),
     // The conversation the job began in. Only a direct chat can start computer work (a Brick standing in a room never uses its owner's computer for anyone), so
     // anything but `dm` is refused. The result goes back to that conversation and nowhere else.
     origin: z.object({ kind: z.literal('dm'), ref: z.string().min(1).max(255) }).strict().optional(),
@@ -51,13 +56,15 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 }
 
 /**
- * POST /api/bots/:id/computer-jobs { userId, isGuest?, title, writes?, runId?, origin? }
+ * POST /api/bots/:id/computer-jobs { userId, isGuest?, title, writes?, runId?, plan?, origin? }
  * The bot server starts a job on a Brick's computer (game #2000), after it chose the computer as the way (an app that can do it for
  * less wakes no computer: that choice is made before this call, and this call is the only thing that can make or wake a machine).
  * Only the Brick's owner starts work on it: whoever else is talking to the Brick gets `not_owner`. Answers with the job and why
  * it waits if it does: `turn` (another job is writing), `allowance` (the person's own is used up: "Ask for more"), `busy` or
  * `pool` (wait in line, nothing to ask for), or `{ ok: false, reason }` when it cannot start at all (`rule`: a rule the person said in chat does not let it spend, with the rule's own words). With a `runId` (a run of the
  * person's goal or task on this Brick) the run starts one job, ever: asked again it answers with that job; another's run is `no_run`.
+ * With a `plan` (the connected app the Brick weighed, about how many steps, and why it cannot) Orbit works out which way costs least: when the app does,
+ * it answers `{ ok: false, reason: 'cheaper_route', app }` and starts nothing.
  *
  * Auth: service token only.
  */
@@ -77,10 +84,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // A rule the person said in chat ("no more than $1 a month", "only my own accounts") is held before a job exists, so Brick can say so at once
     const ruled = await ownerSpendAllowed(id, person.personId, 'computer', new Date(), parsed.data.runId ?? null);
     if (!ruled.ok) return NextResponse.json({ ok: false, reason: 'rule', rule: { id: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words } });
-    const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, brief: parsed.data.brief, writes: parsed.data.writes, runId: parsed.data.runId, origin: parsed.data.origin ?? null });
+    const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, brief: parsed.data.brief, writes: parsed.data.writes, runId: parsed.data.runId, plan: parsed.data.plan, origin: parsed.data.origin ?? null });
     if (started.ok) return NextResponse.json({ ok: true, job: started.job, restoredFrom: started.restoredFrom });
     // A rule that stopped it on the try itself (the pre-check only asks for a first millionth): the same shape as above, with the rule's words
     if (started.reason === 'rule') return NextResponse.json({ ok: false, reason: 'rule', rule: { id: null, why: null, leftMicros: null, words: started.words } });
+    // A connected app would do it for less: nothing was started, and the Brick is told which one to use
+    if (started.reason === 'cheaper_route') return NextResponse.json({ ok: false, reason: 'cheaper_route', app: started.app });
     return NextResponse.json({ ok: false, reason: started.reason });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });

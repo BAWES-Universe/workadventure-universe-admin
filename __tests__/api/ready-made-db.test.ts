@@ -57,6 +57,14 @@ const fake = () => {
   return adapter;
 };
 
+
+async function monthSpentByOthers(): Promise<number> {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const sum = await prisma.meterEvent.aggregate({ where: { kind: 'app_use', route: 'app', payerKind: 'universe', occurredAt: { gte: start } }, _sum: { costMicros: true } });
+  return Number(sum._sum.costMicros ?? 0);
+}
+
 run('ready-made apps through the adapter, in a real database', () => {
   beforeAll(async () => {
     process.env.BOT_SERVICE_TOKEN = SERVICE_TOKEN;
@@ -66,6 +74,10 @@ run('ready-made apps through the adapter, in a real database', () => {
     omar = (await person('omar')).id;
     boss = (await person('boss', 'boss@example.test')).id;
     saraBrick = (await createBrick({ ownerId: sara, name: 'Brick' })).id;
+  });
+  beforeEach(async () => {
+    // Paid use of an App is held against two Limits (lib/app-use-cap.ts): other suites change the shared meter setting, so these suites state theirs
+    await saveMeterSettings({ appUseCeilingMicros: 1_000_000_000, appUseMemberCeilingMicros: 1_000_000_000 }, boss);
   });
   afterEach(async () => {
     setAdapterForTests(undefined);
@@ -769,5 +781,110 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect(servers.find((s) => s.id === serverId)?.readyMade).toBe(true);
     expect(servers.find((s) => s.id === ownGrant.id)?.readyMade).toBe(false);
     expect(servers.find((s) => s.id === ownServer.id)?.readyMade).toBe(false);
+  });
+
+  describe('the spending stop on what the universe pays for (audit F3): held back before the call, never after', () => {
+    /** The meter setting is shared with other suites: what was there is put back, never deleted */
+    async function withLimits(limits: { appUseCeilingMicros: number | null; appUseMemberCeilingMicros: number | null }, run: () => Promise<void>) {
+      const before = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
+      try {
+        await saveMeterSettings(limits, boss);
+        await run();
+      } finally {
+        if (before) await prisma.appSetting.update({ where: { key: 'meter' }, data: { value: before.value as never } });
+        else await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
+      }
+    }
+    const paidUses = () => prisma.meterEvent.count({ where: { personId: sara, kind: 'app_use', route: 'app' } });
+
+    it('lets a person use it until their own month’s limit would be passed, then says so in plain words and does not call the App', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      // A use is $0.0004 (400); room for two
+      await withLimits({ appUseCeilingMicros: 1_000_000, appUseMemberCeilingMicros: 900 }, async () => {
+        expect((await useIt({ serverId })).status).toBe(200);
+        expect((await useIt({ serverId })).status).toBe(200);
+        const held = await useIt({ serverId });
+        expect(held.status).toBe(200);
+        expect(await held.json()).toEqual({ ok: false, data: { error: expect.stringContaining('Nothing was done'), stopped: true } });
+        expect(adapter.use).toHaveBeenCalledTimes(2);
+        expect(await paidUses()).toBe(2);
+      });
+    });
+
+    it('stops everyone at the month’s limit for all people together', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      await withLimits({ appUseCeilingMicros: 800 + (await monthSpentByOthers()), appUseMemberCeilingMicros: 1_000_000 }, async () => {
+        expect((await useIt({ serverId })).status).toBe(200);
+        expect((await useIt({ serverId })).status).toBe(200);
+        expect(await (await useIt({ serverId })).json()).toMatchObject({ ok: false, data: { stopped: true } });
+        expect(adapter.use).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    it('stops all paid use while a limit is empty, and 0 pauses it', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      await withLimits({ appUseCeilingMicros: null, appUseMemberCeilingMicros: 1_000_000 }, async () => {
+        expect(await (await useIt({ serverId })).json()).toMatchObject({ data: { stopped: true } });
+      });
+      await withLimits({ appUseCeilingMicros: 0, appUseMemberCeilingMicros: 1_000_000 }, async () => {
+        expect(await (await useIt({ serverId })).json()).toMatchObject({ data: { stopped: true } });
+      });
+      expect(adapter.use).not.toHaveBeenCalled();
+      expect(await paidUses()).toBe(0);
+    });
+
+    it('never counts a retry against the limit it already used, and never lets two calls at the same moment both take the last place', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      await withLimits({ appUseCeilingMicros: 1_000_000, appUseMemberCeilingMicros: 900 }, async () => {
+        const callId = `call-${randomUUID()}`;
+        expect((await useIt({ serverId, callId })).status).toBe(200);
+        expect((await useIt({ serverId })).status).toBe(200);
+        // The limit is now full, and a retry of the first call is still "already asked", not "stopped"
+        expect((await useIt({ serverId, callId })).status).toBe(409);
+      });
+      await prisma.meterEvent.deleteMany({ where: { personId: sara } });
+      adapter.use.mockClear();
+      await withLimits({ appUseCeilingMicros: 1_000_000, appUseMemberCeilingMicros: 900 }, async () => {
+        const answers = await Promise.all(Array.from({ length: 6 }, () => useIt({ serverId })));
+        const done = await Promise.all(answers.map(async (answer) => (await answer.json()) as { ok: boolean }));
+        expect(done.filter((answer) => answer.ok)).toHaveLength(2);
+        expect(adapter.use).toHaveBeenCalledTimes(2);
+        expect(await paidUses()).toBe(2);
+      });
+    });
+
+    it('holds a call back, and says so in plain words, when the limits cannot be checked in time: never a server error, never let through unchecked', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const transaction = jest.spyOn(prisma, '$transaction').mockRejectedValueOnce(new Error('Transaction API error: timed out'));
+      try {
+        const held = await useIt({ serverId });
+        expect(held.status).toBe(200);
+        expect(await held.json()).toMatchObject({ ok: false, data: { stopped: true } });
+        expect(adapter.use).not.toHaveBeenCalled();
+        expect(await paidUses()).toBe(0);
+      } finally {
+        transaction.mockRestore();
+        quiet.mockRestore();
+      }
+      // And the next call, once the books answer again, goes through
+      expect((await useIt({ serverId })).status).toBe(200);
+    });
+
+    it('holds back a paid call on the app link with a tool result that says so, and lets listings through', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      const call = (extra: Record<string, unknown>) =>
+        linkApp(request('/api/ready-made/link', { method: 'POST', token: SERVICE_TOKEN, body: { botId: saraBrick, serverId, requesterKey: `sara-${tag}`, ...extra } }));
+      await withLimits({ appUseCeilingMicros: 0, appUseMemberCeilingMicros: 0 }, async () => {
+        const stopped = await (await call({ callId: `call-${randomUUID()}`, message: { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'GMAIL_FETCH_EMAILS', arguments: {} } } })).json();
+        expect(stopped.status).toBe(200);
+        expect(JSON.parse(stopped.body)).toMatchObject({ id: 7, result: { isError: true, content: [{ type: 'text', text: expect.stringContaining('Nothing was done') }] } });
+        expect(adapter.callLink).not.toHaveBeenCalled();
+        expect(await paidUses()).toBe(0);
+        // A listing is not a use and costs nothing: it still goes through
+        expect((await call({ message: { jsonrpc: '2.0', id: 1, method: 'tools/list' } })).status).toBe(200);
+        expect(adapter.callLink).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 });

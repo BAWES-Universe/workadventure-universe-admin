@@ -722,6 +722,20 @@ export function brickLimits(values: BrickLimits): Limit[] {
       ],
     },
     {
+      id: 'coldStorageDays',
+      label: 'Days a computer sits unused before it is packed away',
+      hint: 'A Brick’s computer that nobody has used for this long is packed into our own encrypted storage, tried out on a throwaway computer, and only then deleted. Its files, its Files list and its chat stay as they are. The next job that needs it brings it back first, which takes a few minutes.',
+      unit: 'days',
+      value: values.coldStorageDays,
+      recommended: recommended.coldStorageDays,
+      note: 'Applies from the next check. A computer already packed away stays packed until it is next used.',
+      options: [
+        { value: 7, label: '7 days', meaning: 'Saves the most; a return after a quiet week takes a few minutes.' },
+        { value: 14, label: '14 days', meaning: 'A steady pace.' },
+        { value: 30, label: '30 days', meaning: 'Keeps computers ready for longer.' },
+      ],
+    },
+    {
       id: 'scheduledCardWait',
       label: 'How long a card from a goal or task waits for a person',
       hint: 'When a goal or task needs a yes before it goes on, its card waits this long. If it is the same thing again on a later check, that check joins the waiting card: no second card, no second message. When the time is up the card ends.',

@@ -3,22 +3,57 @@ import { gzipSync } from 'node:zlib';
 import { Readable } from 'node:stream';
 
 const stored = new Map<string, Buffer>();
+// The signal each copy into place was sent with (a copy that is not bounded could land after the row that names it was taken)
+const copySignals: Array<AbortSignal | undefined> = [];
+// Bodies a test hands out for a key to read (a download that is still coming)
+const openBodies = new Map<string, Readable>();
 let abortCalled = false;
 let failUpload = false;
 let failCopy = false;
 
+let purged = false;
+const writes = new Map<string, { botId: string; expiresAt: Date }>();
+let failDeletes = false;
+let copyTimesOut = false;
+jest.mock('@/lib/db', () => ({
+  prisma: {
+    brickPurge: { count: async () => (purged ? 1 : 0) },
+    savedCopyWrite: {
+      create: async ({ data }: { data: { botId: string; expiresAt: Date } }) => {
+        const id = `w${writes.size + 1}-${data.botId}`;
+        writes.set(id, data);
+        return { id };
+      },
+      deleteMany: async ({ where }: { where: { id: string } }) => ({ count: writes.delete(where.id) ? 1 : 0 }),
+      count: async ({ where }: { where: { id: string } }) => (writes.has(where.id) ? 1 : 0),
+    },
+  },
+}));
 jest.mock('@/lib/artifact-storage', () => ({
   artifactBucket: () => ({
     bucket: 'b',
     s3: {
-      send: async (command: { input: { Key: string; CopySource?: string } }) => {
+      send: async (command: { input: { Key: string; CopySource?: string } }, options?: { abortSignal?: AbortSignal }) => {
         const kind = command.constructor.name;
         if (kind === 'CopyObjectCommand') {
           if (failCopy) throw new Error('bucket could not copy');
+          copySignals.push(options?.abortSignal);
+          if (copyTimesOut) throw Object.assign(new Error('The operation was aborted'), { name: 'TimeoutError' });
           stored.set(command.input.Key, stored.get((command.input.CopySource as string).replace('b/', '')) as Buffer);
           return {};
         }
+        if (kind === 'ListObjectsV2Command') {
+          const input = command.input as unknown as { Prefix: string; ContinuationToken?: string; StartAfter?: string };
+          // As a real bucket: the token is the last key read, so deleting while listing never skips one. Two to a page.
+          const keys = [...stored.keys()].filter((key) => key.startsWith(input.Prefix) && (!input.ContinuationToken || key > input.ContinuationToken) && (!input.StartAfter || key > input.StartAfter)).sort();
+          const page = keys.slice(0, 2);
+          return { Contents: page.map((Key) => ({ Key, LastModified: new Date('2026-11-14T12:00:00Z') })), IsTruncated: keys.length > 2, NextContinuationToken: page[page.length - 1] };
+        }
+        if (kind === 'GetObjectCommand' && openBodies.has(command.input.Key)) {
+          return { Body: openBodies.get(command.input.Key), ContentLength: 1000 };
+        }
         if (kind === 'DeleteObjectCommand') {
+          if (failDeletes) throw new Error('bucket would not delete');
           stored.delete(command.input.Key);
           return {};
         }
@@ -49,7 +84,7 @@ jest.mock('@aws-sdk/lib-storage', () => ({
   },
 }));
 
-import { COPY_OVERHEAD, openSavedCopy, savedCopyKey, savedCopyOf, storeSavedCopy } from '@/lib/agent37/saved-copies';
+import { COPY_OVERHEAD, CopyOutcomeUnknown, deleteSavedCopy, listSealed, openSavedCopy, openSealedStream, savedCopyKey, savedCopyOf, storeSavedCopy } from '@/lib/agent37/saved-copies';
 
 const webStream = (...parts: Buffer[]) => Readable.toWeb(Readable.from(parts)) as unknown as ReadableStream<Uint8Array>;
 
@@ -58,9 +93,14 @@ beforeAll(() => {
 });
 beforeEach(() => {
   stored.clear();
+  copySignals.length = 0;
   abortCalled = false;
   failUpload = false;
   failCopy = false;
+  purged = false;
+  writes.clear();
+  failDeletes = false;
+  copyTimesOut = false;
 });
 
 describe('the saved copy of a Brick computer’s files', () => {
@@ -73,6 +113,101 @@ describe('the saved copy of a Brick computer’s files', () => {
     expect(file.length).toBe(archive.length + COPY_OVERHEAD);
     expect(info.bytes).toBe(archive.length);
     expect(openSavedCopy(file).equals(archive)).toBe(true);
+  });
+
+  it('bounds the copy into place: it is sent with a signal that gives the request up after a few minutes, so it cannot land long after its row was taken', async () => {
+    await storeSavedCopy('bot-1', webStream(archive));
+    expect(copySignals).toHaveLength(1);
+    expect(copySignals[0]).toBeInstanceOf(AbortSignal);
+    expect(copySignals[0]?.aborted).toBe(false);
+  });
+
+  it('says the outcome is not known when the copy into place is given up on by its signal (it may still finish at the bucket), and a plain failure is not that', async () => {
+    copyTimesOut = true;
+    await expect(storeSavedCopy('bot-1', webStream(archive))).rejects.toBeInstanceOf(CopyOutcomeUnknown);
+  });
+
+  it('does not leave a copy behind for a Brick that was purged while its save was running: the purge marker is there by the time the copy lands', async () => {
+    // The purge wrote its marker and deleted the bucket's keys for the Brick before this save's copy landed
+    purged = true;
+    await expect(storeSavedCopy('bot-gone', webStream(archive))).rejects.toThrow('deleted while its files were being saved');
+    expect(await savedCopyOf('bot-gone')).toBeNull();
+    expect([...stored.keys()]).toEqual([]);
+  });
+
+  it('writes the save down before it starts and lets go of it once the copy is checked, so a purge can always tell a save is under way', async () => {
+    let seenDuring = 0;
+    const slow = Readable.from(
+      (async function* () {
+        seenDuring = writes.size;
+        yield archive;
+      })(),
+    );
+    await storeSavedCopy('bot-1', Readable.toWeb(slow) as unknown as ReadableStream<Uint8Array>);
+    expect(seenDuring).toBe(1);
+    expect(writes.size).toBe(0);
+  });
+
+  it('refuses to start for a Brick already purged, leaving nothing in the bucket and no row behind', async () => {
+    purged = true;
+    await expect(storeSavedCopy('bot-gone', webStream(archive))).rejects.toThrow('deleted while its files were being saved');
+    expect(stored.size).toBe(0);
+    expect(writes.size).toBe(0);
+  });
+
+  it('takes a copy back that landed after the purge, and lets go of its row only then', async () => {
+    const stream = Readable.from(
+      (async function* () {
+        yield archive;
+        purged = true;
+      })(),
+    );
+    await expect(storeSavedCopy('bot-late', Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>)).rejects.toThrow('deleted while its files were being saved');
+    expect(stored.has(savedCopyKey('bot-late'))).toBe(false);
+    expect(writes.size).toBe(0);
+  });
+
+  it('publishes nothing once its write was settled by the purge (the row is gone) or its window is over: the upload is taken out again and the copy is not saved', async () => {
+    // A purge settled this write (deleted its row) while the upload was still running
+    const settledStream = Readable.from(
+      (async function* () {
+        yield archive;
+        writes.clear();
+      })(),
+    );
+    await expect(storeSavedCopy('bot-slow', Readable.toWeb(settledStream) as unknown as ReadableStream<Uint8Array>)).rejects.toThrow('no longer allowed');
+    expect(stored.has(savedCopyKey('bot-slow'))).toBe(false);
+    expect([...stored.keys()].filter((key) => key.includes('bot-slow'))).toEqual([]);
+    // Its window ran out while it was uploading
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    try {
+      const slowStream = Readable.from(
+        (async function* () {
+          yield archive;
+          jest.setSystemTime(Date.now() + 3 * 60 * 60_000);
+        })(),
+      );
+      await expect(storeSavedCopy('bot-slow', Readable.toWeb(slowStream) as unknown as ReadableStream<Uint8Array>)).rejects.toThrow('no longer allowed');
+      expect(stored.has(savedCopyKey('bot-slow'))).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('keeps its row when a copy that landed after the purge could not be taken away again, so the purge still finds it', async () => {
+    // The copy lands, the marker is seen, and the bucket will not delete: the copy may still be there, so the row stays for the purge to settle
+    const real = purged;
+    expect(real).toBe(false);
+    const stream = Readable.from(
+      (async function* () {
+        yield archive;
+        purged = true;
+        failDeletes = true;
+      })(),
+    );
+    await expect(storeSavedCopy('bot-late', Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>)).rejects.toThrow();
+    expect(writes.size).toBe(1);
+    expect(stored.has(savedCopyKey('bot-late'))).toBe(true);
   });
 
   it('refuses a copy that was changed', async () => {
@@ -116,5 +251,47 @@ describe('the saved copy of a Brick computer’s files', () => {
 
   it('says nothing is saved for a Brick that has no copy', async () => {
     expect(await savedCopyOf('nobody')).toBeNull();
+  });
+
+  it('deletes everything kept of a Brick for good: the saved copy and every staged object, across pages, and nobody else\'s', async () => {
+    stored.set(savedCopyKey('bot-1'), Buffer.from('saved'));
+    stored.set('computer-saves/bot-1.attempt-a.ubc.new', Buffer.from('staged a'));
+    stored.set('computer-saves/bot-1.attempt-b.ubc.new', Buffer.from('staged b'));
+    stored.set('computer-saves/bot-1.attempt-c.ubc.new', Buffer.from('staged c'));
+    stored.set(savedCopyKey('bot-10'), Buffer.from('another Brick whose id starts the same'));
+    stored.set(savedCopyKey('bot-2'), Buffer.from('another Brick'));
+    await deleteSavedCopy('bot-1');
+    expect([...stored.keys()].sort()).toEqual([savedCopyKey('bot-10'), savedCopyKey('bot-2')].sort());
+    expect(await savedCopyOf('bot-1')).toBeNull();
+    // Asked for a Brick with nothing kept it is the same answer
+    await expect(deleteSavedCopy('bot-1')).resolves.toBeUndefined();
+  });
+
+  it('lists the objects under a prefix with the time each was written, across pages, up to the limit asked for', async () => {
+    for (const name of ['a', 'b', 'c', 'd', 'e']) stored.set(`computer-cold/bot-1/${name}`, Buffer.from(name));
+    stored.set('computer-cold-other/x', Buffer.from('not under the prefix'));
+    const all = await listSealed('computer-cold/', 100);
+    expect(all.map((object) => object.key)).toEqual(['a', 'b', 'c', 'd', 'e'].map((name) => `computer-cold/bot-1/${name}`));
+    expect(all[0].modifiedAt.toISOString()).toBe('2026-11-14T12:00:00.000Z');
+    expect(await listSealed('computer-cold/', 3)).toHaveLength(3);
+    // Starting after a key: the pass before stopped there
+    expect((await listSealed('computer-cold/', 100, 'computer-cold/bot-1/c')).map((object) => object.key)).toEqual(['d', 'e'].map((name) => `computer-cold/bot-1/${name}`));
+  });
+
+  it('lets go of the response from the bucket when a download is cancelled half way, so its connection is not left checked out', async () => {
+    const body = new Readable({ read() {} });
+    body.push(Buffer.alloc(10));
+    openBodies.set('computer-cold/bot-1/x', body);
+    try {
+      const { stream } = await openSealedStream('computer-cold/bot-1/x');
+      expect(body.destroyed).toBe(false);
+      // The client goes away: the decrypted stream is destroyed
+      stream.on('error', () => undefined);
+      stream.destroy();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(body.destroyed).toBe(true);
+    } finally {
+      openBodies.delete('computer-cold/bot-1/x');
+    }
   });
 });

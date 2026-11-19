@@ -12,17 +12,21 @@ import { POST as fillRoute } from '@/app/api/bricks/[id]/computer/fill-details/r
 import { POST as dismissRoute } from '@/app/api/bricks/[id]/computer/dismiss/route';
 import { GET as stateRoute, POST as startRoute } from '@/app/api/bots/[id]/computer-jobs/route';
 import { GET as getJobRoute, POST as jobAction } from '@/app/api/bots/[id]/computer-jobs/[jobId]/route';
+import { GET as visitsRoute } from '@/app/api/bricks/[id]/computer/jobs/[jobId]/visits/route';
 import { POST as sweepRoute } from '@/app/api/computer/sweep/route';
+import { POST as reviewRoute } from '@/app/api/bots/[id]/computer-route-review/route';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import * as computer from '@/lib/computer';
+import * as visitsLib from '@/lib/computer-visits';
 import * as spend from '@/lib/spend-rules';
 
 jest.mock('@/lib/db', () => ({ prisma: { user: { findUnique: jest.fn() } } }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/usage-person', () => ({ resolveUsagePerson: jest.fn() }));
 jest.mock('@/lib/computer');
+jest.mock('@/lib/computer-visits');
 jest.mock('@/lib/spend-rules');
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
@@ -30,6 +34,7 @@ const db = prisma as unknown as { user: { findUnique: jest.Mock } };
 const session = getSessionUser as jest.Mock;
 const resolve = resolveUsagePerson as jest.Mock;
 const lib = computer as jest.Mocked<typeof computer>;
+const visits = visitsLib as jest.Mocked<typeof visitsLib>;
 const rules = spend as jest.Mocked<typeof spend>;
 
 const SERVICE_TOKEN = 'bot-server-secret';
@@ -56,6 +61,39 @@ beforeEach(() => {
 afterAll(() => {
   if (tokenBefore === undefined) delete process.env.BOT_SERVICE_TOKEN;
   else process.env.BOT_SERVICE_TOKEN = tokenBefore;
+});
+
+describe('where a job’s computer browsed (R06)', () => {
+  const path = `/api/bricks/${BRICK}/computer/jobs/${JOB}/visits`;
+  const own = () => lib.brickOf.mockResolvedValue({ id: BRICK } as never);
+
+  it('is for a signed-in person: nobody gets a 401, a guest a 403, and nothing is read', async () => {
+    session.mockResolvedValue(null);
+    expect((await visitsRoute(call(path, { method: 'GET' }), jobParams)).status).toBe(401);
+    session.mockResolvedValue({ id: 'g1' });
+    db.user.findUnique.mockResolvedValue({ isGuest: true });
+    expect((await visitsRoute(call(path, { method: 'GET' }), jobParams)).status).toBe(403);
+    expect(visits.visitsFor).not.toHaveBeenCalled();
+  });
+
+  it('is the same "not found" for a Brick that is not theirs and for a job that is not that Brick’s', async () => {
+    lib.brickOf.mockResolvedValue(null);
+    expect((await visitsRoute(call(path, { method: 'GET' }), jobParams)).status).toBe(404);
+    expect(visits.visitsFor).not.toHaveBeenCalled();
+    own();
+    visits.visitsFor.mockResolvedValue(null);
+    expect((await visitsRoute(call(path, { method: 'GET' }), jobParams)).status).toBe(404);
+    expect(visits.visitsFor).toHaveBeenCalledWith(BRICK, JOB);
+  });
+
+  it('shows the owner their own job’s record, by the Brick and job named, and a token cannot ask for it', async () => {
+    own();
+    visits.visitsFor.mockResolvedValue({ state: 'complete', items: [] });
+    expect(await (await visitsRoute(call(path, { method: 'GET' }), jobParams)).json()).toEqual({ visits: { state: 'complete', items: [] } });
+    expect(lib.brickOf).toHaveBeenCalledWith(BRICK, 'u-sara');
+    session.mockResolvedValue(null);
+    expect((await visitsRoute(asBot(path, { method: 'GET' }), jobParams)).status).toBe(401);
+  });
 });
 
 describe('the owner’s calls', () => {
@@ -132,6 +170,13 @@ describe('the owner’s calls', () => {
     expect(await (await takeOverRoute(call('/x'), params)).json()).toEqual({ job: { id: JOB } });
     lib.takeOver.mockResolvedValue({ ok: false, reason: 'nothing_waiting' });
     expect((await takeOverRoute(call('/x'), params)).status).toBe(409);
+    // Still changing hands, or the fence could not be proved: said as it is, never as success and never as "nothing waiting"
+    lib.takeOver.mockResolvedValue({ ok: false, reason: 'in_progress' });
+    expect(await (await takeOverRoute(call('/x'), params)).json()).toMatchObject({ inProgress: true });
+    lib.takeOver.mockResolvedValue({ ok: false, reason: 'not_secured' });
+    const unsecured = await takeOverRoute(call('/x'), params);
+    expect(unsecured.status).toBe(409);
+    expect(await unsecured.json()).toMatchObject({ notSecured: true });
     lib.handBack.mockResolvedValue({ ok: false, reason: 'nothing_waiting' });
     expect((await handBackRoute(call('/x'), params)).status).toBe(409);
   });
@@ -233,6 +278,28 @@ describe('the bot server’s calls', () => {
     expect((await startRoute(asBot('/x', { body: { title: 'x' } }), params)).status).toBe(400);
   });
 
+  it('passes the way the Brick proposes to the start, and says which app to use instead when one would do it for less', async () => {
+    resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+    lib.startJob.mockResolvedValue({ ok: false, reason: 'cheaper_route', app: 'Notion' });
+    const plan = { app: 'Notion', steps: 3, appCannot: null };
+    expect(await (await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x', plan } }), params)).json()).toEqual({ ok: false, reason: 'cheaper_route', app: 'Notion' });
+    expect(lib.startJob).toHaveBeenCalledWith(expect.objectContaining({ plan }));
+    // A plan with something else in it, or a step count that is not a number, is not accepted
+    expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x', plan: { app: 'Notion', steps: 'many' } } }), params)).status).toBe(400);
+    expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x', plan: { app: 'Notion', price: 1 } } }), params)).status).toBe(400);
+  });
+
+  it('answers the review at 20 app steps for the bot server only, for the person it resolves, and a guest never has one', async () => {
+    resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+    lib.reviewAppSteps.mockResolvedValue({ review: true });
+    expect((await reviewRoute(call('/x', { body: { userId: 'wa-sara', app: 'Notion', steps: 20 } }), params)).status).toBe(401);
+    expect(await (await reviewRoute(asBot('/x', { body: { userId: 'wa-sara', app: 'Notion', steps: 20 } }), params)).json()).toEqual({ review: true });
+    expect(lib.reviewAppSteps).toHaveBeenCalledWith(BRICK, 'u-sara', { app: 'Notion', steps: 20 });
+    expect((await reviewRoute(asBot('/x', { body: { userId: 'wa-sara', app: 'Notion', steps: 'many' } }), params)).status).toBe(400);
+    resolve.mockResolvedValue({ personId: null, guest: true });
+    expect(await (await reviewRoute(asBot('/x', { body: { userId: 'wa-guest', isGuest: true, app: 'Notion', steps: 20 } }), params)).json()).toEqual({ review: false });
+  });
+
   it('reaches a job only through its own Brick', async () => {
     lib.getJob.mockResolvedValue({ ...job, botId: 'another-brick' } as never);
     expect((await getJobRoute(asBot('/x', { method: 'GET' }), jobParams)).status).toBe(404);
@@ -254,10 +321,14 @@ describe('the bot server’s calls', () => {
     await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'details', ready: { what: 'Your details', where: 'visa-portal.example' } } }), jobParams);
     expect(lib.requestHandover).toHaveBeenCalledWith(JOB, 'details', expect.any(Date), { what: 'Your details', where: 'visa-portal.example' });
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done' } }), jobParams);
-    expect(lib.finishJob).toHaveBeenCalledWith(JOB, 'done', expect.any(Date), undefined);
+    expect(lib.finishJob).toHaveBeenCalledWith(JOB, 'done', expect.any(Date), undefined, undefined);
     // A failure carries the computer's own sentence about why, kept cleaned for the message that tells the person
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', why: 'The site kept showing an error' } }), jobParams);
-    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), 'The site kept showing an error');
+    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), 'The site kept showing an error', undefined);
+    // Who a failure is down to travels with it (only `ours` is given back); a word it does not know is refused
+    await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours' } }), jobParams);
+    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), undefined, 'ours');
+    expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'theirs' } }), jobParams)).status).toBe(400);
     expect(await (await jobAction(asBot('/x', { body: { action: 'plan-effect', key: 'pr-1', kind: 'publish' } }), jobParams)).json()).toEqual({ ok: false, reason: 'look_up', evidence: 'draft pull request' });
     expect(await (await jobAction(asBot('/x', { body: { action: 'settle-effect', key: 'pr-1', state: 'done', evidence: 'pull request 12' } }), jobParams)).json()).toEqual({ ok: true });
   });

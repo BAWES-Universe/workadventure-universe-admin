@@ -14,7 +14,8 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { finishJob, giveComputer, handBack, renewJob, startJob, sweepComputers, takeOver } from '@/lib/computer';
+import { computerView, finishJob, giveComputer, handBack, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { activityFor } from '@/lib/task-receipts';
 import { TOKEN_LIFE_MS, forgetOldTokens, mintJobToken, verifyJobToken } from '@/lib/computer-token';
 import { authorizeModelCall, callRoomKey, releaseModelCall, settleModelCall } from '@/lib/computer-calls';
 
@@ -124,11 +125,9 @@ run('what a computer may ask of Orbit, in a real database', () => {
       const before = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
       await takeOver(sara.brickId, sara.id, NOW);
       expect(await verifyJobToken(before.token, 'model', NOW)).toEqual({ ok: false, reason: 'refused' });
-      // A key made while the person has the machine is for an older number once they hand it back
-      const during = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
-      expect((await verifyJobToken(during.token, 'model', NOW)).ok).toBe(true);
+      // While the person has the machine Brick is not admitted: no key is made for it (audit F02: the agent and the person are never authorized together)
+      expect(await mintJobToken(jobId, 'model', NOW)).toEqual({ ok: false, reason: 'not_running' });
       await handBack(sara.brickId, sara.id);
-      expect(await verifyJobToken(during.token, 'model', NOW)).toEqual({ ok: false, reason: 'refused' });
       const after = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
       expect((await verifyJobToken(after.token, 'model', NOW)).ok).toBe(true);
       const job = await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
@@ -172,6 +171,20 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect(Number(room.settledMicros)).toBe(1_200);
     });
 
+    it('says so when a call cost more than the room held for it, and the extra counts from then on (audit F9)', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      expect(await call(token, 'c-over', 1_000)).toMatchObject({ ok: true, reservedMicros: 1_000 });
+      await settleModelCall(jobId, 'c-over', { costMicros: 1_800, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW);
+      const event = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:c-over` } });
+      expect(Number(event.costMicros)).toBe(1_800);
+      expect(event.detail).toMatchObject({ overrunMicros: 800 });
+      // A call that stayed inside its room says nothing of the kind
+      expect(await call(token, 'c-fine', 1_000)).toMatchObject({ ok: true });
+      await settleModelCall(jobId, 'c-fine', { costMicros: 900, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW);
+      expect((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:c-fine` } })).detail).not.toHaveProperty('overrunMicros');
+    });
+
     it('is the same call when asked twice, and a settled call is not another', async () => {
       const { jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
@@ -191,6 +204,26 @@ run('what a computer may ask of Orbit, in a real database', () => {
       // 60,000 of the 1,000,000 allowance is the job's own room: a call that asks for more than what is left is refused
       expect(await call(token, 'big', 2_000_000)).toEqual({ ok: false, reason: 'allowance' });
       expect(await prisma.meterReservation.count({ where: { reservationKey: callRoomKey(jobId, 'big') } })).toBe(0);
+    });
+
+    it('ends the job right there as the person’s when it is refused for their allowance, so a failed turn after it can never end it as ours and give back what it ran', async () => {
+      const { sara, jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      // 900,000 of the 1,000,000 allowance goes on the job's own calls (60,000 more is its own room)
+      expect(await call(token, 'spent', 900_000)).toMatchObject({ ok: true });
+      await settleModelCall(jobId, 'spent', { costMicros: 900_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW);
+      expect(await call(token, 'more', 100_000)).toEqual({ ok: false, reason: 'allowance' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'stopped', endedBy: 'allowance' });
+      const month = async () => (await computerView(sara.brickId, sara.id, NOW))?.month?.leftFraction as number;
+      expect(await month()).toBeLessThan(0.2);
+      // The runner's three failed turns on the refusal end it "failed, ours": the job is already over, so nothing is given back
+      await finishJob(jobId, 'failed', NOW, 'Three turns failed', 'ours');
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'stopped', endedBy: 'allowance' });
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:spent` } })).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
+      expect(await month()).toBeLessThan(0.2);
+      await sweepComputers(minutes(30));
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:spent` } })).toMatchObject({ personKey: `person:${sara.id}` });
+      expect(await month()).toBeLessThan(0.2);
     });
 
     it('is refused with "pool" when the platform ceiling has no room, never "ask for more"', async () => {
@@ -302,6 +335,18 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect(await prisma.meterEvent.count({ where: { eventId: `computer:${jobId}:call:late` } })).toBe(1);
     });
 
+    it('a late report that cost more than the room held keeps the overrun beside the figure', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await call(token, 'late-over', 9_000);
+      await sweepComputers(minutes(30));
+      const facts = { costMicros: 12_000, basis: 'measured' as const, payer: { kind: 'universe' as const }, route: 'universe-ai' as const };
+      expect(await settleModelCall(jobId, 'late-over', facts, minutes(31))).toEqual({ ok: true });
+      const event = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:late-over` } });
+      expect(event).toMatchObject({ basis: 'measured', costMicros: BigInt(12_000) });
+      expect(event.detail).toMatchObject({ overrunMicros: 3_000 });
+    });
+
     it('the sweep gives back room held for a call whose job is gone, instead of finding it again on every sweep', async () => {
       const { jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
@@ -312,5 +357,195 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect(room.state).toBe('released');
       expect(await prisma.meterEvent.count({ where: { eventId: `computer:${jobId}:call:orphan` } })).toBe(0);
     });
+  });
+
+  describe('the model calls of a job that failed on our side', () => {
+    const facts = (costMicros: number) => ({ costMicros, basis: 'measured' as const, payer: { kind: 'universe' as const }, route: 'universe-ai' as const });
+    const callEvent = (jobId: string, callId: string) => prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:${callId}` } });
+    /** A call that was sent and settled while the job ran. */
+    const settledCall = async (jobId: string, callId: string, cost: number) => {
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await authorizeModelCall({ token, callId, estimateMicros: 5_000, payer: 'universe' }, NOW);
+      await settleModelCall(jobId, callId, facts(cost), NOW);
+    };
+
+    it('are not taken from the person’s month, and stay in the books as our own cost, written against nobody', async () => {
+      const { sara, jobId } = await running();
+      await settledCall(jobId, 'c1', 1_200);
+      await settledCall(jobId, 'c2', 3_000);
+      // While it runs they are the person's
+      expect((await callEvent(jobId, 'c1')).personKey).toBe(`person:${sara.id}`);
+      await finishJob(jobId, 'failed', minutes(5), null, 'ours');
+      for (const [callId, cost] of [['c1', 1_200], ['c2', 3_000]] as const) {
+        const event = await callEvent(jobId, callId);
+        expect(event).toMatchObject({ kind: 'model_call', pool: 'computer', payerKind: 'universe', personKey: 'unknown', personId: null, jobId, costMicros: BigInt(cost) });
+        expect(event.detail).toMatchObject({ givenBack: true, forPersonId: sara.id });
+      }
+      // Their month is whole, the calls' room is settled (not left held), and our exposure still counts what the providers billed
+      expect((await computerView(sara.brickId, sara.id, minutes(5)))?.month?.leftFraction).toBe(1);
+      expect(await prisma.meterReservation.count({ where: { personKey: `person:${sara.id}`, state: 'held' } })).toBe(0);
+      expect((await currentEnvelope(minutes(5))).unsettledMicros).toBeGreaterThanOrEqual(30_000 + 4_200);
+      // Asked again, it changes nothing more
+      const [item] = await activityFor(sara.id);
+      expect(item).toMatchObject({ state: 'refunded', spentMicros: null });
+    });
+
+    it('stay the person’s when the runner says the job failed with no cause, or that the agent gave up or ran out of turns: only a cause that is ours gives back', async () => {
+      for (const cause of [undefined, null, 'agent'] as const) {
+        const { sara, jobId } = await running();
+        await settledCall(jobId, 'c1', 1_200);
+        await finishJob(jobId, 'failed', minutes(5), 'The agent gave up', cause);
+        expect(await callEvent(jobId, 'c1')).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
+        await sweepComputers(minutes(30));
+        expect(await callEvent(jobId, 'c1')).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
+        expect(await prisma.meterEvent.findFirstOrThrow({ where: { eventId: `computer:${jobId}:time` } })).toMatchObject({ personId: sara.id });
+        await prisma.computerJob.deleteMany({ where: { id: jobId } });
+      }
+    });
+
+    it('are written against nobody when the report comes after the job failed (a call that finished late)', async () => {
+      const { sara, jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await authorizeModelCall({ token, callId: 'late', estimateMicros: 5_000, payer: 'universe' }, NOW);
+      await finishJob(jobId, 'failed', minutes(5), null, 'ours');
+      expect(await settleModelCall(jobId, 'late', { ...facts(2_500), cutShort: true }, minutes(6))).toEqual({ ok: true });
+      const event = await callEvent(jobId, 'late');
+      expect(event).toMatchObject({ personKey: 'unknown', personId: null, costMicros: BigInt(2_500) });
+      expect(event.detail).toMatchObject({ givenBack: true, forPersonId: sara.id, cutShort: true });
+      expect((await computerView(sara.brickId, sara.id, minutes(6)))?.month?.leftFraction).toBe(1);
+    });
+
+    it('are given back when the worker was lost: the sweep stops the job, and the call it never heard back from is written against nobody too', async () => {
+      const { sara, jobId } = await running();
+      await settledCall(jobId, 'done1', 1_000);
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await authorizeModelCall({ token, callId: 'lost', estimateMicros: 9_000, payer: 'universe' }, NOW);
+      await sweepComputers(minutes(60));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'stopped', endedBy: 'error' });
+      expect(await callEvent(jobId, 'done1')).toMatchObject({ personKey: 'unknown', personId: null });
+      expect(await callEvent(jobId, 'lost')).toMatchObject({ personKey: 'unknown', personId: null, costMicros: null, basis: 'unknown' });
+      expect((await computerView(sara.brickId, sara.id, minutes(60)))?.month?.leftFraction).toBe(1);
+    });
+
+    it('a report that replaces an unknown figure keeps the call given back', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await authorizeModelCall({ token, callId: 'lost', estimateMicros: 9_000, payer: 'universe' }, NOW);
+      await sweepComputers(minutes(60));
+      await settleModelCall(jobId, 'lost', facts(4_000), minutes(61));
+      const event = await callEvent(jobId, 'lost');
+      expect(event).toMatchObject({ personKey: 'unknown', personId: null, costMicros: BigInt(4_000), basis: 'measured' });
+      expect(event.detail).toMatchObject({ givenBack: true });
+    });
+
+    it('a report that read the job as still running does not wipe a give-back made in the meantime, and still drops what the sweep guessed', async () => {
+      const { sara, jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await authorizeModelCall({ token, callId: 'lost', estimateMicros: 9_000, payer: 'universe' }, NOW);
+      await sweepComputers(minutes(60));
+      // The sweep wrote it as unknown, cut short, and given back
+      expect((await callEvent(jobId, 'lost')).detail).toMatchObject({ givenBack: true, cutShort: true });
+      // A report that read the job while it still ran (so it carries no give-back of its own) comes after
+      const real = prisma.computerJob.findUnique.bind(prisma.computerJob);
+      const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementationOnce(((args: never) => real({ ...(args as object), where: { id: jobId } }).then((job: unknown) => ({ ...(job as object), status: 'running', endedBy: null }))) as never);
+      await settleModelCall(jobId, 'lost', { ...facts(4_000), tokens: { input: 10, output: 2 } }, minutes(61));
+      spy.mockRestore();
+      const event = await callEvent(jobId, 'lost');
+      expect(event).toMatchObject({ personKey: 'unknown', personId: null, costMicros: BigInt(4_000), basis: 'measured' });
+      expect(event.detail).toMatchObject({ givenBack: true, forPersonId: sara.id, tokens: { input: 10, output: 2 } });
+      // This report was not cut short, so the sweep's own mark is gone
+      expect(event.detail).not.toHaveProperty('cutShort');
+    });
+
+    it('stay the person’s when the job ran fine or the person stopped it', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const done = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!done.ok) throw new Error('no');
+      await settledCall(done.job.id, 'c1', 1_200);
+      await finishJob(done.job.id, 'done', minutes(5));
+      expect(await callEvent(done.job.id, 'c1')).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
+      expect((await callEvent(done.job.id, 'c1')).detail).not.toHaveProperty('givenBack');
+
+      const stopped = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(6));
+      if (!stopped.ok) throw new Error('no');
+      await settledCall(stopped.job.id, 'c2', 700);
+      await stopJobFor(sara.brickId, sara.id, minutes(9));
+      expect(await callEvent(stopped.job.id, 'c2')).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
+      // Their month has both jobs' calls and minutes taken from it
+      const left = (await computerView(sara.brickId, sara.id, minutes(9)))?.month?.leftFraction ?? 1;
+      expect(left).toBeLessThan(1 - (1_200 + 700) / 1_000_000);
+    });
+
+    it('do not touch a call on the owner’s own key (it was never the platform’s cost or the person’s allowance)', async () => {
+      const { sara, jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await authorizeModelCall({ token, callId: 'k1', estimateMicros: 1, payer: 'own-key' }, NOW);
+      await settleModelCall(jobId, 'k1', { costMicros: 900, basis: 'measured', payer: { kind: 'person', personId: sara.id }, route: 'own-key' }, NOW);
+      await finishJob(jobId, 'failed', minutes(5), null, 'ours');
+      expect(await callEvent(jobId, 'k1')).toMatchObject({ payerKind: 'person', payerPersonId: sara.id, personKey: `person:${sara.id}` });
+    });
+
+    it('are found by a later sweep when the give-back at the end did not go through, and Activity does not say refunded until then', async () => {
+      const { sara, jobId } = await running();
+      await settledCall(jobId, 'c1', 1_200);
+      await finishJob(jobId, 'failed', minutes(5), null, 'ours');
+      // Put it back as it would be had the give-back write failed
+      await prisma.meterEvent.updateMany({ where: { eventId: `computer:${jobId}:call:c1` }, data: { personKey: `person:${sara.id}`, personId: sara.id, detail: {} } });
+      expect((await computerView(sara.brickId, sara.id, minutes(6)))?.month?.leftFraction).toBeLessThan(1);
+      // A call that still draws from the month is something taken: not "nothing taken"
+      expect((await activityFor(sara.id))[0].state).not.toBe('refunded');
+      await sweepComputers(minutes(7));
+      expect(await callEvent(jobId, 'c1')).toMatchObject({ personKey: 'unknown', personId: null, costMicros: BigInt(1_200) });
+      expect((await computerView(sara.brickId, sara.id, minutes(7)))?.month?.leftFraction).toBe(1);
+      expect((await activityFor(sara.id))[0]).toMatchObject({ state: 'refunded', spentMicros: null });
+    });
+
+    it('are found by a sweep however long after the job failed, so a person is never left charged for them', async () => {
+      const { sara, jobId } = await running();
+      await settledCall(jobId, 'c1', 1_200);
+      await finishJob(jobId, 'failed', minutes(5), null, 'ours');
+      await prisma.meterEvent.updateMany({ where: { eventId: `computer:${jobId}:call:c1` }, data: { personKey: `person:${sara.id}`, personId: sara.id, detail: {} } });
+      await sweepComputers(minutes(5 + 40 * 24 * 60));
+      expect(await callEvent(jobId, 'c1')).toMatchObject({ personKey: 'unknown', personId: null });
+    });
+
+    it('is the receipt’s state even when the job is not among the newest jobs listed: the receipts and the jobs are each cut to the newest few', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const older = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Older' }, NOW);
+      if (!older.ok) throw new Error('no');
+      await finishJob(older.job.id, 'failed', minutes(5), null, 'ours');
+      await prisma.taskReceipt.create({ data: { botId: sara.brickId, personId: sara.id, taskKey: older.job.id, title: 'Older', category: 'computer', state: 'done', chargedMicros: BigInt(30_000), payerKind: 'person', payerPersonId: sara.id, startedAt: minutes(10), endedAt: minutes(20) } });
+      // A newer job than the older one (but ended before the receipt did) takes the only place in the job list of one
+      const newer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Newer' }, minutes(12));
+      if (!newer.ok) throw new Error('no');
+      await finishJob(newer.job.id, 'done', minutes(15));
+      const items = await activityFor(sara.id, 1);
+      // The receipt is the newest line, though its job was cut from the job list by the limit
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ title: 'Older', state: 'refunded', spentMicros: null });
+    });
+
+    it('a receipt already stored as refunded does not read as refunded while a platform-paid call of the job is still on the person', async () => {
+      const { sara, jobId } = await running();
+      await settledCall(jobId, 'c1', 1_200);
+      await finishJob(jobId, 'failed', minutes(5), null, 'ours');
+      await prisma.taskReceipt.create({ data: { botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Visa form', category: 'computer', state: 'refunded', payerKind: 'person', payerPersonId: sara.id, startedAt: NOW, endedAt: minutes(5) } });
+      await prisma.meterEvent.updateMany({ where: { eventId: `computer:${jobId}:call:c1` }, data: { personKey: `person:${sara.id}`, personId: sara.id, detail: {} } });
+      expect((await activityFor(sara.id))[0].state).toBe('done');
+      await sweepComputers(minutes(7));
+      expect((await activityFor(sara.id))[0]).toMatchObject({ state: 'refunded', spentMicros: null });
+    });
+
+    it('is the receipt’s own state too: a job with a receipt of its own whose time was given back shows as refunded, not with the charge the receipt stored', async () => {
+      const { sara, jobId } = await running();
+      await finishJob(jobId, 'failed', minutes(5), null, 'ours');
+      await prisma.taskReceipt.create({ data: { botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Visa form', category: 'computer', state: 'done', chargedMicros: BigInt(30_000), payerKind: 'person', payerPersonId: sara.id, startedAt: NOW, endedAt: minutes(5) } });
+      const items = await activityFor(sara.id);
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ title: 'Visa form', state: 'refunded', spentMicros: null });
+    });
+
   });
 });

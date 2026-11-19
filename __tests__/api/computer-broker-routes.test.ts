@@ -57,9 +57,9 @@ describe('every route', () => {
 
 describe('prepare', () => {
   it('says the key will last and never gives it back', async () => {
-    lib.prepareJob.mockResolvedValueOnce({ ok: true, expiresAt: new Date('2026-11-15T12:15:00Z') });
+    lib.prepareJob.mockResolvedValueOnce({ ok: true, expiresAt: new Date('2026-11-15T12:15:00Z'), git: true });
     const answer = await prepare(req('POST', { relay: 'https://bot.example.test' }), params);
-    expect(await answer.json()).toEqual({ ok: true, expiresAt: '2026-11-15T12:15:00.000Z' });
+    expect(await answer.json()).toEqual({ ok: true, expiresAt: '2026-11-15T12:15:00.000Z', git: true });
     expect(lib.prepareJob).toHaveBeenCalledWith('job-1', 'https://bot.example.test');
   });
   it('checks the body first, and says why in a word and a status', async () => {

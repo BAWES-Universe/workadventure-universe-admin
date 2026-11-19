@@ -13,7 +13,7 @@ import { prisma } from '@/lib/db';
 import { setAdapterForTests, type LinkAnswer, type ReadyMadeAdapter } from '@/lib/app-adapter';
 import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
 import { setOwnVersionsForTests, type OwnAppVersion } from '@/lib/app-routes/own-versions';
-import { recordMeterEvent } from '@/lib/meter';
+import { recordMeterEvent, saveMeterSettings } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
 import { GET as demandGet } from '@/app/api/admin/apps-demand/route';
 import { PUT as routePut } from '@/app/api/admin/app-routes/[appKey]/route';
@@ -76,6 +76,10 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
     omar = (await person('omar')).id;
     boss = (await person('boss', 'boss@example.test')).id;
     saraBrick = (await createBrick({ ownerId: sara, name: 'Brick' })).id;
+  });
+  beforeEach(async () => {
+    // Paid use of an App is held against two Limits (lib/app-use-cap.ts): other suites change the shared meter setting, so this suite states its own
+    await saveMeterSettings({ appUseCeilingMicros: 1_000_000_000, appUseMemberCeilingMicros: 1_000_000_000 }, boss);
   });
   afterEach(async () => {
     setAdapterForTests(undefined);

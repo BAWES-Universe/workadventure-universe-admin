@@ -38,6 +38,7 @@ jest.mock('@/lib/db', () => ({
     botMemoryForget: { findMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn(), updateMany: jest.fn() },
     botMemoryItemForget: { findMany: jest.fn(), deleteMany: jest.fn(), updateMany: jest.fn() },
     botFile: { deleteMany: jest.fn() },
+    brickPurge: { count: jest.fn() },
   },
 }));
 
@@ -78,6 +79,8 @@ beforeEach(() => {
   session.mockReset().mockResolvedValue({ id: 'u-sara', email: 'sara@example.com', isSuperAdmin: false });
   manages.mockReset().mockResolvedValue(true);
   botIs(null);
+  // No Brick in these tests was purged
+  db.brickPurge.count.mockResolvedValue(0);
   db.botsConversation.findMany.mockResolvedValue([TRANSCRIPT]);
   db.botsConversation.count.mockResolvedValue(1);
   db.botsConversation.findFirst.mockResolvedValue({ endedAt: new Date(5) });
