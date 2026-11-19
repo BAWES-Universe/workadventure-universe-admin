@@ -457,6 +457,12 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
   }
   const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued' }, data: { queuedFor } });
 
+  // A turn of a job that ended may still run on this machine: nothing starts beside it until the machine is proved asleep (tried again here and by every sweep)
+  if (!(await settleTurnHold(job.botId))) {
+    await queue('turn');
+    return 'queued';
+  }
+
   // The person has the machine: nothing starts under Brick's hands until they hand it back. Nothing is reserved while waiting in line.
   if ((await prisma.computerJob.count({ where: { botId: job.botId, status: 'waiting', control: 'person' } })) > 0) {
     await queue('turn');
@@ -794,10 +800,20 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     const held = job.status === 'running' || job.status === 'waiting';
     const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
     seconds = job.secondsRun + stretch;
-    ended = await prisma.computerJob.updateMany({
-      where: { id: jobId, status: job.status },
-      data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, readyWhat: null, readyWhere: null, control: 'brick', stretchStarted: null, secondsRun: seconds, agentResponseId: null, brief: null },
-    });
+    const endData = { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, readyWhat: null, readyWhere: null, control: 'brick', stretchStarted: null, secondsRun: seconds, agentResponseId: null, brief: null } as const;
+    if (held && job.firstTurnSentAt && !job.agentResponseId) {
+      // The job's first turn was sent and never named: it may still run on the machine with nothing to cancel it by. The machine carries a hold from the
+      // moment the job is over (one commit with the end), so no other job or turn starts beside that turn until the machine is proved asleep
+      const botId = job.botId;
+      const status0 = job.status;
+      ended = await prisma.$transaction(async (tx) => {
+        const done = await tx.computerJob.updateMany({ where: { id: jobId, status: status0 }, data: endData });
+        if (done.count === 1) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
+        return done;
+      });
+    } else {
+      ended = await prisma.computerJob.updateMany({ where: { id: jobId, status: job.status }, data: endData });
+    }
   }
   // Someone else ended it between the read and the write: that one counts and settles
   if (!job || ended.count === 0) return;
@@ -824,7 +840,9 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
 
   if (held) {
     await closeOutIfUnheld(job.botId);
-    await restIfUnheld(job.botId, now);
+    // A machine under a hold (a turn of this or an earlier job may still run on it) is put to sleep and proved, not only rested
+    if (await underTurnHold(job.botId)) await settleTurnHold(job.botId);
+    else await restIfUnheld(job.botId, now);
   }
   // The turn passes to the next job in line, except while a Stop is ending everything
   if (advance && endedBy !== 'off' && endedBy !== 'deleted') await startNext(job.botId, now);
@@ -971,6 +989,9 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
     const provider = providerFor(machine);
     if (provider && machine.providerRef) await stopMachine(machine.botId, machine.providerRef, provider, ['stopping']);
   }
+  // A machine that may still run the turn of a job that ended is put to sleep and proved, and only then do the jobs behind it start
+  const turnHolds = await prisma.brickComputer.findMany({ where: { NOT: { turnUnprovenSince: null } }, select: { botId: true }, take: 200 });
+  for (const machine of turnHolds) await settleTurnHold(machine.botId);
   const idle = await prisma.brickComputer.findMany({ where: { machine: 'working', NOT: { providerRef: null }, updatedAt: { lte: new Date(now.getTime() - 2 * 60 * 1000) } }, select: { botId: true }, take: 200 });
   for (const machine of idle) await restIfUnheld(machine.botId, now);
   // A machine a job holds is kept awake while it works
@@ -1224,6 +1245,44 @@ const FENCE_LOOK_MS = 250;
 /** The first turns of a Brick's jobs that were marked as sent and never named: gone only when nothing can still be running them (see fenceTakeOver). */
 async function clearFirstTurnMarks(botId: string): Promise<void> {
   await prisma.computerJob.updateMany({ where: { botId, NOT: { firstTurnSentAt: null }, agentResponseId: null }, data: { firstTurnSentAt: null } });
+}
+
+/** Whether a job ended here with a first turn that may still run on this machine (see `settleTurnHold`). */
+export async function underTurnHold(botId: string): Promise<boolean> {
+  const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { turnUnprovenSince: true } });
+  return !!row?.turnUnprovenSince;
+}
+
+/**
+ * A job whose first turn was marked as sent and never named can end while that turn still runs on the machine (nothing can be asked for it, and a
+ * machine that is not put to rest, or a rest that failed, leaves it running). The machine then carries a hold in its own row (`turnUnprovenSince`,
+ * kept with the job's end in one commit, so it survives a failed call and a restart): no job is started on it and no turn is opened on it until the
+ * machine is proved asleep (or there is none). This is the one place that asks for that proof and lifts the hold. It stops the machine only when no
+ * other job holds it (`exceptJobId` is the caller that is itself waiting to start a turn, which does not count): a job's work, or a person at the
+ * screen, is never put to sleep under them; the hold then waits for them to end. Returns whether the machine is free of the hold. Never throws.
+ */
+export async function settleTurnHold(botId: string, exceptJobId?: string): Promise<boolean> {
+  try {
+    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true, provider: true, machine: true, turnUnprovenSince: true } });
+    if (!row?.turnUnprovenSince) return true;
+    const seen = row.turnUnprovenSince;
+    // Only the hold that was seen is lifted: a newer one, set by another job's end while this looked, stays
+    const lift = () => prisma.brickComputer.updateMany({ where: { botId, turnUnprovenSince: seen }, data: { turnUnprovenSince: null } });
+    if (await agentCannotRun(botId)) {
+      await lift();
+      return true;
+    }
+    const holders = await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] }, ...(exceptJobId ? { id: { not: exceptJobId } } : {}) } });
+    if (holders > 0) return false;
+    const provider = providerFor(row);
+    if (!provider || !row.providerRef) return false;
+    if (!(await stopMachine(botId, row.providerRef, provider))) return false;
+    await lift();
+    return true;
+  } catch (error) {
+    console.error('[Computer] Could not settle a machine’s turn hold:', error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
 }
 
 /**

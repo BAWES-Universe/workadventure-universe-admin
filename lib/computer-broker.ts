@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { agentCannotRun, providerFor, fenceMachine, finishJob } from '@/lib/computer';
+import { agentCannotRun, providerFor, fenceMachine, finishJob, settleTurnHold, underTurnHold } from '@/lib/computer';
 import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
 import { Agent37Error, TurnNotSent } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
@@ -218,10 +218,24 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   if (claim === 'busy') return { ok: false, reason: 'starting' };
   // Looked at again now that the claim is held: the job was read before it, and a start that kept its turn's id (or a take-over) in between changed what
   // is true. A turn the job holds now is busy (its id is given, to reconnect to), and the conversation to start on is the one it has now
-  const fresh = await liveJob(job.jobId);
+  let fresh = await liveJob(job.jobId);
   if (!fresh.ok) {
     await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
     return fresh;
+  }
+  // A job that ended on this machine may have left its first turn running there, with nothing to cancel it by: no turn is opened beside it until the
+  // machine is proved asleep. The caller waits and asks again; the hold is lifted by the end of the jobs that hold the machine, or by the sweep
+  if (await underTurnHold(fresh.job.botId)) {
+    if (!(await settleTurnHold(fresh.job.botId, job.jobId))) {
+      await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+      return { ok: false, reason: 'starting' };
+    }
+    // The machine was put to sleep to prove it: this job is looked at again on what it is now
+    fresh = await liveJob(job.jobId);
+    if (!fresh.ok) {
+      await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+      return fresh;
+    }
   }
   if (fresh.job.responseId) {
     await releaseOnJob(job.jobId, 'turnClaimedAt', claim);

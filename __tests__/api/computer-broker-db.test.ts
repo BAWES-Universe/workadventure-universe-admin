@@ -844,6 +844,92 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         }
       });
 
+      describe('a job that ends with a first turn nobody can name: no other job or turn starts on its machine until the machine is proved asleep', () => {
+        const machineOf = (botId: string) => prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
+        const waitingJob = async (sara: { id: string; brickId: string }, writes = true) => {
+          const queued = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Next', writes }, NOW);
+          if (!queued.ok) throw new Error('the job was not saved');
+          return queued.job.id;
+        };
+
+        it('the machine is put to sleep and proved before the job in line starts (a stop is made, then the machine is woken for it)', async () => {
+          const { sara, jobId } = await running();
+          const { sent } = await acceptedAndLost(jobId);
+          try {
+            const nextId = await waitingJob(sara);
+            expect((await jobRow(nextId)).status).toBe('queued');
+            fake.calls.length = 0;
+            await finishJob(jobId, 'failed', NOW);
+            const names = fake.calls.map((call) => call.name);
+            expect(names).toContain('stop');
+            expect(names.indexOf('stop')).toBeLessThan(names.lastIndexOf('wake'));
+            expect((await jobRow(nextId)).status).toBe('running');
+            expect((await machineOf(sara.brickId)).turnUnprovenSince).toBeNull();
+          } finally {
+            sent.mockRestore();
+          }
+        });
+
+        it('a stop that cannot be proved keeps the hold: the job in line stays in line, and a later sweep that proves the machine asleep lets it start', async () => {
+          const { sara, jobId } = await running();
+          const { sent } = await acceptedAndLost(jobId);
+          const ref = `fake-${sara.brickId}`;
+          try {
+            const nextId = await waitingJob(sara);
+            fake.stuckAwake.add(ref);
+            await finishJob(jobId, 'failed', NOW);
+            expect((await jobRow(nextId)).status).toBe('queued');
+            expect((await machineOf(sara.brickId)).turnUnprovenSince).not.toBeNull();
+            // Still unproved: another try to start it changes nothing
+            await sweepComputers(minutes(1));
+            expect((await jobRow(nextId)).status).toBe('queued');
+            expect((await machineOf(sara.brickId)).turnUnprovenSince).not.toBeNull();
+            fake.stuckAwake.delete(ref);
+            await sweepComputers(minutes(2));
+            expect((await jobRow(nextId)).status).toBe('running');
+            expect((await machineOf(sara.brickId)).turnUnprovenSince).toBeNull();
+          } finally {
+            fake.stuckAwake.delete(ref);
+            sent.mockRestore();
+          }
+        });
+
+        it('a job that ended with no unnamed turn leaves nothing behind: the job in line starts at once and the machine is not put to sleep', async () => {
+          const { sara, jobId } = await running();
+          const nextId = await waitingJob(sara);
+          fake.calls.length = 0;
+          await finishJob(jobId, 'done', NOW);
+          expect((await jobRow(nextId)).status).toBe('running');
+          expect(fake.calls.map((call) => call.name)).not.toContain('stop');
+          expect((await machineOf(sara.brickId)).turnUnprovenSince).toBeNull();
+        });
+
+        it('a job that already holds the machine opens no turn beside it: it waits while another job holds the machine too, and is told the machine is gone once it alone holds it and the machine was put to sleep', async () => {
+          const { sara, jobId } = await running();
+          const { sent } = await acceptedAndLost(jobId);
+          try {
+            // A read-only job holds the machine beside the writer
+            const readerId = await waitingJob(sara, false);
+            expect((await jobRow(readerId)).status).toBe('running');
+            // A second reader keeps the machine held when the writer ends
+            const other = await waitingJob(sara, false);
+            await finishJob(jobId, 'failed', NOW);
+            expect((await machineOf(sara.brickId)).turnUnprovenSince).not.toBeNull();
+            expect((await machineOf(sara.brickId)).machine).toBe('working');
+            // Neither reader opens a turn on a machine that may still run the other's turn: it waits while the other holds the machine
+            expect(await startTurn(readerId, 'go')).toEqual({ ok: false, reason: 'starting' });
+            expect(sent).toHaveBeenCalledTimes(1);
+            // The other reader ends: the one left alone is the only holder, so the machine is put to sleep and proved, and no turn is opened on it
+            await finishJob(other, 'done', NOW);
+            expect(await startTurn(readerId, 'go')).toEqual({ ok: false, reason: 'no_machine' });
+            expect(sent).toHaveBeenCalledTimes(1);
+            expect((await machineOf(sara.brickId)).turnUnprovenSince).toBeNull();
+          } finally {
+            sent.mockRestore();
+          }
+        });
+      });
+
       it('a first turn whose id comes after the job was fenced and that cannot be cancelled by its id keeps its mark (the fence that replaces the cancel keeps the gateway): the next start ends the job and opens no second turn', async () => {
         const { jobId } = await running();
         const letGo = gatedFirstTurn();
