@@ -267,6 +267,23 @@ run('rules said in chat and task receipts, in a real database', () => {
       }
     });
 
+    it('reads no totals for a rule that covers another kind of charge: a computer-only rule fetched for an Apps step is not held to, and its totals are never read', async () => {
+      const sara = await person('sara');
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000, covers: 'computer' });
+      await spend(sara.id, sara.brickId, 5_000);
+      const reads = jest.spyOn(prisma.meterEvent, 'aggregate');
+      try {
+        // The rule is about this person, so it is fetched for the step; but it covers computer credit, and an Apps step is not held to it
+        expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'apps', amountMicros: 1 }, NOW)).toEqual({ ok: true });
+        expect(reads).not.toHaveBeenCalled();
+        // The control: a computer step is the rule's own, reads the totals and is held
+        expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: 1 }, NOW)).toMatchObject({ ok: false, why: 'cap' });
+        expect(reads).toHaveBeenCalled();
+      } finally {
+        reads.mockRestore();
+      }
+    });
+
     it('a day’s cap starts again at 00:00 UTC, and a task’s cap counts that task only', async () => {
       const sara = await person('sara');
       await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'day', capMicros: 300_000 });

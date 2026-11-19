@@ -467,11 +467,19 @@ run('usage for people, and cost for us, in a real database', () => {
       }
       // Nothing of the grant is saved, so the ask it was for is still open, and the person is not left with a grant that answered nothing
       expect(await prisma.meterGrant.count({ where: { personId: sara.id } })).toBe(0);
-      // She asks again before the retry; the retry is a new grant and answers both
+      const [first] = await openRequests();
+      expect(first.personId).toBe(sara.id);
+      // That ask is settled some other way (someone answers it on another page), and she asks again before the retry: a genuinely later ask, made after the
+      // first try. (An ask made while one is still open adds nothing, so the first has to be out of the way for there to be a later one)
+      await prisma.meterRequest.updateMany({ where: { id: first.id }, data: { answeredAt: new Date(), grantKey: 'settled-elsewhere' } });
       await new Promise((resolve) => setTimeout(resolve, 20));
       await askForMore(sara.id);
+      const [later] = await openRequests();
+      expect(later.id).not.toBe(first.id);
+      // The retry is a new grant and answers the later ask, which only a retry that reads asks made after the first try can do
       expect((await send()).status).toBe(201);
       expect(await openRequests()).toEqual([]);
+      expect((await prisma.meterRequest.findUniqueOrThrow({ where: { id: later.id } })).grantKey).toBe(`${sara.id}:${key}`);
     });
 
     describe('a grant sent again after its end date passed', () => {
