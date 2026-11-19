@@ -13,7 +13,13 @@ import { join } from 'node:path';
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/computer', () => {
   const actual = jest.requireActual('@/lib/computer');
-  return { ...actual, finishJob: jest.fn(actual.finishJob) };
+  return {
+    ...actual,
+    finishJob: jest.fn(actual.finishJob),
+    underTurnHold: jest.fn(actual.underTurnHold),
+    settleTurnHold: jest.fn(actual.settleTurnHold),
+    wakeIfStopped: jest.fn(actual.wakeIfStopped),
+  };
 });
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
@@ -23,7 +29,7 @@ import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests, type TurnEvent } from '@/lib/computer-provider';
 import { Agent37Error, Agent37Unreached } from '@/lib/agent37/client';
 import { screenTicket } from '@/lib/computer-screen';
-import { fenceMachine, finishJob, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { fenceMachine, finishJob, settleTurnHold, underTurnHold, wakeIfStopped, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { verifyJobToken } from '@/lib/computer-token';
 import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
 
@@ -582,6 +588,85 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       // Once that turn has ended, the claim is let go and the next one starts
       expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt).toBeNull();
       expect((await startTurn(jobId, 'three')).ok).toBe(true);
+    });
+
+    it('a prepare whose read throws after it took its claim lets the claim go (it is under a finally), so the next prepare is not told "preparing"', async () => {
+      const { jobId } = await running();
+      const silent = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const spy = jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementationOnce((() => {
+        throw new Error('the database did not answer');
+      }) as never);
+      await expect(prepareJob(jobId, RELAY)).rejects.toThrow('did not answer');
+      spy.mockRestore();
+      silent.mockRestore();
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).prepareClaimedAt).toBeNull();
+      expect((await prepareJob(jobId, RELAY)).ok).toBe(true);
+    });
+
+    describe('a read that throws after the turn is claimed', () => {
+      const claimed = async (jobId: string) => (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt;
+      const okTurn = () => [[{ type: 'created', id: 'resp-a', sessionId: 'sess-1' }, { type: 'completed', outputText: '', usage: null }]] as TurnEvent[][];
+      const quiet = () => jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      afterEach(() => {
+        jest.restoreAllMocks();
+        for (const fn of [underTurnHold, settleTurnHold, wakeIfStopped]) (fn as jest.Mock).mockClear();
+      });
+
+      it('the second look at the job: the claim goes back at once, and the same start can be asked again straight away', async () => {
+        const { jobId } = await running();
+        fake.turns = okTurn();
+        const silent = quiet();
+        const real = prisma.brickComputer.findUnique.bind(prisma.brickComputer);
+        let looks = 0;
+        const spy = jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementation(((args: never) => {
+          // The first look is before the claim; the second is the one made with the claim held
+          if (++looks === 2) throw new Error('the database did not answer');
+          return real(args);
+        }) as never);
+        expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'failed' });
+        spy.mockRestore();
+        silent.mockRestore();
+        expect(await claimed(jobId)).toBeNull();
+        expect((await startTurn(jobId, 'go')).ok).toBe(true);
+      });
+
+      it('asking whether a hold is on the machine', async () => {
+        const { jobId } = await running();
+        fake.turns = okTurn();
+        const silent = quiet();
+        (underTurnHold as jest.Mock).mockRejectedValueOnce(new Error('the database did not answer'));
+        expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'failed' });
+        silent.mockRestore();
+        expect(await claimed(jobId)).toBeNull();
+        expect((await startTurn(jobId, 'go')).ok).toBe(true);
+      });
+
+      it('proving the machine asleep under a hold', async () => {
+        const { jobId } = await running();
+        fake.turns = okTurn();
+        const silent = quiet();
+        (underTurnHold as jest.Mock).mockResolvedValueOnce(true);
+        (settleTurnHold as jest.Mock).mockRejectedValueOnce(new Error('the machine could not be asked'));
+        expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'failed' });
+        silent.mockRestore();
+        expect(await claimed(jobId)).toBeNull();
+        expect((await startTurn(jobId, 'go')).ok).toBe(true);
+      });
+
+      it('waking the machine after the hold was settled', async () => {
+        const { jobId } = await running();
+        fake.turns = okTurn();
+        const silent = quiet();
+        (underTurnHold as jest.Mock).mockResolvedValueOnce(true);
+        (settleTurnHold as jest.Mock).mockResolvedValueOnce(true);
+        (wakeIfStopped as jest.Mock).mockRejectedValueOnce(new Error('the machine did not wake'));
+        expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'failed' });
+        silent.mockRestore();
+        expect(await claimed(jobId)).toBeNull();
+        // Nothing was sent, so no first-turn mark was left either
+        expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).firstTurnSentAt).toBeNull();
+        expect((await startTurn(jobId, 'go')).ok).toBe(true);
+      });
     });
 
     it('a claim left by a server that stopped is not waited behind for minutes: it is asked again later while it is fresh, and lapses after about 45 seconds', async () => {

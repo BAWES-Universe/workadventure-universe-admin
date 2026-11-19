@@ -227,53 +227,65 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   // Held by a start still on its way, or left by a server that stopped: there is no turn id to hand back (and one just cleared must never be
   // sent as "busy"), so the caller is told "starting": it waits a few seconds and asks again, and the claim lapses by itself
   if (claim === 'busy') return { ok: false, reason: 'starting' };
-  // Looked at again now that the claim is held: the job was read before it, and a start that kept its turn's id (or a take-over) in between changed what
-  // is true. A turn the job holds now is busy (its id is given, to reconnect to), and the conversation to start on is the one it has now
-  let fresh = await liveJob(job.jobId);
-  if (!fresh.ok) {
-    await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
-    return fresh;
-  }
-  if (fresh.job.responseId) {
-    await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
-    return { ok: false, reason: 'busy', responseId: fresh.job.responseId };
-  }
-  // A job that ended on this machine may have left its first turn running there, with nothing to cancel it by: no turn is opened beside it until the
-  // machine is proved asleep. The caller waits and asks again; the hold is lifted by the end of the jobs that hold the machine, or by the sweep.
-  // (Asked after the busy answer above: a job's own named turn is never stopped by this.)
-  if (await underTurnHold(fresh.job.botId)) {
-    if (!(await settleTurnHold(fresh.job.botId, job.jobId))) {
-      await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
-      return { ok: false, reason: 'starting' };
-    }
-    // The machine may have been put to sleep to prove it, with this job the only one holding it: it is woken for this job (and the job ends as an error
-    // if it will not come back, its room given back), so the job goes on instead of failing for nothing
-    await wakeIfStopped(fresh.job.botId);
-    fresh = await liveJob(job.jobId);
+  // Everything between the claim and the start's own try below runs under this one: a read that throws (the database, the provider) must not leave the
+  // claim held for its whole lapse, with every start in that time told "starting". The claim goes back on any throw here, before a turn could be open: the
+  // first-turn mark is written at the very end of this part, and a throw after it is the next try's, which keeps the mark rules
+  let ready!: { job: Live; provider: NonNullable<ReturnType<typeof providerFor>> };
+  let sessionId: string | null;
+  try {
+    // Looked at again now that the claim is held: the job was read before it, and a start that kept its turn's id (or a take-over) in between changed what
+    // is true. A turn the job holds now is busy (its id is given, to reconnect to), and the conversation to start on is the one it has now
+    let fresh = await liveJob(job.jobId);
     if (!fresh.ok) {
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       return fresh;
     }
-  }
-  const sessionId = fresh.job.sessionId;
-  // A job's very first turn has no conversation to be found by, and the agent has no way to be asked for "the turn this request started" (a request
-  // carries no key of ours and sessions cannot be listed). So the turn is marked in the job's row BEFORE it is sent, and a start that finds the mark
-  // with no turn id and no conversation (the server stopped after the agent accepted the turn, or the stream failed before its id came) never opens
-  // a second one beside it: the job ends, visibly, as it does when the turn never says its id. In a conversation the agent knows, a second turn is
-  // refused by the agent itself, atomically, so only the first turn needs the mark.
-  if (!sessionId) {
-    if (fresh.job.firstTurnSentAt) {
-      const ended = await endJobOfUnknownTurn(job.jobId);
+    if (fresh.job.responseId) {
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
-      return { ok: false, reason: ended ? 'not_running' : 'failed' };
+      return { ok: false, reason: 'busy', responseId: fresh.job.responseId };
     }
-    const marked = await prisma.computerJob
-      .updateMany({ where: { id: job.jobId, status: 'running', control: 'brick', firstTurnSentAt: null }, data: { firstTurnSentAt: new Date() } })
-      .catch(() => null);
-    if (!marked || marked.count !== 1) {
-      await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
-      return { ok: false, reason: marked ? 'not_running' : 'failed' };
+    // A job that ended on this machine may have left its first turn running there, with nothing to cancel it by: no turn is opened beside it until the
+    // machine is proved asleep. The caller waits and asks again; the hold is lifted by the end of the jobs that hold the machine, or by the sweep.
+    // (Asked after the busy answer above: a job's own named turn is never stopped by this.)
+    if (await underTurnHold(fresh.job.botId)) {
+      if (!(await settleTurnHold(fresh.job.botId, job.jobId))) {
+        await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+        return { ok: false, reason: 'starting' };
+      }
+      // The machine may have been put to sleep to prove it, with this job the only one holding it: it is woken for this job (and the job ends as an error
+      // if it will not come back, its room given back), so the job goes on instead of failing for nothing
+      await wakeIfStopped(fresh.job.botId);
+      fresh = await liveJob(job.jobId);
+      if (!fresh.ok) {
+        await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+        return fresh;
+      }
     }
+    sessionId = fresh.job.sessionId;
+    // A job's very first turn has no conversation to be found by, and the agent has no way to be asked for "the turn this request started" (a request
+    // carries no key of ours and sessions cannot be listed). So the turn is marked in the job's row BEFORE it is sent, and a start that finds the mark
+    // with no turn id and no conversation (the server stopped after the agent accepted the turn, or the stream failed before its id came) never opens
+    // a second one beside it: the job ends, visibly, as it does when the turn never says its id. In a conversation the agent knows, a second turn is
+    // refused by the agent itself, atomically, so only the first turn needs the mark.
+    if (!sessionId) {
+      if (fresh.job.firstTurnSentAt) {
+        const ended = await endJobOfUnknownTurn(job.jobId);
+        await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+        return { ok: false, reason: ended ? 'not_running' : 'failed' };
+      }
+      const marked = await prisma.computerJob
+        .updateMany({ where: { id: job.jobId, status: 'running', control: 'brick', firstTurnSentAt: null }, data: { firstTurnSentAt: new Date() } })
+        .catch(() => null);
+      if (!marked || marked.count !== 1) {
+        await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+        return { ok: false, reason: marked ? 'not_running' : 'failed' };
+      }
+    }
+    ready = fresh;
+  } catch (error) {
+    console.error('[Computer] Could not get a turn ready to start:', error instanceof Error ? error.message : 'unknown');
+    await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+    return { ok: false, reason: 'failed' };
   }
   // The runner's connection must not cut the turn off before its id is kept: once the agent has accepted it, it runs on the machine, and
   // an id that was never stored leaves nothing to cancel or reconnect to. So the request's own signal is not handed on; the start has its
@@ -289,7 +301,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       return { ok: false, reason: 'failed' };
     }
-    events = await provider.openTurn(fresh.job.ref, { text: `${jobTagOf(job.jobId)}\n${text}`, sessionId }, own.signal);
+    events = await provider.openTurn(ready.job.ref, { text: `${jobTagOf(job.jobId)}\n${text}`, sessionId }, own.signal);
     // The agent has answered, so the turn is accepted: the limit was for that answer. Its id follows on the stream, however long that takes.
     clearTimeout(timer);
   } catch (error) {
@@ -309,7 +321,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     if (error instanceof Agent37Error && error.code === 'session_busy') return { ok: false, reason: 'busy', responseId: error.runningResponseId };
     return { ok: false, reason: 'failed' };
   }
-  return { ok: true, events: withoutTags(keeping(fresh.job, provider, events, { timer, controller: own, claim })) };
+  return { ok: true, events: withoutTags(keeping(ready.job, ready.provider, events, { timer, controller: own, claim })) };
 }
 
 /**
