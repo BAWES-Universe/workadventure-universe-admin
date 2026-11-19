@@ -1543,7 +1543,7 @@ run('payments for pages, in a real database', () => {
         const { artifactId } = await pending();
         const sent = gateway();
         const raw = (text: string | null, address: string) => publicStart(new NextRequest(`http://localhost/api/pay/${artifactId}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': address }, ...(text === null ? {} : { body: text }) }), params({ artifactId }));
-        for (const [n, bad] of ['{"check":true,"intentId":"i1234567', '5', '"start"', '[]', 'null'].entries()) {
+        for (const [n, bad] of ['{"check":true,"intentId":"i1234567', '5', '"start"', '[]', 'null', '   ', '\n'].entries()) {
           const response = await raw(bad, `203.0.113.${40 + n}`);
           expect(response.status).toBe(400);
           expect(await response.json()).toMatchObject({ code: 'bad_request' });

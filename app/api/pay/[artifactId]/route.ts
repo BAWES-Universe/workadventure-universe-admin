@@ -66,7 +66,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const text = await request.text().catch(() => null);
   let raw: unknown = {};
   if (text === null) return respond({ error: 'Invalid request data', code: 'bad_request' }, 400);
-  if (text.trim() !== '') {
+  if (text !== '') {
     try {
       raw = JSON.parse(text);
     } catch {
