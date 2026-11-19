@@ -320,10 +320,13 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       let release: () => void = () => undefined;
       const gate = new Promise<void>((resolve) => (release = resolve));
       let writes = 0;
-      fake.execAnswer = async () => {
+      const finished: string[] = [];
+      fake.execAnswer = async (command) => {
         writes += 1;
         // The first write is slow; the second prepare starts while it waits
         if (writes === 1) await gate;
+        // The order the writes reached the machine in is the order they finished
+        finished.push(command);
         return {};
       };
       const first = prepareJob(jobId, RELAY, NOW);
@@ -333,8 +336,8 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       release();
       expect(await first).toMatchObject({ ok: true });
       expect(await second).toMatchObject({ ok: true });
-      // The last key written is the one that is good: the second prepare did not end it, and did not write before the first
-      const last = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(fake.commands.at(-1)?.command ?? '')?.[1] ?? '';
+      // The last key to reach the machine is the one that is good: the second prepare did not end it, and did not write before the first
+      const last = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(finished.at(-1) ?? '')?.[1] ?? '';
       expect((await verifyJobToken(last, 'model', minutes(2))).ok).toBe(true);
       expect(fake.commands.filter((entry) => entry.command.includes('relay.json'))).toHaveLength(2);
     });
