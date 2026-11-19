@@ -432,4 +432,30 @@ describe('the strict outgoing guard', () => {
     const got = await guardedRequest(request('https://api.example.com/'), { resolve: async () => [{ address: '93.184.216.34', family: 4 }], send: async () => ({ ...answer, status: 302, redirected: true, body: '' }) });
     expect(got.redirected).toBe(true);
   });
+
+  it('the real sender hands a 302 back as an answer too, with no body, and makes the one request it was asked for', async () => {
+    let asked = 0;
+    const spy = jest.spyOn(https, 'request').mockImplementation(((_options: unknown, onResponse: (response: EventEmitter & { statusCode: number; headers: Record<string, string> }) => void) => {
+      asked += 1;
+      return Object.assign(new EventEmitter(), {
+        write: () => true,
+        destroy: () => undefined,
+        end: () => {
+          const response = Object.assign(new EventEmitter(), { statusCode: 302, headers: { location: 'https://elsewhere.example.net/next' }, destroy: () => undefined });
+          onResponse(response);
+          response.emit('data', Buffer.from('<a href="https://elsewhere.example.net/next">moved</a>'));
+          response.emit('end');
+        },
+      });
+    }) as never);
+    try {
+      const got = await guardedRequest(request('https://api.example.com/'), { resolve: async () => [{ address: '93.184.216.34', family: 4 }] });
+      expect(got).toMatchObject({ status: 302, redirected: true, body: '' });
+      // Never followed: the one request, and nothing sent to the address it named
+      expect(asked).toBe(1);
+      expect(spy.mock.calls).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });

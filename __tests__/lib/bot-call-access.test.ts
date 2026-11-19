@@ -217,9 +217,12 @@ describe('a call needs everything a direct message needs', () => {
     expect(await allowed('call', signedIn(USERS.sara))).toBe(true);
   });
 
-  it('a person who cannot see the bot’s room cannot call it', async () => {
+  it('a person who cannot see the bot’s room cannot call it, even with a Yes on Call', async () => {
+    // With a Yes of their own, the room is the only thing in the way: a call that goes through in a public room
+    rule({ userId: USERS.omar.id }, { call: 'yes' });
+    expect(await allowed('call', signedIn(USERS.omar))).toBe(true);
     state.bot!.isPublicRoom = false;
-    expect(await ask('call', signedIn(USERS.omar))).toMatchObject({ allowed: false });
+    expect(await ask('call', signedIn(USERS.omar))).toMatchObject({ allowed: false, code: 'no_room_access' });
   });
 
   it('a person who was never asked about, and has no account, only has what Everyone has: no call', async () => {
