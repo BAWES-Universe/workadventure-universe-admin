@@ -145,12 +145,13 @@ describe('the owner’s calls', () => {
     const changed = await fillRoute(call('/x', { body: { what: 'Your name', where: 'visa-portal.example' } }), params);
     expect(changed.status).toBe(409);
     expect(await changed.json()).toEqual({ error: 'What Brick is ready to fill in has changed' });
+    // No body, or anything but the two words the screen showed: nothing is passed to check, and the service does not approve a pending pair on nothing
+    lib.fillInDetails.mockResolvedValue({ ok: false, reason: 'changed' });
+    expect((await fillRoute(call('/x'), params)).status).toBe(409);
+    expect(lib.fillInDetails).toHaveBeenLastCalledWith(BRICK, 'u-sara', null);
+    expect((await fillRoute(call('/x', { body: { what: 3, where: [] } }), params)).status).toBe(409);
+    expect(lib.fillInDetails).toHaveBeenLastCalledWith(BRICK, 'u-sara', null);
     lib.fillInDetails.mockResolvedValue({ ok: true, job: { id: JOB } as never });
-    expect((await fillRoute(call('/x'), params)).status).toBe(200);
-    // No body, or anything but the two words the screen showed: nothing is passed to check
-    expect(lib.fillInDetails).toHaveBeenLastCalledWith(BRICK, 'u-sara', null);
-    expect((await fillRoute(call('/x', { body: { what: 3, where: [] } }), params)).status).toBe(200);
-    expect(lib.fillInDetails).toHaveBeenLastCalledWith(BRICK, 'u-sara', null);
     // What the screen showed is passed on to be checked against what Brick named
     expect((await fillRoute(call('/x', { body: { what: 'Your name', where: 'visa-portal.example' } }), params)).status).toBe(200);
     expect(lib.fillInDetails).toHaveBeenLastCalledWith(BRICK, 'u-sara', { what: 'Your name', where: 'visa-portal.example' });

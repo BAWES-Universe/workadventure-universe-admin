@@ -60,7 +60,7 @@ describe('asking for a ticket', () => {
 
   it('is for a signed-in person: nobody signed in gets no ticket', async () => {
     (getSessionUser as jest.Mock).mockResolvedValue(null);
-    expect((await ask()).status).toBeGreaterThanOrEqual(401);
+    expect((await ask()).status).toBe(401);
     expect(lib.screenTicket).not.toHaveBeenCalled();
   });
 });
