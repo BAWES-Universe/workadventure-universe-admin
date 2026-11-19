@@ -610,8 +610,10 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     // A request without a valid id of its own, or without its document's session, is never answered: there would be no way to tell whose answer
     // it is. The buyer is told so on the host's own line, and can still check a payment (a bare status would be taken for whichever checkout
     // the page is waiting on)
+    // While a checkout is on its way (a start, a check or a watch) the line is that checkout's, with its own link and actions: a message like
+    // this one never replaces it, and is not told to anyone
     if (typeof data.request !== 'string' || !REQUEST_ID.test(data.request) || typeof data.session !== 'string' || !REQUEST_ID.test(data.session)) {
-      publish({ needsUpdate: true, canCheck: true }, true);
+      if (!busy) publish({ needsUpdate: true, canCheck: true }, true);
       return;
     }
     const session = data.session;

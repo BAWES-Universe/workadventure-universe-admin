@@ -210,6 +210,24 @@ describe('a paying page on the public share link', () => {
     host.destroy();
   });
 
+  it('a message without a valid request or session never replaces the line of a checkout that is on its way', async () => {
+    const { host, frame, tap, lines, told } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'checking', pollAfterMs: 3000 } }));
+    tap({ request: 'a' });
+    await flush();
+    const before = lines.at(-1);
+    expect(before).toMatchObject({ checking: true, needsUpdate: false });
+    const send = (data: Record<string, unknown>) => host.onMessage({ source: frame, data: { universe: 'use-app', app: 'shop', ...data } });
+    send({});
+    send({ request: 'b' });
+    send({ session: 's1' });
+    await flush();
+    // Still checking, with the checkout's own link, and nothing told to anyone
+    expect(lines.at(-1)).toMatchObject({ checking: true, needsUpdate: false, canCheck: false });
+    expect(lines.at(-1)?.resume).toEqual(before?.resume);
+    expect(told().filter((message) => message.status !== 'started')).toEqual([]);
+    host.destroy();
+  });
+
   it('hears only the artifact’s own frame', async () => {
     const { tap, told, calls, host } = setup(() => ({ body: started }));
     tap({ request: 'a' }, {} as Window);
