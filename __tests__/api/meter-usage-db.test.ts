@@ -377,6 +377,32 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await personUsage(sara.id, NOW)).leftMicros).toBeNull();
     });
 
+    it('reads the whole page on the one connection its snapshot holds: with a pool of a single connection it still answers, never waiting on a second one', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await askForMore(sara.id, NOW, 'computer');
+      // A reader that is not the shared client: a pool with room for one connection only (as the funding books' own database has). A read that is not made
+      // on the snapshot's connection waits for one that never frees, and under load the same wait takes every connection of the real pool
+      const { Pool } = await import('pg');
+      const { PrismaPg } = await import('@prisma/adapter-pg');
+      const { PrismaClient } = await import('@prisma/client');
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+      const single = new PrismaClient({ adapter: new PrismaPg(pool) });
+      const shared = (globalThis as unknown as { prisma: unknown }).prisma;
+      let page: { asked: { at: string } | null } | null = null;
+      try {
+        (globalThis as unknown as { prisma: unknown }).prisma = single;
+        await jest.isolateModulesAsync(async () => {
+          const { personUsage: onOne } = await import('@/lib/meter-person');
+          page = await onOne(sara.id, NOW);
+        });
+      } finally {
+        (globalThis as unknown as { prisma: unknown }).prisma = shared;
+        await single.$disconnect();
+      }
+      expect(page).toMatchObject({ asked: { at: expect.any(String) } });
+    }, 30_000);
+
   });
 
   describe('extra usage', () => {
