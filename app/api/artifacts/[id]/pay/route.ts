@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { artifactRoute, viewerSchema } from '@/lib/artifact-http';
 import { requireMayOpen } from '@/lib/artifact-service';
 import { ArtifactError } from '@/lib/artifacts';
-import { buyerKeyOf, checkPurchase, INTENT_ID, orderForArtifact, pageTakesPayments, restorePurchase, startCheckout } from '@/lib/app-direct/pay';
+import { buyerKeysOf, checkPurchase, INTENT_ID, orderForArtifact, pageTakesPayments, restorePurchase, startCheckout } from '@/lib/app-direct/pay';
 import { findUserByIdentifier } from '@/lib/user-identifier';
 
 export const runtime = 'nodejs';
@@ -47,21 +47,24 @@ export const POST = artifactRoute('POST /api/artifacts/:id/pay', 'game', schema,
   }
   const person = body.viewer.person;
   const account = person.signedIn && person.identifier ? await findUserByIdentifier(person.identifier) : null;
-  const buyerKey = buyerKeyOf({ accountId: account && !account.isGuest ? account.id : null, recoveryCode: body.recoveryCode });
+  // The account when there is one, and the guest's recovery code when the window holds one: a guest who paid and then signed in still has
+  // the code, which proves their earlier orders are theirs, so everything is looked for under both
+  const [buyerKey, ...alsoBuyerKeys] = buyerKeysOf({ accountId: account && !account.isGuest ? account.id : null, recoveryCode: body.recoveryCode });
+  const buyerKeys = buyerKey ? [buyerKey, ...alsoBuyerKeys] : [];
   if (body.restore) {
     if (!buyerKey) throw new ArtifactError('buyer_required', 400, 'Say who is asking.');
-    return restorePurchase({ artifactId: params.id, buyerKey });
+    return restorePurchase({ artifactId: params.id, buyerKeys });
   }
   if (body.check) {
     if (!buyerKey || !body.intentId) throw new ArtifactError('buyer_required', 400, 'Say who is asking, and about which purchase.');
-    const view = await checkPurchase({ artifactId: params.id, buyerKey, intentId: body.intentId });
+    const view = await checkPurchase({ artifactId: params.id, buyerKeys, intentId: body.intentId });
     if (!view) throw new ArtifactError('not_found', 404, 'No such order.');
     return view;
   }
   if (!body.start) return { enabled: await pageTakesPayments(params.id) };
   if (body.intentId && !buyerKey) throw new ArtifactError('buyer_required', 400, 'Say who is asking.');
   const visitor = person.signedIn ? `game:${person.identifier}` : `game-guest:${person.name ?? ''}:${body.viewer.chat?.ref ?? ''}`;
-  const outcome = await startCheckout({ artifactId: params.id, visitor, intentId: body.intentId, buyerKey: body.intentId ? buyerKey : null });
+  const outcome = await startCheckout({ artifactId: params.id, visitor, intentId: body.intentId, buyerKey: body.intentId ? buyerKey : null, alsoBuyerKeys });
   if (outcome.status === 'ok') return { orderId: outcome.orderId, checkoutUrl: outcome.checkoutUrl, amount: outcome.amount, currency: outcome.currency, app: outcome.app, reused: outcome.reused };
   if (outcome.status === 'limit') throw new ArtifactError('limit', 429, 'Too many tries for now.');
   throw new ArtifactError('unavailable', 409, 'Payments are unavailable.');

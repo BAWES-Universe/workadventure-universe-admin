@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { buyerKeyOf, checkPurchase, INTENT_ID, isOpenByLink, orderForArtifact, pageTakesPayments, restorePurchase, startCheckout } from '@/lib/app-direct/pay';
+import { buyerKeysOf, checkPurchase, INTENT_ID, isOpenByLink, orderForArtifact, pageTakesPayments, restorePurchase, startCheckout } from '@/lib/app-direct/pay';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed } from '@/lib/me-route';
 
@@ -62,17 +62,19 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (!parsed.success) return respond({ error: 'Invalid request data', code: 'bad_request' }, 400);
   const body = parsed.data;
   const session = body.restore || body.check || body.intentId ? await getSessionUser(request).catch(() => null) : null;
-  const buyerKey = buyerKeyOf({ accountId: session?.id ?? null, recoveryCode: body.recoveryCode });
+  // The account when signed in, and the recovery code when this browser holds one: a guest who paid and then signed in is looked for under both
+  const buyerKeys = buyerKeysOf({ accountId: session?.id ?? null, recoveryCode: body.recoveryCode });
+  const buyerKey = buyerKeys[0] ?? null;
   // Who the buyer is, for the host: a guest keeps a receipt link (which holds the recovery code); an account has nothing to keep
   const buyer = session ? 'account' : 'guest';
-  if (body.restore) return buyerKey ? respond({ ...(await restorePurchase({ artifactId, buyerKey })), buyer }) : respond({ error: 'Say who is asking', code: 'buyer_required' }, 400);
+  if (body.restore) return buyerKey ? respond({ ...(await restorePurchase({ artifactId, buyerKeys })), buyer }) : respond({ error: 'Say who is asking', code: 'buyer_required' }, 400);
   if (body.check) {
     if (!buyerKey || !body.intentId) return respond({ error: 'Say who is asking, and about which purchase', code: 'buyer_required' }, 400);
-    const view = await checkPurchase({ artifactId, buyerKey, intentId: body.intentId });
+    const view = await checkPurchase({ artifactId, buyerKeys, intentId: body.intentId });
     return view ? respond({ ...view, buyer }) : respond({ error: 'Not found' }, 404);
   }
   if (body.intentId && !buyerKey) return respond({ error: 'Say who is asking', code: 'buyer_required' }, 400);
-  const outcome = await startCheckout({ artifactId, visitor: visitorOf(request), intentId: body.intentId, buyerKey: body.intentId ? buyerKey : null });
+  const outcome = await startCheckout({ artifactId, visitor: visitorOf(request), intentId: body.intentId, buyerKey: body.intentId ? buyerKey : null, alsoBuyerKeys: buyerKeys.slice(1) });
   if (outcome.status === 'ok') return respond({ orderId: outcome.orderId, checkoutUrl: outcome.checkoutUrl, amount: outcome.amount, currency: outcome.currency, app: outcome.app, reused: outcome.reused, buyer });
   if (outcome.status === 'limit') return respond({ error: 'Too many tries for now', code: 'limit' }, 429);
   return respond({ error: 'Payments are unavailable', code: 'unavailable' }, 409);

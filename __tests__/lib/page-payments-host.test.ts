@@ -113,6 +113,8 @@ describe('a paying page on the public share link', () => {
     const { tap, told, host } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
     tap({ request: 'a' });
     await flush();
+    // The page was open and the buyer was paying for a while before it reloaded
+    await jest.advanceTimersByTimeAsync(2_500);
     host.frameLoaded();
     tap({ request: 'a' });
     expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'busy', request: 'a' });
@@ -121,6 +123,29 @@ describe('a paying page on the public share link', () => {
     await jest.advanceTimersByTimeAsync(3_000);
     expect(told()).toHaveLength(before);
     host.destroy();
+  });
+
+  it('tells a page that asked while it was still loading, before its frame’s load event: its first request is its own', async () => {
+    const { tap, told, host } = setup((call) => ({ body: call.body.restore ? { status: 'paid', testPayment: false, orderId: 'o-1' } : started }));
+    // A page's scripts run, and may ask to restore, before the frame says it has loaded
+    tap({ request: 'r1', restore: true });
+    host.frameLoaded();
+    await flush();
+    expect(told()).toEqual([{ universe: 'app-result', status: 'paid', request: 'r1' }]);
+    host.destroy();
+  });
+
+  it('tells a checkout started while the page was loading, and never one that was started long before a reload', async () => {
+    const early = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
+    early.tap({ request: 'a' });
+    early.host.frameLoaded();
+    await flush();
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(early.told()).toEqual([
+      { universe: 'app-result', status: 'started', request: 'a' },
+      { universe: 'app-result', status: 'paid', request: 'a' },
+    ]);
+    early.host.destroy();
   });
 
   it('hears only the artifact’s own frame', async () => {

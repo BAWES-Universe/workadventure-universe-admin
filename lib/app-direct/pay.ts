@@ -97,8 +97,17 @@ export function guestBuyerKey(code: unknown): string | null {
  * start is made as before, with nothing to find it by.
  */
 export function buyerKeyOf(input: { accountId?: string | null; recoveryCode?: unknown }): string | null {
-  if (input.accountId) return accountBuyerKey(input.accountId);
-  return guestBuyerKey(input.recoveryCode);
+  return buyerKeysOf(input)[0] ?? null;
+}
+
+/**
+ * Every key this buyer's purchases may be under, the account first. A guest who paid and then signed in has both: the account (new orders
+ * are made under it) and the recovery code their browser still holds, which proves the guest orders are theirs. Looking under both is what
+ * keeps a purchase from being lost to signing in, and a wish started as a guest from being made twice when it is retried signed in.
+ */
+export function buyerKeysOf(input: { accountId?: string | null; recoveryCode?: unknown }): string[] {
+  const guest = guestBuyerKey(input.recoveryCode);
+  return [...(input.accountId ? [accountBuyerKey(input.accountId)] : []), ...(guest ? [guest] : [])];
 }
 
 // ---- The owner's side: a job per page --------------------------------------------------------------------------
@@ -276,6 +285,8 @@ export interface StartCheckout {
    */
   intentId?: string | null;
   buyerKey?: string | null;
+  /** Other keys the same buyer's earlier orders may be under (see `buyerKeysOf`): the wish is looked up under all of them. */
+  alsoBuyerKeys?: string[];
 }
 
 const HOUR = 3_600_000;
@@ -320,14 +331,16 @@ async function moveOrder(orderId: string, move: OrderMove, db?: Prisma.Transacti
   return db ? run(db) : prisma.$transaction(run);
 }
 
-const wishOf = (artifactId: string, intent: { intentId: string; buyerKey: string }) => ({ artifactId_buyerKey_intentId: { artifactId, buyerKey: intent.buyerKey, intentId: intent.intentId } });
+/** The order a purchase wish made, under any of the buyer's keys. */
+const wishWhere = (artifactId: string, intentId: string, keys: string[]) => ({ artifactId, intentId, buyerKey: { in: keys } });
 
 export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}): Promise<CheckoutOutcome> {
   const intent = input.intentId && input.buyerKey ? { intentId: input.intentId, buyerKey: input.buyerKey } : null;
   const limits = await getBrickLimits();
   // The same wish again (a retry after a lost answer, a second tab): the order it made, found before anything else is asked or counted
+  const keys = intent ? [intent.buyerKey, ...(input.alsoBuyerKeys ?? [])] : [];
   if (intent) {
-    const made = await prisma.appPageOrder.findUnique({ where: wishOf(input.artifactId, intent), select: { id: true } });
+    const made = await prisma.appPageOrder.findFirst({ where: wishWhere(input.artifactId, intent.intentId, keys), select: { id: true } });
     if (made) return carryOn(made.id, limits, deps);
   }
   const first = checkoutTerms(await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, include: { connection: true, artifact: { select: { expiresAt: true } } } }));
@@ -340,7 +353,7 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`page-orders:${first.job.ownerId}`}, 0))`;
     // Two taps of one wish, at the same moment, wait here for each other: the second finds what the first made
     if (intent) {
-      const made = await tx.appPageOrder.findUnique({ where: wishOf(input.artifactId, intent), select: { id: true } });
+      const made = await tx.appPageOrder.findFirst({ where: wishWhere(input.artifactId, intent.intentId, keys), select: { id: true } });
       if (made) return { again: made.id } as const;
     }
     // Holding both rows keeps the owner from replacing the terms, the app or its key until this order is written; what they hold NOW is what
@@ -795,8 +808,8 @@ export async function pageTakesPayments(artifactId: string): Promise<boolean> {
  * Found only by the page, the buyer and the wish together, so one buyer cannot ask about another's. An order whose start was never finished
  * is carried on with the same wish first (the same payment, not a second one). Null when this buyer has no order for that wish.
  */
-export async function checkPurchase(input: { artifactId: string; buyerKey: string; intentId: string }, deps: GuardDeps = {}): Promise<OrderView | null> {
-  const order = await prisma.appPageOrder.findUnique({ where: wishOf(input.artifactId, input), select: { id: true, status: true } });
+export async function checkPurchase(input: { artifactId: string; buyerKeys: string[]; intentId: string }, deps: GuardDeps = {}): Promise<OrderView | null> {
+  const order = await prisma.appPageOrder.findFirst({ where: wishWhere(input.artifactId, input.intentId, input.buyerKeys), select: { id: true, status: true } });
   if (!order) return null;
   if (order.status === 'creating') await carryOn(order.id, await getBrickLimits(), deps);
   return verifyOrder(order.id, deps);
@@ -819,12 +832,12 @@ const RESTORE_LOOKS = 5;
  * buyer alone: never by a page-chosen id, a browser or "the last order for this page". Orders of theirs that are still open are asked
  * about at the service first, so a payment made late is found. A live purchase wins over a test one.
  */
-export async function restorePurchase(input: { artifactId: string; buyerKey: string }, deps: GuardDeps = {}): Promise<Restored> {
+export async function restorePurchase(input: { artifactId: string; buyerKeys: string[] }, deps: GuardDeps = {}): Promise<Restored> {
   const none = (status: Restored['status'] = 'none'): Restored => ({ status, testPayment: false, orderId: null, pollAfterMs: 3_000 });
   const limits = await getBrickLimits();
   const lateFrom = new Date(Date.now() - (limits.checkoutOpenHours + limits.latePaymentHours) * HOUR);
   const open = await prisma.appPageOrder.findMany({
-    where: { artifactId: input.artifactId, buyerKey: input.buyerKey, status: { in: ['pending', 'not_paid'] }, providerRef: { not: null }, createdAt: { gte: lateFrom } },
+    where: { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, status: { in: ['pending', 'not_paid'] }, providerRef: { not: null }, createdAt: { gte: lateFrom } },
     orderBy: { createdAt: 'desc' },
     take: RESTORE_LOOKS,
     select: { id: true },
@@ -832,14 +845,14 @@ export async function restorePurchase(input: { artifactId: string; buyerKey: str
   for (const order of open) await verifyOrder(order.id, deps).catch(() => null);
   const offer = await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, select: { amountMinor: true, currency: true } });
   const paid = await prisma.appPageOrder.findMany({
-    where: { artifactId: input.artifactId, buyerKey: input.buyerKey, status: 'paid', ...(offer ? { amountMinor: offer.amountMinor, currency: offer.currency } : {}) },
+    where: { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, status: 'paid', ...(offer ? { amountMinor: offer.amountMinor, currency: offer.currency } : {}) },
     orderBy: { paidAt: 'desc' },
     take: 20,
     select: { id: true, mode: true },
   });
   const chosen = paid.find((order) => order.mode !== 'test') ?? paid[0];
   if (chosen) return { status: 'paid', testPayment: chosen.mode === 'test', orderId: chosen.id, pollAfterMs: 3_000 };
-  const waiting = await prisma.appPageOrder.findFirst({ where: { artifactId: input.artifactId, buyerKey: input.buyerKey, status: { in: ['creating', 'pending'] } }, orderBy: { createdAt: 'desc' }, select: { id: true, createdAt: true } });
+  const waiting = await prisma.appPageOrder.findFirst({ where: { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, status: { in: ['creating', 'pending'] } }, orderBy: { createdAt: 'desc' }, select: { id: true, createdAt: true } });
   return waiting ? { status: 'checking', testPayment: false, orderId: waiting.id, pollAfterMs: pollAfterMs(waiting.createdAt) } : none();
 }
 

@@ -1362,16 +1362,16 @@ run('payments for pages, in a real database', () => {
         const intentId = wish();
         const made = await begin(artifactId, intentId, code);
         if (made.status !== 'ok') throw new Error('expected ok');
-        expect(await checkPurchase({ artifactId, buyerKey: buyerOf(code), intentId })).toMatchObject({ status: 'checking', orderId: made.orderId, testPayment: true });
+        expect(await checkPurchase({ artifactId, buyerKeys: [buyerOf(code)], intentId })).toMatchObject({ status: 'checking', orderId: made.orderId, testPayment: true });
         // Another buyer with the same wish id, another wish, another page: nothing
-        expect(await checkPurchase({ artifactId, buyerKey: buyerOf(word()), intentId })).toBeNull();
-        expect(await checkPurchase({ artifactId, buyerKey: buyerOf(code), intentId: wish() })).toBeNull();
+        expect(await checkPurchase({ artifactId, buyerKeys: [buyerOf(word())], intentId })).toBeNull();
+        expect(await checkPurchase({ artifactId, buyerKeys: [buyerOf(code)], intentId: wish() })).toBeNull();
         const other = await makeArtifact();
-        expect(await checkPurchase({ artifactId: other, buyerKey: buyerOf(code), intentId })).toBeNull();
+        expect(await checkPurchase({ artifactId: other, buyerKeys: [buyerOf(code)], intentId })).toBeNull();
         // The payment is made at the service, the page never hears of it, and Check payment finds it
         gateway({ record: (order) => paidRecord(order) });
         await old(made.orderId);
-        expect(await checkPurchase({ artifactId, buyerKey: buyerOf(code), intentId })).toMatchObject({ status: 'paid', orderId: made.orderId, testPayment: true });
+        expect(await checkPurchase({ artifactId, buyerKeys: [buyerOf(code)], intentId })).toMatchObject({ status: 'paid', orderId: made.orderId, testPayment: true });
       });
 
       it('carries on an order whose start was lost before asking about it', async () => {
@@ -1383,7 +1383,7 @@ run('payments for pages, in a real database', () => {
           data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'creating', visitorHash: 'v', intentId, buyerKey: buyerOf(code), createdAt: new Date(Date.now() - 120_000) },
         });
         gateway();
-        expect(await checkPurchase({ artifactId, buyerKey: buyerOf(code), intentId })).toMatchObject({ status: 'checking', checkoutUrl: 'https://checkout.examplepay.com/?mode=page&token=abc' });
+        expect(await checkPurchase({ artifactId, buyerKeys: [buyerOf(code)], intentId })).toMatchObject({ status: 'checking', checkoutUrl: 'https://checkout.examplepay.com/?mode=page&token=abc' });
       });
     });
 
@@ -1394,13 +1394,13 @@ run('payments for pages, in a real database', () => {
         const code = word();
         const made = await begin(artifactId, wish(), code);
         if (made.status !== 'ok') throw new Error('expected ok');
-        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(code) })).toMatchObject({ status: 'checking', orderId: made.orderId });
+        expect(await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] })).toMatchObject({ status: 'checking', orderId: made.orderId });
         // Paid at the service while nobody was watching: Restore asks about the open order first
         gateway({ record: (order) => paidRecord(order) });
         await old(made.orderId);
-        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(code) })).toMatchObject({ status: 'paid', orderId: made.orderId, testPayment: true });
-        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(word()) })).toMatchObject({ status: 'none', orderId: null });
-        expect(await restorePurchase({ artifactId: await makeArtifact(), buyerKey: buyerOf(code) })).toMatchObject({ status: 'none' });
+        expect(await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] })).toMatchObject({ status: 'paid', orderId: made.orderId, testPayment: true });
+        expect(await restorePurchase({ artifactId, buyerKeys: [buyerOf(word())] })).toMatchObject({ status: 'none', orderId: null });
+        expect(await restorePurchase({ artifactId: await makeArtifact(), buyerKeys: [buyerOf(code)] })).toMatchObject({ status: 'none' });
       });
 
       it('prefers a live purchase and never gives a test one as live', async () => {
@@ -1413,9 +1413,9 @@ run('payments for pages, in a real database', () => {
           });
         const live = await row('live', new Date(Date.now() - 3_600_000));
         await row('test', new Date());
-        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(code) })).toMatchObject({ status: 'paid', orderId: live.id, testPayment: false });
+        expect(await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] })).toMatchObject({ status: 'paid', orderId: live.id, testPayment: false });
         await prisma.appPageOrder.delete({ where: { id: live.id } });
-        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(code) })).toMatchObject({ status: 'paid', testPayment: true });
+        expect(await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] })).toMatchObject({ status: 'paid', testPayment: true });
       });
 
       it('is for what the page sells now: an order at other terms is not this offer', async () => {
@@ -1426,11 +1426,11 @@ run('payments for pages, in a real database', () => {
         if (made.status !== 'ok') throw new Error('expected ok');
         await old(made.orderId);
         await verifyOrder(made.orderId);
-        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(code) })).toMatchObject({ status: 'paid' });
+        expect(await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] })).toMatchObject({ status: 'paid' });
         await prisma.appPageJob.update({ where: { artifactId }, data: { amountMinor: 9_000 } });
-        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(code) })).toMatchObject({ status: 'none' });
+        expect(await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] })).toMatchObject({ status: 'none' });
         // The original order can always be asked about with Check payment, whatever the page sells now
-        expect(await checkPurchase({ artifactId, buyerKey: buyerOf(code), intentId: (await prisma.appPageOrder.findUniqueOrThrow({ where: { id: made.orderId } })).intentId as string })).toMatchObject({ status: 'paid' });
+        expect(await checkPurchase({ artifactId, buyerKeys: [buyerOf(code)], intentId: (await prisma.appPageOrder.findUniqueOrThrow({ where: { id: made.orderId } })).intentId as string })).toMatchObject({ status: 'paid' });
       });
     });
 
@@ -1498,6 +1498,44 @@ run('payments for pages, in a real database', () => {
         expect((await web(artifactId, { check: true, intentId, recoveryCode: word() })).status).toBe(404);
         expect(await (await web(artifactId, { restore: true, recoveryCode: code })).json()).toMatchObject({ status: 'checking', orderId: one.orderId });
         expect((await web(artifactId, { restore: true })).status).toBe(400);
+      });
+
+      it('keeps a guest’s purchase after the same browser signs in: Restore, Check payment and the receipt link find it under the code, and a retried wish is not made twice', async () => {
+        const { artifactId } = await pending();
+        gateway({ record: (order) => paidRecord(order) });
+        const code = word();
+        const intentId = wish();
+        // A guest pays
+        const made = await (await web(artifactId, { intentId, recoveryCode: code })).json();
+        await old(made.orderId);
+        expect(await (await web(artifactId, { restore: true, recoveryCode: code })).json()).toMatchObject({ status: 'paid', orderId: made.orderId, buyer: 'guest' });
+        // The same browser signs in to Orbit: the same code still finds it, on the page and on the saved receipt link
+        mockUser.current = { id: sara };
+        expect(await (await web(artifactId, { restore: true, recoveryCode: code })).json()).toMatchObject({ status: 'paid', orderId: made.orderId, buyer: 'account' });
+        expect(await (await web(artifactId, { check: true, intentId, recoveryCode: code })).json()).toMatchObject({ status: 'paid', orderId: made.orderId });
+        // The wish started as a guest and retried signed in is the same order, never a second
+        const again = await (await web(artifactId, { intentId, recoveryCode: code }, '203.0.113.11')).json();
+        expect(again).toMatchObject({ orderId: made.orderId, reused: true });
+        expect(await orders(artifactId)).toHaveLength(1);
+        // Signed in WITHOUT the code, or with another browser's code, finds nothing: the code is the proof
+        expect(await (await web(artifactId, { restore: true })).json()).toMatchObject({ status: 'none' });
+        expect(await (await web(artifactId, { restore: true, recoveryCode: word() })).json()).toMatchObject({ status: 'none' });
+        // The game's window, with the person signed in and the code its own window holds, finds it too
+        expect(await (await game(artifactId, { viewer: viewerOf(`sara-${tag}`), restore: true, recoveryCode: code })).json()).toMatchObject({ status: 'paid', orderId: made.orderId });
+        expect(await (await game(artifactId, { viewer: viewerOf(`omar-${tag}`), restore: true, recoveryCode: code })).json()).toMatchObject({ status: 'paid', orderId: made.orderId });
+      });
+
+      it('makes new orders under the account when signed in, and still finds the earlier guest ones', async () => {
+        const { artifactId } = await pending();
+        gateway({ record: (order) => paidRecord(order) });
+        const code = word();
+        const guestOrder = await (await web(artifactId, { intentId: wish(), recoveryCode: code })).json();
+        mockUser.current = { id: sara };
+        const accountOrder = await (await web(artifactId, { intentId: wish(), recoveryCode: code }, '203.0.113.12')).json();
+        expect(accountOrder.orderId).not.toBe(guestOrder.orderId);
+        expect((await orders(artifactId)).map((row) => row.buyerKey)).toEqual([buyerOf(code), `acct:${sara}`]);
+        await old(accountOrder.orderId);
+        expect(await (await web(artifactId, { restore: true, recoveryCode: code })).json()).toMatchObject({ status: 'paid' });
       });
 
       it('binds an Orbit session on the public link to the account, and restores it for the same account in the game', async () => {

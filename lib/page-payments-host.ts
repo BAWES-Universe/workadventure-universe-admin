@@ -75,6 +75,18 @@ interface Answer {
   body: Record<string, unknown> | null;
 }
 
+/**
+ * Which opening a request came from. A page's scripts run, and may ask, before its frame's `load` event; that event then bumps the opening
+ * count. A request that came in the moment before a load belongs to the document that is loading (not to the one that just went), so such a
+ * ticket is moved to the new opening at the load; any other ticket stays with the opening it was made in.
+ */
+interface Ticket {
+  from: number;
+  at: number;
+}
+/** How close to a load a request must have come to be taken for the loading document's own. */
+const LOADING_MS = 2_000;
+
 export interface PagePaymentsHostOptions {
   artifactId: string;
   /** The window of the artifact's frame, as it is now: a message from any other window is ignored. */
@@ -121,14 +133,14 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   let busy = false;
   /** The id the page gave the request that is on its way, and the opening it came from. */
   let activeRequest = '';
-  let activeOpening = 0;
+  let activeTicket: Ticket | null = null;
   let opening = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   let tabWatch: ReturnType<typeof setInterval> | undefined;
   let startInFlight: { abort: AbortController; clear: () => void } | undefined;
   /** What Check payment asks about: the wish of the last checkout (when there is one), and who asked for it. */
-  let target: { intentId: string | null; request: string; from: number } | null = null;
+  let target: { intentId: string | null; request: string; ticket: Ticket } | null = null;
   let guest = false;
   let memoryCode: string | null = null;
 
@@ -169,11 +181,11 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     options.frame()?.postMessage({ universe: 'app-result', status, request, ...(test ? { test: true } : {}) }, '*');
 
   // How a checkout ended is told to the page that asked, in the opening it asked in, and to no other
-  const end = (update: Partial<PayLine>, status: string, request: string, from: number, test = false) => {
+  const end = (update: Partial<PayLine>, status: string, request: string, ticket: Ticket, test = false) => {
     busy = false;
     activeRequest = '';
     publish({ ...update, receipt: receiptFor() });
-    if (opening === from) tellRequest(status, request, test);
+    if (opening === ticket.from) tellRequest(status, request, test);
   };
 
   const stopTimers = () => {
@@ -184,14 +196,14 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   };
 
   /** Asks about an order until it ends. The deadline has its own clock; a closed checkout tab gets its link back. */
-  const watch = (orderId: string, checkout: { url: string; app: string; popup: Window | null } | null, request: string, from: number) => {
+  const watch = (orderId: string, checkout: { url: string; app: string; popup: Window | null } | null, request: string, ticket: Ticket) => {
     let over = false;
     let linkBack = false;
     const finish = (update: Partial<PayLine>, status: string, test = false) => {
       if (over || destroyed) return;
       over = true;
       stopTimers();
-      end(update, status, request, from, test);
+      end(update, status, request, ticket, test);
     };
     // Twenty minutes without an answer: said plainly, never a silent end. The order may still be counted later, which Check payment finds.
     deadline = setTimeout(() => finish({ problem: 'cant_confirm', canCheck: true }, 'cant_confirm'), POLL_FOR_MS);
@@ -222,22 +234,22 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     timer = setTimeout(() => void poll(), FIRST_POLL_MS);
   };
 
-  const adopt = (orderId: string, checkout: { url: string; app: string; popup: Window | null } | null, request: string, from: number) => {
+  const adopt = (orderId: string, checkout: { url: string; app: string; popup: Window | null } | null, request: string, ticket: Ticket) => {
     busy = true;
     activeRequest = request;
-    activeOpening = from;
+    activeTicket = ticket;
     publish({ checking: true, resume: checkout && !checkout.popup ? { url: checkout.url, app: checkout.app } : null, receipt: receiptFor() });
-    watch(orderId, checkout, request, from);
+    watch(orderId, checkout, request, ticket);
   };
 
-  const begin = (request: string, from: number) => {
+  const begin = (request: string, ticket: Ticket) => {
     busy = true;
     activeRequest = request;
-    activeOpening = from;
+    activeTicket = ticket;
     stopTimers();
     // The wish for this tap: made here, never by the page. A start sent again after a lost answer carries the same one, so it finds the order it made
     const intentId = random(24);
-    target = { intentId, request, from };
+    target = { intentId, request, ticket };
     // Opened now, in the same moment as the page's tap, so a blocked pop-up is the only thing left that can go wrong
     let popup: Window | null = null;
     try {
@@ -277,23 +289,23 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         // No answer ever came: an order may or may not have been made. The same wish can be asked about with Check payment.
         if (!answer) {
           popup?.close();
-          return end({ problem: 'unavailable', canCheck: true }, 'unavailable', request, from);
+          return end({ problem: 'unavailable', canCheck: true }, 'unavailable', request, ticket);
         }
         const url = safeCheckout(typeof answer.body?.checkoutUrl === 'string' ? answer.body.checkoutUrl : null);
         const orderId = typeof answer.body?.orderId === 'string' ? answer.body.orderId : '';
         if (!answer.ok || !orderId || !url) {
           popup?.close();
           const limit = answer.status === 429 || answer.body?.code === 'limit';
-          return end({ problem: limit ? 'limit' : 'unavailable' }, limit ? 'limit' : 'unavailable', request, from);
+          return end({ problem: limit ? 'limit' : 'unavailable' }, limit ? 'limit' : 'unavailable', request, ticket);
         }
         if (popup) popup.location.href = url;
-        adopt(orderId, { url, app: typeof answer.body?.app === 'string' ? answer.body.app : '', popup }, request, from);
-        if (opening === from) tellRequest('started', request);
+        adopt(orderId, { url, app: typeof answer.body?.app === 'string' ? answer.body.app : '', popup }, request, ticket);
+        if (opening === ticket.from) tellRequest('started', request);
       } catch {
         popup?.close();
         if (destroyed) return;
         // Dropped for good after two minutes without an answer: said once, and Check payment can ask about the same wish
-        end({ problem: 'unavailable', canCheck: true }, 'unavailable', request, from);
+        end({ problem: 'unavailable', canCheck: true }, 'unavailable', request, ticket);
       } finally {
         mine.clear();
         if (startInFlight === mine) startInFlight = undefined;
@@ -302,25 +314,25 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   };
 
   /** A page asking for a purchase this buyer already made (a reload, a reopened version): found by the buyer, never by anything the page chose. */
-  const restore = (request: string, from: number) => {
+  const restore = (request: string, ticket: Ticket) => {
     busy = true;
     activeRequest = request;
-    activeOpening = from;
+    activeTicket = ticket;
     void (async () => {
       try {
         const answer = await post({ restore: true });
         if (destroyed) return;
         const status = answer.body?.status;
-        if (answer.ok && status === 'paid') return end({ paid: { test: answer.body?.testPayment === true } }, 'paid', request, from, answer.body?.testPayment === true);
-        if (answer.ok && status === 'none') return end({}, 'none', request, from);
+        if (answer.ok && status === 'paid') return end({ paid: { test: answer.body?.testPayment === true } }, 'paid', request, ticket, answer.body?.testPayment === true);
+        if (answer.ok && status === 'none') return end({}, 'none', request, ticket);
         if (answer.ok && status === 'checking' && typeof answer.body?.orderId === 'string') {
           // An order of theirs is still open: it is watched like a new checkout, and the page hears how it ends under this request
-          target = { intentId: null, request, from };
-          return adopt(answer.body.orderId, null, request, from);
+          target = { intentId: null, request, ticket };
+          return adopt(answer.body.orderId, null, request, ticket);
         }
-        end({ problem: 'unavailable', canCheck: true }, 'unavailable', request, from);
+        end({ problem: 'unavailable', canCheck: true }, 'unavailable', request, ticket);
       } catch {
-        if (!destroyed) end({ problem: 'unavailable', canCheck: true }, 'unavailable', request, from);
+        if (!destroyed) end({ problem: 'unavailable', canCheck: true }, 'unavailable', request, ticket);
       }
     })();
   };
@@ -339,19 +351,20 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     if (busy) {
       // The same tap heard twice, in the same opening, is the same request. Anything else while a checkout is on its way (or its start is
       // still waiting for an answer, however long it takes) is told so under its own id, and the checkout on its way keeps its own
-      if (data.request !== activeRequest || activeOpening !== opening) tellRequest('busy', data.request);
+      if (data.request !== activeRequest || activeTicket?.from !== opening) tellRequest('busy', data.request);
       return;
     }
-    if (data.restore === true) return restore(data.request, opening);
-    begin(data.request, opening);
+    const ticket: Ticket = { from: opening, at: Date.now() };
+    if (data.restore === true) return restore(data.request, ticket);
+    begin(data.request, ticket);
   };
 
   const checkPayment = () => {
     if (destroyed || busy) return;
-    const asked = target ?? { intentId: null, request: '', from: -1 };
+    const asked = target ?? { intentId: null, request: '', ticket: { from: -1, at: 0 } };
     busy = true;
     activeRequest = asked.request;
-    activeOpening = asked.from;
+    activeTicket = asked.ticket;
     publish({ checking: true });
     void (async () => {
       try {
@@ -365,10 +378,10 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
           busy = false;
           activeRequest = '';
           publish({ ...update, receipt: receiptFor() });
-          if (request && opening === asked.from) tellRequest(told, request, isTest);
+          if (request && opening === asked.ticket.from) tellRequest(told, request, isTest);
         };
         if (answer.ok && status === 'paid') return done({ paid: { test } }, 'paid', test);
-        if (answer.ok && status === 'checking' && typeof answer.body?.orderId === 'string') return adopt(answer.body.orderId, null, request, asked.from);
+        if (answer.ok && status === 'checking' && typeof answer.body?.orderId === 'string') return adopt(answer.body.orderId, null, request, asked.ticket);
         if (answer.ok && (status === 'not_paid' || status === 'cant_confirm')) return done({ problem: status, canCheck: true }, status);
         if (answer.ok && status === 'none') return done({ problem: 'none', canCheck: true }, 'none');
         if (answer.status === 404) return done({ problem: 'none', canCheck: true }, 'none');
@@ -390,9 +403,11 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     },
     onMessage,
     frameLoaded() {
-      // Every load is a new opening: the page appearing, a reload or another version. A request can only have come from the opening
-      // before it, which is gone
+      // Every load is a new opening: the page appearing, a reload or another version. What an earlier opening asked is never told to the
+      // page that is there now, except a request that came in the moment before this load: a page asks as its scripts run, before its frame
+      // says it has loaded, so that one is the loading document's own and is moved to the new opening
       opening += 1;
+      if (busy && activeTicket && Date.now() - activeTicket.at < LOADING_MS) activeTicket.from = opening;
     },
     checkPayment,
     destroy() {
