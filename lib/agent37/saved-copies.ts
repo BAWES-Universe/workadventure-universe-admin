@@ -153,8 +153,10 @@ export async function storeSealed(finalKey: string, stagingKey: string, archive:
   } catch (error) {
     // Given up on by the signal: the request may still finish at the bucket, so the caller is told the outcome is not known (not that it failed)
     if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) throw new CopyOutcomeUnknown();
-    // A copy that failed is not a saved copy, and nothing else would ever remove the staging object (an unknown outcome keeps it: the copy may still be reading it)
-    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).then(leftNothing, () => undefined);
+    // A copy that failed is not a saved copy, and nothing else would ever remove the staging object (an unknown outcome keeps it: the copy may still be reading it).
+    // The save's row is NOT let go of here: a transport error (a reset connection) after the request went out may still let the copy land, so the row stays for the
+    // purge to settle once it is stale, and a purge cannot call the files gone while a late copy is still possible
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).catch(() => undefined);
     throw error;
   }
   await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).catch(() => undefined);

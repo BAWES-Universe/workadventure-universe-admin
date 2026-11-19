@@ -226,13 +226,15 @@ describe('the saved copy of a Brick computer’s files', () => {
     expect((stored.get(savedCopyKey('bot-1')) as Buffer).equals(before)).toBe(true);
   });
 
-  it('a copy step that throws leaves no staging object behind, and the earlier copy stays', async () => {
+  it('a copy step that throws leaves no staging object behind, the earlier copy stays, and its row is kept for the purge to settle', async () => {
     await storeSavedCopy('bot-1', webStream(archive));
     const before = Buffer.from(stored.get(savedCopyKey('bot-1')) as Buffer);
     failCopy = true;
     await expect(storeSavedCopy('bot-1', webStream(archive))).rejects.toThrow('bucket could not copy');
     expect([...stored.keys()]).toEqual([savedCopyKey('bot-1')]);
     expect((stored.get(savedCopyKey('bot-1')) as Buffer).equals(before)).toBe(true);
+    // The save's row stays: a reset connection after the request went out may still let the copy land, so only the purge may settle the row once it is stale
+    expect(writes.size).toBe(1);
   });
 
   it('a bucket that fails while a big archive is still coming ends the save with an error instead of hanging', async () => {
