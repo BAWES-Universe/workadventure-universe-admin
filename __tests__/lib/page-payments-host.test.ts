@@ -202,6 +202,44 @@ describe('a paying page on the public share link', () => {
     early.host.destroy();
   });
 
+  it('binds a request that carries its document’s session to that document: it is told even when the frame loads meanwhile, with the session echoed', async () => {
+    const { tap, told, host } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
+    // The page was tapped before its frame's load event: the load does not take its checkout away
+    tap({ request: 'a', session: 's-one' });
+    await flush();
+    host.frameLoaded();
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(told()).toEqual([
+      { universe: 'app-result', status: 'started', request: 'a', session: 's-one' },
+      { universe: 'app-result', status: 'paid', request: 'a', session: 's-one' },
+    ]);
+    host.destroy();
+  });
+
+  it('never tells a checkout to a document that has spoken since with another session, and tells it busy under its own session', async () => {
+    const { tap, told, host } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
+    tap({ request: 'a', session: 's-one' });
+    await flush();
+    await jest.advanceTimersByTimeAsync(500);
+    host.frameLoaded();
+    // Document B, with a session of its own and the same request id
+    tap({ request: 'a', session: 's-two' });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'busy', request: 'a', session: 's-two' });
+    await jest.advanceTimersByTimeAsync(3_000);
+    // A's payment ended, and B is told nothing of it
+    expect(told()).toHaveLength(2);
+    host.destroy();
+  });
+
+  it('binds a restore with a session too: it is not moved at a load, and is told with its session', async () => {
+    const { tap, told, host } = setup(() => ({ body: { status: 'paid', testPayment: false, orderId: 'o-1' } }));
+    tap({ request: 'r1', restore: true, session: 's-one' });
+    host.frameLoaded();
+    await flush();
+    expect(told()).toEqual([{ universe: 'app-result', status: 'paid', request: 'r1', session: 's-one' }]);
+    host.destroy();
+  });
+
   it('hears only the artifact’s own frame', async () => {
     const { tap, told, calls, host } = setup(() => ({ body: started }));
     tap({ request: 'a' }, {} as Window);

@@ -2,9 +2,9 @@
  * The host side of a page that takes payments, for Orbit's public share link (game #2044). It speaks exactly what the game's window speaks
  * (see `PagePayments.ts` in the game), so the same published page behaves the same in both:
  *
- *   page → host   { universe: 'use-app', app, request }                  start a checkout
- *   page → host   { universe: 'use-app', app, request, restore: true }  get back a purchase this buyer already made
- *   host → page   { universe: 'app-result', status, request, test? }
+ *   page → host   { universe: 'use-app', app, request, session? }                  start a checkout
+ *   page → host   { universe: 'use-app', app, request, session?, restore: true }  get back a purchase this buyer already made
+ *   host → page   { universe: 'app-result', status, request, session?, test? }
  *
  * `request` is a short id the page makes up for that tap, and every answer carries it back, so a page (a reloaded one, or one that asked
  * twice) never takes the result of another checkout as its own. Statuses: started · paid · not_paid · cant_confirm · unavailable · limit ·
@@ -13,6 +13,11 @@
  * line says the page needs an update and still offers Check payment. That is the policy for pages made before this protocol (they exist only
  * on dev, the screen is in the approved mock M1 §4): they are made again with the current instructions, and a request-less message never
  * starts a checkout, because there would be no way to tell whose answer is whose.
+ *
+ * `session` is optional: a random id the page's document gives itself when its scripts start. A request that carries one is bound to that
+ * document, whatever the frame does meanwhile (a load before it was shown, a reload, another version): every answer carries it back so the page
+ * checks it is its own, and the host tells nothing once another document has spoken. A frame's documents cannot be told apart from outside
+ * in any other way (the window is the same across loads), so a page without a session is bound only by the frame's loads: see `Ticket`.
  *
  * Everything real is decided by Orbit: the amount and the service are the owner's (a message carries neither), the page hears back only a
  * status, never an address, a key, an order or a recovery code. The purchase wish (`intentId`) is made here per tap, never by the page, and a
@@ -110,6 +115,8 @@ interface Ticket {
   at: number;
   /** A restore (a page asking for its purchase as it loads), the only request that is ever moved to the opening that is loading. */
   restore: boolean;
+  /** The id the page's document gave itself (when it sends one): it binds the request to that document, whatever the frame does meanwhile. */
+  session: string | null;
 }
 /** How close to a load a request must have come to be taken for the loading document's own. */
 const LOADING_MS = 2_000;
@@ -206,6 +213,8 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   let lastRestore: { request: string; ticket: Ticket } | null = null;
   let memoryCode: string | null = null;
   let memoryReceipt: string | null = null;
+  /** The id the document that spoke last gave itself (null when it gave none): another one speaking means another document. */
+  let lastSession: string | null = null;
 
   const publish = (update: Partial<PayLine>, keep = false) => {
     line = { ...(keep ? line : { ...NO_PAY_LINE, receipt: line.receipt }), buyer, ...update };
@@ -373,15 +382,22 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     return { ok: response.ok, status: response.status, body: json };
   };
 
-  const tellRequest = (status: string, request: string, test = false) =>
-    options.frame()?.postMessage({ universe: 'app-result', status, request, ...(test ? { test: true } : {}) }, '*');
+  const tellRequest = (status: string, request: string, test = false, session: string | null = null) =>
+    options.frame()?.postMessage({ universe: 'app-result', status, request, ...(session ? { session } : {}), ...(test ? { test: true } : {}) }, '*');
+
+  /**
+   * Whether the document that is there is the one that asked. A request that carries the id its document gave itself is bound to that document:
+   * the answer carries the id back (the page checks it is its own), and it is told only while no other document has spoken since. A request
+   * without one can only be told apart by the frame's loads (an opening), which is the best a frame can say of its documents.
+   */
+  const isAsker = (ticket: Ticket) => (ticket.session ? lastSession === ticket.session : opening === ticket.from);
 
   // How a checkout ended is told to the page that asked, in the opening it asked in, and to no other
   const end = (update: Partial<PayLine>, status: string, request: string, ticket: Ticket, test = false) => {
     busy = false;
     activeRequest = '';
     publish({ ...update, receipt: receiptFor() });
-    if (opening === ticket.from) tellRequest(status, request, test);
+    if (isAsker(ticket)) tellRequest(status, request, test, ticket.session);
   };
 
   const stopTimers = () => {
@@ -507,7 +523,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         }
         if (popup) popup.location.href = url;
         adopt(orderId, { url, app: typeof answer.body?.app === 'string' ? answer.body.app : '', popup }, request, ticket);
-        if (opening === ticket.from) tellRequest('started', request);
+        if (isAsker(ticket)) tellRequest('started', request, false, ticket.session);
       } catch {
         popup?.close();
         if (destroyed) return;
@@ -565,7 +581,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   const onMessage = (event: { source: unknown; data: unknown }) => {
     const frame = options.frame();
     if (destroyed || !frame || event.source !== frame) return;
-    const data = event.data as { universe?: unknown; app?: unknown; request?: unknown; restore?: unknown } | null;
+    const data = event.data as { universe?: unknown; app?: unknown; request?: unknown; restore?: unknown; session?: unknown } | null;
     if (!data || data.universe !== 'use-app' || typeof data.app !== 'string') return;
     // A request without a valid id of its own is never answered: there would be no way to tell whose answer it is. The buyer is told so on
     // the host's own line, and can still check a payment (a bare status would be taken for whichever checkout the page is waiting on)
@@ -573,13 +589,15 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
       publish({ needsUpdate: true, canCheck: true }, true);
       return;
     }
+    const session = typeof data.session === 'string' && REQUEST_ID.test(data.session) ? data.session : null;
+    lastSession = session;
     if (busy) {
-      // The same tap heard twice, in the same opening, is the same request. Anything else while a checkout is on its way (or its start is
+      // The same tap heard twice, from the same document, is the same request. Anything else while a checkout is on its way (or its start is
       // still waiting for an answer, however long it takes) is told so under its own id, and the checkout on its way keeps its own
-      if (data.request !== activeRequest || activeTicket?.from !== opening) tellRequest('busy', data.request);
+      if (data.request !== activeRequest || !activeTicket || !isAsker(activeTicket)) tellRequest('busy', data.request, false, session);
       return;
     }
-    const ticket: Ticket = { from: opening, at: Date.now(), restore: data.restore === true };
+    const ticket: Ticket = { from: opening, at: Date.now(), restore: data.restore === true, session };
     if (data.restore === true) return restore(data.request, ticket);
     begin(data.request, ticket);
   };
@@ -590,7 +608,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
    */
   const askAgain = (restoring: boolean) => {
     if (destroyed || busy) return;
-    const asked = restoring ? (lastRestore ? { intentId: null, ...lastRestore } : { intentId: null, request: '', ticket: { from: -1, at: 0, restore: false } }) : target ?? { intentId: null, request: '', ticket: { from: -1, at: 0, restore: false } };
+    const asked = restoring ? (lastRestore ? { intentId: null, ...lastRestore } : { intentId: null, request: '', ticket: { from: -1, at: 0, restore: false, session: null } }) : target ?? { intentId: null, request: '', ticket: { from: -1, at: 0, restore: false, session: null } };
     busy = true;
     activeRequest = asked.request;
     activeTicket = asked.ticket;
@@ -607,7 +625,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
           busy = false;
           activeRequest = '';
           publish({ ...update, receipt: receiptFor() });
-          if (request && opening === asked.ticket.from) tellRequest(told, request, isTest);
+          if (request && isAsker(asked.ticket)) tellRequest(told, request, isTest, asked.ticket.session);
         };
         if (answer.ok && status === 'paid') return done({ paid: { test }, restored: asked.intentId ? null : restoredOf(answer.body) }, 'paid', test);
         // This browser's own start that never finished and cannot be carried on yet (it may still be in flight, or its wait is not over): Orbit
@@ -630,7 +648,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         busy = false;
         activeRequest = '';
         publish({ problem: 'unavailable', canCheck: true });
-        if (asked.request && opening === asked.ticket.from) tellRequest('unavailable', asked.request);
+        if (asked.request && isAsker(asked.ticket)) tellRequest('unavailable', asked.request, false, asked.ticket.session);
       }
     };
     void attempt(Date.now());
@@ -648,7 +666,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
       // page that is there now, except a request that came in the moment before this load: a page asks as its scripts run, before its frame
       // says it has loaded, so that one is the loading document's own and is moved to the new opening
       opening += 1;
-      if (busy && activeTicket?.restore && Date.now() - activeTicket.at < LOADING_MS) activeTicket.from = opening;
+      if (busy && activeTicket?.restore && !activeTicket.session && Date.now() - activeTicket.at < LOADING_MS) activeTicket.from = opening;
     },
     checkPayment: () => askAgain(false),
     restorePurchase: () => askAgain(true),
