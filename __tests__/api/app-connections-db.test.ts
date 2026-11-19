@@ -42,7 +42,7 @@ import { DELETE as removeApp } from '@/app/api/me/apps/[connectionId]/bricks/[bo
 import { GET as signInStart } from '@/app/api/me/apps/[connectionId]/sign-in/route';
 import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { PATCH as patchServer, DELETE as deleteServer } from '@/app/api/bots/[id]/mcp-servers/[serverId]/route';
-import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
+import { POST as checkUse } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { GET as signInReturn } from '@/app/api/oauth/mcp-callback/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -331,7 +331,7 @@ run('apps a person connects once, in a real database', () => {
 
     // the very next use finds nothing
     expect(await checkAppUse(saraBrick, a.id, asSara)).toBeNull();
-    const answer = await (await useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: asSara }), params({ id: saraBrick, serverId: a.id }))).json();
+    const answer = await (await checkUse(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: asSara }), params({ id: saraBrick, serverId: a.id }))).json();
     expect(answer).toMatchObject({ allowed: false, reason: 'gone' });
     // every approval for it ended and its waiting card is closed ...
     expect((await prisma.botActionGrant.findUniqueOrThrow({ where: { id: grantId } })).revokedAt).not.toBeNull();
@@ -411,7 +411,7 @@ run('apps a person connects once, in a real database', () => {
     const refused = [{ requesterKey: `omar-${tag}` }, { requesterKey: `omar-${tag}@example.test` }, { requesterKey: 'a-guest-session' }, {}];
     for (const input of refused) expect(await checkAppUse(saraBrick, a.id, input)).toEqual({ allowed: false, reason: 'not_owner', viaConnection: true });
     // and the answer over the wire says nothing about the app
-    const wire = await (await useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `omar-${tag}` } }), params({ id: saraBrick, serverId: a.id }))).json();
+    const wire = await (await checkUse(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `omar-${tag}` } }), params({ id: saraBrick, serverId: a.id }))).json();
     expect(wire).toEqual({ allowed: false, reason: 'not_owner', viaConnection: true });
     expect(JSON.stringify(wire)).not.toMatch(/Calendar|mcp\.example|sara/);
   });
@@ -430,7 +430,7 @@ run('apps a person connects once, in a real database', () => {
   it('asks the bot server’s check only with the service token', async () => {
     const connection = await newOAuthApp(sara);
     const a = (await grantToBrick(sara, connection.id, saraBrick))!;
-    const asked = (token?: string) => useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token, body: { forOwner: true } }), params({ id: saraBrick, serverId: a.id }));
+    const asked = (token?: string) => checkUse(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token, body: { forOwner: true } }), params({ id: saraBrick, serverId: a.id }));
     expect((await asked()).status).toBe(401);
     expect((await asked('wrong')).status).toBe(401);
     expect((await asked(ADMIN_TOKEN)).status).toBe(401);

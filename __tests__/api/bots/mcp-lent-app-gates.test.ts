@@ -31,6 +31,7 @@ jest.mock('@/lib/app-connections', () => ({
   WITH_CONNECTION: { connection: true },
   effectiveServer: (row: Record<string, unknown>) => ({ ...row, ...(row.connection as object) }),
   newSignInNonce: jest.fn().mockResolvedValue('nonce-1'),
+  newSignInGeneration: jest.fn().mockResolvedValue(1),
 }));
 jest.mock('@/lib/github/check', () => ({ testGitHub: jest.fn() }));
 jest.mock('@/lib/app-adapter/ready-made', () => ({ testReadyMade: jest.fn() }));

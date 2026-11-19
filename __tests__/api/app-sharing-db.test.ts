@@ -30,7 +30,7 @@ import { GET as teamGet, DELETE as teamDisconnect } from '@/app/api/me/team-apps
 import { POST as addManagerRoute } from '@/app/api/me/team-apps/[connectionId]/managers/route';
 import { DELETE as removeManagerRoute } from '@/app/api/me/team-apps/[connectionId]/managers/[personId]/route';
 import { GET as available, POST as letBotUse } from '@/app/api/bots/[id]/apps/available/route';
-import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
+import { POST as checkUse } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { GET as listServers, POST as addServer } from '@/app/api/bots/[id]/mcp-servers/route';
 import { GET as botSignInStart } from '@/app/api/bots/[id]/mcp-servers/[serverId]/oauth/start/route';
 import { GET as signInStart } from '@/app/api/me/apps/[connectionId]/sign-in/route';
@@ -71,7 +71,7 @@ const letGuide = async (userId: string, connectionId: string, botId = guide) => 
   return letBotUse(request(`/api/bots/${botId}/apps/available`, { method: 'POST', body: { connectionId } }), params({ id: botId }));
 };
 const check = async (botId: string, serverId: string, body: Record<string, unknown> = {}) => {
-  const response = await useCheck(request(`/api/bots/${botId}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body }), params({ id: botId, serverId }));
+  const response = await checkUse(request(`/api/bots/${botId}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body }), params({ id: botId, serverId }));
   return { status: response.status, body: await response.json() };
 };
 async function lentAndLet(extra: Record<string, unknown> = {}) {
