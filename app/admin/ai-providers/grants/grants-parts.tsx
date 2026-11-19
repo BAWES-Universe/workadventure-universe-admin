@@ -105,26 +105,38 @@ export async function sendJson(url: string, method: 'GET' | 'POST' | 'PUT' | 'PA
  * older figures never lands on top of the figures now on the sheet. `null` asks for nothing (the sheet is closed or not ready).
  */
 export function usePreview(request: PreviewRequest | null): { preview: PreviewView | null; loading: boolean } {
-  // The answer is kept with the request it was for, and shown only while that is the request now made: figures of $5 are not left on screen under $50
-  const [state, setState] = useState<{ preview: PreviewView | null; loading: boolean; key: string | null }>({ preview: null, loading: false, key: null });
+  // The answer is kept with the request it was for, and shown only while that is the request now made: figures of $5 are not left on screen under $50.
+  // Nothing is set while an effect starts: loading is simply "a request is made and its answer is not the one kept".
+  const [answer, setAnswer] = useState<{ preview: PreviewView; key: string } | null>(null);
   const latest = useRef(0);
   const key = request ? JSON.stringify(request) : null;
   useEffect(() => {
     const mine = ++latest.current;
-    if (!key) {
-      setState({ preview: null, loading: false, key: null });
-      return;
-    }
-    setState((current) => ({ ...current, loading: true }));
+    if (!key) return;
     const timer = setTimeout(async () => {
       const result = await sendJson('/api/admin/grants/preview', 'POST', JSON.parse(key));
       if (mine !== latest.current) return;
-      if (result.ok && result.data) setState({ preview: result.data as unknown as PreviewView, loading: false, key });
-      else setState({ preview: { numbers: null, clash: null, problem: result.error ?? 'The preview isn’t available right now.' }, loading: false, key });
+      if (result.ok && result.data) setAnswer({ preview: result.data as unknown as PreviewView, key });
+      else setAnswer({ preview: { numbers: null, clash: null, problem: result.error ?? 'The preview isn’t available right now.' }, key });
     }, 250);
     return () => clearTimeout(timer);
   }, [key]);
-  return { preview: state.key === key ? state.preview : null, loading: state.loading };
+  const current = key !== null && answer?.key === key;
+  return { preview: current ? answer.preview : null, loading: key !== null && !current };
+}
+
+/**
+ * Runs `reset` while rendering, once each time one of `deps` changes and `when` holds: state that has to start again with what it is about
+ * (a sheet that opens, the rule being edited). It is the way React documents for this, with no effect that sets state and no extra paint
+ * of the old values.
+ */
+export function useResetWhen(when: boolean, deps: readonly unknown[], reset: () => void): void {
+  const [seen, setSeen] = useState<readonly unknown[] | null>(null);
+  const changed = seen === null || seen.length !== deps.length || deps.some((dep, index) => !Object.is(dep, seen[index]));
+  if (changed) {
+    setSeen(deps);
+    if (when) reset();
+  }
 }
 
 // ---- The recipients picker ----
@@ -175,21 +187,19 @@ type Match = { id: string; name: string; woka?: string[]; detail?: string };
 function Finder({ kind, onPick, picked }: { kind: 'people' | 'universes'; onPick: (match: Match) => void; picked: string[] }) {
   const [q, setQ] = useState('');
   // The results are kept with the search they answer: after typing on, the rows of the earlier search are not offered
-  const [found, setFound] = useState<{ q: string; kind: string; matches: Match[] } | null>(null);
-  const matches = found && found.q === q && found.kind === kind ? found.matches : null;
-  const [failed, setFailed] = useState(false);
+  // A search that failed is kept the same way (no rows), so it is only said while it is the search now made
+  const [found, setFound] = useState<{ q: string; kind: string; matches: Match[] | null } | null>(null);
+  const answered = found && found.q === q && found.kind === kind ? found : null;
+  const matches = answered?.matches ?? null;
+  const failed = !!answered && answered.matches === null;
   const latest = useRef(0);
   useEffect(() => {
     const mine = ++latest.current;
-    setFailed(false);
     const timer = setTimeout(async () => {
       const result = await sendJson(`/api/admin/grants/find?kind=${kind}&q=${encodeURIComponent(q)}`, 'GET');
       if (mine !== latest.current) return;
       if (result.ok && result.data && Array.isArray(result.data.results)) setFound({ q, kind, matches: result.data.results as Match[] });
-      else {
-        setFound(null);
-        setFailed(true);
-      }
+      else setFound({ q, kind, matches: null });
     }, 200);
     return () => clearTimeout(timer);
   }, [q, kind]);

@@ -25,7 +25,7 @@ import {
   type PreviewRequest,
   type Recipients,
 } from '@/lib/grants-view';
-import { Chosen, Clash, Group, Preview, RecipientPicker, SheetButtons, Words, draftOfAudience, emptyDraft, recipientsOf, sendJson, usePreview, type RecipientDraft } from './grants-parts';
+import { Chosen, Clash, Group, Preview, RecipientPicker, SheetButtons, Words, draftOfAudience, emptyDraft, recipientsOf, sendJson, usePreview, useResetWhen, type RecipientDraft } from './grants-parts';
 
 type Done = () => void;
 
@@ -39,12 +39,10 @@ export function AiSheet({ open, onClose, onSaved, ai }: { open: boolean; onClose
   const [signedIn, setSignedIn] = useState(String(ai.signedIn));
   const [guest, setGuest] = useState(String(ai.guest));
   const [saving, setSaving] = useState(false);
-  useEffect(() => {
-    if (open) {
-      setSignedIn(String(ai.signedIn));
-      setGuest(String(ai.guest));
-    }
-  }, [open, ai.signedIn, ai.guest]);
+  useResetWhen(open, [open, ai.signedIn, ai.guest], () => {
+    setSignedIn(String(ai.signedIn));
+    setGuest(String(ai.guest));
+  });
   const signedInN = Number(signedIn);
   const guestN = Number(guest);
   const valid = Number.isInteger(signedInN) && signedInN >= 1 && Number.isInteger(guestN) && guestN >= 1;
@@ -110,7 +108,7 @@ export function DefaultSheet({ category, view, onClose, onSaved }: { category: M
   const [from, setFrom] = useState('');
   const [startsOn, setStartsOn] = useState<StartsOn>('next');
   const [saving, setSaving] = useState(false);
-  useEffect(() => {
+  useResetWhen(!!category && !!view, [category, view], () => {
     if (!category || !view) return;
     setAmount(dollarsText(view.amountMicros));
     // Computer credit is monthly for everyone for now: it follows the one monthly allowance every member has
@@ -118,7 +116,7 @@ export function DefaultSheet({ category, view, onClose, onSaved }: { category: M
     setWhom(view.recipients?.kind === 'new_from' ? 'new_from' : 'all');
     setFrom(view.recipients?.kind === 'new_from' ? view.recipients.from.slice(0, 10) : dateInput(new Date()));
     setStartsOn('next');
-  }, [category, view]);
+  });
 
   const micros = microsOfDollars(amount);
   const recipients: Recipients | null = interval === 'once' && whom === 'new_from' ? (from ? { kind: 'new_from', from } : null) : { kind: 'all' };
@@ -235,8 +233,7 @@ export function ExceptionSheet({ open, editing, onClose, onSaved }: { open: bool
   const [settings, setSettings] = useState<Record<MoneyCategory, SettingDraft>>({ instant_apps: sameDraft(), computers: sameDraft() });
   const [choice, setChoice] = useState<'this' | 'other' | null>(null);
   const [saving, setSaving] = useState(false);
-  useEffect(() => {
-    if (!open) return;
+  useResetWhen(open, [open, editing], () => {
     setChoice(null);
     if (editing) {
       setAudience(draftOfAudience(editing.audience));
@@ -245,7 +242,7 @@ export function ExceptionSheet({ open, editing, onClose, onSaved }: { open: bool
       setAudience(emptyDraft('people'));
       setSettings({ instant_apps: sameDraft(), computers: sameDraft() });
     }
-  }, [open, editing]);
+  });
 
   const who = recipientsOf(audience);
   const apps = settingOf(settings.instant_apps);
@@ -258,7 +255,7 @@ export function ExceptionSheet({ open, editing, onClose, onSaved }: { open: bool
   // A clash must be answered before saving; a new one starts unanswered
   // The choice belongs to the draft it was made for: changing a category, an amount or the people asks it again, even for the same rule
   const clashKey = clash ? JSON.stringify([clash.people, clash.other.name, request]) : '';
-  useEffect(() => setChoice(null), [clashKey]);
+  useResetWhen(true, [clashKey], () => setChoice(null));
 
   async function save() {
     if (!request) return;
