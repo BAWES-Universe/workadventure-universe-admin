@@ -57,7 +57,7 @@ const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,
 // are RFC 6750 challenge parameters (a name, `=`, then a value) and carry none, so they are left readable — a bare `abc=` or `abc==`
 // is a padded token and is redacted —
 // the WWW-Authenticate header is precisely what we want to store and show.
-const BEARER_PATTERN = /(bearer\s+)(?!resource_metadata=|[a-z_]+[a-z]=[^\s,=])([A-Za-z0-9._~+/=-]{1,})/gi;
+const BEARER_PATTERN = /(bearer\s+)(?!resource_metadata=[^\s,=]|[a-z_]+[a-z]=[^\s,=])([A-Za-z0-9._~+/=-]{1,})/gi;
 const JSON_SECRET_PATTERN =
   /((?:"|')?(?:access_token|refresh_token|id_token|client_secret|api[_-]?key|token)(?:"|')?\s*[:=]\s*(?:"|'))([^"']{4,})(?:"|')/gi;
 const QUERY_SECRET_PATTERN =
@@ -222,7 +222,8 @@ export function summarizeTestResult(
 
   if (result.success) {
     // What an app brings reads "it can do 3 things" (I1): the word tool is never shown to a person
-    const label = `Connected — it can do ${result.toolCount} thing${result.toolCount !== 1 ? 's' : ''}`;
+    // A list that was not read to its end is not the whole of what the app can do: the count says "at least"
+    const label = `Connected — it can do ${result.incomplete ? 'at least ' : ''}${result.toolCount} thing${result.toolCount !== 1 ? 's' : ''}`;
     const lastTested = age ? ` (last tested ${age})` : '';
     if (opts.reconnectRequired === true) {
       return {

@@ -766,6 +766,23 @@ export interface HeldNotice {
   waitId: string;
 }
 
+/**
+ * Something Brick must tell a person once: a run of theirs was given up without a report (it did not finish in time, on every try), so no
+ * report could carry the word. It is handed out again after a while until the bot server confirms it (the same `told` call as a run's own).
+ */
+export interface FailedNotice {
+  runId: string;
+  itemId: string;
+  brickId: string;
+  userId: string;
+  matrixUserId: string | null;
+  kind: ItemKind;
+  words: string;
+  timeZone: string;
+  /** What went wrong, in a line. */
+  error: string;
+}
+
 export interface ClaimedRun {
   runId: string;
   itemId: string;
@@ -855,10 +872,10 @@ export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH, 
  * `kinds` is what the bot server can run: it is handed nothing else, and nothing else is claimed, handed out again, counted as a try or
  * counted as a failure for it (a watch or goal that nothing tried is never failed). Without `kinds`, every kind.
  */
-export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, waitingPage = WAITING_PAGE, kinds?: readonly ItemKind[]): Promise<{ runs: ClaimedRun[]; held: HeldNotice[] }> {
+export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, waitingPage = WAITING_PAGE, kinds?: readonly ItemKind[]): Promise<{ runs: ClaimedRun[]; held: HeldNotice[]; failed: FailedNotice[] }> {
   const kindList = kinds ? [...new Set(kinds)] : null;
   // An empty list is "nothing": no run is claimed for it
-  if (kindList && kindList.length === 0) return { runs: [], held: [] };
+  if (kindList && kindList.length === 0) return { runs: [], held: [], failed: [] };
   const ofKinds = kindList ? Prisma.sql`AND i."kind" IN (${Prisma.join(kindList)})` : Prisma.empty;
   const limits = await getBrickLimits();
   // Read once: the room check and the window start take these, so neither needs another connection while a transaction is open
@@ -867,6 +884,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
   const lease = new Date(now.getTime() + limits.longestRun * MINUTE);
   const out: ClaimedRun[] = [];
   const held: HeldNotice[] = [];
+  const failed: FailedNotice[] = [];
   const noticeRetry = limits.longestRun * MINUTE;
 
   // Runs handed out and never reported
@@ -898,12 +916,19 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
         }
         if (run.attempts >= MAX_TRIES) {
           await tx.brickItemRun.update({ where: { id }, data: { state: 'failed', error: 'It did not finish in time', finishedAt: now } });
-          await tx.brickItem.update({ where: { id: run.itemId }, data: { failuresInRow: { increment: 1 }, lastRunAt: now, ...(!run.manual && endsOnFailure(item) ? endedOneOff(now) : {}) } });
-          return null;
+          // Given up with no report, so no report can say "tell the person": the notice goes out with this call (and again until it is
+          // confirmed), told once per row of failures like any other
+          const tellAt = item.kind === 'reminder' || item.kind === 'schedule' ? 1 : limits.failuresBeforeTelling;
+          const tell = item.failuresInRow + 1 >= tellAt && !item.failureTold;
+          await tx.brickItem.update({ where: { id: run.itemId }, data: { failuresInRow: { increment: 1 }, lastRunAt: now, ...(tell ? { tellRunId: id, failureNoticeAt: now } : {}), ...(!run.manual && endsOnFailure(item) ? endedOneOff(now) : {}) } });
+          if (!tell) return null;
+          const owner = await tx.user.findUnique({ where: { id: item.ownerId }, select: { uuid: true, matrixChatId: true } });
+          return owner ? ({ notice: { runId: id, itemId: item.id, brickId: item.botId, userId: owner.uuid, matrixUserId: owner.matrixChatId, kind: item.kind as ItemKind, words: item.words, timeZone: item.timeZone, error: 'It did not finish in time' } } satisfies { notice: FailedNotice }) : null;
         }
         return tx.brickItemRun.update({ where: { id }, data: { attempts: { increment: 1 }, leaseUntil: lease }, include: RUN_INCLUDE });
       });
-      if (again) out.push(claimedOf(again));
+      if (again && 'notice' in again) failed.push(again.notice);
+      else if (again) out.push(claimedOf(again));
     } catch (error) {
       // One run that could not be taken (a deadlock Postgres broke, a dropped connection) never discards what is already claimed:
       // it stays claimed and is looked at again by the next ask
@@ -1132,7 +1157,33 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
       console.error('[BrickItems] Could not hand a held notice out again:', error instanceof Error ? error.message : 'unknown');
     }
   }
-  return { runs: out, held };
+
+  // A failure notice handed out and never confirmed is handed out again once the retry interval is over. Only the ones this call made up
+  // (`failure_notice_at` is set), never a tell a run's own report asked for
+  const unTold = await prisma.$queryRaw<{ id: string; tell_run_id: string }[]>(Prisma.sql`
+    SELECT i."id", i."tell_run_id" FROM "brick_items" i
+    JOIN "bots" b ON b."id" = i."bot_id"
+    WHERE i."tell_run_id" IS NOT NULL AND i."failure_told" = false AND i."failure_notice_at" IS NOT NULL AND i."failure_notice_at" <= ${new Date(now.getTime() - noticeRetry)}
+      AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
+      ${ofKinds}
+    ORDER BY i."failure_notice_at" ASC, i."id" ASC
+    LIMIT ${limit}`);
+  for (const { id, tell_run_id: runId } of unTold) {
+    try {
+      const notice = await prisma.$transaction(async (tx) => {
+        const item = await lockedItem(tx, { id });
+        if (!item || item.tellRunId !== runId || item.failureTold || !item.failureNoticeAt || item.failureNoticeAt.getTime() > now.getTime() - noticeRetry) return null;
+        const [run, owner] = await Promise.all([tx.brickItemRun.findUnique({ where: { id: runId }, select: { error: true } }), tx.user.findUnique({ where: { id: item.ownerId }, select: { uuid: true, matrixChatId: true } })]);
+        if (!owner) return null;
+        await tx.brickItem.update({ where: { id }, data: { failureNoticeAt: now } });
+        return { runId, itemId: item.id, brickId: item.botId, userId: owner.uuid, matrixUserId: owner.matrixChatId, kind: item.kind as ItemKind, words: item.words, timeZone: item.timeZone, error: run?.error ?? 'It did not work' } satisfies FailedNotice;
+      });
+      if (notice) failed.push(notice);
+    } catch (error) {
+      console.error('[BrickItems] Could not hand a failure notice out again:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+  return { runs: out, held, failed };
 }
 
 export const runReportSchema = z
@@ -1233,7 +1284,7 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
     const tellAt = kind === 'reminder' || kind === 'schedule' ? 1 : limits.failuresBeforeTelling;
     // It is kept as told only when the bot server says it did tell (markTold), so a tell that failed is asked for again with the next failure
     const tellPerson = report.state === 'failed' && failuresInRow >= tellAt && !item.failureTold;
-    const data: Prisma.BrickItemUpdateInput = { lastRunAt: now, failuresInRow, ...(report.state === 'failed' ? (tellPerson ? { tellRunId: runId } : {}) : { failureTold: false, tellRunId: null }) };
+    const data: Prisma.BrickItemUpdateInput = { lastRunAt: now, failuresInRow, ...(report.state === 'failed' ? (tellPerson ? { tellRunId: runId, failureNoticeAt: null } : {}) : { failureTold: false, tellRunId: null, failureNoticeAt: null }) };
     if (report.progress && kind === 'goal') {
       if (report.progress.statusLine !== undefined) data.statusLine = report.progress.statusLine;
       if (report.progress.steps !== undefined) data.steps = report.progress.steps;

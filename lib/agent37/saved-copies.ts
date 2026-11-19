@@ -152,6 +152,8 @@ export async function storeSealed(finalKey: string, stagingKey: string, archive:
     await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: finalKey, CopySource: `${bucket}/${stagingKey}` }), { abortSignal: AbortSignal.timeout(COPY_REQUEST_MAX_MS) });
   } catch (error) {
     // Given up on by the signal: the request may still finish at the bucket, so the caller is told the outcome is not known (not that it failed)
+    // The staging object goes whether the copy worked or threw: a copy that fails is not a saved copy, and nothing else would ever remove it
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).catch(() => undefined);
     if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) throw new CopyOutcomeUnknown();
     throw error;
   }
