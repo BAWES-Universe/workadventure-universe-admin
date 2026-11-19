@@ -64,6 +64,16 @@ describe('POST /api/meter/events', () => {
     expect(sent()).toMatchObject({ personKey: 'person:sara', personId: 'sara', botId: 'b1', brick: true });
   });
 
+  it('writes nothing and asks to be sent again when who it was for could not be looked up, rather than calling the person a guest', async () => {
+    for (const isGuest of [undefined, false]) {
+      record.mockClear();
+      resolve.mockResolvedValue({ personId: null, guest: isGuest ?? null, lookupFailed: true });
+      const answer = await post(event({ botId: 'b1', userId: 'wa-sara', ...(isGuest === undefined ? {} : { isGuest }) }));
+      expect((await answer.json()).results).toEqual([{ eventId: 'e1', status: 'retry', error: expect.any(String) }]);
+      expect(record).not.toHaveBeenCalled();
+    }
+  });
+
   it('counts a guest by their own id and never names them', async () => {
     await post(event({ botId: 'b1', userId: 'wa-guest', isGuest: true }));
     expect(sent()).toMatchObject({ personKey: 'guest:wa-guest', personId: null });
