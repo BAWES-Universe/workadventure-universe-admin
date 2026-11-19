@@ -795,7 +795,9 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
     seconds = job.secondsRun + stretch;
     ended = await prisma.computerJob.updateMany({
-      where: { id: jobId, status: job.status },
+      // The seconds were worked out from what was read: the end lands only on that same snapshot. A take-over and a hand-back in between leave the status as
+      // it was but move the seconds and the stretch, and an end written from the old read would put the smaller count over the newer one
+      where: { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted },
       data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, readyWhat: null, readyWhere: null, control: 'brick', stretchStarted: null, secondsRun: seconds, agentResponseId: null, brief: null },
     });
   }
