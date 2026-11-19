@@ -858,9 +858,9 @@ export async function evaluatePause(now: Date = new Date()): Promise<boolean> {
     async (tx) => {
       const done = await tx.instantRun.count({ where: { state: { in: ['succeeded', 'failed'] }, finishedAt: { gte: since }, ...notInvalid } });
       const failed = await tx.instantRun.count({ where: { state: 'failed', finishedAt: { gte: since }, ...notInvalid } });
-      // Only a give-back the books confirmed, and only for a run that is itself in this window: a give-back for an older run, or one
-      // the books never made, is not a failure of the runs being counted
-      const refunded = await tx.instantRefund.findMany({ where: { kind: 'goodwill', confirmedAt: { not: null, gte: since } }, select: { runId: true } });
+      // Only a give-back the books confirmed with credit actually given (a confirmed zero gave nothing), and only for a run that is itself in this
+      // window: a give-back for an older run, or one the books never made, is not a failure of the runs being counted
+      const refunded = await tx.instantRefund.findMany({ where: { kind: 'goodwill', amountMicros: { gt: 0 }, confirmedAt: { not: null, gte: since } }, select: { runId: true } });
       const givenBack = refunded.length === 0 ? 0 : await tx.instantRun.count({ where: { id: { in: refunded.map((one) => one.runId) }, state: 'succeeded', finishedAt: { gte: since }, ...notInvalid } });
       return { done, failed, givenBack };
     },
@@ -908,6 +908,8 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
           personId: input.personId,
           kind: 'goodwill',
           createdAt: { gte: month.start, lt: month.end },
+          // A give-back the books confirmed at zero gave nothing, so it does not use up one of the person's give-backs
+          amountMicros: { gt: 0 },
           OR: [{ releasedAt: null }, { confirmedAt: null, createdAt: { gte: new Date(now.getTime() - LATE_EVIDENCE_DAYS * 24 * 60 * MINUTE) } }],
           ...(ownRowId ? { id: { not: ownRowId } } : {}),
         },
@@ -928,7 +930,8 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
       if (!run || run.personId !== input.personId) return { done: { status: 'refused', reason: 'not_found' } };
       if (run.state !== 'succeeded' || run.customerState !== 'charged' || asNumber(run.customerMicros) <= 0) return { done: { status: 'refused', reason: 'not_charged' } };
       const earlier = await tx.instantRefund.findUnique({ where: { refundKey } });
-      if (earlier?.confirmedAt) return { done: { status: 'refused', reason: 'already_given' } };
+      // A give-back the books confirmed at zero gave the person nothing: it says so (never "given 0"), and it never used up a give-back of theirs
+      if (earlier?.confirmedAt) return { done: { status: 'refused', reason: asNumber(earlier.amountMicros) > 0 ? 'already_given' : 'not_charged' } };
       // An intent the books may already have acted on: finished at its own amount, before any limit is applied to a new give-back
       if (earlier && !earlier.releasedAt) return { go: { amount: asNumber(earlier.amountMicros), runId: run.id, personId: run.personId } };
       // An intent let go of: the books are asked first (read only), because letting go says only that they did not answer, not that they did nothing
@@ -976,10 +979,9 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
             return { done: { status: 'refused', reason: 'not_charged' } };
           }
           const checked = await checkNew(tx, run, row.id);
-          if ('done' in checked) {
-            await tx.instantRefund.deleteMany({ where: { id: row.id, confirmedAt: null, releasedAt: { not: null } } });
-            return checked;
-          }
+          // The limits as they stand refuse a NEW give-back, but the books' first request may still be in flight and commit afterwards: the intent is KEPT
+          // (let go of, asked about again later) so that a refund they did make is still found and recorded; it authorizes nothing new
+          if ('done' in checked) return checked;
           await tx.instantRefund.update({ where: { id: row.id }, data: { releasedAt: null, createdAt: now, amountMicros: BigInt(checked.amount) } });
           return { go: { amount: checked.amount, runId: run.id, personId: run.personId } };
         },
@@ -1023,6 +1025,8 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
   const outcome = await prisma.$transaction(async (tx): Promise<GiveBackOutcome> => {
     const { count } = await tx.instantRefund.updateMany({ where: { refundKey, confirmedAt: null }, data: { confirmedAt: now, releasedAt: null, amountMicros: BigInt(given) } });
     if (count === 1 && given > 0) await tx.instantRun.update({ where: { id: go.runId }, data: { refundedMicros: { increment: BigInt(given) } } });
+    // Nothing was given back (the books had nothing to give): the person is told so, not "gave back 0"
+    if (given === 0) return { status: 'refused', reason: 'not_charged' };
     return { status: 'given', amountMicros: given };
   });
   if (outcome.status === 'given') await evaluatePause(now).catch(() => undefined);
