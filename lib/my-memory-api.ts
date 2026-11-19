@@ -20,6 +20,6 @@ export async function myMemoryAuth(request: NextRequest, botId: string): Promise
   if (!who) return { response: memoryJson(request, { error: 'Sign in to see what a bot remembers about you' }, 403) };
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { roomId: true, ownerId: true, deletedAt: true } });
   // A room bot that is gone keeps no list to show; a Brick answers only to its owner
-  if (!bot || (bot.roomId === null && !ownsBrick(bot, session.id))) return { response: memoryJson(request, { error: 'Bot not found' }, 404) };
+  if (!bot || (bot.roomId !== null && bot.deletedAt !== null) || (bot.roomId === null && !ownsBrick(bot, session.id))) return { response: memoryJson(request, { error: 'Bot not found' }, 404) };
   return { who };
 }

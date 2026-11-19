@@ -196,6 +196,26 @@ async function move(
   return true;
 }
 
+/**
+ * Closes every card that waits for a tap or was approved and not yet started, for `where`. A card that moved while it was being closed
+ * (a tap, a start) no longer matches the revision it was read at: it is read again and closed at its new one, so nothing a person
+ * said yes to before can still run once what it was for is over. A card that began running is left to finish its own record.
+ */
+async function closeOpenCards(db: Db, where: Prisma.BotActionRequestWhereInput, closedReason: string, event: string, now: Date): Promise<number> {
+  let closed = 0;
+  for (let attempt = 0; attempt < CLOSE_TRIES; attempt++) {
+    const open = await db.botActionRequest.findMany({ where: { ...where, status: { in: ['waiting', 'approved'] } }, select: { id: true, revision: true } });
+    if (open.length === 0) break;
+    for (const row of open) {
+      if (await move(db, row, ['waiting', 'approved'], { status: 'closed', closedReason, finishedAt: now }, event, null)) closed += 1;
+    }
+  }
+  return closed;
+}
+
+/** How many times the cards still open are read again after some of them moved while they were being closed. */
+const CLOSE_TRIES = 4;
+
 /* --------------------------------- creating --------------------------------- */
 
 export const createRequestSchema = z
@@ -527,12 +547,7 @@ async function taskIsGoing(db: Db, row: { botId: string; conversationKey: string
  * nobody can say yes to a step for something that is over. Safe to call twice. Pass the transaction the item changed in.
  */
 export async function endTaskCards(db: Db, botId: string, itemId: string, now: Date = new Date()): Promise<number> {
-  const rows = await db.botActionRequest.findMany({ where: { botId, conversationKey: taskConversationKey(itemId), status: { in: ['waiting', 'approved'] } } });
-  let ended = 0;
-  for (const row of rows) {
-    if (await move(db, row, ['waiting', 'approved'], { status: 'closed', closedReason: 'cancelled', finishedAt: now }, 'cancel', null)) ended += 1;
-  }
-  return ended;
+  return closeOpenCards(db, { botId, conversationKey: taskConversationKey(itemId) }, 'cancelled', 'cancel', now);
 }
 
 /* --------------------------------- running ---------------------------------- */
@@ -806,12 +821,7 @@ export const ENDED_BY_DELETE = 'brick_deleted';
  */
 export async function endAllApprovals(db: Db, botId: string, now: Date = new Date()): Promise<{ grants: number; requests: number }> {
   const grants = await db.botActionGrant.updateMany({ where: { botId, revokedAt: null }, data: { revokedAt: now, revokedReason: ENDED_BY_DELETE } });
-  const open = await db.botActionRequest.findMany({ where: { botId, status: { in: ['waiting', 'approved'] } }, select: { id: true, revision: true } });
-  let requests = 0;
-  for (const row of open) {
-    if (await move(db, row, ['waiting', 'approved'], { status: 'closed', closedReason: 'revoked', finishedAt: now }, 'revoke', null)) requests += 1;
-  }
-  return { grants: grants.count, requests };
+  return { grants: grants.count, requests: await closeOpenCards(db, { botId }, 'revoked', 'revoke', now) };
 }
 
 /** Why a remembered approval ended when the app it was for was taken away from a Brick or disconnected (game #2001). */
@@ -826,12 +836,7 @@ export const ENDED_BY_APP_REMOVED = 'app_removed';
 export async function endApprovalsForServers(db: Db, serverIds: string[], now: Date = new Date()): Promise<{ grants: number; requests: number }> {
   if (serverIds.length === 0) return { grants: 0, requests: 0 };
   const grants = await db.botActionGrant.updateMany({ where: { connectionRef: { in: serverIds }, revokedAt: null }, data: { revokedAt: now, revokedReason: ENDED_BY_APP_REMOVED } });
-  const open = await db.botActionRequest.findMany({ where: { connectionRef: { in: serverIds }, status: { in: ['waiting', 'approved'] } }, select: { id: true, revision: true } });
-  let requests = 0;
-  for (const row of open) {
-    if (await move(db, row, ['waiting', 'approved'], { status: 'closed', closedReason: 'revoked', finishedAt: now }, 'revoke', null)) requests += 1;
-  }
-  return { grants: grants.count, requests };
+  return { grants: grants.count, requests: await closeOpenCards(db, { connectionRef: { in: serverIds } }, 'revoked', 'revoke', now) };
 }
 
 /** One remembered approval that is still alive, as the bot's Approvals page lists it ("Allowed more right now"). */
