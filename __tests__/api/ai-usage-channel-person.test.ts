@@ -11,7 +11,7 @@ import { recordModelCall } from '@/lib/meter';
 jest.mock('@/lib/db', () => ({
   prisma: {
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn() },
-    botsAiUsage: { create: jest.fn(async () => ({})) },
+    botsAiUsage: { create: jest.fn(async () => ({})), findFirst: jest.fn(async () => null) },
     user: { findUnique: jest.fn() },
     bot: { findUnique: jest.fn() },
     // A reply row is written under the voice reservation lock, in a transaction (the stand-in hands this same object over as the transaction)
@@ -23,7 +23,7 @@ jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/meter', () => ({ recordModelCall: jest.fn(async () => null) }));
 
 const provider = prisma.botsAiProvider as unknown as Record<'findUnique', jest.Mock>;
-const usage = prisma.botsAiUsage as unknown as Record<'create', jest.Mock>;
+const usage = prisma.botsAiUsage as unknown as Record<'create' | 'findFirst', jest.Mock>;
 const users = prisma.user as unknown as Record<'findUnique', jest.Mock>;
 const bots = prisma.bot as unknown as Record<'findUnique', jest.Mock>;
 
@@ -237,6 +237,25 @@ describe('the meter’s books (game #1998)', () => {
 
 describe('a reply row written under the voice lock', () => {
   const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  it('is not written a second time when the transaction failed after the row was committed (the answer to the commit was lost)', async () => {
+    const log = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      usage.create.mockClear();
+      usage.findFirst.mockReset();
+      // The row is in: the first write went through, then the transaction rejected
+      usage.findFirst.mockResolvedValueOnce({ id: 77, botId: 'b1' });
+      (prisma.$transaction as jest.Mock).mockRejectedValueOnce(new Error('Connection terminated before the commit was acknowledged'));
+      const answer = await track({ channel: 'dm', userId: 'wa-guest', isGuest: true, eventId: 'turn-1' });
+      expect(await answer.json()).toEqual({ status: 'tracked' });
+      await settle();
+      expect(usage.findFirst).toHaveBeenCalledTimes(1);
+      expect(usage.create).not.toHaveBeenCalled();
+    } finally {
+      usage.findFirst.mockReset().mockResolvedValue(null);
+      log.mockRestore();
+    }
+  });
 
   it('is still written, without the lock, when the transaction cannot be had: logged, never lost from the counts and the books', async () => {
     const log = jest.spyOn(console, 'error').mockImplementation(() => undefined);

@@ -23,7 +23,7 @@ import { GrantRefused, changeGrant, endGrantNow, markGrantBilled, recordGrant, r
 import { answerRequests, askForMore, openRequests } from '@/lib/meter-requests';
 import { memberUsage } from '@/lib/meter-usage';
 import { personUsage } from '@/lib/meter-person';
-import { costsReport, readDay } from '@/lib/meter-costs';
+import { GIVEN_RECENT, costsReport, readDay } from '@/lib/meter-costs';
 import { checkReplyAllowance } from '@/lib/reply-limits';
 import { readMeterEvent, type MeterEventInput } from '@/lib/meter-values';
 import { GET as usageGet } from '@/app/api/me/usage/route';
@@ -906,6 +906,20 @@ run('usage for people, and cost for us, in a real database', () => {
       const report = await costsReport(range.from, range.to, NOW);
       expect(report.given.some((row) => row.grantKey === `g-${tag}-old` && row.ended)).toBe(true);
       expect(report.given.filter((row) => !row.ended)).toHaveLength(55);
+    });
+
+    it('lists cancelled gifts under the same limit as ended ones, though their end dates are still to come', async () => {
+      const sara = await person('sara');
+      const base = { personId: sara.id, givenById: sara.id, settlement: 'gift' as const, multiplier: 2 };
+      for (let i = 0; i < 60; i++) {
+        await recordGrant({ ...base, grantKey: `g-${tag}-cancelled-${i}`, startsAt: days(1), endsAt: days(10) });
+        await endGrantNow(`g-${tag}-cancelled-${i}`, NOW);
+      }
+      await recordGrant({ ...base, grantKey: `g-${tag}-live`, startsAt: days(-1), endsAt: days(10) });
+      const report = await costsReport(range.from, range.to, NOW);
+      // The running one is always there, and no more than the recent few of the ended and cancelled ones
+      expect(report.given.some((row) => row.grantKey === `g-${tag}-live` && !row.ended)).toBe(true);
+      expect(report.given.filter((row) => row.ended).length).toBeLessThanOrEqual(GIVEN_RECENT);
     });
 
     it('counts the people waiting beyond the ones listed', async () => {

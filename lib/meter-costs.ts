@@ -321,11 +321,11 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
   const listedPeople = peopleRows.slice(0, COSTS_LISTED);
   const listedBricks = brickRows.slice(0, COSTS_LISTED);
   // The given list is every grant still running or waiting to start, every one still to bill, and the latest few that ended. A cap
-  // on all of them would drop a running or unbilled grant once enough newer ones exist.
-  const recentIds = (await prisma.meterGrant.findMany({ where: { endsAt: { lte: now } }, orderBy: { createdAt: 'desc' }, take: GIVEN_RECENT, select: { id: true } })).map((grant) => grant.id);
+  // on all of them would drop a running or unbilled grant once enough newer ones exist. A cancelled grant is an ended one, whatever its end date was.
+  const recentIds = (await prisma.meterGrant.findMany({ where: { OR: [{ endsAt: { lte: now } }, { cancelledAt: { not: null } }] }, orderBy: { createdAt: 'desc' }, take: GIVEN_RECENT, select: { id: true } })).map((grant) => grant.id);
   const [shownGrants, requests, openCount, bots] = await Promise.all([
     prisma.meterGrant.findMany({
-      where: { OR: [{ endsAt: { gt: now } }, { settlement: 'to_bill', billedAt: null }, { id: { in: recentIds } }] },
+      where: { OR: [{ endsAt: { gt: now }, cancelledAt: null }, { settlement: 'to_bill', billedAt: null }, { id: { in: recentIds } }] },
       orderBy: { createdAt: 'desc' },
     }),
     prisma.meterRequest.findMany({ where: { answeredAt: null }, orderBy: { createdAt: 'asc' }, take: ASKED_LISTED }),

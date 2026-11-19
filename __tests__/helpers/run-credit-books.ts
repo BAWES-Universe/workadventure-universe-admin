@@ -330,6 +330,10 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     check('a refund goes back into the lot it came from, and never becomes cash', run.ok && r1.ok && r1.restoredMicros === 1 * M && bal?.usedMicros === 2 * M && bal.availableMicros === 3 * M, { r1, bal });
     const r1b = await spend.refundHold({ holdKey: 'rf-1', refundKey: 'ref-1', amountMicros: 1 * M, reason: 'platform_failure' }, G);
     check('the same refund key refunds once', r1b.ok && !r1b.created && r1b.refundedMicros === 1 * M && (await prisma.creditRefund.count({ where: { holdId: (await prisma.creditHold.findUniqueOrThrow({ where: { holdKey: 'rf-1' } })).id } })) === 1, r1b);
+    // Read only: a key the books gave under answers with its first amount, a key they never saw with nothing, and asking creates nothing
+    const seen = await spend.findRefund({ refundKey: 'ref-1' });
+    const unseen = await spend.findRefund({ refundKey: 'ref-never' });
+    check('looking up a refund key finds what was given under it, and nothing for a key never used, without making one', seen.found && seen.refundedMicros === 1 * M && !unseen.found && (await prisma.creditRefundRequest.count({ where: { requestKey: 'ref-never' } })) === 0, { seen, unseen });
     const tooMuch = await spend.refundHold({ holdKey: 'rf-1', refundKey: 'ref-2', amountMicros: 3 * M, reason: 'platform_failure' }, G);
     check('a refund cannot be more than was charged and not yet given back', !tooMuch.ok && tooMuch.reason === 'too_much', tooMuch);
     const early = await spend.refundHold({ holdKey: 'rf-nope', refundKey: 'ref-9', amountMicros: 1, reason: 'platform_failure' }, G);
