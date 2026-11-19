@@ -4,19 +4,28 @@
  * A grant is recorded once. Chat's money and the computer's are two pools. Runs only with ROLES_DB_TEST=yes and a DATABASE_URL to a
  * migrated THROWAWAY database (it empties the meter's tables first, so it never runs against anything that matters):
  *
- *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/meter-db.test.ts
+ *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/meter-db.test.ts --runInBand
+ *
+ * Its clean-up empties the meter's tables whole, and so does meter-usage-db.test.ts: the two suites never run at the same time against one
+ * database (npm run test:db runs every real-database suite one after the other).
  */
 import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
+// The report route copies a call into the books after it has answered: the copy is the real one, watched so a test knows when it has finished
+jest.mock('@/lib/meter', () => {
+  const actual = jest.requireActual('@/lib/meter');
+  return { ...actual, recordModelCall: jest.fn(actual.recordModelCall) };
+});
 
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
 import { POST as writeEvents } from '@/app/api/meter/events/route';
-import { recordMeterEvent, saveMeterSettings, settleEventsThrough } from '@/lib/meter';
+import { recordMeterEvent, recordModelCall, saveMeterSettings, settleEventsThrough } from '@/lib/meter';
+import { waitUntil } from '../helpers/waits';
 import { currentEnvelope, memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
 import { GrantRefused, markGrantBilled, recordGrant } from '@/lib/meter-grants';
 import { compareModelCalls, compareReplyWindow } from '@/lib/meter-shadow';
@@ -50,7 +59,17 @@ const event = (over: Partial<Record<keyof MeterEventInput, unknown>> = {}): Mete
 const setUp = (over: Record<string, number | null> = {}) =>
   saveMeterSettings({ memberAllowanceMicros: 1_000, poolCeilingMicros: 1_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10, ...over }, 'admin');
 
+/** Waits for the report route to have copied `n` calls into the books (it does that after answering), and for each copy to have finished. */
+const booked = async (n: number) => {
+  const copies = recordModelCall as unknown as jest.Mock;
+  expect(await waitUntil(() => copies.mock.calls.length >= n)).toBe(true);
+  await Promise.all(copies.mock.results.map((result) => result.value));
+};
+
 const wipe = async () => {
+  (recordModelCall as unknown as jest.Mock).mockClear();
+  // The usage rows of this suite too: one an earlier test left would stand in the comparison window with no event
+  if (providerId) await prisma.botsAiUsage.deleteMany({ where: { providerId } });
   await prisma.meterEvent.deleteMany({});
   await prisma.meterReservation.deleteMany({});
   await prisma.meterGrant.deleteMany({});
@@ -119,7 +138,7 @@ run('the meter, in a real database', () => {
       const report = (extra: object = {}) =>
         trackUsage(new NextRequest('http://localhost:3333/api/bots/ai-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botId: sara.brickId, providerId, userId: sara.uuid, isGuest: false, tokensUsed: 500, channel: 'dm', ...extra }) }));
       expect((await report()).status).toBe(200);
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await booked(1);
       const [row] = await prisma.botsAiUsage.findMany({ where: { botId: sara.brickId } });
       const stored = await prisma.meterEvent.findMany({ where: { botId: sara.brickId } });
       expect(stored).toHaveLength(1);
@@ -132,7 +151,7 @@ run('the meter, in a real database', () => {
         trackUsage(new NextRequest('http://localhost:3333/api/bots/ai-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botId: omar.brickId, providerId, userId: omar.uuid, isGuest: false, eventId: 'turn-1' }) }));
       await report();
       await report();
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await booked(2);
       expect(await prisma.botsAiUsage.count({ where: { botId: omar.brickId } })).toBe(2);
       expect(await prisma.meterEvent.count({ where: { botId: omar.brickId } })).toBe(1);
       const compared = await compareModelCalls(new Date(Date.now() - 60_000), new Date(Date.now() + 60_000));
@@ -149,7 +168,7 @@ run('the meter, in a real database', () => {
       await report();
       await report({ error: true });
       await report({ greeting: true });
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await booked(4);
       const compared = await compareReplyWindow(lina.id);
       expect(compared.today).toBe(2);
       expect(compared.books).toBe(2);
@@ -164,7 +183,7 @@ run('the meter, in a real database', () => {
       await report({ userId: dana.uuid, isGuest: false });
       // Nobody talked to it: the books put this one to the owner, today's count has no person for it
       await report();
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await booked(2);
       expect(await prisma.meterEvent.count({ where: { personKey: `person:${dana.id}` } })).toBe(2);
       const compared = await compareReplyWindow(dana.id);
       expect([compared.today, compared.books, compared.replies.state]).toEqual([1, 1, 'same']);
