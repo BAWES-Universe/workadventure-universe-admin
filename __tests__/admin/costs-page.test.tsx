@@ -63,9 +63,15 @@ const report = (over: Partial<CostsReport> = {}): CostsReport => ({
 const answer = (data: CostsReport | number = report()) =>
   fetchMock.mockImplementation(() => (typeof data === 'number' ? Promise.resolve({ ok: false, status: data, json: () => Promise.resolve({}) }) : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(data) })));
 
+// The page's own "today" (its default dates, "Today at") is a fixed day, so no test here depends on the day it runs: only the clock's date is faked, never its timers
+const TODAY = new Date(2026, 10, 10, 12);
 beforeEach(() => {
+  jest.useFakeTimers({ now: TODAY, doNotFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'nextTick', 'queueMicrotask', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback', 'performance'] });
   fetchMock.mockReset();
   replace.mockReset();
+});
+afterEach(() => {
+  jest.useRealTimers();
 });
 
 describe('the Costs page', () => {
@@ -146,7 +152,7 @@ describe('the Costs page', () => {
     fetchMock.mockClear();
     fireEvent.change(screen.getByLabelText('From'), { target: { value: '2026-10-01' } });
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    expect(String(fetchMock.mock.calls[0][0])).toMatch(/^\/api\/admin\/meter-costs\?from=2026-10-01&to=\d{4}-\d{2}-\d{2}$/);
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/admin/meter-costs?from=2026-10-01&to=2026-11-10');
     fetchMock.mockClear();
     fireEvent.change(screen.getByLabelText('From'), { target: { value: '' } });
     expect(fetchMock).not.toHaveBeenCalled();
