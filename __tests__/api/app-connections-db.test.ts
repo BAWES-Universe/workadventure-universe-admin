@@ -238,6 +238,57 @@ run('apps a person connects once, in a real database', () => {
     expect(outcome.config).toMatchObject({ accessToken: 'theirs' });
   });
 
+  it('does not call a stored token that is out of date and cannot be renewed fresh', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'old', refreshToken: 'refresh-1', expiresAt: nowSeconds() - 60 });
+    global.fetch = jest.fn() as unknown as typeof fetch;
+    await prisma.appConnection.update({ where: { id: connection.id }, data: { refreshLeaseUntil: new Date(Date.now() + LEASE_MS) } });
+    const before = (await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).authConfig!;
+    const waiting = ensureFreshOAuthConfig({ serverId: 'unused', connectionId: connection.id, authConfig: before });
+    // The one that held the lease stored a token that is already out of date, with nothing to renew it with
+    setTimeout(async () => {
+      await prisma.appConnection.update({ where: { id: connection.id }, data: { authConfig: encryptApiKey(oauthConfig({ accessToken: 'stale', expiresAt: nowSeconds() - 600 })), refreshLeaseUntil: null } });
+    }, 400);
+    expect((await waiting).status).toBe('reconnect_required');
+  });
+
+  it('holds the lease until a renewal that took over from another request is over, and presents no token it could not read the latest of', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'old', refreshToken: 'refresh-1', expiresAt: nowSeconds() - 60 });
+    let leaseDuringRenewal: Date | null | undefined;
+    global.fetch = jest.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      leaseDuringRenewal = (await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).refreshLeaseUntil;
+      return new Response(JSON.stringify({ access_token: 'new', expires_in: 3600, refresh_token: 'r3' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await prisma.appConnection.update({ where: { id: connection.id }, data: { refreshLeaseUntil: new Date(Date.now() + LEASE_MS) } });
+    const before = (await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).authConfig!;
+    const waiting = ensureFreshOAuthConfig({ serverId: 'unused', connectionId: connection.id, authConfig: before });
+    // The other request stored a token that already needs renewing again, and let go of the lease
+    setTimeout(async () => {
+      await prisma.appConnection.update({ where: { id: connection.id }, data: { authConfig: encryptApiKey(oauthConfig({ accessToken: 'b', refreshToken: 'refresh-2', expiresAt: nowSeconds() - 60 })), refreshLeaseUntil: null } });
+    }, 400);
+    expect((await waiting).status).toBe('refreshed');
+    expect(leaseDuringRenewal).not.toBeNull();
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).refreshLeaseUntil).toBeNull();
+  });
+
+  it('never sends a token to the provider when the connection cannot be read under the lease', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'old', refreshToken: 'refresh-1', expiresAt: nowSeconds() - 60 });
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const stored = (await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).authConfig!;
+    const real = prisma.appConnection.findUnique.bind(prisma.appConnection);
+    let calls = 0;
+    const spy = jest.spyOn(prisma.appConnection, 'findUnique').mockImplementation(((args: never) => {
+      calls += 1;
+      // The read after the lease is taken fails
+      return (calls >= 1 ? Promise.reject(new Error('db blip')) : real(args)) as never;
+    }) as never);
+    const outcome = await ensureFreshOAuthConfig({ serverId: 'unused', connectionId: connection.id, authConfig: stored });
+    spy.mockRestore();
+    expect(outcome.status).toBe('unavailable');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('takes the renewal over when the one that held it never finished (the lease ends by itself)', async () => {
     const connection = await newOAuthApp(sara, { accessToken: 'old', refreshToken: 'refresh-1', expiresAt: nowSeconds() - 60 });
     await prisma.appConnection.update({ where: { id: connection.id }, data: { refreshLeaseUntil: new Date(Date.now() - 1000) } });

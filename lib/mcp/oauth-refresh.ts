@@ -343,9 +343,7 @@ async function refreshUnderLease(
     // Someone else is renewing it: look at what they stored instead of renewing a second time
     await new Promise((resolve) => setTimeout(resolve, WAIT_STEP_MS));
     const stored = await readStoredConfig(holder).catch(() => null);
-    if (stored && !needsRefresh(stored.config, Date.now()) && !!stored.config.accessToken) {
-      return { status: 'fresh', config: stored.config, authConfig: stored.encrypted };
-    }
+    // Whether the person must reconnect is decided first: an expired access token with no refresh token "needs no refresh", and is not fresh
     if (stored && isReconnectRequired(stored.config, Date.now())) {
       return {
         status: 'reconnect_required',
@@ -353,6 +351,9 @@ async function refreshUnderLease(
         authConfig: stored.encrypted,
         reason: refreshBlockedReason(stored.config, Date.now()) ?? 'Reconnect required.',
       };
+    }
+    if (stored && !needsRefresh(stored.config, Date.now()) && !!stored.config.accessToken) {
+      return { status: 'fresh', config: stored.config, authConfig: stored.encrypted };
     }
     leaseUntil = await claim();
     claimed = leaseUntil !== null;
@@ -366,8 +367,16 @@ async function refreshUnderLease(
     }
   }
   try {
-    // Read again now that the lease is ours: the one that held it may have renewed it just before
-    const stored = await readStoredConfig(holder).catch(() => null);
+    // Read again now that the lease is ours: the one that held it may have renewed it just before. When it cannot be read, it is not
+    // known whether the token this request holds was already replaced, so it is never presented: asked again in a moment
+    let readFailed = false;
+    const stored = await readStoredConfig(holder).catch(() => {
+      readFailed = true;
+      return null;
+    });
+    if (readFailed) {
+      return { status: 'unavailable', config, authConfig: encryptedConfig, reason: 'This connection could not be read just now. Try again in a moment.' };
+    }
     if (stored && stored.encrypted !== encryptedConfig) {
       if (isReconnectRequired(stored.config, Date.now())) {
         return {
@@ -380,7 +389,8 @@ async function refreshUnderLease(
       if (!needsRefresh(stored.config, Date.now()) && !!stored.config.accessToken) {
         return { status: 'fresh', config: stored.config, authConfig: stored.encrypted };
       }
-      return performRefresh(holder, stored.encrypted, stored.config, serverUrl, nowMs);
+      // Awaited here, so the lease is held until the renewal is over (letting go in `finally` of a promise still running frees the lease early)
+      return await performRefresh(holder, stored.encrypted, stored.config, serverUrl, nowMs);
     }
     return await performRefresh(holder, encryptedConfig, config, serverUrl, nowMs);
   } finally {
