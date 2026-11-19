@@ -525,7 +525,7 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
       for (const category of MONEY_CATEGORIES) {
         const current = findExisting(category);
         // A computers rule from before is sent back as it was: it stays as it is, neither saved again nor ended
-        if (keepsComputersRule(category, request[category], current, opened)) continue;
+        if (keepsComputersRule(category, request[category], current, recipients)) continue;
         const input = settingInput(category, request[category], recipients, now);
         if (!input) {
           if (current) toEnd.push(current);

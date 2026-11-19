@@ -123,9 +123,24 @@ export async function POST(request: NextRequest) {
             return tx.botsAiUsage.create({ data });
           }, SPEECH_LOCK);
         } catch (err) {
-          // The lock was busy for too long or no connection came in time: the row is still written, without it. The worst that can follow is one
-          // reply counted twice by a reservation that was running at that moment, never a reply that drops out of the counts and the books
+          // The lock was busy for too long or no connection came in time: the row is still written, without it, so a reply never drops out of the
+          // counts and the books. Written without the lock, a reservation running at that moment may miss it for that one hold. If the failure
+          // came after the first write was committed and the look below finds nothing (or fails), the reply is in the counts twice and stays
+          // so: that is the safe side. Telling a repeat of one report from a second identical reply for certain needs an id of the report
+          // stored on the row (a new column, its migration, and the bot server sending one on every report), which is not here.
           console.error('Could not write a reply row under the speech lock, writing it without:', err);
+          // The failure may have come after the row was committed (the answer to the commit was lost): a row with exactly this report's figures, at
+          // exactly its moment, is this report's own row and is not written twice. Where the answer is not known the row is written: a row
+          // too many is the safe side of a reply that drops out of the counts.
+          try {
+            const already = await prisma.botsAiUsage.findFirst({
+              where: { botId, providerId, talkedUserId: talked, timestamp: data.timestamp, tokensUsed, apiCalls, error: false, greeting: false, brickRunId: data.brickRunId },
+              orderBy: { id: 'asc' },
+            });
+            if (already) return already;
+          } catch (lookup) {
+            console.error('Could not look for a row this report already wrote:', lookup);
+          }
         }
       }
       return prisma.botsAiUsage.create({ data });

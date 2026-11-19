@@ -327,6 +327,18 @@ export interface GiveBackLimits {
   goodwillBudgetMicros?: number | null;
 }
 
+/**
+ * What the books already gave back under a refund key, read only (nothing is created, locked or changed): the amount of the first answer, or
+ * nothing when no give-back was ever made under it. Both kinds of rows are looked at, as `refundHold` does when asked again.
+ */
+export async function findRefund(input: { refundKey: string }): Promise<{ found: true; refundedMicros: number } | { found: false }> {
+  const request = await prisma.creditRefundRequest.findUnique({ where: { requestKey: input.refundKey } });
+  if (request) return { found: true, refundedMicros: asNumber(request.refundedMicros) };
+  const earlier = (await prisma.creditRefund.findMany({ where: { refundKey: { startsWith: `${input.refundKey}#` } } })).filter((row) => /^\d+$/.test(row.refundKey.slice(input.refundKey.length + 1)));
+  if (earlier.length === 0) return { found: false };
+  return { found: true, refundedMicros: earlier.reduce((total, row) => total + asNumber(row.amountMicros), 0) };
+}
+
 export async function refundHold(input: { holdKey: string; refundKey: string; amountMicros: number; reason: 'platform_failure' | 'goodwill' | 'redelivery'; limits?: GiveBackLimits }, now: Date = new Date()): Promise<Refunded> {
   wholeMicros(input.amountMicros, 'amountMicros');
   if (!input.refundKey || input.refundKey.length > 240) throw new RangeError('refundKey is required (up to 240 characters)');

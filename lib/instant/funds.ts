@@ -61,6 +61,12 @@ export interface InstantFunds {
   release(input: { key: string }): Promise<{ ok: boolean; none?: boolean }>;
   /** After a charge: gives `amountMicros` back to the lots it came from, once per `refundKey`. Free credit never becomes cash. */
   refund(input: { key: string; refundKey: string; amountMicros: number; reason: 'platform_failure' | 'goodwill'; limits?: GiveBackLimits }): Promise<{ ok: boolean; refundedMicros: number; reason?: string }>;
+  /**
+   * Read only: did the books ever give anything back under this `refundKey`? `found` answers with the FIRST amount; `none` means they
+   * confirm nothing was ever given under it; `unavailable` means that is not known. It never gives, locks or changes anything, so a give-back
+   * this side let go of can be looked at without making it again.
+   */
+  refundLookup(input: { key: string; refundKey: string }): Promise<{ status: 'found'; refundedMicros: number } | { status: 'none' } | { status: 'unavailable' }>;
 }
 
 /** The shut door: no credit source is wired in, so nothing is held. */
@@ -76,6 +82,9 @@ export const shutFunds: InstantFunds = {
   },
   async refund() {
     return { ok: false, refundedMicros: 0, reason: 'unavailable' };
+  },
+  async refundLookup() {
+    return { status: 'unavailable' };
   },
 };
 
