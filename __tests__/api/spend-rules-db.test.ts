@@ -528,7 +528,8 @@ run('rules said in chat and task receipts, in a real database', () => {
       // Five minutes in, the job has used half a stretch and still has one stretch of lease: 90,000 can still be spent, under 100,000
       expect(await renewRoom({ key, moreMicros: 60_000 }, at(300))).toMatchObject({ ok: true });
       // Ten minutes in the job could cost 120,000 by the end of its lease: that is over, so it stops safely with the room it holds
-      expect(await renewRoom({ key, moreMicros: 60_000 }, at(600))).toMatchObject({ ok: false, reason: 'rule', leftMicros: 0 });
+      // (the lease it holds ends at minute 15 and can cost 90,000 whatever the clock says, so 10,000 is left of the cap: not enough for the 30,000 the renewal adds)
+      expect(await renewRoom({ key, moreMicros: 60_000 }, at(600))).toMatchObject({ ok: false, reason: 'rule', leftMicros: 10_000 });
       expect((await prisma.meterReservation.findUnique({ where: { reservationKey: key } }))?.amountMicros).toBe(BigInt(120_000));
       await changeRule(made.rule.id, sara.id, { capMicros: 500_000 });
       expect(await renewRoom({ key, moreMicros: 60_000 }, at(600))).toMatchObject({ ok: true });
