@@ -312,8 +312,13 @@ export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now:
     // standing in the room they came from, where people could still reach a Brick whose person is elsewhere now
     // A sighting older than the move that put the person elsewhere (the same page load's clock) is late: it moves nothing, and is told as late, so the bot
     // server leaves the Brick standing in their newer room alone and does not read the empty list as "no Brick"
-    const rejected = clientId ? await prisma.brickVisit.findMany({ where: { userId: { in: userIds }, roomClient: clientId, roomSince: { gte: sightedAt } }, select: { userId: true } }) : [];
+    // The same sighting again (the same page load, the same time it came into this room, and the visit stands in no Brick room) is no move and not late:
+    // it is the person still here, so it keeps the visit alive. Equal while the visit stands in a Brick room is a clash of two times, and is late as before
+    const rejected = clientId
+      ? await prisma.brickVisit.findMany({ where: { userId: { in: userIds }, roomClient: clientId, OR: [{ roomSince: { gt: sightedAt } }, { roomSince: sightedAt, roomId: { not: null } }] }, select: { userId: true } })
+      : [];
     const lateIds = new Set(rejected.map((row) => row.userId));
+    if (clientId) await prisma.brickVisit.updateMany({ where: { userId: { in: userIds.filter((id) => !lateIds.has(id)) }, roomClient: clientId, roomSince: sightedAt, roomId: null }, data: { seenAt: now } });
     await prisma.brickVisit.updateMany({
       where: { userId: { in: userIds.filter((id) => !lateIds.has(id)) }, ...(newer ? { AND: [{ OR: newer }] } : {}) },
       data: { roomId: null, roomSince: sightedAt, roomClient: clientId ?? null, seenAt: now },

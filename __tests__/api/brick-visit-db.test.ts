@@ -791,6 +791,26 @@ run('bringing a Brick along, in a real database', () => {
       expect(await visit(sara.id)).toMatchObject({ roomId: null });
     });
 
+    it('a repeated sync of the same sighting from a room that takes no visits is the person still here: not late, and it keeps the visit alive', async () => {
+      const T = Date.now() - 60_000;
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      const syncClosed = (enteredAt: number) =>
+        roomFeed(call('POST', '/api/brick-visits/room', { roomUrl: universes.closed.roomUrl, people: [sara.uuid], enteredAt, clientId: CLIENT, withLate: true }, service));
+      const first = await syncClosed(T);
+      expect(first.status).toBe(200);
+      expect(await first.json()).toEqual({ bricks: [], late: [] });
+      // The sighting again, a while later: the same entry time from the same page load
+      const seenFirst = (await visit(sara.id))!.seenAt;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const again = await syncClosed(T);
+      expect(again.status).toBe(200);
+      expect(await again.json()).toEqual({ bricks: [], late: [] });
+      expect((await visit(sara.id))!.seenAt.getTime()).toBeGreaterThan(seenFirst.getTime());
+      // Older than that sighting is still late
+      const older = await syncClosed(T - 1_000);
+      expect(await older.json()).toEqual({ bricks: [], late: [sara.uuid] });
+    });
+
     it('compares times only when the same page load said both: another device with an older clock still moves the visit (no clock of one device is held against another)', async () => {
       const T = Date.now() - 60_000;
       // The laptop's clock runs five minutes ahead: it brought the visit into room A at a time far in the future of the phone's
