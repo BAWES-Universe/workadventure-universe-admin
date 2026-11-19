@@ -96,4 +96,29 @@ describe('the payment line on the shared page', () => {
     // Still not "copied": the button can be pressed again
     expect(screen.getByRole('button', { name: 'Copy receipt link' })).toBeTruthy();
   });
+
+  it('shows no copy fallback for a purchase a receipt link brought back, even after an earlier copy failed', async () => {
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: async () => { throw new Error('denied'); } }, configurable: true });
+    jest.useFakeTimers();
+    let restoring = false;
+    const { ask } = mount('', (method) =>
+      method !== 'POST' ? { status: 'paid', testPayment: false } : restoring ? { status: 'paid', via: 'receipt', paidAt: '2026-11-01T10:00:00Z', testPayment: false, buyer: 'guest' } : { orderId: 'o-1', checkoutUrl: 'https://checkout.examplepay.com/?t=1', app: 'ExamplePay', buyer: 'guest' },
+    );
+    window.open = jest.fn(() => null);
+    await ask({ request: 'r1' });
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(3_000);
+    });
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Copy receipt link' })));
+    expect(screen.getByLabelText('Receipt link')).toBeTruthy();
+    // A later purchase, brought back by someone's receipt link: no link of this browser's own is offered for it
+    restoring = true;
+    await ask({ request: 'r2', restore: true });
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(3_000);
+    });
+    expect(screen.getByRole('status').textContent).toContain('is back.');
+    expect(screen.queryByLabelText('Receipt link')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy receipt link' })).toBeNull();
+  });
 });

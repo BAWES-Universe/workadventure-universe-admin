@@ -63,7 +63,9 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
   }, [artifactId]);
 
   const view = describeLine(line, { copied: !!line.receipt && copied === line.receipt });
-  const failed = !!line.receipt && copyFailed === line.receipt;
+  // Only a line that offers the copy (a purchase made in this browser) can show the link a failed copy leaves to select: a purchase found through
+  // someone's receipt link is "back", and this browser's own link would not bring it back
+  const failed = !!line.receipt && copyFailed === line.receipt && !!view?.actions.some((action) => action.kind === 'copy');
   if (!view) return null;
 
   const press = (action: PayAction) => {
