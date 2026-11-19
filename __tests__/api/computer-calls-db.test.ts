@@ -16,6 +16,7 @@ import { currentEnvelope } from '@/lib/meter-allowance';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, handBack, renewJob, startJob, sweepComputers, takeOver } from '@/lib/computer';
 import { TOKEN_LIFE_MS, forgetOldTokens, mintJobToken, verifyJobToken } from '@/lib/computer-token';
+import { recordMeterEvent } from '@/lib/meter';
 import { authorizeModelCall, callRoomKey, releaseModelCall, settleModelCall } from '@/lib/computer-calls';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -300,6 +301,19 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect(await settleModelCall(jobId, 'late', { ...facts, costMicros: 7_000 }, minutes(32))).toEqual({ ok: true });
       expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:late` } })).toMatchObject({ costMicros: BigInt(4_000) });
       expect(await prisma.meterEvent.count({ where: { eventId: `computer:${jobId}:call:late` } })).toBe(1);
+    });
+
+    it('settles the room at the cost the books hold for the call, also when a report is sent again with another figure after the first one wrote the event and did not settle', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await call(token, 'again', 9_000);
+      // The first report wrote its event (4,000) and stopped before the room was settled
+      await recordMeterEvent({ eventId: `computer:${jobId}:call:again`, kind: 'model_call', pool: 'computer', occurredAt: NOW, personKey: `person:${(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).personId}`, personId: (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).personId, botId: (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).botId, brick: true, payerKind: 'universe', route: 'universe-ai', jobId, quantity: 1, unit: 'call', costMicros: 4_000, basis: 'measured', sourceRef: `computer_jobs:${jobId}` });
+      expect(await settleModelCall(jobId, 'again', { costMicros: 1_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW)).toEqual({ ok: true });
+      const room = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'again') } });
+      expect(room.state).toBe('settled');
+      // The books say 4,000, so that is what the room settles at, not the 1,000 of the second report
+      expect(Number(room.settledMicros)).toBe(4_000);
     });
 
     it('the sweep gives back room held for a call whose job is gone, instead of finding it again on every sweep', async () => {

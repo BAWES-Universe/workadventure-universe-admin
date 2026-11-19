@@ -120,8 +120,14 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
       data: { costMicros: BigInt(cost), basis: paidByOther ? 'paid_by_other' : facts.basis, route: facts.route, detail: { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}) } },
     });
   }
-  // A price that is not known settles at the room that was held (never 0); one that is settles at what it was, at least 1
-  if (reservation) await settleRoom({ key: reservation.reservationKey, settledMicros: Math.max(1, cost ?? Number(reservation.amountMicros)) }, now);
+  // The room settles at what the books hold for this call, never at what this report says: a report sent again after a first one that wrote
+  // the event but did not settle (or with another figure) must settle at the event's own cost. A price that is not known settles at the
+  // room that was held (never 0); one that is settles at what it was, at least 1
+  if (reservation) {
+    const stored = await prisma.meterEvent.findUnique({ where: { eventId }, select: { costMicros: true } });
+    const booked = stored ? (stored.costMicros === null ? null : Number(stored.costMicros)) : cost;
+    await settleRoom({ key: reservation.reservationKey, settledMicros: Math.max(1, booked ?? Number(reservation.amountMicros)) }, now);
+  }
   return { ok: true };
 }
 
