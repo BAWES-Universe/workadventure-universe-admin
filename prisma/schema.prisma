@@ -1613,15 +1613,40 @@ model AppPageOrder {
   // When it was closed as not paid: the late-payment window runs from here
   closedAt       DateTime? @map("closed_at")
   createdAt      DateTime @default(now()) @map("created_at")
+  // The purchase wish this order was made for: the host (the game window or the public page, never the page itself) makes one per tap, so a
+  // retry of the same tap, even from two tabs at once, finds this order instead of making another. Null for a start that sent none.
+  intentId       String?  @map("intent_id") @db.VarChar(64)
+  // Whose purchase it is: "acct:<account id>" for a signed-in buyer, "guest:<hash>" for a guest, where the hash is made (with a secret) from
+  // a recovery code only the guest's own host holds. Never a page-chosen id, a fingerprint or an address. Null for a start that named nobody.
+  buyerKey       String?  @map("buyer_key") @db.VarChar(80)
 
   job        AppPageJob?    @relation(fields: [jobId], references: [id], onDelete: SetNull)
   connection AppConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  events     AppPageOrderEvent[]
 
+  @@unique([artifactId, buyerKey, intentId])
+  @@index([artifactId, buyerKey, status])
   @@index([jobId, createdAt])
   @@index([ownerId, createdAt])
   @@index([visitorHash, createdAt])
   @@index([status, createdAt])
   @@map("app_page_orders")
+}
+
+// One line for every move an order makes (made, started, paid, closed, ended without ever starting): who or what moved it and why. Kept for
+// the owner's questions and ours; never shown to a buyer or a page.
+model AppPageOrderEvent {
+  id         String   @id @default(uuid())
+  orderId    String   @map("order_id")
+  fromStatus String?  @map("from_status") @db.VarChar(32)
+  toStatus   String   @map("to_status") @db.VarChar(14)
+  reason     String   @db.VarChar(60)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  order AppPageOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+  @@map("app_page_order_events")
 }
 
 model AppConnectionManager {

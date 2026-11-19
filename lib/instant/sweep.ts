@@ -6,6 +6,7 @@ import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 import { denyInstantOnSessions, type SessionSweep } from '@/lib/instant/sessions';
 import { pauseInstant } from '@/lib/instant/state';
 import { settleCheckingReceipts } from '@/lib/task-receipts';
+import { sweepPageOrders, type OrderSweep } from '@/lib/app-direct/pay';
 import { instantListedPrices, usdToMicros } from '@/lib/instant/values';
 
 /**
@@ -68,6 +69,8 @@ export interface SweepResult {
   paused: boolean;
   sessions: SessionSweep;
   drift: DriftReport | null;
+  /** Page payments nobody is watching, asked about at the payment service (see `sweepPageOrders`). */
+  pageOrders: OrderSweep | null;
 }
 
 export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: ReadyMadeAdapter | null; now?: Date; forceDrift?: boolean } = {}): Promise<SweepResult> {
@@ -110,7 +113,13 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
     // The clock starts only when the check finished and Composio answered for every tool (and any pause it needed was made): a failed or partial check is tried again by the next sweep
     if (drift && drift.unreachable.length === 0) lastDriftAt = Date.now();
   }
-  return { looked: open.length, receipts, paused, sessions, drift };
+  // Orders of paid pages that nobody is watching any more are asked about here too, so the same call that settles what is owed settles what
+  // was paid. A failure of this never stops the rest of the sweep.
+  const pageOrders = await sweepPageOrders(now).catch((error): OrderSweep | null => {
+    console.error('[Instant] The page order check failed:', error instanceof Error ? error.message : 'unknown');
+    return null;
+  });
+  return { looked: open.length, receipts, paused, sessions, drift, pageOrders };
 }
 
 /** For tests. */

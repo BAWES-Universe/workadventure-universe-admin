@@ -35,8 +35,9 @@ import { disconnect } from '@/lib/app-connections';
 import { definitionSchema, hashDefinition } from '@/lib/app-direct/definition';
 import { openKeyForm, submitKey } from '@/lib/app-direct/connect';
 import { getBrickLimits, saveServerLimits } from '@/lib/bot-limits';
-import { isWaiting, orderForArtifact, startCheckout, verifyOrder } from '@/lib/app-direct/pay';
-import { POST as makeJob } from '@/app/api/bots/[id]/key-apps/[serverId]/page-jobs/route';
+import { checkPurchase, guestBuyerKey, isWaiting, orderForArtifact, pagePaymentLoad, pollAfterMs, restorePurchase, startCheckout, sweepPageOrders, verifyOrder } from '@/lib/app-direct/pay';
+import { GET as readJob, POST as makeJob } from '@/app/api/bots/[id]/key-apps/[serverId]/page-jobs/route';
+import { GET as sweepLoad, POST as sweepRoute } from '@/app/api/app-pay/sweep/route';
 import { GET as listPages } from '@/app/api/me/apps/pages/route';
 import { DELETE as stopPage } from '@/app/api/me/apps/pages/[jobId]/route';
 import { GET as publicGet, POST as publicStart } from '@/app/api/pay/[artifactId]/route';
@@ -642,7 +643,7 @@ run('payments for pages, in a real database', () => {
       const other = await makeArtifact();
       expect((await publicGet(request(`/api/pay/${other}?order=${orderId}`), params({ artifactId: other }))).status).toBe(404);
       const own = await publicGet(request(`/api/pay/${artifactId}?order=${orderId}`), params({ artifactId }));
-      expect(await own.json()).toEqual({ status: 'checking', checkoutUrl: 'https://checkout.examplepay.com/?mode=page&token=abc', testPayment: true });
+      expect(await own.json()).toEqual({ status: 'checking', checkoutUrl: 'https://checkout.examplepay.com/?mode=page&token=abc', testPayment: true, orderId, pollAfterMs: 3_000 });
     });
 
     it('tells a real payment from a test one in what the owner reads', async () => {
@@ -751,7 +752,7 @@ run('payments for pages, in a real database', () => {
       expect(await settle(order.orderId)).toMatchObject({ status: 'paid' });
     });
 
-    it('ends an order whose start never finished, instead of leaving it checking for ever', async () => {
+    it('keeps an order whose start never finished while an order may stay open, then ends it, instead of leaving it checking for ever', async () => {
       const { artifactId } = await pending();
       const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
       const stuck = await prisma.appPageOrder.create({
@@ -761,8 +762,14 @@ run('payments for pages, in a real database', () => {
         data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, status: 'creating', visitorHash: 'v2' },
       });
       expect(await verifyOrder(fresh.id)).toMatchObject({ status: 'checking' });
-      expect(await verifyOrder(stuck.id)).toMatchObject({ status: 'cant_confirm' });
-      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: stuck.id } })).status).toBe('cant_confirm');
+      // An hour old: the same wish asked again can still carry it on, so it is not ended yet
+      expect(await verifyOrder(stuck.id)).toMatchObject({ status: 'checking' });
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: stuck.id } })).status).toBe('creating');
+      // Past the open time (24 hours by default) it ends, as not paid, with a line of history
+      await prisma.appPageOrder.update({ where: { id: stuck.id }, data: { createdAt: new Date(Date.now() - 25 * 3_600_000) } });
+      expect(await verifyOrder(stuck.id)).toMatchObject({ status: 'not_paid' });
+      expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: stuck.id } })).toMatchObject({ status: 'not_paid', paidAt: null });
+      expect(await prisma.appPageOrderEvent.findMany({ where: { orderId: stuck.id }, select: { fromStatus: true, toStatus: true, reason: true } })).toEqual([{ fromStatus: 'creating', toStatus: 'not_paid', reason: 'start_never_finished' }]);
     });
 
     it('never keeps or gives out a checkout address that carries the key', async () => {
@@ -1199,6 +1206,426 @@ run('payments for pages, in a real database', () => {
       } finally {
         spy.mockRestore();
       }
+    });
+  });
+
+  /* ------------------ a purchase a buyer can always get back to (O3) ------------------ */
+
+  describe('a purchase wish: one order, and a way back to it', () => {
+    const word = () => randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '');
+    const wish = () => `i${randomUUID().replace(/-/g, '').slice(0, 20)}`;
+    const buyerOf = (code: string) => guestBuyerKey(code) as string;
+    const begin = (artifactId: string, intentId: string, code: string, visitor = 'visitor-1') => startCheckout({ artifactId, visitor, intentId, buyerKey: buyerOf(code) });
+    const orders = (artifactId: string) => prisma.appPageOrder.findMany({ where: { artifactId }, orderBy: { createdAt: 'asc' } });
+    const old = (orderId: string) => prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 24 * 3_600_000) } });
+
+    it('gives the same wish the same order, with the same link, and asks the service once', async () => {
+      const { artifactId } = await pending();
+      const sent = gateway();
+      const code = word();
+      const intentId = wish();
+      const one = await begin(artifactId, intentId, code);
+      const two = await begin(artifactId, intentId, code);
+      if (one.status !== 'ok' || two.status !== 'ok') throw new Error('expected both to be ok');
+      expect(two.orderId).toBe(one.orderId);
+      expect(two.checkoutUrl).toBe(one.checkoutUrl);
+      expect([one.reused, two.reused]).toEqual([false, true]);
+      expect(sent).toHaveLength(1);
+      expect(await orders(artifactId)).toHaveLength(1);
+      expect(await orders(artifactId)).toEqual([expect.objectContaining({ intentId, buyerKey: buyerOf(code), status: 'pending' })]);
+    });
+
+    it('makes one order when two tabs send the same wish at the same moment', async () => {
+      const { artifactId } = await pending();
+      const sent = gateway();
+      const code = word();
+      const intentId = wish();
+      const both = await Promise.all([begin(artifactId, intentId, code), begin(artifactId, intentId, code)]);
+      const ids = both.map((outcome) => (outcome.status === 'ok' ? outcome.orderId : null));
+      expect(ids[0]).not.toBeNull();
+      expect(ids[1]).toBe(ids[0]);
+      expect(sent.filter((target) => target.method === 'POST')).toHaveLength(1);
+      expect(await orders(artifactId)).toHaveLength(1);
+    });
+
+    it('makes a new order for a deliberate new purchase, and a separate one for another buyer with the same wish', async () => {
+      const { artifactId } = await pending();
+      gateway();
+      const code = word();
+      const intentId = wish();
+      const first = await begin(artifactId, intentId, code);
+      const second = await begin(artifactId, wish(), code, 'visitor-2');
+      const third = await begin(artifactId, intentId, word(), 'visitor-3');
+      const ids = [first, second, third].map((outcome) => (outcome.status === 'ok' ? outcome.orderId : null));
+      expect(new Set(ids).size).toBe(3);
+      expect(await orders(artifactId)).toHaveLength(3);
+    });
+
+    it('stores only a hash of a guest’s recovery code, and refuses a code that is too short to be unguessable', async () => {
+      const { artifactId } = await pending();
+      gateway();
+      const code = word();
+      await begin(artifactId, wish(), code);
+      const stored = JSON.stringify(await orders(artifactId));
+      expect(stored).not.toContain(code);
+      expect(guestBuyerKey('short')).toBeNull();
+      expect(guestBuyerKey('has spaces in it and is long enough to pass the length rule!!')).toBeNull();
+    });
+
+    it('carries on an order whose start was lost with the same wish: the same order, the same key at the service, no second order', async () => {
+      const { artifactId } = await pending();
+      const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+      const code = word();
+      const intentId = wish();
+      // The server stopped after writing the order and before the service answered: nobody was given a link
+      const lost = await prisma.appPageOrder.create({
+        data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'creating', visitorHash: 'v', intentId, buyerKey: buyerOf(code), createdAt: new Date(Date.now() - 120_000) },
+      });
+      const sent = gateway();
+      const outcome = await begin(artifactId, intentId, code);
+      if (outcome.status !== 'ok') throw new Error('expected ok');
+      expect(outcome.orderId).toBe(lost.id);
+      expect(sent).toHaveLength(1);
+      expect(JSON.parse(sent[0].body as string)).toMatchObject({ amount: 4.5, currency: 'KWD', reference: { order: lost.id, idempotent: lost.id } });
+      expect(await orders(artifactId)).toHaveLength(1);
+      expect((await orders(artifactId))[0]).toMatchObject({ status: 'pending', providerRef: 'chg_TS01' });
+    });
+
+    it('lets only one of two requests carry on a lost start, and gives both the same order', async () => {
+      const { artifactId } = await pending();
+      const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+      const code = word();
+      const intentId = wish();
+      const lost = await prisma.appPageOrder.create({
+        data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'creating', visitorHash: 'v', intentId, buyerKey: buyerOf(code), createdAt: new Date(Date.now() - 120_000) },
+      });
+      const sent = gateway();
+      const both = await Promise.all([begin(artifactId, intentId, code), begin(artifactId, intentId, code)]);
+      expect(both.map((outcome) => (outcome.status === 'ok' ? outcome.orderId : null))).toEqual([lost.id, lost.id]);
+      expect(sent.filter((target) => target.method === 'POST')).toHaveLength(1);
+    });
+
+    it('waits for a start another request is still making, and answers with its order', async () => {
+      const { artifactId } = await pending();
+      const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+      const code = word();
+      const intentId = wish();
+      const busy = await prisma.appPageOrder.create({
+        data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'creating', visitorHash: 'v', intentId, buyerKey: buyerOf(code) },
+      });
+      const sent = gateway();
+      setTimeout(() => { prisma.appPageOrder.update({ where: { id: busy.id }, data: { status: 'pending', providerRef: 'chg_OTHER', checkoutUrl: 'https://checkout.examplepay.com/?mode=page&token=other' } }).catch(() => undefined); }, 400);
+      const outcome = await begin(artifactId, intentId, code);
+      expect(outcome).toMatchObject({ status: 'ok', orderId: busy.id, checkoutUrl: 'https://checkout.examplepay.com/?mode=page&token=other', reused: true });
+      expect(sent).toHaveLength(0);
+    });
+
+    it('does not carry on a lost start for a page the owner stopped, or past the time an order may stay open', async () => {
+      const { artifactId } = await pending();
+      const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+      const make = (intentId: string, code: string, age: number) =>
+        prisma.appPageOrder.create({
+          data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'creating', visitorHash: 'v', intentId, buyerKey: buyerOf(code), createdAt: new Date(Date.now() - age) },
+        });
+      const sent = gateway();
+      const code = word();
+      const tooOld = await make(wish(), code, 25 * 3_600_000);
+      expect((await begin(artifactId, tooOld.intentId as string, code)).status).toBe('unavailable');
+      expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: tooOld.id } })).toMatchObject({ status: 'not_paid' });
+      const stopped = await make(wish(), code, 120_000);
+      await prisma.appPageJob.update({ where: { artifactId }, data: { status: 'stopped' } });
+      expect((await begin(artifactId, stopped.intentId as string, code)).status).toBe('unavailable');
+      expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: stopped.id } })).toMatchObject({ status: 'not_paid' });
+      expect(sent).toHaveLength(0);
+    });
+
+    it('keeps a line of history for every move an order makes', async () => {
+      const { artifactId } = await pending();
+      gateway({ record: (order) => paidRecord(order) });
+      const outcome = await begin(artifactId, wish(), word());
+      if (outcome.status !== 'ok') throw new Error('expected ok');
+      await old(outcome.orderId);
+      await verifyOrder(outcome.orderId);
+      const lines = await prisma.appPageOrderEvent.findMany({ where: { orderId: outcome.orderId }, orderBy: { createdAt: 'asc' }, select: { fromStatus: true, toStatus: true, reason: true } });
+      expect(lines).toEqual([
+        { fromStatus: null, toStatus: 'creating', reason: 'started' },
+        { fromStatus: 'creating', toStatus: 'pending', reason: 'checkout_ready' },
+        { fromStatus: 'pending|not_paid', toStatus: 'paid', reason: 'paid' },
+      ]);
+    });
+
+    describe('Check payment', () => {
+      it('asks the service about the buyer’s own order for that wish, and nobody else’s', async () => {
+        const { artifactId } = await pending();
+        gateway();
+        const code = word();
+        const intentId = wish();
+        const made = await begin(artifactId, intentId, code);
+        if (made.status !== 'ok') throw new Error('expected ok');
+        expect(await checkPurchase({ artifactId, buyerKey: buyerOf(code), intentId })).toMatchObject({ status: 'checking', orderId: made.orderId, testPayment: true });
+        // Another buyer with the same wish id, another wish, another page: nothing
+        expect(await checkPurchase({ artifactId, buyerKey: buyerOf(word()), intentId })).toBeNull();
+        expect(await checkPurchase({ artifactId, buyerKey: buyerOf(code), intentId: wish() })).toBeNull();
+        const other = await makeArtifact();
+        expect(await checkPurchase({ artifactId: other, buyerKey: buyerOf(code), intentId })).toBeNull();
+        // The payment is made at the service, the page never hears of it, and Check payment finds it
+        gateway({ record: (order) => paidRecord(order) });
+        await old(made.orderId);
+        expect(await checkPurchase({ artifactId, buyerKey: buyerOf(code), intentId })).toMatchObject({ status: 'paid', orderId: made.orderId, testPayment: true });
+      });
+
+      it('carries on an order whose start was lost before asking about it', async () => {
+        const { artifactId } = await pending();
+        const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+        const code = word();
+        const intentId = wish();
+        await prisma.appPageOrder.create({
+          data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'creating', visitorHash: 'v', intentId, buyerKey: buyerOf(code), createdAt: new Date(Date.now() - 120_000) },
+        });
+        gateway();
+        expect(await checkPurchase({ artifactId, buyerKey: buyerOf(code), intentId })).toMatchObject({ status: 'checking', checkoutUrl: 'https://checkout.examplepay.com/?mode=page&token=abc' });
+      });
+    });
+
+    describe('Restore purchase', () => {
+      it('finds this buyer’s paid order, finds a payment made late, and finds nobody else’s', async () => {
+        const { artifactId } = await pending();
+        gateway();
+        const code = word();
+        const made = await begin(artifactId, wish(), code);
+        if (made.status !== 'ok') throw new Error('expected ok');
+        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(code) })).toMatchObject({ status: 'checking', orderId: made.orderId });
+        // Paid at the service while nobody was watching: Restore asks about the open order first
+        gateway({ record: (order) => paidRecord(order) });
+        await old(made.orderId);
+        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(code) })).toMatchObject({ status: 'paid', orderId: made.orderId, testPayment: true });
+        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(word()) })).toMatchObject({ status: 'none', orderId: null });
+        expect(await restorePurchase({ artifactId: await makeArtifact(), buyerKey: buyerOf(code) })).toMatchObject({ status: 'none' });
+      });
+
+      it('prefers a live purchase and never gives a test one as live', async () => {
+        const { artifactId } = await pending();
+        const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+        const code = word();
+        const row = (mode: string, paidAt: Date) =>
+          prisma.appPageOrder.create({
+            data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode, status: 'paid', paidAt, visitorHash: 'v', intentId: wish(), buyerKey: buyerOf(code) },
+          });
+        const live = await row('live', new Date(Date.now() - 3_600_000));
+        await row('test', new Date());
+        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(code) })).toMatchObject({ status: 'paid', orderId: live.id, testPayment: false });
+        await prisma.appPageOrder.delete({ where: { id: live.id } });
+        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(code) })).toMatchObject({ status: 'paid', testPayment: true });
+      });
+
+      it('is for what the page sells now: an order at other terms is not this offer', async () => {
+        const { artifactId } = await pending();
+        gateway({ record: (order) => paidRecord(order) });
+        const code = word();
+        const made = await begin(artifactId, wish(), code);
+        if (made.status !== 'ok') throw new Error('expected ok');
+        await old(made.orderId);
+        await verifyOrder(made.orderId);
+        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(code) })).toMatchObject({ status: 'paid' });
+        await prisma.appPageJob.update({ where: { artifactId }, data: { amountMinor: 9_000 } });
+        expect(await restorePurchase({ artifactId, buyerKey: buyerOf(code) })).toMatchObject({ status: 'none' });
+        // The original order can always be asked about with Check payment, whatever the page sells now
+        expect(await checkPurchase({ artifactId, buyerKey: buyerOf(code), intentId: (await prisma.appPageOrder.findUniqueOrThrow({ where: { id: made.orderId } })).intentId as string })).toMatchObject({ status: 'paid' });
+      });
+    });
+
+    describe('through the game’s route and the public link', () => {
+      const viewerOf = (identifier: string | null, chat = `chat-${tag}`) => ({ person: identifier ? { signedIn: true, identifier } : { signedIn: false, name: 'Visitor' }, inChat: true, chat: { kind: 'dm', ref: chat } });
+      const game = (artifactId: string, body: Record<string, unknown>) => gamePay(request(`/api/artifacts/${artifactId}/pay`, { method: 'POST', token: ADMIN_TOKEN, body }), params({ id: artifactId }));
+      const web = (artifactId: string, body: Record<string, unknown>, address = '203.0.113.9') => publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body, headers: { 'x-forwarded-for': address } }), params({ artifactId }));
+
+      it('binds a signed-in buyer to their account and a guest to their code', async () => {
+        const { artifactId } = await pending();
+        gateway();
+        const intentId = wish();
+        const code = word();
+        const account = await game(artifactId, { viewer: viewerOf(`sara-${tag}`), start: true, intentId });
+        expect(account.status).toBe(200);
+        const guest = await game(artifactId, { viewer: viewerOf(null), start: true, intentId: wish(), recoveryCode: code });
+        expect(guest.status).toBe(200);
+        const rows = await orders(artifactId);
+        expect(rows.map((row) => row.buyerKey)).toEqual([`acct:${sara}`, buyerOf(code)]);
+      });
+
+      it('restores for the same account from the game, but not for another account or for a guest without the code', async () => {
+        const { artifactId } = await pending();
+        gateway({ record: (order) => paidRecord(order) });
+        const first = await (await game(artifactId, { viewer: viewerOf(`sara-${tag}`), start: true, intentId: wish() })).json();
+        await old(first.orderId);
+        const body = await (await game(artifactId, { viewer: viewerOf(`sara-${tag}`), restore: true })).json();
+        expect(body).toMatchObject({ status: 'paid', orderId: first.orderId, testPayment: true });
+        expect(await (await game(artifactId, { viewer: viewerOf(`omar-${tag}`), restore: true })).json()).toMatchObject({ status: 'none' });
+        expect((await game(artifactId, { viewer: viewerOf(null), restore: true })).status).toBe(400);
+        expect(await (await game(artifactId, { viewer: viewerOf(null), restore: true, recoveryCode: word() })).json()).toMatchObject({ status: 'none' });
+      });
+
+      it('answers Check payment for the buyer’s wish, 404 for another’s, and 400 for a guest with no code', async () => {
+        const { artifactId } = await pending();
+        gateway();
+        const intentId = wish();
+        const code = word();
+        const made = await (await game(artifactId, { viewer: viewerOf(null), start: true, intentId, recoveryCode: code })).json();
+        const mine = await game(artifactId, { viewer: viewerOf(null), check: true, intentId, recoveryCode: code });
+        expect(mine.status).toBe(200);
+        expect(await mine.json()).toMatchObject({ status: 'checking', orderId: made.orderId });
+        expect((await game(artifactId, { viewer: viewerOf(null), check: true, intentId, recoveryCode: word() })).status).toBe(404);
+        expect((await game(artifactId, { viewer: viewerOf(null), check: true, intentId })).status).toBe(400);
+        expect((await game(artifactId, { viewer: viewerOf(null), start: true, intentId: wish() })).status).toBe(400);
+        // A start that names no wish is made as before, with nothing to find it by
+        const plain = await game(artifactId, { viewer: viewerOf(null), start: true });
+        expect(plain.status).toBe(200);
+        expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: (await plain.json()).orderId } })).toMatchObject({ intentId: null, buyerKey: null });
+      });
+
+      it('does the same on the public link, and never takes a start with a wish but no buyer', async () => {
+        const { artifactId } = await pending();
+        gateway();
+        const intentId = wish();
+        const code = word();
+        const one = await (await web(artifactId, { intentId, recoveryCode: code })).json();
+        const two = await (await web(artifactId, { intentId, recoveryCode: code }, '203.0.113.10')).json();
+        expect(two.orderId).toBe(one.orderId);
+        expect(two.reused).toBe(true);
+        expect((await web(artifactId, { intentId: wish() })).status).toBe(400);
+        expect((await web(artifactId, { intentId: 'no spaces allowed here', recoveryCode: code })).status).toBe(400);
+        const check = await web(artifactId, { check: true, intentId, recoveryCode: code });
+        expect(await check.json()).toMatchObject({ status: 'checking', orderId: one.orderId });
+        expect((await web(artifactId, { check: true, intentId, recoveryCode: word() })).status).toBe(404);
+        expect(await (await web(artifactId, { restore: true, recoveryCode: code })).json()).toMatchObject({ status: 'checking', orderId: one.orderId });
+        expect((await web(artifactId, { restore: true })).status).toBe(400);
+      });
+
+      it('binds an Orbit session on the public link to the account, and restores it for the same account in the game', async () => {
+        const { artifactId } = await pending();
+        gateway({ record: (order) => paidRecord(order) });
+        mockUser.current = { id: sara };
+        const made = await (await web(artifactId, { intentId: wish() })).json();
+        expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: made.orderId } })).toMatchObject({ buyerKey: `acct:${sara}` });
+        await old(made.orderId);
+        expect(await (await game(artifactId, { viewer: viewerOf(`sara-${tag}`), restore: true })).json()).toMatchObject({ status: 'paid', orderId: made.orderId });
+      });
+    });
+  });
+
+  /* ------------------ orders nobody is watching (O3.4) and how loaded it is (O5) ------------------ */
+
+  describe('orders nobody is watching', () => {
+    it('asks about an abandoned order at the service and finds the payment, leaves a quiet one alone, and ends a start that never finished', async () => {
+      const { artifactId } = await pending();
+      const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+      gateway();
+      const watched = await checkout(artifactId, '198.51.100.71');
+      // (the stand-in service answers for the newest order, so the one to be found paid is made last)
+      const abandoned = await checkout(artifactId, '198.51.100.70');
+      await prisma.appPageOrder.update({ where: { id: abandoned.orderId }, data: { checkedAt: new Date(Date.now() - 3_600_000) } });
+      await prisma.appPageOrder.update({ where: { id: watched.orderId }, data: { checkedAt: new Date() } });
+      const never = await prisma.appPageOrder.create({
+        data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'creating', visitorHash: 'v', createdAt: new Date(Date.now() - 30 * 3_600_000) },
+      });
+      const sent = gateway({ record: (order) => paidRecord(order) });
+      const swept = await sweepPageOrders();
+      expect(swept).toMatchObject({ looked: 1, ended: 1, moved: 1 });
+      expect(sent).toHaveLength(1);
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: abandoned.orderId } })).status).toBe('paid');
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: watched.orderId } })).status).toBe('pending');
+      expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: never.id } })).toMatchObject({ status: 'not_paid' });
+      expect(await notices()).toHaveLength(1);
+    });
+
+    it('is run by the service route, and shows the load', async () => {
+      const { artifactId } = await pending();
+      gateway();
+      const made = await checkout(artifactId, '198.51.100.72');
+      await prisma.appPageOrder.update({ where: { id: made.orderId }, data: { createdAt: new Date(Date.now() - 600_000), checkedAt: new Date(Date.now() - 3_600_000) } });
+      expect((await sweepRoute(request('/api/app-pay/sweep', { method: 'POST' }))).status).toBe(401);
+      const answer = await (await sweepRoute(request('/api/app-pay/sweep', { method: 'POST', token: SERVICE_TOKEN }))).json();
+      expect(answer.sweep).toMatchObject({ looked: 1 });
+      expect(answer.load).toMatchObject({ pending: 1, starting: 0 });
+      expect(answer.load.oldestPendingSeconds).toBeGreaterThanOrEqual(600);
+      const load = await (await sweepLoad(request('/api/app-pay/sweep', { token: SERVICE_TOKEN }))).json();
+      expect(load.load.looks.made).toBeGreaterThanOrEqual(1);
+    });
+
+    it('measures how long orders took to be found paid', async () => {
+      const { artifactId } = await pending();
+      gateway({ record: (order) => paidRecord(order) });
+      const made = await checkout(artifactId, '198.51.100.73');
+      await prisma.appPageOrder.update({ where: { id: made.orderId }, data: { createdAt: new Date(Date.now() - 120_000) } });
+      await settle(made.orderId);
+      const load = await pagePaymentLoad();
+      expect(load.recoveryLastDay.paid).toBe(1);
+      expect(load.recoveryLastDay.p50Seconds).toBeGreaterThanOrEqual(119);
+      expect(load.pending).toBe(0);
+    });
+
+    it('tells a host to wait longer between questions the longer an order has waited', () => {
+      const now = new Date();
+      const ago = (minutes: number) => new Date(now.getTime() - minutes * 60_000);
+      expect([0, 0.5, 1, 4, 5, 9, 10, 600].map((minutes) => pollAfterMs(ago(minutes), now))).toEqual([3_000, 3_000, 5_000, 5_000, 10_000, 10_000, 15_000, 15_000]);
+    });
+
+    it('puts the wait in what an order’s status says, for either host', async () => {
+      const { artifactId } = await pending();
+      gateway();
+      const made = await checkout(artifactId, '198.51.100.74');
+      const body = await (await publicGet(request(`/api/pay/${artifactId}?order=${made.orderId}`), params({ artifactId }))).json();
+      expect(body).toMatchObject({ status: 'checking', pollAfterMs: 3_000, orderId: made.orderId });
+    });
+  });
+
+  /* ------------------ the saved job, read back (O4) ------------------ */
+
+  describe('the saved job, in canonical form', () => {
+    const readBack = (serverId: string, artifactId: string, token: string | null = SERVICE_TOKEN, bot = brick) =>
+      readJob(request(`/api/bots/${bot}/key-apps/${serverId}/page-jobs?artifactId=${artifactId}`, { token: token ?? undefined }), params({ id: bot, serverId }));
+
+    it('answers a write with the saved job as whole minor units, an upper-case currency and the currency’s decimals', async () => {
+      const { serverId, id } = await connectGateway();
+      const artifactId = await makeArtifact();
+      const written = await (await job(serverId, artifactId, { amount: '4.5' })).json();
+      expect(written.job).toMatchObject({ artifactId, connectionId: id, amount: '4.500', amountMinor: 4500, currency: 'KWD', exponent: 3, active: true, status: 'active' });
+      const lower = await (await job(serverId, artifactId, { amount: 4.5, currency: 'kwd' })).json();
+      expect(lower.job).toMatchObject({ amountMinor: 4500, currency: 'KWD' });
+    });
+
+    it('reads the job back without writing, and the same as the write said', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await makeArtifact();
+      const written = await (await job(serverId, artifactId)).json();
+      const before = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+      const answer = await readBack(serverId, artifactId);
+      expect(answer.status).toBe(200);
+      expect((await answer.json()).job).toEqual(written.job);
+      expect(await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } })).toEqual(before);
+      expect(await prisma.appKeyCall.count({ where: { ownerId: sara } })).toBe(0);
+    });
+
+    it('reads a stopped job as not active, and says not found for a page with no job, another page, another app or no token', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await makeArtifact();
+      expect((await readBack(serverId, artifactId)).status).toBe(404);
+      await job(serverId, artifactId);
+      const row = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+      await prisma.appPageJob.update({ where: { id: row.id }, data: { status: 'stopped' } });
+      expect((await (await readBack(serverId, artifactId)).json()).job).toMatchObject({ active: false, status: 'stopped' });
+      expect((await readBack(serverId, await makeArtifact())).status).toBe(404);
+      expect((await readBack(serverId, artifactId, null)).status).toBe(401);
+      expect((await readBack(serverId, 'x'.repeat(101))).status).toBe(400);
+      // Another Brick's grant of the same app does not reach this page's job
+      const other = (await createBrick({ ownerId: omar, name: 'Other' })).id;
+      expect((await readBack(serverId, artifactId, SERVICE_TOKEN, other)).status).toBe(404);
+    });
+
+    it('gives the exponent of a zero-decimal and a two-decimal currency too', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await makeArtifact();
+      expect((await (await job(serverId, artifactId, { amount: '1500', currency: 'JPY' })).json()).job).toMatchObject({ amountMinor: 1500, exponent: 0, currency: 'JPY' });
+      expect((await (await job(serverId, artifactId, { amount: '12.5', currency: 'USD' })).json()).job).toMatchObject({ amountMinor: 1250, exponent: 2, currency: 'USD' });
     });
   });
 });
