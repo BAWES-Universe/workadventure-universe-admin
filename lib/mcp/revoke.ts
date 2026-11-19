@@ -19,7 +19,11 @@ export async function revokeAtApp(connection: { authType: string; authConfig: st
     if (!config || typeof address !== 'string' || !token) return false;
     // The token and the client secret go there, so never over plain http (RFC 7009), and the same destination check as the token endpoint, DNS included
     if (new URL(address).protocol !== 'https:') return false;
-    if (!(await checkOutboundUrl(address)).allowed) return false;
+    // One deadline for the whole of it: the name lookup of the destination check counts too, so a resolver that stalls cannot hold a disconnect
+    const deadline = AbortSignal.timeout(REVOKE_TIMEOUT_MS);
+    const late = new Promise<never>((_, reject) => deadline.addEventListener('abort', () => reject(new Error('timeout')), { once: true }));
+    late.catch(() => undefined);
+    if (!(await Promise.race([checkOutboundUrl(address), late])).allowed) return false;
     const body = new URLSearchParams({ token, token_type_hint: config.refreshToken ? 'refresh_token' : 'access_token' });
     if (config.clientId) body.set('client_id', config.clientId);
     if (config.clientSecret) body.set('client_secret', config.clientSecret);
@@ -29,7 +33,7 @@ export async function revokeAtApp(connection: { authType: string; authConfig: st
       body: body.toString(),
       // A redirect would carry the token and the client secret somewhere the check never saw
       redirect: 'error',
-      signal: AbortSignal.timeout(REVOKE_TIMEOUT_MS),
+      signal: deadline,
     });
     return response.ok;
   } catch {

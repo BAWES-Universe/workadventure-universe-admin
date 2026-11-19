@@ -63,4 +63,19 @@ describe('taking a sign-in back at the app (best effort)', () => {
     expect(await revokeAtApp({ authType: 'oauth', authConfig: config() })).toBe(false);
     expect(await revokeAtApp({ authType: 'oauth', authConfig: 'enc:not json' })).toBe(false);
   });
+
+  it('gives up within the deadline when the name lookup of the destination check stalls, and sends nothing', async () => {
+    jest.useFakeTimers();
+    try {
+      (checkOutboundUrl as jest.Mock).mockImplementation(() => new Promise(() => undefined));
+      const fetchMock = jest.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const done = revokeAtApp({ authType: 'oauth', authConfig: config() });
+      await jest.advanceTimersByTimeAsync(5_100);
+      expect(await done).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

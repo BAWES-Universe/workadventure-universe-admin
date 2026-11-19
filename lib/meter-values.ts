@@ -104,12 +104,22 @@ export function readMeterEvent(input: unknown): Checked<MeterEventInput> {
   if (costMicros !== null && !whole(costMicros)) return { ok: false, error: 'costMicros must be a whole number, 0 or more, or empty when the price is not known' };
   // A figure we have no number for cannot be called measured
   if (input.basis === 'measured' && costMicros === null) return { ok: false, error: 'a measured figure needs costMicros' };
-  const occurredAt = input.occurredAt === undefined || input.occurredAt === null ? new Date() : new Date(input.occurredAt as string | number | Date);
+  // Only a date, a date's text or its number in milliseconds is read as a time: `false` or an object would become the year 1970
+  const given = input.occurredAt;
+  if (given !== undefined && given !== null && typeof given !== 'string' && typeof given !== 'number' && !(given instanceof Date)) return { ok: false, error: 'occurredAt is not a date' };
+  const occurredAt = given === undefined || given === null ? new Date() : new Date(given);
   if (Number.isNaN(occurredAt.getTime())) return { ok: false, error: 'occurredAt is not a date' };
   let detail: Record<string, unknown> | null = null;
   if (input.detail !== undefined && input.detail !== null) {
     if (!isRecord(input.detail)) return { ok: false, error: 'detail must be an object' };
-    if (JSON.stringify(input.detail).length > MAX_DETAIL_CHARS) return { ok: false, error: `detail is too long (up to ${MAX_DETAIL_CHARS} characters)` };
+    // A value that cannot be written as JSON (a bigint, a loop) is an invalid detail, not an error thrown at the caller
+    let written: string | undefined;
+    try {
+      written = JSON.stringify(input.detail);
+    } catch {
+      return { ok: false, error: 'detail must be plain data that can be written as JSON' };
+    }
+    if (written === undefined || written.length > MAX_DETAIL_CHARS) return { ok: false, error: `detail is too long (up to ${MAX_DETAIL_CHARS} characters)` };
     detail = input.detail;
   }
   return {

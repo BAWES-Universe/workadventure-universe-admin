@@ -6,11 +6,24 @@ import { headerProblem } from '@/lib/mcp/header-text';
  * What a person gives to add an app by its link: a bot's own (POST /api/bots/:id/mcp-servers) and a person's connection
  * (POST /api/me/apps) take exactly the same input and the same checks, so neither can be the way round the other.
  */
+/** Whether the address is an https one by its parsed scheme (`HTTPS://` is too), never by how it is written. */
+const isHttps = (address: string): boolean => {
+  try {
+    return new URL(address).protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
 export const createMcpServerSchema = z.object({
   name: z.string().min(1, 'name is required').max(255, 'name must be at most 255 characters'),
   serverUrl: z.string().url('serverUrl must be a valid URL').refine(
     (url) => isAllowedServerUrl(url),
     { message: 'Server URL must not point to internal or private addresses' }
+  ).refine(
+    // The client posts to it with fetch: another scheme (ftp:, say) can never be reached, so it is refused here, not at the first test
+    (url) => ['http:', 'https:'].includes(new URL(url).protocol),
+    { message: 'serverUrl must start with http:// or https://' }
   ),
   authType: z.enum(['none', 'bearer', 'api-key', 'oauth'], {
     message: 'authType must be one of: none, bearer, api-key, oauth',
@@ -88,7 +101,7 @@ export const createMcpServerSchema = z.object({
       // Where the app takes a sign-in back (RFC 7009), when it says (game #2001): used once, when the person disconnects, so it
       // gets the same check as the other two addresses
       if (parsed.revocationUrl !== undefined && parsed.revocationUrl !== null) {
-        if (typeof parsed.revocationUrl !== 'string' || !parsed.revocationUrl.startsWith('https://') || !isAllowedServerUrl(parsed.revocationUrl)) {
+        if (typeof parsed.revocationUrl !== 'string' || !isHttps(parsed.revocationUrl) || !isAllowedServerUrl(parsed.revocationUrl)) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
             path: ['authConfig'],
