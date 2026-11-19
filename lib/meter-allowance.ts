@@ -81,7 +81,7 @@ export async function memberAllowance(personId: string, now: Date, settings: Met
       where: { pool: 'computer', payerKind: 'universe', personKey: `person:${personId}`, costMicros: { not: null }, occurredAt: { gte: month.start, lt: month.end } },
       select: { occurredAt: true, costMicros: true },
     }),
-    db.meterGrant.findMany({ where: { personId, endsAt: { gt: month.start }, startsAt: { lt: month.end } }, select: { grantKey: true, startsAt: true, endsAt: true, multiplier: true, noLimit: true } }),
+    db.meterGrant.findMany({ where: { personId, cancelledAt: null, endsAt: { gt: month.start }, startsAt: { lt: month.end } }, select: { grantKey: true, startsAt: true, endsAt: true, multiplier: true, noLimit: true } }),
   ]);
   return allowanceNow(
     settings.memberAllowanceMicros,
@@ -214,12 +214,14 @@ const wholeMicros = (value: number, what: string): void => {
  */
 export async function reserveRoom(
   input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; /** False for a step inside a job that already holds its place (a model call): it is not another job at once. */ newJob?: boolean },
-  now: Date = new Date(),
+  asked?: Date,
 ): Promise<Room> {
   wholeMicros(input.amountMicros, 'amountMicros');
   if (!input.key || input.key.length > 255) throw new RangeError('key is required (up to 255 characters)');
   return prisma.$transaction(async (tx): Promise<Room> => {
     await lockPool(tx);
+    // The time is read once the lock is held, unless the caller fixed it
+    const now = asked ?? new Date();
     const already = await tx.meterReservation.findUnique({ where: { reservationKey: input.key } });
     if (already) {
       if (already.personKey !== `person:${input.personId}`) return { ok: false, reason: 'key_reused' };
@@ -253,11 +255,13 @@ export async function reserveRoom(
  * it. The extra passes the same checks as new room (the member's allowance and the pool); if it does not, nothing changes and the
  * job saves its work and stops safely. A reservation that already lapsed, was settled or released is not renewed.
  */
-export async function renewRoom(input: { key: string; moreMicros?: number }, now: Date = new Date()): Promise<Room> {
+export async function renewRoom(input: { key: string; moreMicros?: number }, asked?: Date): Promise<Room> {
   const more = input.moreMicros ?? 0;
   if (more !== 0) wholeMicros(more, 'moreMicros');
   return prisma.$transaction(async (tx): Promise<Room> => {
     await lockPool(tx);
+    // The time is read once the lock is held (a renewal that waited for the lock past the end of its lease is a lapsed hold), unless the caller fixed it
+    const now = asked ?? new Date();
     const row = await tx.meterReservation.findUnique({ where: { reservationKey: input.key } });
     if (!row || row.state !== 'held' || row.expiresAt <= now) return { ok: false, reason: 'closed' };
     const settings = await getMeterSettings(tx);
@@ -269,7 +273,8 @@ export async function renewRoom(input: { key: string; moreMicros?: number }, now
       const before = exposureOf([row], settings.renewMinutes, now);
       const after = exposureOf([{ amountMicros: row.amountMicros + BigInt(more), renewals: row.renewals + 1, createdAt: row.createdAt, expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE) }], settings.renewMinutes, now);
       const ruled = await checkSpend(
-        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: 'computer', amountMicros: Math.max(1, after - before) },
+        // What the renewal adds, and nothing when exposure does not grow (a job exactly at its cap may go on to the end of the lease it holds)
+        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: 'computer', amountMicros: Math.max(0, after - before), renewal: { exposureBeforeMicros: before, exposureAfterMicros: after, startedAt: row.createdAt } },
         now,
         tx,
       );

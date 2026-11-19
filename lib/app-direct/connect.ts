@@ -274,6 +274,8 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
           signInLostStatus: null,
           noAnswerAt: null,
           reconnectedAt: new Date(),
+          // The new key has not worked yet: what the old one did says nothing about it
+          lastWorkedAt: null,
         },
       });
       return { id: updated.id, name: updated.name, created: false };

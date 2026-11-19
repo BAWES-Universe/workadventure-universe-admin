@@ -34,7 +34,7 @@ import {
   WITH_CONNECTION,
 } from '@/lib/app-connections';
 import { ensureFreshOAuthConfig, LEASE_MS } from '@/lib/mcp/oauth-refresh';
-import { reportToolSignIn } from '@/lib/tool-signin';
+import { reportKeyWorked, reportToolSignIn } from '@/lib/tool-signin';
 import { GET as listApps, POST as addApp } from '@/app/api/me/apps/route';
 import { DELETE as disconnectApp } from '@/app/api/me/apps/[connectionId]/route';
 import { POST as letUse } from '@/app/api/me/apps/[connectionId]/bricks/route';
@@ -236,6 +236,57 @@ run('apps a person connects once, in a real database', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(outcome.status).toBe('fresh');
     expect(outcome.config).toMatchObject({ accessToken: 'theirs' });
+  });
+
+  it('does not call a stored token that is out of date and cannot be renewed fresh', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'old', refreshToken: 'refresh-1', expiresAt: nowSeconds() - 60 });
+    global.fetch = jest.fn() as unknown as typeof fetch;
+    await prisma.appConnection.update({ where: { id: connection.id }, data: { refreshLeaseUntil: new Date(Date.now() + LEASE_MS) } });
+    const before = (await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).authConfig!;
+    const waiting = ensureFreshOAuthConfig({ serverId: 'unused', connectionId: connection.id, authConfig: before });
+    // The one that held the lease stored a token that is already out of date, with nothing to renew it with
+    setTimeout(async () => {
+      await prisma.appConnection.update({ where: { id: connection.id }, data: { authConfig: encryptApiKey(oauthConfig({ accessToken: 'stale', expiresAt: nowSeconds() - 600 })), refreshLeaseUntil: null } });
+    }, 400);
+    expect((await waiting).status).toBe('reconnect_required');
+  });
+
+  it('holds the lease until a renewal that took over from another request is over, and presents no token it could not read the latest of', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'old', refreshToken: 'refresh-1', expiresAt: nowSeconds() - 60 });
+    let leaseDuringRenewal: Date | null | undefined;
+    global.fetch = jest.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      leaseDuringRenewal = (await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).refreshLeaseUntil;
+      return new Response(JSON.stringify({ access_token: 'new', expires_in: 3600, refresh_token: 'r3' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await prisma.appConnection.update({ where: { id: connection.id }, data: { refreshLeaseUntil: new Date(Date.now() + LEASE_MS) } });
+    const before = (await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).authConfig!;
+    const waiting = ensureFreshOAuthConfig({ serverId: 'unused', connectionId: connection.id, authConfig: before });
+    // The other request stored a token that already needs renewing again, and let go of the lease
+    setTimeout(async () => {
+      await prisma.appConnection.update({ where: { id: connection.id }, data: { authConfig: encryptApiKey(oauthConfig({ accessToken: 'b', refreshToken: 'refresh-2', expiresAt: nowSeconds() - 60 })), refreshLeaseUntil: null } });
+    }, 400);
+    expect((await waiting).status).toBe('refreshed');
+    expect(leaseDuringRenewal).not.toBeNull();
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).refreshLeaseUntil).toBeNull();
+  });
+
+  it('never sends a token to the provider when the connection cannot be read under the lease', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'old', refreshToken: 'refresh-1', expiresAt: nowSeconds() - 60 });
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const stored = (await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).authConfig!;
+    const real = prisma.appConnection.findUnique.bind(prisma.appConnection);
+    let calls = 0;
+    const spy = jest.spyOn(prisma.appConnection, 'findUnique').mockImplementation(((args: never) => {
+      calls += 1;
+      // The read after the lease is taken fails
+      return (calls >= 1 ? Promise.reject(new Error('db blip')) : real(args)) as never;
+    }) as never);
+    const outcome = await ensureFreshOAuthConfig({ serverId: 'unused', connectionId: connection.id, authConfig: stored });
+    spy.mockRestore();
+    expect(outcome.status).toBe('unavailable');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('takes the renewal over when the one that held it never finished (the lease ends by itself)', async () => {
@@ -520,6 +571,87 @@ run('apps a person connects once, in a real database', () => {
     await markConnectionReconnected(connection.id, sara);
     expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: seenAt })).toEqual({ changed: false });
     expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).toBeNull();
+  });
+
+  it('a success of the old key does not clear a refusal of the key that replaced it', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    await prisma.appConnection.update({ where: { id: connection.id }, data: { keyVersion: 4, signInLostAt: new Date(Date.now() - 60_000), signInLostStatus: 401 } });
+    const real = prisma.appConnection.findUnique.bind(prisma.appConnection);
+    const spy = jest.spyOn(prisma.appConnection, 'findUnique').mockImplementationOnce(((args: never) =>
+      real(args).then(async (row) => {
+        // The owner replaces the key, and its first call is refused, between the read and the write
+        await prisma.appConnection.update({ where: { id: connection.id }, data: { keyVersion: 5, signInLostAt: new Date(Date.now() - 1_000), signInLostStatus: 403 } });
+        return row;
+      })) as never);
+    await reportKeyWorked(connection.id, 4);
+    spy.mockRestore();
+    expect(await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).toMatchObject({ keyVersion: 5, signInLostStatus: 403 });
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).not.toBeNull();
+  });
+
+  it('a good call of the key is written down even when nothing was lost, at most once a minute, so an older refusal that reports late never marks the key lost', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    const refusedAt = new Date(Date.now() - 2_000);
+    const worked = new Date(Date.now() - 500);
+    await reportKeyWorked(connection.id, 1, worked);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt).toEqual(worked);
+    // Another good call inside the minute does not write again
+    await reportKeyWorked(connection.id, 1, new Date(worked.getTime() + 10_000));
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt).toEqual(worked);
+    // A call refused before the good one, reported after it, is old news
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: refusedAt })).toEqual({ changed: false });
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).toBeNull();
+    // A refusal seen after it is a loss
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: new Date() })).toEqual({ changed: true });
+    // A minute later the next good call is written
+    await reportKeyWorked(connection.id, 1, new Date(Date.now() + 61_000));
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt!.getTime()).toBeGreaterThan(worked.getTime() + 60_000);
+  });
+
+  it('finishes the cards of a loss on the next report when the lookup of the Bricks failed after the loss was saved, without making a card the person dismissed', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    const lookup = jest.spyOn(prisma.botMcpServer, 'findMany').mockRejectedValueOnce(new Error('connection reset'));
+    const silenced = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const at = new Date();
+    try {
+      // The loss is saved and said; the cards could not follow
+      expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at })).toEqual({ changed: true });
+    } finally {
+      lookup.mockRestore();
+      silenced.mockRestore();
+    }
+    const pending = await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } });
+    expect(pending.signInLostAt).not.toBeNull();
+    expect(pending.noticesPendingAt).not.toBeNull();
+    expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'tool-signin', dismissedAt: null } })).toBe(0);
+    // The same report again changes nothing in the state, and finishes the cards
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at })).toEqual({ changed: false });
+    expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'tool-signin', dismissedAt: null } })).toBe(1);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).noticesPendingAt).toBeNull();
+    // The person dismisses it; a later report of the same loss never makes it again
+    await prisma.userNotice.updateMany({ where: { userId: sara, kind: 'tool-signin' }, data: { dismissedAt: new Date() } });
+    await prisma.appConnection.update({ where: { id: connection.id }, data: { noticesPendingAt: new Date() } });
+    await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at });
+    expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'tool-signin', dismissedAt: null } })).toBe(0);
+  });
+
+  it('the app’s own sign-in return clears the connection’s lost sign-in and the cards of every Brick that uses it', async () => {
+    const connection = await newOAuthApp(sara);
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    await grantToBrick(sara, connection.id, saraStudio);
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401 })).toEqual({ changed: true });
+    expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'tool-signin', dismissedAt: null } })).toBe(2);
+    mockUser.current = { id: sara };
+    const started = await (await signInStart(request(`/api/me/apps/${connection.id}/sign-in?redirectUrl=${encodeURIComponent('http://localhost/admin')}`), params({ connectionId: connection.id }))).json();
+    const state = new URL(started.authorizeUrl).searchParams.get('state')!;
+    global.fetch = jest.fn(async () => new Response(JSON.stringify({ access_token: 'signed-in', refresh_token: 'r', expires_in: 3600 }), { status: 200 })) as unknown as typeof fetch;
+    const back = await signInReturn(request(`/api/oauth/mcp-callback?code=abc&state=${encodeURIComponent(state)}`));
+    expect(back.headers.get('location')).toContain('oauth=success');
+    expect(await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).toMatchObject({ signInLostAt: null, signInLostStatus: null, noAnswerAt: null, noticesPendingAt: null, connectedById: sara });
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).reconnectedAt).not.toBeNull();
+    expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'tool-signin', dismissedAt: null } })).toBe(0);
   });
 
   it('refuses to sign a grant in on its own: its connection does', async () => {

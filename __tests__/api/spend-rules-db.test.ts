@@ -166,6 +166,17 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await proposeRule({ botId: sara.brickId, speakerId: omar.id, sayingKey: 'shared-id', scope: 'person', period: 'day', capMicros: 2_000_000 })).toMatchObject({ ok: true, created: false, rule: { words: expect.stringContaining('$2.00 a day') } });
     });
 
+    it('a message id is a replay only of what that message said, even after the rule was corrected', async () => {
+      const sara = await person('sara');
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'edited-id', scope: 'person', period: 'month', capMicros: 1_000_000 });
+      if (!made.ok) throw new Error('not made');
+      expect((await changeRule(made.rule.id, sara.id, { capMicros: 3_000_000 })).ok).toBe(true);
+      // Another proposal under the same id is not that message: nothing is saved and nothing shown
+      expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'edited-id', scope: 'person', period: 'month', capMicros: 50_000_000 })).toEqual({ ok: false, reason: 'key_reused' });
+      // The same message again still finds its rule, as it stands now
+      expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'edited-id', scope: 'person', period: 'month', capMicros: 1_000_000 })).toMatchObject({ ok: true, created: false });
+    });
+
     it('asks one short question when it is not clear, saves nothing, and saves when it is answered', async () => {
       const sara = await person('sara');
       const asked = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'm2', scope: 'bot', capMicros: 1_000_000 });
@@ -365,6 +376,38 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-a`, scope: 'bot', period: 'month', capMicros: 1_000_000 })).toMatchObject({ ok: true, created: false });
     });
 
+    it('a renewal at the exact cap goes on when the job can cost no more than it already could', async () => {
+      const sara = await person('sara');
+      // 100 millionths for a 10-minute stretch: a first stretch renewed with 33 more, five minutes in, can still cost 100
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100 });
+      const key = `k-${tag}-exact`;
+      expect((await reserveRoom({ key, personId: sara.id, amountMicros: 100, botId: sara.brickId, jobId: 'jx' }, NOW)).ok).toBe(true);
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: NOW } });
+      expect(await renewRoom({ key, moreMicros: 33 }, new Date(NOW.getTime() + 300_000))).toMatchObject({ ok: true });
+      await releaseRoom({ key }, NOW);
+    });
+
+    it('a renewal that waited for the lock past the end of its lease is a lapsed hold, not a renewed one', async () => {
+      const sara = await person('sara');
+      const key = `k-${tag}-lapse`;
+      await prisma.meterReservation.create({ data: { reservationKey: key, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, jobId: 'jl', amountMicros: BigInt(100), state: 'held', expiresAt: new Date(Date.now() + 1_000) } });
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      const other = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('meter:pool'))`;
+        locked();
+        await held;
+      });
+      await lockTaken;
+      const renewing = renewRoom({ key, moreMicros: 0 });
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      release();
+      await other;
+      expect(await renewing).toEqual({ ok: false, reason: 'closed' });
+    });
+
     it('a model call whose id holds ":call:" still finds the room it settled', async () => {
       const sara = await person('sara');
       await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
@@ -496,10 +539,25 @@ run('rules said in chat and task receipts, in a real database', () => {
       // Five minutes in, the job has used half a stretch and still has one stretch of lease: 90,000 can still be spent, under 100,000
       expect(await renewRoom({ key, moreMicros: 60_000 }, at(300))).toMatchObject({ ok: true });
       // Ten minutes in the job could cost 120,000 by the end of its lease: that is over, so it stops safely with the room it holds
-      expect(await renewRoom({ key, moreMicros: 60_000 }, at(600))).toMatchObject({ ok: false, reason: 'rule', leftMicros: 0 });
+      // (the lease it holds ends at minute 15 and can cost 90,000 whatever the clock says, so 10,000 is left of the cap: not enough for the 30,000 the renewal adds)
+      expect(await renewRoom({ key, moreMicros: 60_000 }, at(600))).toMatchObject({ ok: false, reason: 'rule', leftMicros: 10_000 });
       expect((await prisma.meterReservation.findUnique({ where: { reservationKey: key } }))?.amountMicros).toBe(BigInt(120_000));
       await changeRule(made.rule.id, sara.id, { capMicros: 500_000 });
       expect(await renewRoom({ key, moreMicros: 60_000 }, at(600))).toMatchObject({ ok: true });
+      await releaseRoom({ key }, NOW);
+    });
+
+    it('a renewal of room taken in an earlier month is held to this month’s rule for all it adds, not for the difference to room that rule never counted', async () => {
+      const sara = await person('sara');
+      // This month's cap of 100,000. The job's room was taken last month (its createdAt is before this month began), so this month's rule counts none of it
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+      if (!made.ok) throw new Error('not made');
+      const key = `k-${tag}-boundary`;
+      expect((await reserveRoom({ key, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: 'jb' }, NOW)).ok).toBe(true);
+      const lastMonth = new Date(NOW.getTime() - 40 * 86_400_000);
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: lastMonth, expiresAt: new Date(NOW.getTime() + 300_000) } });
+      // Renewing adds 80,000 of room: the room is then 140,000, over the cap of 100,000 that this month never counted any of. Only the difference (80,000) was asked before, and passed
+      expect(await renewRoom({ key, moreMicros: 80_000 }, NOW)).toMatchObject({ ok: false, reason: 'rule' });
       await releaseRoom({ key }, NOW);
     });
 

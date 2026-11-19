@@ -388,7 +388,7 @@ async function clashesOf(db: Tx, candidate: RuleFacts, now: Date, programIds?: {
 }
 
 /** Saves a new program, or a new version of one (`programId`). A clash between rules is refused. */
-async function save(kind: ProgramKind, input: GrantInput & { programId?: string }, issuer: Issuer, now: Date): Promise<ProgramView> {
+async function save(kind: ProgramKind, input: GrantInput & { programId?: string }, issuer: Issuer, now: Date, after?: (tx: Tx) => Promise<void>): Promise<ProgramView> {
   const checked = checkGrant(kind, input, now);
   const programId = input.programId ?? randomUUID();
   if (input.requestKey !== undefined && (!input.requestKey || input.requestKey.length > 255)) throw new CreditRefused('requestKey must be 1 to 255 characters', 'request_key');
@@ -503,17 +503,19 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     });
     if (existing && input.label?.trim()) await tx.grantProgram.update({ where: { id: programId }, data: { label: checked.label } });
     const saved = await loadProgramRow(tx, programId);
+    // What must change together with this rule (the same save, the same commit): it fails, and so does the rule
+    if (after) await after(tx);
     return viewOf(saved as ProgramRow, (saved as ProgramRow).rules[0], (saved as ProgramRow).rules.length);
   });
   return view;
 }
 
 /** The category's default: how much, how often, and who gets it. Saving again makes a new version of the same program. */
-export async function saveDefault(input: GrantInput, issuer: Issuer, now: Date = new Date()): Promise<ProgramView> {
+export async function saveDefault(input: GrantInput, issuer: Issuer, now: Date = new Date(), after?: (tx: Tx) => Promise<void>): Promise<ProgramView> {
   for (let attempt = 0; ; attempt += 1) {
     const current = await prisma.grantProgram.findFirst({ where: { categoryId: input.categoryId, kind: 'default', status: 'active' }, select: { id: true } });
     try {
-      return await save('default', { ...input, programId: current?.id }, issuer, now);
+      return await save('default', { ...input, programId: current?.id }, issuer, now, after);
     } catch (error) {
       // A unique-key refusal on the default's index means someone else just made it too (a writer that did not take the lock): look again
       const raced = error instanceof DefaultAppeared || (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002');
@@ -534,22 +536,33 @@ export async function createGift(input: GrantInput, issuer: Issuer, now: Date = 
 
 /** Ends a program: nothing new is issued under it, the credit already given stays until it ends, and its history stays. */
 export async function endProgram(programId: string, issuer: Issuer, now: Date = new Date()): Promise<'ended' | 'already_ended' | 'not_found'> {
+  return prisma.$transaction((tx) => endProgramIn(tx, programId, issuer, now));
+}
+
+/** Ends several programs in one commit: all of them end, or none does (a refusal on the second leaves the first as it was). */
+export async function endPrograms(programIds: string[], issuer: Issuer, now: Date = new Date()): Promise<('ended' | 'already_ended' | 'not_found')[]> {
   return prisma.$transaction(async (tx) => {
-    // Under the funding account's lock and the category's rules lock (issuing holds the rules lock shared, and may still be issuing from a
-    // version waiting to be replaced that another account funds): an issuing that read the rule before this ends it sees it ended and gives nothing
-    const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true, program: { select: { categoryId: true } } } });
-    if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId), lockOfRules(peek.program.categoryId)]);
-    const program = await tx.grantProgram.findUnique({ where: { id: programId }, include: { rules: { where: { state: 'current' }, take: 1 } } });
-    if (!program) return 'not_found';
-    if (program.status === 'ended') return 'already_ended';
-    const rule = program.rules[0];
-    if (rule) {
-      await checkMayFundFrom(tx, rule.fundingAccountId, issuer, 'You cannot end this one');
-    }
-    await tx.grantProgram.update({ where: { id: programId }, data: { status: 'ended', endedAt: now } });
-    await tx.grantRule.updateMany({ where: { programId, state: 'current' }, data: { state: 'ended', supersededAt: now } });
-    return 'ended';
+    const results: ('ended' | 'already_ended' | 'not_found')[] = [];
+    for (const programId of programIds) results.push(await endProgramIn(tx, programId, issuer, now));
+    return results;
   });
+}
+
+async function endProgramIn(tx: Tx, programId: string, issuer: Issuer, now: Date): Promise<'ended' | 'already_ended' | 'not_found'> {
+  // Under the funding account's lock and the category's rules lock (issuing holds the rules lock shared, and may still be issuing from a
+  // version waiting to be replaced that another account funds): an issuing that read the rule before this ends it sees it ended and gives nothing
+  const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true, program: { select: { categoryId: true } } } });
+  if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId), lockOfRules(peek.program.categoryId)]);
+  const program = await tx.grantProgram.findUnique({ where: { id: programId }, include: { rules: { where: { state: 'current' }, take: 1 } } });
+  if (!program) return 'not_found';
+  if (program.status === 'ended') return 'already_ended';
+  const rule = program.rules[0];
+  if (rule) {
+    await checkMayFundFrom(tx, rule.fundingAccountId, issuer, 'You cannot end this one');
+  }
+  await tx.grantProgram.update({ where: { id: programId }, data: { status: 'ended', endedAt: now } });
+  await tx.grantRule.updateMany({ where: { programId, state: 'current' }, data: { state: 'ended', supersededAt: now } });
+  return 'ended';
 }
 
 // ---------- The preview, before any save (spec 7a) ----------

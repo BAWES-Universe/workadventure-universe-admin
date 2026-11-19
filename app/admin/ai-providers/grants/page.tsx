@@ -4,7 +4,7 @@
 // The super admin sets each default (amount, how often, who), the exceptions for people or a universe, and gifts. All amounts are
 // typed by the super admin: nothing here has a built-in value. Nothing needs a payment gateway.
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Gift, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/components/ui/toast';
@@ -60,9 +60,13 @@ export default function GrantsPage() {
   const [failed, setFailed] = useState(false);
   const [sheet, setSheet] = useState<Sheet>(null);
 
+  // Only the latest read may show: two saves in a row each read the list again, and the earlier read finishing last must not put its older list back
+  const latest = useRef(0);
   const load = useCallback(async () => {
+    const mine = ++latest.current;
     setFailed(false);
     const result = await sendJson('/api/admin/grants', 'GET');
+    if (mine !== latest.current) return;
     if (result.status === 401 || result.status === 403) {
       replacePage('/admin');
       return;

@@ -79,6 +79,34 @@ describe('exceptions and gifts', () => {
   });
 });
 
+describe('the day a gift ends, said in the zone of the one reading it', () => {
+  // An admin in another zone: the same calls, with the zone the browser would have
+  const inZone = (timeZone: string) => {
+    const original = Date.prototype.toLocaleDateString;
+    return jest.spyOn(Date.prototype, 'toLocaleDateString').mockImplementation(function (this: Date, locale?: Intl.LocalesArgument, options?: Intl.DateTimeFormatOptions) {
+      return original.call(this, locale, { timeZone, ...options });
+    });
+  };
+  afterEach(() => jest.restoreAllMocks());
+  // 20 Nov 23:59:59 where the admin is, in New York (UTC-5): already 21 Nov in UTC
+  const saved = '2026-11-21T04:59:59.000Z';
+  const gift = (over: Partial<GiftView> = {}): GiftView => ({ id: 'g1', audience: { kind: 'people', people: [{ id: 'a', name: 'Omar', woka: [] }], universe: null, count: 1 }, amountMicros: 5_000_000, shared: false, totalMicros: 5_000_000, scope: 'both', endsAt: saved, ended: false, usedMicros: 0, givenByName: 'Khalid', settlement: 'gift', billedAt: null, payer: 'Paid by Universe', ...over });
+
+  it('shows the day the admin picked in the list and in the preview, not the day it is in UTC', () => {
+    inZone('America/New_York');
+    expect(giftLines(gift())[2]).toBe('until 20 Nov');
+    expect(giftLines(gift({ ended: true }))[2]).toBe('ended 20 Nov');
+    const request: PreviewRequest = { what: 'gift', audience: { kind: 'people', userIds: ['a'] }, scope: 'both', amountMicros: 5_000_000, shared: false, endsAt: saved };
+    // The server said 21 Nov (its own zone is UTC): the screen says the admin's day
+    expect(words(previewRows(request, numbers({ people: 1, ownRules: 0, laterToo: false, amountMicros: 5_000_000, mostNowMicros: 5_000_000, noLifetimeMax: false, endsOn: '21 Nov' })))['Most credit issued']).toContain('ending 20 Nov');
+  });
+
+  it('shows the same moment as the next day for an admin who is ahead of UTC', () => {
+    inZone('Pacific/Auckland');
+    expect(giftLines(gift())[2]).toBe('until 21 Nov');
+  });
+});
+
 describe('the three-part preview', () => {
   const once: PreviewRequest = { what: 'default', category: 'instant_apps', amountMicros: 2_000_000, interval: 'once', recipients: { kind: 'all' } };
 
@@ -104,6 +132,29 @@ describe('the three-part preview', () => {
     expect(said['Most credit issued']).toContain('Up to $560 a month');
   });
 
+  it('says a monthly default that starts on the 1st issues nothing now, and what its first month is, against the budget it will come out of', () => {
+    const monthly: PreviewRequest = { ...once, interval: 'monthly', startsOn: 'next', amountMicros: 10_000_000 };
+    // 56 people, $10 each: nothing now, $560 on the 1st, and the room left this month does not matter to it
+    const fits = words(previewRows(monthly, numbers({ interval: 'monthly', amountMicros: 10_000_000, mostNowMicros: 560_000_000, issuedNowMicros: 0, firstMonthMicros: 560_000_000, startsOn: 'next', budget: { budgetMicros: 1_000_000_000, roomMicros: 0 } })));
+    expect(fits['Funding']).toContain('Nothing is issued now');
+    expect(fits['Funding']).toContain('Starts on the 1st: $560 for the first month');
+    expect(fits['Funding']).not.toContain('Raise the budget');
+    // Bigger than the whole budget: said now, before the 1st
+    const over = words(previewRows(monthly, numbers({ interval: 'monthly', amountMicros: 10_000_000, mostNowMicros: 560_000_000, issuedNowMicros: 0, firstMonthMicros: 560_000_000, startsOn: 'next', budget: { budgetMicros: 100_000_000, roomMicros: 100_000_000 } })));
+    expect(over['Funding']).toContain('more than the $100 rollout budget');
+    expect(over['Funding']).toContain('Raise the budget in Limits before then');
+    // Starting now it is checked against the room left this month, as before
+    const now = words(previewRows({ ...monthly, startsOn: 'now' }, numbers({ interval: 'monthly', amountMicros: 10_000_000, mostNowMicros: 560_000_000, issuedNowMicros: 560_000_000, startsOn: 'now', budget: { budgetMicros: 1_000_000_000, roomMicros: 100_000_000 } })));
+    expect(now['Funding']).toContain('more than the $100 left in this month’s rollout budget');
+  });
+
+  it('says an exception’s one-time credit and its monthly credit apart, never as one monthly sum', () => {
+    const request: PreviewRequest = { what: 'exception', audience: { kind: 'people', userIds: ['a'] }, instant_apps: { mode: 'own', amountMicros: 10_000_000, interval: 'once' }, computers: { mode: 'same' } };
+    expect(words(previewRows(request, numbers({ people: 1, mostNowMicros: 10_000_000, mostOnceMicros: 10_000_000, mostMonthlyMicros: null })))['Most credit issued']).toContain('Up to $10 once');
+    expect(words(previewRows(request, numbers({ people: 1, mostNowMicros: 10_000_000, mostOnceMicros: 10_000_000, mostMonthlyMicros: null })))['Most credit issued']).not.toContain('a month');
+    expect(words(previewRows(request, numbers({ people: 1, mostNowMicros: 15_000_000, mostOnceMicros: 10_000_000, mostMonthlyMicros: 5_000_000 })))['Most credit issued']).toContain('Up to $5 a month and $10 once');
+  });
+
   it('says none as nobody getting the default, without a made-up figure', () => {
     const rows = previewRows({ ...once, interval: 'none', amountMicros: null }, null);
     expect(rows).toHaveLength(1);
@@ -115,7 +166,7 @@ describe('the three-part preview', () => {
   });
 
   it('says a gift for each person is one amount for either use, and a shared one is one pool', () => {
-    const each: PreviewRequest = { what: 'gift', audience: { kind: 'people', userIds: ['a', 'b', 'c', 'd'] }, scope: 'both', amountMicros: 5_000_000, shared: false, endsAt: '2026-12-31T00:00:00Z' };
+    const each: PreviewRequest = { what: 'gift', audience: { kind: 'people', userIds: ['a', 'b', 'c', 'd'] }, scope: 'both', amountMicros: 5_000_000, shared: false, endsAt: '2026-12-31T12:00:00Z' };
     const eachWords = words(previewRows(each, numbers({ people: 4, ownRules: 0, laterToo: false, amountMicros: 5_000_000, mostNowMicros: 20_000_000, noLifetimeMax: false, endsOn: '31 Dec', already: ['Omar already has $10 a month from an exception. This is a separate gift, so it adds.'] })));
     expect(eachWords['Who gets what']).toContain('Each of the 4 gets one $5 for Instant Apps or computers, not $5 for each');
     expect(eachWords['Most credit issued']).toContain('$20 in total, ending 31 Dec');

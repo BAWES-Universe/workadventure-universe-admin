@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
+import { getUniverseAiReplyLimits } from '@/lib/bot-limits';
 
 /**
  * Shadow checks for the meter (game #1998, Brick 7). The meter records first and enforces nothing new, so what it has to prove
@@ -70,9 +71,11 @@ export interface WindowComparison {
  * One signed-in person's Universe AI replies in their running window, counted the way today's allowance counts them (lib/reply-limits.ts)
  * and counted from the books. They should agree: this is the shared 5 hour allowance, which stays enforced exactly as it is.
  */
-export async function compareReplyWindow(personId: string): Promise<WindowComparison> {
+export async function compareReplyWindow(personId: string, now: Date = new Date()): Promise<WindowComparison> {
   const window = await prisma.replyWindow.findUnique({ where: { key: `ua:person:${personId}` }, select: { startedAt: true } });
-  if (!window) return { since: null, today: 0, books: 0, replies: compareFigures(0, 0) };
+  // A window that has run its hours is over, not running, even while its row is still there: the allowance starts a new one at the next reply
+  const limits = await getUniverseAiReplyLimits();
+  if (!window || window.startedAt.getTime() + limits.windowHours * 3_600_000 <= now.getTime()) return { since: null, today: 0, books: 0, replies: compareFigures(0, 0) };
   const since = window.startedAt;
   const [today, books] = await Promise.all([
     prisma.botsAiUsage.count({ where: { talkedPersonId: personId, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } } }),

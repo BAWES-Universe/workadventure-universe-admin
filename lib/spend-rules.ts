@@ -108,6 +108,11 @@ export function chatRuleKey(botId: string, speakerId: string, sayingKey: string)
   return whole.length <= 255 ? whole : `chat:${botId}:${speakerId}:sha256:${createHash('sha256').update(sayingKey).digest('hex')}`.slice(0, 255);
 }
 
+/** What a message proposed, normalized: the same words give the same hash, a different amount, period or reach another. */
+export function fingerprintOf(draft: RuleDraft): string {
+  return createHash('sha256').update(JSON.stringify([draft.scope, draft.botId, draft.taskKey, draft.period, draft.capMicros, draft.onlyOwnAccounts, draft.covers])).digest('hex');
+}
+
 export type Proposed =
   | { ok: true; rule: RuleCard; created: boolean }
   | { ok: false; reason: 'invalid'; error: string }
@@ -122,6 +127,8 @@ export type Proposed =
  */
 function isReplayOf(row: Prisma.SpendRuleGetPayload<object>, draft: RuleDraft, ownerPersonId: string): boolean {
   if (row.ownerPersonId !== ownerPersonId) return false;
+  // Against what the message first said, however the rule was corrected after: the same id with another amount is another message
+  if (row.proposalFingerprint) return row.proposalFingerprint === fingerprintOf(draft);
   if (row.version > 1) return true;
   return (
     row.scope === draft.scope &&
@@ -159,6 +166,7 @@ export async function proposeRule(input: DraftInput & { speakerId: string; sayin
     const row = await prisma.spendRule.create({
       data: {
         ruleKey: ruleKey ?? `chat:${input.botId}:${randomUUID()}`,
+        proposalFingerprint: fingerprintOf(draft),
         ownerPersonId: owner.ownerPersonId,
         scope: draft.scope,
         botId: draft.botId,
@@ -280,7 +288,7 @@ async function unpricedCallRoom(db: Db, events: Prisma.MeterEventWhereInput[]): 
  * task can really cost, so it counts the time already used plus the one stretch the lease still covers, never the whole of what was
  * stacked up: a cap of $1 must not stop a job at $0.40. Room taken once (a model call, a first stretch) has no renewals and counts whole.
  */
-export function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals: number; createdAt: Date; expiresAt: Date }>, renewMinutes: number, now: Date): number {
+export function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals: number; createdAt: Date; expiresAt: Date }>, renewMinutes: number, _now?: Date): number {
   const stretchMs = renewMinutes * 60_000;
   let total = 0;
   for (const row of rows) {
@@ -290,8 +298,11 @@ export function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals:
       continue;
     }
     const oneStretch = amount / (row.renewals + 1);
-    const usedMs = Math.max(0, Math.min(now.getTime(), row.expiresAt.getTime()) - row.createdAt.getTime());
-    total += Math.min(amount, Math.ceil(oneStretch * (1 + usedMs / stretchMs)));
+    // The most the lease can cost is the whole time it covers, from when it began to when it now ends (what was used and what it still
+    // covers): that moves only when a renewal moves the end, never with the clock, so waiting inside one lease does not make a job look dearer.
+    // Never less than one stretch, never more than what was held.
+    const coveredMs = Math.max(0, row.expiresAt.getTime() - row.createdAt.getTime());
+    total += Math.min(amount, Math.max(Math.ceil(oneStretch), Math.ceil(oneStretch * (coveredMs / stretchMs))));
   }
   return total;
 }
@@ -370,7 +381,7 @@ export async function checkSpend(attempt: SpendAttempt, now: Date = new Date(), 
   for (const rule of rules) {
     if (rule.capMicros !== null) spent.set(rule.id, await spentFor(db, rule, attempt, now));
   }
-  return holdToRules(rules, attempt, (rule) => spent.get(rule.id) ?? { spentMicros: 0, heldMicros: 0 });
+  return holdToRules(rules, attempt, (rule) => spent.get(rule.id) ?? { spentMicros: 0, heldMicros: 0 }, now);
 }
 
 /**

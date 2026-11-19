@@ -2,6 +2,8 @@ import { prisma } from '@/lib/db';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import { ReplyAllowanceError, windowStart } from '@/lib/reply-limits';
 import { servedVoiceLimits } from '@/lib/voice-limits';
+import { repliesPerWindowFor } from '@/lib/credit-replies';
+import { textReserve, voiceReplies } from '@/lib/voice-limit-values';
 import { runningExtra, type RunningExtra } from '@/lib/meter-grants';
 
 /**
@@ -19,9 +21,11 @@ export type VoiceAllowance =
 
 /** What a person has left, for the line at the bottom of the Voice menu. `resetsAt` is null while no window is running (nothing used yet). */
 export interface VoiceLeft {
-  /** `null` while the person has no limit (extra usage with no limit is running): there is no number to show. */
+  /** `null` while the person has no limit (extra usage with no limit is running): there is no number to show. `null` with no `unlimited` is a person nobody could name. */
   left: number | null;
   resetsAt: string | null;
+  /** True when `left` is null because the person has no limit (so the menu can say "unlimited"); absent otherwise, so a game that does not read it still reads null as "nothing to show". */
+  unlimited?: true;
 }
 
 const HOUR = 60 * 60 * 1000;
@@ -49,6 +53,18 @@ function places(served: Served, guest: boolean, spoken: number, used: number, ex
   if (!guest && extra?.noLimit) return { byVoice: Infinity, byText: Infinity };
   const times = guest ? 1 : (extra?.multiplier ?? 1);
   return { byVoice: window.voiceReplies * times - spoken, byText: window.replies * times - used - window.textReserve * times };
+}
+
+/**
+ * The windows a person is served: a signed-in person's own number of replies when a super admin's exception sets one (or gives none, so
+ * a spoken reply is no place either), the usual one when it does not. The text limit reads it the same way (lib/reply-limits.ts).
+ */
+async function servedFor(served: Served, person: { personId: string | null }, now: Date): Promise<Served> {
+  if (!person.personId) return served;
+  const base = served.window.signedIn.replies;
+  const replies = await repliesPerWindowFor(person.personId, base, now);
+  if (replies === base) return served;
+  return { ...served, window: { ...served.window, signedIn: { replies, textReserve: textReserve(replies, served.limits.textReserveShare), voiceReplies: voiceReplies(replies, served.limits, false) } } };
 }
 
 /** The extra usage running for a signed-in person now, if any; a guest has none. */
@@ -92,7 +108,8 @@ export async function checkVoiceAllowance(
   // The same words the Universe AI reply window is kept under (lib/reply-limits.ts), so a spoken reply is in the same window
   const personKey = person.personId ? `person:${person.personId}` : `guest:${userId}`;
 
-  const [served, extra] = await Promise.all([servedVoiceLimits(), extraFor(person, now)]);
+  const [usual, extra] = await Promise.all([servedVoiceLimits(), extraFor(person, now)]);
+  const served = await servedFor(usual, person, now);
   const { window } = served;
   const since = await windowStart(`ua:${personKey}`, window.hours, now);
   const resetsAt = new Date(since.getTime() + window.hours * HOUR).toISOString();
@@ -132,18 +149,22 @@ export async function voiceRepliesLeft(botId: string, input: { userId?: unknown;
   const person = await resolveUsagePerson(userId, input.isGuest);
   const guest = !person.personId;
   const personKey = person.personId ? `person:${person.personId}` : `guest:${userId}`;
-  const [served, extra] = await Promise.all([servedVoiceLimits(), extraFor(person, now)]);
+  const [usual, extra] = await Promise.all([servedVoiceLimits(), extraFor(person, now)]);
+  const served = await servedFor(usual, person, now);
   const { window } = served;
 
   const row = await prisma.replyWindow.findUnique({ where: { key: `ua:${personKey}` }, select: { startedAt: true } });
   const endsAt = row ? new Date(row.startedAt.getTime() + window.hours * HOUR) : null;
-  if (!row || !endsAt || endsAt <= now) return { left: repliesLeft(served, guest, 0, 0, extra), resetsAt: null };
+  if (!row || !endsAt || endsAt <= now) return withUnlimited({ left: repliesLeft(served, guest, 0, 0, extra), resetsAt: null });
   const [spoken, used] = await Promise.all([
     prisma.voiceReplyUse.count({ where: { personKey, createdAt: { gte: row.startedAt } } }),
     usedReplies(prisma, person, userId, row.startedAt),
   ]);
-  return { left: repliesLeft(served, guest, spoken, used, extra), resetsAt: endsAt.toISOString() };
+  return withUnlimited({ left: repliesLeft(served, guest, spoken, used, extra), resetsAt: endsAt.toISOString() });
 }
+
+/** A person with no limit has no number, and says so: null alone also means "nobody the bot could name". */
+const withUnlimited = (answer: VoiceLeft): VoiceLeft => (answer.left === null ? { ...answer, unlimited: true } : answer);
 
 /**
  * A reply that was counted but never played (a person talked over it while it was being settled, a greeting that waited for audio

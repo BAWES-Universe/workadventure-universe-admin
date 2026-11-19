@@ -16,7 +16,7 @@ jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn((email: string | n
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { createBrick } from '@/lib/brick-create';
-import { recordMeterEvent, saveMeterSettings } from '@/lib/meter';
+import { recordMeterEvent, saveMeterSettings, scheduleMemberAllowance } from '@/lib/meter';
 import { GrantRefused, changeGrant, endGrantNow, markGrantBilled, recordGrant, runningExtra } from '@/lib/meter-grants';
 import { answerRequests, askForMore, openRequests } from '@/lib/meter-requests';
 import { memberUsage } from '@/lib/meter-usage';
@@ -28,6 +28,7 @@ import { GET as usageGet } from '@/app/api/me/usage/route';
 import { POST as askPost } from '@/app/api/me/usage/ask-for-more/route';
 import { GET as costsGet } from '@/app/api/admin/meter-costs/route';
 import { GET as personGet, PATCH as personPatch, POST as personPost } from '@/app/api/admin/users/[id]/extra-usage/route';
+import { GET as statusGet } from '@/app/api/admin/users/[id]/extra-usage/status/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -62,6 +63,7 @@ const spendComputer = (who: { id: string; brickId: string }, micros: number, at:
   recordMeterEvent(event({ personKey: `person:${who.id}`, personId: who.id, botId: who.brickId, brick: true, costMicros: micros, occurredAt: at }));
 
 const wipe = async () => {
+  await prisma.meterAllowanceChange.deleteMany({});
   await prisma.meterEvent.deleteMany({});
   await prisma.meterReservation.deleteMany({});
   await prisma.meterGrant.deleteMany({});
@@ -161,6 +163,42 @@ run('usage for people, and cost for us, in a real database', () => {
       await addUsage(sara, 30, { greeting: true });
       await addUsage(sara, 30, { error: true });
       expect((await memberUsage(sara.id, NOW)).chat.left).toBe(1);
+    });
+
+    it('a grant that answers while an ask is still being written waits for it, so the ask is answered', async () => {
+      const sara = await person('sara');
+      const holder = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`meter_request:${sara.id}:computer`}))`;
+        await tx.meterRequest.create({ data: { personId: sara.id, what: 'computer', createdAt: hours(-1) } });
+        await new Promise((resolve) => setTimeout(resolve, 600));
+      });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      // The ask is not committed yet: an answer that did not wait would see nothing to answer
+      expect(await answerRequests(sara.id, 'grant-x', NOW, NOW, 'computer')).toBe(1);
+      await holder;
+      expect(await prisma.meterRequest.count({ where: { personId: sara.id, answeredAt: null } })).toBe(0);
+    });
+
+    it('keeps the chat bar and the credit when the computer part cannot be read, and says the computer part is unavailable', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 300);
+      const spy = jest.spyOn(prisma.meterReservation, 'aggregate').mockRejectedValueOnce(new Error('database hiccup'));
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const usage = await memberUsage(sara.id, NOW);
+        expect(usage.computer).toMatchObject({ unavailable: true, canAskForMore: false });
+        expect(usage.chat).toMatchObject({ left: 1, words: 'plenty' });
+        expect(usage.credit).toEqual([]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('has no time to wait for in a window that started before any reply was counted', async () => {
+      const sara = await person('sara');
+      await prisma.replyWindow.create({ data: { key: `ua:person:${sara.id}`, startedAt: hours(-1) } });
+      expect((await memberUsage(sara.id, NOW)).chat).toMatchObject({ left: 1, fullAgainAt: null, replies: { running: true } });
     });
 
     it('shows computer time and storage only to someone whose Brick uses a computer, in plain words about this month', async () => {
@@ -590,6 +628,31 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: owed.grant.grantKey } })).multiplier).toBe(2);
     });
 
+    it('an edit never goes onto a grant that was ended after the edit read it, a new end before the start is refused, and the same key with other agreed words is another agreement', async () => {
+      const sara = await person('sara');
+      const base = { personId: sara.id, givenById: sara.id, startsAt: days(-1) };
+      const live = await recordGrant({ ...base, grantKey: `g-${tag}-w1`, settlement: 'to_bill', multiplier: 2, endsAt: days(5), note: 'Agreed 5 KD' });
+      const real = prisma.meterGrant.findUnique.bind(prisma.meterGrant);
+      const spy = jest.spyOn(prisma.meterGrant, 'findUnique').mockImplementationOnce(((args: never) =>
+        real(args).then(async (row) => {
+          // Another admin ends it a second after this edit's clock, while the edit is between its read and its write
+          await endGrantNow(live.grant.grantKey, new Date(NOW.getTime() + 1000));
+          return row;
+        })) as never);
+      await expect(changeGrant(live.grant.grantKey, { multiplier: 9 }, NOW)).rejects.toThrow(GrantRefused);
+      spy.mockRestore();
+      expect(await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: live.grant.grantKey } })).toMatchObject({ multiplier: 2, endsAt: new Date(NOW.getTime() + 1000) });
+
+      const omar = await person('omar');
+      const later = await recordGrant({ ...base, personId: omar.id, grantKey: `g-${tag}-w2`, settlement: 'gift', multiplier: 2, startsAt: days(2), endsAt: days(5) });
+      await expect(changeGrant(later.grant.grantKey, { endsAt: days(1) }, NOW)).rejects.toThrow(/after it starts/);
+
+      const billed = await recordGrant({ ...base, grantKey: `g-${tag}-w3`, settlement: 'to_bill', multiplier: 2, endsAt: days(5), note: 'Agreed 5 KD' });
+      expect((await recordGrant({ ...base, grantKey: `g-${tag}-w3`, settlement: 'to_bill', multiplier: 2, endsAt: days(5), note: ' Agreed 5 KD ' })).recorded).toBe(false);
+      await expect(recordGrant({ ...base, grantKey: `g-${tag}-w3`, settlement: 'to_bill', multiplier: 2, endsAt: days(5), note: 'Agreed 50 KD' })).rejects.toThrow(/different grant/);
+      expect((await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: billed.grant.grantKey } })).note).toBe('Agreed 5 KD');
+    });
+
     it('lets a running one change and end, and refuses to rewrite one that was billed, one that ended, or a gift marked billed', async () => {
       const sara = await person('sara');
       const base = { personId: sara.id, givenById: sara.id, startsAt: days(-1) };
@@ -610,6 +673,13 @@ run('usage for people, and cost for us, in a real database', () => {
       const later = await recordGrant({ ...base, personId: omar.id, grantKey: `g-${tag}-g`, settlement: 'gift', multiplier: 2, startsAt: days(2), endsAt: days(5) });
       expect(await endGrantNow(later.grant.grantKey, NOW)).toBe('ended');
       expect(await runningExtra(omar.id, days(3))).toBeNull();
+      // Its dates stay as they were given (it is marked cancelled instead of being made to look as if it ran for a second)
+      const kept = await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: `g-${tag}-g` } });
+      expect(kept.startsAt).toEqual(days(2));
+      expect(kept.endsAt).toEqual(days(5));
+      expect(kept.cancelledAt).toEqual(NOW);
+      expect(await endGrantNow(later.grant.grantKey, NOW)).toBe('already_ended');
+      await expect(changeGrant(later.grant.grantKey, { multiplier: 3 }, NOW)).rejects.toThrow(/ended/);
       await expect(changeGrant(gift.grant.grantKey, { multiplier: 3 }, new Date(NOW.getTime() + 1000))).rejects.toThrow(/ended/);
     });
   });
@@ -623,6 +693,7 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await personGet(adminCall(`/api/admin/users/${sara.id}/extra-usage`), ctx)).status).toBe(403);
       expect((await personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, {}), ctx)).status).toBe(403);
       expect((await personPatch(body('PATCH', `/api/admin/users/${sara.id}/extra-usage`, {}), ctx)).status).toBe(403);
+      expect((await statusGet(adminCall(`/api/admin/users/${sara.id}/extra-usage/status?grantKey=k`), ctx)).status).toBe(403);
       session.mockResolvedValue(null);
       expect((await costsGet(adminCall('/api/admin/meter-costs'))).status).toBe(403);
     });
@@ -665,6 +736,26 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await patch(sara.id, { grantKey: gift.grant.grantKey, action: 'billed' })).status).toBe(400);
     });
 
+    it('say whether a give was saved under a key, without giving anything: saved only for that person, and a key nobody used is not saved', async () => {
+      asAdmin();
+      const sara = await person('sara');
+      const omar = await person('omar');
+      const real = (n: number) => new Date(Date.now() + n * 86_400_000);
+      const ask = (id: string, key?: string) => statusGet(adminCall(`/api/admin/users/${id}/extra-usage/status${key === undefined ? '' : `?grantKey=${encodeURIComponent(key)}`}`), { params: Promise.resolve({ id }) });
+      expect((await ask(sara.id)).status).toBe(400);
+      expect((await ask(sara.id, 'x'.repeat(256))).status).toBe(400);
+      const before = await prisma.meterGrant.count({});
+      const none = await ask(sara.id, `g-${tag}-s`);
+      expect(await none.json()).toEqual({ saved: false });
+      expect(await prisma.meterGrant.count({})).toBe(before);
+      const { grant } = await recordGrant({ grantKey: `g-${tag}-s`, personId: sara.id, settlement: 'gift', multiplier: 2, startsAt: real(-1), endsAt: real(5), givenById: sara.id });
+      const saved = await (await ask(sara.id, grant.grantKey)).json();
+      expect(saved).toEqual({ saved: true, startsAt: grant.startsAt.toISOString(), endsAt: grant.endsAt.toISOString() });
+      // The same key under another person's name says nothing about them
+      expect(await (await ask(omar.id, grant.grantKey)).json()).toEqual({ saved: false });
+      expect(await prisma.meterGrant.count({})).toBe(before + 1);
+    });
+
     it('turn down dates that are not dates, run backwards, or ask for more than a year of figures', async () => {
       asAdmin();
       expect((await costsGet(adminCall('/api/admin/meter-costs?from=yesterday&to=2026-11-10'))).status).toBe(400);
@@ -676,6 +767,13 @@ run('usage for people, and cost for us, in a real database', () => {
 
   describe('the Costs page', () => {
     const range = { from: new Date('2026-11-14T00:00:00Z'), to: new Date('2026-11-15T00:00:00Z') };
+
+    it('a report whose settings cannot be read fails, and does not show $0 above the usual', async () => {
+      await setUp();
+      const spy = jest.spyOn(prisma.appSetting, 'findUnique').mockRejectedValueOnce(new Error('db down'));
+      await expect(costsReport(range.from, range.to, NOW)).rejects.toThrow('db down');
+      spy.mockRestore();
+    });
 
     it('counts what was recorded by person, Brick and what the Brick did, each figure with its mark', async () => {
       await setUp();
@@ -717,6 +815,17 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(own.bricks.rows[0].sure).toBe('Unknown');
       await prisma.meterEvent.deleteMany({ where: { basis: 'unknown' } });
       expect((await costsReport(range.from, range.to, NOW)).bricks.rows[0].sure).toBe('Paid by someone else');
+    });
+
+    it('counts replies on a person’s own key only when they were replies: not a failed call, not a greeting', async () => {
+      const sara = await person('sara');
+      const own = (n: number, detail: object) =>
+        recordMeterEvent(event({ eventId: `own-${tag}-${n}`, kind: 'model_call', pool: 'chat', unit: 'call', personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'person', payerPersonId: sara.id, basis: 'paid_by_other', costMicros: 1_000, detail }));
+      await own(1, { error: false, greeting: false });
+      await own(2, { error: true, greeting: false });
+      await own(3, { error: false, greeting: true });
+      const report = await costsReport(range.from, range.to, NOW);
+      expect(report.bricks.rows[0]).toMatchObject({ ownKeyReplies: 1 });
     });
 
     it('stays inside the dates it was given, both ends included, and lists days newest first', async () => {
@@ -803,6 +912,47 @@ run('usage for people, and cost for us, in a real database', () => {
       // And the person’s row says extra usage runs, until when
       expect((await costsReport(new Date('2026-11-01T00:00:00Z'), range.to, NOW)).people.rows.find((row) => row.name === 'sara')?.extraUntil).toBe(days(10).toISOString());
     });
+    it('never attributes spending to a gift that was cancelled before it started', async () => {
+      await setUp();
+      const sara = await person('sara');
+      const faisal = await person('faisal');
+      const later = await recordGrant({ grantKey: `g-${tag}-later`, personId: sara.id, settlement: 'to_bill', multiplier: 5, startsAt: days(1), endsAt: days(10), givenById: faisal.id, note: 'Agreed' });
+      expect(await endGrantNow(later.grant.grantKey, NOW)).toBe('ended');
+      // Spent in the second before it was cancelled: no extra usage was running, so none of it is "above the usual"
+      await spendComputer(sara, 2_500, new Date(NOW.getTime() - 500));
+      const report = await costsReport(range.from, range.to, NOW);
+      const row = report.given.find((item) => item.grantKey === `g-${tag}-later`)!;
+      expect(row).toMatchObject({ ended: true, aboveUsualMicros: 0 });
+      expect(report.people.rows.find((item) => item.name === 'sara')?.extraUntil).toBeNull();
+    });
+
+    it('works a past month out with the allowance that applied in it, not with today’s', async () => {
+      await setUp();
+      const sara = await person('sara');
+      const faisal = await person('faisal');
+      // The usual was 2,000 until the 10th of this month and is 1,000 since
+      await prisma.meterAllowanceChange.deleteMany({});
+      await prisma.meterAllowanceChange.createMany({ data: [{ effectiveFrom: new Date('1970-01-01T00:00:00Z'), allowanceMicros: BigInt(2_000) }, { effectiveFrom: new Date('2026-11-10T00:00:00Z'), allowanceMicros: BigInt(1_000) }] });
+      await recordGrant({ grantKey: `g-${tag}-sara`, personId: sara.id, settlement: 'to_bill', multiplier: 2, startsAt: days(-30), endsAt: days(10), givenById: faisal.id, note: 'Agreed' });
+      // Double gives one more usual, drawn first: October's extra could carry 2,000 and drew 2,000 of the 3,000; November's could carry 1,000 and drew 1,000
+      await spendComputer(sara, 3_000, days(-20));
+      await spendComputer(sara, 3_000, days(-2));
+      const report = await costsReport(range.from, range.to, NOW);
+      expect(report.given.find((row) => row.grantKey === `g-${tag}-sara`)?.aboveUsualMicros).toBe(3_000);
+    });
+
+    it('keeps the allowance of each month as it was saved: saving a new one later never rewrites an earlier month', async () => {
+      await prisma.meterAllowanceChange.deleteMany({});
+      await saveMeterSettings({ memberAllowanceMicros: 2_000 }, 'admin');
+      await saveMeterSettings({ memberAllowanceMicros: 1_000 }, 'admin');
+      await scheduleMemberAllowance(7_000, new Date('2099-01-01T00:00:00Z'), 'admin');
+      await scheduleMemberAllowance(8_000, new Date('2099-02-01T00:00:00Z'), 'admin');
+      await saveMeterSettings({ memberAllowanceMicros: null }, 'admin');
+      const rows = await prisma.meterAllowanceChange.findMany({ orderBy: { effectiveFrom: 'asc' } });
+      // Both saved figures are kept in order, the waiting ones were replaced by the later save (a save now replaces what waited)
+      expect(rows.map((row) => (row.allowanceMicros === null ? null : Number(row.allowanceMicros)))).toEqual([2_000, 1_000, null]);
+    });
+
     it('reads the computer spending once for everyone, whatever the number of people and months their grants span', async () => {
       await setUp();
       const sara = await person('sara');

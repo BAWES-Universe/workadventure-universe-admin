@@ -250,12 +250,14 @@ export function ExceptionSheet({ open, editing, onClose, onSaved }: { open: bool
   const who = recipientsOf(audience);
   const apps = settingOf(settings.instant_apps);
   const computers = settingOf(settings.computers);
-  const ready = !!who && !!apps && !!computers && (apps.mode !== 'same' || computers.mode !== 'same');
+  // An exception that already exists may go back to "As everyone" in both: the server ends the rule. A new one needs a category chosen.
+  const ready = !!who && !!apps && !!computers && (!!editing || apps.mode !== 'same' || computers.mode !== 'same');
   const request: PreviewRequest | null = who && apps && computers ? { what: 'exception', audience: who, instant_apps: apps, computers, ...(editing ? { replaceId: editing.id } : {}) } : null;
   const { preview, loading } = usePreview(open && ready ? request : null);
   const clash = preview?.clash ?? null;
   // A clash must be answered before saving; a new one starts unanswered
-  const clashKey = clash ? clash.people.join(',') + clash.other.name : '';
+  // The choice belongs to the draft it was made for: changing a category, an amount or the people asks it again, even for the same rule
+  const clashKey = clash ? JSON.stringify([clash.people, clash.other.name, request]) : '';
   useEffect(() => setChoice(null), [clashKey]);
 
   async function save() {
@@ -363,6 +365,13 @@ export function GiftSheet({ open, onClose, onSaved }: { open: boolean; onClose: 
     pending.current = null;
   }, [open]);
 
+  const zoneName = (() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone;
+    } catch {
+      return '';
+    }
+  })();
   const endsAtDate = until ? new Date(`${until}T23:59:59`) : null;
   const endsAt = endsAtDate && !Number.isNaN(endsAtDate.getTime()) && endsAtDate.getTime() > Date.now() ? endsAtDate.toISOString() : null;
   const who = recipientsOf(audience);
@@ -381,9 +390,11 @@ export function GiftSheet({ open, onClose, onSaved }: { open: boolean; onClose: 
     void _what;
     const result = await sendJson('/api/admin/grants/gifts', 'POST', { ...body, grantKey: pending.current.key, settlement, note: settlement === 'to_bill' && note.trim() ? note.trim() : null });
     setSaving(false);
-    // The key lasts while the books may have saved it without our hearing (no answer, or a server error);
-    // a clear answer (saved, or refused with a 4xx), ends it. Saving again with the same key never gives twice.
-    if (result.ok || (result.status >= 400 && result.status < 500)) pending.current = null;
+    // The key lasts while the books may have saved it without our hearing (no answer, or a server error, or a sign-in that failed
+    // on the way back: the first try may have been saved before it); a clear answer (saved, or refused with a 4xx that says so), ends it.
+    // Saving again with the same key never gives twice.
+    const refused = result.status >= 400 && result.status < 500 && ![401, 403, 408].includes(result.status);
+    if (result.ok || refused) pending.current = null;
     if (!result.ok) {
       addToast({ description: result.error ?? 'That didn’t save.', variant: 'error' });
       return;
@@ -467,6 +478,7 @@ export function GiftSheet({ open, onClose, onSaved }: { open: boolean; onClose: 
           <Group label="Until">
             <Input type="date" className="h-11" aria-label="Ends on" value={until} onChange={(event) => setUntil(event.target.value)} />
             {until && !endsAt && <p className="text-sm text-muted-foreground">Pick a day in the future. Every gift ends.</p>}
+            {endsAt && <p className="text-sm text-muted-foreground">Ends at the end of that day in your time zone{zoneName ? ` (${zoneName})` : ''}. The list and the preview show the same day.</p>}
           </Group>
           <Group label="Gift or bill">
             <Segmented<Settlement>

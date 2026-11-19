@@ -248,6 +248,29 @@ run('using a key app, in a real database', () => {
     expect((await prisma.botMcpTool.findMany({ where: { serverId: grant.id } })).map((tool) => tool.name).sort()).toEqual(['example_lookuppayment', 'example_makepaymentlink']);
   });
 
+  it('a call that read the tools before another one brought them up to date does not overwrite what that one wrote or what the owner decided since', async () => {
+    const id = await connectGateway();
+    const grant = (await grantOf(saraBrick, id))!;
+    await toolsOf(saraBrick, grant.id);
+    const rows = await prisma.botMcpTool.findMany({ where: { serverId: grant.id }, orderBy: { name: 'asc' } });
+    // The rows are of an older version when the stale call reads them...
+    await prisma.botMcpTool.updateMany({ where: { serverId: grant.id }, data: { fingerprint: 'old-version' } });
+    const real = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+    const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce((async (...args: unknown[]) => {
+      // ...and by the time it writes, the other call has made them current and the owner has moved one
+      await prisma.botMcpTool.updateMany({ where: { id: rows[0].id }, data: { fingerprint: rows[0].fingerprint, heading: 'changesThings', movedById: sara } });
+      await prisma.botMcpTool.updateMany({ where: { id: rows[1].id }, data: { fingerprint: rows[1].fingerprint } });
+      return real(...args);
+    }) as never);
+    try {
+      await ensureKeyAppTools(grant.id);
+    } finally {
+      spy.mockRestore();
+    }
+    const after = await prisma.botMcpTool.findMany({ where: { serverId: grant.id }, orderBy: { name: 'asc' } });
+    expect(after[0]).toMatchObject({ fingerprint: rows[0].fingerprint, heading: 'changesThings', movedById: sara });
+  });
+
   it('keeps a custom app’s operations waiting to be confirmed, and forgets a confirmation when the definition changes', async () => {
     const draft = (extra = {}) => ({
       version: 1, service: 'custom', name: 'ShipLink', short: 'ShipLink', origin: 'https://api.shiplink.com', placement: { in: 'header', name: 'X-Api-Key', scheme: 'none' },

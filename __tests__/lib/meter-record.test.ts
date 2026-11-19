@@ -38,13 +38,13 @@ describe('writing an event once', () => {
 
   it('writes nothing when the id was written before, and says so', async () => {
     events.createMany.mockResolvedValue({ count: 0 });
-    events.findUnique.mockResolvedValue({ kind: 'app_use', personKey: 'person:sara', botId: 'b1', unit: 'use', quantity: BigInt(2), costMicros: BigInt(300), jobId: null });
+    events.findUnique.mockResolvedValue({ kind: 'app_use', pool: 'chat', payerKind: 'universe', payerPersonId: null, personKey: 'person:sara', botId: 'b1', unit: 'use', quantity: BigInt(2), costMicros: BigInt(300), jobId: null });
     expect(await recordMeterEvent(input())).toEqual({ recorded: false, conflict: false });
   });
 
   it('says it is a conflict when the id was written before with other figures: the first stands', async () => {
     events.createMany.mockResolvedValue({ count: 0 });
-    events.findUnique.mockResolvedValue({ kind: 'app_use', personKey: 'person:sara', botId: 'b1', unit: 'use', quantity: BigInt(5), costMicros: BigInt(300), jobId: null });
+    events.findUnique.mockResolvedValue({ kind: 'app_use', pool: 'chat', payerKind: 'universe', payerPersonId: null, personKey: 'person:sara', botId: 'b1', unit: 'use', quantity: BigInt(5), costMicros: BigInt(300), jobId: null });
     expect(await recordMeterEvent(input())).toEqual({ recorded: false, conflict: true });
   });
 
