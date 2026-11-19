@@ -17,6 +17,7 @@ import { memoryStore } from '../helpers/archive-store';
 import { setArchiveStoreForTests } from '@/lib/computer-archives';
 import { createBrick } from '@/lib/brick-create';
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
+import { sweepPurges } from '@/lib/brick-purge';
 import { confirmChatPurges } from '@/lib/brick-purge';
 import { saveServerLimits } from '@/lib/bot-limits';
 import * as meter from '@/lib/meter';
@@ -1750,18 +1751,18 @@ run('a Brick’s computer, in a real database', () => {
       expect(await prisma.bot.count({ where: { id: sara.brickId } })).toBe(0);
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machinePending: true, copyPending: true, attempts: 1, doneAt: null, providerRef: `fake-${sara.brickId}` });
       expect(await newest()).toBe(5_000_000_000);
-      // Not due yet: the sweep leaves it alone until its wait is over
+      // Not due yet: the sweep leaves it alone until its wait is over (the sweeps here look at this Brick only: another test's purge note that is due must not count)
       const calls = provider.calls.length;
-      await removeGoneBricks(minutes(3));
+      await sweepPurges(minutes(3), [sara.brickId]);
       expect(provider.calls.length).toBe(calls);
       // The provider works again but the bucket does not: only what is left is tried, and the machine is not asked again
       provider.failRemove = false;
-      await removeGoneBricks(minutes(10));
+      await sweepPurges(minutes(10), [sara.brickId]);
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machinePending: false, copyPending: true, attempts: 2, doneAt: null });
       expect(await newest()).toBe(5_000_000_000);
       provider.failDeleteCopy = false;
       await confirmChatPurges([sara.brickId], minutes(10));
-      await removeGoneBricks(minutes(60));
+      await sweepPurges(minutes(60), [sara.brickId]);
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machinePending: false, copyPending: false, doneAt: expect.any(Date), providerRef: null });
       expect(await newest()).toBe(0);
     });

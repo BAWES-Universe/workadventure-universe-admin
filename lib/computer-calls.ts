@@ -179,12 +179,6 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
     const now2 = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { status: true, endedBy: true } });
     if (now2 && givenBackJob(now2.status, now2.endedBy)) await giveBackModelCalls(job.id, job.personId);
   }
-  // The job may have failed while this call was being written: its calls are given back when it ends, and this one was written after that
-  // looked. Look again (the answer is only ever "failed on our side" once, so this is cheap and settles the race either way)
-  if (!givenBack && !paidByOther) {
-    const now2 = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { status: true, endedBy: true } });
-    if (now2 && givenBackJob(now2.status, now2.endedBy)) await giveBackModelCalls(job.id, job.personId);
-  }
   // The room settles at what the books hold for this call, never at what this report says: a report sent again after a first one that wrote
   // the event but did not settle (or with another figure) must settle at the event's own cost. A price that is not known settles at the
   // room that was held (never 0); one that is settles at what it was, at least 1
