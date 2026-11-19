@@ -8,8 +8,9 @@ ALTER TABLE "task_receipts" ADD COLUMN "actions" JSONB;
 ALTER TABLE "task_receipts" ADD CONSTRAINT "task_receipts_outcome_check" CHECK ("outcome" IS NULL OR "outcome" IN ('done', 'partial', 'refunded'));
 CREATE INDEX "task_receipts_state_lease_until_idx" ON "task_receipts"("state", "lease_until");
 
--- A receipt that is still running when this lands has no lease to wait for: its lease has already run out (the sweep settles it from its runs).
+-- A receipt that is still running when this lands is a live task as far as anyone knows (the bot server may be minutes into it): it gets a
+-- fresh lease from now, which the bot server's next open or renew extends, and which only runs out if the task really is gone. (Times here are UTC, as Prisma writes them.)
 -- A computer's receipt has none: its job is its own record.
-UPDATE "task_receipts" SET "lease_until" = "started_at" WHERE "state" = 'running' AND "category" IS DISTINCT FROM 'computer';
+UPDATE "task_receipts" SET "lease_until" = timezone('UTC', now()) + interval '10 minutes' WHERE "state" = 'running' AND "category" IS DISTINCT FROM 'computer';
 -- A receipt that already ended came to what its state says
 UPDATE "task_receipts" SET "outcome" = "state" WHERE "state" IN ('done', 'refunded');

@@ -225,7 +225,7 @@ export async function closeReceipt(
       // Ended already: the word changes nothing. Only a task whose run records say otherwise is put right: a run that landed after the word,
       // or one still going (then a newer turn is on it)
       if (view.open) return { ok: true, id, state: await reopenForOpenRun(tx, row), generation: row.generation + 1 };
-      const state = view.actions.length === 0 ? (row.state as ReceiptState) : await reconcileEnded(tx, row, view, now);
+      const state = view.actions.length === 0 ? (row.state as ReceiptState) : await reconcileEnded(tx, row, view, await jobOf(tx, input), now);
       return { ok: true, id, state, generation: row.generation };
     }
     // The bot server's word is the task's end; an open run means the task is not settled yet, whatever the word is
@@ -235,7 +235,7 @@ export async function closeReceipt(
     }
     if (view.actions.length > 0) {
       // Every run has ended and some went out: the run records say how it went, whatever the word was
-      const state = await endReceipt(tx, row, view.outcome, view.actions, now, input.chargedMicros ?? null);
+      const state = await endReceipt(tx, row, outcomeWith(view, await jobOf(tx, input)), view.actions, now, input.chargedMicros ?? null);
       return { ok: true, id, state, generation: row.generation };
     }
     if (input.state === 'checking') {
@@ -249,14 +249,27 @@ export async function closeReceipt(
   });
 }
 
+type JobRow = { status: string } | null;
+const jobOf = (tx: Tx, task: Task): Promise<JobRow> => tx.computerJob.findFirst({ where: { id: task.taskKey, botId: task.botId, personId: task.personId }, select: { status: true } });
+
+/**
+ * What a task came to, from its Instant runs and its computer job if it has one. The job's own record is the computer's work: a task that
+ * ran a job did something, so runs that all failed do not make it refunded (the time the books took for the job stays on the receipt; a job
+ * that failed on our side is shown as refunded when nothing was taken, as it always was).
+ */
+const outcomeWith = (view: ReturnType<typeof outcomeOfRuns>, job: JobRow): ReceiptOutcome => (job !== null && view.outcome === 'refunded' ? 'done' : view.outcome);
+
 /**
  * A receipt that has ended whose runs now say it came to something else is put right from the run records (a run that landed after the word
- * said the task was over): the books already charged what they charged, and the receipt must not say "nothing taken" over it.
+ * said the task was over): the books already charged what they charged, and the receipt must not say "nothing taken" over it. A receipt that
+ * ended before actions were written down (no actions at all) is left as it ended.
  */
-async function reconcileEnded(tx: Tx, row: Row, view: ReturnType<typeof outcomeOfRuns>, now: Date): Promise<ReceiptState> {
-  const same = row.outcome === view.outcome && JSON.stringify(readActions(row.actions)) === JSON.stringify(view.actions);
+async function reconcileEnded(tx: Tx, row: Row, view: ReturnType<typeof outcomeOfRuns>, job: JobRow, now: Date): Promise<ReceiptState> {
+  if (row.actions === null) return row.state as ReceiptState;
+  const outcome = outcomeWith(view, job);
+  const same = row.outcome === outcome && JSON.stringify(readActions(row.actions)) === JSON.stringify(view.actions);
   if (same) return row.state as ReceiptState;
-  return endReceipt(tx, row, view.outcome, view.actions, now);
+  return endReceipt(tx, row, outcome, view.actions, now);
 }
 
 /** A receipt that ended while a run of its task has not ended: a newer turn is on it, so it is put back to checking on the next generation. */
@@ -339,14 +352,14 @@ export async function settleReceipt(task: Task, now: Date = new Date(), unwatche
       return reopenForOpenRun(tx, row);
     }
     // A computer's job is its own record, whatever category the receipt was opened under
-    const job = await tx.computerJob.findFirst({ where: { id: task.taskKey, botId: task.botId, personId: task.personId }, select: { status: true } });
+    const job = await jobOf(tx, task);
     if (view.actions.length > 0) {
-      if (isTerminal(row.state)) return reconcileEnded(tx, row, view, now);
+      if (isTerminal(row.state)) return reconcileEnded(tx, row, view, job, now);
       // A task whose computer job is still running is not over, whatever its Instant runs came to: it waits (running or checking) for the job, then ends from the runs
       if (job && !isOver(job.status)) return row.state as ReceiptNow;
       // A running receipt on no lease (a computer's) is the job's: with the job over (or no job of that key after a lease's age) it is as good as lapsed
       if (row.state === 'running' && !lapsed && !(row.leaseUntil === null && jobEnded(row, job, now))) return 'running';
-      return endReceipt(tx, row, view.outcome, view.actions, now);
+      return endReceipt(tx, row, outcomeWith(view, job), view.actions, now);
     }
     // No Instant run that went out (none at all, or every one refused before it ran)
     if (isTerminal(row.state)) return row.state as ReceiptState;
@@ -402,8 +415,9 @@ export async function settleCheckingReceipts(limit: number, now: Date = new Date
       OR (r."state" IN ('done', 'refunded') AND (
         EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" IN (${open}))
         -- A run that went out and ended, and is not among the actions the receipt recorded: it landed after the word and the hook that records it did not finish (a retry of the same work, never a new action)
-        OR EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" <> 'refused' AND i."state" NOT IN (${open})
-          AND NOT (COALESCE(r."actions", '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('run', i."id"))))
+        -- (A receipt that ended before this existed has no actions written down at all: it is left as it ended, never judged afresh.)
+        OR (r."actions" IS NOT NULL AND EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" <> 'refused' AND i."state" NOT IN (${open})
+          AND NOT (r."actions" @> jsonb_build_array(jsonb_build_object('run', i."id")))))
       ))
     )
     ORDER BY COALESCE(r."lease_until", r."updated_at") ASC

@@ -283,6 +283,52 @@ run('receipts that always settle (O1)', () => {
     });
   });
 
+  describe('receipts from before this existed, and computer jobs whose Apps all failed', () => {
+    it('a receipt that ended before actions were written down is left as it ended: the sweep never picks it, and a repeat of its close changes nothing', async () => {
+      const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Old job', status: 'done', startedAt: START, endedAt: at(5) } });
+      await prisma.taskReceipt.create({ data: { botId: brick, personId: sara, taskKey: job.id, title: 'Old job', category: 'computer', state: 'done', outcome: 'done', chargedMicros: BigInt(50_000), startedAt: START, endedAt: at(5), payerKind: 'person', payerPersonId: sara } as never });
+      await makeRun(job.id, 'failed', { reason: 'provider_failed' });
+      expect(await settleCheckingReceipts(50, at(900))).toBe(0);
+      expect(await settleReceipt({ botId: brick, personId: sara, taskKey: job.id }, at(900))).toBe('done');
+      expect(await closeReceipt({ botId: brick, taskKey: job.id, personId: sara, state: 'done' }, at(901))).toMatchObject({ ok: true, state: 'done' });
+      expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'done', chargedMicros: BigInt(50_000) });
+    });
+
+    it('a computer job that ran does not come out refunded because its Apps all failed: the job is the task’s work', async () => {
+      const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Job whose App failed', status: 'running', startedAt: START } });
+      await open(job.id, { category: 'computer' });
+      const failed = await makeRun(job.id, 'failed', { reason: 'provider_failed', toolkit: 'gmail' });
+      await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'done', endedAt: at(5) } });
+      expect(await settleCheckingReceipts(50, at(6))).toBe(1);
+      expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'done', actions: [{ run: failed.id, outcome: 'failed' }] });
+      // A task with no job still ends refunded when none of its actions worked
+      await open('no-job-all-failed');
+      await makeRun('no-job-all-failed', 'failed', { reason: 'provider_failed' });
+      await closeReceipt({ botId: brick, taskKey: 'no-job-all-failed', personId: sara, state: 'done' }, at(3));
+      expect(await receipt('no-job-all-failed')).toMatchObject({ state: 'refunded', outcome: 'refunded' });
+    });
+  });
+
+  describe('the migration', () => {
+    it('gives a receipt still running when it lands a fresh lease, not an already-lapsed one; a computer’s receipt stays on none', async () => {
+      const { readFileSync } = await import('node:fs');
+      const sql = readFileSync('prisma/migrations/20261119100000_task_receipt_lease/migration.sql', 'utf8');
+      const statement = sql.split('\n').find((line) => line.startsWith('UPDATE "task_receipts" SET "lease_until"'));
+      expect(statement).toBeDefined();
+      await open('mig-1', {}, new Date(Date.now() - 3 * 60 * MIN));
+      await prisma.taskReceipt.updateMany({ where: { botId: brick, taskKey: 'mig-1' }, data: { leaseUntil: null } });
+      await open('mig-2', { category: 'computer' });
+      await prisma.$executeRawUnsafe(statement as string);
+      const lease = (await receipt('mig-1')).leaseUntil;
+      expect(lease && lease.getTime()).toBeGreaterThan(Date.now() + 9 * MIN);
+      expect(lease && lease.getTime()).toBeLessThan(Date.now() + 11 * MIN);
+      expect((await receipt('mig-2')).leaseUntil).toBeNull();
+      // So a live task is not ended by the first sweep after the migration
+      expect(await settleCheckingReceipts(50, new Date())).toBe(0);
+      expect((await receipt('mig-1')).state).toBe('running');
+    });
+  });
+
   describe('a lease extension and a settlement of the same task never overlap', () => {
     it('a run about to go out, at the same moment the lease is read as run out: the receipt ends up whole either way (running with a live lease, or ended with none)', async () => {
       const keys = Array.from({ length: 8 }, (_, i) => `race-${i}`);
