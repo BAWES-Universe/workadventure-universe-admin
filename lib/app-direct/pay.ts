@@ -304,6 +304,8 @@ const HOUR = 3_600_000;
 const LOOKUP_ROWS = 'page-payments';
 /** How long past the service's own time limit a start is given before another request may take it over. */
 const START_GRACE_MS = 2_000;
+/** After an unsure start nothing is in flight any more: the same wish may be carried on (same id, same key at the service) this soon, not after a whole start time. */
+const UNSURE_RETRY_MS = 5_000;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 type CheckoutJob = Prisma.AppPageJobGetPayload<{ include: { connection: true; artifact: { select: { expiresAt: true } } } }>;
@@ -450,7 +452,10 @@ async function runStart(
   // as it is, tried again with the same id (which is the service's idempotency key, so the same payment and never a second) when the same wish
   // asks again or Check payment does, until its open time is up
   const unsure = async (reason: string) => {
-    await moveOrder(order.id, { from: 'creating', to: 'creating', reason, lease, data: { checkedAt: new Date() } }).catch(() => undefined);
+    // This attempt is over, so nothing is in flight: the next ask (the same wish again, or Check payment) may carry the order on after a short
+    // pause, and does not sit through a whole start time that nobody is using. `checkedAt` is also the lease, so it still changes.
+    const heldFor = Math.max(0, limits.keyCallSeconds * 1000 + START_GRACE_MS - UNSURE_RETRY_MS);
+    await moveOrder(order.id, { from: 'creating', to: 'creating', reason, lease, data: { checkedAt: new Date(Date.now() - heldFor) } }).catch(() => undefined);
     return { status: 'unavailable', unsure: true } as const;
   };
   const { create } = payment;

@@ -1421,6 +1421,11 @@ run('payments for pages, in a real database', () => {
           expect(outcome).toMatchObject({ status: 'unavailable', unsure: true });
           const made = (await orders(artifactId)).find((row) => row.intentId === wishId);
           expect(made).toMatchObject({ status: 'creating' });
+          // Nothing is in flight any more: it can be carried on within a few seconds, not after a whole start time (Check payment has 30 s)
+          const limits = await getBrickLimits();
+          const wait = made!.checkedAt!.getTime() + limits.keyCallSeconds * 1000 + 2_000 - Date.now();
+          expect(wait).toBeGreaterThan(0);
+          expect(wait).toBeLessThanOrEqual(5_200);
           expect((await prisma.appPageOrderEvent.findMany({ where: { orderId: made!.id } })).map((line) => line.reason)).toContain(trouble === '5xx' ? 'start_service_trouble' : 'start_unsure');
         }
         // The same wish asked again, once the wait is over, goes on with the SAME order and the same key at the service
