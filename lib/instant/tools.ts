@@ -40,26 +40,45 @@ export function cutSchema(tool: string, schema: unknown): unknown {
   // Exa's contents needs pages from one of its two lists, even where the provider words them as optional
   const lists = (allowed.anyOf ?? []).filter((names) => names.every((name) => name in kept)).map((names) => ({ required: names }));
   // Laid beside whatever the provider already says (allOf), never over it
-  if (lists.length > 0) cut.allOf = [...(Array.isArray(source.allOf) ? source.allOf : []), { anyOf: lists }];
+  const beside: unknown[] = lists.length > 0 ? [{ anyOf: lists }] : [];
+  // Two lists that together may hold only so many (Exa's contents: urls and ids add up): either list may be as long as the room the other leaves
+  if (allowed.together && allowed.together.names.every((name) => name in kept)) {
+    const { names, max } = allowed.together;
+    beside.push({ anyOf: Array.from({ length: max + 1 }, (_, used) => ({ properties: { [names[0]]: { maxItems: used }, [names[1]]: { maxItems: max - used } } })) });
+  }
+  if (beside.length > 0) cut.allOf = [...(Array.isArray(source.allOf) ? source.allOf : []), ...beside];
   return cut;
 }
 
+const NUMBER_LIMITS = [['minimum', Math.max], ['minItems', Math.max], ['minLength', Math.max], ['maximum', Math.min], ['maxItems', Math.min], ['maxLength', Math.min]] as const;
+const isPlain = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
 /**
- * The provider's schema for one argument with admission's limits laid over it: the numbers meet in the middle (the larger minimum, the smaller
- * maximum), a list of allowed words is cut to the ones both allow, and everything else of the provider's (its type, its description) stays.
+ * The provider's schema for one argument with admission's limits laid over it, so a value must satisfy BOTH: the numbers meet in the middle (the larger
+ * minimum, the smaller maximum), a list of allowed words is cut to the ones both allow, the schema of a list's items is tightened the same way, and
+ * everything else of the provider's (its type, its description) stays. A limit that cannot be merged with what the provider says (another type, a list
+ * of words with none in common, another pattern) is not written over it: it is added beside it in `allOf`, so both still hold.
  */
 function tighten(own: unknown, limit: Record<string, unknown>): unknown {
-  const base = typeof own === 'object' && own !== null && !Array.isArray(own) ? { ...(own as Record<string, unknown>) } : {};
-  const merged: Record<string, unknown> = { ...base, ...limit };
-  for (const [key, pick] of [['minimum', Math.max], ['minItems', Math.max], ['minLength', Math.max], ['maximum', Math.min], ['maxItems', Math.min], ['maxLength', Math.min]] as const) {
-    if (typeof base[key] === 'number' && typeof limit[key] === 'number') merged[key] = pick(base[key] as number, limit[key] as number);
-  }
-  if (Array.isArray(base.enum) && Array.isArray(limit.enum)) {
-    const both = (limit.enum as unknown[]).filter((value) => (base.enum as unknown[]).includes(value));
-    merged.enum = both.length > 0 ? both : limit.enum;
+  const base = isPlain(own) ? { ...own } : {};
+  const merged: Record<string, unknown> = { ...base };
+  const beside: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(limit)) {
+    if (!(key in base)) merged[key] = value;
+    else if (JSON.stringify(base[key]) === JSON.stringify(value)) continue;
+    else if (NUMBER_LIMITS.some(([name]) => name === key) && typeof base[key] === 'number' && typeof value === 'number') {
+      const pick = NUMBER_LIMITS.find(([name]) => name === key)![1];
+      merged[key] = pick(base[key] as number, value);
+    } else if (key === 'items' && isPlain(base.items) && isPlain(value)) merged.items = tighten(base.items, value);
+    else if (key === 'enum' && Array.isArray(base.enum) && Array.isArray(value)) {
+      const both = value.filter((word) => (base.enum as unknown[]).includes(word));
+      if (both.length > 0) merged.enum = both;
+      else beside.enum = value;
+    } else beside[key] = value;
   }
   // The provider's own description of the argument is kept; the limits are only added to it
   if (typeof base.description === 'string') merged.description = base.description;
+  if (Object.keys(beside).length > 0) merged.allOf = [...(Array.isArray(base.allOf) ? base.allOf : []), beside];
   return merged;
 }
 
