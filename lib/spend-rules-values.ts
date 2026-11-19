@@ -186,11 +186,11 @@ export interface SpendAttempt {
   /** What it would take, millionths of a dollar. Use 1 to ask whether anything more may be taken at all; 0 asks only whether the rule is already past (a renewal that adds nothing). */
   amountMicros: number;
   /**
-   * Set for the renewal of room already held: what the room could cost before and after, and when it was first taken. A rule that
-   * already counts this room (it was taken in the rule's own period) is asked for the difference; a rule that does not count it (taken
-   * in an earlier day or month) is asked for all of it, since nothing of it is in what that rule has counted.
+   * Set for the renewal of room already held: the lease as it is before the renewal and as it would be after it. A rule counts a held
+   * lease by what it covers inside the rule's own period (see `exposureOf`), so the renewal is asked for the growth of that, whether the
+   * lease began in this period or an earlier day or month.
    */
-  renewal?: { exposureBeforeMicros: number; exposureAfterMicros: number; startedAt: Date };
+  renewal?: { before: Lease; after: Lease; renewMinutes: number };
 }
 
 /** What is already taken or held, for the rule's own scope and period (see `spentFor`). */
@@ -237,13 +237,54 @@ export function holdToRules(rules: readonly SpendRule[], attempt: SpendAttempt, 
   return worst ?? { ok: true };
 }
 
-/** What a step asks of one rule: for a renewal, the growth of what the rule already counts of that room (all of it when the rule does not count it). */
+/** What a step asks of one rule: for a renewal, the growth of what the rule counts of that lease (the part it covers in the rule's period). */
 function amountFor(rule: SpendRule, attempt: SpendAttempt, now: Date): number {
   const renewal = attempt.renewal;
   if (!renewal) return attempt.amountMicros;
-  const start = rule.period ? periodStart(rule.period, now) : null;
-  const counted = start === null || renewal.startedAt.getTime() >= start.getTime();
-  return Math.max(0, renewal.exposureAfterMicros - (counted ? renewal.exposureBeforeMicros : 0));
+  const since = rule.period ? periodStart(rule.period, now) : null;
+  const before = exposureOf([renewal.before], renewal.renewMinutes, now, since);
+  const after = exposureOf([renewal.after], renewal.renewMinutes, now, since);
+  return Math.max(0, after - before);
+}
+
+/** Room held for a computer: a lease is taken for one stretch and renewed, each renewal holding one more stretch and moving the end. */
+export interface Lease {
+  amountMicros: bigint;
+  renewals: number;
+  createdAt: Date;
+  expiresAt: Date;
+}
+
+const toNumber = (value: bigint | number | null): number => (value === null ? 0 : Number(value));
+
+/**
+ * What held room can still cost, for a rule. A job that keeps running renews its room every part of a stretch and each renewal holds one
+ * more stretch (so the room held grows faster than the computer is used: that is how the allowance stays safe). A rule is about what a
+ * task can really cost, so it counts the time the lease covers, never the whole of what was stacked up: a cap of $1 must not stop a job at
+ * $0.40. Room taken once (a model call, a first stretch) has no renewals and counts whole.
+ *
+ * `since` is the start of the rule's period (a day or a month): a lease that began before it is counted by what it covers from `since` on,
+ * so the room of a job that crossed midnight or the end of a month is seen by every step of the new period, not only by its own renewal.
+ * It is never less than one stretch and never more than what was held.
+ */
+export function exposureOf(rows: ReadonlyArray<Lease>, renewMinutes: number, _now?: Date, since: Date | null = null): number {
+  const stretchMs = renewMinutes * 60_000;
+  let total = 0;
+  for (const row of rows) {
+    const amount = toNumber(row.amountMicros);
+    if (row.renewals <= 0 || !(stretchMs > 0)) {
+      total += amount;
+      continue;
+    }
+    const oneStretch = amount / (row.renewals + 1);
+    // The most the lease can cost is the whole time it covers, from when it began (or from the start of the period, when it began before)
+    // to when it now ends: that moves only when a renewal moves the end, never with the clock, so waiting inside one lease does not make a
+    // job look dearer.
+    const from = since && row.createdAt.getTime() < since.getTime() ? since : row.createdAt;
+    const coveredMs = Math.max(0, row.expiresAt.getTime() - from.getTime());
+    total += Math.min(amount, Math.max(Math.ceil(oneStretch), Math.ceil(oneStretch * (coveredMs / stretchMs))));
+  }
+  return total;
 }
 
 /** The first moment a cap with this period starts counting, UTC. A task has no calendar: it counts what that task did. */

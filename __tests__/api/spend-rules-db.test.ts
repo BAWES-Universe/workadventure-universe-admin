@@ -579,6 +579,76 @@ run('rules said in chat and task receipts, in a real database', () => {
       await releaseRoom({ key }, NOW);
     });
 
+    describe('a computer lease that crosses the end of a month (N1)', () => {
+      // 5 minutes into November. A 10 minute stretch is 60,000. The lease began at 23:55 on 31 October and was renewed once (120,000 held), now ending at 00:15:
+      // 15 of its 20 minutes fall in November: 90,000 of November's cap of 100,000 is taken, and 10,000 is left
+      const BOUNDARY = new Date('2026-11-01T00:05:00Z');
+      const crossing = async (name: string) => {
+        const sara = await person(name);
+        const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+        if (!made.ok) throw new Error('not made');
+        const key = `k-${tag}-${name}`;
+        expect((await reserveRoom({ key, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: `j-${name}` }, new Date('2026-10-31T23:55:00Z'))).ok).toBe(true);
+        await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: new Date('2026-10-31T23:55:00Z'), expiresAt: new Date('2026-11-01T00:15:00Z'), amountMicros: BigInt(120_000), renewals: 1 } });
+        const ask = (micros: number, class_: 'instant' | 'computer' = 'instant') => checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: class_, amountMicros: micros }, BOUNDARY);
+        return { sara, key, made, ask };
+      };
+
+      it('is seen by an Instant App in the new month before any renewal: exactly what is left passes, one micro more is refused', async () => {
+        const { key, ask } = await crossing('mia');
+        expect(await ask(10_000)).toEqual({ ok: true });
+        expect(await ask(10_001)).toMatchObject({ ok: false, why: 'cap', leftMicros: 10_000 });
+        await releaseRoom({ key }, BOUNDARY);
+      });
+
+      it('is renewed for the growth of what the month counts of it, not for all of it', async () => {
+        const { key } = await crossing('noa');
+        // Renewed at 00:10, the lease would end at 00:20 and cover 20 minutes of November (120,000): 30,000 more than the 90,000 it counts now, with 10,000 left
+        expect(await renewRoom({ key, moreMicros: 60_000 }, new Date('2026-11-01T00:10:00Z'))).toMatchObject({ ok: false, reason: 'rule', leftMicros: 10_000 });
+        // Renewed at 00:05 it would end at 00:15, where it already ends: November's count does not grow, so it goes on though it is over the cap's last 10,000 for any new step
+        expect(await renewRoom({ key, moreMicros: 60_000 }, BOUNDARY)).toMatchObject({ ok: true });
+        await releaseRoom({ key }, BOUNDARY);
+      });
+
+      it('counts the same after the job ends: the job’s cost is split by the time before and after the boundary', async () => {
+        const { sara, key, ask } = await crossing('oli');
+        await releaseRoom({ key }, BOUNDARY);
+        // The job ran 20 minutes (23:55 to 00:15) and cost 120,000, written as one event when it ended at 00:15: 15 minutes of it are November's, 90,000
+        await prisma.meterEvent.create({
+          data: { eventId: `rules-${tag}-cross`, kind: 'computer_time', pool: 'computer', occurredAt: new Date('2026-11-01T00:15:00Z'), personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId: 'jx', quantity: 1200, unit: 'second', costMicros: BigInt(120_000), basis: 'measured', detail: { startedMs: Date.parse('2026-10-31T23:55:00Z') } },
+        });
+        const later = (micros: number) => checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'instant', amountMicros: micros }, new Date('2026-11-01T00:16:00Z'));
+        expect(await later(10_000)).toEqual({ ok: true });
+        expect(await later(10_001)).toMatchObject({ ok: false, why: 'cap', leftMicros: 10_000 });
+        void ask;
+      });
+
+      it('counts a job event written without its start (older) whole in the month it ended in', async () => {
+        const sara = await person('pat');
+        await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+        await prisma.meterEvent.create({
+          data: { eventId: `rules-${tag}-legacy`, kind: 'computer_time', pool: 'computer', occurredAt: new Date('2026-11-01T00:15:00Z'), personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId: 'jy', quantity: 1200, unit: 'second', costMicros: BigInt(120_000), basis: 'measured' },
+        });
+        expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'instant', amountMicros: 1 }, new Date('2026-11-01T00:16:00Z'))).toMatchObject({ ok: false, why: 'cap', leftMicros: 0 });
+      });
+
+      it('two admissions at the same moment never both take the last room', async () => {
+        const sara = await person('quin');
+        await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+        const take = (index: number) => reserveRoom({ key: `k-${tag}-par-${index}`, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: `jp-${index}` }, NOW);
+        const answers = await Promise.all([take(1), take(2)]);
+        expect(answers.filter((one) => one.ok)).toHaveLength(1);
+        for (const index of [1, 2]) await releaseRoom({ key: `k-${tag}-par-${index}` }, NOW);
+      });
+
+      it('a cap lowered while a step waited is the cap it is held to', async () => {
+        const { sara, made, key } = await crossing('rae');
+        await releaseRoom({ key }, BOUNDARY);
+        await changeRule(made.rule.id, sara.id, { capMicros: 30_000 });
+        expect(await reserveRoom({ key: `k-${tag}-cap`, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: 'jcap' }, BOUNDARY)).toMatchObject({ ok: false, reason: 'rule' });
+      });
+    });
+
     it('renewing often does not stop a job early: a rule counts what the job can really cost, not the room stacked up by every renewal', async () => {
       const sara = await person('sara');
       // $0.15 is 25 minutes of a computer at 6,000 a minute: with one stretch (10 minutes, 60,000) of lease on top, the job may use 15 minutes

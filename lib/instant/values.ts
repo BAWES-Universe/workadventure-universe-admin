@@ -344,7 +344,7 @@ export const INSTANT_LIMIT_LABELS: Record<keyof InstantLimits, { label: string; 
   markupBps: { label: 'Added to Composio’s charge for what the person pays', hint: 'In hundredths of a percent (1,000 is 10%). Empty: the person pays Composio’s charge as it is.', unit: 'bps' },
   sentWaitMinutes: { label: 'Wait before looking up a run with no answer', hint: 'Minutes.', unit: 'minutes' },
   unclearWaitMinutes: { label: 'How long an unclear run is looked up for', hint: 'Minutes, from when it went out. After that it is closed on what is known and the person’s hold goes back.', unit: 'minutes' },
-  unreachableWaitMinutes: { label: 'How long to wait when Composio’s log cannot be reached', hint: 'Minutes, from when the run went out. After that the person’s hold is let go and the run is written off as failed with a refund, and the Costs report says it was released unconfirmed.', unit: 'minutes' },
+  unreachableWaitMinutes: { label: 'How long to wait when Composio’s log cannot be reached', hint: 'Minutes, from when the run went out. After that the person’s hold is given back (they are never charged for it later), the cost is ours, and the Costs report says it was released unconfirmed.', unit: 'minutes' },
   chargeWaitMinutes: { label: 'Wait for Composio’s charge', hint: 'Minutes. After that the top price stands as an estimate until the monthly check.', unit: 'minutes' },
   pauseWindowMinutes: { label: 'Failure window', hint: 'Minutes of recent runs the pause check reads.', unit: 'minutes' },
 };
@@ -454,3 +454,11 @@ export const REASON_WORDS: Record<InstantReason, string> = {
   invalid_request: 'Those details were not accepted, so it did not run. You were not charged.',
   unclear: 'Checking whether it worked.',
 };
+
+/** What a run says once the wait to look it up is over and nobody could confirm it: the person's hold is given back, and it is never charged to them later. */
+export const UNCONFIRMED_WORDS = 'We couldn’t confirm this one, so you weren’t charged.';
+
+/** Words for a run that ended failed: an unconfirmed one (reason unclear) is not called a failure, and says the person was not charged. */
+export function failedWords(reason: InstantReason): string {
+  return reason === 'unclear' ? UNCONFIRMED_WORDS : REASON_WORDS[reason];
+}

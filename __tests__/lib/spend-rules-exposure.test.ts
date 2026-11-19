@@ -24,4 +24,32 @@ describe('exposureOf', () => {
   it('a second renewal adds a stretch to what the lease covers', () => {
     expect(exposureOf([{ amountMicros: BigInt(30 * MIL), renewals: 2, createdAt: min(0), expiresAt: min(25) }], 10, min(20))).toBe(25 * MIL);
   });
+
+  it('with fixed terms, a 10 minute stretch at $0.10 renewed at minute 5 through minute 15 can cost $0.15, not the $0.20 that was held', () => {
+    const lease = { amountMicros: BigInt(0.2 * MIL), renewals: 1, createdAt: min(0), expiresAt: min(15) };
+    expect(exposureOf([lease], 10)).toBe(0.15 * MIL);
+  });
+
+  describe('a lease counted from the start of a period it began before (a day or a month)', () => {
+    // A lease from 23:50 to 00:20 (30 minutes, a 10 minute stretch at $0.10, renewed twice: $0.30 held): 10 of its minutes fell before midnight, 20 after
+    const midnight = new Date(Date.UTC(2026, 10, 20, 0, 0));
+    const lease = { amountMicros: BigInt(0.3 * MIL), renewals: 2, createdAt: new Date(Date.UTC(2026, 10, 19, 23, 50)), expiresAt: new Date(Date.UTC(2026, 10, 20, 0, 20)) };
+
+    it('counts only what it covers from the start of the period on', () => {
+      expect(exposureOf([lease], 10, undefined, midnight)).toBe(0.2 * MIL);
+    });
+
+    it('counts all of it when the period began before the lease, or when no period is given', () => {
+      expect(exposureOf([lease], 10, undefined, new Date(Date.UTC(2026, 10, 19, 0, 0)))).toBe(0.3 * MIL);
+      expect(exposureOf([lease], 10)).toBe(0.3 * MIL);
+    });
+
+    it('is never less than one stretch while the lease still covers time in the period', () => {
+      expect(exposureOf([{ ...lease, expiresAt: new Date(Date.UTC(2026, 10, 20, 0, 2)) }], 10, undefined, midnight)).toBe(0.1 * MIL);
+    });
+
+    it('counts room taken once (no renewals) whole', () => {
+      expect(exposureOf([{ amountMicros: BigInt(0.1 * MIL), renewals: 0, createdAt: new Date(Date.UTC(2026, 10, 19, 23, 58)), expiresAt: new Date(Date.UTC(2026, 10, 20, 0, 8)) }], 10, undefined, midnight)).toBe(0.1 * MIL);
+    });
+  });
 });

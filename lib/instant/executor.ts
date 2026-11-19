@@ -17,6 +17,7 @@ import {
   missingInstantLimits,
   providerUserIdFor,
   REASON_WORDS,
+  failedWords,
   type InstantLimits,
   type InstantOutcome,
   type InstantReason,
@@ -594,7 +595,7 @@ function outcomeOf(run: Row): InstantOutcome {
     }
     case 'failed': {
       const reason = (run.reason as InstantReason) ?? 'provider_failed';
-      return { status: 'failed', runId: run.id, reason, message: REASON_WORDS[reason] };
+      return { status: 'failed', runId: run.id, reason, message: failedWords(reason) };
     }
     case 'succeeded':
       return { status: 'already_done', runId: run.id, chargedMicros: run.customerMicros === null ? null : Number(run.customerMicros), state: run.state };

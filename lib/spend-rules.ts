@@ -5,6 +5,7 @@ import { getMeterSettings } from '@/lib/meter';
 import { ownsBrick } from '@/lib/brick';
 import {
   draftRule,
+  exposureOf,
   holdToRules,
   periodStart,
   ruleWords,
@@ -283,29 +284,29 @@ async function unpricedCallRoom(db: Db, events: Prisma.MeterEventWhereInput[]): 
   return toNumber(rooms._sum.settledMicros);
 }
 
+export { exposureOf };
+
 /**
- * What held room can still cost, for a rule. A job that keeps running renews its room every part of a stretch and each renewal holds one
- * more stretch (so the room held grows faster than the computer is used: that is how the allowance stays safe). A rule is about what a
- * task can really cost, so it counts the time already used plus the one stretch the lease still covers, never the whole of what was
- * stacked up: a cap of $1 must not stop a job at $0.40. Room taken once (a model call, a first stretch) has no renewals and counts whole.
+ * How much of what a rule's period counted belongs before the period began: a job that began in an earlier day or month and ended in this one
+ * is one event, written when it ended. Its cost is split by the time it ran on each side of the boundary (whole micros: the earlier part is the
+ * rounded-down share, so the two parts add up to the cost), the same split the held room was counted by while it ran, so settling a job never
+ * moves what a cap counts. Events written without the start (older ones) count whole in the period they ended in.
  */
-export function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals: number; createdAt: Date; expiresAt: Date }>, renewMinutes: number, _now?: Date): number {
-  const stretchMs = renewMinutes * 60_000;
-  let total = 0;
-  for (const row of rows) {
-    const amount = toNumber(row.amountMicros);
-    if (row.renewals <= 0 || !(stretchMs > 0)) {
-      total += amount;
-      continue;
-    }
-    const oneStretch = amount / (row.renewals + 1);
-    // The most the lease can cost is the whole time it covers, from when it began to when it now ends (what was used and what it still
-    // covers): that moves only when a renewal moves the end, never with the clock, so waiting inside one lease does not make a job look dearer.
-    // Never less than one stretch, never more than what was held.
-    const coveredMs = Math.max(0, row.expiresAt.getTime() - row.createdAt.getTime());
-    total += Math.min(amount, Math.max(Math.ceil(oneStretch), Math.ceil(oneStretch * (coveredMs / stretchMs))));
+async function crossedBefore(db: Db, events: Prisma.MeterEventWhereInput[], start: Date): Promise<number> {
+  const crossed = await db.meterEvent.findMany({
+    where: { AND: [...events, { kind: 'computer_time', costMicros: { not: null }, detail: { path: ['startedMs'], lt: start.getTime() } }] },
+    select: { costMicros: true, occurredAt: true, detail: true },
+  });
+  let before = BigInt(0);
+  for (const event of crossed) {
+    const startedMs = (event.detail as { startedMs?: unknown } | null)?.startedMs;
+    if (typeof startedMs !== 'number' || event.costMicros === null) continue;
+    const span = BigInt(Math.max(0, event.occurredAt.getTime() - startedMs));
+    const earlier = BigInt(Math.max(0, start.getTime() - startedMs));
+    // The part before the boundary: cost x (time before it) / (time in all), rounded down
+    before += span === BigInt(0) ? BigInt(0) : (event.costMicros * (earlier > span ? span : earlier)) / span;
   }
-  return total;
+  return Number(before);
 }
 
 /** What a rule counts for a step: taken (in the books) and held (room not yet settled), for the rule's own scope and period. */
@@ -335,8 +336,10 @@ async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Dat
   const start = rule.period ? periodStart(rule.period, now) : null;
   if (start) {
     events.push({ occurredAt: { gte: start } });
-    // Room that lapsed without being settled still counts, in the period it was taken in
-    holds.push({ createdAt: { gte: start } });
+    // Room that lapsed without being settled still counts, in the period it was taken in. Room taken before the period that still covers time
+    // inside it (a lease that crossed midnight or the end of a month) counts too, by what it covers there (see `exposureOf`): without it, a
+    // step of the new period would not see it until its own renewal, and a cap could be passed by the room held beside it
+    holds.push({ OR: [{ createdAt: { gte: start } }, { expiresAt: { gt: start } }] });
     credit.push({ createdAt: { gte: start } });
   }
   let spentMicros = 0;
@@ -348,8 +351,8 @@ async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Dat
     const taken = await db.meterEvent.aggregate({ where: { AND: events }, _sum: { costMicros: true } });
     const unpriced = await unpricedCallRoom(db, events);
     const settings = await getMeterSettings(db);
-    spentMicros += toNumber(taken._sum.costMicros) + unpriced;
-    heldMicros += exposureOf(held, settings.renewMinutes, now);
+    spentMicros += toNumber(taken._sum.costMicros) + unpriced - (start ? await crossedBefore(db, events, start) : 0);
+    heldMicros += exposureOf(held, settings.renewMinutes, now, start);
   }
   if (wantsApps(rule.covers)) {
     const held = await db.creditHold.aggregate({ where: { AND: [...credit, { state: 'held' }] }, _sum: { amountMicros: true } });

@@ -716,6 +716,14 @@ run('the bounded Instant executor, in a real database', () => {
       const day = new Date(Date.now() + 601 * MIN);
       const report = await costsReport(new Date(day.getTime() - 3 * 86_400_000), new Date(day.getTime() + 2 * 86_400_000), day);
       expect(report.goes.find((entry) => entry.key === 'instant')?.releasedUnconfirmed).toBeGreaterThanOrEqual(1);
+      // Asked again, the person is told it could not be confirmed and that they were not charged (never "failed")
+      const again = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds, now: day });
+      expect(again).toMatchObject({ status: 'failed', reason: 'unclear', message: 'We couldn’t confirm this one, so you weren’t charged.' });
+      // The log is reachable again later: nothing is charged to the person afterwards, and the credit stays whole
+      p.setLogsDown(false);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(day.getTime() + 60 * MIN) });
+      expect(await runOf(rowId)).toMatchObject({ state: 'failed', customerState: 'released' });
+      expect(f.left()).toBe(1_000_000);
     });
 
     it('a run still in flight is never called unclear by a look-up that happens during its wait', async () => {

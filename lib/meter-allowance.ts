@@ -309,11 +309,13 @@ export async function renewRoom(input: { key: string; moreMicros?: number }, ask
       // The rules count what the job can still cost (the time used and the stretch its lease covers, see spend-rules), so the question is
       // what the renewal adds to that. What the renewal adds to what the job can still cost: its exposure through the new lease, less what it counts now (at minute five a
       // first stretch counts whole; renewed, it counts the five minutes used and the stretch the new lease covers)
-      const before = exposureOf([row], settings.renewMinutes, now);
-      const after = exposureOf([{ amountMicros: row.amountMicros + BigInt(more), renewals: row.renewals + 1, createdAt: row.createdAt, expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE) }], settings.renewMinutes, now);
+      const lease = { amountMicros: row.amountMicros, renewals: row.renewals, createdAt: row.createdAt, expiresAt: row.expiresAt };
+      const renewed = { amountMicros: row.amountMicros + BigInt(more), renewals: row.renewals + 1, createdAt: row.createdAt, expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE) };
+      const before = exposureOf([lease], settings.renewMinutes, now);
+      const after = exposureOf([renewed], settings.renewMinutes, now);
       const ruled = await checkSpend(
         // What the renewal adds, and nothing when exposure does not grow (a job exactly at its cap may go on to the end of the lease it holds)
-        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: 'computer', amountMicros: Math.max(0, after - before), renewal: { exposureBeforeMicros: before, exposureAfterMicros: after, startedAt: row.createdAt } },
+        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: 'computer', amountMicros: Math.max(0, after - before), renewal: { before: lease, after: renewed, renewMinutes: settings.renewMinutes } },
         now,
         tx,
       );
