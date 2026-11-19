@@ -871,7 +871,11 @@ const goodwillLetGoBefore = (now: Date, unreachableWaitMinutes: number): Date =>
 
 /** How long a let-go give-back is still asked about before it is given up. The books answer a key they have seen with its first amount for as long as they keep it. */
 const GOODWILL_GIVE_UP_DAYS = 30;
-/** The most let-go give-backs asked about in one sweep, so a books outage cannot crowd out the new ones. */
+/**
+ * The most let-go give-backs asked about in one sweep, so a books outage cannot crowd out the new ones. Half are the oldest and half the newest: a row that
+ * keeps failing for its own reason (not an outage) would otherwise hold a place among the oldest for its whole 30 days, and with more than this many of
+ * them a newer let-go row that the books could still find would never be asked again.
+ */
 const GOODWILL_LET_GO_BATCH = 20;
 
 /**
@@ -890,7 +894,10 @@ export async function sweepGoodwill(deps: Deps & { batch?: number } = {}): Promi
   const select = { refundKey: true, runId: true, personId: true, createdAt: true } as const;
   // Those still inside the wait come first, so a let-go one never crowds a new one out
   const fresh = await prisma.instantRefund.findMany({ where: { kind: 'goodwill', confirmedAt: null, createdAt: { lte: askedBefore, gt: letGoBefore } }, orderBy: { createdAt: 'asc' }, take: deps.batch ?? 50, select });
-  const letGo = await prisma.instantRefund.findMany({ where: { kind: 'goodwill', confirmedAt: null, createdAt: { lte: letGoBefore } }, orderBy: { createdAt: 'asc' }, take: GOODWILL_LET_GO_BATCH, select });
+  const letGoWhere = { kind: 'goodwill', confirmedAt: null, createdAt: { lte: letGoBefore } } as const;
+  const oldest = await prisma.instantRefund.findMany({ where: letGoWhere, orderBy: { createdAt: 'asc' }, take: Math.ceil(GOODWILL_LET_GO_BATCH / 2), select });
+  const newest = await prisma.instantRefund.findMany({ where: { ...letGoWhere, refundKey: { notIn: oldest.map((row) => row.refundKey) } }, orderBy: { createdAt: 'desc' }, take: Math.floor(GOODWILL_LET_GO_BATCH / 2), select });
+  const letGo = [...oldest, ...newest];
   const result: GoodwillSweep = { looked: fresh.length + letGo.length, settled: 0, released: 0, abandoned: 0 };
   for (const intent of [...fresh, ...letGo]) {
     const outcome = await giveBack({ personId: intent.personId, runId: intent.runId }, { ...deps, now }).catch((error): GiveBackOutcome => {

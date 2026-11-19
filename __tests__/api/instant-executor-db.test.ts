@@ -1166,6 +1166,29 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await prisma.instantRefund.count({ where: { runId: first } })).toBe(0);
     });
 
+    it('a newer let-go give-back the books could still find is asked about even when more than a batch of older ones keep failing for their own reason', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 600 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const real = f.funds.refund.getMockImplementation()!;
+      const runId = await charged(f, p, 'a');
+      f.funds.refund.mockRejectedValue(new Error('unreachable'));
+      expect(await giveBack({ personId: sara, runId }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'unavailable' });
+      // 25 older ones whose runs are not there at all: they will never finish, whatever the books say
+      const older = new Date(Date.now() - 24 * 60 * MIN);
+      await prisma.instantRefund.createMany({
+        data: Array.from({ length: 25 }, (_, i) => ({ refundKey: `stuck-${tag}-${i}`, runId: `no-run-${tag}-${i}`, personId: sara, kind: 'goodwill', amountMicros: BigInt(1_000), createdAt: new Date(older.getTime() + i * 1000) })),
+      });
+      // The books can be reached now: the one that can be found must be found, in this sweep, not after the stuck ones are given up
+      f.funds.refund.mockImplementation(real as never);
+      const { sweepGoodwill } = await import('@/lib/instant/executor');
+      const result = await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN) });
+      expect(result.looked).toBe(20);
+      expect((await prisma.instantRefund.findFirstOrThrow({ where: { runId } })).confirmedAt).not.toBeNull();
+      expect(Number((await runOf(runId)).refundedMicros)).toBe(5_000);
+      await prisma.instantRefund.deleteMany({ where: { refundKey: { startsWith: `stuck-${tag}-` } } });
+    });
+
     it('when the books fail after they gave it back, the intent stays and a later ask finishes it at the books amount, even if the limits moved', async () => {
       await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 3 });
       const p = fakeProvider();
