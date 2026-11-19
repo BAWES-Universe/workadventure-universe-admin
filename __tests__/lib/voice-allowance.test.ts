@@ -411,7 +411,8 @@ describe('with extra usage running (game #1999)', () => {
     db.voiceReplyUse.count.mockResolvedValue(10);
     expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: 40, resetsAt: '2026-11-02T13:00:00.000Z' });
     grant({ noLimit: true });
-    expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: null, resetsAt: '2026-11-02T13:00:00.000Z' });
+    // No limit says so: null alone is a person nobody could name
+    expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: null, resetsAt: '2026-11-02T13:00:00.000Z', unlimited: true });
   });
 
   it('applies it before a window runs too: 2x gives 50, no limit gives no count', async () => {
@@ -419,13 +420,15 @@ describe('with extra usage running (game #1999)', () => {
     grant({ multiplier: 2 });
     expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: 50, resetsAt: null });
     grant({ noLimit: true });
-    expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: null, resetsAt: null });
+    expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: null, resetsAt: null, unlimited: true });
+    // A person nobody could name has no count and is not unlimited
+    expect(await voiceRepliesLeft('bot-1', {}, NOW)).toBeNull();
   });
 
   it('looks up a signed-in person by their account and the moment now, and a guest not at all: a guest never has extra usage', async () => {
     grant({ noLimit: true });
     await checkVoiceAllowance('bot-1', SARA, NOW);
-    expect(db.meterGrant.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { personId: 'u-sara', startsAt: { lte: NOW }, endsAt: { gt: NOW } } }));
+    expect(db.meterGrant.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { personId: 'u-sara', cancelledAt: null, startsAt: { lte: NOW }, endsAt: { gt: NOW } } }));
     db.meterGrant.findMany.mockClear();
     spokenBefore(3);
     expect(await checkVoiceAllowance('bot-1', GUEST, NOW)).toMatchObject({ allowed: false });

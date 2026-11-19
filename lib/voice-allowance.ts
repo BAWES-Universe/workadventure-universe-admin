@@ -21,9 +21,11 @@ export type VoiceAllowance =
 
 /** What a person has left, for the line at the bottom of the Voice menu. `resetsAt` is null while no window is running (nothing used yet). */
 export interface VoiceLeft {
-  /** `null` while the person has no limit (extra usage with no limit is running): there is no number to show. */
+  /** `null` while the person has no limit (extra usage with no limit is running): there is no number to show. `null` with no `unlimited` is a person nobody could name. */
   left: number | null;
   resetsAt: string | null;
+  /** True when `left` is null because the person has no limit (so the menu can say "unlimited"); absent otherwise, so a game that does not read it still reads null as "nothing to show". */
+  unlimited?: true;
 }
 
 const HOUR = 60 * 60 * 1000;
@@ -153,13 +155,16 @@ export async function voiceRepliesLeft(botId: string, input: { userId?: unknown;
 
   const row = await prisma.replyWindow.findUnique({ where: { key: `ua:${personKey}` }, select: { startedAt: true } });
   const endsAt = row ? new Date(row.startedAt.getTime() + window.hours * HOUR) : null;
-  if (!row || !endsAt || endsAt <= now) return { left: repliesLeft(served, guest, 0, 0, extra), resetsAt: null };
+  if (!row || !endsAt || endsAt <= now) return withUnlimited({ left: repliesLeft(served, guest, 0, 0, extra), resetsAt: null });
   const [spoken, used] = await Promise.all([
     prisma.voiceReplyUse.count({ where: { personKey, createdAt: { gte: row.startedAt } } }),
     usedReplies(prisma, person, userId, row.startedAt),
   ]);
-  return { left: repliesLeft(served, guest, spoken, used, extra), resetsAt: endsAt.toISOString() };
+  return withUnlimited({ left: repliesLeft(served, guest, spoken, used, extra), resetsAt: endsAt.toISOString() });
 }
+
+/** A person with no limit has no number, and says so: null alone also means "nobody the bot could name". */
+const withUnlimited = (answer: VoiceLeft): VoiceLeft => (answer.left === null ? { ...answer, unlimited: true } : answer);
 
 /**
  * A reply that was counted but never played (a person talked over it while it was being settled, a greeting that waited for audio
