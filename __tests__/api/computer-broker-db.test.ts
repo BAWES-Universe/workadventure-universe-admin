@@ -121,7 +121,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         expect(runIt(older).status).toBe(0);
         expect(readFileSync(join(home, '.universe', 'relay.json'), 'utf8')).not.toContain('older.example.test');
         // Another job's write is never held back by this job's number
-        const other = command.replace(jobId, 'another-job').replace('"url":"' + RELAY + '"', '"url":"https://other.example.test"');
+        const other = command.replaceAll(jobId, 'another-job').replace('"url":"' + RELAY + '"', '"url":"https://other.example.test"');
         expect(runIt(other).status).toBe(0);
         expect(readFileSync(join(home, '.universe', 'relay.json'), 'utf8')).toContain('other.example.test');
       } finally {
@@ -151,6 +151,36 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         expect(runIt(command.replaceAll(token, 'cjt_delayed')).status).toBe(0);
         expect(keyIn(`jobs/${jobId}.json`)).toBe('cjt_later');
         expect(keyIn('jobs/another-job.json')).toBe('cjt_other');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it('a delayed prepare of one job, run after another job wrote the key last written, changes nothing at all: not its own file, and not relay.json or relay.gen', async () => {
+      const { sara, jobId: a } = await running();
+      const readerStarted = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second', writes: false }, NOW);
+      if (!readerStarted.ok) throw new Error('the second job did not start');
+      const b = readerStarted.job.id;
+      const home = mkdtempSync(join(tmpdir(), 'universe-relay-'));
+      const runIt = (text: string) => spawnSync('sh', ['-c', text], { env: { ...process.env, HOME: home }, encoding: 'utf8' });
+      const commandOf = async (jobId: string) => {
+        await prepareJob(jobId, RELAY, NOW);
+        return fake.commands.filter((entry) => entry.command.includes('relay.json')).at(-1)?.command ?? '';
+      };
+      try {
+        // job A is prepared twice (the first command is delayed), then job B writes the key last written
+        const earlier = await commandOf(a);
+        const later = await commandOf(a);
+        const other = await commandOf(b);
+        expect(runIt(later).status).toBe(0);
+        expect(runIt(other).status).toBe(0);
+        const state = () => ['relay.json', 'relay.gen', `jobs/${a}.json`, `jobs/${a}.gen`, `jobs/${b}.json`].map((name) => readFileSync(join(home, '.universe', name), 'utf8'));
+        const before = state();
+        expect(JSON.parse(before[0]).token).toBe(JSON.parse(before[4]).token);
+        expect(before[1].startsWith(b)).toBe(true);
+        // the delayed write of A's earlier claim arrives: nothing on the machine changes
+        expect(runIt(earlier).status).toBe(0);
+        expect(state()).toEqual(before);
       } finally {
         rmSync(home, { recursive: true, force: true });
       }
