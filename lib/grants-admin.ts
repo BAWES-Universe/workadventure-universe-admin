@@ -143,7 +143,6 @@ export async function overview(now: Date = new Date()): Promise<GrantsOverview> 
     exposureOf(PLATFORM_ACCOUNT_ID, now),
   ]);
   const money = programs.filter((program) => asMoney(program.categoryId));
-  const names = await namesFor(money);
 
   const defaults = {} as Record<MoneyCategory, MoneyDefaultView>;
   for (const category of MONEY_CATEGORIES) {
@@ -157,17 +156,6 @@ export async function overview(now: Date = new Date()): Promise<GrantsOverview> 
     else defaults[category] = { set: false, amountMicros: null, interval: 'none', recipients: null };
   }
 
-  // Exceptions: the active ones, one line for each group of people
-  const groups = new Map<string, { audience: AudienceView; apps?: ProgramView; computers?: ProgramView }>();
-  for (const program of money.filter((entry) => entry.kind === 'exception' && entry.status === 'active')) {
-    const key = recipientKey(program.recipients);
-    const group = groups.get(key) ?? { audience: audienceOf(program, names) };
-    if (program.categoryId === 'instant_apps') group.apps = program;
-    else group.computers = program;
-    groups.set(key, group);
-  }
-  const exceptions: ExceptionView[] = [...groups.values()].map((group) => ({ id: exceptionId(group.apps?.programId, group.computers?.programId), audience: group.audience, instant_apps: settingOf(group.apps), computers: settingOf(group.computers) }));
-
   // Gifts: every one still running, and the ones that ended most recently (so a long history never hides a running gift)
   const endedAt = (program: ProgramView) => (program.lotExpiresAt ?? program.claimEndsAt ?? now).getTime();
   const isEnded = (program: ProgramView) => program.status === 'ended' || endedAt(program) <= now.getTime();
@@ -178,6 +166,20 @@ export async function overview(now: Date = new Date()): Promise<GrantsOverview> 
   const owed = older.length === 0 ? [] : await prisma.creditLot.findMany({ where: { programId: { in: older.map((program) => program.programId) }, settlement: 'to_bill', billedAt: null }, select: { programId: true }, distinct: ['programId'] });
   const stillOwed = new Set(owed.map((lot) => lot.programId));
   const gifts = [...allGifts.filter((program) => !isEnded(program)), ...endedGifts.filter((program, index) => index < RECENTLY_ENDED_GIFTS || stillOwed.has(program.programId))];
+  // Only the people, universes and funding accounts of what is shown are looked up: the older ended gifts are not listed, so they cost nothing here
+  const activeExceptions = money.filter((entry) => entry.kind === 'exception' && entry.status === 'active');
+  const names = await namesFor([...activeExceptions, ...gifts]);
+  // Exceptions: the active ones, one line for each group of people
+  const groups = new Map<string, { audience: AudienceView; apps?: ProgramView; computers?: ProgramView }>();
+  for (const program of activeExceptions) {
+    const key = recipientKey(program.recipients);
+    const group = groups.get(key) ?? { audience: audienceOf(program, names) };
+    if (program.categoryId === 'instant_apps') group.apps = program;
+    else group.computers = program;
+    groups.set(key, group);
+  }
+  const exceptions: ExceptionView[] = [...groups.values()].map((group) => ({ id: exceptionId(group.apps?.programId, group.computers?.programId), audience: group.audience, instant_apps: settingOf(group.apps), computers: settingOf(group.computers) }));
+
   const figures = await giftFigures(gifts.map((gift) => gift.programId));
   const giftViews: GiftView[] = gifts
     .map((gift): GiftView => {
