@@ -41,6 +41,16 @@ describe('the readiness check', () => {
     }
   });
 
+  it('answers the super admin with the readiness body, 200, and never cached', async () => {
+    provider.mockReturnValue(real([{ name: 'agent37 key', ok: true, detail: 'The Agent37 key works' }]));
+    const response = await GET(new NextRequest('http://localhost:3333/api/admin/computer/readiness'));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    const body = await response.json();
+    expect(body.ready).toBe(true);
+    expect(body.checks.map((check: { name: string }) => check.name)).toEqual(['provider', 'agent37 key', 'usage controls', 'wind-down']);
+  });
+
   it('is ready when the provider, the controls and the door all say so', async () => {
     provider.mockReturnValue(real([{ name: 'agent37 key', ok: true, detail: 'The Agent37 key works' }]));
     const answer = await computerReadiness();
