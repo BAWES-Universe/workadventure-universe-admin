@@ -117,18 +117,20 @@ export async function syncToolSignInNotices(botId: string, fresh?: { serverId: s
         if (existing) {
           await tx.userNotice.update({ where: { id: existing.id }, data: fields });
         } else if (fresh && servers.some((server) => server.id === fresh.serverId)) {
-          await tx.userNotice.create({
-            data: { userId, kind: TOOL_SIGNIN_KIND, dedupeKey: `${TOOL_SIGNIN_KIND}:${botId}:${fresh.at.toISOString()}`, ...fields },
+          // A card for this outage that the person already dismissed has this key: it is skipped (never made again), not an error that would undo the
+          // other cards of this same step and still be told as done
+          await tx.userNotice.createMany({
+            data: [{ userId, kind: TOOL_SIGNIN_KIND, dedupeKey: `${TOOL_SIGNIN_KIND}:${botId}:${fresh.at.toISOString()}`, ...fields }],
+            skipDuplicates: true,
           });
         }
       }
     });
     return true;
   } catch (error) {
-    // A card made twice for the same instant (same key) is "already told" (a card the person dismissed for that outage is never made
-    // again); any other failure is reported, and the state is saved either way. False says it did not finish, so the caller's marker
-    // stays and the next report for the same sign-in tries the cards again
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return true;
+    // A failure is reported, and the state is saved either way. False says it did not finish (the step was undone whole), so the caller's marker
+    // stays and the next report for the same sign-in tries the cards again. A card made twice for the same instant, or one the person
+    // dismissed for that outage, is skipped inside the step (see above) and never lands here
     Sentry.captureException(error, { tags: { area: 'tool-signin' } });
     console.error('[ToolSignIn] Could not update the notices:', error instanceof Error ? error.message : 'unknown');
     return false;
@@ -273,28 +275,30 @@ export async function dropOrphanedToolSignInNotices(userId: string): Promise<voi
  * A good answer from a key: clears a "stopped working" mark, but only when the key is still the one that was used (a late answer from a
  * key that has been replaced says nothing about the new one) and only when the connection is marked right now (not as it was when the
  * call began, since another call may have reported a refusal in between).
+ *
+ * Every good answer is written down, as the moment the key was seen working, so a refusal seen before it that reports after it is old news
+ * however close the two were (a write only once in a while would leave the moment of an earlier answer, and a refusal between the two would
+ * count as the newest word). It is written first, then anything marked lost that is not newer than it is cleared in what is saved now: a
+ * refusal that was saved between the read above and these writes is cleared, and one that comes after is refused by its own check.
  */
 export async function reportKeyWorked(connectionId: string, keyVersion: number, now: Date = new Date()): Promise<void> {
-  const row = await prisma.appConnection.findUnique({ where: { id: connectionId }, select: { keyVersion: true, signInLostAt: true, lastWorkedAt: true, noticesPendingAt: true } });
+  const row = await prisma.appConnection.findUnique({ where: { id: connectionId }, select: { keyVersion: true, signInLostAt: true, noticesPendingAt: true } });
   if (!row || row.keyVersion !== keyVersion) return;
   if (row.signInLostAt) {
     await reportConnectionSignIn(connectionId, { state: 'ok' }, now, keyVersion);
     return;
   }
-  // No loss to clear, but the success is still seen: a refusal of an earlier call that reports after it is old news and never marks a
-  // working key as lost. Written at most once a minute for a connection, so a busy key costs one write a minute, not one a call
-  if (!row.lastWorkedAt || now.getTime() - row.lastWorkedAt.getTime() >= LAST_WORKED_EVERY_MS) {
-    await prisma.appConnection.updateMany({
-      where: { id: connectionId, keyVersion, OR: [{ lastWorkedAt: null }, { lastWorkedAt: { lt: now } }] },
-      data: { lastWorkedAt: now },
-    });
-  }
-  // The cards of an earlier change that did not finish are finished now
-  if (row.noticesPendingAt) await finishConnectionNotices(connectionId);
+  await prisma.appConnection.updateMany({ where: { id: connectionId, keyVersion, OR: [{ lastWorkedAt: null }, { lastWorkedAt: { lt: now } }] }, data: { lastWorkedAt: now } });
+  const [lost] = await Promise.all([
+    prisma.appConnection.updateMany({
+      where: { id: connectionId, keyVersion, signInLostAt: { lte: now } },
+      data: { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, noticesPendingAt: new Date() },
+    }),
+    prisma.appConnection.updateMany({ where: { id: connectionId, keyVersion, signInLostAt: null, noAnswerAt: { lte: now } }, data: { noAnswerAt: null } }),
+  ]);
+  // The cards of a loss cleared here, and of an earlier change that did not finish, are finished now
+  if (lost.count === 1 || row.noticesPendingAt) await finishConnectionNotices(connectionId);
 }
-
-/** How often a key's good calls are written down for a connection. */
-const LAST_WORKED_EVERY_MS = 60_000;
 
 /** The same report, for the connection a grant belongs to: its fields move, and the cards of every Brick that uses it follow. */
 export async function reportConnectionSignIn(connectionId: string, report: ToolSignInReport, at: Date, onlyKeyVersion?: number): Promise<{ changed: boolean }> {
