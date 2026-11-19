@@ -256,9 +256,17 @@ async function run(request: Request, name: string, args: Record<string, unknown>
     }
     case 'github_list_repos': {
       const query = text(args.query, 'query', false)?.toLowerCase();
-      const answer = await request<{ full_name: string; private: boolean; default_branch: string; description: string | null; pushed_at: string }[]>('/user/repos?per_page=100&sort=pushed');
+      type Repo = { full_name: string; private: boolean; default_branch: string; description: string | null; pushed_at: string };
+      const answer = await request<Repo[]>('/user/repos?per_page=100&sort=pushed');
       if (!answer.ok) return refusal(answer, 'listing repositories');
-      const rows = answer.data.filter((repo) => !query || repo.full_name.toLowerCase().includes(query));
+      // A name looked for is looked for beyond the first hundred (up to five pages): GitHub gives at most a hundred at a time
+      const all: Repo[] = [...answer.data];
+      for (let page = 2; query && page <= 5 && all.length === (page - 1) * 100; page += 1) {
+        const more = await request<Repo[]>(`/user/repos?per_page=100&sort=pushed&page=${page}`);
+        if (!more.ok) break;
+        all.push(...more.data);
+      }
+      const rows = all.filter((repo) => !query || repo.full_name.toLowerCase().includes(query));
       return out(rows.map((repo) => ({ repo: repo.full_name, private: repo.private, defaultBranch: repo.default_branch, description: repo.description, lastPush: repo.pushed_at })));
     }
     case 'github_get_repo': {
@@ -346,6 +354,8 @@ async function run(request: Request, name: string, args: Record<string, unknown>
         url: issue.html_url,
         body: issue.body,
         comments: comments?.ok ? comments.data.map((comment) => ({ by: comment.user?.login, at: comment.created_at, body: comment.body })) : [],
+        // Comments that could not be read are not an issue with none
+        ...(comments && !comments.ok ? { commentsUnavailable: true } : {}),
       });
     }
     case 'github_ci_status': {
