@@ -88,7 +88,10 @@ export interface OpenInput {
  */
 export const RECEIPT_LEASE_MS = 10 * 60 * 1000;
 
-/** A computer's receipt is on no lease: its job is its own record (it can run for hours), and `settleReceipt` reads the job. */
+/**
+ * A computer's receipt is on no lease: its job is its own record (it can run for hours), and `settleReceipt` reads the job. A receipt opened
+ * without a category for a computer job's id gets a lease, but the sweep leaves it while that job runs and ends it with the job.
+ */
 const hasLease = (category: string | null | undefined): boolean => category !== 'computer';
 
 const leaseFrom = (now: Date): Date => new Date(now.getTime() + RECEIPT_LEASE_MS);
@@ -322,11 +325,12 @@ export async function settleReceipt(task: Task, now: Date = new Date(), unwatche
     }
     // No Instant run at all
     if (isTerminal(row.state)) return row.state as ReceiptState;
-    if (row.category === 'computer') {
-      // A computer's job is its own record: a receipt waits for it while it runs, and ends with it. A running one (no lease) ends when its job is
-      // over, or, when no job of that key exists at all, once it is as old as a lease; a checking one only after the bot server's own retries.
-      const job = await tx.computerJob.findFirst({ where: { id: task.taskKey, botId: task.botId, personId: task.personId }, select: { status: true } });
-      if (job && !isOver(job.status)) return row.state as ReceiptNow;
+    // A computer's job is its own record, whatever category the receipt was opened under (one opened without a category for a job's id is the
+    // job's too): a receipt waits for it while it runs, and ends with it. A running one with no lease ends when its job is over, or, when no
+    // job of that key exists at all, once it is as old as a lease; a checking one, or one whose lease ran out, only after the bot server's own retries.
+    const job = await tx.computerJob.findFirst({ where: { id: task.taskKey, botId: task.botId, personId: task.personId }, select: { status: true } });
+    if (job && !isOver(job.status)) return row.state as ReceiptNow;
+    if (job || row.category === 'computer') {
       const waited = row.state === 'running' ? job !== null || row.startedAt.getTime() + RECEIPT_LEASE_MS <= now.getTime() : unwatchedBefore !== null && row.updatedAt < unwatchedBefore;
       if (!waited) return row.state as ReceiptNow;
       return endReceipt(tx, row, job ? 'done' : 'refunded', [], now);
@@ -356,14 +360,15 @@ export async function settleCheckingReceipts(limit: number, now: Date = new Date
     SELECT r."bot_id" AS "botId", r."person_id" AS "personId", r."task_key" AS "taskKey"
     FROM task_receipts r
     WHERE (
-      (r."state" = 'running' AND r."lease_until" IS NOT NULL AND r."lease_until" <= ${now})
+      (r."state" = 'running' AND r."lease_until" IS NOT NULL AND r."lease_until" <= ${now}
+        AND NOT EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key" AND j."status" NOT IN ('done', 'stopped', 'failed')))
       OR (r."state" = 'running' AND r."category" = 'computer' AND r."lease_until" IS NULL AND (
         EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key" AND j."status" IN ('done', 'stopped', 'failed'))
         OR (r."started_at" <= ${leaseBefore} AND NOT EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key"))))
       OR (r."state" = 'checking' AND (
         (r."updated_at" < ${unwatchedBefore}
           AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key")
-          AND NOT (r."category" = 'computer' AND EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key" AND j."status" NOT IN ('done', 'stopped', 'failed'))))
+          AND NOT EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key" AND j."status" NOT IN ('done', 'stopped', 'failed')))
         OR (EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key") AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" IN (${open})))
       ))
       OR (r."state" IN ('done', 'refunded') AND EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" IN (${open})))

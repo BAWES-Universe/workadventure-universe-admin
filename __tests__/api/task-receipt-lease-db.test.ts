@@ -183,6 +183,19 @@ run('receipts that always settle (O1)', () => {
     });
   });
 
+  describe('a computer job’s receipt opened with no category', () => {
+    it('is never ended while its job runs, however long its lease has been out, and ends with its job', async () => {
+      const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Long job', status: 'running', startedAt: START } });
+      expect((await open(job.id, { category: null })).leaseUntil).toEqual(at(10));
+      expect(await settleCheckingReceipts(50, at(600))).toBe(0);
+      expect(await settleReceipt({ botId: brick, personId: sara, taskKey: job.id }, at(600))).toBe('running');
+      expect((await receipt(job.id)).state).toBe('running');
+      await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'done', endedAt: at(700) } });
+      expect(await settleCheckingReceipts(50, at(701))).toBe(1);
+      expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'done' });
+    });
+  });
+
   describe('case 1: the bot process is lost mid-turn (no close ever arrives, and nobody writes again)', () => {
     it('a task that never ran anything ends as refunded, nothing taken, by the sweep once its lease has run out; and not before', async () => {
       const p = fakeProvider();
