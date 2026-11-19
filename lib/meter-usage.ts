@@ -153,10 +153,11 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
     const asked = (await openRequestFor(personId, 'computer')) !== null;
     if (allowance && settings.memberAllowanceMicros) {
       // Against what they have now: the usual, or the raised one while extra usage runs, so the bar is never more than full
-      const total = settings.memberAllowanceMicros * (grant?.multiplier ?? 1);
+      // (their month is the default, or what an exception says for them, and credit given to them for computers is on top of it)
+      const total = allowance.baseMicros * (grant?.multiplier ?? 1) + allowance.creditTotalMicros;
       // What is left is what new work can take: the allowance less everything held, as admission counts it (a hold that ran out and is not yet settled still counts)
       const available = allowance.unlimited ? 0 : Math.max(0, (allowance.leftMicros ?? 0) - held);
-      const left = allowance.unlimited ? 1 : Math.min(1, Math.max(0, available / total));
+      const left = allowance.unlimited ? 1 : total > 0 ? Math.min(1, Math.max(0, available / total)) : 0;
       const words = allowance.unlimited ? 'plenty' : usageWords(left);
       const inProgress = await prisma.meterReservation.aggregate({ where: { personKey: `person:${personId}`, state: 'held', expiresAt: { gt: now } }, _sum: { amountMicros: true } });
       computer = {

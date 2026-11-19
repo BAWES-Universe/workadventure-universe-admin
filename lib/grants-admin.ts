@@ -220,12 +220,8 @@ export async function overview(now: Date = new Date()): Promise<GrantsOverview> 
 
 const scopeCovers = (scope: GiftScope): MoneyCategory[] => (scope === 'both' ? ['instant_apps', 'computers'] : scope === 'apps' ? ['instant_apps'] : ['computers']);
 
-/** Until computer jobs draw from credit lots, credit for computers alone is never spent: it is refused rather than issued to sit there. */
-export const COMPUTER_CREDIT_WORDS = 'For now computer jobs follow one monthly allowance for each member, so credit for computers alone is not available yet. Set the computers default to change that allowance, or give Instant Apps credit in a gift.';
-
 function settingInput(category: MoneyCategory, setting: ExceptionSetting, recipients: Recipient, now: Date): GrantInput | null {
   if (setting.mode === 'same') return null;
-  if (category === 'computers') throw new GrantsRefused(COMPUTER_CREDIT_WORDS, 400, 'computers_not_yet');
   if (setting.mode === 'none') return { categoryId: category, schedule: 'none', recipients, claimStartsAt: now };
   return { categoryId: category, amount: setting.amountMicros, schedule: setting.interval, recipients, claimStartsAt: now };
 }
@@ -233,7 +229,7 @@ function settingInput(category: MoneyCategory, setting: ExceptionSetting, recipi
 export function defaultInput(request: Extract<PreviewRequest, { what: 'default' }>, now: Date): GrantInput {
   // Until computer jobs draw from credit lots they follow one monthly allowance for every member, so a computers default can only say that
   if (request.category === 'computers' && request.interval !== 'none' && (request.interval !== 'monthly' || request.recipients.kind !== 'all')) {
-    throw new GrantsRefused('For now computer credit is given every month to everyone, or not at all. Anything else for computers is not available yet.');
+    throw new GrantsRefused('For now computer credit is given every month to everyone, or not at all. Use an exception or a gift for anything else.');
   }
   if (request.interval === 'none') return { categoryId: request.category, amount: 0, schedule: 'none', recipients: recipientOf(request.recipients), claimStartsAt: now };
   const monthlyNext = request.interval === 'monthly' && request.startsOn !== 'now';
@@ -245,7 +241,6 @@ export async function giftInput(request: Extract<PreviewRequest, { what: 'gift' 
   if (Number.isNaN(endsAt.getTime()) || endsAt <= now) throw new GrantsRefused('A gift ends on a day in the future');
   if (endsAt.getTime() - now.getTime() > 366 * DAY) throw new GrantsRefused('A gift can end up to a year from now');
   const recipients = recipientOf(request.audience);
-  if (request.scope === 'computers') throw new GrantsRefused(COMPUTER_CREDIT_WORDS, 400, 'computers_not_yet');
   const covers = scopeCovers(request.scope);
   const input: GrantInput = {
     categoryId: covers[0],

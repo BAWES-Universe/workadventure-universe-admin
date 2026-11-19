@@ -5,7 +5,7 @@ import { getMeterSettings } from '@/lib/meter';
 import { ensureIssued, type IssueResult } from '@/lib/credit-issue';
 import type { MeterSettings } from '@/lib/meter-values';
 import { allocate, asNumber, categoryFor, monthEnd, monthStart, wholeMicros, type ChargeClass, type MoneyCategory } from '@/lib/credit-values';
-import { lockAll, lockOfEffect, lockOfHoldKey, lockOfPerson, lockOfPool, lotBalances, usableLots, type Tx } from '@/lib/credit-store';
+import { lockAll, lockOfEffect, lockOfHoldKey, lockOfPerson, lockOfPool, lotBalances, usableLots, type LotRow, type Tx } from '@/lib/credit-store';
 
 /**
  * Spending credit (paying spec v3, sections 4, 7 and 8): room is held before any paid effect, in one step under locks, from the lots
@@ -82,6 +82,8 @@ export interface HoldInput {
   effectKey?: string | null;
   /** For work a named payer funds (a universe-paid service): only that account's lots count, and nothing falls back to anyone else's. */
   onlyAccountId?: string | null;
+  /** Which of the person's lots may pay for this step (Computers: credit given on purpose, never the month's own allowance, which is counted apart). Leave out for all of them. */
+  lotFilter?: (lot: LotRow) => boolean;
   /**
    * Asked inside the hold's own transaction, after the person's lock is taken and before anything is held: whatever it reads (what the
    * person has already spent or holds) cannot change under it, so two steps asked at the same moment meet here one after the other.
@@ -116,8 +118,8 @@ const holdView = (row: FullHold): HoldView => ({
 });
 
 /** The pool lots a person can draw on, so they can be locked before anything is counted. */
-async function poolNames(tx: Tx, personId: string, category: MoneyCategory, now: Date, onlyAccountId: string | null | undefined): Promise<string[]> {
-  const lots = await usableLots(tx, personId, category, now, { onlyAccountId });
+async function poolNames(tx: Tx, personId: string, category: MoneyCategory, now: Date, onlyAccountId: string | null | undefined, lotFilter?: (lot: LotRow) => boolean): Promise<string[]> {
+  const lots = (await usableLots(tx, personId, category, now, { onlyAccountId })).filter((lot) => !lotFilter || lotFilter(lot.lot));
   return lots.filter((lot) => lot.lot.subjectKey.startsWith('pool:')).map((lot) => lockOfPool(lot.lot.programId ?? lot.lot.subjectKey));
 }
 
@@ -162,7 +164,7 @@ export async function holdCredit(input: HoldInput, now: Date = new Date()): Prom
 async function holdOnce(input: HoldInput, now: Date, settings: MeterSettings, issued: IssueResult): Promise<Held | 'again'> {
   return prisma.$transaction(async (tx): Promise<Held | 'again'> => {
     // The execution's own lock too: two asks for one execution under different keys (even for different people) meet here, not at the unique index
-    const locked = [lockOfPerson(input.personId), lockOfHoldKey(input.holdKey), ...(input.effectKey ? [lockOfEffect(input.effectKey)] : []), ...(await poolNames(tx, input.personId, input.category, now, input.onlyAccountId))];
+    const locked = [lockOfPerson(input.personId), lockOfHoldKey(input.holdKey), ...(input.effectKey ? [lockOfEffect(input.effectKey)] : []), ...(await poolNames(tx, input.personId, input.category, now, input.onlyAccountId, input.lotFilter))];
     await lockAll(tx, locked);
     const again = await loadHold(tx, input.holdKey);
     if (again) return alreadyHeld(again, input, now);
@@ -175,7 +177,7 @@ async function holdOnce(input: HoldInput, now: Date, settings: MeterSettings, is
       const stopped = await input.guard(tx);
       if (stopped) return stopped;
     }
-    const lots = await usableLots(tx, input.personId, input.category, now, { onlyAccountId: input.onlyAccountId });
+    const lots = (await usableLots(tx, input.personId, input.category, now, { onlyAccountId: input.onlyAccountId })).filter((lot) => !input.lotFilter || input.lotFilter(lot.lot));
     const lockedSet = new Set(locked);
     const unlocked = lots.some((lot) => lot.lot.subjectKey.startsWith('pool:') && !lockedSet.has(lockOfPool(lot.lot.programId ?? lot.lot.subjectKey)));
     if (unlocked) return 'again';

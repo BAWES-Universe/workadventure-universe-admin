@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { getBrickLimits } from '@/lib/bot-limits';
+import { drawComputerCredit } from '@/lib/computer-credit';
 import { memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
@@ -170,7 +171,9 @@ async function monthOfPerson(personId: string, now: Date): Promise<ComputerView[
   if (!state || settings.memberAllowanceMicros === null) return null;
   const endsAt = monthOf(now).end;
   if (state.unlimited || state.leftMicros === null) return { leftFraction: 1, unlimited: true, endsAt };
-  return { leftFraction: Math.max(0, Math.min(1, state.leftMicros / settings.memberAllowanceMicros)), unlimited: false, endsAt };
+  // Against what they have now: their month (the default, or what an exception says for them) and credit given to them for computers
+  const total = state.baseMicros + state.creditTotalMicros;
+  return { leftFraction: total > 0 ? Math.max(0, Math.min(1, state.leftMicros / total)) : 0, unlimited: false, endsAt };
 }
 
 /** What the owner sees about a Brick's computer. Null when the Brick is not theirs. Reads only: it never makes or wakes anything. */
@@ -856,6 +859,8 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
   const cost = costOfSeconds(seconds, provider ? provider.microsPerMinute() : null);
+  // Credit given on purpose (a gift for computers) is drawn first, before the event is written, so the allowance never counts what credit paid
+  if (cost !== null && cost > 0) await drawComputerCredit({ eventId: `computer:${job.id}:time`, personId: job.personId, botId: job.botId, jobId: job.id, costMicros: cost, chargeClass: 'computer_job' }, at);
   await recordMeterEvent({
     eventId: `computer:${job.id}:time`,
     kind: 'computer_time',
