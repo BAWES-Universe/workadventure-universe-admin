@@ -43,10 +43,13 @@ const templateRow = (id: string) => prisma.brickTemplate.findUnique({ where: { b
 const itemFor = (botId: string, ownerId: string, data: Record<string, unknown>) =>
   prisma.brickItem.create({ data: { ownerId, botId, kind: 'reminder', words: 'Send me a recipe', cadence: { type: 'daily', time: '08:00', days: [1, 2, 3, 4, 5] }, timeZone: 'Asia/Kuwait', ...data } as never });
 
+const made = { users: [] as string[], universes: [] as string[] };
+
 run('sharing a Brick as a template, in a real database', () => {
   beforeAll(async () => {
     const person = async (name: string, isGuest = false): Promise<Person> => {
       const user = await prisma.user.create({ data: { uuid: `${name}-${tag}`, email: `${name}-${tag}@example.test`, name, isGuest } });
+      made.users.push(user.id);
       return { id: user.id, email: user.email! };
     };
     sara = await person('sara');
@@ -55,15 +58,21 @@ run('sharing a Brick as a template, in a real database', () => {
     brickId = (await createBrick({ ownerId: sara.id, name: 'Recipe Brick', description: 'Keeps the family recipes', characterTextureId: 'brick-red', chatInstructions: 'You keep my family recipes. Send me one when I ask.', hello: 'Send me the first recipe' })).id;
     const universe = await prisma.universe.create({ data: { slug: `tpl-${tag}`, name: 'tpl place', ownerId: sara.id } });
     universeId = universe.id;
+    made.universes.push(universe.id);
     const world = await prisma.world.create({ data: { universeId, slug: 'hq', name: 'HQ' } });
     const room = await prisma.room.create({ data: { worldId: world.id, slug: 'lobby', name: 'Lobby' } });
     roomBotId = (await prisma.bot.create({ data: { roomId: room.id, name: 'Nora', createdById: sara.id, behaviorConfig: {} } })).id;
   });
 
+
   afterAll(async () => {
-    await prisma.universe.deleteMany({ where: { id: universeId } });
-    await prisma.user.deleteMany({ where: { id: { in: [sara.id, omar.id, guest.id] } } });
-    await prisma.$disconnect();
+    // What setup made, by the ids it recorded as it went: a setup that stopped halfway is cleaned up, and the connection always closes
+    try {
+      await prisma.universe.deleteMany({ where: { id: { in: made.universes } } });
+      await prisma.user.deleteMany({ where: { id: { in: made.users } } });
+    } finally {
+      await prisma.$disconnect();
+    }
   });
 
   beforeEach(async () => {
@@ -205,8 +214,12 @@ run('sharing a Brick as a template, in a real database', () => {
       expect(body.look.instructions).toBe('A different prompt that was never read');
       expect(await templateRow(brickId)).toBeNull();
 
-      const wrongChoice = await putTemplate(call('PUT', `/api/bricks/${brickId}/template`, { token: read.look.token, audience: 'link' }), ids(brickId));
+      // A fresh look after the edit, for everyone: sent with another audience and no further edit, the Brick has not changed, so only the audience can be what is turned down
+      const fresh = await (await look(brickId)).json();
+      expect(fresh.look.audience).toBe('everyone');
+      const wrongChoice = await putTemplate(call('PUT', `/api/bricks/${brickId}/template`, { token: fresh.look.token, audience: 'link' }), ids(brickId));
       expect(wrongChoice.status).toBe(409);
+      expect(await templateRow(brickId)).toBeNull();
       expect((await putTemplate(call('PUT', `/api/bricks/${brickId}/template`, {}), ids(brickId))).status).toBe(400);
       expect((await putTemplate(call('PUT', `/api/bricks/${brickId}/template`, { token: 'x', owner: sara.id }), ids(brickId))).status).toBe(400);
     });

@@ -65,6 +65,8 @@ const routine = (botId: string, ownerId: string, data: Record<string, unknown> =
   prisma.brickItem.create({ data: { ownerId, botId, kind: 'schedule', words: 'Every morning send me one recipe', cadence: { type: 'daily', time: '08:00', days: [1, 2, 3, 4, 5] }, timeZone: 'Europe/London', ...data } as never });
 const brickRow = (id: string) => prisma.bot.findUniqueOrThrow({ where: { id } });
 const made: string[] = [];
+const pickedIds = (shown: { picks: { id: string }[] }) => shown.picks.map((card) => card.id);
+const madeUsers: string[] = [];
 const remember = async (response: Response) => {
   const body = await json(response);
   if (body.brick?.id) made.push(body.brick.id);
@@ -76,6 +78,7 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
     process.env.SUPER_ADMINS = `team-${tag}@example.test`;
     const person = async (name: string, isGuest = false): Promise<Person> => {
       const user = await prisma.user.create({ data: { uuid: `${name}-${tag}`, email: `${name}-${tag}@example.test`, name: name === 'sara' ? 'Sara A.' : name, isGuest } });
+      madeUsers.push(user.id);
       return { id: user.id, email: user.email! };
     };
     sara = await person('sara');
@@ -88,12 +91,16 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
   });
 
   afterAll(async () => {
-    await prisma.bot.deleteMany({ where: { id: { in: made } } });
-    await prisma.botsAiProvider.deleteMany({ where: { providerId: keyId } });
-    await prisma.user.deleteMany({ where: { id: { in: [sara.id, omar.id, lina.id, guest.id] } } });
-    if (superAdminsBefore === undefined) delete process.env.SUPER_ADMINS;
-    else process.env.SUPER_ADMINS = superAdminsBefore;
-    await prisma.$disconnect();
+    // By what setup recorded as it went, so a setup that stopped halfway is cleaned up, and the connection and the setting always go back
+    try {
+      await prisma.bot.deleteMany({ where: { id: { in: made } } });
+      await prisma.botsAiProvider.deleteMany({ where: { providerId: keyId } });
+      await prisma.user.deleteMany({ where: { id: { in: madeUsers } } });
+    } finally {
+      if (superAdminsBefore === undefined) delete process.env.SUPER_ADMINS;
+      else process.env.SUPER_ADMINS = superAdminsBefore;
+      await prisma.$disconnect();
+    }
   });
 
   beforeEach(async () => {
@@ -163,6 +170,8 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       expect((await json(await preview(id))).template.setupRequired).toBe(false);
       const required = await share({ optionalNeeds: [] });
       expect(required).toBe(id);
+      // share() leaves the session on the maker: Omar looks again, so only the requirement changed between the two previews
+      as(omar);
       expect((await json(await preview(id))).template.setupRequired).toBe(true);
     });
 
@@ -197,7 +206,7 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       await prisma.botMcpServer.create({ data: { botId: brickId, name: 'Gmail', serverUrl: gmail.serverUrl, connectionId: gmail.id } });
       await prisma.brickComputer.create({ data: { botId: brickId, enabled: true } });
       await prisma.botsMemory.create({ data: { botId: brickId, userUuid: `sara-${tag}`, userId: sara.id, isGuest: false, memories: [{ text: 'Her mum’s lentil soup is the best' }] } });
-      await prisma.botFile.create({ data: { botId: brickId, number: 1, ownerId: sara.id, source: 'person', kind: 'document', name: 'secret-recipe.pdf', chatKind: 'dm', chatRef: 'x', participants: [sara.id] } as never }).catch(() => undefined);
+      await prisma.botFile.create({ data: { botId: brickId, number: 1, ownerId: sara.id, source: 'person', kind: 'document', name: 'secret-recipe.pdf', chatKind: 'dm', chatRef: 'x', seenBy: [sara.id] } });
       await prisma.brickItem.create({ data: { ownerId: sara.id, botId: brickId, kind: 'goal', words: 'Cook everything', outcome: 'All cooked', cadence: { type: 'none' }, timeZone: 'Asia/Kuwait', waitingFor: 'the weekend' } });
       await prisma.bot.update({ where: { id: brickId }, data: { aiProviderRef: keyId, voiceEnabled: true, privateBot: true, companionTextureId: 'pet' } });
       const id = await share();
@@ -481,7 +490,7 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       expect(await prisma.brickTemplateStar.count({ where: { userId: omar.id } })).toBe(1);
       const shown = await lists();
       expect(shown.starred.map((card: { id: string; starred: boolean }) => [card.id, card.starred])).toEqual([[id, true]]);
-      expect(shown.picks).toEqual([]);
+      expect(pickedIds(shown)).not.toContain(id);
       expect(shown.met).toEqual([]);
       expect((await json(await preview(id))).template.starred).toBe(true);
       // Only they see their stars
@@ -518,19 +527,20 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       as(omar);
       const refused = await putPick(call('PUT', `/api/admin/brick-templates/${id}/pick`), ids(id));
       expect(refused.status).toBe(403);
-      expect((await lists()).picks).toEqual([]);
+      // Only this suite's own template is looked for: a pick left in the database by anything else is not this test's business
+      expect(pickedIds(await lists())).not.toContain(id);
 
       session.mockResolvedValue({ id: lina.id, email: `team-${tag}@example.test`, name: 'team', isSuperAdmin: true });
       expect((await putPick(call('PUT', `/api/admin/brick-templates/${id}/pick`), ids(id))).status).toBe(200);
       as(omar);
-      expect((await lists()).picks.map((card: { id: string }) => card.id)).toEqual([id]);
+      expect(pickedIds(await lists())).toContain(id);
 
       // A new version waits to be picked again
       as(sara);
       await prisma.bot.update({ where: { id: brickId }, data: { description: 'New line' } });
       await share();
       as(omar);
-      expect((await lists()).picks).toEqual([]);
+      expect(pickedIds(await lists())).not.toContain(id);
 
       // A template shared by link only cannot be picked, and is on no list but a Starred one
       as(sara);
@@ -540,7 +550,8 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       expect((await deletePick(call('DELETE', `/api/admin/brick-templates/${id}/pick`), ids(id))).status).toBe(200);
       as(omar);
       const shown = await lists();
-      expect([shown.picks, shown.met]).toEqual([[], []]);
+      expect(pickedIds(shown)).not.toContain(id);
+      expect(shown.met).toEqual([]);
     });
 
     it('lists Bricks the person has met (talked with) that share one for everyone, never their own and never by link only', async () => {
