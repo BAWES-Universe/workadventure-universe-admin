@@ -620,7 +620,7 @@ run('payments for pages, in a real database', () => {
         const answer = await settle(orderId);
         expect(answer).toMatchObject({ status: 'not_paid' });
         // The page that refreshes itself for a late payment is told no look is made any more, so it stops
-        expect(checksHaveEnded(answer)).toBe(true);
+        expect(checksHaveEnded(answer!)).toBe(true);
         expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(0);
         expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('not_paid');
       });
@@ -632,7 +632,7 @@ run('payments for pages, in a real database', () => {
         gateway({ record: (order) => paidRecord(order, { status: 'FAILED' }) });
         const answer = await settle(orderId);
         expect(answer).toMatchObject({ status: 'not_paid' });
-        expect(checksHaveEnded(answer)).toBe(false);
+        expect(checksHaveEnded(answer!)).toBe(false);
       });
     });
 
