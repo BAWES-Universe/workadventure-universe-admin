@@ -861,11 +861,12 @@ run('the bounded Instant executor, in a real database', () => {
     });
 
     it('a give-back the books never confirmed, and a give-back for a run outside the window, are not failures', async () => {
-      await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 2 });
+      await setLimits({ pauseFailureRateBps: 3_000, pauseMinRuns: 2 });
       const p = fakeProvider();
       const f = fakeFunds(10_000_000);
       const ids: string[] = [];
-      for (const n of [1, 2]) {
+      // Three runs: when the first leaves the window two are still counted, so the minimum is met and only the give-back decides
+      for (const n of [1, 2, 3]) {
         const key = callId();
         await runInstant(ask({ callId: key, arguments: { query: `gw${n}` } }), { adapter: p.adapter, funds: f.funds });
         ids.push(await runIdOf(key));
