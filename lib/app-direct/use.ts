@@ -157,7 +157,7 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}, again = 
   }
   const ok = answer.status >= 200 && answer.status < 300;
   await finish(input, ok ? 'ok' : 'failed', answer.status);
-  if (ok) await reportKeyWorked(connection.id, connection.keyVersion).catch(() => undefined);
+  if (ok) await reportKeyWorked(connection.id, connection.keyVersion, startedAt).catch(() => undefined);
   if (!ok) return { status: 'done', ok: false, httpStatus: answer.status, data: null, truncated: false };
 
   let data: unknown = null;

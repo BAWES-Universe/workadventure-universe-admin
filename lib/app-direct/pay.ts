@@ -331,7 +331,7 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   }
   if (answer.status < 200 || answer.status >= 300) return fail('not_paid');
   // The service accepted the key: a "stopped working" mark from an earlier refusal (even one for another operation) no longer holds
-  await reportKeyWorked(connection.id, connection.keyVersion).catch(() => undefined);
+  await reportKeyWorked(connection.id, connection.keyVersion, startedAt).catch(() => undefined);
   let picked: unknown;
   try {
     picked = pickFields(JSON.parse(answer.body), operation.returns);
@@ -503,7 +503,7 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     return unreadable();
   }
   if (answer.redirected || answer.truncated || answer.status < 200 || answer.status >= 300) return unreadable();
-  await reportKeyWorked(connection.id, connection.keyVersion).catch(() => undefined);
+  await reportKeyWorked(connection.id, connection.keyVersion, startedAt).catch(() => undefined);
   let record: unknown;
   try {
     const asked = definition.operations.find((candidate) => candidate.id === lookup.operation);
