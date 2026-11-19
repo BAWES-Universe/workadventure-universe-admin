@@ -34,12 +34,12 @@ const make = (name: string, title: string, description: string, properties: Reco
   annotations: { title, readOnlyHint: false, openWorldHint: true },
 });
 
-const change = (name: string, title: string, description: string, properties: Record<string, unknown>, required: string[]): ToolDefinition => ({
+const change = (name: string, title: string, description: string, properties: Record<string, unknown>, required: string[], destructive = false): ToolDefinition => ({
   name,
   title,
   description,
   inputSchema: { type: 'object', properties, required, additionalProperties: false },
-  annotations: { title, readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  annotations: { title, readOnlyHint: false, destructiveHint: destructive, openWorldHint: true },
 });
 
 export const GITHUB_TOOLS: ToolDefinition[] = [
@@ -82,7 +82,7 @@ export const GITHUB_TOOLS: ToolDefinition[] = [
   make('github_create_issue', 'Open an issue', 'A new issue.', { repo: REPO, title: { type: 'string' }, body: { type: 'string' }, labels: { type: 'array', items: { type: 'string' } } }, ['repo', 'title']),
   make('github_comment', 'Comment', 'A comment on an issue or pull request.', { repo: REPO, number: NUMBER, body: { type: 'string' } }, ['repo', 'number', 'body']),
   change('github_merge_pull_request', 'Merge a pull request', 'Merges a pull request.', { repo: REPO, number: NUMBER, method: { type: 'string', enum: ['merge', 'squash', 'rebase'] } }, ['repo', 'number']),
-  change('github_update_issue', 'Change an issue', 'Changes an issue or pull request: its title, text, labels, or open or closed.', { repo: REPO, number: NUMBER, title: { type: 'string' }, body: { type: 'string' }, state: { type: 'string', enum: ['open', 'closed'] }, labels: { type: 'array', items: { type: 'string' } } }, ['repo', 'number']),
+  change('github_update_issue', 'Change an issue', 'Changes an issue or pull request: its title, text, labels, or open or closed.', { repo: REPO, number: NUMBER, title: { type: 'string' }, body: { type: 'string' }, state: { type: 'string', enum: ['open', 'closed'] }, labels: { type: 'array', items: { type: 'string' } } }, ['repo', 'number'], true),
   change('github_rerun_ci', 'Run CI again', 'Runs a workflow run again (only its failed jobs, unless all is asked).', { repo: REPO, run_id: NUMBER, all: { type: 'boolean' } }, ['repo', 'run_id']),
 ];
 
