@@ -5,6 +5,7 @@ import { evaluatePause, reconcileRun } from '@/lib/instant/executor';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 import { denyInstantOnSessions, type SessionSweep } from '@/lib/instant/sessions';
 import { pauseInstant } from '@/lib/instant/state';
+import { repairInstantReporting, type ReportingRepair } from '@/lib/instant/report';
 import { settleCheckingReceipts } from '@/lib/task-receipts';
 import { instantListedPrices, usdToMicros } from '@/lib/instant/values';
 
@@ -66,6 +67,8 @@ export interface SweepResult {
   /** Receipts that left "checking" in this pass. */
   receipts: number;
   paused: boolean;
+  /** The usage events mended in this pass (missing ones written, wrong amounts corrected) and the gaps still there, with the age of the oldest; null when the pass could not run. */
+  reporting: ReportingRepair | null;
   sessions: SessionSweep;
   drift: DriftReport | null;
 }
@@ -96,6 +99,12 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
     console.error('[Instant] The receipt check failed:', error instanceof Error ? error.message : 'unknown');
     return 0;
   });
+  // Usage events a settled run lacks (the write was refused) or has with other amounts than the run: mended from the run's own rows, a bounded batch a pass.
+  // Nothing here asks an App, the credit books or a wallet for anything
+  const reporting = await repairInstantReporting({ now }).catch((error): ReportingRepair | null => {
+    console.error('[Instant] The usage event repair failed:', error instanceof Error ? error.message : 'unknown');
+    return null;
+  });
   const paused = await evaluatePause(now).catch(() => false);
   const sessions = await denyInstantOnSessions(BATCH, adapter).catch((error): SessionSweep => {
     console.error('[Instant] The session check failed:', error instanceof Error ? error.message : 'unknown');
@@ -110,7 +119,7 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
     // The clock starts only when the check finished and Composio answered for every tool (and any pause it needed was made): a failed or partial check is tried again by the next sweep
     if (drift && drift.unreachable.length === 0) lastDriftAt = Date.now();
   }
-  return { looked: open.length, receipts, paused, sessions, drift };
+  return { looked: open.length, receipts, paused, reporting, sessions, drift };
 }
 
 /** For tests. */

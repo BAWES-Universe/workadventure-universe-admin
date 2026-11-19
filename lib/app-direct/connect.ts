@@ -22,7 +22,7 @@ import { grantKeyAppToBricks } from '@/lib/app-direct/grants';
 export class KeyFormError extends Error {
   constructor(
     readonly status: number,
-    readonly code: 'not_found' | 'expired' | 'used' | 'too_many' | 'invalid_key' | 'rejected' | 'unreachable' | 'mode_change' | 'unknown_service' | 'invalid_definition' | 'not_yours',
+    readonly code: 'not_found' | 'expired' | 'used' | 'too_many' | 'check_in_progress' | 'invalid_key' | 'rejected' | 'unreachable' | 'mode_change' | 'unknown_service' | 'invalid_definition' | 'not_yours',
     message: string,
     readonly extra?: Record<string, unknown>,
   ) {
@@ -57,6 +57,8 @@ export interface KeyFormView {
   /** When it replaces the key of an app the person already has: how that one ends, and its mode. */
   replacing: { keyLast4: string | null; mode: string | null } | null;
   triesLeft: number;
+  /** A check of a key is under way and takes the last room: a second key is refused until it ends, which is a wait ("A check is in progress"), not "Too many tries". */
+  checkInProgress: boolean;
   expiresAt: Date;
 }
 
@@ -167,6 +169,14 @@ function usedTries(row: { tries: number; reservedTries: number; reservedAt: Date
 }
 const lapseCutoff = (callSeconds: number) => new Date(Date.now() - (callSeconds + RESERVATION_GRACE_SECONDS) * 1000);
 
+/**
+ * A check of a key is under way and takes the last room: a second key sent now would be refused, but only until that check ends (it gives its try back unless the
+ * service refuses the key). That is a wait, not "Too many tries": the form says "A check is in progress" for it.
+ */
+function checkIsRunning(row: { tries: number; reservedTries: number; reservedAt: Date | null }, keyTries: number, cutoff: Date): boolean {
+  return row.reservedTries > 0 && !!row.reservedAt && row.reservedAt > cutoff && row.tries + row.reservedTries >= keyTries && row.tries < keyTries;
+}
+
 /** What the form shows. Only the person it was opened for can read it; anyone else gets "not found". */
 export async function readKeyForm(requestId: string, ownerId: string): Promise<KeyFormView> {
   const row = await prisma.appKeyRequest.findFirst({ where: { id: requestId, ownerId } });
@@ -198,6 +208,7 @@ export async function readKeyForm(requestId: string, ownerId: string): Promise<K
     payments: definition.payment ? { checkoutHosts: definition.payment.checkoutHosts, paidWhen: definition.payment.lookup.successStates, testAndLive: !!definition.modes } : null,
     replacing: replacing ? { keyLast4: replacing.keyLast4, mode: replacing.keyMode } : null,
     triesLeft: Math.max(0, limits.keyTries - usedTries(row, lapseCutoff(limits.keyCallSeconds))),
+    checkInProgress: checkIsRunning(row, limits.keyTries, lapseCutoff(limits.keyCallSeconds)),
     expiresAt: row.expiresAt,
   };
 }
@@ -245,7 +256,12 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
       WHERE "id" = ${row.id} AND "used_at" IS NULL
         AND "tries" + "reserved_tries" < ${limits.keyTries}
       RETURNING "reserved_epoch" AS epoch`;
-    if (reserved.length !== 1) throw new KeyFormError(429, 'too_many', 'Too many tries');
+    if (reserved.length !== 1) {
+      // Refused for the room a check under way holds (it may give it back) or because the form really has no tries left: the person is told which
+      const now_ = await prisma.appKeyRequest.findUnique({ where: { id: row.id }, select: { tries: true, reservedTries: true, reservedAt: true, usedAt: true } });
+      if (now_ && !now_.usedAt && checkIsRunning(now_, limits.keyTries, cutoff)) throw new KeyFormError(429, 'check_in_progress', 'A check is in progress');
+      throw new KeyFormError(429, 'too_many', 'Too many tries');
+    }
     const epoch = reserved[0].epoch;
     const release = async (refused: boolean) => {
       try {

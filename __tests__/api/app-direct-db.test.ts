@@ -211,13 +211,41 @@ run('key apps, in a real database', () => {
     expect(await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true, reservedTries: true } })).toEqual({ tries: 4, reservedTries: 1 });
     // While the reservation could still be a call in flight, the last try is not given to a second one
     const quietService = service(404);
-    await expect(submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, quietService.deps)).rejects.toMatchObject({ status: 429, code: 'too_many' });
+    await expect(submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, quietService.deps)).rejects.toMatchObject({ status: 429, code: 'check_in_progress', message: 'A check is in progress' });
     // After the longest a call can take it has lapsed: nobody can tell whether the service refused the key, so the try is used, in the row
     // itself (nothing lives in this process), and the form shows and keeps it
     await prisma.appKeyRequest.update({ where: { id }, data: { reservedAt: new Date(Date.now() - 10 * 60_000) } });
     expect((await readKeyForm(id, sara)).triesLeft).toBe(0);
     await expect(submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, quietService.deps)).rejects.toMatchObject({ status: 429, code: 'too_many' });
     expect(quietService.seen).toHaveLength(0);
+  });
+
+  it('while a check holds the last room, a second key is told a check is in progress (not Too many tries), the form says so, and it goes through once the check has given its try back', async () => {
+    const id = await open();
+    await prisma.appKeyRequest.update({ where: { id }, data: { tries: 4 } });
+    let finish: (answer: { status: number; redirected: boolean; body: string; truncated: boolean; contentType: null }) => void = () => undefined;
+    const slow = {
+      resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+      send: () => new Promise<{ status: number; redirected: boolean; body: string; truncated: boolean; contentType: null }>((resolve) => (finish = resolve)),
+    };
+    const first = submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow as never);
+    await waitFor(async () => (await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { reservedTries: true } })).reservedTries === 1);
+    expect((await readKeyForm(id, sara)).checkInProgress).toBe(true);
+    await expect(submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, service(404).deps)).rejects.toMatchObject({ status: 429, code: 'check_in_progress' });
+    // The check ends without the service refusing the key: its try is given back, the wait is over, and the next key is checked
+    finish({ status: 503, redirected: false, body: '', truncated: false, contentType: null });
+    await expect(first).rejects.toMatchObject({ status: 502 });
+    expect((await readKeyForm(id, sara)).checkInProgress).toBe(false);
+    const next = service(404);
+    await submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, next.deps).catch(() => null);
+    expect(next.seen.length).toBeGreaterThan(0);
+  });
+
+  it('a form with no tries left says Too many tries, never that a check is in progress', async () => {
+    const id = await open();
+    await prisma.appKeyRequest.update({ where: { id }, data: { tries: 5 } });
+    expect((await readKeyForm(id, sara)).checkInProgress).toBe(false);
+    await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(404).deps)).rejects.toMatchObject({ status: 429, code: 'too_many' });
   });
 
   it('counts the lapsed tries of a form once, however many calls reserve at the same moment, and a late call from that run counts nothing more', async () => {
@@ -450,19 +478,36 @@ run('key apps, in a real database', () => {
       await saveServerLimits({ bricks: { keyFormMinutes: 5, keyTries: 2 } }, sara);
       const id = await open();
       let asked = 0;
+      // Both looks are held on an explicit gate, not a timer, until the four blocked submissions have been told to wait: one that reloaded the row after the
+      // looks were recorded would rightly be told there are no tries left
+      let letGo!: () => void;
+      const gate = new Promise<void>((resolve) => (letGo = resolve));
       const slow: GuardDeps = {
         resolve: async () => [{ address: '93.184.216.34', family: 4 }],
         send: async () => {
           asked += 1;
-          // Every look is still on its way while the others start: none has added to the count yet
-          await new Promise((resolve) => setTimeout(resolve, 50));
+          await gate;
           return { status: 401, redirected: false, body: '{}', truncated: false, contentType: 'application/json' };
         },
       };
-      const results = await Promise.allSettled(Array.from({ length: 6 }, () => submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow)));
+      let told = 0;
+      const all = Array.from({ length: 6 }, () =>
+        submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow).catch((error: { code?: string }) => {
+          if (error.code === 'check_in_progress') told += 1;
+          throw error;
+        }),
+      );
+      const settled = Promise.allSettled(all);
+      for (const end = Date.now() + 15_000; told < 4 && Date.now() < end; ) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(told).toBe(4);
+      letGo();
+      const results = await settled;
       expect(asked).toBe(2);
       expect(results.filter((r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'rejected')).toHaveLength(2);
-      expect(results.filter((r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'too_many')).toHaveLength(4);
+      // The two checks under way hold the room: the others are told to wait, which is not the same as having no tries left
+      expect(results.filter((r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'check_in_progress')).toHaveLength(4);
+      // Both were refused by the service, so the tries are used: now there really are none
+      await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow)).rejects.toMatchObject({ code: 'too_many' });
     } finally {
       await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
     }

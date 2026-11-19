@@ -15,6 +15,7 @@ import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
 import { setOwnVersionsForTests, type OwnAppVersion } from '@/lib/app-routes/own-versions';
 import { recordMeterEvent, saveMeterSettings } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
+import { instantEventOf } from '@/lib/instant/report';
 import { GET as demandGet } from '@/app/api/admin/apps-demand/route';
 import { PUT as routePut } from '@/app/api/admin/app-routes/[appKey]/route';
 import { POST as asked } from '@/app/api/apps/asked/route';
@@ -325,6 +326,8 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
       });
 
     it('counts uses, people, cost and failures exactly as the ledger has them, leaving free lookups and old days out', async () => {
+      // The adapter is stated, never left to the environment: with Apps on, the picker lists the Apps and the use rows carry their names
+      setAdapterForTests(fake());
       await list();
       asBoss();
       const before = await demand();
@@ -353,6 +356,70 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
       expect(after.totals.costMicros - before.totals.costMicros).toBe(3500);
       // A longer range brings the old day in
       expect((await demand(60)).totals.costMicros - before.totals.costMicros).toBeGreaterThanOrEqual(9_003_500);
+    });
+
+    it('while Apps are off, a use keeps the name its App was listed under (never its internal key), and only the Apps with a use are listed', async () => {
+      setAdapterForTests(null);
+      await list();
+      asBoss();
+      await event('hist', sara, { cost: 700 });
+      const off = await demand();
+      expect(off.apps.find((app) => app.key === KEY)).toMatchObject({ name: 'Gmail', uses: 1 });
+      // With Apps off an App with no use is not offered to move: the list is only what was used
+      expect(off.apps.find((app) => app.key === OTHER)).toBeUndefined();
+    });
+
+    it('reads the uses, the total and the gaps in one repeatable-read snapshot whose timeout fits four scans of the books (not Prisma’s 5 s default)', async () => {
+      setAdapterForTests(fake());
+      await list();
+      asBoss();
+      const spy = jest.spyOn(prisma, '$transaction');
+      try {
+        await demand();
+        const options = spy.mock.calls.map((call) => call[1] as { isolationLevel?: string; timeout?: number; maxWait?: number } | undefined).find((o) => o?.isolationLevel === 'RepeatableRead');
+        expect(options).toBeDefined();
+        expect(options?.timeout).toBeGreaterThanOrEqual(30_000);
+        expect(options?.maxWait).toBeGreaterThanOrEqual(5_000);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('the headline cost says when it is a part: an unpriced use, an Instant run not settled yet, a run with no usage event, and an estimated price each show', async () => {
+      setAdapterForTests(fake());
+      await list();
+      asBoss();
+      const base = (await demand()).totals.cost;
+      await event('priced', sara, { cost: 500 });
+      // An estimate (the helper writes estimates): the total is priced, but not measured
+      expect((await demand()).totals.cost).toEqual({ state: base.state === 'incomplete' ? 'incomplete' : 'estimated', unpriced: base.unpriced, estimated: base.estimated + 1, notCounted: base.notCounted, mismatched: base.mismatched });
+      await event('unpriced', omar, { cost: null });
+      const unpriced = (await demand()).totals.cost;
+      expect(unpriced).toMatchObject({ state: 'incomplete', unpriced: base.unpriced + 1 });
+      await prisma.meterEvent.deleteMany({ where: { eventId: `demand-${tag}-unpriced` } });
+      // A settled Instant run whose usage event is not there is counted as not in the total (found from the run itself)
+      const run = await prisma.instantRun.create({
+        data: {
+          runKey: `demand-run-${tag}`, botId: saraBrick, personId: sara, toolSlug: 'EXA_SEARCH', toolkit: KEY, argsHash: 'a'.repeat(64), priceVersion: 'v', topMicros: BigInt(9000), holdMicros: BigInt(9000),
+          state: 'succeeded', customerState: 'charged', customerMicros: BigInt(7000), providerState: 'settled', providerMicros: BigInt(7000), providerBasis: 'measured', providerUserId: `u-${tag}`, finishedAt: new Date(),
+        },
+      });
+      try {
+        expect((await demand()).totals.cost).toMatchObject({ state: 'incomplete', notCounted: base.notCounted + 1 });
+        // An Instant run Composio has not settled yet is not in the total either
+        await prisma.instantRun.update({ where: { id: run.id }, data: { providerState: 'pending', providerMicros: null, providerBasis: null } });
+        expect((await demand()).totals.cost).toMatchObject({ state: 'incomplete', notCounted: base.notCounted + 1 });
+        // Settled again, and its event is there but holds another cost: it IS in the total (at the wrong figure), so it is being corrected, never "not in the total"
+        await prisma.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(7000), providerBasis: 'measured' } });
+        const wanted = instantEventOf(await prisma.instantRun.findUniqueOrThrow({ where: { id: run.id } }));
+        await recordMeterEvent({ ...wanted!, costMicros: 9000 });
+        const fixing = (await demand()).totals.cost;
+        expect(fixing).toMatchObject({ state: base.state === 'incomplete' ? 'incomplete' : 'correcting', notCounted: base.notCounted, mismatched: base.mismatched + 1 });
+      } finally {
+        await prisma.instantRun.deleteMany({ where: { id: run.id } });
+      }
+      await prisma.meterEvent.deleteMany({ where: { eventId: `instant:${run.id}` } });
+      expect((await demand()).totals.cost).toMatchObject({ unpriced: base.unpriced, notCounted: base.notCounted, mismatched: base.mismatched });
     });
 
     it('says a failed run was refunded only when a refund is recorded for every failed run', async () => {

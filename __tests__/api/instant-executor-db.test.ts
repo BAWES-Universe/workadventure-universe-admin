@@ -11,6 +11,7 @@ import { evaluatePause, exposureIn, giveBack, instantRunKey, reconcileRun, runIn
 import { setInstantFunds, shutFunds, type InstantFunds } from '@/lib/instant/funds';
 import { getInstantPause, resumeInstant, saveInstantLimits } from '@/lib/instant/state';
 import { checkPriceDrift, forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
+import { instantReportingGaps, instantRunsUnsettled, reportInstantRun, repairInstantReporting } from '@/lib/instant/report';
 import { denyInstantOnSessions } from '@/lib/instant/sessions';
 import { admitInstantTool } from '@/lib/instant/values';
 import { instantRulesAndReceipts } from '@/lib/instant/rules-and-receipts';
@@ -308,6 +309,221 @@ run('the bounded Instant executor, in a real database', () => {
         quiet.mockRestore();
         await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT IF EXISTS instant_event_refused');
       }
+    });
+
+    /** Refuses every usage event of an Instant run in the database, like a real failure of that table, until `allow` is called. */
+    async function refuseEvents() {
+      await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT IF EXISTS instant_event_refused');
+      await prisma.$executeRawUnsafe(`ALTER TABLE meter_events ADD CONSTRAINT instant_event_refused CHECK (event_id NOT LIKE 'instant:%') NOT VALID`);
+      return () => prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT IF EXISTS instant_event_refused');
+    }
+    const eventOf = async (runId: string) => prisma.meterEvent.findUnique({ where: { eventId: `instant:${runId}` } });
+    const customerOf = (event: { detail: unknown } | null) => (event?.detail as { customerMicros?: number | null } | null)?.customerMicros;
+
+    it('a run settled while its usage event was refused gets the event from the sweep, with its own day, person and amounts; mending it again changes nothing and asks nobody for anything', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const allow = await refuseEvents();
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let rowId = '';
+      try {
+        await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+        rowId = (await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } })).id;
+        expect(await eventOf(rowId)).toBeNull();
+      } finally {
+        quiet.mockRestore();
+        await allow();
+      }
+      // The gap is there to be found from the run's own rows: nothing else was written down
+      expect(await instantReportingGaps()).toMatchObject({ missing: 1, wrong: 0 });
+      const row = await runOf(rowId);
+      const calls = { run: p.instant.run.mock.calls.length, reserve: f.funds.reserve.mock.calls.length, settle: f.funds.settle.mock.calls.length, release: f.funds.release.mock.calls.length };
+      const swept = await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(swept.reporting).toMatchObject({ written: 1, failed: 0, remaining: { missing: 0, wrong: 0, oldestAt: null } });
+      const event = await eventOf(rowId);
+      expect(event).toMatchObject({ kind: 'app_use', route: 'instant', pool: 'chat', payerKind: 'universe', personId: sara, botId: brick, basis: 'measured', quantity: BigInt(1) });
+      expect(Number(event?.costMicros)).toBe(7_000);
+      expect(customerOf(event)).toBe(7_000);
+      // The day the run was settled, never the day it was mended
+      expect(event?.occurredAt.getTime()).toBe(row.finishedAt?.getTime());
+      // Again: nothing is written, corrected or called
+      const again = await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(again.reporting).toMatchObject({ looked: 0, written: 0, corrected: 0 });
+      expect(await prisma.meterEvent.count({ where: { eventId: `instant:${rowId}` } })).toBe(1);
+      expect(await prisma.meterEvent.findUnique({ where: { eventId: `instant:${rowId}` } })).toEqual(event);
+      expect({ run: p.instant.run.mock.calls.length, reserve: f.funds.reserve.mock.calls.length, settle: f.funds.settle.mock.calls.length, release: f.funds.release.mock.calls.length }).toEqual(calls);
+    });
+
+    it('the usage event says what the credit books confirmed (6,000), never the amount worked out for the hold (7,700): pending until then, and a wrong one is corrected and kept in the event', async () => {
+      await setLimits({ markupBps: 1_000 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      // The books took an earlier charge for this hold and answer with it
+      let seenWhileSettling: unknown = 'not asked';
+      f.funds.settle.mockImplementation(async (input: { key: string; chargeMicros: number }) => {
+        expect(input.chargeMicros).toBe(7_700);
+        const [mine] = await prisma.meterEvent.findMany({ where: { personId: sara } });
+        seenWhileSettling = mine ? customerOf(mine) : 'no event';
+        const hold = f.holds.get(input.key)!;
+        hold.state = 'charged';
+        hold.charged = 6_000;
+        return { ok: true as const, chargedMicros: 6_000 };
+      });
+      const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'done', chargedMicros: 6_000 });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      expect(Number(row.customerMicros)).toBe(6_000);
+      // Written when the provider settled, before the books had said: pending, not a charge nobody confirmed
+      expect(seenWhileSettling).toBeNull();
+      expect(customerOf(await eventOf(row.id))).toBe(6_000);
+      expect(Number((await eventOf(row.id))?.costMicros)).toBe(7_000);
+      expect(await instantReportingGaps()).toMatchObject({ missing: 0, wrong: 0 });
+      // An event written the old way (the worked-out amount) is found and corrected, and keeps what it said
+      await prisma.meterEvent.update({ where: { eventId: `instant:${row.id}` }, data: { detail: { ...((await eventOf(row.id))?.detail as object), customerMicros: 7_700 } } });
+      expect(await instantReportingGaps()).toMatchObject({ missing: 0, wrong: 1 });
+      const calls = [f.funds.reserve.mock.calls.length, f.funds.settle.mock.calls.length, f.funds.release.mock.calls.length, p.instant.run.mock.calls.length];
+      const swept = await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(swept.reporting).toMatchObject({ corrected: 1, written: 0, remaining: { missing: 0, wrong: 0 } });
+      const fixed = await eventOf(row.id);
+      expect(customerOf(fixed)).toBe(6_000);
+      expect((fixed?.detail as { corrections: Array<{ was: { customerMicros: number }; now: { customerMicros: number } }> }).corrections).toEqual([expect.objectContaining({ was: expect.objectContaining({ customerMicros: 7_700 }), now: expect.objectContaining({ customerMicros: 6_000 }) })]);
+      // Again: nothing changes, no second correction, nothing asked of the books or the App, the use is still one
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(await eventOf(row.id)).toEqual(fixed);
+      expect([f.funds.reserve.mock.calls.length, f.funds.settle.mock.calls.length, f.funds.release.mock.calls.length, p.instant.run.mock.calls.length]).toEqual(calls);
+      expect(await prisma.meterEvent.count({ where: { personId: sara } })).toBe(1);
+    });
+
+    it('a wrong provider amount or basis on the event is corrected from the run as well, and a hold the books have not answered yet reads as pending without being a gap', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.state.settleOk = false;
+      await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      expect(row.customerState).toBe('held');
+      expect(customerOf(await eventOf(row.id))).toBeNull();
+      expect(await instantReportingGaps()).toMatchObject({ missing: 0, wrong: 0 });
+      await prisma.meterEvent.update({ where: { eventId: `instant:${row.id}` }, data: { costMicros: BigInt(1), basis: 'estimated' } });
+      expect(await instantReportingGaps()).toMatchObject({ wrong: 1 });
+      await repairInstantReporting();
+      const fixed = await eventOf(row.id);
+      expect(Number(fixed?.costMicros)).toBe(7_000);
+      expect(fixed?.basis).toBe('measured');
+    });
+
+    it('a repair that picked a run while it was still held does not write "pending" over a charge the books confirmed in the meantime: the run is locked and read again first', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.state.settleOk = false;
+      await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      expect(row.customerState).toBe('held');
+      expect(customerOf(await eventOf(row.id))).toBeNull();
+      // The books confirm the charge while the repair waits for the run (the repair was handed the held row)
+      let locked!: () => void;
+      let release!: () => void;
+      const hasLock = new Promise<void>((resolve) => (locked = resolve));
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const settling = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 FROM instant_runs WHERE id = ${row.id} FOR UPDATE`;
+          locked();
+          await gate;
+          await tx.instantRun.update({ where: { id: row.id }, data: { customerState: 'charged', customerMicros: BigInt(6_000) } });
+          await tx.meterEvent.update({ where: { eventId: `instant:${row.id}` }, data: { detail: { ...((await eventOf(row.id))?.detail as object), customerMicros: 6_000 } } });
+        },
+        { timeout: 20_000 },
+      );
+      await hasLock;
+      const repair = reportInstantRun(row);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      release();
+      await settling;
+      const result = await repair;
+      expect(result).toBe('same');
+      expect(customerOf(await eventOf(row.id))).toBe(6_000);
+      const kept = (await eventOf(row.id))?.detail as { corrections?: unknown };
+      expect(kept.corrections).toBeUndefined();
+      expect(await instantReportingGaps()).toMatchObject({ missing: 0, wrong: 0, costWrong: 0 });
+    });
+
+    it('a pending run is counted on the day it finished (the day its event will have), by when it began only while it has not finished', async () => {
+      await setLimits();
+      const day = 24 * 60 * MIN;
+      const now = Date.now();
+      const base = (offset: number) => ({ from: new Date(now + offset - 60 * MIN), to: new Date(now + offset + 60 * MIN) });
+      const make = async (data: { createdAt: Date; finishedAt: Date | null }) =>
+        prisma.instantRun.create({
+          data: { runKey: `pending-${randomUUID()}`, botId: brick, personId: sara, toolSlug: 'EXA_SEARCH', toolkit: 'exa', argsHash: 'b'.repeat(64), priceVersion: 'v', topMicros: BigInt(TOP), holdMicros: BigInt(TOP), state: 'succeeded', customerState: 'held', providerState: 'pending', providerUserId: `u-${tag}`, ...data },
+        });
+      const before = await instantRunsUnsettled(base(0));
+      const beforeBeginDay = await instantRunsUnsettled(base(-day));
+      // Began the day before, finished now: counted in the span of its finish, and not in the span it began in
+      const across = await make({ createdAt: new Date(now - day), finishedAt: new Date(now) });
+      expect(await instantRunsUnsettled(base(0))).toBe(before + 1);
+      expect(await instantRunsUnsettled(base(-day))).toBe(beforeBeginDay);
+      await prisma.instantRun.delete({ where: { id: across.id } });
+      // Not finished: counted by when it began
+      const open = await make({ createdAt: new Date(now), finishedAt: null });
+      expect(await instantRunsUnsettled(base(0))).toBe(before + 1);
+      await prisma.instantRun.delete({ where: { id: open.id } });
+      expect(await instantRunsUnsettled(base(0))).toBe(before);
+    });
+
+    it('a run that failed and gave the hold back is a zero charge on its event, and a run the repair has nothing to say about is not a gap', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'boom', logId: 'log-g', chargeMicros: null });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const rowId = await runIdOf(id);
+      p.script.logs.set('log-g', p.line('u', 'failed', 3_000, 'log-g'));
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect(customerOf(await eventOf(rowId))).toBe(0);
+      expect(await instantReportingGaps()).toMatchObject({ missing: 0, wrong: 0 });
+    });
+
+    it('many gaps are mended a few at a time from where the last pass stopped, and one that keeps failing does not keep the others waiting', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      const allow = await refuseEvents();
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        for (let at = 0; at < 5; at++) await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      } finally {
+        quiet.mockRestore();
+        await allow();
+      }
+      expect(await instantReportingGaps()).toMatchObject({ missing: 5 });
+      const first = await repairInstantReporting({ limit: 2 });
+      expect(first).toMatchObject({ looked: 2, written: 2, remaining: { missing: 3 } });
+      // The place is kept in the database: the next pass goes on from it, with nothing held in memory
+      expect(await prisma.appSetting.findUnique({ where: { key: 'instant-reporting-cursor' } })).toMatchObject({ value: { after: expect.any(String) } });
+      const second = await repairInstantReporting({ limit: 2 });
+      expect(second).toMatchObject({ looked: 2, written: 2, remaining: { missing: 1 } });
+      const third = await repairInstantReporting({ limit: 2 });
+      expect(third).toMatchObject({ looked: 1, written: 1, remaining: { missing: 0, wrong: 0, oldestAt: null } });
+      expect(await prisma.meterEvent.count({ where: { personId: sara, eventId: { startsWith: 'instant:' } } })).toBe(5);
+      // After the end the place is the top again
+      expect(await prisma.appSetting.findUnique({ where: { key: 'instant-reporting-cursor' } })).toMatchObject({ value: { after: null } });
+      // A run whose event cannot be written stays a gap that is counted, with the age of the oldest, and the rest are still mended
+      await prisma.meterEvent.deleteMany({ where: { personId: sara } });
+      const refuse = await refuseEvents();
+      const quiet2 = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const stuck = await repairInstantReporting({ limit: 10 });
+        expect(stuck).toMatchObject({ looked: 5, written: 0, failed: 5, remaining: { missing: 5 } });
+        expect(stuck.remaining.oldestAt).toBeInstanceOf(Date);
+      } finally {
+        quiet2.mockRestore();
+        await refuse();
+      }
+      expect(await repairInstantReporting({ limit: 10 })).toMatchObject({ written: 5, remaining: { missing: 0 } });
     });
 
     it('applies the markup a super admin set to what the person pays, never past the hold', async () => {
