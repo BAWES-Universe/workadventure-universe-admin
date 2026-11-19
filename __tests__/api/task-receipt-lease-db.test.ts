@@ -20,7 +20,7 @@ import { resumeInstant, saveInstantLimits } from '@/lib/instant/state';
 import { forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
 import { instantRulesAndReceipts } from '@/lib/instant/rules-and-receipts';
 import { activityFor, closeReceipt, openReceipt, RECEIPT_LEASE_MS, renewReceipt, settleCheckingReceipts, settleReceipt, UNWATCHED_CHECKING_WAIT_MS } from '@/lib/task-receipts';
-import { OUTCOME_WORDS, actionWords } from '@/lib/task-receipt-words';
+import { NOTHING_TAKEN, OUTCOME_WORDS, actionWords, outcomeNote } from '@/lib/task-receipt-words';
 import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
@@ -219,7 +219,7 @@ run('receipts that always settle (O1)', () => {
       await settleCheckingReceipts(50, at(11));
       expect(await receipt('lost-2')).toMatchObject({ state: 'done', outcome: 'done', actions: [{ run: worked.id, label: 'exa', outcome: 'worked' }] });
       const [item] = await activityFor(sara);
-      expect(item).toMatchObject({ state: 'done', outcome: 'done', outcomeText: OUTCOME_WORDS.done, spentMicros: 9_000, actions: [{ label: 'exa', outcome: 'worked', text: actionWords('exa', 'worked') }] });
+      expect(item).toMatchObject({ state: 'done', outcome: 'done', outcomeText: OUTCOME_WORDS.done, spentMicros: 9_000, actions: [{ label: 'exa', outcome: 'worked', text: actionWords('exa', 'worked'), takenText: null }] });
     });
 
     it('a task whose run failed before the bot server was lost ends as refunded', async () => {
@@ -399,9 +399,10 @@ run('receipts that always settle (O1)', () => {
       const [item] = await activityFor(sara);
       expect(item).toMatchObject({ state: 'done', outcome: 'partial', outcomeText: OUTCOME_WORDS.partial, spentMicros: 9_000 });
       expect(item.actions).toEqual([
-        { label: 'gmail', outcome: 'worked', text: actionWords('gmail', 'worked') },
-        { label: 'exa', outcome: 'failed', text: actionWords('exa', 'failed') },
+        { label: 'gmail', outcome: 'worked', text: actionWords('gmail', 'worked'), takenText: null },
+        { label: 'exa', outcome: 'failed', text: actionWords('exa', 'failed'), takenText: NOTHING_TAKEN },
       ]);
+      expect(item.outcomeNote).toBe(outcomeNote('partial', item.actions));
       expect((await receipt('mixed-1')).actions).toEqual([
         { run: worked.id, label: 'gmail', outcome: 'worked' },
         { run: failed.id, label: 'exa', outcome: 'failed' },

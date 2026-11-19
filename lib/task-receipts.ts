@@ -23,7 +23,7 @@ import {
   type ReceiptOutcome,
   type ReceiptState,
 } from '@/lib/task-receipts-values';
-import { actionWords, OUTCOME_WORDS } from '@/lib/task-receipt-words';
+import { actionWords, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote } from '@/lib/task-receipt-words';
 import { isOver } from '@/lib/computer-values';
 
 /**
@@ -44,8 +44,10 @@ export interface ActivityItem {
   state: ReceiptState;
   /** How the task came to end: done (every action worked), partial, or refunded. `state` stays done for a partly done task, since something worked. */
   outcome: ReceiptOutcome;
-  /** The words for `outcome` (placeholder wording until mock M2: see `lib/task-receipt-words.ts`). */
+  /** The words for `outcome` ("Partly done"; see `lib/task-receipt-words.ts`). */
   outcomeText: string;
+  /** The sentence under a partly done receipt ("Two steps worked and one didn’t. Nothing was taken for the one that didn’t."); null otherwise. */
+  outcomeNote: string | null;
   /** Each Instant action of the task and how it ended. Empty for a task with none (a computer's). */
   actions: ActivityAction[];
   spentMicros: number | null;
@@ -60,8 +62,10 @@ export interface ActivityItem {
 export interface ActivityAction {
   label: string;
   outcome: ActionOutcome;
-  /** "gmail: worked" */
+  /** "Gmail · didn't work" */
   text: string;
+  /** "Nothing taken" for an action that did not work; null for one that did (what it took is on the receipt's own lines). */
+  takenText: string | null;
 }
 
 type ReceiptRow = NonNullable<Awaited<ReturnType<typeof prisma.taskReceipt.findUnique>>>;
@@ -477,7 +481,8 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
     // `state` stays done for a task that partly worked (something worked and may have been taken); a state put right at read time wins over the stored outcome
     outcome: header.state === 'refunded' ? 'refunded' : header.outcome === 'partial' ? 'partial' : 'done',
     outcomeText: OUTCOME_WORDS[header.state === 'refunded' ? 'refunded' : header.outcome === 'partial' ? 'partial' : 'done'],
-    actions: header.actions.map((action) => ({ label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome) })),
+    outcomeNote: header.state === 'refunded' ? null : outcomeNote(header.outcome ?? 'done', header.actions),
+    actions: header.actions.map((action) => ({ label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome), takenText: action.outcome === 'failed' ? NOTHING_TAKEN : null })),
     spentMicros: spentOf(header.state, header.chargedMicros, lines),
     category: categoryOf(header.category, events),
     payer: who.payer,
