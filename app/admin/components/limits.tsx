@@ -47,6 +47,8 @@ export interface Limit {
   note?: string;
   /** No "Other" box (a choice between fixed steps). */
   fixedSteps?: boolean;
+  /** A row that may be left empty on purpose: a card to empty it is offered, and choosing it hands -1 to the saver (which saves "empty"). */
+  clearable?: { label: string; meaning: string };
   /** A model that stops below this value (#673): where it stops, the line that says so, and the words on each choice above it. */
   cap?: ModelCap;
   /** The values it can be set to, said on its sheet; Other outside them is turned down there. */
@@ -119,20 +121,21 @@ export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }
 /** The choices for one limit: radio cards with what each means, the recommended one marked, and Other. */
 export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone: (value: number) => Promise<void> | void; onCancel: () => void }) {
   const known = !limit.unset && limit.options.some((option) => option.value === limit.value);
-  const [picked, setPicked] = useState<number | 'other'>(known ? limit.value : 'other');
+  const [picked, setPicked] = useState<number | 'other' | 'clear'>(limit.unset && limit.clearable ? 'clear' : known ? limit.value : 'other');
   const [other, setOther] = useState(known || limit.unset ? '' : String(limit.value));
   const [saving, setSaving] = useState(false);
   // What was typed is read as it is, with commas and spaces as thousands marks: "-50" or "1e2" is refused, not turned into 50 or 12
   const typed = other.replace(/[,\s]/g, '');
-  const value = picked === 'other' ? (typed === '' ? 0 : /^\d+(\.\d+)?$/.test(typed) ? Number(typed) : Number.NaN) : picked;
+  const value = picked === 'clear' ? -1 : picked === 'other' ? (typed === '' ? 0 : /^\d+(\.\d+)?$/.test(typed) ? Number(typed) : Number.NaN) : picked;
   const range = limit.range;
   // A row that can't go above another says the lower of the two as its most
   const most = range ? Math.min(range.max, limit.atMost?.value ?? range.max) : 0;
   const rangeLine = range ? `Between ${range.min.toLocaleString('en')} and ${most.toLocaleString('en')} ${limit.unit}.` : null;
   const outOfRange = picked === 'other' && other.trim() !== '' && !!range && (Number.isNaN(value) || value < range.min || value > range.max || (!!range.whole && !Number.isInteger(value)));
   const aboveOther = !!limit.atMost && value > limit.atMost.value;
-  // "Never" (0) is a choice of its own; an empty or 0 "Other" is not
-  const ready = (picked === 'other' ? value > 0 : true) && !outOfRange && !aboveOther;
+  // "Never" (0) is a choice of its own; an empty "Other" is never a choice, and a typed 0 is one only on a row whose range starts at 0
+  const zeroAllowed = !!range && range.min <= 0;
+  const ready = (picked === 'other' ? typed !== '' && !Number.isNaN(value) && (value > 0 || (zeroAllowed && value === 0)) : true) && !outOfRange && !aboveOther;
   return (
     <div className="grid gap-4">
       {limit.cap?.line && (
@@ -158,6 +161,9 @@ export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone
             description={limit.cap && option.value > limit.cap.at ? `${option.meaning} ${limit.cap.short}` : option.meaning}
           />
         ))}
+        {limit.clearable && (
+          <PickCard role="radio" picked={picked === 'clear'} onClick={() => setPicked('clear')} indicator={<Radio checked={picked === 'clear'} />} title={limit.clearable.label} description={limit.clearable.meaning} />
+        )}
         {!limit.fixedSteps && (
           <>
             <PickCard role="radio" picked={picked === 'other'} onClick={() => setPicked('other')} indicator={<Radio checked={picked === 'other'} />} title="Other" />
@@ -637,6 +643,19 @@ export function brickLimits(values: BrickLimits): Limit[] {
       ],
     },
     {
+      id: 'metExpiresDays',
+      label: 'Days someone who only met a Brick can still start a message to it',
+      hint: 'Meeting a Brick, in a place it visits or lives in, lets a person message it afterwards, wherever it is. Once they have written to it, that stays until its owner or a host changes it, whatever this says.',
+      unit: 'days',
+      value: values.metExpiresDays,
+      recommended: recommended.metExpiresDays,
+      options: [
+        { value: 7, label: '7 days', meaning: 'Only a fresh meeting counts.' },
+        { value: 30, label: '30 days', meaning: 'A month to write back.' },
+        { value: 90, label: '90 days', meaning: 'A season to write back.' },
+      ],
+    },
+    {
       id: 'itemsPerPerson',
       label: 'Goals and tasks one person can have going',
       hint: 'Reminders, schedules, watches and goals together, paused ones included. Done ones do not count.',
@@ -1031,6 +1050,32 @@ export function brickLimits(values: BrickLimits): Limit[] {
         { value: 20, label: '20 templates', meaning: 'For a busy shelf.' },
       ],
     },
+    {
+      id: 'computerFiles',
+      label: 'Files a finished computer job hands over',
+      hint: 'When a job on a Brick’s computer finishes, Brick puts the files it made in the chat as cards, newest first. This is how many. Any others are named in the message and stay on the computer. 0 hands over none.',
+      unit: 'files',
+      value: values.computerFiles,
+      recommended: recommended.computerFiles,
+      options: [
+        { value: 1, label: '1 file', meaning: 'Only the newest.' },
+        { value: 5, label: '5 files', meaning: 'Enough for most jobs.' },
+        { value: 10, label: '10 files', meaning: 'For jobs that make a few.' },
+      ],
+    },
+    {
+      id: 'computerFileMb',
+      label: 'Largest file a computer job hands over',
+      hint: 'A file bigger than this is not copied into the chat. Brick names it in the message and it stays on the computer. Every file handed over is kept in Universe in Files, so this also limits storage. The chat takes up to 50 MB.',
+      unit: 'megabytes',
+      value: values.computerFileMb,
+      recommended: recommended.computerFileMb,
+      options: [
+        { value: 10, label: '10 MB', meaning: 'Documents and pictures.' },
+        { value: 25, label: '25 MB', meaning: 'Most receipts, reports and slides.' },
+        { value: 50, label: '50 MB', meaning: 'The most the chat takes; slower to hand over.' },
+      ],
+    },
   ], LIMIT_RANGES.bricks);
 }
 
@@ -1133,6 +1178,62 @@ export function instantLimits(views: InstantLimitViews): Limit[] {
     };
   });
 }
+
+
+/**
+ * The code job limits for Apps (the bounded Workbench): read from /api/admin/workbench, which says each limit's words, range and value.
+ * Sizes are held in bytes and shown in MB (the code itself in KB), money in millionths of a dollar and shown in dollars. Nothing is built in here.
+ */
+export type CodeJobLimitView = {
+  value: number | null;
+  range: { min: number; max: number };
+  recommended: number | null;
+  label: string;
+  help: string;
+  unit: 'seconds' | 'count' | 'bytes' | 'micros' | 'days';
+  required: boolean;
+};
+export type CodeJobLimitViews = Record<string, CodeJobLimitView>;
+
+const CODE_JOB_COUNT_WORDS: Record<string, string> = { maxCells: 'runs', maxOutputFiles: 'files', maxResultChars: 'characters', maxReads: 'reads', atOncePerPerson: 'jobs', atOnceAll: 'jobs', jobsPerPersonPerDay: 'jobs' };
+const codeJobScale = (key: string, unit: CodeJobLimitView['unit']) => (unit === 'micros' ? 1_000_000 : unit === 'bytes' ? (key === 'maxCodeBytes' || key === 'maxAnswerBytes' ? 1024 : 1_048_576) : 1);
+const codeJobUnit = (key: string, unit: CodeJobLimitView['unit']) => (unit === 'micros' ? 'dollars' : unit === 'bytes' ? (key === 'maxCodeBytes' || key === 'maxAnswerBytes' ? 'KB' : 'MB') : unit === 'count' ? (CODE_JOB_COUNT_WORDS[key] ?? 'times') : unit);
+
+/** The limits of an answer from /api/admin/workbench, or null when it is not that answer (each one needs its words and range). */
+export function readCodeJobLimits(answer: unknown): CodeJobLimitViews | null {
+  const limits = (answer as { limits?: unknown } | null)?.limits;
+  if (!limits || typeof limits !== 'object') return null;
+  const entries = Object.entries(limits as Record<string, Partial<CodeJobLimitView>>);
+  const valid = entries.length > 0 && entries.every(([, view]) => view && typeof view.label === 'string' && typeof view.help === 'string' && view.range && typeof view.range.min === 'number' && typeof view.range.max === 'number' && ['seconds', 'count', 'bytes', 'micros', 'days'].includes(view.unit as string));
+  return valid ? (limits as CodeJobLimitViews) : null;
+}
+
+export function codeJobLimits(views: CodeJobLimitViews): Limit[] {
+  return Object.entries(views).map(([key, view]) => {
+    const scale = codeJobScale(key, view.unit);
+    const unset = view.value === null;
+    return {
+      id: key,
+      label: view.label,
+      hint: view.help,
+      unit: codeJobUnit(key, view.unit),
+      value: unset ? 0 : (view.value as number) / scale,
+      recommended: view.recommended === null ? -1 : view.recommended / scale,
+      unset,
+      options: [],
+      note: unset ? (view.required ? 'Not set yet. Code jobs do not run until you set it.' : key === 'maxAnswerBytes' ? 'Not set yet. Every App answer is passed on whole.' : 'Not set yet. Printed results are kept until the person deletes them.') : undefined,
+      range: { min: view.range.min / scale, max: view.range.max / scale },
+      // The two that may be empty on purpose can be emptied again from here
+      ...(CODE_JOB_EMPTYABLE[key] ? { clearable: CODE_JOB_EMPTYABLE[key] } : {}),
+    };
+  });
+}
+
+/** The code job Limits that may be left empty, and what empty means for each. */
+const CODE_JOB_EMPTYABLE: Record<string, { label: string; meaning: string } | undefined> = {
+  keepDays: { label: 'Not set', meaning: 'Printed results are kept until the person deletes them.' },
+  maxAnswerBytes: { label: 'Not set', meaning: 'Every App answer is passed on whole, whatever its size.' },
+};
 
 /** The id without its maker's prefix: "openai/gpt-4o-mini" is "gpt-4o-mini". */
 const shortModel = (id: string) => (id.includes('/') ? id.slice(id.indexOf('/') + 1) : id);
@@ -1484,6 +1585,8 @@ export function UniverseAiLimits() {
   const [allowanceFailed, setAllowanceFailed] = useState(false);
   // Instant Apps' own limits come from their own route; when it is not there (or not readable) the group is simply not shown
   const [instant, setInstant] = useState<InstantLimitViews | null>(null);
+  // Code jobs' own limits, the same way
+  const [codeJobs, setCodeJobs] = useState<CodeJobLimitViews | null>(null);
 
   async function load() {
     setFailed(false);
@@ -1536,11 +1639,24 @@ export function UniverseAiLimits() {
     }
   }
 
+  async function loadCodeJobs() {
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/workbench');
+      if (!response.ok) return;
+      const views = readCodeJobLimits(await response.json());
+      if (views) setCodeJobs(views);
+    } catch {
+      // Not shown until it can be read
+    }
+  }
+
   useEffect(() => {
     load();
     loadVoice();
     loadAllowance();
     loadInstant();
+    loadCodeJobs();
   }, []);
 
   async function saveAllowance(dollars: number): Promise<boolean> {
@@ -1576,6 +1692,21 @@ export function UniverseAiLimits() {
     }
     const views = readInstantLimits(result.data);
     if (views) setInstant(views);
+    addToast({ description: 'Saved', variant: 'success', duration: 2000 });
+    return true;
+  }
+
+  async function saveCodeJobs(id: string, value: number): Promise<boolean> {
+    const view = codeJobs?.[id];
+    if (!view) return false;
+    // A negative value is the "Not set" card: empty is saved as null
+    const result = await sendLimits('/api/admin/workbench', { [id]: value < 0 ? null : Math.round(value * codeJobScale(id, view.unit)) });
+    if (!result.ok) {
+      addToast({ description: result.error, variant: 'error' });
+      return false;
+    }
+    const views = readCodeJobLimits(result.data);
+    if (views) setCodeJobs(views);
     addToast({ description: 'Saved', variant: 'success', duration: 2000 });
     return true;
   }
@@ -1643,6 +1774,7 @@ export function UniverseAiLimits() {
             onChange={(id, value) => (id === COMPUTER_ALLOWANCE_ID ? saveAllowance(value) : save({ bricks: { [id]: value } }))}
           />
           {instant && <LimitGroup title="Instant Apps" note="Apps that work without connecting anything. Universe pays for each run, so each limit is yours to set. Instant Apps do not run until the required ones have a number." limits={instantLimits(instant)} onChange={saveInstant} />}
+          {codeJobs && <LimitGroup title="Apps: code jobs" note="Short pieces of code an App's Brick may run in a separate, temporary workspace with no access to anyone's accounts. They are on by default, with these starting values; change any of them here. A job stops at its time and size limits, whatever it was doing." limits={codeJobLimits(codeJobs)} onChange={saveCodeJobs} />}
           {allowance && <LimitGroup title="Credit and give-backs" note="What Universe funds and returns. None of these has a built-in value: set each one yourself." limits={moneyLimits(money)} onChange={saveMoney} />}
           {voiceFailed ? (
             <LoadError label="the voice limits" retry={loadVoice} />

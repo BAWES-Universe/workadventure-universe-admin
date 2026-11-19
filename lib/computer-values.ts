@@ -62,3 +62,13 @@ export function costOfSeconds(seconds: number, microsPerMinute: number | null): 
 export function roomFor(minutes: number, microsPerMinute: number | null): number {
   return Math.max(1, Math.ceil(minutes * (microsPerMinute ?? 0)));
 }
+
+/**
+ * The endings Brick never tells the person about, because they just did it themselves: their own Stop, the computer turned off, the Brick
+ * deleted. Every other ending is said once in their chat with the Brick (the report back).
+ */
+export const silentEnding = (endedBy: string | null): boolean => endedBy === 'person' || endedBy === 'off' || endedBy === 'deleted';
+
+/** Why a report can never be delivered: nobody to deliver it to, not allowed to, the conversation it began in is gone, or the chat turned it down. */
+export const UNDELIVERABLE_WHY = ['no_chat', 'not_allowed', 'origin_gone', 'refused'] as const;
+export type UndeliverableWhy = (typeof UNDELIVERABLE_WHY)[number];

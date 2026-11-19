@@ -153,7 +153,7 @@ run('goals and tasks screens, in a real database', () => {
     expect(page.runs[1]).toMatchObject({ error: 'The site did not answer' });
     expect(page.next).toBeNull();
     // Rows only: nothing that was said anywhere
-    expect(Object.keys(page.runs[0]).sort()).toEqual(['brickId', 'dueAt', 'error', 'finishedAt', 'fresh', 'itemId', 'kind', 'late', 'outcome', 'result', 'runId', 'state', 'words']);
+    expect(Object.keys(page.runs[0]).sort()).toEqual(['brickId', 'dueAt', 'error', 'finishedAt', 'fresh', 'itemId', 'kind', 'late', 'manual', 'outcome', 'result', 'runId', 'state', 'words']);
     expect((await did(req(`/api/bricks/${eli.brickId}/did?before=soon`), idParams(eli.brickId))).status).toBe(400);
   });
 

@@ -18,6 +18,9 @@ const bodySchema = z
     writes: z.boolean().optional(),
     // The run of a goal or task that asks for the computer (game #2002): a run handed out again finds its job and never starts a second
     runId: z.string().min(1).max(36).optional(),
+    // The conversation the job began in. Only a direct chat can start computer work (a Brick standing in a room never uses its owner's computer for anyone), so
+    // anything but `dm` is refused. The result goes back to that conversation and nowhere else.
+    origin: z.object({ kind: z.literal('dm'), ref: z.string().min(1).max(255) }).strict().optional(),
   })
   .strict();
 
@@ -48,7 +51,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 }
 
 /**
- * POST /api/bots/:id/computer-jobs { userId, isGuest?, title, writes?, runId? }
+ * POST /api/bots/:id/computer-jobs { userId, isGuest?, title, writes?, runId?, origin? }
  * The bot server starts a job on a Brick's computer (game #2000), after it chose the computer as the way (an app that can do it for
  * less wakes no computer: that choice is made before this call, and this call is the only thing that can make or wake a machine).
  * Only the Brick's owner starts work on it: whoever else is talking to the Brick gets `not_owner`. Answers with the job and why
@@ -74,7 +77,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // A rule the person said in chat ("no more than $1 a month", "only my own accounts") is held before a job exists, so Brick can say so at once
     const ruled = await ownerSpendAllowed(id, person.personId, 'computer', new Date(), parsed.data.runId ?? null);
     if (!ruled.ok) return NextResponse.json({ ok: false, reason: 'rule', rule: { id: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words } });
-    const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, brief: parsed.data.brief, writes: parsed.data.writes, runId: parsed.data.runId });
+    const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, brief: parsed.data.brief, writes: parsed.data.writes, runId: parsed.data.runId, origin: parsed.data.origin ?? null });
     if (started.ok) return NextResponse.json({ ok: true, job: started.job, restoredFrom: started.restoredFrom });
     // A rule that stopped it on the try itself (the pre-check only asks for a first millionth): the same shape as above, with the rule's words
     if (started.reason === 'rule') return NextResponse.json({ ok: false, reason: 'rule', rule: { id: null, why: null, leftMicros: null, words: started.words } });

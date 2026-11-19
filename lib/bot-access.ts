@@ -7,7 +7,9 @@ import { findUserByIdentifier } from '@/lib/user-identifier';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { bansCoveringWorld } from '@/lib/moderation';
 import { ownsBrick } from '@/lib/brick';
-import { whereIsBrick } from '@/lib/brick-visit';
+import { whereIsBrick, type Place } from '@/lib/brick-visit';
+import { isTakenOff, rememberMet, standingMeeting } from '@/lib/brick-met';
+import * as Sentry from '@sentry/nextjs';
 import { canManageThisBot } from '@/lib/bot-permissions';
 
 /**
@@ -29,7 +31,14 @@ import { canManageThisBot } from '@/lib/bot-permissions';
  * there, by the roles of that place, and for nothing else: nobody summons it, has it change things or delete or send for
  * them. Nothing of its owner's is used for them (that is the bot server's rule, F4.1). No rule of the owner's, no
  * Private bot and no "its creator passes" apply, and a super admin or the universe's owner has no more say than any
- * member: it is not their bot. Whose key answers them is not decided here but in lib/bot-ai-credentials.ts: where the
+ * member: it is not their bot.
+ *
+ * Meeting it is remembered (lib/brick-met.ts, game #2005 "People who met", Khalid 5 Nov): a person the Brick answered nearby or in
+ * a direct message may keep sending it direct messages after it has left, because a direct message depends on what they are
+ * allowed and never on where the Brick or they are. The roles and bans of the place they met it, their access to its room and
+ * the Brick being on still decide each message, and what ends it is a decision: its owner taking them off (`revokeMet`), a
+ * ban or the roles there, the Brick going off or being deleted, or, for someone who never wrote, the days Limits give.
+ * Whose key answers them is not decided here but in lib/bot-ai-credentials.ts: where the
  * owner's own key runs it, others are served it only where it is lent to the place, and Universe AI otherwise, so a Brick
  * is not refused here for its key; only when nothing can answer do they get the line that says so.
  */
@@ -172,6 +181,7 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
       roomId: true,
       ownerId: true,
       deletedAt: true,
+      enabled: true,
       privateBot: true,
       refusalReply: true,
       accessRules: { select: { roleId: true, userId: true, allow: true, deny: true } },
@@ -210,7 +220,9 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
 
   // A visiting Brick, and the person who is not its owner talking to it (game #2005): decided below by the roles of the
   // place it visits, never by anything of its owner's
-  let visitor: { place: NonNullable<Awaited<ReturnType<typeof whereIsBrick>>>['place'] } | null = null;
+  let visitor: { place: Omit<Place, 'roomUrl'>; met: boolean } | null = null;
+  // Someone who met the Brick and writes to it where it no longer is: no place to ask but the one they met it in, if it still exists
+  let metElsewhere = false;
   if (!bot.room) {
     // A Brick: its owner, signed in, and nobody else. No world to be banned from, and no roles or rules to read.
     if ((action === 'dm' || action === 'call') && !signedIn) {
@@ -223,11 +235,40 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
     // Only a direct message may come from anywhere, as with any bot.
     const roomNamed = action === 'dm' || !!request.roomUrl;
     const here = (action === 'chat' || action === 'dm') && bot.deletedAt === null && roomNamed ? await whereIsBrick(bot.id, request.roomUrl ?? null) : null;
-    if (!here) {
+    // The owner took this person off its direct messages: that holds wherever the Brick is, nearby chat is still the roles' to decide
+    const takenOff = action === 'dm' && !!user && bot.deletedAt === null ? await isTakenOff(bot.id, user.id) : false;
+    if (takenOff) {
       const answer = refusal('not_allowed', action, bot.name);
       return named ? { ...answer, person: named } : answer;
     }
-    visitor = { place: here.place };
+    if (here) {
+      visitor = { place: here.place, met: false };
+    } else if (action === 'dm' && user && bot.deletedAt === null && bot.enabled) {
+      // Not standing anywhere other people can reach it: a direct message still depends on the person's standing with it, not
+      // on where it is. Someone who met it keeps writing to it until a decision says otherwise
+      const meeting = await standingMeeting(bot.id, user.id);
+      if (meeting) {
+        if (meeting.place) visitor = { place: meeting.place, met: true };
+        else metElsewhere = true;
+      }
+    }
+    if (!visitor && !metElsewhere) {
+      const answer = refusal('not_allowed', action, bot.name);
+      return named ? { ...answer, person: named } : answer;
+    }
+  }
+  // The room they met it in is gone, so no world's roles or bans are left to ask: only a ban from everywhere still applies. The owner's
+  // say, the Brick being on and the sign-in above have passed
+  if (metElsewhere) {
+    const banned = banUserId
+      ? await prisma.ban.findFirst({
+          where: { isActive: true, userId: banUserId, worldId: null, universeId: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+          select: { id: true },
+        })
+      : null;
+    const answer = banned ? refusal('banned', action, bot.name) : ALLOWED;
+    if (!banned && user) await rememberMet({ botId: bot.id, userId: user.id, roomId: null, wrote: true, onlyWrote: true }).catch(() => undefined);
+    return named ? { ...answer, person: named } : answer;
   }
   const place = bot.room ?? visitor!.place.room;
   const { world } = place;
@@ -304,6 +345,16 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
     }
   } else {
     answer = decide(action, passes);
+  }
+  // Met it: the Brick answers someone who is not its owner nearby or in a direct message, so they may keep writing to it
+  // when it is gone (lib/brick-met.ts). Only for a person Orbit knows, and never for a person whose answer was no
+  if (visitor && answer.allowed && user && (action === 'chat' || action === 'dm')) {
+    const meeting = { botId: bot.id, userId: user.id, roomId: visitor.place.roomId, wrote: action === 'dm' };
+    // A message that is itself the continuation of a conversation is not a new meeting: it only makes it a written one
+    await rememberMet(visitor.met ? { ...meeting, onlyWrote: true } : meeting).catch((error: unknown) => {
+      // A person who was allowed is not refused because this could not be written; the next message writes it
+      Sentry.captureException(error, { tags: { area: 'bot-access-met' } });
+    });
   }
   return named ? { ...answer, person: named } : answer;
 }

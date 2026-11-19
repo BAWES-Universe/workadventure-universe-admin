@@ -9,6 +9,9 @@ import { personKeyOf } from '@/lib/meter-values';
 import { priceCall } from '@/lib/composio-rates';
 import { readComposioBilling } from '@/lib/composio-billing';
 import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
+import { linkJson } from '@/lib/app-adapter/link-json';
+import { answerCodeJobCall, boundAppAnswer, isCodeJobTool, sandboxRefusal, withCodeJobTools } from '@/lib/workbench/link';
+import { touchesSandbox } from '@/lib/workbench/values';
 import { getGitHubApp } from '@/lib/github/app';
 import { routeForRun, type RunRoute } from '@/lib/app-routes';
 import type { OwnAppVersion } from '@/lib/app-routes/own-versions';
@@ -201,6 +204,8 @@ export type ReadyMadeLinkOutcome =
   | { status: 'done'; answer: LinkAnswer }
   | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' | 'refused' };
 
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
 /** What may be sent to an app link through Orbit: opening a session, listing tools, and running one (which is counted like a use). */
 const LINK_METHODS = new Set(['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
 
@@ -229,17 +234,41 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
   if (method === 'tools/call') {
     const params = input.message.params && typeof input.message.params === 'object' ? (input.message.params as Record<string, unknown>) : {};
     if (typeof params.name !== 'string' || !params.name || !input.callId) return { status: 'refused' };
+    // Code runs only as a code job (lib/workbench): Orbit's own three tools are answered here, and the provider's own sandbox tools, alone or
+    // inside a batch, are refused on every link (a run sent that way has no deadline, no Limits and no cancel, and could reach the person's accounts).
+    // Neither is counted here: a job is counted once, when it ends, and a refusal runs nothing.
+    if (isCodeJobTool(params.name)) {
+      const answer = await answerCodeJobCall({
+        botId: input.botId,
+        personId: input.ownerId,
+        connectionId: input.connectionId,
+        toolkit,
+        name: params.name,
+        args: params.arguments,
+        callId: input.callId,
+        messageId: input.message.id,
+        read: async ({ tool, arguments: args, callId }) => {
+          const used = await runOneTool({ botId: input.botId, connectionId: input.connectionId, ownerId: input.ownerId, tool, arguments: args, callId });
+          return used.status === 'done' ? { ok: used.ok, data: used.data } : null;
+        },
+      });
+      return { status: 'done', answer };
+    }
+    if (touchesSandbox(params.name, params.arguments)) return { status: 'done', answer: sandboxRefusal(input.message.id) };
     callParams = { name: params.name, arguments: params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments) ? (params.arguments as Record<string, unknown>) : {} };
     written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit, tool: params.name, arguments: params.arguments, callId: input.callId, route });
     if (!written.recorded) return { status: 'already_asked' };
   }
   try {
-    const answer =
+    const sent =
       route.provider === 'universe' && route.own
         ? await answerFromOwnVersion(route.own, input.message, callParams, { person: input.ownerId, providerAccountId: connection.providerAccountId, callId: input.callId ?? '' })
         : await adapter.callLink({ url: connection.serverUrl, message: input.message, sessionId: input.sessionId });
+    // The list of tools: the provider's sandbox tools come out (a link made before code jobs may still list them) and the code job tools go in
+    const answer = method === 'tools/list' ? await withCodeJobTools(sent, input.message.id, !(isObject(input.message.params) && typeof (input.message.params as { cursor?: unknown }).cursor === 'string')) : sent;
     if (written) await recordOutcome(written.eventId, toolkit, written.provider, answer.status < 400 && !rpcError(answer.body, typeof input.message.id === 'number' || typeof input.message.id === 'string' ? input.message.id : undefined) && !/"isError"\s*:\s*true/.test(answer.body));
-    return { status: 'done', answer };
+    // A big answer is never cut and never passed on half: the Brick is told it ran, how big it was, and what to do (already counted above)
+    return { status: 'done', answer: callParams ? await boundAppAnswer(answer, input.message.id, callParams.name, callParams.arguments) : answer };
   } catch (error) {
     console.error('[ReadyMade] Link failed:', error instanceof AdapterError ? error.message : error instanceof Error ? error.message : 'unknown');
     if (written) await recordOutcome(written.eventId, toolkit, written.provider, false);
@@ -331,33 +360,6 @@ export interface ReadyMadeTestResult {
   errorBody?: string | null;
 }
 
-/** The JSON of a link's answer, which may be plain JSON or an event stream holding it. */
-function linkJson(body: string, id?: number | string): Record<string, unknown> | null {
-  const attempt = (text: string) => {
-    try {
-      const value = JSON.parse(text);
-      return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-    } catch {
-      return null;
-    }
-  };
-  // An answer is for the question asked: one that carries another id is somebody else's, never taken for this one. (A reply with no id,
-  // or a null one, is how a server answers a request it could not read, and is kept.)
-  const answers = (message: Record<string, unknown>) => id === undefined || message.id === undefined || message.id === null || String(message.id) === String(id);
-  const whole = attempt(body.trim());
-  if (whole) return answers(whole) ? whole : null;
-  // An event stream may carry notifications before the answer: the message that answers the question asked (its id) is the one wanted
-  const messages: Record<string, unknown>[] = [];
-  for (const line of body.split('\n')) {
-    if (line.startsWith('data:')) {
-      const found = attempt(line.slice(5).trim());
-      if (found) messages.push(found);
-    }
-  }
-  if (id === undefined) return messages[0] ?? null;
-  return messages.find((message) => message.id !== undefined && message.id !== null && String(message.id) === String(id)) ?? messages.find((message) => (message.id === undefined || message.id === null) && 'error' in message) ?? null;
-}
-
 /** The text of a JSON-RPC error carried in an answer that came with a 2xx status, or null when there is none. */
 function rpcError(body: string, id?: number | string): string | null {
   const error = linkJson(body, id)?.error;
@@ -431,3 +433,6 @@ export async function testReadyMade(connection: { id: string; source: string; se
     return failed('The app could not be reached.');
   }
 }
+
+/** `useReadyMade` under a name that does not read as a React hook, for the places that call it from a plain function. */
+const runOneTool = useReadyMade;
