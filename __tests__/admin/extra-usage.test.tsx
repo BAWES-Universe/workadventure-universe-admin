@@ -23,6 +23,7 @@ const usage = (over: Partial<PersonUsage> = {}): PersonUsage => ({
   bricks: 2,
   computerMonthMicros: 3_100_000,
   allowanceMicros: 5_000_000,
+  leftMicros: 1_900_000,
   noLimit: false,
   allowanceSet: true,
   keptBytes: 1_200_000_000,
@@ -68,28 +69,28 @@ describe('what a person uses', () => {
     render(<ExtraUsage userId="sara" name="Sara" />);
     expect(await screen.findByText('Usage')).toBeTruthy();
     expect(screen.getByText('Chat and voice · $6.12 in the last 7 days · 2 Bricks')).toBeTruthy();
-    expect(screen.getByText('Computer · $3.10 of $5.00 this month · 1.2 GB kept')).toBeTruthy();
+    expect(screen.getByText('Computer · $3.10 this month, $1.90 left of $5.00 · 1.2 GB kept')).toBeTruthy();
     expect(screen.getByText('On the usual allowance, like every member.')).toBeTruthy();
   });
 
   it('counts against the raised allowance while extra usage runs, and says no limit when it has none', async () => {
-    answer(usage({ allowanceMicros: 25_000_000, extra: running() }));
+    answer(usage({ allowanceMicros: 25_000_000, leftMicros: 21_900_000, extra: running() }));
     const { unmount } = render(<ExtraUsage userId="sara" name="Sara" />);
-    expect(await screen.findByText('Computer · $3.10 of $25.00 this month · 1.2 GB kept')).toBeTruthy();
+    expect(await screen.findByText('Computer · $3.10 this month, $21.90 left of $25.00 · 1.2 GB kept')).toBeTruthy();
     unmount();
-    answer(usage({ allowanceMicros: null, noLimit: true, extra: running({ multiplier: null, noLimit: true }) }));
+    answer(usage({ allowanceMicros: null, leftMicros: null, noLimit: true, extra: running({ multiplier: null, noLimit: true }) }));
     render(<ExtraUsage userId="sara" name="Sara" />);
     expect(await screen.findByText('Computer · $3.10 this month, no limit · 1.2 GB kept')).toBeTruthy();
   });
 
   it('says no limit first when a no-limit grant runs and the usual allowance is not set', async () => {
-    answer(usage({ allowanceSet: false, allowanceMicros: null, noLimit: true, extra: running({ multiplier: null, noLimit: true }) }));
+    answer(usage({ allowanceSet: false, allowanceMicros: null, leftMicros: null, noLimit: true, extra: running({ multiplier: null, noLimit: true }) }));
     render(<ExtraUsage userId="sara" name="Sara" />);
     expect(await screen.findByText('Computer · $3.10 this month, no limit · 1.2 GB kept')).toBeTruthy();
   });
 
   it('shows no allowance to count against until one is set', async () => {
-    answer(usage({ allowanceSet: false, allowanceMicros: null }));
+    answer(usage({ allowanceSet: false, allowanceMicros: null, leftMicros: null }));
     render(<ExtraUsage userId="sara" name="Sara" />);
     expect(await screen.findByText('Computer · $3.10 this month · 1.2 GB kept')).toBeTruthy();
   });

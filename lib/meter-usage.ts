@@ -139,13 +139,22 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
   try {
   if (await usesComputer(personId)) {
     const settings = await getMeterSettings();
-    const allowance = await memberAllowance(personId, now, settings);
+    // The allowance, the grant it was worked from and the room held are read from one snapshot, so an admin changing a grant between
+    // the reads can never leave the bar with a total from one grant and a figure left from another
+    const { allowance, grant, held } = await prisma.$transaction(
+      async (tx) => {
+        const grant = await runningExtra(personId, now, tx);
+        const allowance = await memberAllowance(personId, now, settings, tx);
+        const held = !allowance || allowance.unlimited ? 0 : await heldRoom(personId, now, tx);
+        return { grant, allowance, held };
+      },
+      { isolationLevel: 'RepeatableRead' },
+    );
     const asked = (await openRequestFor(personId, 'computer')) !== null;
     if (allowance && settings.memberAllowanceMicros) {
       // Against what they have now: the usual, or the raised one while extra usage runs, so the bar is never more than full
-      const total = settings.memberAllowanceMicros * (extra?.multiplier ?? 1);
+      const total = settings.memberAllowanceMicros * (grant?.multiplier ?? 1);
       // What is left is what new work can take: the allowance less everything held, as admission counts it (a hold that ran out and is not yet settled still counts)
-      const held = allowance.unlimited ? 0 : await heldRoom(personId, now);
       const available = allowance.unlimited ? 0 : Math.max(0, (allowance.leftMicros ?? 0) - held);
       const left = allowance.unlimited ? 1 : Math.min(1, Math.max(0, available / total));
       const words = allowance.unlimited ? 'plenty' : usageWords(left);
