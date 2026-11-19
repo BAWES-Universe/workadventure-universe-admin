@@ -267,6 +267,38 @@ describe('a paying page on the public share link', () => {
     again.host.destroy();
   });
 
+  it('keeps the same recovery code when the browser’s storage refuses to be read or written', async () => {
+    jest.useFakeTimers();
+    const frame = { postMessage: jest.fn() } as unknown as Window;
+    const bodies: Record<string, unknown>[] = [];
+    let n = 0;
+    const host = createPagePaymentsHost({
+      artifactId: ART,
+      frame: () => frame,
+      fetch: (async (_url: string, init?: RequestInit) => {
+        bodies.push(init?.body ? JSON.parse(init.body as string) : {});
+        return { ok: true, status: 200, json: async () => ({ status: 'none', testPayment: false, orderId: null, buyer: 'guest' }) } as Response;
+      }) as unknown as typeof fetch,
+      storage: {
+        getItem: () => {
+          throw new Error('blocked');
+        },
+        setItem: () => {
+          throw new Error('blocked');
+        },
+      },
+      randomId: (length) => `${'q'.repeat(length - String(++n).length)}${n}`,
+      origin: ORIGIN,
+    });
+    host.onMessage({ source: frame, data: { universe: 'use-app', app: 'shop', request: 'r1', restore: true } });
+    await flush();
+    host.onMessage({ source: frame, data: { universe: 'use-app', app: 'shop', request: 'r2', restore: true } });
+    await flush();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1].recoveryCode).toBe(bodies[0].recoveryCode);
+    host.destroy();
+  });
+
   it('offers no receipt link to a signed-in buyer, who has an account to get back to', async () => {
     const { tap, lines, host } = setup((call) => (call.init?.method === 'POST' ? { body: { ...started, buyer: 'account' } } : { body: { status: 'checking' } }));
     tap({ request: 'a' });
