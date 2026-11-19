@@ -123,6 +123,8 @@ export interface PagePaymentsHostOptions {
   pageUrl?: string;
   /** Where tabs take turns when the browser has no Web Locks (IndexedDB: a transaction is atomic across tabs); none means this browser has no such place. */
   indexedDB?: Pick<IDBFactory, 'open'> | null;
+  /** This tab's own storage (sessionStorage: it survives a reload of the tab and is never shared with another tab). Only a code that nothing could coordinate lives here. */
+  tabStorage?: Pick<Storage, 'getItem' | 'setItem'> | null;
 }
 
 export interface PagePaymentsHost {
@@ -177,6 +179,8 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   const storageKey = `universe-pay-recovery:${options.artifactId}`;
   /** The code of a receipt link, kept apart from the browser's own: it only ever finds the purchases made under it, and no new purchase is made under it. */
   const receiptKey = `universe-pay-receipt:${options.artifactId}`;
+  /** Where a tab keeps the code of its own when nothing could make tabs take turns (this tab's storage only, so a reload of the tab finds it). */
+  const tabKey = `universe-pay-tab:${options.artifactId}`;
   const base = `/api/pay/${encodeURIComponent(options.artifactId)}`;
   const listeners = new Set<(line: PayLine) => void>();
   let line: PayLine = NO_PAY_LINE;
@@ -275,38 +279,64 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   const settleCode = (): Promise<string> => {
     if (memoryCode) return Promise.resolve(memoryCode);
     codeReady ??= (async () => {
-      const locks = (globalThis as { navigator?: { locks?: { request: <T>(name: string, run: () => T | Promise<T>) => Promise<T> } } }).navigator?.locks;
-      if (locks?.request) {
-        try {
-          return await locks.request(storageKey, () => recoveryCode());
-        } catch {
-          // The lock could not be taken: no turn was taken, so the code is settled the next way (never by an uncoordinated write)
-        }
-      }
-      // A code already kept is used as it is
+      // A code this tab made for itself when nothing could coordinate is the code it bought under, and it stays so across a reload of the tab
       try {
-        const existing = options.storage?.getItem(storageKey);
-        if (existing && RECOVERY_CODE.test(existing)) return (memoryCode = existing);
+        const own = options.tabStorage?.getItem(tabKey);
+        if (own && RECOVERY_CODE.test(own)) return (memoryCode = own);
       } catch {
-        // Storage that refuses keeps nothing: the code lives in this page
-        return (memoryCode = random(43));
+        // No tab storage
       }
-      // None is kept: the first code is claimed in IndexedDB, whose transaction (read, and write only if empty) is atomic across tabs, so a tab
-      // that is slow to write can never replace the code another tab has already bought under
-      const claimed = await claimFirstCode(random(43));
-      if (claimed) {
+      let stored: string | null = null;
+      const readStored = () => {
+        try {
+          const value = options.storage?.getItem(storageKey);
+          stored = value && RECOVERY_CODE.test(value) ? value : null;
+        } catch {
+          stored = null;
+        }
+      };
+      /**
+       * IndexedDB is the one place that decides, whichever way the tab got here (with the lock, or without): its transaction (read, and write only
+       * if empty) is atomic across tabs. A code the storage already holds goes in first when IndexedDB has none, so an older code is never lost;
+       * and the storage is only ever given a code when it holds none, never replaced.
+       */
+      const viaIndexedDB = async (): Promise<string | null> => {
+        readStored();
+        const claimed = await claimFirstCode(stored ?? random(43));
+        if (!claimed) return null;
         memoryCode = claimed;
         try {
-          if (options.storage?.getItem(storageKey) !== claimed) options.storage?.setItem(storageKey, claimed);
+          const now = options.storage?.getItem(storageKey);
+          if (!now || !RECOVERY_CODE.test(now)) options.storage?.setItem(storageKey, claimed);
         } catch {
           // The code lives in this page and in IndexedDB
         }
         return claimed;
+      };
+      const locks = (globalThis as { navigator?: { locks?: { request: <T>(name: string, run: () => T | Promise<T>) => Promise<T> } } }).navigator?.locks;
+      if (locks?.request) {
+        try {
+          // One tab at a time; inside the turn IndexedDB decides when it is there, and otherwise the storage is read again and written (safe: it is this tab's turn)
+          return await locks.request(storageKey, async () => (await viaIndexedDB()) ?? recoveryCode());
+        } catch {
+          // The turn could not be taken: the code is settled the next way, never by an uncoordinated write
+        }
       }
-      // Nothing in this browser can make tabs take turns (no Web Locks, and IndexedDB is missing, blocked or failed). Writing a code to the shared
-      // storage could then replace the one another tab has already bought under, so none is written: this page's code lives in this page, and its
-      // receipt link (offered after a payment) is how the purchase is found again from there
-      return (memoryCode = random(43));
+      const claimed = await viaIndexedDB();
+      if (claimed) return claimed;
+      // IndexedDB is missing, blocked or failed: a code the storage already holds is used as it is (nothing is written)
+      readStored();
+      if (stored) return (memoryCode = stored);
+      // Nothing in this browser can make tabs take turns. Writing a code to the shared storage could replace the one another tab has already
+      // bought under, so none is written: the tab keeps a code of its own in its own storage (found again after a reload of the tab) and its
+      // receipt link is the way back from anywhere else
+      memoryCode = random(43);
+      try {
+        options.tabStorage?.setItem(tabKey, memoryCode);
+      } catch {
+        // The code lives in this page
+      }
+      return memoryCode;
     })();
     return codeReady;
   };

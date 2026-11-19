@@ -9,7 +9,7 @@ const ART = 'art-1';
 
 type Call = { url: string; init: RequestInit | undefined; body: Record<string, unknown> };
 
-function setup(answers: (call: Call) => { status?: number; body: Record<string, unknown> } | 'lost' | 'hang', withStorage = true, shared?: Map<string, string>, withLocks = true, fill = 'r', indexedDB?: Pick<IDBFactory, 'open'> | null) {
+function setup(answers: (call: Call) => { status?: number; body: Record<string, unknown> } | 'lost' | 'hang', withStorage = true, shared?: Map<string, string>, withLocks = true, fill = 'r', indexedDB?: Pick<IDBFactory, 'open'> | null, tabStorage?: Map<string, string>) {
   jest.useFakeTimers();
   // A browser with Web Locks (one tab at a time per name) unless the test is about one without
   if (withLocks && !(globalThis as { navigator?: { locks?: unknown } }).navigator?.locks) {
@@ -40,6 +40,7 @@ function setup(answers: (call: Call) => { status?: number; body: Record<string, 
     randomId: (length) => `${fill.repeat(length - String(++n).length)}${n}`,
     pageUrl: PAGE,
     indexedDB,
+    tabStorage: tabStorage ? { getItem: (key) => tabStorage.get(key) ?? null, setItem: (key, value) => void tabStorage.set(key, value) } : undefined,
   });
   const lines: PayLine[] = [];
   host.subscribe((line) => lines.push(line));
@@ -707,6 +708,50 @@ describe('a paying page on the public share link', () => {
     expect(three.calls[0].body.recoveryCode).toBeDefined();
     expect(bare.has(key)).toBe(false);
     three.host.destroy();
+  });
+
+  it('when one tab takes the Web Locks turn and another cannot, both settle on the code IndexedDB holds (the paths agree, whichever writes first)', async () => {
+    let refuse = false;
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: { request: (_name: string, run: () => unknown) => (refuse ? Promise.reject(new Error('refused')) : Promise.resolve().then(run)) } } });
+    const idb = fakeIndexedDB();
+    const answer = () => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } });
+    const holder = setup(answer, true, new Map(), true, 'a', idb);
+    holder.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(1_000);
+    refuse = true;
+    // The other tab (its own view of the storage is empty) cannot take the turn
+    const other = setup(answer, true, new Map(), true, 'b', idb);
+    other.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(holder.calls[0].body.recoveryCode).toBeDefined();
+    expect(other.calls[0].body.recoveryCode).toBe(holder.calls[0].body.recoveryCode);
+    holder.host.destroy();
+    other.host.destroy();
+  });
+
+  it('with nothing to coordinate with, the tab’s own code survives a reload of the tab (before any payment is confirmed) and is never shared with another tab', async () => {
+    const shared = new Map<string, string>();
+    const key = `universe-pay-recovery:${ART}`;
+    const tabOne = new Map<string, string>();
+    const answer = () => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } });
+    const before = setup(answer, true, shared, false, 'a', null, tabOne);
+    before.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(1_000);
+    const code = before.calls[0].body.recoveryCode;
+    before.host.destroy();
+    // The same tab reloads: its tab storage is still there, so it asks under the code it bought under
+    const reloaded = setup(answer, true, shared, false, 'z', null, tabOne);
+    reloaded.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(reloaded.calls[0].body.recoveryCode).toBe(code);
+    reloaded.host.destroy();
+    // Another tab has its own tab storage and its own code, and the shared storage was never written
+    const another = setup(answer, true, shared, false, 'c', null, new Map());
+    another.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(another.calls[0].body.recoveryCode).not.toBe(code);
+    expect(shared.has(key)).toBe(false);
+    another.host.destroy();
   });
 
   it('does not stay busy for ever when another tab holds the recovery code lock: the 30 s deadline covers the wait too', async () => {

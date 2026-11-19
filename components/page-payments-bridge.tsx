@@ -27,11 +27,19 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
     } catch {
       storage = null;
     }
+    // This tab's own storage: only a code that nothing could coordinate lives there (it survives a reload of the tab, and is never shared with another)
+    let tabStorage: Storage | null = null;
+    try {
+      tabStorage = window.sessionStorage;
+    } catch {
+      tabStorage = null;
+    }
     const made = createPagePaymentsHost({
       artifactId,
       frame: () => frame()?.contentWindow,
       openWindow: () => window.open('about:blank', '_blank'),
       storage,
+      tabStorage,
       pageUrl: `${window.location.origin}${window.location.pathname}${window.location.search}`,
     });
     host.current = made;
