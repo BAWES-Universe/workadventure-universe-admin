@@ -304,6 +304,44 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(await prisma.meterRequest.count({})).toBe(0);
     });
 
+    it('says it cannot read computer time, and records nothing, when the usage cannot be read, rather than claiming time is not used up', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 1_000, new Date());
+      session.mockResolvedValue({ id: sara.id, email: 'sara@example.test' });
+      const spy = jest.spyOn(prisma.meterReservation, 'aggregate').mockRejectedValue(new Error('database hiccup'));
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const asked = await askPost(body('POST', '/api/me/usage/ask-for-more', {}));
+        expect(asked.status).toBe(503);
+        expect((await asked.json()).error).not.toMatch(/not used up/);
+        expect(await prisma.meterRequest.count({})).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('keeps an ask that was made while usage could be read when the re-check afterwards cannot read it', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 1_000, new Date());
+      session.mockResolvedValue({ id: sara.id, email: 'sara@example.test' });
+      let wrote = false;
+      const original = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+      const tx = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => original(...args).then((result) => { if (String(args[0]).includes('meter_request:')) wrote = true; return result; })) as never);
+      const realAggregate = prisma.meterReservation.aggregate.bind(prisma.meterReservation) as (...args: unknown[]) => Promise<unknown>;
+      const spy = jest.spyOn(prisma.meterReservation, 'aggregate').mockImplementation(((...args: unknown[]) => (wrote ? Promise.reject(new Error('database hiccup')) : realAggregate(...args))) as never);
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const asked = await askPost(body('POST', '/api/me/usage/ask-for-more', {}));
+        expect(asked.status).toBe(201);
+        expect(await prisma.meterRequest.count({ where: { personId: sara.id, answeredAt: null } })).toBe(1);
+      } finally {
+        spy.mockRestore();
+        tx.mockRestore();
+      }
+    });
+
     it('treats a missing body as the old computer ask, but a blank or broken body as a bad request', async () => {
       await setUp();
       const sara = await person('sara');

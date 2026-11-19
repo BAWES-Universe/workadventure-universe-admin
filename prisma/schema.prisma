@@ -58,6 +58,7 @@ model User {
   brickTemplateStars BrickTemplateStar[]
   brickTemplateMadeBy BrickTemplateUse[] @relation("BrickTemplateUseMaker")
   guestBrickHandovers GuestBrickHandover[]
+  guestBrickPendingHandovers GuestBrickPendingHandover[]
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
   botAccessRules    BotAccessRule[]
@@ -1049,6 +1050,19 @@ model GuestBrickHandover {
   @@map("guest_brick_handovers")
 }
 
+// A hand-over of a guest's chat that could not be finished when the person signed in (game #1997). The game sends the guest id only
+// once, so it is kept here until the next time that person gets into a room; once it is done (or the window passed) the row goes.
+model GuestBrickPendingHandover {
+  guestKey  String   @id @map("guest_key") @db.VarChar(255)
+  userId    String   @map("user_id")
+  keptAt    DateTime @default(now()) @map("kept_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("guest_brick_pending_handovers")
+}
+
 // A suggestion to make a Brick for a kind of job that keeps coming back (game #1996). One row per person and topic, and
 // the row is the whole rule: a topic is suggested at most once to a person, in every chat and on every device, whatever
 // they answered. `answer` is made | not_now once they tapped one; null while the card waits or was closed unanswered.
@@ -1316,6 +1330,8 @@ model BotMcpServer {
   authConfig  String?  @map("auth_config") @db.Text                          // encrypted JSON
   headers     Json?                                                          // extra headers key-value pairs
   enabled     Boolean  @default(true)
+  // Moves up each time a sign-in starts: a sign-in that finishes after a newer one began is refused, so an older return never writes over a newer one
+  signInGeneration Int   @default(0) @map("sign_in_generation")
   lastTestedAt   DateTime?  @map("last_tested_at")
   lastTestResult Json?      @map("last_test_result")
   // Servers that existed before tools were checked (#738) keep working as they do in text, shown as "Not checked yet",
@@ -1395,6 +1411,8 @@ model AppConnection {
   // The one ticket a sign-in page may bring back: set when a sign-in starts, cleared when it is used, so a replayed return, or
   // one from a sign-in that a newer start replaced, is refused
   signInNonce        String?   @map("sign_in_nonce") @db.VarChar(64)
+  // Moves up each time a sign-in starts: a sign-in that finishes after a newer one began is refused, so an older return never writes over a newer one
+  signInGeneration   Int       @default(0) @map("sign_in_generation")
   // Held while one request renews the token, so two never spend the same refresh token (a rotating one would sign the person out)
   refreshLeaseUntil  DateTime? @map("refresh_lease_until")
   // What the bot server last saw (the same fields a bot's server has, game #1819); a reconnect clears them
@@ -2655,6 +2673,16 @@ model BotFile {
 // A file its person deleted from a Brick's list (game #2003), waiting for the bot server to remove it from the uploader.
 // Orbit cannot reach the uploader, so the row stays until the bot server has confirmed, and a restart never forgets one.
 // Only where the file is, never what it was called or said.
+// A deleted Brick that was removed for good, kept for a few days so the bot server that closes its chats hears of it on its next sweep,
+// whoever's request removed it (the owner opening their Bricks page removes theirs too) and whether or not an answer got through
+model BrickRemoval {
+  botId     String   @id @map("bot_id") @db.VarChar(255)
+  removedAt DateTime @map("removed_at")
+
+  @@index([removedAt])
+  @@map("brick_removals")
+}
+
 model BotFileRemoval {
   id        String   @id @default(uuid())
   botId     String   @map("bot_id") @db.VarChar(255)
@@ -3266,6 +3294,12 @@ model ComputerJob {
   // still going before it starts another, and the take-over fence knows which turn to cancel. Empty when no turn is running.
   agentSessionId    String? @map("agent_session_id") @db.VarChar(80)
   agentResponseId   String? @map("agent_response_id") @db.VarChar(120)
+  // Claims held for a short time, so two of the same thing on one job never run side by side: writing a new key onto the machine, and
+  // starting a turn (until its id is kept). A claim that was never released lapses by itself.
+  prepareClaimedAt  DateTime? @map("prepare_claimed_at")
+  turnClaimedAt     DateTime? @map("turn_claimed_at")
+  /// Set before the first turn of a job (one with no conversation known yet) is sent to the agent, and cleared when that turn's id is kept or the turn ends. Found set with no turn id and no conversation, the first turn may be running with nothing to find it by, so no second one is opened beside it.
+  firstTurnSentAt   DateTime? @map("first_turn_sent_at")
   // What the person asked for in more words than the title, for the agent only: never shown, never sent anywhere else, and cleared when the job ends
   brief             String? @db.VarChar(4000)
 

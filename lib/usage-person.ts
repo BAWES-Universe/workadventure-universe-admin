@@ -7,7 +7,8 @@ import { prisma } from '@/lib/db';
  * A signed-in person is matched to their Orbit account so the bot page can show their name; a guest, or someone
  * Orbit does not know, stays a guest and is only ever counted, never named.
  */
-export type UsagePerson = { personId: string | null; guest: boolean | null };
+/** `lookupFailed` is set when the account could not be looked up (the database failed): nothing is known, and a caller that writes it down asks again later instead of calling the person a guest. */
+export type UsagePerson = { personId: string | null; guest: boolean | null; lookupFailed?: true };
 
 export const USAGE_CHANNELS = ['dm', 'nearby', 'task'] as const;
 export type UsageChannel = (typeof USAGE_CHANNELS)[number];
@@ -42,7 +43,7 @@ export async function resolveUsagePerson(talkedUserId: unknown, isGuest: unknown
   } catch (err) {
     console.error('Error looking up who talked to a bot:', err);
     // Nothing was learned: the bot server's own word stands, never a guess that they are a guest
-    return { personId: null, guest: typeof isGuest === 'boolean' ? isGuest : null };
+    return { personId: null, guest: typeof isGuest === 'boolean' ? isGuest : null, lookupFailed: true };
   }
   return { personId: null, guest: true };
 }

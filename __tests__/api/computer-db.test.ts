@@ -59,7 +59,8 @@ import {
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
 const tag = randomUUID().slice(0, 8);
-const NOW = new Date('2026-11-15T12:00:00Z');
+// Rows get their own times from the database's clock and from `@updatedAt` (now): the tests' clock starts at the real now, so "ten minutes later" is later than those rows whatever day it is run
+const NOW = new Date();
 const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
 const people: string[] = [];
 let made = 0;

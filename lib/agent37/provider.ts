@@ -1,6 +1,6 @@
 import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
 import { readTurn } from '@/lib/agent37/turn-events';
-import { Agent37Client, Agent37Error, Agent37Unreached, type Instance } from '@/lib/agent37/client';
+import { Agent37Client, Agent37Error, Agent37Unreached, TurnNotSent, type Instance } from '@/lib/agent37/client';
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros } from '@/lib/agent37/rates';
 import { savedCopyOf, storeSavedCopy, type SavedCopyInfo } from '@/lib/agent37/saved-copies';
 import { ensureImage, imageReady, type ImageState } from '@/lib/agent37/image';
@@ -368,7 +368,14 @@ export class Agent37ComputerProvider implements ComputerProvider {
   }
 
   async openTurn(ref: string, input: TurnInput, signal?: AbortSignal): Promise<AsyncGenerator<TurnEvent>> {
-    const response = await this.client.openTurn(await this.urlOf(ref), input, signal);
+    // Finding the machine comes before any request to the agent: a failure of it is a turn that was never sent
+    let url: string;
+    try {
+      url = await this.urlOf(ref);
+    } catch (error) {
+      throw new TurnNotSent(error instanceof Error ? error.message : 'The computer could not be found');
+    }
+    const response = await this.client.openTurn(url, input, signal);
     return readTurn(response.body as ReadableStream<Uint8Array>);
   }
 

@@ -438,6 +438,32 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(await readConnection(id, sara)).toMatchObject({ connected: false });
   });
 
+  it('switching back while the GitHub app is not set up answers 404 and leaves the key as it is, since saving it again would answer 404 too', async () => {
+    await makeApp();
+    mockUser.current = { id: sara };
+    pretendGitHub({ 'GET https://api.github.com/user': { body: { login: 'sara-gh', id: 501 } } });
+    const saved = await saveKey(request('/api/me/apps/github/key', { method: 'POST', body: { key: 'ghp_good_key_123' } }));
+    expect(saved.status).toBe(200);
+    const { id } = await saved.json();
+    // The app is taken away (or not made yet on this server)
+    await prisma.appSetting.deleteMany({ where: { key: 'github-app' } });
+    forgetGitHubApp();
+    expect((await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }))).status).toBe(404);
+    expect(await prisma.appConnection.count({ where: { ownerId: sara, catalogKey: '@github' } })).toBe(1);
+    expect(await gitHubToken(id)).toMatchObject({ status: 'ok', token: 'ghp_good_key_123' });
+    // With the app back, switching back works as before
+    await makeApp();
+    expect((await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }))).status).toBe(200);
+    expect(await readConnection(id, sara)).toMatchObject({ connected: false });
+  });
+
+  it('switching back with no GitHub connection answers 404 and never makes one', async () => {
+    await makeApp();
+    mockUser.current = { id: sara };
+    expect((await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }))).status).toBe(404);
+    expect(await prisma.appConnection.count({ where: { ownerId: sara, catalogKey: '@github' } })).toBe(0);
+  });
+
   it('Disconnect takes the sign-in back at GitHub with the app’s own secret', async () => {
     await makeApp();
     const id = await signedIn();
