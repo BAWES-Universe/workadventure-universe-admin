@@ -39,8 +39,8 @@ async function person(name: string) {
   return { id: user.id, uuid: user.uuid, brickId: brick!.id };
 }
 
-async function set(who: { uuid: string; brickId: string }, over: Partial<NewItemInput> = {}) {
-  const answer = await createItem(who.brickId, { userId: who.uuid, kind: 'reminder', words: 'Call the dentist', cadence: { type: 'once', at: at(HOUR).toISOString() }, ...over }, NOW);
+async function set(who: { uuid: string; brickId: string }, over: Partial<NewItemInput> = {}, now: Date = NOW) {
+  const answer = await createItem(who.brickId, { userId: who.uuid, kind: 'reminder', words: 'Call the dentist', cadence: { type: 'once', at: new Date(now.getTime() + HOUR).toISOString() }, ...over }, now);
   if (!answer.ok) throw new Error(answer.error);
   return answer.item;
 }
@@ -132,15 +132,19 @@ run('goals and tasks screens, in a real database', () => {
 
   it('lists everything Brick did, newest first, failed runs and quiet checks included, a page at a time', async () => {
     const eli = await person('eli');
-    const watch = await set(eli, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+    // The queue is read by due time, oldest first, and any batch can hold other people's due items: this watch is set a month before everything
+    // else in this file, so its runs are always at the head of the queue whatever else is due
+    const base = new Date(NOW.getTime() - 30 * 24 * HOUR);
+    const watch = await set(eli, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } }, base);
     const outcomes: { state: 'done' | 'failed'; outcome?: 'quiet' | 'spoke'; result?: string; error?: string }[] = [
       { state: 'done', outcome: 'quiet' },
       { state: 'failed', error: 'The site did not answer' },
       { state: 'done', outcome: 'quiet', result: 'Still 120' },
     ];
     for (let i = 0; i < outcomes.length; i++) {
-      const [one] = (await claimDueRuns(at((i + 1) * HOUR + 60_000))).filter((run) => run.itemId === watch.id);
-      await finishRun(one.runId, { ...outcomes[i], attempt: one.attempt }, at((i + 1) * HOUR + 120_000));
+      const [one] = (await claimDueRuns(new Date(base.getTime() + (i + 1) * HOUR + 60_000))).filter((run) => run.itemId === watch.id);
+      expect(one).toBeDefined();
+      await finishRun(one.runId, { ...outcomes[i], attempt: one.attempt }, new Date(base.getTime() + (i + 1) * HOUR + 120_000));
     }
     signedInAs(eli.id);
     const page = await (await did(req(`/api/bricks/${eli.brickId}/did`), idParams(eli.brickId))).json();

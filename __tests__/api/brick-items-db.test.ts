@@ -120,6 +120,8 @@ run('goals and tasks, in a real database', () => {
       expect(both.filter((answer) => answer.ok)).toHaveLength(1);
     } finally {
       await saveServerLimits({ bricks: { itemsPerPerson: 20 } }, hadi.id);
+      // The two reminders left on are this person's own: put away, so no later claim in this file finds them due
+      await prisma.brickItem.updateMany({ where: { ownerId: hadi.id }, data: { state: 'paused', nextDueAt: null } });
     }
   });
 
