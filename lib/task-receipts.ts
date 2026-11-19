@@ -322,14 +322,17 @@ export async function settleReceipt(task: Task, now: Date = new Date(), unwatche
     }
     // No Instant run at all
     if (isTerminal(row.state)) return row.state as ReceiptState;
-    const quiet = row.state === 'running' ? lapsed : unwatchedBefore !== null && row.updatedAt < unwatchedBefore;
-    if (!quiet) return row.state as ReceiptNow;
     if (row.category === 'computer') {
-      // A computer's job is its own record: a receipt waits for it while it runs, and ends with it
+      // A computer's job is its own record: a receipt waits for it while it runs, and ends with it. A running one (no lease) ends when its job is
+      // over, or, when no job of that key exists at all, once it is as old as a lease; a checking one only after the bot server's own retries.
       const job = await tx.computerJob.findFirst({ where: { id: task.taskKey, botId: task.botId, personId: task.personId }, select: { status: true } });
       if (job && !isOver(job.status)) return row.state as ReceiptNow;
-      if (job) return endReceipt(tx, row, 'done', [], now);
+      const waited = row.state === 'running' ? job !== null || row.startedAt.getTime() + RECEIPT_LEASE_MS <= now.getTime() : unwatchedBefore !== null && row.updatedAt < unwatchedBefore;
+      if (!waited) return row.state as ReceiptNow;
+      return endReceipt(tx, row, job ? 'done' : 'refunded', [], now);
     }
+    const quiet = row.state === 'running' ? lapsed : unwatchedBefore !== null && row.updatedAt < unwatchedBefore;
+    if (!quiet) return row.state as ReceiptNow;
     return endReceipt(tx, row, 'refunded', [], now);
   });
 }
@@ -339,7 +342,7 @@ export const UNWATCHED_CHECKING_WAIT_MS = 15 * 60 * 1000;
 
 /**
  * The sweep over receipts that need an end, oldest first, so none depends on the bot server or on the person writing again:
- *  - running, with a lease that has run out;
+ *  - running, with a lease that has run out; a computer's running receipt (no lease) once its job is over, or once it is a lease old with no job at all;
  *  - in checking: those with Instant runs once every run has ended, those with none after `UNWATCHED_CHECKING_WAIT_MS`
  *    (a computer's receipt only once its job is over);
  *  - ended, with a run of its task that has not ended (it turned up after the word).
@@ -347,12 +350,16 @@ export const UNWATCHED_CHECKING_WAIT_MS = 15 * 60 * 1000;
  */
 export async function settleCheckingReceipts(limit: number, now: Date = new Date(), unwatchedWaitMs: number = UNWATCHED_CHECKING_WAIT_MS): Promise<number> {
   const unwatchedBefore = new Date(now.getTime() - unwatchedWaitMs);
+  const leaseBefore = new Date(now.getTime() - RECEIPT_LEASE_MS);
   const open = Prisma.raw(RUN_OPEN_STATES.map((state) => `'${state}'`).join(', '));
   const rows = await prisma.$queryRaw<Array<{ botId: string; personId: string; taskKey: string }>>(Prisma.sql`
     SELECT r."bot_id" AS "botId", r."person_id" AS "personId", r."task_key" AS "taskKey"
     FROM task_receipts r
     WHERE (
       (r."state" = 'running' AND r."lease_until" IS NOT NULL AND r."lease_until" <= ${now})
+      OR (r."state" = 'running' AND r."category" = 'computer' AND r."lease_until" IS NULL AND (
+        EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key" AND j."status" IN ('done', 'stopped', 'failed'))
+        OR (r."started_at" <= ${leaseBefore} AND NOT EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key"))))
       OR (r."state" = 'checking' AND (
         (r."updated_at" < ${unwatchedBefore}
           AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key")

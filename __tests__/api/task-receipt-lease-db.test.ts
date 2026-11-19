@@ -152,14 +152,16 @@ run('receipts that always settle (O1)', () => {
       expect(await renewReceipt({ botId: brick, personId: omar, taskKey: 'lease-2' })).toEqual({ ok: false, reason: 'not_found' });
     });
 
-    it('a computer’s receipt is on no lease: the sweep waits for its job, and ends it with the job', async () => {
-      const opened = await open('placeholder', { category: 'computer' });
+    it('a computer’s receipt is on no lease: the sweep waits for its job, and ends it with the job, whether or not the bot server ever closes it', async () => {
+      const opened = await open('no-job-key', { category: 'computer' });
       expect(opened.leaseUntil).toBeNull();
       const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Weekly report', status: 'running', startedAt: START } });
       await open(job.id, { category: 'computer' });
-      expect((await renewReceipt({ botId: brick, personId: sara, taskKey: job.id })).renewed).toBe(false);
-      // While the job runs, the receipt (running, no lease) is never swept, however late
-      expect(await settleCheckingReceipts(50, at(600))).toBe(0);
+      expect((await renewReceipt({ botId: brick, personId: sara, taskKey: job.id }))).toMatchObject({ ok: true, renewed: false });
+      // While the job runs, the receipt is never swept, however late. One whose key is no job at all waits a lease, then ends refunded.
+      expect(await settleCheckingReceipts(50, at(9))).toBe(0);
+      expect(await settleCheckingReceipts(50, at(600))).toBe(1);
+      expect(await receipt('no-job-key')).toMatchObject({ state: 'refunded', outcome: 'refunded' });
       expect((await receipt(job.id)).state).toBe('running');
       // Closed as checking by the bot server: still not ended while the job runs, however long it waits
       await closeReceipt({ botId: brick, taskKey: job.id, personId: sara, state: 'checking' }, at(1));
@@ -169,6 +171,15 @@ run('receipts that always settle (O1)', () => {
       await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'done', endedAt: at(30) } });
       expect(await settleCheckingReceipts(50, at(600))).toBeGreaterThanOrEqual(1);
       expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'done' });
+    });
+
+    it('a running computer receipt whose bot server never closed it ends as soon as its job is over', async () => {
+      const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Never closed', status: 'running', startedAt: START } });
+      await open(job.id, { category: 'computer' });
+      expect(await settleCheckingReceipts(50, at(2))).toBe(0);
+      await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'failed', endedBy: 'error', endedAt: at(3) } });
+      expect(await settleCheckingReceipts(50, at(4))).toBe(1);
+      expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'done', leaseUntil: null });
     });
   });
 
