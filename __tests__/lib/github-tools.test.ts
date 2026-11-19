@@ -243,6 +243,29 @@ describe('what a Brick can do on GitHub', () => {
     expect(calls).toHaveLength(3);
   });
 
+  it('says the comments could not be read, rather than that there are none', async () => {
+    const { impl } = fakeGitHub([
+      ['GET', '/repos/acme/tools/issues/7', 200, { number: 7, title: 't', state: 'open', body: 'b', labels: [], user: { login: 's' }, html_url: 'https://github.com/acme/tools/issues/7', comments: 2 }],
+      ['GET', '/repos/acme/tools/issues/7/comments?per_page=30&page=1', 503, { message: 'down' }],
+    ]);
+    const read = JSON.parse((await runGitHubTool('ghu_x', 'github_get_issue', { repo: 'acme/tools', number: 7 }, impl)).text) as { comments: unknown[]; commentsUnavailable?: boolean };
+    expect(read.comments).toEqual([]);
+    expect(read.commentsUnavailable).toBe(true);
+  });
+
+  it('looks for a repository name beyond the first hundred, and keeps the one page when no name is asked', async () => {
+    const repo = (n: number) => ({ full_name: `acme/r${n}`, private: false, default_branch: 'main', description: null, pushed_at: '2026-11-01T00:00:00Z' });
+    const first = Array.from({ length: 100 }, (_, i) => repo(i));
+    const wanted = fakeGitHub([
+      ['GET', '/user/repos?per_page=100&sort=pushed', 200, first],
+      ['GET', '/user/repos?per_page=100&sort=pushed&page=2', 200, [repo(250)]],
+    ]);
+    expect((JSON.parse((await runGitHubTool('t', 'github_list_repos', { query: 'r250' }, wanted.impl)).text) as { repo: string }[]).map((row) => row.repo)).toEqual(['acme/r250']);
+    const plain = fakeGitHub([['GET', '/user/repos?per_page=100&sort=pushed', 200, first]]);
+    await runGitHubTool('t', 'github_list_repos', {}, plain.impl);
+    expect(plain.calls).toHaveLength(1);
+  });
+
   it('clears an issue body when asked with an empty one', async () => {
     const { impl, calls } = fakeGitHub([['PATCH', '/repos/acme/tools/issues/7', 200, { number: 7, state: 'open', html_url: 'u' }]]);
     const result = await runGitHubTool('ghu_x', 'github_update_issue', { repo: 'acme/tools', number: 7, body: '' }, impl);
