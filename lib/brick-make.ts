@@ -86,7 +86,7 @@ export const chatBrickSchema = newBrickSchema
 
 export type ChatBrickAnswer =
   | { ok: true; made: boolean; brick: BrickCard; bricks: BrickCard[] }
-  | { ok: false; status: 403 | 404; error: string };
+  | { ok: false; status: 403 | 404 | 409; error: string };
 
 /**
  * The owner of the Brick that asks, when `userId` is that owner: a signed-in person, found by the name the bot server
@@ -133,11 +133,9 @@ export async function makeBrickFromChat(viaBrickId: string, input: z.infer<typeo
     if (outcome.made) return { ok: true, made: true, brick: outcome.brick, bricks };
     const card = bricks.find((one) => one.id === outcome.id);
     if (card) return { ok: true, made: false, brick: card, bricks };
-    // Deleted again and again: they get the one they asked for
-    if (attempt >= 2) {
-      const made = await makeBrick(ownerId, brick);
-      return { ok: true, made: true, brick: made, bricks: await listBricks(ownerId) };
-    }
+    // The one found was gone from the list again and again: no Brick is made outside the lock (two asks that both got here would each make one), so the
+    // ask ends with an answer the caller can ask again after
+    if (attempt >= 2) return { ok: false, status: 409, error: 'Your Bricks changed while this was being asked. Ask again.' };
   }
 }
 
