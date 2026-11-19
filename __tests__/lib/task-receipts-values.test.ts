@@ -1,4 +1,4 @@
-import { activityIdOf, categoryOf, jobActivityIdOf, outcomeOfRuns, readActions, readActivityId, receiptLines, receiptLink, spentOf, stateOfOutcome, type LineEvent } from '@/lib/task-receipts-values';
+import { activityIdOf, categoryOf, jobActivityIdOf, outcomeOfRuns, readActions, readActivityId, receiptLines, receiptLink, spentOf, stateOfOutcome, takenForRun, type LineEvent } from '@/lib/task-receipts-values';
 
 const event = (over: Partial<LineEvent>): LineEvent => ({ kind: 'app_use', route: 'instant', quantity: 1, costMicros: 30_000, detail: null, ...over });
 
@@ -112,5 +112,17 @@ describe('how a task came to end, from its runs', () => {
     expect(readActions([{ run: 'a', label: 'gmail', outcome: 'worked' }, { run: 'b', label: 'exa', outcome: 'refunded' }, null, 'x', { run: 1, label: 'x', outcome: 'failed' }])).toEqual([{ run: 'a', label: 'gmail', outcome: 'worked' }]);
     expect(readActions(null)).toEqual([]);
     expect(readActions({})).toEqual([]);
+  });
+});
+
+describe('what one Instant run took (takenForRun)', () => {
+  const runEvent = (runId: string, customerMicros: unknown) => event({ detail: { instant: true, runId, customerMicros } });
+  it('reads the run’s own charge by its id: zero is a price, a price not known yet or no record is null, and another run’s is never lent', () => {
+    const events = [runEvent('a', 20_000), runEvent('b', 0), runEvent('c', null), event({ kind: 'model_call', route: 'universe-ai', detail: { runId: 'd', customerMicros: 5 } })];
+    expect(takenForRun(events, 'a')).toBe(20_000);
+    expect(takenForRun(events, 'b')).toBe(0);
+    expect(takenForRun(events, 'c')).toBeNull();
+    expect(takenForRun(events, 'd')).toBeNull();
+    expect(takenForRun(events, 'zzz')).toBeNull();
   });
 });

@@ -97,6 +97,15 @@ function instantTaken(event: LineEvent): number | null {
   return event.costMicros;
 }
 
+/**
+ * What one Instant run took from the person, read from that run's own meter event (by the run's id): its charge when the books know it
+ * (a failed run released its hold, so zero), null when there is no record of it yet or its price is not known yet. Never guessed.
+ */
+export function takenForRun(events: readonly LineEvent[], runId: string): number | null {
+  const found = events.find((event) => event.kind === 'app_use' && event.route === 'instant' && isRecord(event.detail) && event.detail.runId === runId);
+  return found ? instantTaken(found) : null;
+}
+
 /** The name of an App an Instant use was for, when the event carries it. Only a short name; never anything a person wrote. */
 function appName(detail: unknown): string | null {
   const app = isRecord(detail) && typeof detail.app === 'string' ? detail.app.trim() : '';

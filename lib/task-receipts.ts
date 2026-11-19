@@ -15,6 +15,7 @@ import {
   RUN_OPEN_STATES,
   spentOf,
   stateOfOutcome,
+  takenForRun,
   type ActionOutcome,
   type LineEvent,
   type ReceiptAction,
@@ -66,6 +67,11 @@ export interface ActivityAction {
   text: string;
   /** "Nothing taken" for an action that did not work; null for one that did (what it took is on the receipt's own lines). */
   takenText: string | null;
+  /**
+   * What was taken from credit for this action, in whole micros: only for an action that worked and whose price the books know (zero is a
+   * price). Absent for an action that did not work (nothing was taken) and while the price is not known yet (the receipt's line says "Price not known yet").
+   */
+  amountMicros?: number;
 }
 
 type ReceiptRow = NonNullable<Awaited<ReturnType<typeof prisma.taskReceipt.findUnique>>>;
@@ -489,7 +495,10 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
     outcome: header.state === 'refunded' ? 'refunded' : header.outcome === 'partial' ? 'partial' : 'done',
     outcomeText: OUTCOME_WORDS[header.state === 'refunded' ? 'refunded' : header.outcome === 'partial' ? 'partial' : 'done'],
     outcomeNote: header.state === 'refunded' ? null : outcomeNote(header.outcome ?? 'done', header.actions),
-    actions: header.actions.map((action) => ({ label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome), takenText: action.outcome === 'failed' ? NOTHING_TAKEN : null })),
+    actions: header.actions.map((action): ActivityAction => {
+      const taken = action.outcome === 'worked' ? takenForRun(events, action.run) : null;
+      return { label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome), takenText: action.outcome === 'failed' ? NOTHING_TAKEN : null, ...(taken === null ? {} : { amountMicros: taken }) };
+    }),
     spentMicros: spentOf(header.state, header.chargedMicros, lines),
     category: categoryOf(header.category, events),
     payer: who.payer,

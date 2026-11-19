@@ -476,6 +476,70 @@ run('receipts that always settle (O1)', () => {
     });
   });
 
+  describe('what each action took (amountMicros)', () => {
+    const instantEvent = (taskKey: string, runId: string, customerMicros: number | null) =>
+      prisma.meterEvent.create({ data: { eventId: `instant:${runId}`, kind: 'app_use', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(5_000), basis: 'measured', detail: { instant: true, taskKey, runId, customerMicros } } as never });
+
+    it('every worked action carries what it took, they add up to the receipt’s total, and a failed one has none', async () => {
+      await open('amount-1');
+      const gmail = await makeRun('amount-1', 'succeeded', { customerMicros: BigInt(20_000), toolkit: 'gmail' });
+      const calendar = await makeRun('amount-1', 'succeeded', { customerMicros: BigInt(13_000), toolkit: 'googlecalendar' });
+      const failed = await makeRun('amount-1', 'failed', { reason: 'provider_failed', toolkit: 'exa' });
+      await closeReceipt({ botId: brick, taskKey: 'amount-1', personId: sara, state: 'done' }, at(3));
+      await instantEvent('amount-1', gmail.id, 20_000);
+      await instantEvent('amount-1', calendar.id, 13_000);
+      await instantEvent('amount-1', failed.id, 0);
+      const [item] = await activityFor(sara);
+      expect(item).toMatchObject({ outcome: 'partial', spentMicros: 33_000 });
+      expect(item.actions.map((action) => action.amountMicros)).toEqual([20_000, 13_000, undefined]);
+      expect(item.actions[2]).not.toHaveProperty('amountMicros');
+      const worked = item.actions.filter((action) => action.outcome === 'worked');
+      expect(worked.reduce((sum, action) => sum + (action.amountMicros ?? 0), 0)).toBe(item.spentMicros);
+      // Existing fields are as they were
+      expect(item.actions[2]).toMatchObject({ label: 'exa', outcome: 'failed', text: actionWords('exa', 'failed'), takenText: NOTHING_TAKEN });
+      expect(item.actions[0]).toMatchObject({ label: 'gmail', outcome: 'worked', text: actionWords('gmail', 'worked'), takenText: null });
+    });
+
+    it('a worked action whose price is not known yet has no amount, and the receipt says "Price not known yet" with no total made up', async () => {
+      await open('amount-2');
+      const known = await makeRun('amount-2', 'succeeded', { customerMicros: BigInt(20_000), toolkit: 'gmail' });
+      const unknown = await makeRun('amount-2', 'succeeded', { customerMicros: null, customerState: 'held', toolkit: 'exa' });
+      await closeReceipt({ botId: brick, taskKey: 'amount-2', personId: sara, state: 'done' }, at(3));
+      await instantEvent('amount-2', known.id, 20_000);
+      await instantEvent('amount-2', unknown.id, null);
+      const [item] = await activityFor(sara);
+      expect(item.actions[0]).toMatchObject({ outcome: 'worked', amountMicros: 20_000 });
+      expect(item.actions[1]).toMatchObject({ outcome: 'worked' });
+      expect(item.actions[1]).not.toHaveProperty('amountMicros');
+      expect(item.lines.some((line) => line.note === 'Price not known yet')).toBe(true);
+      expect(item.spentMicros).toBeNull();
+    });
+
+    it('a worked action with no record in the books yet has no amount (nothing is guessed)', async () => {
+      await open('amount-3');
+      await makeRun('amount-3', 'succeeded', { customerMicros: BigInt(9_000), toolkit: 'gmail' });
+      await closeReceipt({ botId: brick, taskKey: 'amount-3', personId: sara, state: 'done' }, at(3));
+      const [item] = await activityFor(sara);
+      expect(item.actions).toHaveLength(1);
+      expect(item.actions[0]).not.toHaveProperty('amountMicros');
+    });
+
+    it('another task’s run with the same toolkit never lends its amount', async () => {
+      await open('amount-4a');
+      await open('amount-4b');
+      const a = await makeRun('amount-4a', 'succeeded', { customerMicros: BigInt(11_000), toolkit: 'gmail' });
+      const b = await makeRun('amount-4b', 'succeeded', { customerMicros: BigInt(22_000), toolkit: 'gmail' });
+      await closeReceipt({ botId: brick, taskKey: 'amount-4a', personId: sara, state: 'done' }, at(3));
+      await closeReceipt({ botId: brick, taskKey: 'amount-4b', personId: sara, state: 'done' }, at(3));
+      await instantEvent('amount-4a', a.id, 11_000);
+      await instantEvent('amount-4b', b.id, 22_000);
+      const items = await activityFor(sara);
+      const byTotal = new Map(items.map((item) => [item.spentMicros, item.actions.map((action) => action.amountMicros)]));
+      expect(byTotal.get(11_000)).toEqual([11_000]);
+      expect(byTotal.get(22_000)).toEqual([22_000]);
+    });
+  });
+
   describe('case 5: a task with no run but with unrelated model usage', () => {
     it('a model call’s meter row for the task’s key never makes it done: it ends as refunded', async () => {
       const p = fakeProvider();
