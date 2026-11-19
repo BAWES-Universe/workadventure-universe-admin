@@ -48,7 +48,13 @@ export async function saveMeterSettings(change: Partial<MeterSettings>, userId: 
       else next[key] = value;
     }
     // An allowance saved now replaces one that was waiting for a later day
-    if (Object.prototype.hasOwnProperty.call(change, 'memberAllowanceMicros')) delete next[MEMBER_ALLOWANCE_LATER_KEY];
+    if (Object.prototype.hasOwnProperty.call(change, 'memberAllowanceMicros')) {
+      delete next[MEMBER_ALLOWANCE_LATER_KEY];
+      const at = new Date();
+      // The month's books keep the allowance that applied, so a later change never rewrites what an earlier month was worked out with
+      await tx.meterAllowanceChange.deleteMany({ where: { effectiveFrom: { gt: at } } });
+      await tx.meterAllowanceChange.create({ data: { effectiveFrom: at, allowanceMicros: change.memberAllowanceMicros === null || change.memberAllowanceMicros === undefined ? null : BigInt(change.memberAllowanceMicros), createdById: userId } });
+    }
     const value = next as Prisma.InputJsonValue;
     await tx.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
     return readMeterSettings(next);
@@ -68,6 +74,9 @@ export async function scheduleMemberAllowance(micros: number, from: Date, userId
     const waiting = saved[MEMBER_ALLOWANCE_LATER_KEY] as { micros?: unknown; from?: unknown } | undefined;
     if (waiting && typeof waiting.micros === 'number' && typeof waiting.from === 'string' && new Date(waiting.from).getTime() <= now.getTime()) next.memberAllowanceMicros = waiting.micros;
     next[MEMBER_ALLOWANCE_LATER_KEY] = { micros, from: from.toISOString() };
+    // Begins on that day in the month's books; one that was waiting for another day is replaced
+    await tx.meterAllowanceChange.deleteMany({ where: { effectiveFrom: { gt: now } } });
+    await tx.meterAllowanceChange.create({ data: { effectiveFrom: from, allowanceMicros: BigInt(micros), createdById: userId } });
     const value = next as Prisma.InputJsonValue;
     await tx.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
   });
