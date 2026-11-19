@@ -42,9 +42,8 @@ describe('credentialsForBot for a call that names a room', () => {
 
   it('still answers a call that names neither a person nor a room, as it always did', async () => {
     where.mockResolvedValue(null);
-    const answer = await credentialsForBot('brick', {}).catch(() => null);
-    // It gets past the visit gate (the rest of the answer needs the books, which this test does not set up)
-    expect(answer === null || (answer as { status: number }).status !== 404 || where.mock.calls.length > 0).toBe(true);
+    // It gets past the visit gate: the answer is this fixture's own (the Brick has no AI provider), never the gate's "Bot not found"
+    expect(await credentialsForBot('brick', {})).toEqual({ status: 404, error: 'This bot has no AI provider' });
     expect(where).toHaveBeenCalledTimes(1);
   });
 });

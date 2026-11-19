@@ -506,8 +506,14 @@ describe('the bot server really forgets (it saves a person again whenever they t
   it('accepts a report for as many forgotten things as one batch of notices carries, and no more', async () => {
     const { ITEM_FORGET_BATCH } = jest.requireActual('@/lib/bot-memory-person');
     const full = Array.from({ length: ITEM_FORGET_BATCH }, (_, index) => `item-${index}`);
-    expect((await call(forgotten, 'POST', { token: 'service-secret', body: { itemIds: full } })).status).not.toBe(400);
-    expect((await call(forgotten, 'POST', { token: 'service-secret', body: { items: full.map((id) => ({ id, at: 1 })) } })).status).not.toBe(400);
+    // Both full batches are acknowledged: the helpers answer, so a 500 (a batch that could not be acknowledged) would fail here, not pass as "not a 400"
+    db.botMemoryItemForget.updateMany.mockResolvedValue({ count: 1 });
+    const byIds = await call(forgotten, 'POST', { token: 'service-secret', body: { itemIds: full } });
+    expect(byIds.status).toBe(200);
+    expect(await byIds.json()).toEqual({ acknowledged: 0, itemsAcknowledged: 1 });
+    const byItems = await call(forgotten, 'POST', { token: 'service-secret', body: { items: full.map((id) => ({ id, at: 1 })) } });
+    expect(byItems.status).toBe(200);
+    expect(await byItems.json()).toEqual({ acknowledged: 0, itemsAcknowledged: ITEM_FORGET_BATCH });
     expect((await call(forgotten, 'POST', { token: 'service-secret', body: { itemIds: [...full, 'one-too-many'] } })).status).toBe(400);
   });
 

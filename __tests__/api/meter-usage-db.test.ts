@@ -361,6 +361,8 @@ run('usage for people, and cost for us, in a real database', () => {
       } finally {
         (globalThis as unknown as { prisma: unknown }).prisma = shared;
         await single.$disconnect();
+        // The adapter does not end a pool it was handed (the installed one only does with `disposeExternalPool`), so its one connection is ended here
+        await pool.end();
       }
       expect(page).toMatchObject({ asked: { at: expect.any(String) } });
     }, 30_000);
