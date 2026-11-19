@@ -373,7 +373,7 @@ export async function checkSpend(attempt: SpendAttempt, now: Date = new Date(), 
   for (const rule of rules) {
     if (rule.capMicros !== null) spent.set(rule.id, await spentFor(db, rule, attempt, now));
   }
-  return holdToRules(rules, attempt, (rule) => spent.get(rule.id) ?? { spentMicros: 0, heldMicros: 0 });
+  return holdToRules(rules, attempt, (rule) => spent.get(rule.id) ?? { spentMicros: 0, heldMicros: 0 }, now);
 }
 
 /**

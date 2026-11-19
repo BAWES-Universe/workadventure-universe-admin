@@ -274,7 +274,7 @@ export async function renewRoom(input: { key: string; moreMicros?: number }, ask
       const after = exposureOf([{ amountMicros: row.amountMicros + BigInt(more), renewals: row.renewals + 1, createdAt: row.createdAt, expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE) }], settings.renewMinutes, now);
       const ruled = await checkSpend(
         // What the renewal adds, and nothing when exposure does not grow (a job exactly at its cap may go on to the end of the lease it holds)
-        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: 'computer', amountMicros: Math.max(0, after - before) },
+        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: 'computer', amountMicros: Math.max(0, after - before), renewal: { exposureBeforeMicros: before, exposureAfterMicros: after, startedAt: row.createdAt } },
         now,
         tx,
       );
