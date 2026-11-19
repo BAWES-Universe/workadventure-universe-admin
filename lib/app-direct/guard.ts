@@ -1,5 +1,5 @@
 import https from 'node:https';
-import { lookup as dnsLookup } from 'node:dns/promises';
+import { Resolver } from 'node:dns/promises';
 import { BlockList, isIP } from 'node:net';
 import { isAllowedServerUrl } from '@/lib/mcp/outbound-guard';
 
@@ -100,7 +100,27 @@ export interface GuardDeps {
   send?: Send;
 }
 
-const defaultResolve: Resolve = (host) => dnsLookup(host, { all: true, verbatim: true });
+/**
+ * Names are asked for with the resolver library's own network client (c-ares), never `dns.lookup`: that one runs getaddrinfo on libuv's few shared worker
+ * threads, only two of which may be on slow I/O at a time, so two names whose servers never answer would leave every other lookup of the process waiting
+ * for them. c-ares uses no worker thread, and it ends each try by itself (a time and a number of tries), so a name that never answers frees what it holds.
+ * The connection is made to the address that was checked, so it does not matter that this skips the system's hosts file and name-service switch: a service
+ * that must be reached has a public name.
+ */
+const RESOLVER_TRY_MS = 2_000;
+const RESOLVER_TRIES = 2;
+let resolver: Resolver | null = null;
+const defaultResolve: Resolve = async (host) => {
+  resolver ??= new Resolver({ timeout: RESOLVER_TRY_MS, tries: RESOLVER_TRIES });
+  const [four, six] = await Promise.allSettled([resolver.resolve4(host), resolver.resolve6(host)]);
+  const found = [
+    ...(four.status === 'fulfilled' ? four.value.map((address) => ({ address, family: 4 })) : []),
+    ...(six.status === 'fulfilled' ? six.value.map((address) => ({ address, family: 6 })) : []),
+  ];
+  if (found.length === 0) throw four.status === 'rejected' ? four.reason : new Error('No address');
+  return found;
+};
+
 
 /**
  * The checked address the connection is made to. Passing `lookup` to the request replaces name resolution, so the socket goes to
@@ -203,9 +223,9 @@ export async function guardedRequest(request: GuardedRequest, deps: GuardDeps = 
   const startedAt = Date.now();
   let addresses: { address: string; family: number }[];
   let stopWaiting: ReturnType<typeof setTimeout> | undefined;
-  // A name lookup cannot be cancelled: after the deadline it goes on in the system's resolver (on the few threads the process shares with its other work) until
-  // that answers. So it counts as in flight until it SETTLES, not until the caller gave up, and only so many run at once: a service whose name never answers
-  // cannot pile lookups up until nothing else gets a thread
+  // A name lookup cannot be cancelled: after the deadline it goes on until the resolver gives up (it ends each try by itself, and uses no worker thread that
+  // other work needs). So it counts as in flight until it SETTLES, not until the caller gave up, and only so many run at once: a service whose name never
+  // answers cannot pile lookups up
   if (lookupsInFlight >= MAX_LOOKUPS_IN_FLIGHT) throw new GuardError('unreachable', 'Too many name lookups are waiting');
   lookupsInFlight += 1;
   let lookup: Promise<{ address: string; family: number }[]>;
