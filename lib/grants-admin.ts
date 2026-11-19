@@ -12,6 +12,7 @@ import {
   readExceptionForUpdateIn,
   previewGrant,
   saveDefault,
+  lockForSavesIn,
   saveExceptionIn,
   createGift,
   type GrantInput,
@@ -479,6 +480,10 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
     try {
       await prisma.$transaction(
         async (tx) => {
+          // Everything this save will lock (the rules it replaces, the ones people are taken out of, both categories, the platform account) in one
+          // sorted order before the first write: locks met one rule at a time could be met the other way round by a second transaction
+          const replacing = MONEY_CATEGORIES.map((category) => findExisting(category)?.programId).filter((id): id is string => !!id);
+          await lockForSavesIn(tx, { programIds: [...takeFrom.map((clash) => clash.programId), ...replacing], categoryIds: [...MONEY_CATEGORIES], accountIds: [PLATFORM_ACCOUNT_ID] });
           for (const clash of takeFrom) await takeOut(tx, clash.programId, clash.userIds, issuer, now);
           const toEnd: ProgramView[] = [];
           for (const category of MONEY_CATEGORIES) {

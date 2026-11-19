@@ -375,6 +375,29 @@ export async function readExceptionForUpdateIn(tx: Tx, programId: string): Promi
   return viewOf(row, row.rules[0], row.rules.length);
 }
 
+/**
+ * Every lock a save that touches several rules will need, taken at once in ONE sorted order before the first of them is used. Locks taken one rule
+ * after another, each sorted only within its own call, could be met in the other order by a second transaction that holds a later one and waits for
+ * an earlier one. The funding accounts and categories of the named rules are looked for, locked, and looked for again (a rule moved to another
+ * account in between would need one more), until nothing new turns up.
+ */
+export async function lockForSavesIn(tx: Tx, need: { programIds?: string[]; categoryIds?: string[]; accountIds?: string[] }): Promise<void> {
+  const held = new Set<string>();
+  for (let round = 0; round < 4; round++) {
+    const rules = need.programIds?.length ? await tx.grantRule.findMany({ where: { programId: { in: need.programIds }, state: 'current' }, select: { fundingAccountId: true, program: { select: { categoryId: true } } } }) : [];
+    const names = new Set<string>([
+      ...(need.categoryIds ?? []).map(lockOfRules),
+      ...(need.accountIds ?? []).map(lockOfAccount),
+      ...rules.flatMap((rule) => [lockOfAccount(rule.fundingAccountId), lockOfRules(rule.program.categoryId)]),
+    ]);
+    const fresh = [...names].filter((name) => !held.has(name));
+    if (fresh.length === 0) return;
+    // Only what is not held yet is asked for, so the first round is the whole sorted set and a later one is just what moved
+    await lockAll(tx, fresh);
+    for (const name of fresh) held.add(name);
+  }
+}
+
 /** One program: its current rule, and every earlier version as it was. */
 export async function getProgram(programId: string): Promise<{ program: ProgramView; versions: RuleView[] } | null> {
   const row = await loadProgramRow(prisma, programId);
@@ -571,6 +594,8 @@ export async function endPrograms(programIds: string[], issuer: Issuer, now: Dat
 /** Ends programs inside the caller's transaction: they end together with everything else the caller does there. */
 export async function endProgramsIn(tx: Tx, programIds: string[], issuer: Issuer, now: Date = new Date()): Promise<('ended' | 'already_ended' | 'not_found')[]> {
   const results: ('ended' | 'already_ended' | 'not_found')[] = [];
+  // All of their locks in one sorted order first (see `lockForSavesIn`), so ending two rules never meets another save of them the other way round
+  if (programIds.length > 1) await lockForSavesIn(tx, { programIds });
   for (const programId of programIds) results.push(await endProgramIn(tx, programId, issuer, now));
   return results;
 }
