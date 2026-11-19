@@ -16,6 +16,7 @@ import { ensureDefaultBrick } from '@/lib/brick-default';
 import { checkReplyAllowance } from '@/lib/reply-limits';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
+import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -288,7 +289,8 @@ run('the Brick for guests, in a real database', () => {
       });
       await lockTaken;
       const claiming = claim(guestId, a.roomUrl);
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      // The claim has reached the database and is waiting on the lock the other one holds
+      await waitUntilBlockedOnLock();
       release();
       await other;
       expect(await claiming).toMatchObject({ allowed: true, counted: true });

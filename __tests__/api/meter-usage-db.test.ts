@@ -759,15 +759,23 @@ run('usage for people, and cost for us, in a real database', () => {
       const ask = (id: string, key?: string) => statusGet(adminCall(`/api/admin/users/${id}/extra-usage/status${key === undefined ? '' : `?grantKey=${encodeURIComponent(key)}`}`), { params: Promise.resolve({ id }) });
       expect((await ask(sara.id)).status).toBe(400);
       expect((await ask(sara.id, 'x'.repeat(256))).status).toBe(400);
+      // The limit is on the key as it is stored (the person's id and the key), so a key the give would refuse is refused here too
+      const roomFor = 255 - `${sara.id}:`.length;
+      expect((await ask(sara.id, 'x'.repeat(roomFor + 1))).status).toBe(400);
+      expect((await ask(sara.id, 'x'.repeat(roomFor))).status).toBe(200);
       const before = await prisma.meterGrant.count({});
-      const none = await ask(sara.id, `g-${tag}-s`);
+      const key = `g-${tag}-s`;
+      const none = await ask(sara.id, key);
       expect(await none.json()).toEqual({ saved: false });
       expect(await prisma.meterGrant.count({})).toBe(before);
-      const { grant } = await recordGrant({ grantKey: `g-${tag}-s`, personId: sara.id, settlement: 'gift', multiplier: 2, startsAt: real(-1), endsAt: real(5), givenById: sara.id });
-      const saved = await (await ask(sara.id, grant.grantKey)).json();
-      expect(saved).toEqual({ saved: true, startsAt: grant.startsAt.toISOString(), endsAt: grant.endsAt.toISOString() });
+      // Saved through the give itself, as the sheet does: the sheet's key is the one asked about
+      const give = await personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, { grantKey: key, amount: 'double', endsAt: real(5).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id: sara.id }) });
+      expect(give.status).toBe(201);
+      const stored = await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: `${sara.id}:${key}` } });
+      const saved = await (await ask(sara.id, key)).json();
+      expect(saved).toEqual({ saved: true, startsAt: stored.startsAt.toISOString(), endsAt: stored.endsAt.toISOString() });
       // The same key under another person's name says nothing about them
-      expect(await (await ask(omar.id, grant.grantKey)).json()).toEqual({ saved: false });
+      expect(await (await ask(omar.id, key)).json()).toEqual({ saved: false });
       expect(await prisma.meterGrant.count({})).toBe(before + 1);
     });
 

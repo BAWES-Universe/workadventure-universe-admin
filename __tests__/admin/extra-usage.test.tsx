@@ -227,6 +227,29 @@ describe('giving extra usage', () => {
       expect(statusAsks()).toEqual([`/api/admin/users/sara/extra-usage/status?grantKey=${encodeURIComponent(posts()[0].grantKey)}`]);
     });
 
+    it('keeps the sheet held while the reload after "it went through" is slow, so a tap in that time never gives a second time', async () => {
+      setUpOffline({ status: 503 }, { saved: true });
+      const answer = fetchMock.getMockImplementation()!;
+      let finishReload: () => void = () => undefined;
+      let slow = false;
+      fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+        if (String(url).includes('/extra-usage/status')) slow = true;
+        else if (slow && init?.method !== 'POST') return new Promise((resolve) => (finishReload = () => resolve({ ok: true, status: 200, json: () => Promise.resolve(usage()) })));
+        return answer(url, init);
+      });
+      await tryAndChange();
+      await waitFor(() => expect(statusAsks()).toHaveLength(1));
+      // The reload is still running: the button stays held, and taps on it send nothing
+      await waitFor(() => expect((screen.getByTestId('extra-usage-confirm') as HTMLButtonElement).disabled).toBe(true));
+      fireEvent.click(screen.getByTestId('extra-usage-confirm'));
+      fireEvent.click(screen.getByTestId('extra-usage-confirm'));
+      expect(posts()).toHaveLength(1);
+      finishReload();
+      await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'The last try went through. Use Change if that is not what you want now.' })));
+      expect(posts()).toHaveLength(1);
+      expect(statusAsks()).toHaveLength(1);
+    });
+
     it('gives the new one with a new key when the first one was never saved, without ever sending the first one again', async () => {
       setUpOffline({ status: 503 }, { saved: false });
       await tryAndChange();
