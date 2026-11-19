@@ -310,11 +310,15 @@ export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now:
   if (!place.takesVisits) {
     // Not on this map, but the person is still here: the visit is kept alive for the places that take it, and it is not left
     // standing in the room they came from, where people could still reach a Brick whose person is elsewhere now
+    // A sighting older than the move that put the person elsewhere (the same page load's clock) is late: it moves nothing, and is told as late, so the bot
+    // server leaves the Brick standing in their newer room alone and does not read the empty list as "no Brick"
+    const rejected = clientId ? await prisma.brickVisit.findMany({ where: { userId: { in: userIds }, roomClient: clientId, roomSince: { gte: sightedAt } }, select: { userId: true } }) : [];
+    const lateIds = new Set(rejected.map((row) => row.userId));
     await prisma.brickVisit.updateMany({
-      where: { userId: { in: userIds }, ...(newer ? { AND: [{ OR: newer }] } : {}) },
+      where: { userId: { in: userIds.filter((id) => !lateIds.has(id)) }, ...(newer ? { AND: [{ OR: newer }] } : {}) },
       data: { roomId: null, roomSince: sightedAt, roomClient: clientId ?? null, seenAt: now },
     });
-    return { place, ...none };
+    return { place, visiting: [] as VisitingBrickRow[], late: seen.filter((row) => lateIds.has(row.userId)).map((row) => row.user.uuid) };
   }
   // Already in this room: seen now. Somewhere else: moved here only when this sighting is newer than the move that put it there
   // (equal or older is a late sync from a room the person has left, and changes nothing)

@@ -773,6 +773,24 @@ run('bringing a Brick along, in a real database', () => {
       }
     });
 
+    it('names a person as late from a room that takes no visits too, when they have moved on since; a newer sighting there is not late and clears the room they left', async () => {
+      const T = Date.now() - 60_000;
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await feed(universes.open.roomUrl, [sara.uuid], T);
+      await feed(universes.second.roomUrl, [sara.uuid], T + 5_000);
+      const syncClosed = (enteredAt: number) =>
+        roomFeed(call('POST', '/api/brick-visits/room', { roomUrl: universes.closed.roomUrl, people: [sara.uuid], enteredAt, clientId: CLIENT, withLate: true }, service));
+      // A sync of the closed room from before she left the first one: it is late, so the bot server leaves her Brick in the room she is in now
+      const older = await syncClosed(T + 2_000);
+      expect(older.status).toBe(200);
+      expect(await older.json()).toEqual({ bricks: [], late: [sara.uuid] });
+      expect(await visit(sara.id)).toMatchObject({ roomId: universes.second.roomId });
+      // A newer sighting there is not late: the room she left is cleared (nothing stands beside her in a room that takes no visits)
+      const newer = await syncClosed(T + 9_000);
+      expect(await newer.json()).toEqual({ bricks: [], late: [] });
+      expect(await visit(sara.id)).toMatchObject({ roomId: null });
+    });
+
     it('compares times only when the same page load said both: another device with an older clock still moves the visit (no clock of one device is held against another)', async () => {
       const T = Date.now() - 60_000;
       // The laptop's clock runs five minutes ahead: it brought the visit into room A at a time far in the future of the phone's

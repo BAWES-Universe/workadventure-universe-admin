@@ -198,11 +198,23 @@ const NAME_SHAPE = /^[\p{L}\p{N}][\p{L}\p{M}\p{N} .&'+\-/]*$/u;
 const SENTENCE_WORDS = new Set(['is', 'are', 'was', 'were', 'am', 'has', 'have', 'had', 'will', 'would', 'can', 'could', 'should', 'must', "isn't", "aren't", "don't", "doesn't", "didn't", "can't", 'cannot', "won't", "i'm", "i'd", "i've", "it's", "we're"]);
 const SENTENCE_OPENERS = new Set(['please', 'i', 'hello', 'hi', 'hey', 'thanks', 'thank']);
 
+/** Whom a leading "Can", "Will" or "Could" is asked of: "Can you add Notion" is a request, "Can Opener Pro" is a name. */
+const ASKED_OF = new Set(['you', 'i', 'we', 'they', 'he', 'she', 'it', 'me', 'us', 'someone', 'anyone', 'your', 'my', 'our']);
+
 function readsAsSentence(name: string): boolean {
-  const words = name.toLowerCase().split(' ');
+  const original = name.split(' ');
+  const words = original.map((word) => word.toLowerCase());
   if (words.length < 3) return false;
   if (name.endsWith('.')) return true;
-  return SENTENCE_OPENERS.has(words[0]) || words.some((word) => SENTENCE_WORDS.has(word));
+  if (SENTENCE_OPENERS.has(words[0])) return true;
+  return words.some((word, index) => {
+    if (!SENTENCE_WORDS.has(word)) return false;
+    // A contraction is never part of a name; a plain word like "can" is evidence of a sentence when it is typed in lower case (a name's words
+    // start with capitals), or when it opens the line and asks something of someone ("Can you add Notion", "Can You Add Notion")
+    if (word.includes("'")) return true;
+    const typedLower = original[index] === word;
+    return typedLower || (index === 0 && ASKED_OF.has(words[1] ?? ''));
+  });
 }
 
 /** The App name to count, or null when it is not an App name (empty, too long, a link, an email, or reads like a sentence). */

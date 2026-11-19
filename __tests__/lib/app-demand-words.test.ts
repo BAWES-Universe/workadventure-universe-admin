@@ -71,10 +71,10 @@ describe('cleanAskName: only an App name is kept', () => {
   });
 
   it('turns away a short sentence, and keeps real names that read a little like one', () => {
-    for (const text of ['My project is confidential', 'Our team has a budget', 'please add Zoho', 'I want a bank app', 'Add this app to my list.', 'It was not working', 'Can you add Notion']) {
+    for (const text of ['My project is confidential', 'Our team has a budget', 'please add Zoho', 'I want a bank app', 'Add this app to my list.', 'It was not working', 'Can you add Notion', 'Can You Add Notion']) {
       expect(cleanAskName(text)).toBeNull();
     }
-    for (const text of ['You Need A Budget', 'We Heart It', 'My Fitness Pal', 'Talabat orders', 'Dr. Oetker', 'Stack Exchange.com']) {
+    for (const text of ['You Need A Budget', 'We Heart It', 'My Fitness Pal', 'Talabat orders', 'Dr. Oetker', 'Stack Exchange.com', 'Can Opener Pro', 'Will Smith Fans', 'Must Have Apps']) {
       expect(cleanAskName(text)).not.toBeNull();
     }
     // Two words are never judged
