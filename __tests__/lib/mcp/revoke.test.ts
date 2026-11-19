@@ -24,6 +24,35 @@ describe('taking a sign-in back at the app (best effort)', () => {
     expect(init.redirect).toBe('error');
   });
 
+  it('tries the client in a Basic header when the app refuses the form, once, with the secret in only one of them', async () => {
+    const fetchMock = jest.fn().mockResolvedValueOnce(new Response('', { status: 401 })).mockResolvedValueOnce(new Response('', { status: 200 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    expect(await revokeAtApp({ authType: 'oauth', authConfig: config({ clientId: 'c:1', clientSecret: 's p' }) })).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const first = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(new URLSearchParams(first[1].body as string).get('client_secret')).toBe('s p');
+    const second = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    expect(second[0]).toBe('https://auth.example.com/revoke');
+    expect((second[1].headers as Record<string, string>).Authorization).toBe(`Basic ${Buffer.from('c%3A1:s%20p').toString('base64')}`);
+    expect(Object.fromEntries(new URLSearchParams(second[1].body as string))).toEqual({ token: 'refresh', token_type_hint: 'refresh_token' });
+    expect(second[1].redirect).toBe('error');
+  });
+
+  it('does not try again when the app accepted the form, or refused for another reason, or there is no secret to send', async () => {
+    const ok = jest.fn(async () => new Response('', { status: 200 }));
+    global.fetch = ok as unknown as typeof fetch;
+    await revokeAtApp({ authType: 'oauth', authConfig: config() });
+    expect(ok).toHaveBeenCalledTimes(1);
+    const server = jest.fn(async () => new Response('', { status: 500 }));
+    global.fetch = server as unknown as typeof fetch;
+    expect(await revokeAtApp({ authType: 'oauth', authConfig: config() })).toBe(false);
+    expect(server).toHaveBeenCalledTimes(1);
+    const open = jest.fn(async () => new Response('', { status: 401 }));
+    global.fetch = open as unknown as typeof fetch;
+    expect(await revokeAtApp({ authType: 'oauth', authConfig: config({ clientSecret: undefined }) })).toBe(false);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
   it('uses the access token when there is no refresh token', async () => {
     const fetchMock = jest.fn(async () => new Response('', { status: 200 }));
     global.fetch = fetchMock as unknown as typeof fetch;
