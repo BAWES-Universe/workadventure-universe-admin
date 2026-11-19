@@ -138,6 +138,12 @@ async function main() {
     `INSERT INTO artifacts (id, owner_id, maker_bot_id, maker_name, title, kind, chat_kind, chat_ref, open_scope, updated_at) VALUES
       ('a-private', 'friend', 'bot3', 'Scout', 'Quests private', 'app', 'nearby', 'room#9#900', 'me', now())`,
   );
+  // A friend's "Just you" and a shared one with the same word, in the bubble the owner is in: the real SQL has to keep the one and drop the other
+  await db.query(
+    `INSERT INTO artifacts (id, owner_id, maker_bot_id, maker_name, title, kind, chat_kind, chat_ref, open_scope, updated_at) VALUES
+      ('a-salary-private', 'friend', 'bot1', 'Scout', 'Salary plan', 'app', 'nearby', 'room#1#100', 'me', now()),
+      ('a-salary-shared', 'friend', 'bot1', 'Scout', 'Salary chart', 'app', 'nearby', 'room#1#100', 'chat', now())`,
+  );
   const titles = async (words: string, mode: 'all' | 'any', who: { userId: string | null; chatKind: string; chatRef: string; everyoneHere?: boolean }, botId = 'bot1') => {
     const built = artifactTitleSql({ botId, ...who }, searchWords(words), mode);
     return (await db.query<{ id: string }>(built.sql, built.values)).rows.map((row) => row.id).sort();
@@ -156,6 +162,11 @@ async function main() {
     everyoneOwner: await titles('quests', 'any', { userId: 'friend', chatKind: 'nearby', chatRef: 'room#9#900', everyoneHere: true }),
     everyoneElsewhere: await titles('board', 'any', { userId: 'owner', chatKind: 'nearby', chatRef: 'room#9#900', everyoneHere: true }),
     elsewhere: await titles('board', 'any', { userId: 'owner', chatKind: 'nearby', chatRef: 'room#9#900' }),
+    // Salary plan is the friend's "Just you", Salary chart is shared in the chat: the owner finds the chart only, the friend both, a guest and a reply others read the chart only
+    salaryOwner: await titles('salary', 'any', { userId: 'owner', chatKind: 'nearby', chatRef: 'room#1#100' }),
+    salaryFriend: await titles('salary', 'any', { userId: 'friend', chatKind: 'nearby', chatRef: 'room#1#100' }),
+    salaryGuest: await titles('salary', 'any', { userId: null, chatKind: 'nearby', chatRef: 'room#1#100' }),
+    salaryEveryone: await titles('salary', 'any', { userId: 'friend', chatKind: 'nearby', chatRef: 'room#1#100', everyoneHere: true }),
   };
 
   // One person with 10,000 files with this bot, each with a part of text, and one with the word

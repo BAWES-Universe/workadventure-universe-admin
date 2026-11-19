@@ -445,9 +445,12 @@ describe('finding files in bot chats (game #1508)', () => {
         const yes = await post(findRoute, { botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: true, others: ['uuid-friend'] });
         expect(yes.status).toBe(200);
         expect(yes.body).toMatchObject({ items: [], total: 0 });
+        // A search that ran no SQL at all would pass `every` on nothing
+        expect(asked.length).toBeGreaterThan(0);
         expect(asked.every((values) => values[12] === true && JSON.stringify(values[13]) === '["uuid-owner","uuid-friend"]')).toBe(true);
         asked.length = 0;
         expect((await post(findRoute, { botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: false })).status).toBe(200);
+        expect(asked.length).toBeGreaterThan(0);
         expect(asked.every((values) => values[12] === false)).toBe(true);
         expect((await post(findRoute, { botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: 'yes' })).status).toBe(400);
         expect((await post(findRoute, { botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: true, others: 'uuid-friend' })).status).toBe(400);

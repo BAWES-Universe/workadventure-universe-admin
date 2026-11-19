@@ -93,6 +93,11 @@ describe('bot file search on Postgres', () => {
       everyoneOwner: ['a-plain'],
       everyoneElsewhere: ['a-plain'],
       elsewhere: ['a-marked', 'a-plain'],
+      // The private "Salary plan" is left out by the real SQL for everyone but the friend who owns it; the shared "Salary chart" is found
+      salaryOwner: ['a-salary-shared'],
+      salaryFriend: ['a-salary-private', 'a-salary-shared'],
+      salaryGuest: ['a-salary-shared'],
+      salaryEveryone: ['a-salary-shared'],
     });
   });
 
