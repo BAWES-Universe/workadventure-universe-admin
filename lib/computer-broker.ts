@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { providerFor, fenceMachine } from '@/lib/computer';
+import { providerFor, fenceMachine, finishJob } from '@/lib/computer';
 import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
 import { Agent37Error } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
@@ -275,6 +275,10 @@ async function* keeping(
   let mark = start?.claim ?? null;
   let renewing: Promise<void> | null = null;
   const began = Date.now();
+  // Set when the start is given up for good (see the cap below): the wait for the agent's answer ends at once
+  let gaveUpAt: number | null = null;
+  let gaveUp: (() => void) | null = null;
+  const givenUp = new Promise<'gave-up'>((resolve) => (gaveUp = () => resolve('gave-up')));
   const beat =
     mark !== null && start
       ? setInterval(() => {
@@ -282,6 +286,21 @@ async function* keeping(
           // after it would be told "starting" for good. After the cap the claim lapses by itself, as one left by a server that stopped does
           if (Date.now() - began > TURN_CLAIM_RENEW_MAX_MS) {
             if (beat) clearInterval(beat);
+            // What a replacement start would do next depends on whether the conversation is known. In one the agent knows, a second turn is refused by the
+            // agent itself (409 session_busy, answered "busy" with the running turn's id), atomically, so the lapse is safe. For a job's very first turn
+            // no conversation and no id are known, Agent37 has no way to ask for "the turn started by this request" (a request carries no key of ours and
+            // sessions cannot be listed), so a replacement could run next to a turn that is still going. It must not: the job ends, visibly, and the
+            // person is told it failed, instead of two agents silently working on one machine. (The turn that never said its id is cancelled by the
+            // machine's own fence if it ever does, or rests with the machine.)
+            if (!responseId && !job.sessionId && !over) {
+              gaveUpAt = Date.now();
+              renewing = (async () => {
+                await finishJob(job.jobId, 'failed').catch((error) => console.error('[Computer] Could not end a job whose turn never said its id:', error instanceof Error ? error.message : 'unknown'));
+                gaveUp?.();
+                start?.controller.abort();
+              })();
+              return renewing;
+            }
             return undefined;
           }
           renewing = (async () => {
@@ -309,7 +328,19 @@ async function* keeping(
   try {
     for (;;) {
       // Read one event at a time: a reader that goes away while this waits for the id is only heard after the id is kept
-      const next = await events.next();
+      let next: IteratorResult<TurnEvent> | 'gave-up';
+      try {
+        next = await Promise.race([events.next(), givenUp]);
+      } catch (error) {
+        // The stream was cut by the give-up itself: the same end as when it is seen first
+        if (gaveUpAt === null) throw error;
+        next = 'gave-up';
+      }
+      if (next === 'gave-up') {
+        over = true;
+        yield { type: 'failed', code: 'no_turn_id', message: 'The agent never said its turn had started, so the job was ended' };
+        return;
+      }
       if (next.done) return;
       const event = next.value;
       // Until the turn's id is kept, nothing is passed on (a keep-alive included): the reader is only heard at a hand-over, and a reader that

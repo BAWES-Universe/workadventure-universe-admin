@@ -547,31 +547,40 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       }
     });
 
-    it('stops keeping its claim fresh after a few minutes, so an agent that never says the turn\'s id cannot hold the job for ever: the claim lapses and the next start works', async () => {
-      const { jobId } = await running();
-      let letGo: () => void = () => undefined;
-      const gate = new Promise<void>((resolve) => (letGo = resolve));
-      const open = jest.spyOn(fake, 'openTurn').mockImplementation((async () =>
+    // A turn the agent accepted but whose id never arrives: its stream waits (and ends when it is cut, as a real one does)
+    const silentStream = (fakeProvider: FakeComputerProvider) => {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const open = jest.spyOn(fakeProvider, 'openTurn').mockImplementation((async (_ref: string, _input: unknown, signal?: AbortSignal) =>
         (async function* () {
-          await gate;
+          await new Promise<void>((resolve, reject) => {
+            void gate.then(resolve);
+            signal?.addEventListener('abort', () => reject(new Error('aborted')));
+          });
           yield { type: 'completed', outputText: '', usage: null } as TurnEvent;
         })()) as never);
+      return { open, release };
+    };
+    // The 15-second beats of a start are caught so a test can run them when it likes
+    const catchBeats = () => {
       const beats: Array<() => unknown> = [];
       const realInterval = global.setInterval;
-      const realClear = global.clearInterval;
-      const interval = jest.spyOn(global, 'setInterval').mockImplementation(((handler: () => unknown, ms?: number, ...rest: unknown[]) => {
+      const spy = jest.spyOn(global, 'setInterval').mockImplementation(((handler: () => unknown, ms?: number, ...rest: unknown[]) => {
         if (ms === 15_000) {
           beats.push(handler);
           return realInterval(() => undefined, 1_000_000);
         }
         return (realInterval as unknown as (...args: unknown[]) => NodeJS.Timeout)(handler, ms, ...rest);
       }) as never);
-      const cleared: unknown[] = [];
-      const clear = jest.spyOn(global, 'clearInterval').mockImplementation(((handle: never) => {
-        cleared.push(handle);
-        return realClear(handle);
-      }) as never);
-      let now: jest.SpyInstance | null = null;
+      return { beats, spy };
+    };
+    const later = (ms: number) => jest.spyOn(Date, 'now').mockReturnValue(Date.now() + ms);
+
+    it('a first turn whose id and conversation never arrive: after the cap the job ends visibly and no second turn is opened beside it', async () => {
+      const { jobId } = await running();
+      const { open, release } = silentStream(fake);
+      const { beats, spy } = catchBeats();
+      let clock: jest.SpyInstance | null = null;
       try {
         const started = await startTurn(jobId, 'go');
         if (!started.ok) throw new Error('no turn');
@@ -584,31 +593,67 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         await beats[0]();
         const renewed = (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt!;
         expect(renewed.getTime()).toBeGreaterThan(before.getTime());
-        // Ten minutes on, still without an id: it is not renewed again
-        const real = Date.now();
-        now = jest.spyOn(Date, 'now').mockReturnValue(real + 10 * 60_000);
-        await new Promise((resolve) => setTimeout(resolve, 30));
+        // Ten minutes on, still without an id or a conversation: nothing can say whether that turn still runs, so the job ends
+        clock = later(10 * 60_000);
         await beats[0]();
-        now.mockRestore();
-        now = null;
-        expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt!.getTime()).toBe(renewed.getTime());
-        expect(cleared.length).toBeGreaterThan(0);
-        // The claim lapses as one left by a server that stopped does, and the next start is not turned away for good
-        await prisma.computerJob.update({ where: { id: jobId }, data: { turnClaimedAt: new Date(Date.now() - 50_000) } });
-        const next = await startTurn(jobId, 'again');
-        expect(next.ok).toBe(true);
-        expect(open).toHaveBeenCalledTimes(2);
-        if (next.ok) await next.events.return(undefined);
-        letGo();
-        await started.events.return(undefined);
-        void waiting;
+        clock.mockRestore();
+        clock = null;
+        expect((await waiting).value).toMatchObject({ type: 'failed', code: 'no_turn_id' });
+        expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).status).toBe('failed');
+        // A start after it is told the job is over: the agent is asked once
+        expect(await startTurn(jobId, 'again')).toEqual({ ok: false, reason: 'not_running' });
+        expect(open).toHaveBeenCalledTimes(1);
       } finally {
-        letGo();
-        now?.mockRestore();
+        release();
+        clock?.mockRestore();
         open.mockRestore();
-        interval.mockRestore();
-        clear.mockRestore();
+        spy.mockRestore();
       }
+    });
+
+    it('a turn in a conversation the agent knows: after the cap the claim lapses, and the agent itself refuses a second turn beside the first (busy, with its id)', async () => {
+      const { jobId } = await running();
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentSessionId: 'sess-known' } });
+      const { open, release } = silentStream(fake);
+      const { beats, spy } = catchBeats();
+      let clock: jest.SpyInstance | null = null;
+      try {
+        const started = await startTurn(jobId, 'go');
+        if (!started.ok) throw new Error('no turn');
+        const waiting = started.events.next();
+        for (let wait = 0; wait < 100 && beats.length === 0; wait++) await new Promise((resolve) => setTimeout(resolve, 20));
+        clock = later(10 * 60_000);
+        const before = (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt!;
+        await beats[0]();
+        clock.mockRestore();
+        clock = null;
+        // Not renewed any more, and the job goes on (the conversation can be asked)
+        const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
+        expect(after.turnClaimedAt!.getTime()).toBe(before.getTime());
+        expect(after.status).toBe('running');
+        await prisma.computerJob.update({ where: { id: jobId }, data: { turnClaimedAt: new Date(Date.now() - 50_000) } });
+        // The conversation's first turn is still going: the agent says so, atomically, and no second turn opens
+        open.mockImplementationOnce((async () => {
+          throw new Agent37Error(409, 'session_busy', 'busy', 'resp-first');
+        }) as never);
+        expect(await startTurn(jobId, 'again')).toEqual({ ok: false, reason: 'busy', responseId: 'resp-first' });
+        expect(fake.openedTurns).toHaveLength(0);
+        release();
+        await waiting;
+        await started.events.return(undefined);
+      } finally {
+        release();
+        clock?.mockRestore();
+        open.mockRestore();
+        spy.mockRestore();
+      }
+    });
+
+    it('a start left by a server that stopped lapses by itself, and the next start works', async () => {
+      const { jobId } = await running();
+      await prisma.computerJob.update({ where: { id: jobId }, data: { turnClaimedAt: new Date(Date.now() - 50_000) } });
+      expect((await startTurn(jobId, 'go')).ok).toBe(true);
+      expect(fake.openedTurns).toHaveLength(1);
     });
 
     it('looks at the job again once it holds the claim: a turn another start kept in between is busy (its id is given), and nothing is opened', async () => {
