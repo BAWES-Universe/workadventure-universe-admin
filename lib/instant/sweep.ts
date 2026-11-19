@@ -1,10 +1,11 @@
 import { prisma } from '@/lib/db';
 import { getAdapter } from '@/lib/app-adapter';
 import type { ReadyMadeAdapter } from '@/lib/app-adapter/types';
-import { backfillMeterEvents, evaluatePause, reconcileRun, sweepGoodwill, type GoodwillSweep } from '@/lib/instant/executor';
+import { evaluatePause, reconcileRun, sweepGoodwill, type GoodwillSweep } from '@/lib/instant/executor';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 import { denyInstantOnSessions, type SessionSweep } from '@/lib/instant/sessions';
 import { pauseInstant } from '@/lib/instant/state';
+import { repairInstantReporting, type ReportingRepair } from '@/lib/instant/report';
 import { settleCheckingReceipts } from '@/lib/task-receipts';
 import { instantListedPrices, usdToMicros } from '@/lib/instant/values';
 
@@ -68,6 +69,8 @@ export interface SweepResult {
   /** Goodwill give-backs the books never confirmed: tried again, or let go after the wait. */
   goodwill: GoodwillSweep;
   paused: boolean;
+  /** The usage events mended in this pass (missing ones written, wrong amounts corrected) and the gaps still there, with the age of the oldest; null when the pass could not run. */
+  reporting: ReportingRepair | null;
   sessions: SessionSweep;
   drift: DriftReport | null;
 }
@@ -99,8 +102,6 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
   for (const row of [...open, ...lateRuns.filter((late) => !open.some((one) => one.id === late.id))]) {
     await reconcileRun(row.id, { funds, adapter, now }).catch((error) => console.error('[Instant] Could not look a run up:', error instanceof Error ? error.message : 'unknown'));
   }
-  // A settled run whose meter event could not be written when it settled gets it here, so the books and the Costs page never stay short of it
-  await backfillMeterEvents(now).catch((error) => console.error('[Instant] The meter event check failed:', error instanceof Error ? error.message : 'unknown'));
   // A receipt still in checking whose runs have all ended is settled here too, so one the run's own pass could not move (a crash, a failed
   // write) never stays behind. Nothing here is asked of a person or a model.
   const receipts = await settleCheckingReceipts(BATCH, now).catch((error) => {
@@ -110,6 +111,12 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
   const goodwill = await sweepGoodwill({ funds, adapter, now }).catch((error): GoodwillSweep => {
     console.error('[Instant] The give-back check failed:', error instanceof Error ? error.message : 'unknown');
     return { looked: 0, settled: 0, released: 0 };
+  });
+  // Usage events a settled run lacks (the write was refused) or has with other amounts than the run: mended from the run's own rows, a bounded batch a pass.
+  // Nothing here asks an App, the credit books or a wallet for anything
+  const reporting = await repairInstantReporting({ now }).catch((error): ReportingRepair | null => {
+    console.error('[Instant] The usage event repair failed:', error instanceof Error ? error.message : 'unknown');
+    return null;
   });
   const paused = await evaluatePause(now).catch(() => false);
   const sessions = await denyInstantOnSessions(BATCH, adapter).catch((error): SessionSweep => {
@@ -125,7 +132,7 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
     // The clock starts only when the check finished and Composio answered for every tool (and any pause it needed was made): a failed or partial check is tried again by the next sweep
     if (drift && drift.unreachable.length === 0) lastDriftAt = Date.now();
   }
-  return { looked: open.length, receipts, goodwill, paused, sessions, drift };
+  return { looked: open.length, receipts, goodwill, paused, reporting, sessions, drift };
 }
 
 /** For tests. */

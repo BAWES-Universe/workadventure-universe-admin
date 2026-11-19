@@ -10,7 +10,7 @@ import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import { Figure, Figures, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine } from '../../components/ds';
 import styles from '../../components/ds/ds.module.css';
 import { dollars } from '@/lib/costs-words';
-import { askedLine, byRouteLine, costLine, dayWords, runsOnWords, sheetLine, usesLine } from '@/lib/app-demand-words';
+import { askedLine, byRouteLine, costLine, costTotalLabel, costTotalNote, dayWords, runsOnWords, sheetLine, usesLine } from '@/lib/app-demand-words';
 import type { AppRow, DemandReport } from '@/lib/app-demand';
 import type { AppRouteName } from '@/lib/app-routes';
 
@@ -83,7 +83,7 @@ export default function AppsDemandPage() {
             <Figures>
               <Figure value={report.totals.uses.toLocaleString('en')} label="uses" />
               <Figure value={report.totals.people.toLocaleString('en')} label="people" />
-              <Figure value={dollars(report.totals.costMicros)} label="cost to us" />
+              <Figure value={dollars(report.totals.costMicros)} label={costTotalLabel(report.totals.cost)} />
               <Figure value={report.totals.asks.toLocaleString('en')} label="asked for more" />
             </Figures>
           )
@@ -108,6 +108,11 @@ export default function AppsDemandPage() {
         <LoadingRows label="the Apps" rows={4} />
       ) : (
         <>
+          {costTotalNote(report.totals.cost) && (
+            <p className="text-sm text-muted-foreground" data-testid="apps-cost-note">
+              {costTotalNote(report.totals.cost)}
+            </p>
+          )}
           <section aria-labelledby="apps-used" className="min-w-0" data-testid="apps-used">
             <SectionHeader id="apps-used" title="Most used, by cost to us" count={report.apps.length} />
             <div className="grid min-w-0 gap-0.5">

@@ -4,7 +4,8 @@ import { prisma } from '@/lib/db';
 import { getAdapter } from '@/lib/app-adapter';
 import type { InstantAdapter, InstantCall, InstantLog, ReadyMadeAdapter } from '@/lib/app-adapter/types';
 import { recordMeterEvent } from '@/lib/meter';
-import { monthOf, type MeterEventInput } from '@/lib/meter-values';
+import { instantEventOf, reportInstantRunIn } from '@/lib/instant/report';
+import { monthOf } from '@/lib/meter-values';
 import { brickHasApp } from '@/lib/instant/asker';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 import { getInstantLimits, getInstantPause, pauseInstant } from '@/lib/instant/state';
@@ -469,7 +470,7 @@ async function chargeFromLog(adapter: ReadyMadeAdapter | null, logId: string): P
  * matters if two of these run at once. Only a confirmed answer is recorded; anything else leaves the run held and the sweep says it again.
  * Returns the run as it now stands.
  */
-async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'>): Promise<Row | null> {
+async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'> & { now?: Date }): Promise<Row | null> {
   const run = await prisma.instantRun.findUnique({ where: { id: runId } });
   if (!run || run.customerState !== 'held') return run;
   if (run.state === 'succeeded') {
@@ -492,14 +493,15 @@ async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'>): Promise<R
     if (confirmed === null) return run;
     // The run is marked charged and the meter event says so in one step: when the event cannot be updated, the run stays held, and the next
     // sweep asks the books again (they answer with the same first amount) and writes both. Marked charged first, a failure here would leave the
-    // event saying "not known" for good, as nothing looks at a charged run again.
+    // event saying "not known" for good, as nothing looks at a charged run again (the sweep's repair would still find it, but the person's side
+    // and the books' copy of it are one step).
     await prisma.$transaction(async (tx) => {
-      // Under the run's own lock, like every other writer of the run (late evidence, a lookup, the backfill of a missing event): a backfill that
-      // read the run before this step cannot write the event with "not known" after this step has looked for it and found nothing to update
+      // Under the run's own lock, like every other writer of the run (late evidence, a lookup, the repair of an event): a repair that read the run
+      // before this step cannot write the event with "not known" after this step has looked for it and found nothing to update
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`instant:run:${run.id}`}, 0))`;
       await tx.instantRun.updateMany({ where: { id: runId, customerState: 'held' }, data: { customerState: 'charged', customerMicros: BigInt(confirmed) } });
-      // The meter event of the run says what the person was charged only from here, at the amount the books confirmed
-      await tx.$executeRaw`UPDATE meter_events SET detail = jsonb_set(COALESCE(detail::jsonb, '{}'::jsonb), '{customerMicros}', to_jsonb(${confirmed}::bigint)) WHERE event_id = ${`instant:${run.id}`}`;
+      // The meter event of the run says what the person was charged only from here, at the amount the books confirmed: the one writer of the event
+      await reportInstantRunIn(tx, runId, ctx.now ?? new Date(), { insertIsBestEffort: true });
     });
   } else if (run.state === 'failed' || run.state === 'refused') {
     let gone = false;
@@ -512,6 +514,7 @@ async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'>): Promise<R
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`instant:run:${run.id}`}, 0))`;
       await tx.instantRun.updateMany({ where: { id: runId, customerState: 'held' }, data: { customerState: 'released', customerMicros: BigInt(0) } });
+      await reportInstantRunIn(tx, runId, ctx.now ?? new Date(), { insertIsBestEffort: true });
     });
   } else {
     // Still going: nothing is decided on the person's side yet
@@ -524,44 +527,18 @@ async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'>): Promise<R
  * Composio's charge is known: written on the run (provider side) and once to the meter's books. A charge above the top price
  * means the table is too low: the run still settles, the excess is ours, and Instant stops.
  */
-/**
- * What the person was charged, as the meter event records it. A failed run released its hold, so the person paid nothing: that is a
- * zero, not "not known" (which would show as "Price not known yet" on the task's receipt for good). A run still held is not known yet.
- */
-const customerChargedMicros = (run: Row): number | null => (run.customerMicros === null ? (run.state === 'failed' ? 0 : null) : Number(run.customerMicros));
-
-/** The meter event of a settled run: one per run, under its own id, so writing it twice is one event. */
-function instantMeterEvent(run: Row, micros: number, basis: 'measured' | 'estimated', occurredAt: Date): MeterEventInput {
-  return {
-    eventId: `instant:${run.id}`,
-    kind: 'app_use',
-    pool: 'chat',
-    occurredAt,
-    personKey: `person:${run.personId}`,
-    personId: run.personId,
-    botId: run.botId,
-    brick: true,
-    payerKind: 'universe',
-    payerPersonId: null,
-    route: 'instant',
-    jobId: null,
-    quantity: 1,
-    unit: 'use',
-    costMicros: micros,
-    basis,
-    sourceRef: `instant_runs:${run.id}`,
-    detail: { instant: true, provider: INSTANT_PROVIDER, ...(run.taskKey ? { taskKey: run.taskKey } : {}), tool: run.toolSlug, toolkit: run.toolkit, runId: run.id, customerMicros: customerChargedMicros(run), basis, state: run.state },
-  };
-}
-
 async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: number, basis: 'measured' | 'estimated', now: Date): Promise<void> {
   if (run.providerState === 'settled') return;
-  await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt: run.finishedAt ?? now } });
-  // The meter event is a copy for the books: if it cannot be written, the settlement still stands (and `backfillMeterEvents` writes it later). It is
-  // written inside a savepoint, because a failed statement otherwise leaves the whole transaction aborted, and the settlement above would fail with it
+  const finishedAt = run.finishedAt ?? now;
+  await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt } });
+  // The meter event is a copy for the books: if it cannot be written, the settlement still stands (the sweep mends it from the run's own rows, see
+  // `repairInstantReporting`). It is written inside a savepoint, because a failed statement otherwise leaves the whole transaction aborted, and the
+  // settlement above would fail with it. What the person was charged is whatever the credit books have confirmed by now (pending until they have): the
+  // amount the hold would be settled at is a calculation, never written as a charge
   await tx.$executeRaw`SAVEPOINT instant_meter_event`;
   try {
-    await recordMeterEvent(instantMeterEvent(run, micros, basis, now), tx);
+    const event = instantEventOf({ ...run, providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt });
+    if (event) await recordMeterEvent(event, tx);
     await tx.$executeRaw`RELEASE SAVEPOINT instant_meter_event`;
   } catch (error) {
     await tx.$executeRaw`ROLLBACK TO SAVEPOINT instant_meter_event`;
@@ -570,48 +547,12 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
   if (micros > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
 }
 
-/** How far back a settled run with no meter event is looked for: past it the books of that month are closed. */
-const BACKFILL_DAYS = 35;
-
-/**
- * Settled runs whose meter event was never written (the write failed inside its savepoint, and the run's settlement stood without it): written
- * here, a few a sweep, from what the run says (its provider cost and basis, and what the person was charged if that is known). The event id is
- * the run's own, so a run that has one, or one written twice, is still one event. Returns how many were written.
- */
-export async function backfillMeterEvents(now: Date = new Date(), batch = 25): Promise<number> {
-  const since = new Date(now.getTime() - BACKFILL_DAYS * 24 * 60 * 60 * 1000);
-  const missing = await prisma.$queryRaw<{ id: string }[]>`
-    SELECT r."id" FROM "instant_runs" r
-    WHERE r."provider_state" = 'settled' AND r."provider_micros" IS NOT NULL AND r."finished_at" >= ${since}
-      AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'instant:' || r."id")
-    ORDER BY r."finished_at" ASC LIMIT ${batch}`;
-  let written = 0;
-  for (const { id } of missing) {
-    try {
-      // Read and written under the run's own lock: a late measured cost or the charge being recorded cannot land between the read and the write,
-      // so the event is never written from a run as it stood before them (the event is written once, and nothing would correct it later)
-      const wrote = await withRun(id, async (run, tx) => {
-        if (run.providerState !== 'settled' || run.providerMicros === null) return false;
-        const basis = run.providerBasis === 'measured' ? 'measured' : 'estimated';
-        const { recorded } = await recordMeterEvent(instantMeterEvent(run, asNumber(run.providerMicros), basis, run.finishedAt ?? now), tx);
-        return recorded;
-      });
-      if (wrote) written += 1;
-    } catch (error) {
-      console.error('[Instant] Could not write the meter event again:', error instanceof Error ? error.message : 'unknown');
-    }
-  }
-  return written;
-}
-
 /**
  * A run that worked and whose charge is known: the provider side is settled (inside the caller's transaction). What the person is
  * charged is said to the credit books afterwards, outside it (`finishCustomer`); the amount returned is what that will ask for.
  */
 async function settleSuccess(run: Row, tx: Prisma.TransactionClient, providerMicros: number, basis: 'measured' | 'estimated', limits: InstantLimits, ctx: Ctx): Promise<number> {
   const charged = customerChargeFor(providerMicros, asNumber(run.holdMicros), run.markupBps ?? limits.markupBps);
-  // What the person pays is not written into the meter event here: the books have not said it yet, and a run they could not settle is
-  // still held. `finishCustomer` writes the amount into the event once the books confirm it.
   await settleProvider(run, tx, providerMicros, basis, ctx.now);
   return charged;
 }
@@ -727,7 +668,8 @@ async function applyLateEvidence(run: Row, line: InstantLog, tx: Prisma.Transact
     where: { id: run.id },
     data: { detail: next as Prisma.InputJsonValue, ...(verified !== null ? { providerMicros: BigInt(verified), providerBasis: 'measured', providerLogId: run.providerLogId ?? line.id } : {}) },
   });
-  if (verified !== null) await tx.meterEvent.updateMany({ where: { eventId: `instant:${run.id}` }, data: { costMicros: BigInt(verified), basis: 'measured' } });
+  // The event says the figure that was found: the one writer of the event corrects it (once; a second look finds nothing to change), and keeps what it said before
+  if (verified !== null) await reportInstantRunIn(tx, run.id, now, { insertIsBestEffort: true });
   // A figure found late that is above the top price means the table is too low, as for one found on time: Instant stops (the person's side is not touched)
   if (verified !== null && verified > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
 }
