@@ -64,11 +64,14 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
       let toldNotPaid = false;
       let stopped = false;
       let timer: ReturnType<typeof setTimeout> | null = null;
+      /** The watch's own end: it ends on time whether a look is in flight or the next one is only waiting for its turn. */
+      let endTimer: ReturnType<typeof setTimeout> | null = null;
       /** The look that is in flight, so ending the watch ends it too. */
       let looking: AbortController | null = null;
       const stop = () => {
         stopped = true;
         if (timer) clearTimeout(timer);
+        if (endTimer) clearTimeout(endTimer);
         looking?.abort();
       };
       watchers.current.set(orderId, stop);
@@ -164,6 +167,10 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
         timeUp();
       };
       timer = setTimeout(poll, POLL_MS);
+      // Not left to the next poll: a look that answers just before the end would otherwise leave the watch waiting for a poll after it
+      endTimer = setTimeout(() => {
+        if (alive()) timeUp();
+      }, POLL_FOR_MS);
     },
     [artifactId, tell, stopAll, firstExpired],
   );
