@@ -246,6 +246,102 @@ describe('testMcpConnection', () => {
       expect(await testMcpConnection(base)).toMatchObject({ success: true, toolNames: ['a'] });
     });
 
+    it('never returns a credential with a quote in it from a JSON error answer: not as the error code, not in the kept body', async () => {
+      const key = 'abc"def12345';
+      jest.resetModules();
+      jest.doMock('@/lib/encryption', () => ({ decryptApiKey: () => key }));
+      const { testMcpConnection: run } = await import('@/lib/mcp/test-connection');
+      // The body says it escaped (a quote in a JSON text is written \"), and once read it is the key again
+      pretend(() => new Response(JSON.stringify({ error: `bad key ${key}`, error_description: `${key} refused` }), { status: 401, headers: { 'content-type': 'application/json' } }));
+      const refused = await run({ ...base, authType: 'api-key', authConfig: 'x' });
+      expect(refused.success).toBe(false);
+      expect(JSON.stringify(refused)).not.toContain('def12345');
+      expect(refused.errorCode).toContain('[removed]');
+      expect(refused.errorBody).not.toContain('def12345');
+      // Cut short, so it is no longer JSON: the key as JSON writes it is still removed
+      pretend(() => new Response(`{"error":"bad key ${JSON.stringify(key).slice(1, -1)}", "more": "x`, { status: 401 }));
+      expect(JSON.stringify(await run({ ...base, authType: 'api-key', authConfig: 'x' }))).not.toContain('def12345');
+      jest.dontMock('@/lib/encryption');
+    });
+
+    it('never returns a credential an app echoes as the reason phrase of a redirect that has no Location', async () => {
+      const key = 'plainkey123456';
+      jest.resetModules();
+      jest.doMock('@/lib/encryption', () => ({ decryptApiKey: () => key }));
+      const { testMcpConnection: run } = await import('@/lib/mcp/test-connection');
+      pretend(() => new Response(null, { status: 302, statusText: key }));
+      const result = await run({ ...base, authType: 'api-key', authConfig: 'x' });
+      expect(result.success).toBe(false);
+      expect(JSON.stringify(result)).not.toContain(key);
+      jest.dontMock('@/lib/encryption');
+    });
+
+    it('does not say an app works when it names a protocol version this check does not know, and closes the session it opened', async () => {
+      const sent = pretend(({ message }) => {
+        if (message.method === 'initialize') return json({ jsonrpc: '2.0', id: 'init', result: { protocolVersion: '2099-01-01' } }, { 'mcp-session-id': 'sess-v' });
+        if (message.method === 'tools/list') return json({ jsonrpc: '2.0', id: '1', result: { tools: [{ name: 'a' }] } });
+        return new Response(null, { status: 202 });
+      });
+      const result = await testMcpConnection(base);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('2099-01-01');
+      expect(sent.map((one) => one.message.method)).toEqual(['initialize', 'DELETE']);
+      // An app that names none still passes (it applies its own default)
+      pretend(({ message }) => (message.method === 'initialize' ? json({ jsonrpc: '2.0', id: 'init', result: {} }) : message.method === 'tools/list' ? json({ jsonrpc: '2.0', id: '1', result: { tools: [{ name: 'a' }] } }) : new Response(null, { status: 202 })));
+      expect(await testMcpConnection(base)).toMatchObject({ success: true });
+    });
+
+    it('closes the session at the address that opened it, with the sign-in on the configured origin only', async () => {
+      const keyed = { ...base, authType: 'bearer', authConfig: 'x' };
+      jest.resetModules();
+      jest.doMock('@/lib/encryption', () => ({ decryptApiKey: () => 'tok-close-123' }));
+      const { testMcpConnection: run } = await import('@/lib/mcp/test-connection');
+      const answer = (one: Sent) => {
+        if (one.url === 'https://app.example.com/mcp') return new Response(null, { status: 307, headers: { location: 'https://app.example.com/mcp/' } });
+        if (one.message.method === 'initialize') return json({ jsonrpc: '2.0', id: 'init', result: { protocolVersion: '2025-06-18' } }, { 'mcp-session-id': 'sess-same' });
+        if (one.message.method === 'tools/list') return json({ jsonrpc: '2.0', id: '1', result: { tools: [{ name: 'a' }] } });
+        return new Response(null, { status: 202 });
+      };
+      // /mcp redirects to /mcp/: the session lives at /mcp/, and is closed there with the sign-in (same origin)
+      let sent = pretend(answer);
+      await run(keyed);
+      let closing = sent.find((one) => one.message.method === 'DELETE')!;
+      expect(closing.url).toBe('https://app.example.com/mcp/');
+      expect(closing.headers).toMatchObject({ Authorization: 'Bearer tok-close-123', 'Mcp-Session-Id': 'sess-same', 'MCP-Protocol-Version': '2025-06-18' });
+      // The session is issued by another origin: it is closed there, with its session id and the version, and none of what was configured
+      sent = pretend((one) => (one.url === 'https://app.example.com/mcp' ? new Response(null, { status: 307, headers: { location: 'https://issuer.example.net/mcp' } }) : answer(one)));
+      await run({ ...keyed, headers: { 'X-Tenant': 'tenant-1' } });
+      closing = sent.find((one) => one.message.method === 'DELETE')!;
+      expect(closing.url).toBe('https://issuer.example.net/mcp');
+      expect(closing.headers['Mcp-Session-Id']).toBe('sess-same');
+      expect(closing.headers['Authorization']).toBeUndefined();
+      expect(closing.headers['X-Tenant']).toBeUndefined();
+      jest.dontMock('@/lib/encryption');
+    });
+
+    it('does not let closing the session hold up a finished test beyond its three seconds, whatever it is waiting for', async () => {
+      jest.useFakeTimers();
+      try {
+        // The close never gets as far as an answer (a name that never resolves, or a server that never replies)
+        global.fetch = jest.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+          if (init?.method === 'DELETE') return new Promise<Response>(() => undefined);
+          const message = JSON.parse(String(init?.body));
+          if (message.method === 'initialize') return json({ jsonrpc: '2.0', id: 'init', result: {} }, { 'mcp-session-id': 'sess-slow' });
+          if (message.method === 'tools/list') return json({ jsonrpc: '2.0', id: '1', result: { tools: [{ name: 'a' }] } });
+          return new Response(null, { status: 202 });
+        }) as unknown as typeof fetch;
+        let result: unknown = null;
+        const running = testMcpConnection(base).then((one) => (result = one));
+        await jest.advanceTimersByTimeAsync(2_900);
+        expect(result).toBeNull();
+        await jest.advanceTimersByTimeAsync(300);
+        await running;
+        expect(result).toMatchObject({ success: true, toolNames: ['a'] });
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it('closes the session it opened, and says a non-JSON answer in fixed words', async () => {
       const sent = listing([{ name: 'a' }], { init: json({ jsonrpc: '2.0', id: 'init', result: {} }, { 'mcp-session-id': 'sess-2' }) });
       await testMcpConnection(base);

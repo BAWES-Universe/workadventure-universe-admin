@@ -178,9 +178,35 @@ type Secrets = readonly string[];
 
 function withoutSecrets(text: string, secrets: Secrets): string {
   let out = text;
-  // Longest first, so a secret that holds another is removed whole
-  for (const secret of [...secrets].sort((a, b) => b.length - a.length)) out = out.split(secret).join('[removed]');
+  // Longest first, so a secret that holds another is removed whole. A secret is also removed as JSON writes it (a quote or a backslash in it
+  // comes back escaped inside a JSON body, so the plain text of the secret is not found there)
+  for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
+    out = out.split(secret).join('[removed]');
+    const written = JSON.stringify(secret).slice(1, -1);
+    if (written !== secret) out = out.split(written).join('[removed]');
+  }
   return out;
+}
+
+/**
+ * The body of a failing answer, cleaned of the secrets before anything is read from it. A JSON body is cleaned in what it SAYS (its decoded text
+ * values and names), not only in what it is written as: a secret with a quote in it is `abc\"def` in the written body, and is found again in the
+ * decoded value the error code is taken from. What is kept is the cleaned body written out again; a body that is not JSON is cleaned as text.
+ */
+function cleanedBody(text: string, secrets: Secrets): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return withoutSecrets(text, secrets);
+  }
+  const clean = (value: unknown): unknown => {
+    if (typeof value === 'string') return withoutSecrets(value, secrets);
+    if (Array.isArray(value)) return value.map(clean);
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([name, inner]) => [withoutSecrets(name, secrets), clean(inner)]));
+    return value;
+  };
+  return withoutSecrets(JSON.stringify(clean(parsed)), secrets);
 }
 
 /** Diagnostic fields carried from a failing HTTP response into the stored result. */
@@ -232,7 +258,7 @@ async function describeFailure(
   // control, and a failing endpoint that streams megabytes would otherwise be buffered
   // in full before truncateDetail ever sees it. Covers both failure call sites, the
   // direct response and the followed redirect, which both land here without a body.
-  const rawBody = withoutSecrets(responseBody ?? (await readBodyWithLimit(response)), secrets);
+  const rawBody = cleanedBody(responseBody ?? (await readBodyWithLimit(response)), secrets);
   const errorCode = extractErrorCode(rawBody);
   // The reason phrase is chosen by the server, so it is stored text like any other and
   // goes through the same redact-then-truncate as the body and the challenge header: an
@@ -256,6 +282,33 @@ async function describeFailure(
 function rpcErrorText(error: unknown, secrets: Secrets): string {
   const message = error && typeof error === 'object' ? (error as { message?: unknown }).message : undefined;
   return truncateDetail(withoutSecrets(typeof message === 'string' && message ? message : JSON.stringify(error), secrets)) ?? 'unknown error';
+}
+
+/** How long closing a session may take, the whole of it: the check of the address, the name lookup and the request. */
+const CLOSE_MS = 3000;
+
+/** Closes the session a test opened. Never fails and never takes longer than CLOSE_MS, so a finished test is not held up by it. */
+async function closeSession(session: { id: string; origin: string; url: string }, configuredUrl: string, headers: Record<string, string>, protocolVersion: string | null): Promise<void> {
+  if (!isAllowedServerUrl(session.url)) return;
+  const sameOrigin = new URL(configuredUrl).origin === session.origin;
+  const closing = { ...(sameOrigin ? headers : FIXED_HEADERS), 'Mcp-Session-Id': session.id, ...(protocolVersion ? { 'MCP-Protocol-Version': protocolVersion } : {}) };
+  const control = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      control.abort();
+      resolve();
+    }, CLOSE_MS);
+  });
+  const closed = pinnedFetch(session.url, { method: 'DELETE', headers: closing, signal: control.signal }).then(
+    (res) => res.body?.cancel().catch(() => undefined),
+    () => undefined,
+  );
+  try {
+    await Promise.race([closed.then(() => undefined), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Calls initialize and tools/list on an app's link with its stored sign-in (decrypted here only), through the same address guards at every hop. */
@@ -339,7 +392,7 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
     return { success: false, toolCount: 0, toolNames: [], error: unsendable };
   }
 
-  let session: { id: string; origin: string } | null = null;
+  let session: { id: string; origin: string; url: string } | null = null;
   let protocolVersion: string | null = null;
   try {
     // SSRF guard: reject internal/private addresses before making network request
@@ -435,7 +488,7 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
             status: res.status,
             // Second write site for this field, and the one that does not pass through
             // describeFailure: sanitise it here too rather than storing the raw phrase.
-            statusText: truncateDetail(res.statusText) ?? undefined,
+            statusText: truncateDetail(withoutSecrets(res.statusText, secrets)) ?? undefined,
             errorCode: null,
             wwwAuthenticate: null,
             errorBody: null,
@@ -508,9 +561,17 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
     // Check header first, then fall back to body for non-spec servers. It belongs to the origin the answer came from.
     const initResultBody = initResult.data?.result && typeof initResult.data.result === 'object' ? (initResult.data.result as { sessionId?: unknown; protocolVersion?: unknown }) : undefined;
     const sessionId = initResult.headers?.['mcp-session-id'] || (typeof initResultBody?.sessionId === 'string' ? initResultBody.sessionId : undefined);
-    if (sessionId) session = { id: sessionId, origin: new URL(initResult.from ?? server.serverUrl).origin };
+    if (sessionId) session = { id: sessionId, origin: new URL(initResult.from ?? server.serverUrl).origin, url: initResult.from ?? server.serverUrl };
     // The version the app chose, when it is one this check knows; else none is sent and the app applies its own default
-    if (typeof initResultBody?.protocolVersion === 'string' && KNOWN_PROTOCOL_VERSIONS.has(initResultBody.protocolVersion)) protocolVersion = initResultBody.protocolVersion;
+    if (typeof initResultBody?.protocolVersion === 'string') {
+      // A version the app names that this check does not know is not a compatibility it can vouch for: said plainly, and the session just
+      // opened is closed below. An app that names none is left to apply its own default.
+      if (!KNOWN_PROTOCOL_VERSIONS.has(initResultBody.protocolVersion)) {
+        const named = truncateDetail(withoutSecrets(initResultBody.protocolVersion, secrets), 40) ?? 'unknown';
+        return { success: false, toolCount: 0, toolNames: [], error: `The app answered with a protocol version this check does not know (${named}), so it cannot say the app works.` };
+      }
+      protocolVersion = initResultBody.protocolVersion;
+    }
 
     // The session is open: the server is told so (a server may wait for this before it lists anything). Its answer is empty
     // (202); one that refuses it is left to the list below, which shows any real refusal.
@@ -608,11 +669,9 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
       error: typeof err.message === 'string' ? truncateDetail(withoutSecrets(err.message, secrets)) ?? 'Connection failed' : 'Connection failed',
     };
   } finally {
-    // The session that was opened is closed, so an app that keeps sessions until they expire does not keep one for every test. A short
-    // try, sent only to the origin that issued it, with the sign-in only because that origin is the one the app was configured with.
-    if (session && new URL(server.serverUrl).origin === session.origin) {
-      const closing = { ...headers, 'Mcp-Session-Id': session.id, ...(protocolVersion ? { 'MCP-Protocol-Version': protocolVersion } : {}) };
-      await pinnedFetch(server.serverUrl, { method: 'DELETE', headers: closing, signal: AbortSignal.timeout(3000) }).then((res) => res.body?.cancel().catch(() => undefined), () => undefined);
-    }
+    // The session that was opened is closed, so an app that keeps sessions until they expire does not keep one for every test. It is closed at the
+    // address that opened it (after a redirect that is not the one configured). The sign-in goes only when that address is on the origin the app was
+    // configured with; any other origin gets its own session id and the version, nothing else.
+    if (session) await closeSession(session, server.serverUrl, headers, protocolVersion);
   }
 }
