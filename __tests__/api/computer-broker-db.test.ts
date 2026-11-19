@@ -305,7 +305,8 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       ];
       const [one, two] = await Promise.all([startTurn(jobId, 'one'), startTurn(jobId, 'two')]);
       expect([one.ok, two.ok].sort()).toEqual([false, true]);
-      expect([one, two].find((turn) => !turn.ok)).toMatchObject({ ok: false, reason: 'busy' });
+      // The other one's turn has no id yet, so there is nothing to reconnect to: it is told to ask again later, never "busy"
+      expect([one, two].find((turn) => !turn.ok)).toEqual({ ok: false, reason: 'failed' });
       expect(fake.openedTurns).toHaveLength(1);
       const started = [one, two].find((turn) => turn.ok);
       if (!started || !started.ok) throw new Error('no turn');
@@ -313,6 +314,19 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       // Once that turn has ended, the claim is let go and the next one starts
       expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt).toBeNull();
       expect((await startTurn(jobId, 'three')).ok).toBe(true);
+    });
+
+    it('a claim left by a server that stopped is not waited behind for minutes: it is asked again later while it is fresh, and lapses after about 45 seconds', async () => {
+      const { jobId } = await running();
+      fake.turns = [[{ type: 'created', id: 'resp-a', sessionId: 'sess-1' }, { type: 'completed', outputText: '', usage: null }]];
+      // Left claimed a moment ago, with no turn id: the runner is told to ask again, never "busy" (that sends it to reconnect to nothing)
+      await prisma.computerJob.update({ where: { id: jobId }, data: { turnClaimedAt: new Date(Date.now() - 10_000) } });
+      expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'failed' });
+      expect(fake.openedTurns).toHaveLength(0);
+      // After about 45 seconds nobody holds it any more
+      await prisma.computerJob.update({ where: { id: jobId }, data: { turnClaimedAt: new Date(Date.now() - 50_000) } });
+      expect((await startTurn(jobId, 'go')).ok).toBe(true);
+      expect(fake.openedTurns).toHaveLength(1);
     });
 
     it('writes one key at a time for a job: a second prepare at the same moment waits, so the key left on the machine is the one that is good', async () => {

@@ -43,7 +43,8 @@ async function write(raw: unknown): Promise<EventResult> {
  * a size change, stored bytes, speech) gets into the meter's books (game #1998). Written once under `eventId`: the same id again
  * is a "duplicate" and adds nothing, and the same id with other figures is a "conflict" and adds nothing either.
  * Answers 200 with one result for each event, so a bad one never hides a good one. `retry` means nothing was written because who it was
- * for could not be looked up just now: send the same event again.
+ * for could not be looked up just now. When any event of the request is `retry` the answer is 503 with the same `results`: a sender that
+ * treats every 200 as delivered cannot lose it, it sends the whole batch again, and the events already written come back as `duplicate`.
  *
  * Auth: service token only.
  */
@@ -66,7 +67,7 @@ export async function POST(request: NextRequest) {
     const results: EventResult[] = [];
     // One after another, so two events of one request that share an id are a recorded and a duplicate, in that order
     for (const event of list) results.push(await write(event));
-    return NextResponse.json({ results });
+    return NextResponse.json({ results }, { status: results.some((result) => result.status === 'retry') ? 503 : 200 });
   } catch (error) {
     console.error('[Meter] Could not record events:', error instanceof Error ? error.message : 'unknown');
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });

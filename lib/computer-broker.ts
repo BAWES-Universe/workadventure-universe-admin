@@ -69,7 +69,9 @@ const releaseOnJob = (jobId: string, field: Claim, mark: Date) => prisma.compute
 /** Writing a key takes at most the machine's own limit and a little more. */
 const PREPARE_CLAIM_STALE_MS = 90_000;
 const PREPARE_CLAIM_WAIT_MS = 60_000;
-const TURN_CLAIM_STALE_MS = 120_000;
+// A turn's id is kept within the agent's own start limit (30 s) and a little more; a claim left by a server that stopped lapses soon after, so
+// the runner is not told to wait for minutes behind it
+const TURN_CLAIM_STALE_MS = 45_000;
 
 export type Prepared = { ok: true; expiresAt: Date } | NotLive | { ok: false; reason: 'bad_relay' | 'failed' };
 
@@ -165,7 +167,10 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   // one. The claim is let go when the turn's id is kept (or the start fails); one nobody released lapses by itself.
   const claim = await claimOnJob(job.jobId, 'turnClaimedAt', TURN_CLAIM_STALE_MS, 0);
   if (claim === 'gone') return { ok: false, reason: 'not_found' };
-  if (claim === 'busy') return { ok: false, reason: 'busy', responseId: job.responseId };
+  // Held by a start still on its way (its id is not kept yet) or left by a server that stopped: there is no turn to reconnect to, so this is not
+  // "busy" (the runner would reconnect, find none and count an empty turn). It is said as a failure to start now, which the runner asks
+  // again later, and the claim lapses by itself
+  if (claim === 'busy') return job.responseId ? { ok: false, reason: 'busy', responseId: job.responseId } : { ok: false, reason: 'failed' };
   // The runner's connection must not cut the turn off before its id is kept: once the agent has accepted it, it runs on the machine, and
   // an id that was never stored leaves nothing to cancel or reconnect to. So the request's own signal is not handed on; the start has its
   // own limit instead, for the agent's answer only: once it has accepted the turn the limit is lifted, because cutting the stream before its id arrived would leave a turn running on the machine with nothing to cancel.
