@@ -1394,7 +1394,8 @@ run('payments for pages, in a real database', () => {
         const code = word();
         const made = await begin(artifactId, wish(), code);
         if (made.status !== 'ok') throw new Error('expected ok');
-        expect(await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] })).toMatchObject({ status: 'checking', orderId: made.orderId });
+        // An order of theirs that is still open comes with its own link, so a reload or a lost pop-up goes on with the same order
+        expect(await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] })).toMatchObject({ status: 'checking', orderId: made.orderId, checkoutUrl: made.checkoutUrl });
         // Paid at the service while nobody was watching: Restore asks about the open order first
         gateway({ record: (order) => paidRecord(order) });
         await old(made.orderId);

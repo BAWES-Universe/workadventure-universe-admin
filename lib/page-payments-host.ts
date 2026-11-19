@@ -167,6 +167,12 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     return memoryCode;
   };
 
+  /** The link of an order that is still open, when the answer holds one the host may open (plain https only). */
+  const resumeOf = (body: Record<string, unknown> | null): { url: string; app: string; popup: Window | null } | null => {
+    const url = safeCheckout(typeof body?.checkoutUrl === 'string' ? body.checkoutUrl : null);
+    return url ? { url, app: '', popup: null } : null;
+  };
+
   const receiptFor = (): string | null => (guest && options.origin ? `${options.origin}/pay/receipt/${encodeURIComponent(options.artifactId)}#${recoveryCode()}` : null);
 
   const post = async (body: Record<string, unknown>, signal?: AbortSignal): Promise<Answer> => {
@@ -326,9 +332,10 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         if (answer.ok && status === 'paid') return end({ paid: { test: answer.body?.testPayment === true } }, 'paid', request, ticket, answer.body?.testPayment === true);
         if (answer.ok && status === 'none') return end({}, 'none', request, ticket);
         if (answer.ok && status === 'checking' && typeof answer.body?.orderId === 'string') {
-          // An order of theirs is still open: it is watched like a new checkout, and the page hears how it ends under this request
+          // An order of theirs is still open: it is watched like a new checkout, and the page hears how it ends under this request. Its own
+          // link is offered, so a reload or a lost pop-up goes on with the SAME order and does not need a second one
           target = { intentId: null, request, ticket };
-          return adopt(answer.body.orderId, null, request, ticket);
+          return adopt(answer.body.orderId, resumeOf(answer.body), request, ticket);
         }
         end({ problem: 'unavailable', canCheck: true }, 'unavailable', request, ticket);
       } catch {
@@ -381,7 +388,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
           if (request && opening === asked.ticket.from) tellRequest(told, request, isTest);
         };
         if (answer.ok && status === 'paid') return done({ paid: { test } }, 'paid', test);
-        if (answer.ok && status === 'checking' && typeof answer.body?.orderId === 'string') return adopt(answer.body.orderId, null, request, asked.ticket);
+        if (answer.ok && status === 'checking' && typeof answer.body?.orderId === 'string') return adopt(answer.body.orderId, resumeOf(answer.body), request, asked.ticket);
         if (answer.ok && (status === 'not_paid' || status === 'cant_confirm')) return done({ problem: status, canCheck: true }, status);
         if (answer.ok && status === 'none') return done({ problem: 'none', canCheck: true }, 'none');
         if (answer.status === 404) return done({ problem: 'none', canCheck: true }, 'none');

@@ -227,6 +227,18 @@ describe('a paying page on the public share link', () => {
     await jest.advanceTimersByTimeAsync(3_000);
     expect(open.told()).toEqual([{ universe: 'app-result', status: 'paid', request: 'r2' }]);
     open.host.destroy();
+    const link = setup((call) => (call.body.restore ? { body: { status: 'checking', orderId: 'o-3', checkoutUrl: started.checkoutUrl } } : { body: { status: 'checking' } }));
+    link.tap({ request: 'r3', restore: true });
+    await flush();
+    // The open order's own link is on the line, so a reload does not need a second order
+    expect(link.lines.at(-1)).toMatchObject({ checking: true, resume: { url: started.checkoutUrl } });
+    link.host.destroy();
+    const bad = setup((call) => (call.body.restore ? { body: { status: 'checking', orderId: 'o-4', checkoutUrl: 'http://not-secure.example/x' } } : { body: { status: 'checking' } }));
+    bad.tap({ request: 'r4', restore: true });
+    await flush();
+    expect(bad.lines.at(-1)?.resume).toBeNull();
+    bad.host.destroy();
+    open.host.destroy();
   });
 
   it('follows the server’s wait between questions, and never faster than a second or slower than half a minute', async () => {
