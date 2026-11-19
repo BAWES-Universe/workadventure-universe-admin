@@ -3,7 +3,7 @@ import { Prisma, type VoiceNoteTurn } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { VOICE_RANGES, savedVoiceKeyLimits } from '@/lib/voice-limit-values';
-import { checkReplyAllowance, type ReplyAllowance } from '@/lib/reply-limits';
+import { checkReplyAllowance, type ReplyAllowance, type ReplySlot } from '@/lib/reply-limits';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import { placeFor } from '@/lib/guest-brick';
 import { botHearing, universeAiHearing, type NoteHearing } from '@/lib/voice-note-hearing';
@@ -51,6 +51,8 @@ export const BUFFER_MS = 15 * 60_000;
 export const BUFFER_MAX_BYTES = 64 * 1024;
 /** A note reserved this long ago and never started is no longer "being heard" for the notes-at-once count. */
 const STARTING_MS = LEASE_MS;
+/** A note that has not become an answer after this long is no longer counted as a reply on its way. */
+const ON_THE_WAY_MS = 15 * 60 * 1000;
 
 /**
  * For a transaction that takes the reservations' lock: how long it may wait for a connection, and for the lock and its few reads
@@ -254,10 +256,14 @@ export async function reserveVoiceNote(
 
   // The note and its answer are one reply, checked before anything is heard: the bot's own daily cap whatever it answers on, and
   // Universe AI's windows when it answers there (lib/reply-limits.ts skips those for a person's own key)
+  // The limits the reply was allowed under, counted again under the reservation lock below (with the notes already on their way)
+  const slots: ReplySlot[] = [];
+  let replySource: 'universe-ai' | 'provider' | 'own-key' | null = null;
   if (scope === 'bot') {
     const source = input.source;
     if (source !== 'universe-ai' && source !== 'provider' && source !== 'own-key') throw new VoiceNoteError('source must be universe-ai, provider or own-key', 400);
-    const allowance = await checkReplyAllowance(botId!, { userId, isGuest: input.isGuest, source }, now);
+    replySource = source;
+    const allowance = await checkReplyAllowance(botId!, { userId, isGuest: input.isGuest, source }, now, slots);
     if (!allowance.allowed) return { ok: false, reason: 'reply-limit', allowance };
   }
 
@@ -281,6 +287,27 @@ export async function reserveVoiceNote(
     }
     const raced = await tx.voiceNoteTurn.findFirst({ where: asked, orderBy: { createdAt: 'asc' } });
     if (raced) return same(raced);
+
+    // The reply slot is taken under the lock: two notes at the same instant never both see the last reply free. What is counted is the
+    // replies already used plus the notes reserved and not yet answered (they have no usage row yet), from the same limits the check above read
+    for (const slot of slots) {
+      const used = await tx.botsAiUsage.count({ where: slot.usage });
+      const onTheWay = await tx.voiceNoteTurn.count({
+        where: {
+          scope: 'bot',
+          released: false,
+          state: { in: ['reserved', 'hearing', 'heard', 'answering'] },
+          createdAt: { gt: new Date(now.getTime() - ON_THE_WAY_MS) },
+          personKey: slot.pending.guestsOnly ? { startsWith: 'guest:' } : slot.pending.personKey,
+          ...(slot.pending.botId ? { botId: slot.pending.botId } : {}),
+          ...(slot.pending.notOwnKey ? { replySource: { in: ['universe-ai', 'provider'] } } : {}),
+        },
+      });
+      if (used + onTheWay >= slot.limit) {
+        await tx.botReplyLimitHit.createMany({ data: [slot.hit], skipDuplicates: true });
+        return { ok: false, reason: 'reply-limit', allowance: { allowed: false, limit: slot.kind, resetsAt: slot.resetsAt, who: slot.who } };
+      }
+    }
 
     const counted = { released: false };
     const sum = async (where: Prisma.VoiceNoteTurnWhereInput) => (await tx.voiceNoteTurn.aggregate({ _sum: { seconds: true }, where: { ...counted, ...where } }))._sum.seconds ?? 0;
@@ -321,7 +348,7 @@ export async function reserveVoiceNote(
     }
 
     const turn = await tx.voiceNoteTurn.create({
-      data: { scope, personKey, target, botId, universeKey, clientTurnId, fingerprint, payer: hearing.payer!, providerId: hearing.provider?.id ?? null, seconds, state: 'reserved', createdAt: now },
+      data: { scope, personKey, target, botId, universeKey, clientTurnId, fingerprint, payer: hearing.payer!, providerId: hearing.provider?.id ?? null, seconds, state: 'reserved', replySource, createdAt: now },
     });
     return { ok: true, turn: view(turn), replay: false };
   }, LOCKED);

@@ -3327,6 +3327,8 @@ model VoiceNoteTurn {
   providerRefs Json?     @map("provider_refs")
   // A reservation that was never used, given back
   released     Boolean   @default(false)
+  // What the note's reply runs on (universe-ai, provider or own-key), so a reply on its way counts against the person's reply limits
+  replySource  String?   @map("reply_source") @db.VarChar(16)
   costMicros   Int?      @map("cost_micros")
   // The words heard and the answer, encrypted per turn, until the device has them or `bufferUntil`
   buffer       String?   @db.Text
