@@ -925,6 +925,30 @@ run('the bounded Instant executor, in a real database', () => {
       expect((after.detail as { customerMicros: number }).customerMicros).toBe(Number((await runOf(id)).customerMicros));
       expect(Number((await runOf(id)).customerMicros)).toBeGreaterThan(0);
     });
+    it('a meter event update that fails does not leave a run charged without its customer charge in the event: the run stays held, and the next sweep writes both', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const key = callId();
+      await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION instant_update_refused() RETURNS trigger AS $$ BEGIN IF NEW.event_id LIKE 'instant:%' AND (NEW.detail::jsonb ? 'customerMicros') THEN RAISE EXCEPTION 'refused'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql`);
+      await prisma.$executeRawUnsafe('CREATE TRIGGER instant_update_refused BEFORE UPDATE ON meter_events FOR EACH ROW EXECUTE FUNCTION instant_update_refused()');
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let id = '';
+      try {
+        await runInstant(ask({ callId: key }), { adapter: p.adapter, funds: f.funds }).catch(() => undefined);
+        id = await runIdOf(key);
+        expect((await runOf(id)).customerState).toBe('held');
+        expect(((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${id}` } })).detail as { customerMicros?: number | null }).customerMicros ?? null).toBeNull();
+      } finally {
+        quiet.mockRestore();
+        await prisma.$executeRawUnsafe('DROP TRIGGER instant_update_refused ON meter_events');
+        await prisma.$executeRawUnsafe('DROP FUNCTION instant_update_refused()');
+      }
+      await reconcileRun(id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect((await runOf(id)).customerState).toBe('charged');
+      const event = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${id}` } });
+      expect((event.detail as { customerMicros: number }).customerMicros).toBe(Number((await runOf(id)).customerMicros));
+    });
   });
 
   describe('Instant stops by itself', () => {

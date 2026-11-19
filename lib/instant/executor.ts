@@ -487,9 +487,14 @@ async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'>): Promise<R
       console.error('[Instant] The credit books could not settle:', error instanceof Error ? error.message : 'unknown');
     }
     if (confirmed === null) return run;
-    await prisma.instantRun.updateMany({ where: { id: runId, customerState: 'held' }, data: { customerState: 'charged', customerMicros: BigInt(confirmed) } });
-    // The meter event of the run says what the person was charged only from here, at the amount the books confirmed
-    await prisma.$executeRaw`UPDATE meter_events SET detail = jsonb_set(COALESCE(detail::jsonb, '{}'::jsonb), '{customerMicros}', to_jsonb(${confirmed}::bigint)) WHERE event_id = ${`instant:${run.id}`}`;
+    // The run is marked charged and the meter event of the run says what the person was charged (only from here, at the amount the books confirmed) in ONE
+    // transaction: when the second fails the first is not kept, the run stays held, and the next sweep says the settlement again (the books answer it as
+    // before, with the first amount) and writes both. Written apart, a failure between them left a run charged for good whose event never said so
+    // (The amount is the books' own first answer, so writing it into the event twice, when another call marked the run first, writes the same figure)
+    await prisma.$transaction([
+      prisma.instantRun.updateMany({ where: { id: runId, customerState: 'held' }, data: { customerState: 'charged', customerMicros: BigInt(confirmed) } }),
+      prisma.$executeRaw`UPDATE meter_events SET detail = jsonb_set(COALESCE(detail::jsonb, '{}'::jsonb), '{customerMicros}', to_jsonb(${confirmed}::bigint)) WHERE event_id = ${`instant:${run.id}`}`,
+    ]);
   } else if (run.state === 'failed' || run.state === 'refused') {
     let gone = false;
     try {
