@@ -72,6 +72,28 @@ describe('the Agent37 client', () => {
     check(await client([json(401, echo)]).api.openTurn('https://abc.agent37.app', { text: 'x' }).catch((e) => e));
   });
 
+  it('takes out a bearer value that holds the key together with what follows the key in it, and neither form hides the other', async () => {
+    const echo = { error: { code: 'Bearer sk_live_secret.rotated-code-1', message: 'Sent Bearer sk_live_secret.rotated-secret-456 and Bearer abc-sk_live_secret-tail; also sk_live_secret.bare-suffix' } };
+    const check = (error: unknown) => {
+      const seen = error as Agent37Error;
+      expect(seen).toBeInstanceOf(Agent37Error);
+      for (const text of [seen.message, seen.code ?? '']) {
+        expect(text).not.toContain('sk_live_secret');
+        expect(text).not.toContain('rotated-secret-456');
+        expect(text).not.toContain('rotated-code-1');
+        expect(text).not.toContain('abc-sk');
+        expect(text).not.toContain('-tail');
+      }
+      // The words around the secrets stay
+      expect(seen.message).toContain('Sent Bearer [removed] and Bearer [removed]');
+      expect(seen.message).toContain('also [removed]');
+      expect(seen.code).toBe('Bearer [removed]');
+    };
+    check(await client([json(401, echo)]).api.createInstance({ template: 't' }).catch((e) => e));
+    check(await client([json(401, echo)]).api.exec('abc', 'ls').catch((e) => e));
+    check(await client([json(401, echo)]).api.openTurn('https://abc.agent37.app', { text: 'x' }).catch((e) => e));
+  });
+
   it('takes the key out even when the cut at 200 characters would have left a piece of it', async () => {
     const long = `${'x'.repeat(190)}sk_live_secret and more`;
     const { api } = client([json(500, { message: long })]);

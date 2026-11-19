@@ -14,7 +14,7 @@ import type { AddressInfo } from 'node:net';
 jest.mock('@/lib/db', () => ({ prisma: {} }));
 
 import { IMAGE_NAME, IMAGE_PORT, ensureImage, imageContext, tarOf, type ImageState, type ImageStore } from '@/lib/agent37/image';
-import { DOCKERFILE, IMAGE_SETUP_VERSION, imageFiles, LOCAL_MODEL_PORT } from '@/lib/agent37/image-files';
+import { DOCKERFILE, IMAGE_SETUP_VERSION, imageFiles, LOCAL_MODEL_PORT, SYSTEM_PATH } from '@/lib/agent37/image-files';
 import type { Agent37Client, TemplateBuild } from '@/lib/agent37/client';
 
 const folder = mkdtempSync(join(tmpdir(), 'universe-image-'));
@@ -22,8 +22,9 @@ afterAll(() => rmSync(folder, { recursive: true, force: true }));
 const have = (command: string) => spawnSync('sh', ['-c', `command -v ${command}`]).status === 0;
 const hasPython = have('python3');
 const python = hasPython ? it : it.skip;
-// universe-files lists with `find -printf`, which a machine of ours (Linux, GNU find) has and a BSD find (macOS) does not
-const gnuFind = spawnSync('sh', ['-c', 'find . -maxdepth 0 -printf x']).status === 0;
+// universe-files lists with `find -printf`, which a machine of ours (Linux, GNU find) has and a BSD find (macOS) does not. Asked with the PATH the
+// script sets for itself (not the caller's, which may hold another find first), so the gate answers for the find the script will run
+const gnuFind = spawnSync('sh', ['-c', 'find . -maxdepth 0 -printf x'], { env: { ...process.env, PATH: SYSTEM_PATH } }).status === 0;
 
 const write = () => {
   const dir = join(folder, 'image');
@@ -134,7 +135,7 @@ describe('what the scripts the fence keeps may run', () => {
     for (const name of ['universe-supervise', 'universe-up', 'universe-clean', 'universe-mark', 'universe-files']) {
       const text = script(name);
       const line = text.split('\n').find((one) => one.startsWith('PATH='));
-      expect(line).toBeDefined();
+      expect(line).toBe(`PATH=${SYSTEM_PATH}`);
       // Whatever PATH the agent starts it with, `sleep` is the system's
       const run = spawnSync('sh', ['-c', `${line}; export PATH; command -v sleep`], { env: { ...process.env, PATH: `${folder}:/bin:/usr/bin`, HOME: folder }, encoding: 'utf8' });
       expect(run.stdout.trim()).toMatch(/^\/(usr\/)?bin\/sleep$/);

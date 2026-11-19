@@ -115,10 +115,36 @@ const RETRY_WAITS_MS = [1_000, 3_000, 8_000];
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** The configured key, and any bearer value, never travel into an error: an upstream message that echoes either keeps its words and loses the secret. */
+/**
+ * The configured key, and any bearer value, never travel into an error: an upstream message that echoes either keeps its words and loses the secret.
+ * Both are looked for in the ORIGINAL text and the ranges they cover are joined before anything is replaced, so neither can hide the other: a bearer
+ * value that holds the key (or the key inside a longer value) is taken whole, and what follows the key in that value goes with it.
+ */
 export function redactSecrets(text: string, key: string): string {
-  const withoutKey = key ? text.split(key).join('[removed]') : text;
-  return withoutKey.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [removed]');
+  const ranges: Array<[number, number]> = [];
+  if (key) {
+    for (let at = text.indexOf(key); at !== -1; at = text.indexOf(key, at + key.length)) ranges.push([at, at + key.length]);
+  }
+  // Only the value after "Bearer " is replaced: the word itself stays, so the sentence still reads
+  for (const match of text.matchAll(/\b(Bearer\s+)([A-Za-z0-9._~+/=-]+)/gi)) {
+    const start = (match.index ?? 0) + match[1].length;
+    ranges.push([start, start + match[2].length]);
+  }
+  if (ranges.length === 0) return text;
+  ranges.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const joined: Array<[number, number]> = [];
+  for (const [from, to] of ranges) {
+    const last = joined[joined.length - 1];
+    if (last && from <= last[1]) last[1] = Math.max(last[1], to);
+    else joined.push([from, to]);
+  }
+  let out = '';
+  let at = 0;
+  for (const [from, to] of joined) {
+    out += text.slice(at, from) + '[removed]';
+    at = to;
+  }
+  return out + text.slice(at);
 }
 
 /** Agent37's error body is not documented to one shape: a code and a message can be at the top or under `error`. Only short plain words are kept, with the key taken out first (before the cut, so a key that straddles it cannot leave a piece behind). */

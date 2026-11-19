@@ -26,6 +26,9 @@ export const IMAGE_SETUP_VERSION = '1';
 export const BASE_IMAGE = 'ghcr.io/agent37-platform/hermes-base';
 export const BASE_TAG = 'latest';
 
+/** The PATH every script of the image sets for itself before it runs a program: the system's own folders only. The tests use it too, so the two cannot drift. */
+export const SYSTEM_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+
 /** Where the local model address listens inside the machine, and where Orbit writes the relay's address and the job's key. */
 export const LOCAL_MODEL_PORT = 8650;
 export const RELAY_FILE = '.universe/relay.json';
@@ -47,7 +50,7 @@ export const UNIVERSE_UP = String.raw`#!/bin/sh
 # Brings this computer's parts up. Safe to run any number of times, and the supervisor at the end runs it again every few seconds.
 # Prints lines Orbit reads: ready=1 or ready=0 reason=..., and restart=1 while Hermes' newly written config still waits for a restart.
 # Every program it runs is the system's own, whatever PATH it was started with, so this is the first thing it does (before the first program, not after it).
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PATH=${SYSTEM_PATH}
 export PATH
 HOME_DIR="$HOME"
 [ -n "$HOME_DIR" ] || HOME_DIR=/home/node
@@ -291,7 +294,7 @@ export const UNIVERSE_SUPERVISE = String.raw`#!/bin/sh
 # Brings a part back that stopped (the browser crashing): runs universe-up again every few seconds.
 # Every program it runs is the system's own, whatever PATH it was started with: the fence keeps what this script starts, so a program the
 # agent put first in PATH must never be one of them.
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PATH=${SYSTEM_PATH}
 export PATH
 while :; do
   sleep 5
@@ -600,7 +603,7 @@ export const UNIVERSE_CLEAN = String.raw`#!/bin/sh
 # tab left open on a job that is over shows nothing and a new link is needed.
 # It holds the same lock as universe-up, so the supervisor cannot start the browser again between the stop and the removal; the browser is
 # proved gone before the profile is deleted, and the parts come back only after the lock is let go.
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PATH=${SYSTEM_PATH}
 export PATH
 HOME_DIR="$HOME"
 [ -n "$HOME_DIR" ] || HOME_DIR=/home/node
@@ -641,7 +644,7 @@ export const UNIVERSE_MARK = String.raw`#!/bin/sh
 # Run by Orbit as root once a computer is ready, before a job uses it. Writes the moment from which everything that runs is the agent's:
 # this boot's id and the machine's clock then, in ticks. Run again on the same boot it keeps the first note (a later moment would take
 # in what the agent has started since); a new boot (a stop and start) gets a new one. Prints marked=1 when the note is in place.
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PATH=${SYSTEM_PATH}
 export PATH
 [ "$(id -u)" = "0" ] || { echo "marked=0 reason=not_root"; exit 1; }
 DIR=/run/universe
@@ -660,7 +663,7 @@ echo "marked=1"
 /** Lists the files a person would look for: regular files in the home folder (not hidden ones, not the tools' own folders), newest first. */
 export const UNIVERSE_FILES = String.raw`#!/bin/sh
 # One line for each file: size in bytes, TAB, modified (seconds), TAB, path from the home folder. At most 201 lines (the caller says "more" for the 201st).
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PATH=${SYSTEM_PATH}
 export PATH
 HOME_DIR="$HOME"
 [ -n "$HOME_DIR" ] || HOME_DIR=/home/node
