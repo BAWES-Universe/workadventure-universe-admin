@@ -551,6 +551,37 @@ run('the grants routes, on the real books', () => {
       expect(exceptions.find((e: any) => e.instant_apps.amountMicros === 5 * MILLION)).toBeUndefined();
     });
 
+    it('saves a clash the admin settled on the one connection of its transaction: with a pool of a single connection it still answers, never waiting on a second one', async () => {
+      const [omar, noor, faisal, yousef] = [await person('Omar'), await person('Noor'), await person('Faisal'), await person('Yousef')];
+      expect((await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor, faisal] }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } } })).status).toBe(201);
+      // A writer that is not the shared client: a pool with room for one connection. A read inside the save's transaction that is made on another client
+      // (the other rule's read, the people's names beside a clash) waits for a connection that never frees, and under load the same wait takes the real pool
+      const { Pool } = await import('pg');
+      const { PrismaPg } = await import('@prisma/adapter-pg');
+      const { PrismaClient } = await import('@prisma/client');
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+      const single = new PrismaClient({ adapter: new PrismaPg(pool) });
+      const shared = (globalThis as unknown as { prisma: unknown }).prisma;
+      let answer: unknown = 'never';
+      try {
+        (globalThis as unknown as { prisma: unknown }).prisma = single;
+        await jest.isolateModulesAsync(async () => {
+          const { saveExceptionFor } = await import('@/lib/grants-admin');
+          const request = { what: 'exception', audience: { kind: 'people', userIds: [omar, noor, yousef] }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 25 * MILLION, interval: 'monthly' }, clashChoice: 'this' } as never;
+          // The first try meets the clash (its names are read), the second takes Omar and Noor out of the other rule (it is read, and saved with Faisal alone)
+          const finished = saveExceptionFor(request, { userId: admin.id, superAdmin: true }).then(() => 'saved', (error: Error) => `refused: ${error.message}`);
+          answer = await Promise.race([finished, new Promise((resolve) => setTimeout(() => resolve('waited on a second connection'), 15_000))]);
+        });
+      } finally {
+        (globalThis as unknown as { prisma: unknown }).prisma = shared;
+        await single.$disconnect();
+        await pool.end();
+      }
+      expect(answer).toBe('saved');
+      const { exceptions } = await overview();
+      expect(exceptions.find((e: any) => e.instant_apps.amountMicros === 5 * MILLION).audience.people.map((p: any) => p.name)).toEqual(['Faisal']);
+    }, 40_000);
+
     it('gives the other rule its people back when the choice still can’t be saved', async () => {
       const [omar, noor, faisal] = [await person('Omar'), await person('Noor'), await person('Faisal')];
       const first = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } } });

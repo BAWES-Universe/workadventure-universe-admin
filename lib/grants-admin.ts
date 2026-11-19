@@ -9,6 +9,7 @@ import {
   endPrograms,
   endProgramsIn,
   listPrograms,
+  readExceptionForUpdateIn,
   previewGrant,
   saveDefault,
   saveExceptionIn,
@@ -430,7 +431,8 @@ function inputOfProgram(program: ProgramView): GrantInput {
  * ends when nobody is left in it, and is saved again with the rest otherwise.
  */
 async function takeOut(tx: Tx, programId: string, people: string[], issuer: Issuer, now: Date): Promise<void> {
-  const other = (await listPrograms(undefined, { kind: 'exception' })).find((program) => program.programId === programId);
+  // Read on the save's own connection and under the locks of a save of that rule: what is written back is built from the rule as it is now
+  const other = await readExceptionForUpdateIn(tx, programId);
   if (!other) return;
   if (other.recipients.kind !== 'people') {
     throw new GrantsRefused('That other rule is for a universe’s members, so these people can’t be taken out of it. End that rule, or give each of them a rule of their own (a person’s own rule comes first).', 400, 'clash');

@@ -363,6 +363,18 @@ export async function listPrograms(categoryId?: CategoryId, opts: { kind?: Progr
   return programs.filter((program) => program.rules.length > 0).map((program) => viewOf(program, program.rules[0], program.rules.length));
 }
 
+/**
+ * An active exception program, read inside the caller's transaction under the locks a save of it takes (its funding account and its category's rules), so what
+ * the caller then writes back is built from the rule as it is now and not from a read made before another admin's save. Null when it is gone or ended.
+ */
+export async function readExceptionForUpdateIn(tx: Tx, programId: string): Promise<ProgramView | null> {
+  const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true, program: { select: { categoryId: true } } } });
+  if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId), lockOfRules(peek.program.categoryId)]);
+  const row = await loadProgramRow(tx, programId);
+  if (!row || row.status !== 'active' || row.kind !== 'exception' || row.rules.length === 0) return null;
+  return viewOf(row, row.rules[0], row.rules.length);
+}
+
 /** One program: its current rule, and every earlier version as it was. */
 export async function getProgram(programId: string): Promise<{ program: ProgramView; versions: RuleView[] } | null> {
   const row = await loadProgramRow(prisma, programId);
@@ -372,9 +384,9 @@ export async function getProgram(programId: string): Promise<{ program: ProgramV
 }
 
 /** The names of the first 50 people to show beside a clash. Only what is displayed is limited: the clash itself carries every id. */
-async function chooseNames(userIds: string[]): Promise<{ userId: string; name: string | null }[]> {
+async function chooseNames(db: Pick<Tx, 'user'>, userIds: string[]): Promise<{ userId: string; name: string | null }[]> {
   if (userIds.length === 0) return [];
-  const users = await prisma.user.findMany({ where: { id: { in: userIds.slice(0, 50) } }, select: { id: true, name: true } });
+  const users = await db.user.findMany({ where: { id: { in: userIds.slice(0, 50) } }, select: { id: true, name: true } });
   return users.map((user) => ({ userId: user.id, name: user.name }));
 }
 
@@ -451,7 +463,7 @@ async function saveIn(tx: Tx, kind: ProgramKind, input: GrantInput & { programId
     const clashes = await clashesOf(tx, candidate, now, { exclude: programId });
     if (clashes.length > 0) {
       const labels = await tx.grantProgram.findMany({ where: { id: { in: clashes.map((c) => c.programId) } }, select: { id: true, label: true } });
-      throw new ClashRefused(await Promise.all(clashes.map(async (c) => ({ programId: c.programId, label: labels.find((l) => l.id === c.programId)?.label ?? c.programId, userIds: c.userIds, people: await chooseNames(c.userIds), totalPeople: c.userIds.length }))));
+      throw new ClashRefused(await Promise.all(clashes.map(async (c) => ({ programId: c.programId, label: labels.find((l) => l.id === c.programId)?.label ?? c.programId, userIds: c.userIds, people: await chooseNames(tx, c.userIds), totalPeople: c.userIds.length }))));
     }
     const preview = await previewIn(tx, checked, ids, now, { forProgramId: programId });
     const budget = preview.budget;
