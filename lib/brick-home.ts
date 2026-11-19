@@ -69,7 +69,9 @@ export async function placeBrick(input: { brickId: string; ownerId: string; room
     if (held.length === 0) return false;
     await tx.brickVisit.deleteMany({ where: { botId: brick.id } });
     // Placing it again where it already stands moves it: how it behaves there stays unless the request says otherwise
-    const existing = await tx.brickHome.findUnique({ where: { botId: brick.id }, select: { roomId: true, behaviorType: true, behaviorConfig: true } });
+    // The home's row is held while it is read and written, as moveBrick holds it: a manager's edit saved meanwhile is read here, never put back over
+    const rows = await tx.$queryRaw<{ room_id: string; behavior_type: string; behavior_config: unknown }[]>(Prisma.sql`SELECT "room_id", "behavior_type", "behavior_config" FROM "brick_homes" WHERE "bot_id" = ${brick.id} FOR UPDATE`);
+    const existing = rows[0] ? { roomId: rows[0].room_id, behaviorType: rows[0].behavior_type, behaviorConfig: rows[0].behavior_config } : null;
     const behavior = homeBehaviorForPlacement(existing, place.roomId, input);
     const data = { roomId: place.roomId, placedById: input.ownerId, behaviorType: behavior.behaviorType, behaviorConfig: behavior.behaviorConfig as object };
     await tx.brickHome.upsert({ where: { botId: brick.id }, create: { botId: brick.id, ...data }, update: data });

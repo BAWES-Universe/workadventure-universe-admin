@@ -451,6 +451,21 @@ run('a Brick that lives in a room, in a real database', () => {
       expect((await moveHome(call('PATCH', `/api/brick-homes/${brickId}`, { behaviorConfig: { speed: 60 } }), ids(brickId))).status).toBe(200);
       expect((await home(brickId))?.behaviorConfig).toEqual({ ...SPOT, speed: 60, goesToPeople: true });
     });
+    it('placing it again where it stands keeps how it behaves: a patrol stays a patrol, and only a spot sent moves', async () => {
+      await put(brickId, hosted.roomUrl, { behaviorType: 'patrol', behaviorConfig: { ...SPOT, speed: 30 } });
+      // Placed again with no behavior at all
+      expect((await put(brickId, hosted.roomUrl)).status).toBe(200);
+      expect(await home(brickId)).toMatchObject({ behaviorType: 'patrol', behaviorConfig: { ...SPOT, speed: 30 } });
+      // Placed again with a new spot only
+      const moved = { assignedSpace: { center: { x: 400, y: 500 }, radius: 0 } };
+      expect((await put(brickId, hosted.roomUrl, { behaviorConfig: moved })).status).toBe(200);
+      expect(await home(brickId)).toMatchObject({ behaviorType: 'patrol', behaviorConfig: { ...moved, speed: 30 } });
+    });
+    it('placing it again never puts back what a manager saved meanwhile', async () => {
+      await put(brickId, hosted.roomUrl, { behaviorConfig: SPOT });
+      await Promise.all([put(brickId, hosted.roomUrl), moveBrick(brickId, host.id, { behaviorConfig: { speed: 70 } })]);
+      expect((await home(brickId))?.behaviorConfig).toEqual({ ...SPOT, speed: 70 });
+    });
     it('two edits of different keys at once both stay', async () => {
       await put(brickId, hosted.roomUrl, { behaviorConfig: SPOT });
       await Promise.all([
