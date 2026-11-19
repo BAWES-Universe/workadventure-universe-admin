@@ -324,7 +324,8 @@ export async function settleReceipt(task: Task, now: Date = new Date(), unwatche
       return reopenForOpenRun(tx, row);
     }
     if (view.actions.length > 0) {
-      if (row.state === 'running' && !lapsed) return 'running';
+      // A running receipt on no lease (a computer's) is the job's: with the job over (or no job of that key after a lease's age) it is as good as lapsed
+      if (row.state === 'running' && !lapsed && !(row.leaseUntil === null && (await jobEnded(tx, row, task, now)))) return 'running';
       if (isTerminal(row.state)) return reconcileEnded(tx, row, view, now);
       return endReceipt(tx, row, view.outcome, view.actions, now);
     }
@@ -344,6 +345,12 @@ export async function settleReceipt(task: Task, now: Date = new Date(), unwatche
     if (!quiet) return row.state as ReceiptNow;
     return endReceipt(tx, row, 'refunded', [], now);
   });
+}
+
+/** A running receipt on no lease: its computer job is over, or no job of its key exists after a lease's age (it is the job's own record that says so). */
+async function jobEnded(tx: Tx, row: Row, task: Task, now: Date): Promise<boolean> {
+  const job = await tx.computerJob.findFirst({ where: { id: task.taskKey, botId: task.botId, personId: task.personId }, select: { status: true } });
+  return job ? isOver(job.status) : row.startedAt.getTime() + RECEIPT_LEASE_MS <= now.getTime();
 }
 
 /** How long a receipt in checking with no Instant run waits before it is ended: well past the bot server's own retries (it gives up after 150 s). Internal, not a person-facing limit. */

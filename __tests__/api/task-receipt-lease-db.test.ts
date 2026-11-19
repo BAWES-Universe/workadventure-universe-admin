@@ -183,6 +183,20 @@ run('receipts that always settle (O1)', () => {
     });
   });
 
+  describe('a computer receipt that also has Instant runs', () => {
+    it('is not settled while its job runs, and ends from its runs once the job is over, whether or not the bot server ever closes it', async () => {
+      const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Job with an App', status: 'running', startedAt: START } });
+      await open(job.id, { category: 'computer' });
+      await makeRun(job.id, 'succeeded', { customerMicros: BigInt(9_000) });
+      await makeRun(job.id, 'failed', { reason: 'provider_failed' });
+      expect(await settleCheckingReceipts(50, at(600))).toBe(0);
+      expect((await receipt(job.id)).state).toBe('running');
+      await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'done', endedAt: at(700) } });
+      expect(await settleCheckingReceipts(50, at(701))).toBe(1);
+      expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'partial' });
+    });
+  });
+
   describe('a computer job’s receipt opened with no category', () => {
     it('is never ended while its job runs, however long its lease has been out, and ends with its job', async () => {
       const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Long job', status: 'running', startedAt: START } });
