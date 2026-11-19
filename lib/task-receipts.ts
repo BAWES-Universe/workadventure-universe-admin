@@ -183,7 +183,8 @@ const endReceipt = async (tx: Tx, row: Row, outcome: ReceiptOutcome, actions: re
  *
  * What a task came to is read from its Instant runs' own records, not from the word the bot server sends: that word says the task is over,
  * and Orbit says how it went (done when every action worked, partly done when some did, refunded when none did). The bot server's
- * done or refunded stands only for a task with no Instant run (a computer's, or one of Apps that never reached Orbit's runs).
+ * done or refunded stands only for a task with no Instant run that went out (a computer's, one of Apps that never reached Orbit's runs, or one whose every run was refused
+ * before it ran), so a charge the word carries is never zeroed by a run that never went out.
  * While one of the task's runs has not ended (its answer did not come back and the lookup is still waiting), the receipt is left in
  * `checking` and the run's settling ends it (`settleReceipt`): the bot server can say done before Orbit knows what happened to a run, and
  * that must never freeze the receipt.
@@ -209,7 +210,7 @@ export async function closeReceipt(
       // Ended already: the word changes nothing. Only a task whose run records say otherwise is put right: a run that landed after the word,
       // or one still going (then a newer turn is on it)
       if (view.open) return { ok: true, id, state: await reopenForOpenRun(tx, row), generation: row.generation + 1 };
-      const state = runs.length === 0 ? (row.state as ReceiptState) : await reconcileEnded(tx, row, view, now);
+      const state = view.actions.length === 0 ? (row.state as ReceiptState) : await reconcileEnded(tx, row, view, now);
       return { ok: true, id, state, generation: row.generation };
     }
     // The bot server's word is the task's end; an open run means the task is not settled yet, whatever the word is
@@ -217,8 +218,8 @@ export async function closeReceipt(
       await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'checking', outcome: null, endedAt: null, leaseUntil: null } });
       return { ok: true, id, state: 'checking', generation: row.generation };
     }
-    if (runs.length > 0) {
-      // Every run has ended: the run records say how it went, whatever the word was
+    if (view.actions.length > 0) {
+      // Every run has ended and some went out: the run records say how it went, whatever the word was
       const state = await endReceipt(tx, row, view.outcome, view.actions, now, input.chargedMicros ?? null);
       return { ok: true, id, state, generation: row.generation };
     }
@@ -297,7 +298,7 @@ export async function touchLeaseForRun(task: Task, now: Date = new Date()): Prom
  *  - Every run ended (running with a lapsed lease, checking, or ended): done when all worked, partly done when some did, refunded, nothing
  *    taken, when none did. A refused run never went out and is not an action. A run nobody could vouch for when its wait ended counts as
  *    not worked: the person's favour. A receipt that had ended and does not agree with its runs is put right.
- *  - No Instant run at all, running with a lapsed lease, or in checking past the bot server's own retries: refunded, nothing taken (nothing
+ *  - No Instant run that went out (none at all, or every one refused), running with a lapsed lease, or in checking past the bot server's own retries: refunded, nothing taken (nothing
  *    was ever sent). A model call's row in the books never makes it done. A computer's receipt is read from its job instead: ended when the
  *    job is over, and left alone while it still runs.
  */
@@ -318,12 +319,12 @@ export async function settleReceipt(task: Task, now: Date = new Date(), unwatche
       }
       return reopenForOpenRun(tx, row);
     }
-    if (runs.length > 0) {
+    if (view.actions.length > 0) {
       if (row.state === 'running' && !lapsed) return 'running';
       if (isTerminal(row.state)) return reconcileEnded(tx, row, view, now);
       return endReceipt(tx, row, view.outcome, view.actions, now);
     }
-    // No Instant run at all
+    // No Instant run that went out (none at all, or every one refused before it ran)
     if (isTerminal(row.state)) return row.state as ReceiptState;
     // A computer's job is its own record, whatever category the receipt was opened under (one opened without a category for a job's id is the
     // job's too): a receipt waits for it while it runs, and ends with it. A running one with no lease ends when its job is over, or, when no

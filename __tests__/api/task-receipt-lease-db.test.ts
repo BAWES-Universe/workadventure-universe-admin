@@ -422,6 +422,21 @@ run('receipts that always settle (O1)', () => {
       expect(await receipt('mixed-3')).toMatchObject({ state: 'done', outcome: 'partial' });
     });
 
+    it('a task whose every run was refused before it ran is not an action: the bot server’s word and its charge stand, and only a lease that ran out with no word ends it refunded', async () => {
+      await open('refused-1');
+      await makeRun('refused-1', 'refused', { reason: 'rule' });
+      expect(await closeReceipt({ botId: brick, taskKey: 'refused-1', personId: sara, state: 'done', chargedMicros: 4_000 }, at(3))).toMatchObject({ ok: true, state: 'done' });
+      expect(await receipt('refused-1')).toMatchObject({ state: 'done', outcome: 'done', chargedMicros: BigInt(4_000), actions: [] });
+      // Later looks at it (a run hook, or a repeat of the close) leave it as it ended
+      await instantRulesAndReceipts.afterRun?.({ botId: brick, personId: sara, tool: 'EXA_SEARCH', arguments: {}, callId: 'c', taskKey: 'refused-1' }, { status: 'refused', reason: 'rule', runId: (await prisma.instantRun.findFirstOrThrow({ where: { taskKey: 'refused-1' } })).id });
+      expect(await closeReceipt({ botId: brick, taskKey: 'refused-1', personId: sara, state: 'done', chargedMicros: 4_000 }, at(4))).toMatchObject({ state: 'done' });
+      expect(await receipt('refused-1')).toMatchObject({ state: 'done', chargedMicros: BigInt(4_000) });
+      await open('refused-2');
+      await makeRun('refused-2', 'refused', { reason: 'rule' });
+      await settleCheckingReceipts(50, at(30));
+      expect(await receipt('refused-2')).toMatchObject({ state: 'refunded', outcome: 'refunded' });
+    });
+
     it('none worked is refunded whatever the word was, and all worked is done whatever the word was', async () => {
       await open('mixed-4');
       await makeRun('mixed-4', 'failed', { reason: 'provider_failed' });
