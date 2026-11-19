@@ -117,18 +117,20 @@ export async function syncToolSignInNotices(botId: string, fresh?: { serverId: s
         if (existing) {
           await tx.userNotice.update({ where: { id: existing.id }, data: fields });
         } else if (fresh && servers.some((server) => server.id === fresh.serverId)) {
-          await tx.userNotice.create({
-            data: { userId, kind: TOOL_SIGNIN_KIND, dedupeKey: `${TOOL_SIGNIN_KIND}:${botId}:${fresh.at.toISOString()}`, ...fields },
+          // A card already there for that instant (one the person dismissed for that outage, or one made by a sync that ran first) is "already told": the
+          // insert skips it inside the transaction, so it never aborts the rest of the work (a duplicate error would roll back every update and dismissal above)
+          await tx.userNotice.createMany({
+            data: [{ userId, kind: TOOL_SIGNIN_KIND, dedupeKey: `${TOOL_SIGNIN_KIND}:${botId}:${fresh.at.toISOString()}`, ...fields }],
+            skipDuplicates: true,
           });
         }
       }
     });
     return true;
   } catch (error) {
-    // A card made twice for the same instant (same key) is "already told" (a card the person dismissed for that outage is never made
-    // again); any other failure is reported, and the state is saved either way. False says it did not finish, so the caller's marker
-    // stays and the next report for the same sign-in tries the cards again
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return true;
+    // Any failure is reported, and the state is saved either way. False says it did not finish (everything the transaction did is undone), so the
+    // caller's marker stays and the next report for the same sign-in tries the cards again. A card made twice for the same instant is not a failure:
+    // the insert skips it (see above)
     Sentry.captureException(error, { tags: { area: 'tool-signin' } });
     console.error('[ToolSignIn] Could not update the notices:', error instanceof Error ? error.message : 'unknown');
     return false;
