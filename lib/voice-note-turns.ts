@@ -296,7 +296,11 @@ export async function reserveVoiceNote(
         where: {
           scope: 'bot',
           released: false,
-          state: { in: ['reserved', 'hearing', 'heard', 'answering'] },
+          // An answer being made counts only while its lease is live. The model's reply is reported as a usage row (counted above) before the
+          // answer is recorded, and a bot server that stopped between the two leaves the turn "answering" for good: counted here as well it
+          // would be counted twice, for as long as it stays on the way. Once its lease ran out the model has either run (its row is counted)
+          // or it never will, on its own (the turn goes to "uncertain" when it is asked for again)
+          OR: [{ state: { in: ['reserved', 'hearing', 'heard'] } }, { state: 'answering', leaseUntil: { gt: now } }],
           createdAt: { gt: new Date(now.getTime() - ON_THE_WAY_MS) },
           personKey: slot.pending.guestsOnly ? { startsWith: 'guest:' } : slot.pending.personKey,
           ...(slot.pending.botId ? { botId: slot.pending.botId } : {}),
@@ -449,30 +453,39 @@ export async function leaseVoiceNoteStage(id: string, input: { stage?: unknown; 
     if (turn.state === 'reserved') {
       // Started under the reservations' lock, still young enough at that moment (the clock moved on while the hearing was looked
       // up): a reservation counts as being heard until it is too old, then never starts, so nothing passes the notes at once.
-      // The hearing is looked up again under the lock too: a lend the owner took back while this waited for it is not heard with.
+      // Nothing is looked up while the lock is held: the look-up reads on its own connections, so every lease waiting here with one
+      // connection taken and asking for another could use up the pool and stop all of them until a time-out. The hearing is looked
+      // up again once the lock is let go instead, and a lend the owner took back while this waited for the lock gives the note back
+      // before anything was sent (the bot server has not been told it may start yet)
       const adapters = readAdapterList(input.adapters);
       const started = await prisma.$transaction(async (tx) => {
         await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext('voice-note-reserve'))`);
-        const current = await hearingFor(turn, adapters);
-        if (!current) return { lost: true as const };
         const at = now.getTime() + (Date.now() - entered);
         const moved = await tx.voiceNoteTurn.updateMany({
           where: { id: turn.id, state: 'reserved', generation: turn.generation, createdAt: { gt: new Date(at - STARTING_MS) } },
           data: { state: 'hearing', generation, leaseUntil },
         });
-        return { lost: false as const, count: moved.count, hearing: current };
+        return { count: moved.count };
       }, LOCKED);
-      if (started.lost) {
-        await failUnused(turn);
-        return { granted: false, reason: 'no-hearing' };
-      }
       if (started.count === 0) {
         const after = await findTurn(turn.id);
         if (after.state !== 'reserved') return { granted: false, reason: 'held' };
         await failUnused(after);
         return { granted: false, reason: 'expired' };
       }
-      return { ...granted, hearing: started.hearing };
+      let current: NoteHearing | null;
+      try {
+        current = await hearingFor(turn, adapters);
+      } catch (error) {
+        // The hearing can't be read just now: it was not started, so it is put back as it was, to be asked again
+        await prisma.voiceNoteTurn.updateMany({ where: { id: turn.id, state: 'hearing', generation }, data: { state: 'reserved', generation: turn.generation, leaseUntil: null } });
+        throw error;
+      }
+      if (!current) {
+        await failUnused({ ...turn, state: 'hearing', generation });
+        return { granted: false, reason: 'no-hearing' };
+      }
+      return { ...granted, hearing: current };
     }
     const done = await moveOn(turn, { state: 'hearing', generation, leaseUntil }, true);
     if (done.count === 0) return { granted: false, reason: 'held' };
