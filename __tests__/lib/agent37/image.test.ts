@@ -398,7 +398,9 @@ X1=$!
 cp /bin/sh ${dir}/bin/openbox
 ${dir}/bin/openbox -c 'sleep 309; true' --startup 'sleep 1' &
 X2=$!
-${dir}/bin/openbox -c 'sleep 310 & wait; true' &
+# what a window manager the agent made starts: a program of its own (not root's), so the fence has no reason to keep it
+cp /bin/sh ${dir}/agent/openbox && chown 65534:65534 ${dir}/agent/openbox
+${dir}/agent/openbox -c 'sleep 310 & wait; true' &
 X3=$!
 sleep 1
 for p in $A1 $A2 $A3 $LATE; do kill -0 $p 2>/dev/null && echo "agent-up"; done
