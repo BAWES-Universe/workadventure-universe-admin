@@ -20,7 +20,8 @@ import { createBrick } from '@/lib/brick-create';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { memberAllowance } from '@/lib/meter-allowance';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { finishJob, giveComputer, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
+import { finishJob, giveComputer, removeMachineBeforeDelete, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
+import { deleteBrick, removeGoneBricks } from '@/lib/brick-delete';
 import { mintJobToken } from '@/lib/computer-token';
 import * as calls from '@/lib/computer-calls';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
@@ -333,6 +334,38 @@ run('credit for computers, on the real books', () => {
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
       const holds = await prisma.creditHold.findMany({ where: { jobKey: jobId } });
       expect(holds.map((hold) => Number(hold.refundedMicros)).sort()).toEqual([20_000, 30_000]);
+    });
+
+    it('a Brick removed for good waits while a failed job still holds credit that has not gone back: the job is what finds it again, so deleting it first would lose that credit', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      // The books cannot be reached when the job fails, nor when the delete tries the give-back itself
+      (creditSpend.refundHold as jest.Mock).mockImplementation(async () => {
+        throw new Error('books unreachable');
+      });
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const at = new Date(NOW.getTime() + 10 * 60_000);
+        await failedOnOurSide(jobId, at);
+        expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(970_000);
+        await deleteBrick(sara.brickId, sara.id, at);
+        const later = new Date(at.getTime() + 8 * DAY);
+        expect(await removeMachineBeforeDelete(sara.brickId, later)).toBe(false);
+        expect(await removeGoneBricks(later)).toEqual([]);
+        expect(await prisma.computerJob.count({ where: { id: jobId } })).toBe(1);
+        expect(await prisma.bot.count({ where: { id: sara.brickId } })).toBe(1);
+      } finally {
+        quiet.mockRestore();
+        warn.mockRestore();
+      }
+      // The books answer again: the sweep gives the credit back, and only then is the Brick removed
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(jest.requireActual('@/lib/credit-spend').refundHold);
+      await sweepComputers(new Date(NOW.getTime() + 30 * 60_000));
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      expect(await removeMachineBeforeDelete(sara.brickId, new Date(NOW.getTime() + 9 * DAY))).toBe(true);
     });
 
     it('the sweep takes the oldest and the newest of the jobs it must give back, so jobs whose give-back never works cannot keep a newer one out', async () => {

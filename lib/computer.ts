@@ -1674,6 +1674,17 @@ export async function removeMachineBeforeDelete(botId: string, now: Date = new D
     WHERE j."bot_id" = ${botId} AND j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
   if (Number(unwritten[0]?.n ?? 0) > 0) return false;
+  // A failed job's model calls still written against the person, or credit it drew that has not gone back, are not in the books as given back yet
+  // (the give-back above never throws, so one that failed shows here). The sweep finds them by way of the job, so once the job is deleted with the Brick
+  // nothing can give them back: the Brick waits for the next sweep, until the books answer. (The same two checks the sweep's own query makes.)
+  const owedBack = await prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
+    SELECT COUNT(*)::bigint AS "n" FROM "computer_jobs" j
+    WHERE j."bot_id" = ${botId} AND j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error'
+      AND (
+        EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
+        OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros")
+      )`);
+  if (Number(owedBack[0]?.n ?? 0) > 0) return false;
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   if (!row || !row.providerRef || row.machine === 'none') return true;
   const provider = providerFor(row);
