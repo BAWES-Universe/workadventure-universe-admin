@@ -438,6 +438,13 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(await readConnection(id, sara)).toMatchObject({ connected: false });
   });
 
+  it('switching back with no GitHub connection answers 404 and never makes one', async () => {
+    await makeApp();
+    mockUser.current = { id: sara };
+    expect((await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }))).status).toBe(404);
+    expect(await prisma.appConnection.count({ where: { ownerId: sara, catalogKey: '@github' } })).toBe(0);
+  });
+
   it('Disconnect takes the sign-in back at GitHub with the app’s own secret', async () => {
     await makeApp();
     const id = await signedIn();
