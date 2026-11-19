@@ -10,7 +10,7 @@ export const runtime = 'nodejs';
  * POST /api/bots/:id/voice-allowance/left
  * How many spoken replies a person has left (game #1669), for the line at the bottom of their Voice menu. Counts nothing and starts no
  * window. Body: { userId: their WorkAdventure uuid or email, isGuest: boolean }.
- * Response: { left, resetsAt }: `left` is the spoken replies they can still hear (the replies kept for text are put aside), `resetsAt` is
+ * Response: { left, resetsAt, unlimited? }: `unlimited: true` comes with `left: null` for a person who has no limit (so the menu can say so); without it `left: null` is a person the bot can't name. `left` is the spoken replies they can still hear (the replies kept for text are put aside), `resetsAt` is
  * when their 5-hour window ends, or null while none is running (they have used nothing). { left: null, resetsAt: null } when the bot
  * can't name the person. See lib/voice-allowance.ts.
  *
