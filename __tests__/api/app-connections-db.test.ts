@@ -609,6 +609,21 @@ run('apps a person connects once, in a real database', () => {
     expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt!.getTime()).toBeGreaterThan(worked.getTime() + 60_000);
   });
 
+  it('a good call is ordered by when its request went out: a refusal of a request sent after it stays a loss even if the good answer came back later', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    const goodSentAt = new Date(Date.now() - 5_000);
+    const refusedSentAt = new Date(Date.now() - 3_000);
+    // The good call (sent first) answers after the refused one (sent second) has been reported, and is written down at its send time
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: refusedSentAt })).toEqual({ changed: true });
+    await reportKeyWorked(connection.id, 1, goodSentAt);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).toEqual(refusedSentAt);
+    // The same two the other way round: a refusal reported after a good call sent later is old news
+    await prisma.appConnection.update({ where: { id: connection.id }, data: { signInLostAt: null, signInLostStatus: null, lastWorkedAt: null } });
+    await reportKeyWorked(connection.id, 1, refusedSentAt);
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: goodSentAt })).toEqual({ changed: false });
+  });
+
   it('finishes the cards of a loss on the next report when the lookup of the Bricks failed after the loss was saved, without making a card the person dismissed', async () => {
     const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
     const a = (await grantToBrick(sara, connection.id, saraBrick))!;

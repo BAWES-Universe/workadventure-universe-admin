@@ -378,6 +378,33 @@ run('the grants routes, on the real books', () => {
     expect(await prisma.grantProgram.count({ where: { kind: 'exception', status: 'active' } })).toBe(0);
   });
 
+  it('changes another category of an exception that already has a computers rule from before, sent back as it was, and leaves that rule alone', async () => {
+    const [omar, noor] = [await person('Omar'), await person('Noor')];
+    const audience = { kind: 'people', userIds: [omar, noor] };
+    await call(postException, '/x', { method: 'POST', body: { audience, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'same' } } });
+    const { saveException } = await import('@/lib/credit-rules');
+    await saveException({ categoryId: 'computers', amount: 5 * MILLION, schedule: 'monthly', recipients: { kind: 'people', userIds: [omar, noor] }, claimStartsAt: new Date() }, { userId: admin.id, superAdmin: true });
+    const opened = (await overview()).exceptions[0];
+    expect(opened.computers).toMatchObject({ mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' });
+    const computersBefore = await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'computers', kind: 'exception', status: 'active' }, select: { id: true } });
+    // The edit sheet sends every category back: the Apps amount changes, the computers rule is as it was
+    const body = { audience, replaceId: opened.id, instant_apps: { mode: 'own', amountMicros: 12 * MILLION, interval: 'monthly' }, computers: opened.computers };
+    const preview = await (await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', ...body } })).json();
+    expect(preview.problem).toBeUndefined();
+    expect((await call(postException, '/x', { method: 'POST', body })).status).toBe(201);
+    const after = (await overview()).exceptions;
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ instant_apps: { mode: 'own', amountMicros: 12 * MILLION }, computers: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } });
+    // The computers rule is the same rule, not ended and saved again
+    expect(await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'computers', kind: 'exception', status: 'active' }, select: { id: true } })).toEqual(computersBefore);
+    // A different computers rule is still refused, and "As everyone" still ends it
+    const changed = await call<any>(postException, '/x', { method: 'POST', body: { ...body, replaceId: after[0].id, computers: { mode: 'own', amountMicros: 6 * MILLION, interval: 'monthly' } } });
+    expect(changed.status).toBe(400);
+    expect((await changed.json()).code).toBe('computers_not_yet');
+    expect((await call(postException, '/x', { method: 'POST', body: { ...body, replaceId: after[0].id, computers: { mode: 'same' } } })).status).toBe(201);
+    expect((await overview()).exceptions[0].computers).toEqual({ mode: 'same' });
+  });
+
   it('never half-saves an exception: if the second category is refused, the first is put back', async () => {
     await saveMeterSettings({ rolloutBudgetMicros: 5 * MILLION }, admin.id);
     const [omar, noor] = [await person('Omar'), await person('Noor')];
