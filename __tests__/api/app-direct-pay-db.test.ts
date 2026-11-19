@@ -37,6 +37,7 @@ import { definitionSchema, hashDefinition } from '@/lib/app-direct/definition';
 import { openKeyForm, submitKey } from '@/lib/app-direct/connect';
 import { getBrickLimits, saveServerLimits } from '@/lib/bot-limits';
 import { isWaiting, orderForArtifact, startCheckout, verifyOrder } from '@/lib/app-direct/pay';
+import { keyAppsOf, runKeyApp } from '@/lib/app-direct/use';
 import { POST as makeJob } from '@/app/api/bots/[id]/key-apps/[serverId]/page-jobs/route';
 import { GET as listPages } from '@/app/api/me/apps/pages/route';
 import { DELETE as stopPage } from '@/app/api/me/apps/pages/[jobId]/route';
@@ -756,7 +757,7 @@ run('payments for pages, in a real database', () => {
   });
 
   describe('the platform’s limit', () => {
-    it('is counted by one checkout at a time across every owner, so two at the same moment cannot both take the last place', async () => {
+    it('is counted by one checkout at a time across every owner, under the lock ordinary uses of a key take too, so two at the same moment cannot both take the last place', async () => {
       const { artifactId } = await pending();
       gateway();
       let release: () => void = () => undefined;
@@ -766,7 +767,7 @@ run('payments for pages, in a real database', () => {
       // Another owner's checkout is in the middle of counting and writing its order
       const other = prisma.$transaction(
         async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('page-orders:platform', 0))`;
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('key-calls:everyone', 0))`;
           locked();
           await held;
         },
@@ -780,6 +781,47 @@ run('payments for pages, in a real database', () => {
       release();
       await other;
       expect((await mine).status).toBe('ok');
+    });
+  });
+
+  describe('the platform’s limit, orders and uses together', () => {
+    it('counts a committed order against the room an ordinary use of a key sees, and the other way round', async () => {
+      await saveServerLimits({ bricks: { keyCallsPlatform: 1, keyCallsPerPerson: 100 } }, sara);
+      const { artifactId, serverId } = await (async () => {
+        const gate = await connectGateway();
+        const artifact = await makeArtifact();
+        await job(gate.serverId, artifact);
+        return { artifactId: artifact, serverId: gate.serverId };
+      })();
+      gateway();
+      expect((await startCheckout({ artifactId, visitor: 'one' })).status).toBe('ok');
+      const [app] = await keyAppsOf(brick);
+      let sent = 0;
+      const deps = { resolve: async () => [{ address: '93.184.216.34', family: 4 }], send: async () => ((sent += 1), { status: 200, redirected: false, body: '{"id":"chg_9","status":"INITIATED"}', truncated: false, contentType: null }) };
+      // The order took the platform's one place: an ordinary use is over the limit and sends nothing
+      const outcome = await runKeyApp({ botId: brick, serverId, requesterKey: `sara-${tag}`, callId: `use-${tag}`, operation: 'lookUpPayment', arguments: { chargeId: 'chg_9' }, definitionHash: app.definitionHash }, deps);
+      expect(outcome).toMatchObject({ status: 'limit' });
+      expect(sent).toBe(0);
+    });
+
+    it('two checkouts of different owners at the same moment for the last place: one is made, the other is over the limit, and one order is written', async () => {
+      await saveServerLimits({ bricks: { keyCallsPlatform: 1 } }, sara);
+      const first = await pending();
+      // Omar has his own app and page (made in the rows, since the Brick that grants an app is Sara's)
+      const form = await openKeyForm({ ownerId: omar, service: 'examplepay' });
+      const omarsApp = await submitKey({ requestId: form.id, ownerId: omar, key: KEY }, okCheck);
+      const omarsArtifact = await makeArtifact({ ownerId: omar });
+      const saraJob = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId: first.artifactId } });
+      const { id: _drop, createdAt: _created, updatedAt: _updated, ...rest } = saraJob as typeof saraJob & { updatedAt?: Date };
+      void _drop;
+      void _created;
+      void _updated;
+      const omarConnection = await prisma.appConnection.findUniqueOrThrow({ where: { id: omarsApp.id } });
+      await prisma.appPageJob.create({ data: { ...rest, ownerId: omar, connectionId: omarsApp.id, artifactId: omarsArtifact, definitionHash: omarConnection.definitionHash ?? rest.definitionHash } as never });
+      gateway();
+      const [one, two] = await Promise.all([startCheckout({ artifactId: first.artifactId, visitor: 'a' }), startCheckout({ artifactId: omarsArtifact, visitor: 'b' })]);
+      expect([one.status, two.status].sort()).toEqual(['limit', 'ok']);
+      expect(await prisma.appPageOrder.count({ where: { ownerId: { in: [sara, omar] } } })).toBe(1);
     });
   });
 

@@ -94,8 +94,14 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}, again = 
     const already = await tx.appKeyCall.findUnique({ where: { botId_callId: { botId: input.botId, callId: input.callId } }, select: { id: true } });
     if (already) return 'again' as const;
     const since = new Date(Date.now() - 3_600_000);
-    const [mine, everyone] = await Promise.all([tx.appKeyCall.count({ where: { ownerId, createdAt: { gte: since } } }), tx.appKeyCall.count({ where: { createdAt: { gte: since }, NOT: { ownerId: 'page-payments' } } })]);
-    if (mine >= limits.keyCallsPerPerson || everyone >= limits.keyCallsPlatform) return 'limit' as const;
+    // The platform's limit is one count: ordinary uses AND the checkouts of pages (counted by lib/app-direct/pay.ts under this same lock), so an order that
+    // is committed leaves the room a use sees smaller, as a use leaves the room an order sees
+    const [mine, everyone, orders] = await Promise.all([
+      tx.appKeyCall.count({ where: { ownerId, createdAt: { gte: since } } }),
+      tx.appKeyCall.count({ where: { createdAt: { gte: since }, NOT: { ownerId: 'page-payments' } } }),
+      tx.appPageOrder.count({ where: { createdAt: { gte: since } } }),
+    ]);
+    if (mine >= limits.keyCallsPerPerson || everyone + orders >= limits.keyCallsPlatform) return 'limit' as const;
     await tx.appKeyCall.create({ data: { connectionId: connection.id, ownerId, botId: input.botId, callId: input.callId, operation: operation.id } });
     // Old rows are kept long enough for a retry to be recognised, and no longer
     const old = await tx.appKeyCall.findMany({ where: { createdAt: { lt: new Date(Date.now() - 2 * DAY_MS) } }, select: { id: true }, take: 100 });
