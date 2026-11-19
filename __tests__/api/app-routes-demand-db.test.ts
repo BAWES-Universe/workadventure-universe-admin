@@ -369,6 +369,22 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
       expect(off.apps.find((app) => app.key === OTHER)).toBeUndefined();
     });
 
+    it('reads the uses, the total and the gaps in one repeatable-read snapshot whose timeout fits four scans of the books (not Prisma’s 5 s default)', async () => {
+      setAdapterForTests(fake());
+      await list();
+      asBoss();
+      const spy = jest.spyOn(prisma, '$transaction');
+      try {
+        await demand();
+        const options = spy.mock.calls.map((call) => call[1] as { isolationLevel?: string; timeout?: number; maxWait?: number } | undefined).find((o) => o?.isolationLevel === 'RepeatableRead');
+        expect(options).toBeDefined();
+        expect(options?.timeout).toBeGreaterThanOrEqual(30_000);
+        expect(options?.maxWait).toBeGreaterThanOrEqual(5_000);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('the headline cost says when it is a part: an unpriced use, an Instant run not settled yet, a run with no usage event, and an estimated price each show', async () => {
       setAdapterForTests(fake());
       await list();
