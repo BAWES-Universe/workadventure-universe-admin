@@ -30,7 +30,7 @@ import { POST as createPage } from '@/app/api/admin/github-app/create/route';
 import { GET as created } from '@/app/api/admin/github-app/created/route';
 import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { POST as link } from '@/app/api/ready-made/link/route';
-import { grantToBrick, readConnection, removeGrant } from '@/lib/app-connections';
+import { grantToBrick, newSignInNonceIfClear, readConnection, removeGrant } from '@/lib/app-connections';
 import { POST as gitPass } from '@/app/api/bots/[id]/git-pass/route';
 import { GET as gitGet, POST as gitPost } from '@/app/api/git/[...path]/route';
 import { checkGitPass, MAX_PUSH_BYTES, UPLOAD_GRACE_SECONDS } from '@/lib/github/git-relay';
@@ -268,6 +268,21 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(new URL(madeUp.headers.get('location') as string).searchParams.get('message')).toBe('sign_in_expired');
   });
 
+  it('makes the install page\'s ticket only when no newer sign-in\'s ticket stands', async () => {
+    await makeApp();
+    mockUser.current = { id: sara };
+    const { id } = await (await connectApp(request('/api/me/apps', { method: 'POST', body: { catalogKey: 'github' } }))).json();
+    // A newer sign-in opened while the older one waited on GitHub: its ticket is left alone
+    await prisma.appConnection.update({ where: { id }, data: { signInNonce: 'newer-ticket' } });
+    expect(await newSignInNonceIfClear(id)).toBeNull();
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInNonce).toBe('newer-ticket');
+    // With none waiting (the older one used its own), the install page gets one
+    await prisma.appConnection.update({ where: { id }, data: { signInNonce: null } });
+    const made = await newSignInNonceIfClear(id);
+    expect(made).toBeTruthy();
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInNonce).toBe(made);
+  });
+
   it('closes the window at once when the app is already installed somewhere', async () => {
     await makeApp();
     mockUser.current = { id: sara };
@@ -413,7 +428,20 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(lapsed.status).toBe(200);
     expect(new Headers(calls[calls.length - 1].init.headers as Record<string, string>).get('authorization')).toBeNull();
 
+    // A sign-in GitHub turns down (revoked before its recorded end) still gets the card: the lookup is tried again without it
+    const refused = pretendGitHub({
+      'GET https://api.github.com/users/acme-corp': (init) =>
+        new Headers(init.headers as Record<string, string>).get('authorization') ? { status: 401, body: { message: 'Bad credentials' } } : { body: { id: 4242, type: 'Organization', login: 'acme-corp' } },
+    });
+    expect((await ask('acme-corp')).status).toBe(200);
+    expect(refused.map((call) => new Headers(call.init.headers as Record<string, string>).get('authorization'))).toEqual(['Bearer ghu_first', null]);
+
     // A person's own account is not an organization to ask; a name that does not exist neither
+    pretendGitHub({
+      'GET https://api.github.com/users/acme-corp': { body: { id: 4242, type: 'Organization', login: 'acme-corp' } },
+      'GET https://api.github.com/users/sara': { body: { id: 5, type: 'User', login: 'sara' } },
+      'GET https://api.github.com/users/nobody-here': { status: 404, body: { message: 'Not Found' } },
+    });
     expect((await ask('sara')).status).toBe(404);
     expect((await ask('nobody-here')).status).toBe(404);
     expect((await ask('not%20a%20name')).status).toBe(404);

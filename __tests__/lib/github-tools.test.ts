@@ -268,7 +268,7 @@ describe('what a Brick can do on GitHub', () => {
       const github = fakeGitHub([
         ['GET', '/repos/acme-corp/website', 404, { message: 'Not Found' }],
         ['GET', '/users/acme-corp', 200, { type: 'Organization', login: 'acme-corp', id: 4242 }],
-        ['GET', '/user/installations?per_page=100', 200, { installations: [{ account: { login: 'BAWES-Universe' } }, { account: { login: 'khalid' } }] }],
+        ['GET', '/user/installations?per_page=100&page=1', 200, { installations: [{ account: { login: 'BAWES-Universe' } }, { account: { login: 'khalid' } }] }],
       ]);
       const result = await runGitHubTool('t', 'github_get_repo', { repo: 'acme-corp/website' }, github.impl);
       expect(result).toMatchObject({ isError: true, status: 404, orgNeedsOk: 'acme-corp', changedNothing: true });
@@ -280,7 +280,7 @@ describe('what a Brick can do on GitHub', () => {
       const added = fakeGitHub([
         ['GET', '/repos/acme-corp/website', 404, { message: 'Not Found' }],
         ['GET', '/users/acme-corp', 200, { type: 'Organization', login: 'acme-corp' }],
-        ['GET', '/user/installations?per_page=100', 200, { installations: [{ account: { login: 'ACME-Corp' } }] }],
+        ['GET', '/user/installations?per_page=100&page=1', 200, { installations: [{ account: { login: 'ACME-Corp' } }] }],
       ]);
       expect((await runGitHubTool('t', 'github_get_repo', { repo: 'acme-corp/website' }, added.impl)).orgNeedsOk).toBeUndefined();
 
@@ -295,9 +295,51 @@ describe('what a Brick can do on GitHub', () => {
       const ownKey = fakeGitHub([
         ['GET', '/repos/acme-corp/website', 404, { message: 'Not Found' }],
         ['GET', '/users/acme-corp', 200, { type: 'Organization', login: 'acme-corp' }],
-        ['GET', '/user/installations?per_page=100', 403, { message: 'You must authenticate with an access token authorized to a GitHub App' }],
+        ['GET', '/user/installations?per_page=100&page=1', 403, { message: 'You must authenticate with an access token authorized to a GitHub App' }],
       ]);
       expect((await runGitHubTool('t', 'github_get_repo', { repo: 'acme-corp/website' }, ownKey.impl)).orgNeedsOk).toBeUndefined();
+    });
+
+    it('keeps the plain refusal for a missing file in a repository the person can read', async () => {
+      const github = fakeGitHub([
+        ['GET', '/repos/acme-corp/website/contents/nope.md', 404, { message: 'Not Found' }],
+        ['GET', '/users/acme-corp', 200, { type: 'Organization', login: 'acme-corp' }],
+        ['GET', '/repos/acme-corp/website', 200, { name: 'website', private: false }],
+        ['GET', '/user/installations?per_page=100&page=1', 200, { installations: [] }],
+      ]);
+      const result = await runGitHubTool('t', 'github_read_file', { repo: 'acme-corp/website', path: 'nope.md' }, github.impl);
+      expect(result).toMatchObject({ isError: true, status: 404 });
+      expect(result.orgNeedsOk).toBeUndefined();
+      // The installations were never asked about: a readable repository is not an approval problem
+      expect(github.calls.some((call) => call.url.includes('/user/installations'))).toBe(false);
+    });
+
+    it('reads every page of a person\'s installations before saying the organization is missing', async () => {
+      const filler = Array.from({ length: 100 }, (_, i) => ({ account: { login: `org-${i}` } }));
+      const onSecond = fakeGitHub([
+        ['GET', '/repos/acme-corp/website', 404, { message: 'Not Found' }],
+        ['GET', '/users/acme-corp', 200, { type: 'Organization', login: 'acme-corp' }],
+        ['GET', '/user/installations?per_page=100&page=1', 200, { installations: filler }],
+        ['GET', '/user/installations?per_page=100&page=2', 200, { installations: [{ account: { login: 'acme-corp' } }] }],
+      ]);
+      expect((await runGitHubTool('t', 'github_get_repo', { repo: 'acme-corp/website' }, onSecond.impl)).orgNeedsOk).toBeUndefined();
+
+      const onNone = fakeGitHub([
+        ['GET', '/repos/acme-corp/website', 404, { message: 'Not Found' }],
+        ['GET', '/users/acme-corp', 200, { type: 'Organization', login: 'acme-corp' }],
+        ['GET', '/user/installations?per_page=100&page=1', 200, { installations: filler }],
+        ['GET', '/user/installations?per_page=100&page=2', 200, { installations: [{ account: { login: 'other' } }] }],
+      ]);
+      expect((await runGitHubTool('t', 'github_get_repo', { repo: 'acme-corp/website' }, onNone.impl)).orgNeedsOk).toBe('acme-corp');
+
+      // A later page that fails leaves the plain refusal
+      const broken = fakeGitHub([
+        ['GET', '/repos/acme-corp/website', 404, { message: 'Not Found' }],
+        ['GET', '/users/acme-corp', 200, { type: 'Organization', login: 'acme-corp' }],
+        ['GET', '/user/installations?per_page=100&page=1', 200, { installations: filler }],
+        ['GET', '/user/installations?per_page=100&page=2', 502, { message: 'Bad gateway' }],
+      ]);
+      expect((await runGitHubTool('t', 'github_get_repo', { repo: 'acme-corp/website' }, broken.impl)).orgNeedsOk).toBeUndefined();
     });
 
     it('also covers making a repository in such an organization, and never runs for a refused sign-in', async () => {
@@ -305,7 +347,7 @@ describe('what a Brick can do on GitHub', () => {
         ['GET', '/user', 200, { login: 'khalid' }],
         ['POST', '/orgs/acme-corp/repos', 403, { message: 'Forbidden' }],
         ['GET', '/users/acme-corp', 200, { type: 'Organization', login: 'acme-corp' }],
-        ['GET', '/user/installations?per_page=100', 200, { installations: [] }],
+        ['GET', '/user/installations?per_page=100&page=1', 200, { installations: [] }],
       ]);
       const result = await runGitHubTool('t', 'github_create_repo', { name: 'site', owner: 'acme-corp' }, github.impl);
       expect(result.orgNeedsOk).toBe('acme-corp');

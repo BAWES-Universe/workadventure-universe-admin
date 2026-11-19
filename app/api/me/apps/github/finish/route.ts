@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { z } from 'zod';
-import { markConnectionReconnected, newSignInNonce, NOT_FOUND } from '@/lib/app-connections';
+import { markConnectionReconnected, newSignInNonceIfClear, NOT_FOUND } from '@/lib/app-connections';
 import { getGitHubApp } from '@/lib/github/app';
 import { finishGitHubSignIn, installPageFor, readReturnState } from '@/lib/github/connection';
 import { appsRoute, preflight } from '@/lib/me-apps-route';
@@ -37,6 +37,8 @@ export async function POST(request: NextRequest) {
     if (outcome.status !== 'done') return respond({ error: 'GitHub could not finish the sign-in just now', code: 'unavailable' }, 502);
     await markConnectionReconnected(state.connectionId, user.id);
     const app = outcome.needsInstall ? await getGitHubApp() : null;
-    return respond({ id: state.connectionId, ...(app ? { installUrl: installPageFor(app, state.connectionId, user.id, await newSignInNonce(state.connectionId), state.redirectUrl) } : {}) });
+    // The install page's ticket is made only when no newer sign-in's ticket stands: a sign-in opened while this one waited on GitHub keeps its own
+    const nonce = app ? await newSignInNonceIfClear(state.connectionId) : null;
+    return respond({ id: state.connectionId, ...(app && nonce ? { installUrl: installPageFor(app, state.connectionId, user.id, nonce, state.redirectUrl) } : {}) });
   });
 }

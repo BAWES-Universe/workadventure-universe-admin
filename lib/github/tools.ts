@@ -195,14 +195,27 @@ function refusal(answer: GitHubAnswer, what: string): ToolResult {
  * owner of what was asked for is an organization, and the app is added on none of the places the person reaches it from under that
  * name. Null in every other case, and when GitHub cannot say (a pasted key has no installs to list): the plain refusal stands then.
  */
-async function organizationThatHasNotAllowed(request: Request, owner: string): Promise<string | null> {
+async function organizationThatHasNotAllowed(request: Request, owner: string, repo: string | null, status: number): Promise<string | null> {
   const who = await request<{ type?: string; login?: string }>(`/users/${encodeURIComponent(owner)}`);
   if (!who.ok || who.data.type !== 'Organization' || !who.data.login) return null;
-  const installs = await request<{ installations?: { account?: { login?: string } | null }[] }>('/user/installations?per_page=100');
-  if (!installs.ok || !Array.isArray(installs.data.installations)) return null;
-  const login = who.data.login;
-  return installs.data.installations.some((row) => row.account?.login?.toLowerCase() === login.toLowerCase()) ? null : login;
+  // A 404 on a repository the person can read is a missing file or branch, which the organization's approval does not fix
+  if (status === 404 && repo) {
+    const readable = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
+    if (readable.ok) return null;
+  }
+  const login = who.data.login.toLowerCase();
+  // GitHub lists a person's installations 100 a page: every page is read before an organization is said to be missing
+  for (let page = 1; page <= MAX_INSTALLATION_PAGES; page++) {
+    const installs = await request<{ installations?: { account?: { login?: string } | null }[] }>(`/user/installations?per_page=100&page=${page}`);
+    if (!installs.ok || !Array.isArray(installs.data.installations)) return null;
+    if (installs.data.installations.some((row) => row.account?.login?.toLowerCase() === login)) return null;
+    if (installs.data.installations.length < 100) return who.data.login;
+  }
+  // So many pages that the end was not reached: unknown, so the plain refusal stands
+  return null;
 }
+
+const MAX_INSTALLATION_PAGES = 10;
 
 /** The owner a call was about: the repository's, or the organization a new repository was asked for in. */
 function ownerOfCall(name: string, args: Record<string, unknown>): string | null {
@@ -248,7 +261,8 @@ export async function runGitHubTool(token: string, name: string, args: Record<st
   // offers the person the card (ask the owner, or use their own key), rather than leaving them with "it does not exist"
   if (result.isError && !result.unauthorized && (result.status === 403 || result.status === 404)) {
     const owner = ownerOfCall(name, args ?? {});
-    const org = owner ? await organizationThatHasNotAllowed(request, owner).catch(() => null) : null;
+    const repoName = typeof args?.repo === 'string' && args.repo.includes('/') && name !== 'github_create_repo' ? args.repo.split('/')[1]?.trim() || null : null;
+    const org = owner ? await organizationThatHasNotAllowed(request, owner, repoName, result.status).catch(() => null) : null;
     if (org) {
       const where = typeof args?.repo === 'string' ? args.repo : org;
       result = {

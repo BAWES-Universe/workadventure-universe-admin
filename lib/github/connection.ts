@@ -565,7 +565,10 @@ export async function ownerOkPage(connection: AppConnection, organization: strin
   // sign-in still gets the card, the organization's name is public.
   const signedIn = await gitHubToken(connection.id, fetchImpl).catch(() => null);
   const token = signedIn?.status === 'ok' ? signedIn.token : null;
-  const who = await gitHubRequest<{ id?: number; type?: string }>(token, `/users/${encodeURIComponent(organization)}`, {}, fetchImpl).catch(() => null);
+  const lookup = (using: string | null) => gitHubRequest<{ id?: number; type?: string }>(using, `/users/${encodeURIComponent(organization)}`, {}, fetchImpl).catch(() => null);
+  let who = await lookup(token);
+  // A sign-in GitHub no longer takes (revoked before its recorded end) must not stop the card: the name is public
+  if (token && who?.status === 401) who = await lookup(null);
   if (!who) return { status: 'unavailable' };
   if (!who.ok || who.data.type !== 'Organization' || typeof who.data.id !== 'number') return { status: who.status === 404 || who.ok ? 'not_org' : 'unavailable' };
   // The ticket the return is finished with, once (a newer one replaces it: only the latest page can finish)
