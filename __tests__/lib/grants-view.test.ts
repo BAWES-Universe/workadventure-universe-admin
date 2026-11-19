@@ -104,6 +104,22 @@ describe('the three-part preview', () => {
     expect(said['Most credit issued']).toContain('Up to $560 a month');
   });
 
+  it('says a monthly default that starts on the 1st issues nothing now, and what its first month is, against the budget it will come out of', () => {
+    const monthly: PreviewRequest = { ...once, interval: 'monthly', startsOn: 'next', amountMicros: 10_000_000 };
+    // 56 people, $10 each: nothing now, $560 on the 1st, and the room left this month does not matter to it
+    const fits = words(previewRows(monthly, numbers({ interval: 'monthly', amountMicros: 10_000_000, mostNowMicros: 560_000_000, issuedNowMicros: 0, firstMonthMicros: 560_000_000, startsOn: 'next', budget: { budgetMicros: 1_000_000_000, roomMicros: 0 } })));
+    expect(fits['Funding']).toContain('Nothing is issued now');
+    expect(fits['Funding']).toContain('Starts on the 1st: $560 for the first month');
+    expect(fits['Funding']).not.toContain('Raise the budget');
+    // Bigger than the whole budget: said now, before the 1st
+    const over = words(previewRows(monthly, numbers({ interval: 'monthly', amountMicros: 10_000_000, mostNowMicros: 560_000_000, issuedNowMicros: 0, firstMonthMicros: 560_000_000, startsOn: 'next', budget: { budgetMicros: 100_000_000, roomMicros: 100_000_000 } })));
+    expect(over['Funding']).toContain('more than the $100 rollout budget');
+    expect(over['Funding']).toContain('Raise the budget in Limits before then');
+    // Starting now it is checked against the room left this month, as before
+    const now = words(previewRows({ ...monthly, startsOn: 'now' }, numbers({ interval: 'monthly', amountMicros: 10_000_000, mostNowMicros: 560_000_000, issuedNowMicros: 560_000_000, startsOn: 'now', budget: { budgetMicros: 1_000_000_000, roomMicros: 100_000_000 } })));
+    expect(now['Funding']).toContain('more than the $100 left in this month’s rollout budget');
+  });
+
   it('says an exception’s one-time credit and its monthly credit apart, never as one monthly sum', () => {
     const request: PreviewRequest = { what: 'exception', audience: { kind: 'people', userIds: ['a'] }, instant_apps: { mode: 'own', amountMicros: 10_000_000, interval: 'once' }, computers: { mode: 'same' } };
     expect(words(previewRows(request, numbers({ people: 1, mostNowMicros: 10_000_000, mostOnceMicros: 10_000_000, mostMonthlyMicros: null })))['Most credit issued']).toContain('Up to $10 once');
