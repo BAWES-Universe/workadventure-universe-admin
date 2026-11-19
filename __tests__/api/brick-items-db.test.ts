@@ -930,7 +930,10 @@ run('goals and tasks, in a real database', () => {
 
   it('an account that never asked for one has nothing: no items, no runs, whatever the clock says', async () => {
     const quiet = await person('quiet');
-    for (let day = 1; day <= 7; day++) await claimDueRuns(at(day * DAY));
+    // A few at a time: the claim at the end of the week reaches the items the other tests made with the real clock (the test's NOW is a week
+    // behind it), and claiming all of them for each of the seven days is what ran past the time of the test. Nothing here can be claimed for
+    // a person who has no item, whatever the number.
+    for (let day = 1; day <= 7; day++) await claimDueRuns(at(day * DAY), 5);
     expect(await prisma.brickItem.count({ where: { ownerId: quiet.id } })).toBe(0);
     expect(await prisma.brickItemRun.count({ where: { item: { ownerId: quiet.id } } })).toBe(0);
     expect(await prisma.bot.count({ where: { ownerId: quiet.id } })).toBe(1);
