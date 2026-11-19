@@ -205,6 +205,20 @@ run('usage for people, and cost for us, in a real database', () => {
       }
     });
 
+    it('says the computer part is unavailable when the settings cannot be read, never leaves it out as if there were no allowance', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 300);
+      const spy = jest.spyOn(prisma.appSetting, 'findUnique').mockRejectedValue(new Error('database hiccup'));
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const usage = await memberUsage(sara.id, NOW);
+        expect(usage.computer).toMatchObject({ unavailable: true, canAskForMore: false });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('has no time to wait for in a window that started before any reply was counted', async () => {
       const sara = await person('sara');
       await prisma.replyWindow.create({ data: { key: `ua:person:${sara.id}`, startedAt: hours(-1) } });
@@ -990,6 +1004,19 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(report.given.find((row) => row.grantKey === `g-${tag}-sara`)?.aboveUsualMicros).toBe(3_000);
     });
 
+    it('a figure scheduled to start later gives no allowance to the months before it: the report skips them, as it did before anything was scheduled', async () => {
+      await setUp();
+      const sara = await person('sara');
+      const faisal = await person('faisal');
+      // No usual saved now, and the first (only) figure starts after this month: this month has no allowance to count above
+      await prisma.meterAllowanceChange.deleteMany({});
+      await prisma.meterAllowanceChange.create({ data: { effectiveFrom: days(30), allowanceMicros: BigInt(1_000) } });
+      await recordGrant({ grantKey: `g-${tag}-future`, personId: sara.id, settlement: 'to_bill', multiplier: 2, startsAt: days(-5), endsAt: days(5), givenById: faisal.id });
+      await spendComputer(sara, 5_000, days(-2));
+      const report = await costsReport(range.from, range.to, NOW);
+      expect(report.given.find((row) => row.grantKey === `g-${tag}-future`)?.aboveUsualMicros).toBe(0);
+    });
+
     it('keeps the allowance of each month as it was saved: saving a new one later never rewrites an earlier month', async () => {
       await prisma.meterAllowanceChange.deleteMany({});
       await saveMeterSettings({ memberAllowanceMicros: 2_000 }, 'admin');
@@ -1004,6 +1031,9 @@ run('usage for people, and cost for us, in a real database', () => {
 
     it('reads the computer spending once for everyone, whatever the number of people and months their grants span', async () => {
       await setUp();
+      // The usual has been 1,000 since before these months (the baseline row the migration writes for a figure that was already set)
+      await prisma.meterAllowanceChange.deleteMany({});
+      await prisma.meterAllowanceChange.create({ data: { effectiveFrom: new Date('1970-01-01T00:00:00Z'), allowanceMicros: BigInt(1_000) } });
       const sara = await person('sara');
       const faisal = await person('faisal');
       // Sara's grant crosses from October into November, Faisal's is in November: three months of grants between them, two people

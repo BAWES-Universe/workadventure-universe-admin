@@ -412,8 +412,9 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
   const figureOf = (change: { allowanceMicros: bigint | null }): number | null => (change.allowanceMicros === null ? null : Number(change.allowanceMicros));
   const allowanceOf = (month: { start: Date; end: Date }): number | null => {
     if (changes.length === 0) return settings.memberAllowanceMicros;
-    // A month before the first saved figure is worked out with that first figure: it is all that is known of it, and what every month used until now
-    let applied = figureOf(changes[0]);
+    // A month before the first saved figure has no allowance to speak of (a first figure scheduled for December gives November none), the same as the
+    // report before anything was scheduled. A figure that was set before history was kept has its own row from the beginning (the migration's baseline).
+    let applied: number | null = null;
     for (const change of changes) {
       if (change.effectiveFrom >= month.end) break;
       applied = figureOf(change);

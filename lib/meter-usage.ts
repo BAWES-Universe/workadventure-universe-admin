@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { getMeterSettings } from '@/lib/meter';
+import { getMeterSettings, getMeterSettingsStrict } from '@/lib/meter';
 import { heldRoom, memberAllowance } from '@/lib/meter-allowance';
 import { runningExtra, type RunningExtra } from '@/lib/meter-grants';
 import { openRequestFor } from '@/lib/meter-requests';
@@ -138,7 +138,8 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
   // A computer part that cannot be read says so and leaves the others as they are: the bar and the credit above are what the person came for
   try {
   if (await usesComputer(personId)) {
-    const settings = await getMeterSettings();
+    // Read strictly: a failed read must reach the catch below and show the computer part as unavailable, not leave it out as "no allowance"
+    const settings = await getMeterSettingsStrict();
     const allowance = await memberAllowance(personId, now, settings);
     const asked = (await openRequestFor(personId, 'computer')) !== null;
     if (allowance && settings.memberAllowanceMicros) {
