@@ -7,6 +7,8 @@ const lookupMock = jest.fn();
 jest.mock('dns/promises', () => ({ lookup: (...args: unknown[]) => lookupMock(...args) }));
 
 const requests: { options: Record<string, unknown>; body?: string }[] = [];
+// What the pretend server answers, and whether the answer comes after the request call has returned (as a real one does)
+const mockReply = { status: 200, later: false };
 jest.mock('node:https', () => {
   const { EventEmitter } = jest.requireActual('node:events') as typeof import('node:events');
   const { PassThrough } = jest.requireActual('node:stream') as typeof import('node:stream');
@@ -18,10 +20,11 @@ jest.mock('node:https', () => {
         request.end = (body?: string) => {
           requests.push({ options, body });
           const incoming = new PassThrough() as import('node:stream').PassThrough & { statusCode?: number; statusMessage?: string; headers?: Record<string, string> };
-          incoming.statusCode = 200;
+          incoming.statusCode = mockReply.status;
           incoming.statusMessage = 'OK';
           incoming.headers = { 'content-type': 'application/json' };
-          onResponse(incoming);
+          if (mockReply.later) setTimeout(() => onResponse(incoming), 5);
+          else onResponse(incoming);
           incoming.end('{"ok":true}');
         };
         return request;
@@ -35,6 +38,8 @@ import { pinnedFetch, pinnedLookup } from '@/lib/mcp/outbound-guard';
 
 beforeEach(() => {
   requests.length = 0;
+  mockReply.status = 200;
+  mockReply.later = false;
   lookupMock.mockReset();
 });
 
@@ -54,6 +59,20 @@ describe('pinnedFetch', () => {
     expect(await answer(true)).toEqual([null, [{ address: '93.184.216.34', family: 4 }]]);
     // The caller's Host header is never sent
     expect(Object.keys(options.headers as object).map((name) => name.toLowerCase())).not.toContain('host');
+  });
+
+  it('never lets a caller\'s own accept-encoding replace identity, whatever its case: the answer is not decoded here', async () => {
+    lookupMock.mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }]);
+    await pinnedFetch('https://plain.example.com/mcp', { method: 'POST', headers: { 'Accept-Encoding': 'gzip', 'accept-encoding': 'br' }, body: '{}' });
+    const sent = Object.entries(requests[0].options.headers as Record<string, string>).filter(([name]) => name.toLowerCase() === 'accept-encoding');
+    expect(sent).toEqual([['accept-encoding', 'identity']]);
+  });
+
+  it('rejects an answer it cannot make a response of (a status of 600, which comes after the request call returned) instead of leaving the caller waiting', async () => {
+    lookupMock.mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }]);
+    mockReply.status = 600;
+    mockReply.later = true;
+    await expect(pinnedFetch('https://odd.example.com/mcp', { method: 'POST', body: '{}' })).rejects.toMatchObject({ name: 'RangeError' });
   });
 
   it('hands the socket every checked address, in order, so a first one that does not answer falls back to the next, and never an address that was not checked', async () => {

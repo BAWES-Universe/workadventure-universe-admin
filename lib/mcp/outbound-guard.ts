@@ -251,7 +251,8 @@ export async function pinnedFetch(url: string, init: { method?: string; headers?
   const hostname = target.hostname.startsWith('[') ? target.hostname.slice(1, -1) : target.hostname;
   return new Promise<Response>((resolve, reject) => {
     const headers: Record<string, string> = { 'accept-encoding': 'identity' };
-    for (const [name, value] of Object.entries(init.headers ?? {})) if (!['host', 'content-length', 'transfer-encoding'].includes(name.toLowerCase())) headers[name] = value;
+    // The answer is read as it comes, never decoded: a caller's own accept-encoding would let a server send it compressed and the bytes would be handed on as they are
+    for (const [name, value] of Object.entries(init.headers ?? {})) if (!['host', 'content-length', 'transfer-encoding', 'accept-encoding'].includes(name.toLowerCase())) headers[name] = value;
     const request = (useHttps ? https : http).request(
       {
         host: hostname,
@@ -267,15 +268,22 @@ export async function pinnedFetch(url: string, init: { method?: string; headers?
         autoSelectFamily: true,
       } as import('node:http').RequestOptions,
       (incoming) => {
-        const status = incoming.statusCode ?? 0;
-        const responseHeaders = new Headers();
-        for (const [name, value] of Object.entries(incoming.headers)) {
-          if (Array.isArray(value)) for (const one of value) responseHeaders.append(name, one);
-          else if (typeof value === 'string') responseHeaders.set(name, value);
+        // This runs when the answer arrives, long after the request was made: what it throws is not seen by any caller's catch, so it ends the request here
+        try {
+          const status = incoming.statusCode ?? 0;
+          const responseHeaders = new Headers();
+          for (const [name, value] of Object.entries(incoming.headers)) {
+            if (Array.isArray(value)) for (const one of value) responseHeaders.append(name, one);
+            else if (typeof value === 'string') responseHeaders.set(name, value);
+          }
+          const noBody = [101, 204, 205, 304].includes(status);
+          if (noBody) incoming.resume();
+          // A status outside 200-599 (a server that answers 600) is refused by Response itself
+          resolve(new Response(noBody ? null : (Readable.toWeb(incoming) as ReadableStream), { status, statusText: incoming.statusMessage ?? '', headers: responseHeaders }));
+        } catch (error) {
+          incoming.destroy();
+          reject(error);
         }
-        const noBody = [101, 204, 205, 304].includes(status);
-        if (noBody) incoming.resume();
-        resolve(new Response(noBody ? null : (Readable.toWeb(incoming) as ReadableStream), { status, statusText: incoming.statusMessage ?? '', headers: responseHeaders }));
       },
     );
     request.on('error', reject);
