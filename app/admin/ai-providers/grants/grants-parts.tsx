@@ -110,6 +110,13 @@ export function usePreview(request: PreviewRequest | null): { preview: PreviewVi
   const [answer, setAnswer] = useState<{ preview: PreviewView; key: string } | null>(null);
   const latest = useRef(0);
   const key = request ? JSON.stringify(request) : null;
+  // An answer belongs to one run of the preview: when the sheet closes (nothing asked) it is dropped, so the same figures asked again on reopening wait for a
+  // fresh answer. Another administrator may have added a clash meanwhile, and the old "no clash" must not stand in for it while Save is already open.
+  const [active, setActive] = useState(key !== null);
+  if (active !== (key !== null)) {
+    setActive(key !== null);
+    if (key === null) setAnswer(null);
+  }
   useEffect(() => {
     const mine = ++latest.current;
     if (!key) return;
