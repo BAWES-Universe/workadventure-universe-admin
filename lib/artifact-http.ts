@@ -214,7 +214,12 @@ export const listOffset = z.number().int().min(0).max(1_000_000);
 
 export const ownedListSchema = z.object({ person: personSchema, offset: listOffset.optional() }).strict();
 
-export const chatListSchema = z.object({ viewer: viewerSchema.refine((viewer) => viewer.chat !== undefined, { message: 'Name the chat', path: ['chat'] }), offset: listOffset.optional() }).strict();
+/** `botId`: a direct chat with a bot also lists what that bot made for this person in other chats (nearby chat, say). */
+export const chatListSchema = z.object({
+  viewer: viewerSchema.refine((viewer) => viewer.chat !== undefined, { message: 'Name the chat', path: ['chat'] }),
+  offset: listOffset.optional(),
+  botId: z.string().min(1).max(255).optional(),
+}).strict();
 
 /** A version number from the address, or a 404: there is no version "abc". */
 export function versionParam(value: string | undefined): number {
