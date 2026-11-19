@@ -34,7 +34,9 @@ const schema = z
  *    gives the SAME order, never another, even from two windows at once. 200 { orderId, checkoutUrl, amount, currency, app, reused, buyer }.
  *  - `order`: where an order stands { status, checkoutUrl, testPayment, orderId, pollAfterMs, buyer }; `pollAfterMs` is how long to wait before asking again.
  *  - `check: true` + `intentId`: the same, for the order that wish made (found with the buyer, so no one else's). 404 when there is none.
- *  - `restore: true`: { status: paid | checking | none, testPayment, orderId, pollAfterMs, paidAt, buyer } for this buyer's order for the page's offer.
+ *  - `restore: true`: { status: paid | checking | none, testPayment, orderId, pollAfterMs, paidAt, checkoutUrl, via, buyer } for this buyer's order for the page's offer.
+ *    `via` is `own` (their account or recovery code) or `receipt` (only a `receiptCode` found it; it finds and never starts a payment). An open order
+ *    whose start never finished is carried on first, for its own buyer only.
  * The buyer is the signed-in account when the viewer is one; otherwise the guest's `recoveryCode`, kept only as a hash. An `intentId`, a
  * `check` or a `restore` for a guest with no usable code is 400 `buyer_required`.
  *
@@ -61,11 +63,11 @@ export const POST = artifactRoute('POST /api/artifacts/:id/pay', 'game', schema,
   const buyerKeys = buyerKey ? [buyerKey, ...alsoBuyerKeys] : [];
   if (body.restore) {
     if (!buyerKey) throw new ArtifactError('buyer_required', 400, 'Say who is asking.');
-    return { ...(await restorePurchase({ artifactId: params.id, buyerKeys: askKeysOf(buyerKeys, body.receiptCode) })), buyer };
+    return { ...(await restorePurchase({ artifactId: params.id, buyerKeys: askKeysOf(buyerKeys, body.receiptCode), ownKeys: buyerKeys })), buyer };
   }
   if (body.check) {
     if (!buyerKey || !body.intentId) throw new ArtifactError('buyer_required', 400, 'Say who is asking, and about which purchase.');
-    const view = await checkPurchase({ artifactId: params.id, buyerKeys: askKeysOf(buyerKeys, body.receiptCode), intentId: body.intentId });
+    const view = await checkPurchase({ artifactId: params.id, buyerKeys: askKeysOf(buyerKeys, body.receiptCode), ownKeys: buyerKeys, intentId: body.intentId });
     if (!view) throw new ArtifactError('not_found', 404, 'No such order.');
     return { ...view, buyer };
   }

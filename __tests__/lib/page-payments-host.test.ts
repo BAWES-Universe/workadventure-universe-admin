@@ -9,7 +9,7 @@ const ART = 'art-1';
 
 type Call = { url: string; init: RequestInit | undefined; body: Record<string, unknown> };
 
-function setup(answers: (call: Call) => { status?: number; body: Record<string, unknown> } | 'lost', withStorage = true) {
+function setup(answers: (call: Call) => { status?: number; body: Record<string, unknown> } | 'lost' | 'hang', withStorage = true, shared?: Map<string, string>) {
   jest.useFakeTimers();
   const frame = { postMessage: jest.fn() } as unknown as Window;
   const calls: Call[] = [];
@@ -18,10 +18,12 @@ function setup(answers: (call: Call) => { status?: number; body: Record<string, 
     calls.push(call);
     const answer = answers(call);
     if (answer === 'lost') throw new Error('network');
+    // Never answers, until it is cancelled
+    if (answer === 'hang') return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))));
     const status = answer.status ?? 200;
     return { ok: status >= 200 && status < 300, status, json: async () => answer.body } as Response;
   });
-  const store = new Map<string, string>();
+  const store = shared ?? new Map<string, string>();
   const popup = { opener: 'x', closed: false, close: jest.fn(), location: { href: '' } } as unknown as Window;
   let n = 0;
   const host = createPagePaymentsHost({
@@ -135,15 +137,22 @@ describe('a paying page on the public share link', () => {
     host.destroy();
   });
 
-  it('tells a checkout started while the page was loading, and never one that was started long before a reload', async () => {
+  it('never moves a checkout to the document that is loading: a start made just before a load is told to nobody that is there now', async () => {
+    // Document A starts a checkout (a person tapped), and document B loads in the same frame half a second later: B is not told A's result
     const early = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
     early.tap({ request: 'a' });
-    early.host.frameLoaded();
     await flush();
+    await jest.advanceTimersByTimeAsync(500);
+    early.host.frameLoaded();
+    // B asks for a payment of its own with the same id while A's is still open: busy, under its own id
+    early.tap({ request: 'a' });
+    expect(early.told().at(-1)).toEqual({ universe: 'app-result', status: 'busy', request: 'a' });
     await jest.advanceTimersByTimeAsync(3_000);
+    // A's payment was found, and nobody that is there now is told
+    expect(early.lines.at(-1)?.paid).toEqual({ test: false });
     expect(early.told()).toEqual([
       { universe: 'app-result', status: 'started', request: 'a' },
-      { universe: 'app-result', status: 'paid', request: 'a' },
+      { universe: 'app-result', status: 'busy', request: 'a' },
     ]);
     early.host.destroy();
   });
@@ -464,5 +473,90 @@ describe('a paying page on the public share link', () => {
     await flush();
     expect(next.calls[0].body.receiptCode).toBe(link);
     next.host.destroy();
+  });
+  it('gives Check payment and Restore a deadline of their own: a stalled one is said plainly, the host is free again, and the page hears it under its request', async () => {
+    let stall = true;
+    const { tap, host, lines, told } = setup(() => (stall ? 'hang' : { body: { status: 'none', testPayment: false, buyer: 'guest' } }));
+    tap({ request: 'r1', restore: true });
+    await flush();
+    expect(lines.at(-1)?.checking ?? false).toBe(false);
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: true });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'unavailable', request: 'r1' });
+    // Pressed again: it is not blocked, and a stalled one is cancelled too
+    host.checkPayment();
+    await flush();
+    expect(lines.at(-1)?.checking).toBe(true);
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: true });
+    stall = false;
+    host.restorePurchase();
+    await flush();
+    expect(lines.at(-1)).toMatchObject({ problem: 'none' });
+    host.destroy();
+  });
+
+  it('keeps Check payment after trouble at the service or a good answer with nothing in it, tries the same wish again first, and not after a clear refusal', async () => {
+    let calls = 0;
+    const trouble = setup(() => {
+      calls += 1;
+      return { status: 503, body: {} };
+    });
+    trouble.tap({ request: 'a' });
+    await flush();
+    await jest.advanceTimersByTimeAsync(5_000);
+    // Three tries with the SAME wish, then Check payment for it
+    expect(calls).toBe(3);
+    expect(new Set(trouble.calls.map((call) => call.body.intentId)).size).toBe(1);
+    expect(trouble.lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: true });
+    trouble.host.destroy();
+    const empty = setup(() => ({ body: {} }));
+    empty.tap({ request: 'a' });
+    await flush();
+    expect(empty.lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: true });
+    empty.host.destroy();
+    const refused = setup(() => ({ status: 409, body: { code: 'unavailable' } }));
+    refused.tap({ request: 'a' });
+    await flush();
+    expect(refused.lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: false });
+    refused.host.destroy();
+  });
+
+  it('offers no receipt of its own for a purchase a receipt link found: it is "back", and this browser’s code would not bring it back', async () => {
+    const { tap, host, lines } = setup((call) => (call.body.restore ? { body: { status: 'checking', orderId: 'o-5', via: 'receipt', buyer: 'guest' } } : { body: { status: 'paid', testPayment: false } }));
+    tap({ request: 'r1', restore: true });
+    await flush();
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(lines.at(-1)).toMatchObject({ paid: { test: false }, restored: { paidAt: null } });
+    host.destroy();
+    // Found with its own proof, the buyer's purchase is a normal one with a receipt
+    const own = setup((call) => (call.body.restore ? { body: { status: 'checking', orderId: 'o-6', via: 'own', buyer: 'guest' } } : { body: { status: 'paid', testPayment: false } }));
+    own.tap({ request: 'r1', restore: true });
+    await flush();
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(own.lines.at(-1)).toMatchObject({ paid: { test: false }, restored: null });
+    expect(own.lines.at(-1)?.receipt).toBe(`${PAGE}#receipt=${own.calls[0].body.recoveryCode}`);
+    own.host.destroy();
+  });
+
+  it('settles one recovery code for two tabs that find the storage empty at the same moment', async () => {
+    const shared = new Map<string, string>();
+    // Web Locks: one tab at a time, and the storage is read again inside the lock
+    let tail: Promise<unknown> = Promise.resolve();
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: { request: (_name: string, run: () => unknown) => (tail = tail.then(() => run())) } } });
+    try {
+      const one = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, shared);
+      const two = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, shared);
+      one.tap({ request: 'r1', restore: true });
+      two.tap({ request: 'r1', restore: true });
+      await flush();
+      expect(one.calls[0].body.recoveryCode).toBeDefined();
+      expect(one.calls[0].body.recoveryCode).toBe(two.calls[0].body.recoveryCode);
+      expect(shared.get(`universe-pay-recovery:${ART}`)).toBe(one.calls[0].body.recoveryCode);
+      one.host.destroy();
+      two.host.destroy();
+    } finally {
+      delete (globalThis as { navigator?: unknown }).navigator;
+    }
   });
 });

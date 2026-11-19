@@ -51,7 +51,9 @@ const bodySchema = z.object({
  *  - `{}` or `{ intentId, recoveryCode }`: start. The same `intentId` from the same buyer gives the SAME order (even from two tabs at once).
  *    200 { orderId, checkoutUrl, amount, currency, app, reused, buyer } · 404 · 409 unavailable (the owner stopped it or the app stopped working) · 429 too many.
  *  - `{ check: true, intentId, recoveryCode }`: Check payment, where the order that wish made stands { status, checkoutUrl, testPayment, orderId, pollAfterMs, buyer } · 404.
- *  - `{ restore: true, recoveryCode }`: Restore purchase, { status: paid | checking | none, testPayment, orderId, pollAfterMs, buyer } for this buyer.
+ *  - `{ restore: true, recoveryCode }`: Restore purchase, { status: paid | checking | none, testPayment, orderId, pollAfterMs, paidAt, checkoutUrl, via, buyer } for this buyer.
+ *    `via` is `own` (found by their account or recovery code) or `receipt` (found only through a `receiptCode`, which finds and never starts).
+ *    An open order whose start never finished is carried on first, for its own buyer only.
  * `buyer` is `account` or `guest`: only a guest has a receipt link to keep.
  * The buyer is the signed-in Orbit account when there is one, otherwise the guest's recovery code, kept only as a hash. A wish, a check or a
  * restore with neither is 400 `buyer_required`.
@@ -59,8 +61,20 @@ const bodySchema = z.object({
 export async function POST(request: NextRequest, { params }: { params: Promise<{ artifactId: string }> }) {
   const { artifactId } = await params;
   if (!meOriginAllowed(request) || !(await isOpenByLink(artifactId))) return respond({ error: 'Not found' }, 404);
-  const raw = await request.json().catch(() => ({}));
-  const parsed = bodySchema.safeParse(raw && typeof raw === 'object' ? raw : {});
+  // No body at all is a plain start (as before); anything that is there must be a JSON object. A cut-off or non-object body is never turned into a
+  // start: it could be a Check payment that was truncated on the way, and a start makes a checkout at the service
+  const text = await request.text().catch(() => null);
+  let raw: unknown = {};
+  if (text === null) return respond({ error: 'Invalid request data', code: 'bad_request' }, 400);
+  if (text.trim() !== '') {
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      return respond({ error: 'Invalid request data', code: 'bad_request' }, 400);
+    }
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return respond({ error: 'Invalid request data', code: 'bad_request' }, 400);
+  const parsed = bodySchema.safeParse(raw);
   if (!parsed.success) return respond({ error: 'Invalid request data', code: 'bad_request' }, 400);
   const body = parsed.data;
   const session = body.restore || body.check || body.intentId ? await getSessionUser(request).catch(() => null) : null;
@@ -69,10 +83,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const buyerKey = buyerKeys[0] ?? null;
   // Who the buyer is, for the host: a guest keeps a receipt link (which holds the recovery code); an account has nothing to keep
   const buyer = session ? 'account' : 'guest';
-  if (body.restore) return buyerKey ? respond({ ...(await restorePurchase({ artifactId, buyerKeys: askKeysOf(buyerKeys, body.receiptCode) })), buyer }) : respond({ error: 'Say who is asking', code: 'buyer_required' }, 400);
+  if (body.restore) return buyerKey ? respond({ ...(await restorePurchase({ artifactId, buyerKeys: askKeysOf(buyerKeys, body.receiptCode), ownKeys: buyerKeys })), buyer }) : respond({ error: 'Say who is asking', code: 'buyer_required' }, 400);
   if (body.check) {
     if (!buyerKey || !body.intentId) return respond({ error: 'Say who is asking, and about which purchase', code: 'buyer_required' }, 400);
-    const view = await checkPurchase({ artifactId, buyerKeys: askKeysOf(buyerKeys, body.receiptCode), intentId: body.intentId });
+    const view = await checkPurchase({ artifactId, buyerKeys: askKeysOf(buyerKeys, body.receiptCode), ownKeys: buyerKeys, intentId: body.intentId });
     return view ? respond({ ...view, buyer }) : respond({ error: 'Not found' }, 404);
   }
   if (body.intentId && !buyerKey) return respond({ error: 'Say who is asking', code: 'buyer_required' }, 400);

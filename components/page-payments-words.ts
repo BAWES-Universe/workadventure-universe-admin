@@ -13,6 +13,7 @@ export const PAY_WORDS = {
   paidTest: { title: 'Test payment received. No money moved.', sub: 'Only a live payment counts as a purchase.' },
   restored: (date: string | null) => ({ title: date ? `Your purchase from ${date} is back.` : 'Your purchase is back.', sub: null }),
   receiptCopied: { title: 'Receipt link copied.', sub: 'Keep it somewhere safe, like your notes or email.' },
+  copyFailed: 'Couldn’t copy it. Select the link below and copy it yourself.',
   notHeard: { title: 'We haven’t heard back about your payment yet.', sub: 'If you paid, it still counts. You can check now.' },
   notPaid: { title: 'Not paid yet.', sub: 'If you just paid, it can take a few minutes to show.' },
   needsUpdate: { title: 'This page’s pay button needs an update.', sub: 'If you already paid, you can check it here.' },

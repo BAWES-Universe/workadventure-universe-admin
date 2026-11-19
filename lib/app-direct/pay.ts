@@ -326,16 +326,28 @@ function checkoutTerms(job: CheckoutJob | null) {
 
 /**
  * Every move an order makes is one guarded write and one line of history, together: the move happens only from the states it names (so two
- * things racing to move the same order cannot both win), and the line says what moved it. Returns whether this call moved it.
+ * things racing to move the same order cannot both win), and the line says what moved it. The row is locked and read INSIDE the
+ * transaction, so the line (and a caller that needs to know, like "paid after it was closed") holds the state the order really left, not
+ * what an earlier read saw. `lease` keeps a start attempt that was taken over from changing the order: only the attempt holding the order's
+ * current `checkedAt` may write. Returns the state the order left, or null when this call did not move it.
  */
-type OrderMove = { from: string | string[]; to: string; reason: string; data?: Prisma.AppPageOrderUpdateManyMutationInput };
-async function moveOrder(orderId: string, move: OrderMove, db?: Prisma.TransactionClient): Promise<boolean> {
+type OrderMove = {
+  from: string | string[];
+  to: string;
+  reason: string | ((left: string) => string);
+  data?: Prisma.AppPageOrderUpdateManyMutationInput;
+  lease?: { checkedAt: Date | null };
+};
+async function moveOrder(orderId: string, move: OrderMove, db?: Prisma.TransactionClient): Promise<string | null> {
   const from = Array.isArray(move.from) ? move.from : [move.from];
-  const run = async (tx: Prisma.TransactionClient) => {
-    const moved = await tx.appPageOrder.updateMany({ where: { id: orderId, status: { in: from } }, data: { status: move.to, ...move.data } });
-    if (moved.count !== 1) return false;
-    await tx.appPageOrderEvent.create({ data: { orderId, fromStatus: from.join('|'), toStatus: move.to, reason: move.reason } });
-    return true;
+  const run = async (tx: Prisma.TransactionClient): Promise<string | null> => {
+    const rows = await tx.$queryRaw<{ status: string }[]>`SELECT "status" FROM "app_page_orders" WHERE "id" = ${orderId} FOR UPDATE`;
+    const left = rows[0]?.status;
+    if (!left || !from.includes(left)) return null;
+    const moved = await tx.appPageOrder.updateMany({ where: { id: orderId, status: left, ...(move.lease ? { checkedAt: move.lease.checkedAt } : {}) }, data: { status: move.to, ...move.data } });
+    if (moved.count !== 1) return null;
+    await tx.appPageOrderEvent.create({ data: { orderId, fromStatus: left, toStatus: move.to, reason: typeof move.reason === 'function' ? move.reason(left) : move.reason } });
+    return left;
   };
   return db ? run(db) : prisma.$transaction(run);
 }
@@ -350,7 +362,7 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   const keys = intent ? [intent.buyerKey, ...(input.alsoBuyerKeys ?? [])] : [];
   if (intent) {
     const made = await prisma.appPageOrder.findFirst({ where: wishWhere(input.artifactId, intent.intentId, keys), select: { id: true } });
-    if (made) return carryOn(made.id, limits, deps);
+    if (made) return carryOn(made.id, limits, { resume: true, wait: true }, deps);
   }
   const first = checkoutTerms(await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, include: { connection: true, artifact: { select: { expiresAt: true } } } }));
   if (!first) return { status: 'unavailable' };
@@ -398,6 +410,8 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
         visitorHash: hash,
         intentId: intent?.intentId ?? null,
         buyerKey: intent?.buyerKey ?? null,
+        // What the service is sent as the description, kept with the order: a start carried on later sends exactly what the first one did
+        description: terms.job.description,
       },
     });
     await tx.appPageOrderEvent.create({ data: { orderId: made.id, fromStatus: null, toStatus: 'creating', reason: 'started' } });
@@ -405,12 +419,12 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   });
   if (started === 'gone') return { status: 'unavailable' };
   if (started === 'limit') return { status: 'limit' };
-  if (!('order' in started)) return carryOn(started.again, limits, deps);
-  const { order, job, connection, definition, payment } = started;
-  return runStart(order, { connection, definition, payment, description: job.description, origin }, deps);
+  if (!('order' in started)) return carryOn(started.again, limits, { resume: true, wait: true }, deps);
+  const { order, connection, definition, payment } = started;
+  return runStart(order, { connection, definition, payment, origin }, { checkedAt: null }, deps);
 }
 
-type StartingOrder = { id: string; amountMinor: number; currency: string; mode: string | null };
+type StartingOrder = { id: string; amountMinor: number; currency: string; mode: string | null; description: string | null };
 
 /**
  * The call that makes the payment at the service, for an order already written. The order's own amount and currency are what is sent
@@ -418,7 +432,9 @@ type StartingOrder = { id: string; amountMinor: number; currency: string; mode: 
  */
 async function runStart(
   order: StartingOrder,
-  using: { connection: NonNullable<CheckoutJob['connection']>; definition: Definition; payment: NonNullable<Definition['payment']>; description: string | null; origin: string },
+  using: { connection: NonNullable<CheckoutJob['connection']>; definition: Definition; payment: NonNullable<Definition['payment']>; origin: string },
+  /** The attempt's hold on the order (the order's `checkedAt` when it took it): an attempt that was taken over can no longer change the order. */
+  lease: { checkedAt: Date | null },
   deps: GuardDeps,
 ): Promise<CheckoutOutcome> {
   const { connection, definition, payment, origin } = using;
@@ -426,7 +442,14 @@ async function runStart(
   const fail = async (status: 'not_paid' | 'cant_confirm', reason: string) => {
     // Nobody was ever given a link for an order that fails here (the buyer is told "unavailable" and never learns its id), so nothing can be paid
     // against it: it is closed, and a try again makes a new order
-    await moveOrder(order.id, { from: 'creating', to: status, reason, data: status === 'not_paid' ? { closedAt: new Date() } : {} }).catch(() => undefined);
+    await moveOrder(order.id, { from: 'creating', to: status, reason, lease, data: status === 'not_paid' ? { closedAt: new Date() } : {} }).catch(() => undefined);
+    return { status: 'unavailable' } as const;
+  };
+  // The service may or may not have made the payment (the answer never came, was cut, or said it had trouble): the order is NOT closed. It stays
+  // as it is, tried again with the same id (which is the service's idempotency key, so the same payment and never a second) when the same wish
+  // asks again or Check payment does, until its open time is up
+  const unsure = async (reason: string) => {
+    await moveOrder(order.id, { from: 'creating', to: 'creating', reason, lease, data: { checkedAt: new Date() } }).catch(() => undefined);
     return { status: 'unavailable' } as const;
   };
   const { create } = payment;
@@ -453,7 +476,7 @@ async function runStart(
   // The owner's words go in only as the service's own description field allows: a string, trimmed, cut to its maxLength in whole
   // characters (never in the middle of one). A field that is not plain text or only takes set values, or words that are empty, are left
   // out, so a service's own limits never end a checkout.
-  const wording = wordsFor(operation, using.description);
+  const wording = wordsFor(operation, order.description);
   if (wording.value) args.description = wording.value;
 
   const startedAt = new Date();
@@ -462,16 +485,20 @@ async function runStart(
     const built = buildRequest(definition, operation.id, args, key);
     answer = await guardedRequest({ ...built, timeoutMs: limits.keyCallSeconds * 1000, maxBytes: limits.keyAnswerKb * 1024 }, deps);
   } catch (error) {
-    if (error instanceof RequestError || error instanceof GuardError) return fail('not_paid', 'start_refused');
+    // Never sent: nothing was made. Anything else (no connection, no answer in time, an answer too big) may have been made at the service
+    if (error instanceof RequestError || (error instanceof GuardError && error.code === 'blocked')) return fail('not_paid', 'start_refused');
+    if (error instanceof GuardError) return unsure('start_unsure');
     // Anything else is ours to look at, but the order is not left open on the way out
     await fail('not_paid', 'start_failed');
     throw error;
   }
-  if (answer.redirected || answer.truncated) return fail('not_paid', 'start_unusable_answer');
+  if (answer.redirected || answer.truncated) return unsure('start_unusable_answer');
   if (answer.status === 401 || answer.status === 403) {
     await reportConnectionSignIn(connection.id, { state: 'expired', status: answer.status }, startedAt).catch(() => undefined);
     return fail('not_paid', 'start_key_refused');
   }
+  // The service had trouble (or asked to try again): it may have made the payment before it did
+  if (answer.status >= 500 || answer.status === 408) return unsure('start_service_trouble');
   if (answer.status < 200 || answer.status >= 300) return fail('not_paid', 'start_service_refused');
   // The service accepted the key: a "stopped working" mark from an earlier refusal (even one for another operation) no longer holds
   await reportKeyWorked(connection.id, connection.keyVersion).catch(() => undefined);
@@ -479,7 +506,7 @@ async function runStart(
   try {
     picked = pickFields(JSON.parse(answer.body), operation.returns);
   } catch {
-    return fail('not_paid', 'start_unreadable_answer');
+    return unsure('start_unreadable_answer');
   }
   const providerRef = valueAt(picked, create.idPath);
   const where = valueAt(picked, create.checkoutUrlPath);
@@ -488,8 +515,9 @@ async function runStart(
   if (checkoutUrl && carriesKey(checkoutUrl, key)) return fail('cant_confirm', 'start_address_carries_key');
   if (typeof providerRef !== 'string' || !providerRef || providerRef.length > 255 || !checkoutUrl) return fail('cant_confirm', 'start_no_checkout');
   // Kept so a blocked pop-up can go on with the SAME order, and so a later look can find the payment
-  const kept = await moveOrder(order.id, { from: 'creating', to: 'pending', reason: 'checkout_ready', data: { providerRef, checkoutUrl } });
-  // Closed by someone else while the service was being asked (a sweep that gave up on it): nobody is given its link
+  const kept = await moveOrder(order.id, { from: 'creating', to: 'pending', reason: 'checkout_ready', lease, data: { providerRef, checkoutUrl } });
+  // Closed by someone else while the service was being asked (a sweep that gave up on it), or taken over by a later attempt, which saves the
+  // same checkout itself: this attempt gives nobody a link
   if (!kept) return { status: 'unavailable' };
   return { status: 'ok', orderId: order.id, checkoutUrl, amount: minorToText(order.amountMinor, order.currency), currency: order.currency, app: definition.short, reused: false };
 }
@@ -500,7 +528,7 @@ async function runStart(
  * one whose start was never finished (the server stopped, the answer was lost on the way) is carried on with the same id, which the service
  * knows, so it gives the same payment and not a second one. Never a second order for the same wish.
  */
-async function carryOn(orderId: string, limits: Awaited<ReturnType<typeof getBrickLimits>>, deps: GuardDeps): Promise<CheckoutOutcome> {
+async function carryOn(orderId: string, limits: Awaited<ReturnType<typeof getBrickLimits>>, how: { resume: boolean; wait: boolean }, deps: GuardDeps): Promise<CheckoutOutcome> {
   const unavailable = { status: 'unavailable' } as const;
   const patience = limits.keyCallSeconds * 1000 + START_GRACE_MS;
   const lastTried = (order: { createdAt: Date; checkedAt: Date | null }) => Math.max(order.createdAt.getTime(), order.checkedAt?.getTime() ?? 0);
@@ -513,9 +541,13 @@ async function carryOn(orderId: string, limits: Awaited<ReturnType<typeof getBri
       return { status: 'ok', orderId: order.id, checkoutUrl: order.checkoutUrl, amount: minorToText(order.amountMinor, order.currency), currency: order.currency, app: definition?.short ?? order.connection?.name ?? 'the payment page', reused: true };
     }
     if (order.status !== 'creating') return unavailable;
-    // Still being started by another request: it is waited for, and its answer is this one's answer
+    // A start is only carried on for the buyer who made the wish (their own account or recovery code): a receipt link's code finds purchases
+    // and never makes the service do anything
+    if (!how.resume) return unavailable;
+    // Still being started by another request: it is waited for, and its answer is this one's answer (a Restore does not wait)
     const left = lastTried(order) + patience - Date.now();
     if (left > 0) {
+      if (!how.wait) return unavailable;
       await sleep(Math.min(250, left));
       round -= 1;
       continue;
@@ -527,19 +559,23 @@ async function carryOn(orderId: string, limits: Awaited<ReturnType<typeof getBri
       return unavailable;
     }
     const cut = new Date(Date.now() - patience);
-    const taken = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'creating', createdAt: { lt: cut }, OR: [{ checkedAt: null }, { checkedAt: { lt: cut } }] }, data: { checkedAt: new Date() } });
+    const tookAt = new Date();
+    const taken = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'creating', createdAt: { lt: cut }, OR: [{ checkedAt: null }, { checkedAt: { lt: cut } }] }, data: { checkedAt: tookAt } });
     if (taken.count !== 1) continue;
     const origin = ownOrigin();
     // What the page was set up with when the wish was made must still hold: a stopped page, an app that is gone, a changed definition or a key
     // of another kind is not a payment to start now (the order is closed, and a new tap makes a new one)
     const terms = checkoutTerms(order.job);
     const fail = async (reason: string) => {
-      await moveOrder(order.id, { from: 'creating', to: 'not_paid', reason, data: { closedAt: new Date() } }).catch(() => undefined);
+      await moveOrder(order.id, { from: 'creating', to: 'not_paid', reason, lease: { checkedAt: tookAt }, data: { closedAt: new Date() } }).catch(() => undefined);
       return unavailable;
     };
     if (!origin || !terms) return fail('resume_page_changed');
+    // The offer is the one the wish was made for: a price or currency the owner has changed since is a different offer, never started under
+    // the old terms (the order is closed, and a new tap makes a new one at the new price). What is sent is what the order itself kept.
     if (terms.connection.id !== order.connectionId || terms.job.definitionHash !== order.definitionHash || terms.connection.keyMode !== order.mode) return fail('resume_terms_changed');
-    return runStart(order, { connection: terms.connection, definition: terms.definition, payment: terms.payment, description: terms.job.description, origin }, deps);
+    if (terms.job.amountMinor !== order.amountMinor || terms.job.currency !== order.currency) return fail('resume_offer_changed');
+    return runStart(order, { connection: terms.connection, definition: terms.definition, payment: terms.payment, origin }, { checkedAt: tookAt }, deps);
   }
   return unavailable;
 }
@@ -612,7 +648,7 @@ const stateOf = (status: string): OrderState => (status === 'paid' ? 'paid' : st
  * Asks the service about one order and moves it on. Safe to call as often as anyone likes (the visitor's page, the return page, the
  * service's notice): the service itself is asked at most once in `paymentCheckSeconds` (more for an order that has waited long) for an order, and "paid" is written once.
  */
-export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promise<OrderView | null> {
+export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?: { contacted: boolean }): Promise<OrderView | null> {
   const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, include: { connection: true, job: { select: { artifact: { select: { title: true } } } } } });
   if (!order) return null;
   const view = (status: string, mode: string | null = order.mode): OrderView => ({ status: stateOf(status), checkoutUrl: status === 'pending' ? order.checkoutUrl : null, testPayment: mode === 'test', orderId: order.id, pollAfterMs: pollAfterMs(order.createdAt) });
@@ -702,6 +738,8 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     return unreadable();
   }
   lookStats.made += 1;
+  // This call asked the service (as against one that was spaced, or had no room): a sweep counts these and no others
+  if (trace) trace.contacted = true;
   const startedAt = new Date();
   let answer;
   try {
@@ -748,8 +786,9 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
       await moveOrder(order.id, { from: open.in, to: 'cant_confirm', reason: 'paid_for_something_else' });
       return view('cant_confirm');
     }
-    const marked = await moveOrder(order.id, { from: open.in, to: 'paid', reason: wasClosed ? 'paid_late' : 'paid', data: { paidAt: now } });
-    if (marked) await tellOwnerPaid(order, connection.name, definition.service !== 'custom', order.job?.artifact.title ?? 'your page', wasClosed);
+    // Late is decided by the state the order really left, read under the lock: a close that came in while the service was being asked counts
+    const left = await moveOrder(order.id, { from: open.in, to: 'paid', reason: (was) => (was === 'not_paid' ? 'paid_late' : 'paid'), data: { paidAt: now } });
+    if (left) await tellOwnerPaid(order, connection.name, definition.service !== 'custom', order.job?.artifact.title ?? 'your page', left === 'not_paid');
     return view('paid');
   }
   // A closed order that the service still does not call completed stays closed
@@ -815,13 +854,34 @@ export async function pageTakesPayments(artifactId: string): Promise<boolean> {
 /**
  * "Check payment": where the buyer's ORIGINAL order for this purchase wish stands, asked of the service by Orbit itself (never of the page).
  * Found only by the page, the buyer and the wish together, so one buyer cannot ask about another's. An order whose start was never finished
- * is carried on with the same wish first (the same payment, not a second one). Null when this buyer has no order for that wish.
+ * is carried on with the same wish first (the same payment, not a second one), but only for the buyer who made it: `ownKeys` are their own
+ * (account or recovery code), and an order found only through a receipt link's code is asked about and never started. Null when this buyer
+ * has no order for that wish.
  */
-export async function checkPurchase(input: { artifactId: string; buyerKeys: string[]; intentId: string }, deps: GuardDeps = {}): Promise<OrderView | null> {
-  const order = await prisma.appPageOrder.findFirst({ where: wishWhere(input.artifactId, input.intentId, input.buyerKeys), select: { id: true, status: true } });
+export async function checkPurchase(input: { artifactId: string; buyerKeys: string[]; ownKeys?: string[]; intentId: string }, deps: GuardDeps = {}): Promise<OrderView | null> {
+  const order = await prisma.appPageOrder.findFirst({ where: wishWhere(input.artifactId, input.intentId, input.buyerKeys), select: { id: true, status: true, buyerKey: true } });
   if (!order) return null;
-  if (order.status === 'creating') await carryOn(order.id, await getBrickLimits(), deps);
+  if (order.status === 'creating') await carryOn(order.id, await getBrickLimits(), { resume: ownsOrder(input.ownKeys ?? input.buyerKeys, order.buyerKey), wait: true }, deps);
   return verifyOrder(order.id, deps);
+}
+
+/** Whether an order is under one of the buyer's OWN keys (their account or their browser's recovery code), as against one only a receipt link found. */
+const ownsOrder = (ownKeys: string[], buyerKey: string | null): boolean => !!buyerKey && ownKeys.includes(buyerKey);
+
+/**
+ * The orders of a buyer that may still be asked about at the service: open ones, and closed ones inside the late-payment window, which runs
+ * from when the order was closed (an order closed because its time ran out closed at the end of that time), the same as `verifyOrder`
+ * reads it. An open order past its time is still a candidate, so a sweep that was down never leaves one open for ever.
+ */
+function askable(now: Date, limits: Awaited<ReturnType<typeof getBrickLimits>>): Prisma.AppPageOrderWhereInput {
+  const lateWindow = limits.latePaymentHours * HOUR;
+  const closedFrom = new Date(now.getTime() - lateWindow);
+  // A closed order with no close time ran out of time at createdAt + open hours
+  const unclosedFrom = new Date(now.getTime() - lateWindow - limits.checkoutOpenHours * HOUR);
+  return {
+    providerRef: { not: null },
+    OR: [{ status: 'pending' }, { status: 'not_paid', closedAt: { gte: closedFrom } }, { status: 'not_paid', closedAt: null, createdAt: { gte: unclosedFrom } }],
+  };
 }
 
 export interface Restored {
@@ -835,6 +895,8 @@ export interface Restored {
   paidAt?: string | null;
   /** Only when checking, for an order that is open at the service: where the buyer pays, so a reload or a lost pop-up can go on with the SAME order. */
   checkoutUrl?: string | null;
+  /** Which proof found it: the buyer's own (account or recovery code), or only a receipt link's code. A purchase found by a receipt link is not given a new receipt. */
+  via?: 'own' | 'receipt';
 }
 
 /** The most orders of one buyer asked about at the service in one restore: the rest are asked about by the next. */
@@ -843,30 +905,42 @@ const RESTORE_LOOKS = 5;
 /**
  * "Restore purchase": this buyer's verified, paid order for the page's offer as it stands (the job's amount and currency), found by the
  * buyer alone: never by a page-chosen id, a browser or "the last order for this page". Orders of theirs that are still open are asked
- * about at the service first, so a payment made late is found. A live purchase wins over a test one.
+ * about at the service first (the ones asked about longest ago first, so repeated restores reach every one), so a payment made late is found.
+ * A live purchase wins over a test one however many test ones are newer. An open order for the current offer is handed back with its own link;
+ * one whose start never finished is carried on first, but only for a buyer's own keys, never through a receipt link's code.
  */
-export async function restorePurchase(input: { artifactId: string; buyerKeys: string[] }, deps: GuardDeps = {}): Promise<Restored> {
+export async function restorePurchase(input: { artifactId: string; buyerKeys: string[]; ownKeys?: string[] }, deps: GuardDeps = {}): Promise<Restored> {
   const none = (status: Restored['status'] = 'none'): Restored => ({ status, testPayment: false, orderId: null, pollAfterMs: 3_000 });
+  const own = input.ownKeys ?? input.buyerKeys;
+  const viaOf = (buyerKey: string | null): 'own' | 'receipt' => (ownsOrder(own, buyerKey) ? 'own' : 'receipt');
   const limits = await getBrickLimits();
-  const lateFrom = new Date(Date.now() - (limits.checkoutOpenHours + limits.latePaymentHours) * HOUR);
+  const now = new Date();
+  const due = new Date(now.getTime() - limits.paymentCheckSeconds * 1000);
   const open = await prisma.appPageOrder.findMany({
-    where: { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, status: { in: ['pending', 'not_paid'] }, providerRef: { not: null }, createdAt: { gte: lateFrom } },
-    orderBy: { createdAt: 'desc' },
+    where: { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, AND: [askable(now, limits), { OR: [{ checkedAt: null }, { checkedAt: { lt: due } }] }] },
+    orderBy: [{ checkedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'desc' }],
     take: RESTORE_LOOKS,
     select: { id: true },
   });
   for (const order of open) await verifyOrder(order.id, deps).catch(() => null);
   const offer = await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, select: { amountMinor: true, currency: true } });
-  const paid = await prisma.appPageOrder.findMany({
-    where: { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, status: 'paid', ...(offer ? { amountMinor: offer.amountMinor, currency: offer.currency } : {}) },
-    orderBy: { paidAt: 'desc' },
-    take: 20,
-    select: { id: true, mode: true, paidAt: true },
-  });
-  const chosen = paid.find((order) => order.mode !== 'test') ?? paid[0];
-  if (chosen) return { status: 'paid', testPayment: chosen.mode === 'test', orderId: chosen.id, pollAfterMs: 3_000, paidAt: chosen.paidAt?.toISOString() ?? null };
-  const waiting = await prisma.appPageOrder.findFirst({ where: { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, status: { in: ['creating', 'pending'] } }, orderBy: { createdAt: 'desc' }, select: { id: true, createdAt: true, status: true, checkoutUrl: true } });
-  return waiting ? { status: 'checking', testPayment: false, orderId: waiting.id, pollAfterMs: pollAfterMs(waiting.createdAt), checkoutUrl: waiting.status === 'pending' ? waiting.checkoutUrl : null } : none();
+  const forOffer = offer ? { amountMinor: offer.amountMinor, currency: offer.currency } : {};
+  const mine = { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, ...forOffer };
+  // A live purchase is asked for first, so test ones however many and however new can never push it out
+  const live = await prisma.appPageOrder.findFirst({ where: { ...mine, status: 'paid', OR: [{ mode: null }, { mode: { not: 'test' } }] }, orderBy: { paidAt: 'desc' }, select: { id: true, mode: true, paidAt: true, buyerKey: true } });
+  const chosen = live ?? (await prisma.appPageOrder.findFirst({ where: { ...mine, status: 'paid' }, orderBy: { paidAt: 'desc' }, select: { id: true, mode: true, paidAt: true, buyerKey: true } }));
+  if (chosen) return { status: 'paid', testPayment: chosen.mode === 'test', orderId: chosen.id, pollAfterMs: 3_000, paidAt: chosen.paidAt?.toISOString() ?? null, via: viaOf(chosen.buyerKey) };
+  // Still open for what this page sells now: an older checkout at an old price is never handed back as this offer's (it stays asked about, by its own wish)
+  const waiting = await prisma.appPageOrder.findFirst({ where: { ...mine, status: { in: ['creating', 'pending'] } }, orderBy: { createdAt: 'desc' }, select: { id: true, createdAt: true, status: true, checkoutUrl: true, buyerKey: true } });
+  if (!waiting) return none();
+  let checkoutUrl = waiting.status === 'pending' ? waiting.checkoutUrl : null;
+  // An order whose start never finished (the server stopped, the answer was lost) goes on from here for its own buyer, with the same id: a reload
+  // does not leave it with no way forward
+  if (waiting.status === 'creating' && ownsOrder(own, waiting.buyerKey)) {
+    const resumed = await carryOn(waiting.id, limits, { resume: true, wait: false }, deps).catch(() => null);
+    if (resumed?.status === 'ok') checkoutUrl = resumed.checkoutUrl;
+  }
+  return { status: 'checking', testPayment: false, orderId: waiting.id, pollAfterMs: pollAfterMs(waiting.createdAt), checkoutUrl, via: viaOf(waiting.buyerKey) };
 }
 
 // ---- Orders that nobody is watching ---------------------------------------------------------------------------------
@@ -897,22 +971,23 @@ export async function sweepPageOrders(now: Date = new Date(), deps: GuardDeps = 
   for (const order of never) {
     if (await moveOrder(order.id, { from: 'creating', to: 'not_paid', reason: 'start_never_finished', data: { closedAt: new Date(order.createdAt.getTime() + limits.checkoutOpenHours * HOUR) } }).catch(() => false)) sweep.ended += 1;
   }
-  const lateFrom = new Date(now.getTime() - (limits.checkoutOpenHours + limits.latePaymentHours) * HOUR);
   const quiet = new Date(now.getTime() - SWEEP_QUIET_MS);
   const open = await prisma.appPageOrder.findMany({
-    where: { status: { in: ['pending', 'not_paid'] }, providerRef: { not: null }, createdAt: { gte: lateFrom }, OR: [{ checkedAt: null }, { checkedAt: { lt: quiet } }] },
+    where: { AND: [askable(now, limits), { OR: [{ checkedAt: null }, { checkedAt: { lt: quiet } }] }] },
     orderBy: [{ checkedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
     take: SWEEP_BATCH,
     select: { id: true, status: true },
   });
   for (const order of open) {
     const before = order.status;
-    const view = await verifyOrder(order.id, deps).catch((error) => {
+    const trace = { contacted: false };
+    const view = await verifyOrder(order.id, deps, trace).catch((error) => {
       console.error('[PagePayments] A sweep look failed:', error instanceof Error ? error.message : 'unknown');
       return null;
     });
     if (!view) continue;
-    sweep.looked += 1;
+    // Only a call that asked the service is a look: one that was spaced, or had no room, is not counted
+    if (trace.contacted) sweep.looked += 1;
     if (stateOf(before) !== view.status && !(before === 'pending' && view.status === 'checking')) sweep.moved += 1;
   }
   return sweep;

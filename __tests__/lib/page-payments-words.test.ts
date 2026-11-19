@@ -1,4 +1,6 @@
 /** Every screen of mock M1 for the public page (and the line above each), by the state the host is in. */
+// The day a purchase was made is shown in the buyer's own time zone: these tests fix the zone so "19 Nov" is the same on every machine
+process.env.TZ = 'UTC';
 import { describeLine, shortDate } from '@/components/page-payments-words';
 import { NO_PAY_LINE, type PayLine } from '@/lib/page-payments-host';
 

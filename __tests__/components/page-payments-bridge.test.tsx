@@ -1,5 +1,8 @@
 /** @jest-environment jsdom */
 
+// The day a purchase was made is shown in the buyer's own time zone: these tests fix the zone so "19 Nov" is the same on every machine
+process.env.TZ = 'UTC';
+
 import React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { PagePaymentsBridge } from '@/components/page-payments-bridge';
@@ -73,5 +76,20 @@ describe('the payment line on the shared page', () => {
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Copy receipt link' })));
     expect(written[0]).toMatch(/^http:\/\/localhost(:\d+)?\/a\/k7Qm2xR9#receipt=[A-Za-z0-9_-]{32,128}$/);
     expect(screen.getByRole('status').textContent).toContain('Receipt link copied.');
+  });
+  it('shows a selectable receipt link and says so when the clipboard refuses', async () => {
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: async () => { throw new Error('denied'); } }, configurable: true });
+    jest.useFakeTimers();
+    const { ask } = mount('', (method) => (method === 'POST' ? { orderId: 'o-1', checkoutUrl: 'https://checkout.examplepay.com/?t=1', app: 'ExamplePay', buyer: 'guest' } : { status: 'paid', testPayment: false }));
+    window.open = jest.fn(() => null);
+    await ask({ request: 'r1' });
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(3_000);
+    });
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Copy receipt link' })));
+    expect(screen.getByRole('status').textContent).toContain('Couldn’t copy it.');
+    expect((screen.getByLabelText('Receipt link') as HTMLInputElement).value).toMatch(/#receipt=[A-Za-z0-9_-]{32,128}$/);
+    // Still not "copied": the button can be pressed again
+    expect(screen.getByRole('button', { name: 'Copy receipt link' })).toBeTruthy();
   });
 });

@@ -10,7 +10,9 @@
  * twice) never takes the result of another checkout as its own. Statuses: started · paid · not_paid · cant_confirm · unavailable · limit ·
  * busy (another request is on its way) · none (a restore found no purchase). `test: true` rides with `paid` for a test payment, so a page can
  * show a test preview and never unlock live goods. A page that sends no valid request id is never answered with a bare status: the host's own
- * line says the page needs an update and still offers Check payment.
+ * line says the page needs an update and still offers Check payment. That is the policy for pages made before this protocol (they exist only
+ * on dev, the screen is in the approved mock M1 §4): they are made again with the current instructions, and a request-less message never
+ * starts a checkout, because there would be no way to tell whose answer is whose.
  *
  * Everything real is decided by Orbit: the amount and the service are the owner's (a message carries neither), the page hears back only a
  * status, never an address, a key, an order or a recovery code. The purchase wish (`intentId`) is made here per tap, never by the page, and a
@@ -75,6 +77,8 @@ const STALLED_START_FOR_MS = 120_000;
 const START_TRIES = 3;
 const TRY_AGAIN_MS = 1_000;
 const TAB_WATCH_MS = 1_000;
+/** How long Check payment and Restore may wait for Orbit before the host says it could not ask (and can be pressed again). */
+const ASK_FOR_MS = 30_000;
 
 /** Only a plain https address is ever opened. */
 export function safeCheckout(url: string | null | undefined): string | undefined {
@@ -96,11 +100,16 @@ interface Answer {
 /**
  * Which opening a request came from. A page's scripts run, and may ask, before its frame's `load` event; that event then bumps the opening
  * count. A request that came in the moment before a load belongs to the document that is loading (not to the one that just went), so such a
- * ticket is moved to the new opening at the load; any other ticket stays with the opening it was made in.
+ * ticket is moved to the new opening at the load; any other ticket stays with the opening it was made in. Only a restore is ever moved: it
+ * is what a page asks as its scripts run, it changes nothing, and for the same buyer and page its answer is the same whichever document asks. A
+ * start needs a person's tap, which cannot come before the page is shown, so a start is never taken for the loading document's own: a checkout
+ * of one document is never told to the next.
  */
 interface Ticket {
   from: number;
   at: number;
+  /** A restore (a page asking for its purchase as it loads), the only request that is ever moved to the opening that is loading. */
+  restore: boolean;
 }
 /** How close to a load a request must have come to be taken for the loading document's own. */
 const LOADING_MS = 2_000;
@@ -198,6 +207,36 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     return memoryCode;
   };
 
+  let codeReady: Promise<string> | null = null;
+  /**
+   * Settles this browser's code before anything is sent with it. Two tabs that both find the storage empty would each make a code and the last
+   * write would win, leaving the other tab buying under a code that is no longer kept: so the making is serialised across tabs (Web Locks,
+   * where the browser has them) and the storage is read again inside the lock, so every tab ends up with the one that was written first. A
+   * browser without locks writes, then reads back what the storage holds and uses that.
+   */
+  const settleCode = (): Promise<string> => {
+    if (memoryCode) return Promise.resolve(memoryCode);
+    codeReady ??= (async () => {
+      const locks = (globalThis as { navigator?: { locks?: { request: <T>(name: string, run: () => T | Promise<T>) => Promise<T> } } }).navigator?.locks;
+      if (locks?.request) {
+        try {
+          return await locks.request(storageKey, () => recoveryCode());
+        } catch {
+          return recoveryCode();
+        }
+      }
+      const made = recoveryCode();
+      try {
+        const kept = options.storage?.getItem(storageKey);
+        if (kept && RECOVERY_CODE.test(kept)) memoryCode = kept;
+      } catch {
+        // Keeps the one made
+      }
+      return memoryCode ?? made;
+    })();
+    return codeReady;
+  };
+
   /** The code of a receipt link this browser opened (kept for asking only), or null. */
   const receiptCode = (): string | null => {
     if (memoryReceipt) return memoryReceipt;
@@ -220,9 +259,23 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
 
   const receiptFor = (): string | null => (buyer === 'guest' && options.pageUrl ? `${options.pageUrl.split('#')[0]}#receipt=${recoveryCode()}` : null);
 
+  /** Check payment and Restore each have a deadline of their own, and are cancelled when the host is destroyed: a stalled ask never blocks the next one for good. */
+  const asking = new Set<AbortController>();
+  const bounded = async <T,>(run: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), ASK_FOR_MS);
+    asking.add(abort);
+    try {
+      return await run(abort.signal);
+    } finally {
+      clearTimeout(timer);
+      asking.delete(abort);
+    }
+  };
+
   const post = async (body: Record<string, unknown>, signal?: AbortSignal): Promise<Answer> => {
     // A receipt link's code goes only with a question (Restore, Check payment), never with the start of a purchase
-    const own = recoveryCode();
+    const own = await settleCode();
     const link = body.restore || body.check ? receiptCode() : null;
     const response = await ask(base, { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, recoveryCode: own, ...(link && link !== own ? { receiptCode: link } : {}) }), signal });
     const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
@@ -249,7 +302,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   };
 
   /** Asks about an order until it ends. The deadline has its own clock; a closed checkout tab gets its link back. */
-  const watch = (orderId: string, checkout: { url: string; app: string; popup: Window | null } | null, request: string, ticket: Ticket) => {
+  const watch = (orderId: string, checkout: { url: string; app: string; popup: Window | null } | null, request: string, ticket: Ticket, byReceipt = false) => {
     let over = false;
     let linkBack = false;
     const finish = (update: Partial<PayLine>, status: string, test = false) => {
@@ -276,7 +329,9 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         const body = response.ok ? ((await response.json()) as { status?: string; testPayment?: boolean; pollAfterMs?: number }) : null;
         if (over || destroyed) return;
         if (body?.pollAfterMs && Number.isFinite(body.pollAfterMs)) next = Math.min(MOST_POLL_MS, Math.max(LEAST_POLL_MS, body.pollAfterMs));
-        if (body?.status === 'paid') return finish({ paid: { test: body.testPayment === true } }, 'paid', body.testPayment === true);
+        // An order found through a receipt link is "back", never a new purchase of this browser: no receipt of its own is offered for it, because
+        // this browser's code would not bring it back
+        if (body?.status === 'paid') return finish({ paid: { test: body.testPayment === true }, ...(byReceipt ? { restored: { paidAt: null } } : {}) }, 'paid', body.testPayment === true);
         if (body?.status === 'not_paid') return finish({ problem: 'not_paid', canCheck: true }, 'not_paid');
         if (body?.status === 'cant_confirm') return finish({ problem: 'cant_confirm', canCheck: true }, 'cant_confirm');
       } catch {
@@ -287,12 +342,12 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     timer = setTimeout(() => void poll(), FIRST_POLL_MS);
   };
 
-  const adopt = (orderId: string, checkout: { url: string; app: string; popup: Window | null } | null, request: string, ticket: Ticket) => {
+  const adopt = (orderId: string, checkout: { url: string; app: string; popup: Window | null } | null, request: string, ticket: Ticket, byReceipt = false) => {
     busy = true;
     activeRequest = request;
     activeTicket = ticket;
     publish({ checking: true, resume: checkout && !checkout.popup ? { url: checkout.url, app: checkout.app } : null, receipt: receiptFor() });
-    watch(orderId, checkout, request, ticket);
+    watch(orderId, checkout, request, ticket, byReceipt);
   };
 
   const begin = (request: string, ticket: Ticket) => {
@@ -331,7 +386,13 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         let answer: Answer | null = null;
         for (let attempt = 0; attempt < START_TRIES && !answer; attempt += 1) {
           try {
-            answer = await post({ intentId }, abort.signal);
+            const got = await post({ intentId }, abort.signal);
+            // The service had trouble: the order may exist, so the same wish is sent again (it finds the order it made), like a lost answer
+            if (got.status >= 500 && attempt + 1 < START_TRIES) {
+              await waitFor(TRY_AGAIN_MS);
+              continue;
+            }
+            answer = got;
           } catch (error) {
             if (abort.signal.aborted || destroyed) throw error;
             if (attempt + 1 < START_TRIES) await waitFor(TRY_AGAIN_MS);
@@ -349,7 +410,10 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         if (!answer.ok || !orderId || !url) {
           popup?.close();
           const limit = answer.status === 429 || answer.body?.code === 'limit';
-          return end({ problem: limit ? 'limit' : 'unavailable' }, limit ? 'limit' : 'unavailable', request, ticket);
+          // Trouble on the way (a 5xx, or a good answer that holds nothing usable) may have left an order behind: Check payment asks about the same
+          // wish. A definite answer (the page is gone, the owner stopped it, too many tries) does not
+          const unsure = !limit && (answer.status >= 500 || (answer.ok && (!orderId || !url)));
+          return end({ problem: limit ? 'limit' : 'unavailable', canCheck: unsure }, limit ? 'limit' : 'unavailable', request, ticket);
         }
         if (popup) popup.location.href = url;
         adopt(orderId, { url, app: typeof answer.body?.app === 'string' ? answer.body.app : '', popup }, request, ticket);
@@ -374,7 +438,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     lastRestore = { request, ticket };
     void (async () => {
       try {
-        const answer = await post({ restore: true });
+        const answer = await bounded((signal) => post({ restore: true }, signal));
         if (destroyed) return;
         const status = answer.body?.status;
         if (answer.ok && status === 'paid') return end({ paid: { test: answer.body?.testPayment === true }, restored: restoredOf(answer.body) }, 'paid', request, ticket, answer.body?.testPayment === true);
@@ -384,7 +448,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
           // An order of theirs is still open: it is watched like a new checkout, and the page hears how it ends under this request. Its own
           // link is offered, so a reload or a lost pop-up goes on with the SAME order and does not need a second one
           target = { intentId: null, request, ticket };
-          return adopt(answer.body.orderId, resumeOf(answer.body), request, ticket);
+          return adopt(answer.body.orderId, resumeOf(answer.body), request, ticket, answer.body.via === 'receipt');
         }
         end({ problem: 'unavailable', canCheck: true }, 'unavailable', request, ticket);
       } catch {
@@ -410,7 +474,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
       if (data.request !== activeRequest || activeTicket?.from !== opening) tellRequest('busy', data.request);
       return;
     }
-    const ticket: Ticket = { from: opening, at: Date.now() };
+    const ticket: Ticket = { from: opening, at: Date.now(), restore: data.restore === true };
     if (data.restore === true) return restore(data.request, ticket);
     begin(data.request, ticket);
   };
@@ -421,14 +485,14 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
    */
   const askAgain = (restoring: boolean) => {
     if (destroyed || busy) return;
-    const asked = restoring ? (lastRestore ? { intentId: null, ...lastRestore } : { intentId: null, request: '', ticket: { from: -1, at: 0 } }) : target ?? { intentId: null, request: '', ticket: { from: -1, at: 0 } };
+    const asked = restoring ? (lastRestore ? { intentId: null, ...lastRestore } : { intentId: null, request: '', ticket: { from: -1, at: 0, restore: false } }) : target ?? { intentId: null, request: '', ticket: { from: -1, at: 0, restore: false } };
     busy = true;
     activeRequest = asked.request;
     activeTicket = asked.ticket;
     publish({ checking: true });
     void (async () => {
       try {
-        const answer = await post(asked.intentId ? { check: true, intentId: asked.intentId } : { restore: true });
+        const answer = await bounded((signal) => post(asked.intentId ? { check: true, intentId: asked.intentId } : { restore: true }, signal));
         if (destroyed) return;
         const status = answer.body?.status;
         const test = answer.body?.testPayment === true;
@@ -440,16 +504,19 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
           if (request && opening === asked.ticket.from) tellRequest(told, request, isTest);
         };
         if (answer.ok && status === 'paid') return done({ paid: { test }, restored: asked.intentId ? null : restoredOf(answer.body) }, 'paid', test);
-        if (answer.ok && status === 'checking' && typeof answer.body?.orderId === 'string') return adopt(answer.body.orderId, resumeOf(answer.body), request, asked.ticket);
+        if (answer.ok && status === 'checking' && typeof answer.body?.orderId === 'string') return adopt(answer.body.orderId, resumeOf(answer.body), request, asked.ticket, answer.body.via === 'receipt');
         if (answer.ok && (status === 'not_paid' || status === 'cant_confirm')) return done({ problem: status, canCheck: true }, status);
         if (answer.ok && status === 'none') return done({ problem: 'none', canCheck: !restoring }, 'none');
         if (answer.status === 404) return done({ problem: 'none', canCheck: !restoring }, 'none');
         done({ problem: 'unavailable', canCheck: true }, 'unavailable');
       } catch {
         if (destroyed) return;
+        // It never answered in time (or the network failed): said plainly, and pressed again when the buyer likes. The page hears it under its own
+        // request, in its own opening, and never otherwise
         busy = false;
         activeRequest = '';
         publish({ problem: 'unavailable', canCheck: true });
+        if (asked.request && opening === asked.ticket.from) tellRequest('unavailable', asked.request);
       }
     })();
   };
@@ -466,7 +533,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
       // page that is there now, except a request that came in the moment before this load: a page asks as its scripts run, before its frame
       // says it has loaded, so that one is the loading document's own and is moved to the new opening
       opening += 1;
-      if (busy && activeTicket && Date.now() - activeTicket.at < LOADING_MS) activeTicket.from = opening;
+      if (busy && activeTicket?.restore && Date.now() - activeTicket.at < LOADING_MS) activeTicket.from = opening;
     },
     checkPayment: () => askAgain(false),
     restorePurchase: () => askAgain(true),
@@ -490,6 +557,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
       destroyed = true;
       startInFlight?.abort.abort();
       startInFlight?.clear();
+      asking.forEach((abort) => abort.abort());
       stopTimers();
       listeners.clear();
     },

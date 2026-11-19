@@ -10,7 +10,8 @@ import { NextRequest } from 'next/server';
 const mockUser: { current: { id: string; isGuest?: boolean } | null } = { current: null };
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockUser.current) }));
 type Sent = { host: string; path: string; method: string; headers: Record<string, string>; body?: string };
-const mockSend: { current: ((target: Sent) => { status: number; body?: unknown; redirected?: boolean }) | null } = { current: null };
+type Answered = { status: number; body?: unknown; redirected?: boolean };
+const mockSend: { current: ((target: Sent) => Answered | Promise<Answered>) | null } = { current: null };
 jest.mock('@/lib/app-direct/guard', () => {
   const actual = jest.requireActual('@/lib/app-direct/guard');
   return {
@@ -20,7 +21,7 @@ jest.mock('@/lib/app-direct/guard', () => {
         ? actual.guardedRequest(request, {
             resolve: async () => [{ address: '93.184.216.34', family: 4 }],
             send: async (target: Sent) => {
-              const answer = mockSend.current!(target);
+              const answer = await mockSend.current!(target);
               return { status: answer.status, redirected: answer.redirected ?? false, body: JSON.stringify(answer.body ?? {}), truncated: false, contentType: 'application/json' };
             },
           })
@@ -35,7 +36,8 @@ import { disconnect } from '@/lib/app-connections';
 import { definitionSchema, hashDefinition } from '@/lib/app-direct/definition';
 import { openKeyForm, submitKey } from '@/lib/app-direct/connect';
 import { getBrickLimits, saveServerLimits } from '@/lib/bot-limits';
-import { checkPurchase, guestBuyerKey, isWaiting, orderForArtifact, pagePaymentLoad, pollAfterMs, restorePurchase, startCheckout, sweepPageOrders, verifyOrder } from '@/lib/app-direct/pay';
+import { GuardError } from '@/lib/app-direct/guard';
+import { checkPurchase, guestBuyerKey, isWaiting, lookStats, orderForArtifact, pagePaymentLoad, pollAfterMs, restorePurchase, startCheckout, sweepPageOrders, verifyOrder } from '@/lib/app-direct/pay';
 import { GET as readJob, POST as makeJob } from '@/app/api/bots/[id]/key-apps/[serverId]/page-jobs/route';
 import { GET as sweepLoad, POST as sweepRoute } from '@/app/api/app-pay/sweep/route';
 import { GET as listPages } from '@/app/api/me/apps/pages/route';
@@ -1350,8 +1352,221 @@ run('payments for pages, in a real database', () => {
       expect(lines).toEqual([
         { fromStatus: null, toStatus: 'creating', reason: 'started' },
         { fromStatus: 'creating', toStatus: 'pending', reason: 'checkout_ready' },
-        { fromStatus: 'pending|not_paid', toStatus: 'paid', reason: 'paid' },
+        { fromStatus: 'pending', toStatus: 'paid', reason: 'paid' },
       ]);
+    });
+
+    describe('review findings on the order machine (CodeRabbit, 19 Nov)', () => {
+      const lostOrder = async (artifactId: string, code: string, intentId: string, over: Record<string, unknown> = {}) => {
+        const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+        return prisma.appPageOrder.create({
+          data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'creating', visitorHash: 'v', intentId, buyerKey: buyerOf(code), description: jobRow.description, createdAt: new Date(Date.now() - 120_000), ...over },
+        });
+      };
+      const POSTS = (sent: Sent[]) => sent.filter((target) => target.method === 'POST');
+
+      it('writes the state an order really left, read under the lock: a payment that arrives after a close is late', async () => {
+        const { artifactId } = await pending();
+        gateway({ record: (order) => paidRecord(order) });
+        const made = await begin(artifactId, wish(), word());
+        if (made.status !== 'ok') throw new Error('expected ok');
+        // The service is asked, and while it is being asked the order is closed (another request ran out its time)
+        const records = mockSend.current!;
+        mockSend.current = async (target) => {
+          await prisma.appPageOrder.update({ where: { id: made.orderId }, data: { status: 'not_paid', closedAt: new Date() } });
+          return records(target);
+        };
+        await old(made.orderId);
+        await verifyOrder(made.orderId);
+        const lines = await prisma.appPageOrderEvent.findMany({ where: { orderId: made.orderId }, orderBy: { createdAt: 'asc' }, select: { fromStatus: true, toStatus: true, reason: true } });
+        expect(lines.at(-1)).toEqual({ fromStatus: 'not_paid', toStatus: 'paid', reason: 'paid_late' });
+        expect((await notices()).some((notice) => notice.body.includes('came in after the checkout had closed'))).toBe(true);
+      });
+
+      it('keeps a start attempt that was taken over from changing the order', async () => {
+        const { artifactId } = await pending();
+        const code = word();
+        const intentId = wish();
+        const sent = gateway();
+        const answers = mockSend.current!;
+        let release: () => void = () => undefined;
+        const held = new Promise<void>((resolve) => { release = resolve; });
+        mockSend.current = async () => {
+          // The first attempt is stuck at the service; a later attempt takes the order over (it moves `checkedAt`), then the first one fails
+          await prisma.appPageOrder.updateMany({ where: { artifactId }, data: { checkedAt: new Date() } });
+          release();
+          await held;
+          return { status: 400, body: {} };
+        };
+        expect((await begin(artifactId, intentId, code)).status).toBe('unavailable');
+        // The first attempt's failure did not close an order that now belongs to the later one
+        expect((await orders(artifactId))[0]).toMatchObject({ status: 'creating' });
+        mockSend.current = answers;
+        expect(sent).toHaveLength(0);
+      });
+
+      it('keeps an order recoverable when the service did not clearly refuse: it may have made the payment', async () => {
+        const { artifactId } = await pending();
+        const code = word();
+        const intentId = wish();
+        // Trouble at the service (5xx) and no answer in time: neither closes the order
+        for (const trouble of ['5xx', 'timeout'] as const) {
+          const wishId = trouble === '5xx' ? intentId : wish();
+          mockSend.current = () => {
+            if (trouble === 'timeout') throw new GuardError('timeout', 'no answer');
+            return { status: 503, body: {} };
+          };
+          const outcome = await begin(artifactId, wishId, code);
+          expect(outcome.status).toBe('unavailable');
+          const made = (await orders(artifactId)).find((row) => row.intentId === wishId);
+          expect(made).toMatchObject({ status: 'creating' });
+          expect((await prisma.appPageOrderEvent.findMany({ where: { orderId: made!.id } })).map((line) => line.reason)).toContain(trouble === '5xx' ? 'start_service_trouble' : 'start_unsure');
+        }
+        // The same wish asked again, once the wait is over, goes on with the SAME order and the same key at the service
+        const first = (await orders(artifactId)).find((row) => row.intentId === intentId)!;
+        await prisma.appPageOrder.update({ where: { id: first.id }, data: { createdAt: new Date(Date.now() - 120_000), checkedAt: new Date(Date.now() - 120_000) } });
+        const sent = gateway();
+        const again = await begin(artifactId, intentId, code);
+        expect(again).toMatchObject({ status: 'ok', orderId: first.id });
+        expect(JSON.parse(POSTS(sent)[0].body as string)).toMatchObject({ reference: { order: first.id, idempotent: first.id } });
+        // A clear refusal (the service said no) still closes the order
+        gateway({ createStatus: 400 });
+        const refused = wish();
+        expect((await begin(artifactId, refused, code)).status).toBe('unavailable');
+        expect((await orders(artifactId)).find((row) => row.intentId === refused)).toMatchObject({ status: 'not_paid' });
+      });
+
+      it('never starts a payment for a buyer who only holds a receipt link’s code, in Check payment or in Restore', async () => {
+        const { artifactId } = await pending();
+        const sender = word();
+        const mine = word();
+        const intentId = wish();
+        const lost = await lostOrder(artifactId, sender, intentId);
+        const sent = gateway();
+        const keys = [buyerOf(mine), buyerOf(sender)];
+        await checkPurchase({ artifactId, buyerKeys: keys, ownKeys: [keys[0]], intentId });
+        expect(await restorePurchase({ artifactId, buyerKeys: keys, ownKeys: [keys[0]] })).toMatchObject({ status: 'checking', orderId: lost.id, checkoutUrl: null, via: 'receipt' });
+        expect(sent).toHaveLength(0);
+        expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: lost.id } })).toMatchObject({ status: 'creating' });
+        // Its own buyer's keys do carry it on, in Check payment
+        await checkPurchase({ artifactId, buyerKeys: keys, ownKeys: [keys[1]], intentId });
+        expect(POSTS(sent)).toHaveLength(1);
+        expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: lost.id } })).toMatchObject({ status: 'pending' });
+      });
+
+      it('gives a reloaded buyer a way forward: Restore carries their unfinished start on and hands back its own link', async () => {
+        const { artifactId } = await pending();
+        const code = word();
+        const lost = await lostOrder(artifactId, code, wish());
+        const sent = gateway();
+        const restored = await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] });
+        expect(restored).toMatchObject({ status: 'checking', orderId: lost.id, via: 'own' });
+        expect(restored.checkoutUrl).toBe('https://checkout.examplepay.com/?mode=page&token=abc');
+        expect(JSON.parse(POSTS(sent)[0].body as string)).toMatchObject({ reference: { order: lost.id } });
+      });
+
+      it('refuses to carry on a start for an offer the owner has changed since, and sends the description the order was made with', async () => {
+        const { artifactId, connectionId } = await pending();
+        const code = word();
+        const lost = await lostOrder(artifactId, code, wish(), { description: 'An old mug' });
+        await prisma.appPageJob.update({ where: { artifactId }, data: { amountMinor: 9000 } });
+        const sent = gateway();
+        expect((await begin(artifactId, lost.intentId as string, code)).status).toBe('unavailable');
+        expect(sent).toHaveLength(0);
+        expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: lost.id } })).toMatchObject({ status: 'not_paid' });
+        expect((await prisma.appPageOrderEvent.findMany({ where: { orderId: lost.id } })).map((line) => line.reason)).toContain('resume_offer_changed');
+        // Same offer, but the owner's words changed: what the first start would have sent is what is sent
+        await prisma.appPageJob.update({ where: { artifactId }, data: { amountMinor: lost.amountMinor, description: 'A new mug' } });
+        const second = await lostOrder(artifactId, code, wish(), { description: 'An old mug' });
+        const sent2 = gateway();
+        expect((await begin(artifactId, second.intentId as string, code)).status).toBe('ok');
+        expect(JSON.parse(POSTS(sent2)[0].body as string).description).toBe('An old mug');
+        expect(connectionId).toBeDefined();
+      });
+
+      it('does not hand back an old price’s checkout as the offer’s, and asks about the orders asked longest ago first', async () => {
+        const { artifactId } = await pending();
+        gateway({ record: (order) => paidRecord(order) });
+        const code = word();
+        const key = buyerOf(code);
+        const open = await begin(artifactId, wish(), code);
+        if (open.status !== 'ok') throw new Error('expected ok');
+        await prisma.appPageJob.update({ where: { artifactId }, data: { amountMinor: 9000 } });
+        expect(await restorePurchase({ artifactId, buyerKeys: [key] })).toMatchObject({ status: 'none' });
+        await prisma.appPageJob.update({ where: { artifactId }, data: { amountMinor: 4500 } });
+        // Six open orders: the five newest were asked about a moment ago, the oldest never. Restore reaches the oldest, which was paid.
+        const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+        await prisma.appPageOrder.deleteMany({ where: { artifactId } });
+        const made: string[] = [];
+        for (let n = 0; n < 6; n += 1) {
+          const row = await prisma.appPageOrder.create({
+            data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: 4500, currency: 'KWD', mode: 'test', status: 'pending', providerRef: `chg_${n}`, checkoutUrl: 'https://checkout.examplepay.com/?token=x', visitorHash: 'v', intentId: wish(), buyerKey: key, createdAt: new Date(Date.now() - (6 - n) * 60_000), checkedAt: n === 0 ? null : new Date() },
+          });
+          made.push(row.id);
+        }
+        mockSend.current = () => ({ status: 200, body: paidRecord(made[0]) });
+        const found = await restorePurchase({ artifactId, buyerKeys: [key] });
+        expect(found).toMatchObject({ status: 'paid', orderId: made[0] });
+      });
+
+      it('prefers a live purchase however many newer test purchases there are', async () => {
+        const { artifactId } = await pending();
+        const code = word();
+        const key = buyerOf(code);
+        const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+        const make = (mode: string, minutes: number) =>
+          prisma.appPageOrder.create({
+            data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode, status: 'paid', paidAt: new Date(Date.now() - minutes * 60_000), visitorHash: 'v', intentId: wish(), buyerKey: key },
+          });
+        const live = await make('live', 600);
+        for (let n = 0; n < 21; n += 1) await make('test', n);
+        expect(await restorePurchase({ artifactId, buyerKeys: [key] })).toMatchObject({ status: 'paid', orderId: live.id, testPayment: false });
+      });
+
+      it('finds a late payment by when the order closed, not when it was made, in the sweep and in Restore', async () => {
+        const { artifactId } = await pending();
+        const code = word();
+        const limits = await getBrickLimits();
+        const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+        // Made long ago, closed an hour ago (its open time had run out only just then): still inside the late window
+        const row = await prisma.appPageOrder.create({
+          data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'not_paid', providerRef: 'chg_late', checkoutUrl: 'https://checkout.examplepay.com/?token=x', visitorHash: 'v', intentId: wish(), buyerKey: buyerOf(code), createdAt: new Date(Date.now() - (limits.checkoutOpenHours + limits.latePaymentHours + 5) * 3_600_000), closedAt: new Date(Date.now() - 3_600_000) },
+        });
+        mockSend.current = () => ({ status: 200, body: paidRecord(row.id) });
+        expect(await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] })).toMatchObject({ status: 'paid', orderId: row.id });
+        await prisma.appPageOrder.update({ where: { id: row.id }, data: { status: 'not_paid', paidAt: null, checkedAt: null } });
+        expect((await sweepPageOrders()).moved).toBeGreaterThanOrEqual(1);
+        expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('paid');
+      });
+
+      it('never turns a cut-off or non-object body into a checkout: only no body at all is a plain start', async () => {
+        const { artifactId } = await pending();
+        const sent = gateway();
+        const raw = (text: string | null, address: string) => publicStart(new NextRequest(`http://localhost/api/pay/${artifactId}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': address }, ...(text === null ? {} : { body: text }) }), params({ artifactId }));
+        for (const [n, bad] of ['{"check":true,"intentId":"i1234567', '5', '"start"', '[]', 'null'].entries()) {
+          const response = await raw(bad, `203.0.113.${40 + n}`);
+          expect(response.status).toBe(400);
+          expect(await response.json()).toMatchObject({ code: 'bad_request' });
+        }
+        expect(POSTS(sent)).toHaveLength(0);
+        expect((await raw(null, '203.0.113.50')).status).toBe(200);
+        expect(POSTS(sent)).toHaveLength(1);
+      });
+
+      it('counts only the looks that asked the service', async () => {
+        const { artifactId } = await pending();
+        const code = word();
+        gateway();
+        const made = await begin(artifactId, wish(), code);
+        if (made.status !== 'ok') throw new Error('expected ok');
+        // Quiet for the sweep, but asked about inside the order's own spacing: the verifier answers without asking the service
+        await prisma.appPageOrder.update({ where: { id: made.orderId }, data: { checkedAt: new Date(Date.now() - 6 * 60_000), createdAt: new Date(Date.now() - 1_000) } });
+        const limits = await getBrickLimits();
+        await prisma.appPageOrder.update({ where: { id: made.orderId }, data: { checkedAt: new Date(Date.now() - Math.min(6 * 60_000, limits.paymentCheckSeconds * 1000 + 1_000) + 0) } });
+        const before = lookStats.made;
+        const sweep = await sweepPageOrders();
+        expect(sweep.looked).toBe(lookStats.made - before);
+      });
     });
 
     describe('Check payment', () => {

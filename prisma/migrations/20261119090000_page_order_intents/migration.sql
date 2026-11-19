@@ -1,10 +1,11 @@
 -- A purchase wish per tap (the host makes it), the buyer it belongs to, and a line for every move an order makes.
 ALTER TABLE "app_page_orders" ADD COLUMN "intent_id" VARCHAR(64);
 ALTER TABLE "app_page_orders" ADD COLUMN "buyer_key" VARCHAR(80);
+-- What the service is sent as the description, kept so a start carried on later sends exactly what the first one did.
+ALTER TABLE "app_page_orders" ADD COLUMN "description" VARCHAR(200);
 
--- One order per (page, buyer, wish). Rows with no wish or no buyer (a start from an older host) are never equal to each other here.
-CREATE UNIQUE INDEX "app_page_orders_artifact_id_buyer_key_intent_id_key" ON "app_page_orders"("artifact_id", "buyer_key", "intent_id");
-CREATE INDEX "app_page_orders_artifact_id_buyer_key_status_idx" ON "app_page_orders"("artifact_id", "buyer_key", "status");
+-- The two indexes are built in the next two migrations, one statement each and CONCURRENTLY, so a table with checkouts in flight is never
+-- locked against writes while they build.
 
 CREATE TABLE "app_page_order_events" (
     "id" TEXT NOT NULL,

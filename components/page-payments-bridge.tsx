@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { createPagePaymentsHost, NO_PAY_LINE, type PagePaymentsHost, type PayLine } from '@/lib/page-payments-host';
-import { describeLine, type PayAction } from '@/components/page-payments-words';
+import { describeLine, PAY_WORDS, type PayAction } from '@/components/page-payments-words';
 
 /**
  * The bridge between a page that takes payments and Universe, on the public share link (game #2044). All of what it does with the page lives
@@ -14,7 +14,9 @@ import { describeLine, type PayAction } from '@/components/page-payments-words';
  */
 export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
   const [line, setLine] = useState<PayLine>(NO_PAY_LINE);
-  const [copied, setCopied] = useState(false);
+  // The receipt link that was copied (or that could not be), never a bare yes: another page's receipt, or an earlier copy that finishes late, is never "copied"
+  const [copied, setCopied] = useState<string | null>(null);
+  const [copyFailed, setCopyFailed] = useState<string | null>(null);
   const host = useRef<PagePaymentsHost | null>(null);
 
   useEffect(() => {
@@ -60,7 +62,8 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
     };
   }, [artifactId]);
 
-  const view = describeLine(line, { copied });
+  const view = describeLine(line, { copied: !!line.receipt && copied === line.receipt });
+  const failed = !!line.receipt && copyFailed === line.receipt;
   if (!view) return null;
 
   const press = (action: PayAction) => {
@@ -68,7 +71,19 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
     else if (action.kind === 'restore') host.current?.restorePurchase();
     else if (action.kind === 'copy' && line.receipt) {
       // The link holds the recovery code in its fragment: it goes to the clipboard, and nowhere else
-      void navigator.clipboard?.writeText(line.receipt).then(() => setCopied(true), () => setCopied(false));
+      const receipt = line.receipt;
+      const fail = () => {
+        setCopied((now) => (now === receipt ? null : now));
+        setCopyFailed(receipt);
+      };
+      if (!navigator.clipboard?.writeText) return fail();
+      void navigator.clipboard.writeText(receipt).then(
+        () => {
+          setCopyFailed(null);
+          setCopied(receipt);
+        },
+        fail,
+      );
     }
   };
   const button = 'inline-flex h-11 items-center justify-center gap-2 rounded-full px-[18px] text-[14px] font-bold text-white no-underline';
@@ -90,6 +105,12 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
       ) : null}
       <p className="m-0 font-semibold">{view.title}</p>
       {view.sub ? <p className="m-0 text-[13px] leading-[1.4] text-[#b3acc7]">{view.sub}</p> : null}
+      {failed && line.receipt ? (
+        <>
+          <p className="m-0 text-[13px] leading-[1.4] text-[#b3acc7]">{PAY_WORDS.copyFailed}</p>
+          <input readOnly value={line.receipt} aria-label="Receipt link" onFocus={(event) => event.currentTarget.select()} className="h-11 w-full min-w-0 rounded-full border border-white/[.12] bg-white/[.06] px-4 text-[13px] text-[#f3f1fa]" />
+        </>
+      ) : null}
       {view.actions.length ? (
         <div className="mt-1 flex flex-wrap justify-center gap-2">
           {view.actions.map((action) =>
