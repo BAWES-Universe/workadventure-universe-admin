@@ -60,6 +60,11 @@ export async function openRequests(): Promise<OpenRequest[]> {
  */
 export async function answerRequests(personId: string, grantKey: string, now: Date = new Date(), askedUntil: Date = now, what: AskedFor = 'computer'): Promise<number> {
   // Only what this grant is for: extra computer usage never closes an ask for Instant Apps credit, which it did not give
-  const { count } = await prisma.meterRequest.updateMany({ where: { personId, what, answeredAt: null, createdAt: { lte: askedUntil } }, data: { answeredAt: now, grantKey } });
-  return count;
+  // Under the lock an ask holds until it is saved: a grant that answers while an ask is being written waits for it, so it never misses one
+  // that was already asked for before the grant began
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${`meter_request:${personId}:${what}`}))`);
+    const { count } = await tx.meterRequest.updateMany({ where: { personId, what, answeredAt: null, createdAt: { lte: askedUntil } }, data: { answeredAt: now, grantKey } });
+    return count;
+  });
 }
