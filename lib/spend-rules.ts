@@ -280,7 +280,7 @@ async function unpricedCallRoom(db: Db, events: Prisma.MeterEventWhereInput[]): 
  * task can really cost, so it counts the time already used plus the one stretch the lease still covers, never the whole of what was
  * stacked up: a cap of $1 must not stop a job at $0.40. Room taken once (a model call, a first stretch) has no renewals and counts whole.
  */
-export function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals: number; createdAt: Date; expiresAt: Date }>, renewMinutes: number, now: Date): number {
+export function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals: number; createdAt: Date; expiresAt: Date }>, renewMinutes: number, _now?: Date): number {
   const stretchMs = renewMinutes * 60_000;
   let total = 0;
   for (const row of rows) {
@@ -290,8 +290,11 @@ export function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals:
       continue;
     }
     const oneStretch = amount / (row.renewals + 1);
-    const usedMs = Math.max(0, Math.min(now.getTime(), row.expiresAt.getTime()) - row.createdAt.getTime());
-    total += Math.min(amount, Math.ceil(oneStretch * (1 + usedMs / stretchMs)));
+    // The most the lease can cost is the whole time it covers, from when it began to when it now ends (what was used and what it still
+    // covers): that moves only when a renewal moves the end, never with the clock, so waiting inside one lease does not make a job look dearer.
+    // Never less than one stretch, never more than what was held.
+    const coveredMs = Math.max(0, row.expiresAt.getTime() - row.createdAt.getTime());
+    total += Math.min(amount, Math.max(Math.ceil(oneStretch), Math.ceil(oneStretch * (coveredMs / stretchMs))));
   }
   return total;
 }
