@@ -234,3 +234,22 @@ describe('the meter’s books (game #1998)', () => {
     expect(response.status).toBe(200);
   });
 });
+
+describe('a reply row written under the voice lock', () => {
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  it('is still written, without the lock, when the transaction cannot be had: logged, never lost from the counts and the books', async () => {
+    const log = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      (prisma.$transaction as jest.Mock).mockRejectedValueOnce(new Error('Timed out fetching a new connection'));
+      const answer = await track({ channel: 'dm', userId: 'wa-guest', isGuest: true });
+      expect(await answer.json()).toEqual({ status: 'tracked' });
+      await settle();
+      expect(usage.create).toHaveBeenCalledTimes(1);
+      expect(saved()).toMatchObject({ botId: 'b1', channel: 'dm', talkedUserId: 'wa-guest' });
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('without'), expect.any(Error));
+    } finally {
+      log.mockRestore();
+    }
+  });
+});

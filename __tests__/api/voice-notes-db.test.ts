@@ -720,6 +720,19 @@ run('voice notes for every bot, in a real database', () => {
       await until(async () => (await rows()) === 2);
     });
 
+    it('counts a note answered a moment ago as on its way until its reply row has had time to land, and not for the whole time its answer is kept', async () => {
+      const capped = await newBot('Capped answered');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 1 } });
+      const person = `ans-${randomUUID()}`;
+      const first = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+      // Answered 30 seconds ago: its answer is kept for 15 minutes from then, and its usage row is not there yet
+      await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { state: 'answered', bufferUntil: new Date(Date.now() + 15 * 60_000 - 30_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
+      // Answered five minutes ago the row has long landed (or never will): the note holds nothing, and the rows decide
+      await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { bufferUntil: new Date(Date.now() + 15 * 60_000 - 5 * 60_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+    });
+
     it('never lets a second note through while the first is being completed at the same moment: its row and its answer land under the lock the reservation counts under', async () => {
       const providerId = `completing-${tag}`;
       await prisma.botsAiProvider.upsert({ where: { providerId }, create: { providerId, name: 'Completing', type: 'openai', enabled: true }, update: {} });
