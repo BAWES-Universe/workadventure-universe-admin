@@ -11,15 +11,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
+jest.mock('@/lib/computer', () => {
+  const actual = jest.requireActual('@/lib/computer');
+  return { ...actual, finishJob: jest.fn(actual.finishJob) };
+});
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests, type TurnEvent } from '@/lib/computer-provider';
-import { Agent37Error } from '@/lib/agent37/client';
+import { Agent37Error, Agent37Unreached } from '@/lib/agent37/client';
 import { screenTicket } from '@/lib/computer-screen';
-import { fenceMachine, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { fenceMachine, finishJob, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { verifyJobToken } from '@/lib/computer-token';
 import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
 
@@ -611,6 +615,115 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       }
     });
 
+    describe('a first turn nothing can name (no turn id, no conversation): never a second one beside it', () => {
+      const jobRow = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
+      const failing = (text: string) => async () => (async function* (): AsyncGenerator<TurnEvent> {
+        throw new Error(text);
+      })();
+      const counted = () => {
+        const opened = jest.fn();
+        return { opened, wrap: (make: () => Promise<AsyncGenerator<TurnEvent>>) => async () => (opened(), make()) };
+      };
+
+      it('the server stops after the agent accepted the first turn: the claim lapses, and the next start ends the job instead of opening another turn', async () => {
+        const { jobId } = await running();
+        let markedWhenSent: Date | null = null;
+        const sent = jest.spyOn(fake, 'openTurn').mockImplementation((async () => {
+          // The mark is in the row before the agent is asked
+          markedWhenSent = (await jobRow(jobId)).firstTurnSentAt;
+          return (async function* (): AsyncGenerator<TurnEvent> {
+            await new Promise(() => undefined);
+          })();
+        }) as never);
+        try {
+          const started = await startTurn(jobId, 'go');
+          expect(started.ok).toBe(true);
+          expect(markedWhenSent).not.toBeNull();
+          // The server stopped here: nothing reads the stream, nothing renews or lets go of the claim, and it lapses by itself
+          await prisma.computerJob.update({ where: { id: jobId }, data: { turnClaimedAt: new Date(Date.now() - 5 * 60_000) } });
+          expect(await startTurn(jobId, 'go again')).toEqual({ ok: false, reason: 'not_running' });
+          expect(sent).toHaveBeenCalledTimes(1);
+          const ended = await jobRow(jobId);
+          expect(ended.status).toBe('failed');
+          expect(ended.turnClaimedAt).toBeNull();
+        } finally {
+          sent.mockRestore();
+        }
+      });
+
+      it('the stream fails before the turn\'s id: the job ends there, and a start after it opens nothing', async () => {
+        const { jobId } = await running();
+        const { opened, wrap } = counted();
+        fake.openTurn = wrap(failing('socket hang up'));
+        const started = await startTurn(jobId, 'go');
+        if (!started.ok) throw new Error('no turn');
+        expect(await drain(started.events)).toEqual([expect.objectContaining({ type: 'failed', code: 'no_turn_id' })]);
+        expect((await jobRow(jobId)).status).toBe('failed');
+        expect(await startTurn(jobId, 'again')).toEqual({ ok: false, reason: 'not_running' });
+        expect(opened).toHaveBeenCalledTimes(1);
+      });
+
+      it('the stream ends before the turn\'s id, with no error: the same end', async () => {
+        const { jobId } = await running();
+        const { opened, wrap } = counted();
+        fake.openTurn = wrap(async () => (async function* (): AsyncGenerator<TurnEvent> {})());
+        const started = await startTurn(jobId, 'go');
+        if (!started.ok) throw new Error('no turn');
+        expect(await drain(started.events)).toEqual([expect.objectContaining({ type: 'failed', code: 'no_turn_id' })]);
+        expect((await jobRow(jobId)).status).toBe('failed');
+        expect(opened).toHaveBeenCalledTimes(1);
+      });
+
+      it('the job cannot be ended at that moment: the mark stays, so the next start ends it and never opens another turn', async () => {
+        const { jobId } = await running();
+        const { opened, wrap } = counted();
+        fake.openTurn = wrap(failing('socket hang up'));
+        (finishJob as jest.Mock).mockRejectedValueOnce(new Error('database unreachable'));
+        const started = await startTurn(jobId, 'go');
+        if (!started.ok) throw new Error('no turn');
+        await drain(started.events);
+        const still = await jobRow(jobId);
+        expect(still.status).toBe('running');
+        expect(still.firstTurnSentAt).not.toBeNull();
+        // Nothing holds the claim any more: the next start finds the mark and ends the job
+        expect(await startTurn(jobId, 'again')).toEqual({ ok: false, reason: 'not_running' });
+        expect((await jobRow(jobId)).status).toBe('failed');
+        expect(opened).toHaveBeenCalledTimes(1);
+      });
+
+      it('an answer that is not a turn (the agent said no) opened nothing: the mark goes, and the same start can be asked again', async () => {
+        const { jobId } = await running();
+        fake.openTurn = async () => {
+          throw new Agent37Error(400, 'bad_request', 'no');
+        };
+        expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'failed' });
+        const row = await jobRow(jobId);
+        expect(row.status).toBe('running');
+        expect(row.firstTurnSentAt).toBeNull();
+        fake.openTurn = FakeComputerProvider.prototype.openTurn.bind(fake);
+        expect(await startTurn(jobId, 'go')).toMatchObject({ ok: true });
+      });
+
+      it('a request that may have reached the agent (the connection broke) is a turn that may run: the job ends, as it does for a stream that failed', async () => {
+        const { jobId } = await running();
+        fake.openTurn = async () => {
+          throw new Agent37Unreached('connection reset');
+        };
+        expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'failed' });
+        expect((await jobRow(jobId)).status).toBe('failed');
+      });
+
+      it('once the turn\'s id is kept the mark is gone, so the next first turn of a conversation the agent never named is not ended', async () => {
+        const { jobId } = await running();
+        const started = await startTurn(jobId, 'go');
+        if (!started.ok) throw new Error('no turn');
+        await drain(started.events);
+        const row = await jobRow(jobId);
+        expect(row.firstTurnSentAt).toBeNull();
+        expect(row.status).toBe('running');
+      });
+    });
+
     it('a turn in a conversation the agent knows: after the cap the claim lapses, and the agent itself refuses a second turn beside the first (busy, with its id)', async () => {
       const { jobId } = await running();
       await prisma.computerJob.update({ where: { id: jobId }, data: { agentSessionId: 'sess-known' } });
@@ -731,6 +844,8 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         [{ type: 'created', id: 'resp-a', sessionId: 'sess-1' }, { type: 'completed', outputText: '', usage: null }],
         [{ type: 'created', id: 'resp-b', sessionId: 'sess-2' }, { type: 'completed', outputText: '', usage: null }],
       ];
+      // In a conversation the agent knows (the agent itself refuses a second turn there; a job's very first turn is the mark's: see the tests of it)
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentSessionId: 'sess-0' } });
       const first = await startTurn(jobId, 'one');
       // The first start's claim has lapsed (nobody released it): the backstop still holds, a second turn never replaces the first one's id
       await prisma.computerJob.update({ where: { id: jobId }, data: { turnClaimedAt: new Date(Date.now() - 10 * 60_000) } });

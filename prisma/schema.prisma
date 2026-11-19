@@ -3298,6 +3298,8 @@ model ComputerJob {
   // starting a turn (until its id is kept). A claim that was never released lapses by itself.
   prepareClaimedAt  DateTime? @map("prepare_claimed_at")
   turnClaimedAt     DateTime? @map("turn_claimed_at")
+  /// Set before the first turn of a job (one with no conversation known yet) is sent to the agent, and cleared when that turn's id is kept or the turn ends. Found set with no turn id and no conversation, the first turn may be running with nothing to find it by, so no second one is opened beside it.
+  firstTurnSentAt   DateTime? @map("first_turn_sent_at")
   // What the person asked for in more words than the title, for the agent only: never shown, never sent anywhere else, and cleared when the job ends
   brief             String? @db.VarChar(4000)
 

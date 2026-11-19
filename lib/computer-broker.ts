@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { providerFor, fenceMachine, finishJob } from '@/lib/computer';
 import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
-import { Agent37Error } from '@/lib/agent37/client';
+import { Agent37Error, TurnNotSent } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
 
 /**
@@ -14,7 +14,7 @@ import type { TurnEvent } from '@/lib/agent37/turn-events';
  * no turn, and a person who has taken over is never talked over.
  */
 
-type Live = { jobId: string; botId: string; generation: number; ref: string; sessionId: string | null; responseId: string | null };
+type Live = { jobId: string; botId: string; generation: number; ref: string; sessionId: string | null; responseId: string | null; firstTurnSentAt: Date | null };
 
 export type NotLive = { ok: false; reason: 'not_found' | 'not_running' | 'person_has_it' | 'no_machine' };
 
@@ -27,7 +27,7 @@ async function liveJob(jobId: string): Promise<{ ok: true; job: Live; provider: 
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
   if (!row?.providerRef || !provider || row.machine !== 'working') return { ok: false, reason: 'no_machine' };
-  return { ok: true, job: { jobId: job.id, botId: job.botId, generation: job.controlGeneration, ref: row.providerRef, sessionId: job.agentSessionId, responseId: job.agentResponseId }, provider };
+  return { ok: true, job: { jobId: job.id, botId: job.botId, generation: job.controlGeneration, ref: row.providerRef, sessionId: job.agentSessionId, responseId: job.agentResponseId, firstTurnSentAt: job.firstTurnSentAt }, provider };
 }
 
 /** Where the model relay is: an https address with no login, query or fragment, ending where /v1 begins. */
@@ -228,6 +228,25 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     return { ok: false, reason: 'busy', responseId: fresh.job.responseId };
   }
   const sessionId = fresh.job.sessionId;
+  // A job's very first turn has no conversation to be found by, and the agent has no way to be asked for "the turn this request started" (a request
+  // carries no key of ours and sessions cannot be listed). So the turn is marked in the job's row BEFORE it is sent, and a start that finds the mark
+  // with no turn id and no conversation (the server stopped after the agent accepted the turn, or the stream failed before its id came) never opens
+  // a second one beside it: the job ends, visibly, as it does when the turn never says its id. In a conversation the agent knows, a second turn is
+  // refused by the agent itself, atomically, so only the first turn needs the mark.
+  if (!sessionId) {
+    if (fresh.job.firstTurnSentAt) {
+      const ended = await endJobOfUnknownTurn(job.jobId);
+      await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+      return { ok: false, reason: ended ? 'not_running' : 'failed' };
+    }
+    const marked = await prisma.computerJob
+      .updateMany({ where: { id: job.jobId, status: 'running', control: 'brick', firstTurnSentAt: null }, data: { firstTurnSentAt: new Date() } })
+      .catch(() => null);
+    if (!marked || marked.count !== 1) {
+      await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+      return { ok: false, reason: marked ? 'not_running' : 'failed' };
+    }
+  }
   // The runner's connection must not cut the turn off before its id is kept: once the agent has accepted it, it runs on the machine, and
   // an id that was never stored leaves nothing to cancel or reconnect to. So the request's own signal is not handed on; the start has its
   // own limit instead, for the agent's answer only: once it has accepted the turn the limit is lifted, because cutting the stream before its id arrived would leave a turn running on the machine with nothing to cancel.
@@ -237,6 +256,8 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   try {
     if (signal?.aborted) {
       clearTimeout(timer);
+      // Nothing was sent: the mark goes too
+      if (!sessionId) await prisma.computerJob.updateMany({ where: { id: job.jobId }, data: { firstTurnSentAt: null } }).catch(() => undefined);
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       return { ok: false, reason: 'failed' };
     }
@@ -245,12 +266,34 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     clearTimeout(timer);
   } catch (error) {
     clearTimeout(timer);
+    console.error('[Computer] Could not start a turn:', error instanceof Error ? error.message : 'unknown');
+    if (!sessionId) {
+      // The agent said no (an answer that is not a stream), or the machine was never reached: no turn was opened, the mark goes and the start can be
+      // asked again. Anything else (a connection that broke, a limit that ran out, a server error) may have left a turn running that nothing names:
+      // the job ends, and if it cannot be ended now the mark stays, so the next start ends it and never opens a second turn
+      const notSent = error instanceof TurnNotSent || (error instanceof Agent37Error && (error.status < 500 || error.retryable));
+      if (notSent) await prisma.computerJob.updateMany({ where: { id: job.jobId }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+      else await endJobOfUnknownTurn(job.jobId);
+    }
     await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
     if (error instanceof Agent37Error && error.code === 'session_busy') return { ok: false, reason: 'busy', responseId: error.runningResponseId };
-    console.error('[Computer] Could not start a turn:', error instanceof Error ? error.message : 'unknown');
     return { ok: false, reason: 'failed' };
   }
   return { ok: true, events: keeping(fresh.job, provider, events, { timer, controller: own, claim }) };
+}
+
+/**
+ * The job's first turn may be running on the machine with nothing to find it by: the job ends as failed (its keys revoked, its time settled, the
+ * machine given back, which rests the turn). True when it ended; a job that cannot be ended now keeps its mark, so the next start ends it.
+ */
+async function endJobOfUnknownTurn(jobId: string): Promise<boolean> {
+  try {
+    await finishJob(jobId, 'failed');
+    return true;
+  } catch (error) {
+    console.error('[Computer] Could not end a job whose first turn has no id:', error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
 }
 
 /** How long the agent has to accept a turn and say its id. */
@@ -329,19 +372,34 @@ async function* keeping(
     for (;;) {
       // Read one event at a time: a reader that goes away while this waits for the id is only heard after the id is kept
       let next: IteratorResult<TurnEvent> | 'gave-up';
+      // A start of the job's first turn (no conversation known) that ends or fails before the turn's id came leaves a turn nothing can name
+      const unnamed = !!start && !responseId && !job.sessionId;
       try {
         next = await Promise.race([events.next(), givenUp]);
       } catch (error) {
         // The stream was cut by the give-up itself: the same end as when it is seen first
-        if (gaveUpAt === null) throw error;
-        next = 'gave-up';
+        if (gaveUpAt !== null) next = 'gave-up';
+        else if (unnamed) {
+          // The stream failed before the id: the job ends here (its mark stays if it cannot), never a second turn beside one that may run
+          await endJobOfUnknownTurn(job.jobId);
+          over = true;
+          yield { type: 'failed', code: 'no_turn_id', message: 'The agent never said its turn had started, so the job was ended' };
+          return;
+        } else throw error;
       }
       if (next === 'gave-up') {
         over = true;
         yield { type: 'failed', code: 'no_turn_id', message: 'The agent never said its turn had started, so the job was ended' };
         return;
       }
-      if (next.done) return;
+      if (next.done) {
+        if (unnamed) {
+          await endJobOfUnknownTurn(job.jobId);
+          over = true;
+          yield { type: 'failed', code: 'no_turn_id', message: 'The agent never said its turn had started, so the job was ended' };
+        }
+        return;
+      }
       const event = next.value;
       // Until the turn's id is kept, nothing is passed on (a keep-alive included): the reader is only heard at a hand-over, and a reader that
       // went away at one would end this before the id was stored
@@ -359,7 +417,7 @@ async function* keeping(
             controlGeneration: job.generation,
             OR: [{ agentResponseId: null }, { agentResponseId: event.id }],
           },
-          data: { agentSessionId: event.sessionId ?? job.sessionId, agentResponseId: event.id },
+          data: { agentSessionId: event.sessionId ?? job.sessionId, agentResponseId: event.id, firstTurnSentAt: null },
         });
         // The id is kept (or the turn is refused): the start is over, and the next one is decided by the job's own turn from here
         await letGoOfClaim();
@@ -372,7 +430,11 @@ async function* keeping(
           return;
         }
       }
-      if (event.type === 'completed' || event.type === 'failed') over = true;
+      if (event.type === 'completed' || event.type === 'failed') {
+        over = true;
+        // The turn is over without its id having been kept: nothing runs that nothing names
+        if (start && !responseId) await prisma.computerJob.updateMany({ where: { id: job.jobId }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+      }
       yield event;
       if (over) return;
     }
