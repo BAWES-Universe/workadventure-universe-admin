@@ -625,7 +625,8 @@ run('the bounded Instant executor, in a real database', () => {
       const row = await runOf(await runIdOf(id));
       const held: number[] = [];
       const asking = async () => {
-        const rows = await prisma.$queryRaw<{ n: bigint }[]>`SELECT count(*)::bigint AS n FROM pg_locks WHERE locktype = 'advisory' AND granted`;
+        // Only locks of this database, and only the ones taken by other sessions than this look-up's own
+        const rows = await prisma.$queryRaw<{ n: bigint }[]>`SELECT count(*)::bigint AS n FROM pg_locks WHERE locktype = 'advisory' AND granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`;
         held.push(Number(rows[0].n));
       };
       p.instant.findLogs.mockImplementation((async () => {
@@ -1127,11 +1128,12 @@ run('the bounded Instant executor, in a real database', () => {
     const stuckRow = (over: Record<string, unknown> = {}) =>
       prisma.instantRun.create({ data: { runKey: `k-${randomUUID()}`, botId: brick, personId: sara, toolSlug: 'EXA_SEARCH', toolkit: 'exa', argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v', topMicros: BigInt(TOP), holdMicros: BigInt(TOP), state: 'held', customerState: 'held', providerUserId: `u-${randomUUID().slice(0, 6)}`, ...over } as never });
     /** Holds the books' answer to a reservation back until `open()`, as a slow books would. */
-    function gatedReserve(f: ReturnType<typeof fakeFunds>) {
+    function gatedReserve(f: ReturnType<typeof fakeFunds>, onEnter?: () => void) {
       let open!: () => void;
       const gate = new Promise<void>((resolve) => (open = resolve));
       const real = f.funds.reserve.getMockImplementation()!;
       f.funds.reserve.mockImplementation((async (input: { key: string; amountMicros: number }) => {
+        onEnter?.();
         await gate;
         return real(input);
       }) as never);
@@ -1149,11 +1151,25 @@ run('the bounded Instant executor, in a real database', () => {
       await setLimits();
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
-      const open = gatedReserve(f);
-      setTimeout(open, 300);
-      const both = await Promise.all([runInstant(ask(), { adapter: p.adapter, funds: f.funds }), runInstant(ask(), { adapter: p.adapter, funds: f.funds })]);
-      expect(both.filter((r) => r.status === 'done')).toHaveLength(1);
-      expect(both.filter((r) => r.status === 'refused' && r.reason === 'already_checking')).toHaveLength(1);
+      // The first ask is held inside the books' reservation until the second has had its admission decision
+      let reserving!: () => void;
+      const reserveEntered = new Promise<void>((resolve) => (reserving = resolve));
+      const open = gatedReserve(f, reserving);
+      let first: ReturnType<typeof runInstant> | undefined;
+      let second: ReturnType<typeof runInstant> | undefined;
+      try {
+        first = runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+        await reserveEntered;
+        second = runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+        const decided = await Promise.race([second, new Promise<'stuck'>((resolve) => setTimeout(() => resolve('stuck'), 5_000))]);
+        // The second ask is turned away while the first is still only reserving: nothing finished before it was decided
+        expect(decided).toMatchObject({ status: 'refused', reason: 'already_checking' });
+        expect(p.instant.run).not.toHaveBeenCalled();
+      } finally {
+        open();
+        await Promise.allSettled([first, second]);
+      }
+      expect((await first!).status).toBe('done');
       expect(p.instant.run).toHaveBeenCalledTimes(1);
       expect(await prisma.instantRun.count({ where: { personId: sara } })).toBe(1);
     });
@@ -1225,9 +1241,11 @@ run('the bounded Instant executor, in a real database', () => {
       // The clean-up reads the run and asks the books to release, which takes a while
       let openRelease!: () => void;
       const releaseGate = new Promise<void>((resolve) => (openRelease = resolve));
-      f.funds.release.mockImplementation((async () => {
+      const realRelease = f.funds.release.getMockImplementation()!;
+      f.funds.release.mockImplementation((async (input: { key: string }) => {
         await releaseGate;
-        return { ok: true, none: true };
+        // After the barrier the books release as they normally do, so a hold that arrived late is really given back
+        return realRelease(input);
       }) as never);
       const cleaning = reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
       for (let i = 0; i < 200 && f.funds.release.mock.calls.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 25));
@@ -1242,6 +1260,9 @@ run('the bounded Instant executor, in a real database', () => {
       expect(outcome).toMatchObject({ status: 'refused' });
       expect(p.instant.run).not.toHaveBeenCalled();
       expect(await runOf(row.id)).toMatchObject({ state: 'refused' });
+      // Both finished with the late hold really given back: the balance is whole again
+      expect(f.holds.get(`instant:${row.id}`)?.state).toBe('released');
+      expect(f.left()).toBe(1_000_000);
     });
 
     it('even when the clean-up fails right after the books released the hold, a delayed reservation finds the run closed and Composio is never called', async () => {
@@ -2025,9 +2046,11 @@ run('the bounded Instant executor, in a real database', () => {
       await reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
       expect(await receiptState('look-7')).toBe('checking');
       setInstantHooks(instantRulesAndReceipts);
-      expect(await settleCheckingReceipts(50)).toBeGreaterThanOrEqual(1);
-      // And the sweep itself says it too (here nothing is left for it to move)
-      expect((await sweepInstant({ funds: f.funds, adapter: p.adapter })).receipts).toBeGreaterThanOrEqual(0);
+      // The run itself is wholly settled, so the sweep has no run left to look at: only its pass over receipts can move this one
+      await prisma.instantRun.update({ where: { id: row.id }, data: { providerState: 'settled', providerMicros: BigInt(0), providerBasis: 'measured' } });
+      expect(await receiptState('look-7')).toBe('checking');
+      const swept = await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(swept.receipts).toBeGreaterThanOrEqual(1);
       expect(await receiptState('look-7')).toBe('refunded');
     });
   });
