@@ -536,6 +536,20 @@ run('rules said in chat and task receipts, in a real database', () => {
       await releaseRoom({ key }, NOW);
     });
 
+    it('a renewal of room taken in an earlier month is held to this month’s rule for all it adds, not for the difference to room that rule never counted', async () => {
+      const sara = await person('sara');
+      // This month's cap of 100,000. The job's room was taken last month (its createdAt is before this month began), so this month's rule counts none of it
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+      if (!made.ok) throw new Error('not made');
+      const key = `k-${tag}-boundary`;
+      expect((await reserveRoom({ key, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: 'jb' }, NOW)).ok).toBe(true);
+      const lastMonth = new Date(NOW.getTime() - 40 * 86_400_000);
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: lastMonth, expiresAt: new Date(NOW.getTime() + 300_000) } });
+      // Renewing adds 80,000 of room: the room is then 140,000, over the cap of 100,000 that this month never counted any of. Only the difference (80,000) was asked before, and passed
+      expect(await renewRoom({ key, moreMicros: 80_000 }, NOW)).toMatchObject({ ok: false, reason: 'rule' });
+      await releaseRoom({ key }, NOW);
+    });
+
     it('renewing often does not stop a job early: a rule counts what the job can really cost, not the room stacked up by every renewal', async () => {
       const sara = await person('sara');
       // $0.15 is 25 minutes of a computer at 6,000 a minute: with one stretch (10 minutes, 60,000) of lease on top, the job may use 15 minutes
