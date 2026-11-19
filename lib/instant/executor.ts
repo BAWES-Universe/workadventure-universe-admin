@@ -850,3 +850,52 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
   if (outcome.status === 'given') await evaluatePause(now).catch(() => undefined);
   return outcome;
 }
+
+/** How long a give-back the books have not confirmed is left before the sweep asks again, in minutes. Pacing only: nothing is decided by it. */
+const GOODWILL_RETRY_AFTER_MINUTES = 5;
+
+export interface GoodwillSweep {
+  looked: number;
+  /** Finished: the books confirmed them, or said no (so the intent was dropped). */
+  settled: number;
+  /** Let go: the books stayed unreachable for the whole wait, so the intent no longer uses up the month's budget. */
+  released: number;
+}
+
+/**
+ * Gives goodwill give-backs that the books never confirmed another try, and lets go of the ones the books could not be reached about for
+ * the whole wait. An intent is saved before the books are asked, so one that failed in between stays "unconfirmed" and keeps counting
+ * against the month's give-back budget. The books answer a key they have seen with its first amount, so asking again is safe: a retry
+ * finishes it (confirmed, or dropped when the books say no). One still unconfirmed after `unreachableWaitMinutes` is released: if the
+ * books did act, the person's next ask, or this sweep's next look, finds it again under the same key and records the first amount.
+ */
+export async function sweepGoodwill(deps: Deps & { batch?: number } = {}): Promise<GoodwillSweep> {
+  const now = deps.now ?? new Date();
+  const limits = await getInstantLimits();
+  const open = await prisma.instantRefund.findMany({
+    where: { kind: 'goodwill', confirmedAt: null, createdAt: { lte: new Date(now.getTime() - GOODWILL_RETRY_AFTER_MINUTES * MINUTE) } },
+    orderBy: { createdAt: 'asc' },
+    take: deps.batch ?? 50,
+    select: { refundKey: true, runId: true, personId: true, createdAt: true },
+  });
+  const result: GoodwillSweep = { looked: open.length, settled: 0, released: 0 };
+  for (const intent of open) {
+    const outcome = await giveBack({ personId: intent.personId, runId: intent.runId }, { ...deps, now }).catch((error): GiveBackOutcome => {
+      console.error('[Instant] Could not finish a give-back:', error instanceof Error ? error.message : 'unknown');
+      return { status: 'refused', reason: 'unavailable' };
+    });
+    const stillThere = await prisma.instantRefund.findUnique({ where: { refundKey: intent.refundKey }, select: { confirmedAt: true } });
+    if (!stillThere || stillThere.confirmedAt) {
+      result.settled += 1;
+      continue;
+    }
+    if (outcome.status === 'refused' && now.getTime() - intent.createdAt.getTime() >= limits.unreachableWaitMinutes * MINUTE) {
+      const { count } = await prisma.instantRefund.deleteMany({ where: { refundKey: intent.refundKey, confirmedAt: null } });
+      if (count > 0) {
+        result.released += 1;
+        console.error('[Instant] Let go of a give-back the books never confirmed:', intent.refundKey);
+      }
+    }
+  }
+  return result;
+}
