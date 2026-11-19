@@ -6,6 +6,7 @@ import { wokaLayersForMany } from '@/lib/woka-avatar';
 import {
   ClashRefused,
   endProgram,
+  endPrograms,
   listPrograms,
   previewGrant,
   saveDefault,
@@ -19,7 +20,7 @@ import {
 import { markCreditBilled } from '@/lib/credit-billing';
 import { CreditRefused, readRecipient, type MoneyCategory, type Recipient, type Schedule } from '@/lib/credit-values';
 import { PLATFORM_ACCOUNT_ID, exposureOf } from '@/lib/credit-funding';
-import { currentRules, idsReached } from '@/lib/credit-store';
+import { currentRules, idsReached, type Tx } from '@/lib/credit-store';
 import { MONEY_CATEGORIES, type AudienceView, type ClashView, type ExceptionSetting, type ExceptionView, type GiftScope, type GiftView, type GrantsOverview, type MoneyDefaultView, type PersonView, type PreviewNumbers, type PreviewRequest, type PreviewView, type Recipients } from '@/lib/grants-view';
 
 /**
@@ -386,17 +387,20 @@ export async function previewFor(request: PreviewRequest, now: Date = new Date()
 
 export async function saveDefaultFor(request: Extract<PreviewRequest, { what: 'default' }>, issuer: Issuer, now: Date = new Date()): Promise<void> {
   const category = request.category;
-  await saveDefault(defaultInput(request, now), issuer, now);
-  // Until computer jobs draw from credit lots, they follow one monthly allowance for each member: it follows the default saved here
+  // Until computer jobs draw from credit lots, they follow one monthly allowance for each member: it follows the default saved here.
+  // Both are written in the one commit as the default, so the screen never says "failed" for a change that half happened
+  const everyone = request.recipients.kind === 'all';
+  let allowance: ((tx: Tx) => Promise<void>) | undefined;
   if (category === 'computers') {
-    const everyone = request.recipients.kind === 'all';
-    if (request.interval === 'none') await saveMeterSettings({ memberAllowanceMicros: null }, issuer.userId);
+    if (request.interval === 'none') allowance = async (tx) => void (await saveMeterSettings({ memberAllowanceMicros: null }, issuer.userId, tx));
     else if (request.interval === 'monthly' && everyone && request.amountMicros) {
+      const micros = request.amountMicros;
       // "On the 1st" waits for the 1st, as the default itself does; "Now" changes the allowance now
-      if (request.startsOn === 'now') await saveMeterSettings({ memberAllowanceMicros: request.amountMicros }, issuer.userId);
-      else await scheduleMemberAllowance(request.amountMicros, firstOfNextMonth(now), issuer.userId);
+      if (request.startsOn === 'now') allowance = async (tx) => void (await saveMeterSettings({ memberAllowanceMicros: micros }, issuer.userId, tx));
+      else allowance = (tx) => scheduleMemberAllowance(micros, firstOfNextMonth(now), issuer.userId, now, tx);
     }
   }
+  await saveDefault(defaultInput(request, now), issuer, now, allowance);
 }
 
 /** A program as the input that would save it again, so it can be saved with some people taken out. */
@@ -500,7 +504,7 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
         done.push({ before: current, after: await saveException({ ...input, programId: current?.programId }, issuer, now) });
       }
       // Ending comes last: it is the one step that cannot be put back
-      for (const program of toEnd) await endProgram(program.programId, issuer, now);
+      if (toEnd.length > 0) await endPrograms(toEnd.map((program) => program.programId), issuer, now);
       return;
     } catch (error) {
       const notPutBack = await undo(done, issuer, now);
@@ -536,16 +540,12 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
 export async function endException(id: string, issuer: Issuer, now: Date = new Date()): Promise<'ended' | 'not_found'> {
   const parts = readExceptionId(id);
   if (!parts) return 'not_found';
-  let found = false;
   // Only exception rules are ended here, never a default or a gift that an id happens to name
   const exceptionIds = new Set((await listPrograms(undefined, { kind: 'exception' })).map((program) => program.programId));
-  for (const category of MONEY_CATEGORIES) {
-    const programId = parts[category];
-    if (!programId || !exceptionIds.has(programId)) continue;
-    const result = await endProgram(programId, issuer, now);
-    if (result !== 'not_found') found = true;
-  }
-  return found ? 'ended' : 'not_found';
+  const toEnd = MONEY_CATEGORIES.map((category) => parts[category]).filter((programId): programId is string => !!programId && exceptionIds.has(programId));
+  // Both categories' rules end in one commit: a refusal on the second never leaves the first ended behind an error
+  const results = await endPrograms(toEnd, issuer, now);
+  return results.some((result) => result !== 'not_found') ? 'ended' : 'not_found';
 }
 
 export async function createGiftFor(request: Extract<PreviewRequest, { what: 'gift' }> & { settlement?: 'gift' | 'to_bill'; note?: string | null; grantKey?: string }, issuer: Issuer, now: Date = new Date()): Promise<ProgramView> {
