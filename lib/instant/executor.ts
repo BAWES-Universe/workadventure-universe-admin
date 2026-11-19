@@ -680,7 +680,17 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
 
     // A run that just went out is still in flight: it is not looked up (and never called unclear) until its wait is over
     if (!needsLookup(run, now, limits)) return;
-    if (!looked) return;
+    if (!looked) {
+      // Composio's log could not be asked. Nothing is decided on that guess, but not for ever: a run still unknown a long while after it
+      // went out must not keep the person's credit held and our exposure counted. It is written off as failed with the hold given back,
+      // marked so the Costs report says it was let go unconfirmed (if it did go through, the person got the work free).
+      if ((run.state === 'sent' || run.state === 'ambiguous') && waitedPast(run.sentAt ?? run.createdAt, limits.unreachableWaitMinutes)) {
+        await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason: 'unclear', finishedAt: now, detail: { releasedUnconfirmed: true, unreachableWaitMinutes: limits.unreachableWaitMinutes } } });
+        await settleProvider({ ...run, state: 'failed' }, tx, asNumber(run.topMicros), 'estimated', now);
+        console.error('[Instant] Released a run unconfirmed: the log could not be reached for', limits.unreachableWaitMinutes, 'minutes. Run', run.id);
+      }
+      return;
+    }
     const line = looked.line;
 
     const topMicros = asNumber(run.topMicros);

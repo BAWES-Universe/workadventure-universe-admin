@@ -299,13 +299,15 @@ export interface InstantLimits {
   sentWaitMinutes: number;
   /** How long an unclear run is looked up for before it is closed on what is known, in minutes. */
   unclearWaitMinutes: number;
+  /** How long a run whose log Composio cannot be asked for is waited on before the person's hold is let go, in minutes. */
+  unreachableWaitMinutes: number;
   /** How long a charge not yet reported is waited for before it is settled at the top price, in minutes. */
   chargeWaitMinutes: number;
   /** How long failures are read over for the pause check, in minutes. */
   pauseWindowMinutes: number;
 }
 
-export const INSTANT_LIMITS_RECOMMENDED = { sentWaitMinutes: 5, unclearWaitMinutes: 30, chargeWaitMinutes: 60, pauseWindowMinutes: 60 };
+export const INSTANT_LIMITS_RECOMMENDED = { sentWaitMinutes: 5, unclearWaitMinutes: 30, unreachableWaitMinutes: 1_440, chargeWaitMinutes: 60, pauseWindowMinutes: 60 };
 
 export const INSTANT_LIMITS_EMPTY: InstantLimits = {
   maxRunMicros: null,
@@ -331,6 +333,7 @@ export const INSTANT_LIMIT_LABELS: Record<keyof InstantLimits, { label: string; 
   markupBps: { label: 'Added to Composio’s charge for what the person pays', hint: 'In hundredths of a percent (1,000 is 10%). Empty: the person pays Composio’s charge as it is.', unit: 'bps' },
   sentWaitMinutes: { label: 'Wait before looking up a run with no answer', hint: 'Minutes.', unit: 'minutes' },
   unclearWaitMinutes: { label: 'How long an unclear run is looked up for', hint: 'Minutes, from when it went out. After that it is closed on what is known and the person’s hold goes back.', unit: 'minutes' },
+  unreachableWaitMinutes: { label: 'How long to wait when Composio’s log cannot be reached', hint: 'Minutes, from when the run went out. After that the person’s hold is let go and the run is written off as failed with a refund, and the Costs report says it was released unconfirmed.', unit: 'minutes' },
   chargeWaitMinutes: { label: 'Wait for Composio’s charge', hint: 'Minutes. After that the top price stands as an estimate until the monthly check.', unit: 'minutes' },
   pauseWindowMinutes: { label: 'Failure window', hint: 'Minutes of recent runs the pause check reads.', unit: 'minutes' },
 };
@@ -347,6 +350,8 @@ export const INSTANT_LIMIT_RANGES: Record<keyof InstantLimits, { min: number; ma
   sentWaitMinutes: { min: 1, max: 1_440 },
   // Longer than the 60 seconds a request to Composio may take, so the sweep never closes a run whose answer is still on its way
   unclearWaitMinutes: { min: 2, max: 10_080 },
+  // Never shorter than the time an unclear run is looked up for
+  unreachableWaitMinutes: { min: 60, max: 43_200 },
   chargeWaitMinutes: { min: 1, max: 10_080 },
   pauseWindowMinutes: { min: 1, max: 10_080 },
 };

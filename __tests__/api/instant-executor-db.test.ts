@@ -691,6 +691,33 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await runOf(rowId)).toMatchObject({ state: 'ambiguous', customerState: 'held', providerState: 'pending' });
     });
 
+    it('when Composio cannot be asked for a long while, the hold is let go and the run is written off as released unconfirmed', async () => {
+      await setLimits({ unclearWaitMinutes: 30, unreachableWaitMinutes: 600 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'server', status: 500 });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const rowId = await runIdOf(id);
+      p.setLogsDown(true);
+      // Still inside the long wait: nothing is decided on a guess
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 599 * MIN) });
+      expect(await runOf(rowId)).toMatchObject({ state: 'ambiguous', customerState: 'held', providerState: 'pending' });
+      expect(f.left()).toBeLessThan(1_000_000);
+      // Past it: the person's credit comes back, our exposure closes at the top price as an estimate, and the run says why
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 601 * MIN) });
+      const row = await runOf(rowId);
+      expect(row).toMatchObject({ state: 'failed', reason: 'unclear', customerState: 'released', providerState: 'settled', providerBasis: 'estimated' });
+      expect(Number(row.providerMicros)).toBe(TOP);
+      expect(row.detail).toMatchObject({ releasedUnconfirmed: true });
+      expect(f.left()).toBe(1_000_000);
+      // And the Costs report says so on the Instant row
+      const { costsReport } = await import('@/lib/meter-costs');
+      const day = new Date(Date.now() + 601 * MIN);
+      const report = await costsReport(new Date(day.getTime() - 3 * 86_400_000), new Date(day.getTime() + 2 * 86_400_000), day);
+      expect(report.goes.find((entry) => entry.key === 'instant')?.releasedUnconfirmed).toBeGreaterThanOrEqual(1);
+    });
+
     it('a run still in flight is never called unclear by a look-up that happens during its wait', async () => {
       await setLimits({ sentWaitMinutes: 5 });
       const p = fakeProvider();
