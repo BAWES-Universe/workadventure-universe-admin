@@ -11,6 +11,13 @@ const text = (update: Partial<PayLine>, copied = false) => {
 };
 
 describe('the host line’s wording (mock M1)', () => {
+  it('a payment on its way in a browser that cannot keep the code: the receipt link can be copied right away, and says so', () => {
+    expect(text({ checking: true, buyer: 'guest', keepReceipt: true, receipt: 'https://x/a#receipt=c' })).toEqual(['Checking your payment…', 'This browser can’t remember it. Save your receipt link now.', ['Copy receipt link'], false]);
+    expect(text({ checking: true, buyer: 'guest', keepReceipt: true, receipt: 'https://x/a#receipt=c' }, true)).toEqual(['Checking your payment…', 'This browser can’t remember it. Save your receipt link now.', ['Copied'], false]);
+    // A browser that keeps the code has nothing to hurry
+    expect(text({ checking: true, buyer: 'guest', receipt: 'https://x/a#receipt=c' })).toEqual(['Checking your payment…', 'Asking the payment service directly.', [], false]);
+  });
+
   it('says nothing when there is nothing to say', () => {
     expect(describeLine(NO_PAY_LINE, { copied: false })).toBeNull();
   });

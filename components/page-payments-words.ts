@@ -12,6 +12,7 @@ export const PAY_WORDS = {
   paidGuest: { title: 'Paid. Thank you.', sub: 'Save your receipt link. It brings this purchase back on any device.' },
   paidTest: { title: 'Test payment received. No money moved.', sub: 'Only a live payment counts as a purchase.' },
   restored: (date: string | null) => ({ title: date ? `Your purchase from ${date} is back.` : 'Your purchase is back.', sub: null }),
+  saveReceipt: { title: 'Checking your payment…', sub: 'This browser can’t remember it. Save your receipt link now.' },
   receiptCopied: { title: 'Receipt link copied.', sub: 'Keep it somewhere safe, like your notes or email.' },
   copyFailed: 'Couldn’t copy it. Select the link below and copy it yourself.',
   notHeard: { title: 'We haven’t heard back about your payment yet.', sub: 'If you paid, it still counts. You can check now.' },
@@ -54,6 +55,11 @@ export function shortDate(iso: string | null): string | null {
   return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
 
+/** While a payment is on its way and this browser cannot keep the buyer's code, the receipt link can be copied right away (it is the only way back). */
+function savePrompt(copied: boolean): PayAction {
+  return copied ? { kind: 'copy', label: PAY_WORDS.buttons.copied, style: 'secondary', disabled: true } : { kind: 'copy', label: PAY_WORDS.buttons.copyReceipt, style: 'primary' };
+}
+
 /**
  * What the line says, and what can be pressed, for the state the host is in. A pure function so every screen of the mock is tested on its own.
  * Order: a payment that ended well, then a problem, then a page that cannot ask, then a payment on its way, then the quiet offers.
@@ -79,7 +85,10 @@ export function describeLine(line: PayLine, state: { copied: boolean }): PayView
   if (line.problem === 'unavailable') return line.canCheck ? { ...PAY_WORDS.notHeard, actions: [check], closable: false } : { ...PAY_WORDS.unavailable, actions: [], closable: false };
   if (line.problem === 'limit') return { ...PAY_WORDS.limit, actions: [], closable: false };
   if (line.needsUpdate) return { ...PAY_WORDS.needsUpdate, actions: line.checking ? [] : [check], closable: false };
-  if (line.checking) return { ...(line.slow ? PAY_WORDS.slow : PAY_WORDS.checking), actions: resume, closable: false };
+  if (line.checking) {
+    const save = line.keepReceipt && line.receipt ? savePrompt(state.copied) : null;
+    return { ...(save ? PAY_WORDS.saveReceipt : line.slow ? PAY_WORDS.slow : PAY_WORDS.checking), actions: [...resume, ...(save ? [save] : [])], closable: false };
+  }
   if (line.offerRestore) return { ...PAY_WORDS.boughtBefore, actions: [{ kind: 'restore', label: PAY_WORDS.buttons.restorePurchase, style: 'secondary' }], closable: true };
   if (line.canCheck) return { ...PAY_WORDS.notHeard, actions: [check], closable: false };
   return null;

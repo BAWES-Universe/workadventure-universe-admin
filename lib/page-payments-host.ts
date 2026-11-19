@@ -49,6 +49,8 @@ export interface PayLine {
   canCheck: boolean;
   /** For a guest: the link to keep, which holds the recovery code (in its fragment, so no server ever receives it). */
   receipt: string | null;
+  /** This browser could not keep the guest's code anywhere that survives a reload: the receipt link must be saved now, before the payment is confirmed. */
+  keepReceipt: boolean;
   /** Who the buyer is as far as Orbit has said: signed in, or a guest of this browser (or its receipt link). */
   buyer: 'account' | 'guest' | null;
   /** The payment was found again (a reload, a new device, a receipt link) and was not made just now; `paidAt` says when, when known. */
@@ -66,6 +68,7 @@ export const NO_PAY_LINE: PayLine = {
   needsUpdate: false,
   canCheck: false,
   receipt: null,
+  keepReceipt: false,
   buyer: null,
   restored: null,
   offerRestore: false,
@@ -200,11 +203,14 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   let lastRestore: { request: string; ticket: Ticket } | null = null;
   let memoryCode: string | null = null;
   let memoryReceipt: string | null = null;
+  /** The code is kept somewhere that survives a reload (the storage, IndexedDB or this tab's storage); false only when nothing in this browser would keep it. */
+  let durable = true;
   /** The id the document that spoke last gave itself (null when it gave none): another one speaking means another document. */
   let lastSession: string | null = null;
 
   const publish = (update: Partial<PayLine>, keep = false) => {
     line = { ...(keep ? line : { ...NO_PAY_LINE, receipt: line.receipt }), buyer, ...update };
+    line.keepReceipt = buyer === 'guest' && !!memoryCode && !durable;
     listeners.forEach((run) => run(line));
   };
 
@@ -219,17 +225,21 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         return stored;
       }
       memoryCode = random(43);
+      if (!options.storage) durable = false;
       options.storage?.setItem(storageKey, memoryCode);
     } catch {
+      durable = false;
       memoryCode = memoryCode ?? random(43);
     }
     return memoryCode;
   };
 
+  const indexedDBFactory = () => (options.indexedDB === undefined ? (globalThis as { indexedDB?: IDBFactory }).indexedDB : options.indexedDB);
+
   /** The first code of this browser for this page, claimed atomically (the winner of the race, whichever tab); null when IndexedDB is not there or refuses. */
   const claimFirstCode = (candidate: string): Promise<string | null> =>
     new Promise((resolve) => {
-      const factory = options.indexedDB === undefined ? (globalThis as { indexedDB?: IDBFactory }).indexedDB : options.indexedDB;
+      const factory = indexedDBFactory();
       if (!factory) return resolve(null);
       try {
         const open = factory.open('universe-pay', 1);
@@ -313,30 +323,37 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         }
         return claimed;
       };
+      /**
+       * Nothing could make this tab take turns with the others (or IndexedDB, which decides for them all, is there but failed for this tab).
+       * A code the storage already holds is used as it is (nothing is written); otherwise the code is this tab's own, in its own tab storage:
+       * never in the shared storage, where it could replace the code another tab bought under.
+       */
+      const tabOnly = (): string => {
+        readStored();
+        if (stored) return (memoryCode = stored);
+        memoryCode = random(43);
+        try {
+          if (!options.tabStorage) throw new Error('none');
+          options.tabStorage.setItem(tabKey, memoryCode);
+        } catch {
+          // Nothing in this browser keeps it: the line asks the buyer to save the receipt link before the payment is confirmed
+          durable = false;
+        }
+        return memoryCode;
+      };
       const locks = (globalThis as { navigator?: { locks?: { request: <T>(name: string, run: () => T | Promise<T>) => Promise<T> } } }).navigator?.locks;
       if (locks?.request) {
         try {
-          // One tab at a time; inside the turn IndexedDB decides when it is there, and otherwise the storage is read again and written (safe: it is this tab's turn)
-          return await locks.request(storageKey, async () => (await viaIndexedDB()) ?? recoveryCode());
+          // One tab at a time. Inside the turn IndexedDB decides when it is there; when it is there but failed for this tab, the storage is NOT
+          // written (another tab may have claimed a different code there); with no IndexedDB in this browser, the turn alone keeps the tabs apart
+          return await locks.request(storageKey, async () => (await viaIndexedDB()) ?? (indexedDBFactory() ? tabOnly() : recoveryCode()));
         } catch {
           // The turn could not be taken: the code is settled the next way, never by an uncoordinated write
         }
       }
       const claimed = await viaIndexedDB();
       if (claimed) return claimed;
-      // IndexedDB is missing, blocked or failed: a code the storage already holds is used as it is (nothing is written)
-      readStored();
-      if (stored) return (memoryCode = stored);
-      // Nothing in this browser can make tabs take turns. Writing a code to the shared storage could replace the one another tab has already
-      // bought under, so none is written: the tab keeps a code of its own in its own storage (found again after a reload of the tab) and its
-      // receipt link is the way back from anywhere else
-      memoryCode = random(43);
-      try {
-        options.tabStorage?.setItem(tabKey, memoryCode);
-      } catch {
-        // The code lives in this page
-      }
-      return memoryCode;
+      return tabOnly();
     })();
     return codeReady;
   };

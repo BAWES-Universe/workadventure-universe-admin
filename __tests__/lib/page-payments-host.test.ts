@@ -754,6 +754,46 @@ describe('a paying page on the public share link', () => {
     another.host.destroy();
   });
 
+  it('a tab that has the Web Locks turn but whose IndexedDB claim failed writes nothing to the shared storage: another tab’s IndexedDB code is the one the storage ends up with', async () => {
+    let refuse = false;
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: { request: (_name: string, run: () => unknown) => (refuse ? Promise.reject(new Error('refused')) : Promise.resolve().then(run)) } } });
+    const key = `universe-pay-recovery:${ART}`;
+    const shared = new Map<string, string>();
+    const failing = { open: () => { const request = {} as { onerror?: () => void }; void Promise.resolve().then(() => request.onerror?.()); return request; } } as unknown as Pick<IDBFactory, 'open'>;
+    const answer = () => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } });
+    // Tab one has the turn, but IndexedDB failed for it
+    const one = setup(answer, true, shared, true, 'a', failing, new Map());
+    one.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(shared.has(key)).toBe(false);
+    // Tab two cannot take the turn, and its IndexedDB works: its code is the one the storage ends up with
+    refuse = true;
+    const two = setup(answer, true, shared, true, 'b', fakeIndexedDB(), new Map());
+    two.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(shared.get(key)).toBe(two.calls[0].body.recoveryCode);
+    expect(one.calls[0].body.recoveryCode).not.toBe(two.calls[0].body.recoveryCode);
+    one.host.destroy();
+    two.host.destroy();
+  });
+
+  it('asks a guest to save the receipt link right away when nothing in the browser can keep the code, and not when something can', async () => {
+    const answer = (call: Call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'checking' } });
+    // Storage that refuses, no tab storage, no IndexedDB, no locks
+    const lost = setup(answer, false, undefined, false, 'a', null);
+    lost.tap({ request: 'r1' });
+    await flush();
+    expect(lost.lines.at(-1)).toMatchObject({ checking: true, keepReceipt: true });
+    expect(lost.lines.at(-1)?.receipt).toBe(`${PAGE}#receipt=${lost.calls[0].body.recoveryCode}`);
+    lost.host.destroy();
+    // A tab storage that works keeps it across a reload: nothing to save in a hurry
+    const kept = setup(answer, false, undefined, false, 'b', null, new Map());
+    kept.tap({ request: 'r1' });
+    await flush();
+    expect(kept.lines.at(-1)).toMatchObject({ checking: true, keepReceipt: false });
+    kept.host.destroy();
+  });
+
   it('does not stay busy for ever when another tab holds the recovery code lock: the 30 s deadline covers the wait too', async () => {
     // A lock that is never given: the other tab holds it
     Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: { request: () => new Promise(() => undefined) } } });
