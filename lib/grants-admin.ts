@@ -324,8 +324,10 @@ function numbersOf(preview: Preview, request: PreviewRequest, extra: { interval:
     startsOn: extra.startsOn,
     // A changing universe gift can reach the people there now and the joiners the admin allowed: that is the most it can issue
     mostNowMicros: shared ? each : each * (countNow + (request.what === 'gift' && request.joinerCap && preview.recipients.growing ? request.joinerCap : 0)),
-    // The funding check is about who is there now: joiners are funded as they join
-    issuedNowMicros: shared ? each : each * countNow,
+    // The funding check is about who is there now: joiners are funded as they join. A monthly default that starts on the 1st issues nothing
+    // now: its first month is said apart
+    issuedNowMicros: request.what === 'default' && extra.interval === 'monthly' && extra.startsOn !== 'now' ? 0 : shared ? each : each * countNow,
+    firstMonthMicros: request.what === 'default' && extra.interval === 'monthly' && extra.startsOn !== 'now' ? (shared ? each : each * countNow) : null,
     noLifetimeMax: preview.mostIssued.unbounded,
     endsOn: extra.endsOn,
     audienceName: extra.audienceName,

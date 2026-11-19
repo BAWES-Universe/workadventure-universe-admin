@@ -105,6 +105,8 @@ export interface PreviewNumbers {
   mostMonthlyMicros?: number | null;
   /** What saving issues straight away to the people there now (the funding check). Never more than the most it can issue. */
   issuedNowMicros?: number | null;
+  /** For a monthly default that starts on the 1st: what the first month issues to the people there now. Nothing is issued before it. */
+  firstMonthMicros?: number | null;
   /** True when nothing caps how long or how many it reaches, so there is no lifetime maximum. */
   noLifetimeMax: boolean;
   endsOn?: string;
@@ -285,6 +287,12 @@ export function previewRows(request: PreviewRequest, numbers: PreviewNumbers | n
 /** The funding line: nothing is given out until the rollout budget is set, and a rule bigger than what is left this month is refused on save. */
 function fundingRow(n: PreviewNumbers): PreviewRow | null {
   if (n.budget.budgetMicros === null) return ['Funding', ['Nothing is given out until you set the rollout budget in Limits.']];
+  // A monthly default that starts on the 1st issues nothing now: its first month comes out of the budget of the month it starts in
+  if (n.interval === 'monthly' && n.startsOn !== 'now' && n.firstMonthMicros !== undefined && n.firstMonthMicros !== null) {
+    const month = usd(n.firstMonthMicros);
+    if (n.firstMonthMicros > n.budget.budgetMicros) return ['Funding', [`Nothing is issued now. On the 1st it issues ${month} for the first month, which is more than the ${usd(n.budget.budgetMicros)} rollout budget. Raise the budget in Limits before then.`]];
+    return ['Funding', [`Nothing is issued now. Starts on the 1st: ${month} for the first month, from that month’s rollout budget (${usd(n.budget.budgetMicros)}).`]];
+  }
   const first = n.interval === 'none' ? 0 : n.issuedNowMicros ?? n.mostNowMicros ?? 0;
   if (first > n.budget.roomMicros) return ['Funding', [`This is more than the ${usd(n.budget.roomMicros)} left in this month’s rollout budget. Raise the budget in Limits first.`]];
   return null;

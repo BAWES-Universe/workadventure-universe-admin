@@ -617,6 +617,20 @@ run('the grants routes, on the real books', () => {
     expect((await overview()).exceptions).toHaveLength(1);
   });
 
+  it('previews a monthly default that starts on the 1st as nothing issued now, with its first month said apart', async () => {
+    await person('Omar');
+    await person('Noor');
+    const preview = (startsOn: string) => call<any>(postPreview, '/x', { method: 'POST', body: { what: 'default', category: 'instant_apps', amountMicros: 3 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn } }).then((response) => response.json());
+    const next = await preview('next');
+    expect(next.numbers.issuedNowMicros).toBe(0);
+    expect(next.numbers.firstMonthMicros).toBe(next.numbers.mostNowMicros);
+    expect(next.numbers.firstMonthMicros).toBeGreaterThan(0);
+    // Starting now, the same people are issued now
+    const now = await preview('now');
+    expect(now.numbers.issuedNowMicros).toBe(now.numbers.mostNowMicros);
+    expect(now.numbers.firstMonthMicros).toBeNull();
+  });
+
   it('says a default for everyone has no lifetime maximum, and counts the people who have their own rules', async () => {
     const [omar, noor] = [await person('Omar'), await person('Noor')];
     await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'once' }, computers: { mode: 'same' } } });
