@@ -27,6 +27,8 @@ jest.mock('@/lib/db', () => ({
   prisma: {
     bot: { findUnique: jest.fn(), update: jest.fn() },
     user: { findUnique: jest.fn(), findFirst: jest.fn(), create: jest.fn() },
+    $queryRaw: jest.fn(),
+    $transaction: jest.fn(),
   },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -50,7 +52,7 @@ jest.mock('@/lib/ai-provider-ref', () => ({ checkAiProviderRef: jest.fn(async ()
 jest.mock('@/lib/bot-vision', () => ({ ...jest.requireActual('@/lib/bot-vision'), checkConfigVision: jest.fn(async () => null), dropOthersVisionKey: jest.fn(async () => null) }));
 jest.mock('@/lib/notices', () => ({ ...jest.requireActual('@/lib/notices'), clearBotRunsOnNotices: jest.fn(async () => undefined) }));
 
-const db = prisma as unknown as { bot: Record<'findUnique' | 'update', jest.Mock>; user: Record<'findUnique', jest.Mock> };
+const db = prisma as unknown as { bot: Record<'findUnique' | 'update', jest.Mock>; user: Record<'findUnique', jest.Mock>; $queryRaw: jest.Mock; $transaction: jest.Mock };
 const session = getSessionUser as jest.Mock;
 const ensure = ensureDefaultBrick as jest.Mock;
 const list = listBricks as jest.Mock;
@@ -121,6 +123,9 @@ beforeEach(() => {
   db.user.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) => ({ isGuest: where.id === GUEST.id }));
   db.bot.findUnique.mockResolvedValue(brick);
   db.bot.update.mockResolvedValue(brick);
+  // The Brick's row held for the write: what the config holds there is read again under the hold
+  db.$queryRaw.mockImplementation(async () => [{ behavior_config: brick.behaviorConfig }]);
+  db.$transaction.mockImplementation(async (work: (tx: unknown) => unknown) => work({ $queryRaw: db.$queryRaw, bot: { update: db.bot.update } }));
   ensure.mockResolvedValue({ brick: card, made: true, deleted: false });
   list.mockResolvedValue([card]);
   listDeleted.mockResolvedValue([]);
@@ -306,6 +311,24 @@ describe('POST /api/bricks: New Brick (game #1996)', () => {
           updatedById: SARA.id,
         },
       });
+    });
+
+    it('merges into the config as it stands when the Brick is held for the write, never the copy read before the checks', async () => {
+      db.$queryRaw.mockResolvedValue([{ behavior_config: { showToolCalls: true, assignedSpace: { center: { x: 9, y: 9 }, radius: 4 }, apps: { chosen: 'later-save' } } }]);
+      const response = await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { behaviorConfig: { moves: 'wander' } } }), params());
+      expect(response.status).toBe(200);
+      expect(db.bot.update).toHaveBeenLastCalledWith({
+        where: { id: BRICK_ID },
+        data: { behaviorConfig: { showToolCalls: true, assignedSpace: { center: { x: 9, y: 9 }, radius: 4 }, apps: { chosen: 'later-save' }, moves: 'wander' }, updatedById: SARA.id },
+      });
+    });
+
+    it('changes nothing, and says not found, when the Brick was deleted or handed on after it was read', async () => {
+      db.$queryRaw.mockResolvedValue([]);
+      const response = await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { enabled: false } }), params());
+      expect(response.status).toBe(404);
+      expect(db.bot.update).not.toHaveBeenCalled();
+      expect(clearBotRunsOnNotices).not.toHaveBeenCalled();
     });
 
     it('takes the direction and pause of a route it was saved with', async () => {

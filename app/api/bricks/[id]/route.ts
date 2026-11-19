@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { brickJson, brickOwner } from '@/lib/brick-api';
 import { listBricks } from '@/lib/brick-default';
@@ -97,32 +97,41 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     const visionError = await checkConfigVision(change.behaviorConfig, { storedConfig: brick.behaviorConfig, ...home, mainRef: nextRef ?? null });
     if (visionError) return brickJson(request, { error: visionError }, 400);
 
-    // Only the keys sent change; the rest of what is saved there stays
-    const storedConfig = brick.behaviorConfig && typeof brick.behaviorConfig === 'object' && !Array.isArray(brick.behaviorConfig) ? (brick.behaviorConfig as Record<string, unknown>) : {};
-    let behaviorConfig = change.behaviorConfig ? keepToolCallSetting(storedConfig, { ...storedConfig, ...change.behaviorConfig }) : undefined;
-    // Moving it to another key moves its images off a key that is not its owner's
-    if (nextRef !== brick.aiProviderRef) {
-      const withoutVision = await dropOthersVisionKey(behaviorConfig ?? storedConfig, owner.userId);
-      if (withoutVision) behaviorConfig = withoutVision;
-    }
-
-    await prisma.bot.update({
-      where: { id },
-      data: {
-        ...(change.name !== undefined ? { name: change.name } : {}),
-        ...(change.description !== undefined ? { description: change.description?.trim() || null } : {}),
-        ...(change.chatInstructions !== undefined ? { chatInstructions: change.chatInstructions?.trim() || null } : {}),
-        ...(change.enabled !== undefined ? { enabled: change.enabled } : {}),
-        ...(change.characterTextureId !== undefined ? { characterTextureId: change.characterTextureId } : {}),
-        ...(change.aiProviderRef !== undefined ? { aiProviderRef: change.aiProviderRef } : {}),
-        // A model belongs to one key: a Brick moved to another key without a model picked starts on that key's own
-        ...(change.aiModel !== undefined ? { aiModel: change.aiModel } : nextRef !== brick.aiProviderRef ? { aiModel: null } : {}),
-        ...(change.behaviorType !== undefined ? { behaviorType: change.behaviorType } : {}),
-        ...(behaviorConfig !== undefined ? { behaviorConfig: behaviorConfig as Prisma.InputJsonValue } : {}),
-        ...(change.companionTextureId !== undefined ? { companionTextureId: change.companionTextureId } : {}),
-        updatedById: owner.userId,
-      },
+    // The Brick's row is held while it is written, as deleting it does: what is saved in its config is read again under that hold, so
+    // a save here never replaces what Apps or another save put there a moment ago, and a Brick deleted (or handed on) a moment ago
+    // is left exactly as it is until Undo
+    const saved = await prisma.$transaction(async (tx) => {
+      const held = await tx.$queryRaw<{ behavior_config: unknown }[]>(Prisma.sql`SELECT "behavior_config" FROM "bots" WHERE "id" = ${id} AND "owner_id" = ${owner.userId} AND "deleted_at" IS NULL AND "room_id" IS NULL FOR UPDATE`);
+      if (held.length === 0) return false;
+      // Only the keys sent change; the rest of what is saved there stays
+      const current = held[0].behavior_config;
+      const storedConfig = current && typeof current === 'object' && !Array.isArray(current) ? (current as Record<string, unknown>) : {};
+      let behaviorConfig = change.behaviorConfig ? keepToolCallSetting(storedConfig, { ...storedConfig, ...change.behaviorConfig }) : undefined;
+      // Moving it to another key moves its images off a key that is not its owner's
+      if (nextRef !== brick.aiProviderRef) {
+        const withoutVision = await dropOthersVisionKey(behaviorConfig ?? storedConfig, owner.userId);
+        if (withoutVision) behaviorConfig = withoutVision;
+      }
+      await tx.bot.update({
+        where: { id },
+        data: {
+          ...(change.name !== undefined ? { name: change.name } : {}),
+          ...(change.description !== undefined ? { description: change.description?.trim() || null } : {}),
+          ...(change.chatInstructions !== undefined ? { chatInstructions: change.chatInstructions?.trim() || null } : {}),
+          ...(change.enabled !== undefined ? { enabled: change.enabled } : {}),
+          ...(change.characterTextureId !== undefined ? { characterTextureId: change.characterTextureId } : {}),
+          ...(change.aiProviderRef !== undefined ? { aiProviderRef: change.aiProviderRef } : {}),
+          // A model belongs to one key: a Brick moved to another key without a model picked starts on that key's own
+          ...(change.aiModel !== undefined ? { aiModel: change.aiModel } : nextRef !== brick.aiProviderRef ? { aiModel: null } : {}),
+          ...(change.behaviorType !== undefined ? { behaviorType: change.behaviorType } : {}),
+          ...(behaviorConfig !== undefined ? { behaviorConfig: behaviorConfig as Prisma.InputJsonValue } : {}),
+          ...(change.companionTextureId !== undefined ? { companionTextureId: change.companionTextureId } : {}),
+          updatedById: owner.userId,
+        },
+      });
+      return true;
     });
+    if (!saved) return brickJson(request, { error: 'Brick not found' }, 404);
     // What it runs on changed: the notices that said where it was are out of date
     if (nextRef !== brick.aiProviderRef || (change.aiModel !== undefined && change.aiModel !== brick.aiModel)) await clearBotRunsOnNotices(id);
     const card = (await listBricks(owner.userId)).find((one) => one.id === id);
