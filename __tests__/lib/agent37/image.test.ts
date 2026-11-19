@@ -14,7 +14,7 @@ import type { AddressInfo } from 'node:net';
 jest.mock('@/lib/db', () => ({ prisma: {} }));
 
 import { IMAGE_NAME, IMAGE_PORT, ensureImage, imageContext, tarOf, type ImageState, type ImageStore } from '@/lib/agent37/image';
-import { DOCKERFILE, IMAGE_SETUP_VERSION, imageFiles, LOCAL_MODEL_PORT } from '@/lib/agent37/image-files';
+import { DOCKERFILE, IMAGE_SETUP_VERSION, imageFiles, LOCAL_MODEL_PORT, SYSTEM_PATH } from '@/lib/agent37/image-files';
 import type { Agent37Client, TemplateBuild } from '@/lib/agent37/client';
 
 const folder = mkdtempSync(join(tmpdir(), 'universe-image-'));
@@ -22,6 +22,9 @@ afterAll(() => rmSync(folder, { recursive: true, force: true }));
 const have = (command: string) => spawnSync('sh', ['-c', `command -v ${command}`]).status === 0;
 const hasPython = have('python3');
 const python = hasPython ? it : it.skip;
+// universe-files lists with `find -printf`, which a machine of ours (Linux, GNU find) has and a BSD find (macOS) does not. Asked with the PATH the
+// script sets for itself (not the caller's, which may hold another find first), so the gate answers for the find the script will run
+const gnuFind = spawnSync('sh', ['-c', 'find . -maxdepth 0 -printf x'], { env: { ...process.env, PATH: SYSTEM_PATH } }).status === 0;
 
 const write = () => {
   const dir = join(folder, 'image');
@@ -78,7 +81,7 @@ describe('what is in the image', () => {
     }
   });
 
-  it('lists the files a person would look for, newest first, without hidden folders or the tools’ own', () => {
+  (gnuFind ? it : it.skip)('lists the files a person would look for, newest first, without hidden folders or the tools’ own', () => {
     const dir = write();
     const home = mkdtempSync(join(tmpdir(), 'universe-home-'));
     mkdirSync(join(home, 'visa'), { recursive: true });
@@ -117,6 +120,9 @@ describe('what is in the image', () => {
   it('clears the browser under the same lock as the supervisor and proves it gone before the profile is removed', () => {
     const clean = imageFiles().find((file) => file.name === 'universe-clean')!.text;
     expect(clean).toContain('up.lock');
+    // the check for the browser is there (a missing one would be -1, which sorts before everything), and it comes before the removal
+    expect(clean.indexOf('pgrep -x chromium')).toBeGreaterThan(-1);
+    expect(clean.indexOf('rm -rf')).toBeGreaterThan(-1);
     expect(clean.indexOf('pgrep -x chromium')).toBeLessThan(clean.indexOf('rm -rf'));
     expect(clean.indexOf('rm -rf')).toBeLessThan(clean.indexOf('universe-up --child'));
   });
@@ -126,16 +132,16 @@ describe('what the scripts the fence keeps may run', () => {
   const script = (name: string) => imageFiles().find((file) => file.name === name)!.text;
 
   it('start from a fixed PATH, so a program the agent put first in its own PATH is never one the supervisor runs', () => {
-    for (const name of ['universe-supervise', 'universe-up', 'universe-clean']) {
+    for (const name of ['universe-supervise', 'universe-up', 'universe-clean', 'universe-mark', 'universe-files']) {
       const text = script(name);
       const line = text.split('\n').find((one) => one.startsWith('PATH='));
-      expect(line).toBeDefined();
+      expect(line).toBe(`PATH=${SYSTEM_PATH}`);
       // Whatever PATH the agent starts it with, `sleep` is the system's
       const run = spawnSync('sh', ['-c', `${line}; export PATH; command -v sleep`], { env: { ...process.env, PATH: `${folder}:/bin:/usr/bin`, HOME: folder }, encoding: 'utf8' });
       expect(run.stdout.trim()).toMatch(/^\/(usr\/)?bin\/sleep$/);
-      // and it is set before the first program is run
-      const first = Math.min(...['mkdir', 'sleep', 'pkill'].map((word) => text.indexOf(word)).filter((at) => at >= 0));
-      expect(text.indexOf(line!)).toBeLessThan(first);
+      // and it is set before ANY program is run: nothing but the shebang, comments and blank lines comes before it (`cut` and `find` count too)
+      const before = text.split('\n').slice(0, text.split('\n').indexOf(line!));
+      expect(before.filter((one) => one.trim() !== '' && !one.startsWith('#'))).toEqual([]);
     }
   });
 
@@ -182,17 +188,41 @@ describe('the local model address', () => {
     handler = (_req, res) => res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }));
   });
 
+  // The proxy script itself is the one that ships. It is started through a small launcher of the test's own that asks the system for a free
+  // port (0), and tells the test the port it really bound on its own output: no port is guessed, so no other server on this machine can
+  // answer in its place. Setup fails when the child exits or says nothing in time.
+  const LAUNCHER = [
+    'import sys, importlib.machinery, importlib.util',
+    'from http.server import ThreadingHTTPServer',
+    'loader = importlib.machinery.SourceFileLoader("universe_proxy", sys.argv[1])',
+    'module = importlib.util.module_from_spec(importlib.util.spec_from_loader("universe_proxy", loader))',
+    'loader.exec_module(module)',
+    'server = ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)',
+    'print(server.server_address[1], flush=True)',
+    'server.serve_forever()',
+  ].join('\n');
+
   async function withProxy(run: (base: string, home: string) => Promise<void>) {
     const dir = write();
     const home = mkdtempSync(join(folder, 'home-'));
-    const port = 20_000 + Math.floor(Math.random() * 20_000);
-    const child = spawn('python3', [join(dir, 'universe-proxy')], { env: { ...process.env, HOME: home, UNIVERSE_PROXY_PORT: String(port) }, stdio: 'ignore' });
+    const child = spawn('python3', ['-c', LAUNCHER, join(dir, 'universe-proxy')], { env: { ...process.env, HOME: home }, stdio: ['ignore', 'pipe', 'inherit'] });
     try {
-      for (let tries = 0; tries < 50; tries++) {
-        const up = await fetch(`http://127.0.0.1:${port}/v1/models`).then(() => true).catch(() => false);
-        if (up) break;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
+      const port = await new Promise<number>((resolve, reject) => {
+        let said = '';
+        const timer = setTimeout(() => reject(new Error('The proxy did not say which port it is on')), 10_000);
+        child.stdout!.on('data', (chunk) => {
+          said += chunk;
+          const line = said.split('\n')[0];
+          if (said.includes('\n') && /^\d+$/.test(line)) {
+            clearTimeout(timer);
+            resolve(Number(line));
+          }
+        });
+        child.once('exit', (code) => {
+          clearTimeout(timer);
+          reject(new Error(`The proxy stopped before it was ready (exit ${code})`));
+        });
+      });
       await run(`http://127.0.0.1:${port}`, home);
     } finally {
       child.kill('SIGKILL');
@@ -229,28 +259,37 @@ describe('the local model address', () => {
   python('passes the answer back as it comes, and the relay’s refusals as they are', async () => {
     await withProxy(async (base, home) => {
       setRelay(home, 'cjt_x');
+      // The relay's second event is held until the test has read the first from the proxy: only a proxy that forwards as it goes can show
+      // the first event while the relay has not finished, and no timing of a busy machine can fail it
+      let releaseSecond!: () => void;
+      const second = new Promise<void>((resolve) => (releaseSecond = resolve));
       handler = (_req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         res.write('data: one\n\n');
-        setTimeout(() => {
+        res.on('close', releaseSecond);
+        void second.then(() => {
           res.write('data: two\n\n');
           res.end();
-        }, 300);
+        });
       };
-      const answer = await fetch(`${base}/v1/chat/completions`, { method: 'POST', body: '{}' });
-      const reader = answer.body!.getReader();
-      const first = await reader.read();
-      const at = Date.now();
-      // the first part arrives before the relay has finished
-      expect(new TextDecoder().decode(first.value)).toContain('data: one');
-      let rest = '';
-      for (;;) {
-        const part = await reader.read();
-        if (part.done) break;
-        rest += new TextDecoder().decode(part.value);
+      const within = <T,>(work: Promise<T>, what: string) => Promise.race([work, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${what} did not arrive`)), 5_000))]);
+      try {
+        const answer = await within(fetch(`${base}/v1/chat/completions`, { method: 'POST', body: '{}' }), 'The proxy’s answer');
+        const reader = answer.body!.getReader();
+        const first = await within(reader.read(), 'The first event');
+        expect(new TextDecoder().decode(first.value)).toContain('data: one');
+        // the relay has not finished, and the first event is already here
+        releaseSecond();
+        let rest = '';
+        for (;;) {
+          const part = await within(reader.read(), 'The rest of the answer');
+          if (part.done) break;
+          rest += new TextDecoder().decode(part.value);
+        }
+        expect(rest).toContain('data: two');
+      } finally {
+        releaseSecond();
       }
-      expect(rest).toContain('data: two');
-      expect(Date.now() - at).toBeGreaterThanOrEqual(150);
 
       handler = (_req, res) => res.writeHead(429, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { code: 'insufficient_quota' } }));
       const refused = await fetch(`${base}/v1/chat/completions`, { method: 'POST', body: '{}' });
@@ -275,7 +314,8 @@ describe('the local model address', () => {
 
 describe('the take-over fence', () => {
   // Run in a process space of its own, so only what the scenario starts can be touched
-  const isolated = hasPython && spawnSync('unshare', ['--pid', '--fork', '--mount-proc', 'true']).status === 0;
+  // (and a network of its own, so nothing listening on this machine's 127.0.0.1:3737 can be in the way of the gateway fixture)
+  const isolated = hasPython && spawnSync('unshare', ['--pid', '--fork', '--mount-proc', '--net', 'true']).status === 0;
   (isolated ? it : it.skip)('stops what the agent started, keeps the gateway and the browser, and proves none is left', () => {
     const dir = write();
     mkdirSync(join(dir, 'bin'), { recursive: true });
@@ -329,11 +369,19 @@ __attribute__((constructor)) static void h(void) {
 }
 `,
     );
+    // a directory of this run's own under /dev/shm: two runs on one machine never write or remove each other's library
+    const shm = mkdtempSync('/dev/shm/universe-fence-test-');
     const scenario = `
+# a network of its own starts with the loopback down
+python3 -c "
+import fcntl, socket, struct
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+flags = struct.unpack('16sH14x', fcntl.ioctl(s, 0x8913, struct.pack('16sH14x', b'lo', 0)))[1]
+fcntl.ioctl(s, 0x8914, struct.pack('16sH14x', b'lo', flags | 1))" || exit 1
 export HOME=${dir}/home
 mkdir -p $HOME ${dir}/agent /run/universe
 # the folder of the note is a private one here, so the real machine's is never touched
-mount -t tmpfs tmpfs /run/universe
+mount -t tmpfs tmpfs /run/universe || exit 1
 echo "unmarked: $(python3 ${dir}/universe-fence --check; echo rc=$?)"
 cp /bin/sh ${dir}/bin/chromium
 python3 -c "
@@ -380,8 +428,8 @@ if command -v cc >/dev/null 2>&1 && cc -shared -fPIC -o ${dir}/agent/wipe.so ${d
   NOTE_FILE=${dir}/agent/wipe.ran LD_PRELOAD=${dir}/agent/wipe.so sleep 9 </dev/null >/dev/null 2>&1 &
   WIPED=$!
   # the same library in a folder every user can write to and that looks like part of the system (/dev/shm)
-  mkdir -p /dev/shm/universe-fence-test && cp ${dir}/agent/wipe.so /dev/shm/universe-fence-test/wipe.so
-  NOTE_FILE=${dir}/agent/shm.ran LD_PRELOAD=/dev/shm/universe-fence-test/wipe.so sleep 9 </dev/null >/dev/null 2>&1 &
+  mkdir -p ${shm} && cp ${dir}/agent/wipe.so ${shm}/wipe.so
+  NOTE_FILE=${dir}/agent/shm.ran LD_PRELOAD=${shm}/wipe.so sleep 9 </dev/null >/dev/null 2>&1 &
   SHM=$!
 fi
 # and with the library gone from the map: its code copied into nameless memory, the library unmapped (x86-64 only)
@@ -405,13 +453,13 @@ kill -0 $OWN 2>/dev/null && echo "own-alive" || echo "own-dead"
 kill -0 $SHORT 2>/dev/null && echo "short-alive" || echo "short-dead"
 kill -0 $OTHER 2>/dev/null && echo "other-alive" || echo "other-dead"
 kill -0 $LOADED 2>/dev/null && echo "loaded-alive" || echo "loaded-dead"
-if [ -n "$SHM" ]; then [ -f ${dir}/agent/shm.ran ] && echo "shm-loaded"; kill -0 $SHM 2>/dev/null && echo "shm-alive" || echo "shm-dead"; rm -rf /dev/shm/universe-fence-test; fi
+if [ -n "$SHM" ]; then [ -f ${dir}/agent/shm.ran ] && echo "shm-loaded"; kill -0 $SHM 2>/dev/null && echo "shm-alive" || echo "shm-dead"; rm -rf ${shm}; fi
 if [ -n "$WIPED" ]; then [ -f ${dir}/agent/wipe.ran ] && echo "wipe-loaded"; kill -0 $WIPED 2>/dev/null && echo "wiped-alive" || echo "wiped-dead"; fi
 if [ -n "$HIDDEN" ]; then [ -f ${dir}/agent/hide.ran ] && echo "hide-loaded"; kill -0 $HIDDEN 2>/dev/null && echo "hidden-alive" || echo "hidden-dead"; fi
 # a child the browser started after the note, below a part that was running before it, is the browser's own
 pgrep -P $BR -x sleep >/dev/null && echo "late-child-alive" || echo "late-child-dead"
 `;
-    const run = spawnSync('unshare', ['--pid', '--fork', '--mount-proc', 'sh', '-c', scenario], { encoding: 'utf8', timeout: 60_000 });
+    const run = spawnSync('unshare', ['--pid', '--fork', '--mount-proc', '--net', 'sh', '-c', scenario], { encoding: 'utf8', timeout: 60_000 });
     // Without the note nothing is stopped and nothing is proved; the note is written once per boot
     expect(run.stdout).toMatch(/unmarked: unmarked=1\s+rc=3/);
     expect(run.stdout).toMatch(/mark: marked=1\n/);

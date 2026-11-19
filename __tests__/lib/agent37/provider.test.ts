@@ -13,8 +13,10 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   let healthy = true;
   let execOut: (command: string) => string = () => 'ok';
   let markOut = 'marked=1\n';
-  let revisionAfterUpdate = 2;
+  const revisionAfterUpdate = 2;
   const refuse: Record<string, Error | undefined> = {};
+  /** A create whose answer is lost: by default the machine WAS made; set `makesNothing` for one that never reached Agent37. */
+  const lost = { makesNothing: false };
   const client = {
     async listInstances() {
       calls.push('list');
@@ -26,7 +28,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
         const error = refuse.create;
         refuse.create = undefined;
         // A lost answer after the machine WAS made
-        if (error instanceof Agent37Unreached) instances.set('made1', { id: 'made1', status: 'running', url: 'https://made1.agent37.app', metadata: input.metadata, region: 'us' });
+        if (error instanceof Agent37Unreached && !lost.makesNothing) instances.set('made1', { id: 'made1', status: 'running', url: 'https://made1.agent37.app', metadata: input.metadata, region: 'us' });
         throw error;
       }
       const instance = { id: `m${instances.size + 1}`, status: 'running', url: `https://m${instances.size + 1}.agent37.app`, metadata: input.metadata, region: 'us' } as Instance;
@@ -107,7 +109,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
     },
   };
   const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean }> = [];
-  return { client: client as unknown as Agent37Client, instances, calls, execs, created, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
+  return { client: client as unknown as Agent37Client, instances, calls, execs, created, refuse, lost, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
 }
 
 function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
@@ -153,6 +155,18 @@ describe('the Agent37 provider', () => {
     const info = await provider(w).create('bot-1');
     expect(info.ref).toBe('made1');
     expect(w.calls.filter((call) => call === 'create')).toHaveLength(1);
+  });
+
+  it('after a create whose answer was lost and made nothing, looks for the machine once, finds none, and says what happened', async () => {
+    const w = world();
+    w.refuse.create = new Agent37Unreached('TimeoutError');
+    w.lost.makesNothing = true;
+    await expect(provider(w).create('bot-1')).rejects.toBeInstanceOf(Agent37Unreached);
+    // One create (never repeated), and a look for the machine after the failure
+    const calls = w.calls;
+    expect(calls.filter((call) => call === 'create')).toHaveLength(1);
+    expect(calls.lastIndexOf('list')).toBeGreaterThan(calls.indexOf('create'));
+    expect(w.instances.size).toBe(0);
   });
 
   it('after a lost create that made nothing, says so and makes none', async () => {
@@ -479,6 +493,24 @@ describe('getting a machine ready for a job', () => {
     // The note is written once, after the restart (a note from before it would be for the old boot)
     expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-mark']);
     expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
+  });
+
+  it('is not ready when the restart it made did not clear the pending restart: nothing is marked, and the next job restarts it again', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    let runs = 0;
+    // The boot it was told by cannot be read: universe-up still says restart=1 after the restart
+    w.setExec(() => (++runs <= 2 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
+    await expect(p.ready('m1')).rejects.toThrow('still needs a restart');
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up']);
+    expect(w.execs.some((entry) => entry.command === 'universe-mark')).toBe(false);
+    expect(w.calls.filter((call) => call.startsWith('stop:'))).toEqual(['stop:m1']);
+    // Asked again once the boot can be read: restarts as before and is ready
+    runs = 0;
+    w.setExec(() => (++runs === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
+    await expect(p.ready('m1')).resolves.toBeUndefined();
+    expect(w.execs[w.execs.length - 1].command).toBe('universe-mark');
   });
 
   it('after asking a machine to stop, waits until it is really stopped, not just until it stops saying "stopping"', async () => {

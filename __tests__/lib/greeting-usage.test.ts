@@ -63,4 +63,17 @@ describe('what a greeting costs the person', () => {
     await track({ userId: 'wa-sara', isGuest: false, greeting: 'yes' });
     expect(db.botsAiUsage.create.mock.calls.map(([arg]) => arg.data.greeting)).toEqual([true, false, false]);
   });
+
+  it('is kept as usage of the key that paid for it: the provider’s owner, never one the request names', async () => {
+    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'deepseek-flash', ownerId: 'u-key-owner' });
+    await trackUsage(
+      new NextRequest('http://localhost:3333/api/bots/ai-usage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ botId: 'bot-1', providerId: 'deepseek-flash', userId: 'wa-sara', isGuest: false, greeting: true, keyOwnerId: 'u-somebody-else' }),
+      }),
+    );
+    const [[arg]] = db.botsAiUsage.create.mock.calls;
+    expect(arg.data).toMatchObject({ greeting: true, keyOwnerId: 'u-key-owner' });
+  });
 });

@@ -54,6 +54,54 @@ describe('the Agent37 client', () => {
     expect(String(error.message)).not.toContain('sk_live_secret');
   });
 
+  it('takes the key out of what Agent37 says back, keeps the rest of the refusal, in every kind of call', async () => {
+    const echo = { error: { code: 'bad_key_sk_live_secret', message: 'Key sk_live_secret was refused; sent Bearer sk_live_secret and Bearer abc.DEF-123' } };
+    const check = (error: unknown) => {
+      const seen = error as Agent37Error;
+      expect(seen).toBeInstanceOf(Agent37Error);
+      expect(seen.message).not.toContain('sk_live_secret');
+      expect(seen.message).not.toContain('abc.DEF-123');
+      expect(seen.code ?? '').not.toContain('sk_live_secret');
+      // The refusal itself is still there
+      expect(seen.message).toContain('was refused');
+      expect(seen.code).toBe('bad_key_[removed]');
+    };
+    // The API call, the call on the machine (exec) and the stream of a turn
+    check(await client([json(401, echo)]).api.createInstance({ template: 't' }).catch((e) => e));
+    check(await client([json(401, echo)]).api.exec('abc', 'ls').catch((e) => e));
+    check(await client([json(401, echo)]).api.openTurn('https://abc.agent37.app', { text: 'x' }).catch((e) => e));
+  });
+
+  it('takes out a bearer value that holds the key together with what follows the key in it, and neither form hides the other', async () => {
+    const echo = { error: { code: 'Bearer sk_live_secret.rotated-code-1', message: 'Sent Bearer sk_live_secret.rotated-secret-456 and Bearer abc-sk_live_secret-tail; also sk_live_secret.bare-suffix' } };
+    const check = (error: unknown) => {
+      const seen = error as Agent37Error;
+      expect(seen).toBeInstanceOf(Agent37Error);
+      for (const text of [seen.message, seen.code ?? '']) {
+        expect(text).not.toContain('sk_live_secret');
+        expect(text).not.toContain('rotated-secret-456');
+        expect(text).not.toContain('rotated-code-1');
+        expect(text).not.toContain('abc-sk');
+        expect(text).not.toContain('-tail');
+      }
+      // The words around the secrets stay
+      expect(seen.message).toContain('Sent Bearer [removed] and Bearer [removed]');
+      expect(seen.message).toContain('also [removed]');
+      expect(seen.code).toBe('Bearer [removed]');
+    };
+    check(await client([json(401, echo)]).api.createInstance({ template: 't' }).catch((e) => e));
+    check(await client([json(401, echo)]).api.exec('abc', 'ls').catch((e) => e));
+    check(await client([json(401, echo)]).api.openTurn('https://abc.agent37.app', { text: 'x' }).catch((e) => e));
+  });
+
+  it('takes the key out even when the cut at 200 characters would have left a piece of it', async () => {
+    const long = `${'x'.repeat(190)}sk_live_secret and more`;
+    const { api } = client([json(500, { message: long })]);
+    const error = (await api.createInstance({ template: 't' }).catch((e) => e)) as Error;
+    expect(error.message).not.toContain('sk_live');
+    expect(error.message.length).toBeLessThanOrEqual(200);
+  });
+
   it('health is false for a gateway failure and for an agent that is not ready', async () => {
     const { api } = client([json(502, { error: 'container_unreachable' }), json(200, { ok: true, healthy: false })]);
     expect(await api.healthy('https://abc.agent37.app')).toBe(false);
@@ -75,6 +123,8 @@ describe('the Agent37 client', () => {
       const named = client([json(503, { code: 'try_again' }), json(200, { exit_code: 0, stdout: '', stderr: '' })]);
       await named.api.exec('abc', 'true', { name: 'awake:1' });
       expect(named.calls).toHaveLength(2);
+      // The same name on the first ask and on the retry: that is what lets Agent37 tell the retry from a new command
+      expect(JSON.parse(String(named.calls[0].init.body)).name).toBe('awake:1');
       expect(JSON.parse(String(named.calls[1].init.body)).name).toBe('awake:1');
       const plain = client([json(503, { code: 'try_again' }), json(200, { exit_code: 0 })]);
       await expect(plain.api.exec('abc', 'true')).rejects.toMatchObject({ status: 503 });

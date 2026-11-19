@@ -198,7 +198,9 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     const c = await spend.holdCredit({ holdKey: 'g1-c', personId: 'g1', category: 'computers', amountMicros: 2 * M, chargeClass: 'computer_job' }, G);
     const d = await spend.holdCredit({ holdKey: 'g1-d', personId: 'g1', category: 'instant_apps', amountMicros: 1, chargeClass: 'instant_run' }, G);
     check('a $5 "both" gift has one shared remainder: $3 of Apps leaves $2 for computers, never $5 each', a.ok && !b.ok && b.reason === 'credit_used_up' && b.availableMicros === 2 * M && c.ok && !d.ok, { a, b, c, d });
-    check('replies never pay for dollars: a hold has no way to name replies', (await refuses(() => spend.holdCredit({ holdKey: 'x', personId: 'g1', category: 'universe_ai' as never, amountMicros: 1, chargeClass: 'instant_run' }, G))) === null);
+    // The hold is awaited and its own answer read: a refusal is a resolved { ok: false }, and a rejected promise fails the whole scenario
+    const replyHold = await spend.holdCredit({ holdKey: 'x', personId: 'g1', category: 'universe_ai' as never, amountMicros: 1, chargeClass: 'instant_run' }, G);
+    check('replies never pay for dollars: a hold has no way to name replies', replyHold.ok === false, replyHold);
     const wrong = await spend.holdCredit({ holdKey: 'g1-wrong', personId: 'g2', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'computer_job' }, G);
     check('a charge class the category does not pay for is refused', !wrong.ok && wrong.reason === 'wrong_class', wrong);
     const overhead = await spend.holdCredit({ holdKey: 'g2-overhead', personId: 'g2', category: 'instant_apps', amountMicros: 1, chargeClass: 'app_overhead' }, G);
@@ -351,10 +353,14 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     const mixed = await spend.holdCredit({ holdKey: 'pal-2', personId: 'pal', category: 'instant_apps', amountMicros: 3 * M, chargeClass: 'instant_run' }, G);
     check('ordinary work may use any credit that covers it', mixed.ok, mixed);
     await spend.releaseHold({ holdKey: 'pal-2' }, G);
+    // While active, the sponsor can fund a $2 hold of its own (it has exactly $2); then it is released and the account paused, so the same
+    // sponsor-only request with a fresh key can only fail because of the pause (a $3 one would have failed with or without it)
+    const activeSponsor = await spend.holdCredit({ holdKey: 'pal-3a', personId: 'pal', category: 'instant_apps', amountMicros: 2 * M, chargeClass: 'instant_run', onlyAccountId: account.id }, G);
+    await spend.releaseHold({ holdKey: 'pal-3a' }, G);
     await funding.setAccountStatus(account.id, 'paused');
-    const paused = await spend.holdCredit({ holdKey: 'pal-3', personId: 'pal', category: 'instant_apps', amountMicros: 3 * M, chargeClass: 'instant_run', onlyAccountId: account.id }, G);
+    const paused = await spend.holdCredit({ holdKey: 'pal-3', personId: 'pal', category: 'instant_apps', amountMicros: 2 * M, chargeClass: 'instant_run', onlyAccountId: account.id }, G);
     const platformStill = await spend.holdCredit({ holdKey: 'pal-4', personId: 'pal', category: 'instant_apps', amountMicros: 3 * M, chargeClass: 'instant_run' }, G);
-    check('a paused account funds nothing new while the platform’s credit still works', !paused.ok && platformStill.ok, { paused, platformStill });
+    check('a paused account funds nothing new while the platform’s credit still works', activeSponsor.ok && !paused.ok && platformStill.ok, { activeSponsor, paused, platformStill });
     await spend.releaseHold({ holdKey: 'pal-4' }, G);
     await funding.setAccountStatus(account.id, 'active');
     const exposure = await funding.exposureOf('funding-platform', G);
@@ -788,10 +794,11 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
       await rules.createGift({ categoryId: 'instant_apps', amount: 5 * M, schedule: 'once', share: 'shared', recipients: { kind: 'people', userIds: ['fu-s1', 'fu-s2'] } }, root, at('2027-02-13T09:30:00Z'));
       await issue.ensureIssued('fu-s1', at('2027-02-13T12:00:00Z'));
       await issue.ensureIssued('fu-s2', at('2027-02-13T12:30:00Z'));
-      await requests.askForMore('fu-s2', at('2027-02-13T13:00:00Z'), 'apps');
+      const later = await requests.askForMore('fu-s2', at('2027-02-13T13:00:00Z'), 'apps');
       await issue.ensureIssued('fu-s2', at('2027-02-13T13:30:00Z'));
       const open = async (id: string, what: string) => prisma.meterRequest.count({ where: { personId: id, what, answeredAt: null } });
       check('a shared Instant Apps amount answers the earlier asks of everyone it reaches, leaves computer asks, later asks and other people alone', (await open('fu-s1', 'apps')) === 0 && (await open('fu-s2', 'computer')) === 1 && (await open('fu-s2', 'apps')) === 1 && (await open('fu-s3', 'apps')) === 1, { s1: await open('fu-s1', 'apps'), s2computer: await open('fu-s2', 'computer'), s2apps: await open('fu-s2', 'apps'), s3: await open('fu-s3', 'apps') });
+      check('the 13:00 Instant Apps ask opens a new request, because the 09:00 one was answered', later.created === true, later);
     }
 
     // A group that can change can clash later, when someone joins both: nobody gets a number by guesswork
@@ -831,9 +838,12 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
       // A database dropped at the end closes this connection: that is the end of the run, not an error
       writer.on('error', () => undefined);
       await writer.connect();
+      const writerPid = (await writer.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+      // A session of THIS database that is waiting on a lock this writer holds (what pg_locks lists spans every database of the server, and
+      // another run's waiter would have satisfied a plain count before this run's operation reached its lock)
       const waitForWaiter = async () => {
         for (let i = 0; i < 100; i++) {
-          const { rows } = await writer.query(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`);
+          const { rows } = await writer.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND $1::int = ANY(pg_blocking_pids(pid))`, [writerPid]);
           if (rows[0].n > 0) return true;
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
@@ -916,14 +926,16 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
           racing.reserve({ key, personId: 'inst', amountMicros: 10_000, botId: 'bot-1', runId: `race-${i}`, charge: { class: 'instant', route: 'composio', provider: 'composio' } }),
           racing.release({ key }),
         ]);
-        // Said again after both answered: what the books hold for the key must not change
-        const again = await racing.release({ key });
-        return { key, reserved, gone, again };
+        return { key, reserved, gone };
       }));
-      const heldAfter = await prisma.creditHold.findMany({ where: { holdKey: { in: keys } }, select: { holdKey: true, state: true } });
-      const closedAfter = await prisma.creditClosedKey.findMany({ where: { holdKey: { in: keys } }, select: { holdKey: true } });
-      const heldKeys = new Map(heldAfter.map((h) => [h.holdKey, h.state]));
-      const closedKeys = new Set(closedAfter.map((c) => c.holdKey));
+      const readKeys = async () => {
+        const held = await prisma.creditHold.findMany({ where: { holdKey: { in: keys } }, select: { holdKey: true, state: true } });
+        const closed = await prisma.creditClosedKey.findMany({ where: { holdKey: { in: keys } }, select: { holdKey: true } });
+        return { held, heldKeys: new Map(held.map((h) => [h.holdKey, h.state])), closed, closedKeys: new Set(closed.map((c) => c.holdKey)) };
+      };
+      // What the race itself left, read BEFORE anything is said again: a release that reported success and left the hold live would otherwise be
+      // repaired by the repeat below and pass
+      const { held: heldAfter, heldKeys, closed: closedAfter, closedKeys } = await readKeys();
       const bad = pairs.filter((p) => {
         const state = heldKeys.get(p.key);
         // Either the hold won (and is given back, and the key is not closed) or the closing won (nothing held, the reservation refused)
@@ -931,8 +943,12 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
         const closeWon = state === undefined && closedKeys.has(p.key) && !p.reserved.ok && p.gone.none === true;
         return !(holdWon || closeWon);
       });
+      // Said again after both answered: what the books hold for each key must not change
+      await Promise.all(keys.map((key) => racing.release({ key })));
+      const repeated = await readKeys();
+      const changed = keys.filter((key) => heldKeys.get(key) !== repeated.heldKeys.get(key) || closedKeys.has(key) !== repeated.closedKeys.has(key));
       const stillHeld = await spend.availableCredit('inst', 'instant_apps', G);
-      check('24 reservations racing the closing of their keys: each key ends given back or closed, none is held for good, and no credit stays taken', bad.length === 0 && heldAfter.every((h) => h.state !== 'held') && stillHeld.heldMicros === 0, { bad, stillHeld, wins: { hold: heldAfter.length, closed: closedAfter.length } });
+      check('24 reservations racing the closing of their keys: each key ends given back or closed, none is held for good, and no credit stays taken', bad.length === 0 && changed.length === 0 && heldAfter.every((h) => h.state !== 'held') && stillHeld.heldMicros === 0, { bad, changed, stillHeld, wins: { hold: heldAfter.length, closed: closedAfter.length } });
     }
   }
 
@@ -944,9 +960,17 @@ function classifyTool(values: typeof import('@/lib/credit-values')) {
   return values.classifyCharge({ work: 'instant', inComputerJob: true });
 }
 
+// The report is written out completely before the process ends: Jest reads it through a pipe, and a write still pending when the child exits
+// would be cut off (and a crash would lose its diagnostic)
+const flushed = () => new Promise<void>((resolve) => process.stdout.write('', () => resolve()));
+
 main()
-  .then(() => process.exit(0))
-  .catch((error) => {
+  .then(async () => {
+    await flushed();
+    process.exit(0);
+  })
+  .catch(async (error) => {
     console.log(printable({ kind: 'crashed', error: error instanceof Error ? `${error.message}\n${error.stack}` : String(error), checks }));
+    await flushed();
     process.exit(1);
   });

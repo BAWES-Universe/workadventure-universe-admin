@@ -81,5 +81,25 @@ const offeredAtIsSet = (await db.query('SELECT count(*)::int AS n FROM brick_off
 await db.exec(`DELETE FROM users WHERE id = 'sara'`);
 const offersAfterAccountGone = (await db.query('SELECT user_id, topic FROM brick_offers ORDER BY user_id, topic')).rows;
 
-console.log(JSON.stringify({ before, after, newColumns, checks, deleted, undone, offers, offeredAtIsSet, offersAfterAccountGone }));
+// The check made again with the saved switch in it (20261119050000): a deleted Brick with no kept switch was allowed by the first one
+await db.exec(`
+  INSERT INTO bots (id, owner_id, name, enabled, created_by_id, updated_at) VALUES ('legacy1', 'omar', 'Deleted, no kept switch', false, 'omar', now()), ('keep1', 'omar', 'Deleted, kept on', false, 'omar', now());
+`);
+const FIRST_CHECK_ALLOWS = await accepted(`UPDATE bots SET deleted_at = '2026-11-12 09:00:00', gone_at = '2026-11-19 09:00:00' WHERE id = 'legacy1'`);
+await db.exec(`UPDATE bots SET deleted_at = '2026-11-12 09:00:00', gone_at = '2026-11-19 09:00:00', enabled_before_delete = true WHERE id = 'keep1'`);
+await run('20261119050000_brick_deleted_keeps_switch');
+const keptRows = (await db.query(`SELECT id, enabled, enabled_before_delete FROM bots WHERE id IN ('legacy1', 'keep1') ORDER BY id`)).rows;
+await db.exec(`INSERT INTO bots (id, owner_id, name, created_by_id, updated_at) VALUES ('brick4', 'omar', 'Brick 4', 'omar', now())`);
+const keptSwitchChecks = {
+  firstCheckAllowedIt: FIRST_CHECK_ALLOWS,
+  deleteWithoutASavedSwitch: await accepted(`UPDATE bots SET deleted_at = now(), gone_at = now() + interval '7 days', enabled = false WHERE id = 'brick4'`),
+  deleteTheWayOrbitDoesIt: await accepted(`UPDATE bots SET ${DELETE} WHERE id = 'brick4'`),
+  savedSwitchTakenOutOfADeletedBrick: await accepted(`UPDATE bots SET enabled_before_delete = NULL WHERE id = 'brick4'`),
+  switchADeletedBrickOn: await accepted(`UPDATE bots SET enabled = true WHERE id = 'brick4'`),
+  undoTheWayOrbitDoesIt: await accepted(`UPDATE bots SET enabled = COALESCE(enabled_before_delete, true), deleted_at = NULL, gone_at = NULL, enabled_before_delete = NULL WHERE id = 'brick4'`),
+  deleteARoomBot: await accepted(`UPDATE bots SET ${DELETE} WHERE id = 'bot1'`),
+};
+const undoneAgain = (await db.query(`SELECT enabled, enabled_before_delete, deleted_at, gone_at FROM bots WHERE id = 'brick4'`)).rows[0];
+
+console.log(JSON.stringify({ before, after, newColumns, checks, deleted, undone, offers, offeredAtIsSet, offersAfterAccountGone, keptRows, keptSwitchChecks, undoneAgain }));
 await db.close();

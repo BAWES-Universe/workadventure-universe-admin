@@ -1,10 +1,11 @@
-import { randomBytes } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { Readable } from 'node:stream';
 
 const stored = new Map<string, Buffer>();
 let abortCalled = false;
 let failUpload = false;
+/** Resolves when the archive's first part has been taken from the source: the failing upload waits for it, so it fails while the source is going. */
+let sourceStarted: Promise<void> = Promise.resolve();
 
 jest.mock('@/lib/artifact-storage', () => ({
   artifactBucket: () => ({
@@ -33,8 +34,8 @@ jest.mock('@aws-sdk/lib-storage', () => ({
     constructor(private readonly options: { params: { Key: string; Body: Readable } }) {}
     async done() {
       if (failUpload) {
-        // A bucket that stops reading and then fails, while the archive is still coming
-        await new Promise((resolve) => setTimeout(resolve, 5));
+        // A bucket that stops reading and then fails, once the archive has started to come and while the rest of it is still coming
+        await sourceStarted;
         throw new Error('bucket refused the upload');
       }
       const chunks: Buffer[] = [];
@@ -58,6 +59,7 @@ beforeEach(() => {
   stored.clear();
   abortCalled = false;
   failUpload = false;
+  sourceStarted = Promise.resolve();
 });
 
 describe('the saved copy of a Brick computer’s files', () => {
@@ -90,12 +92,20 @@ describe('the saved copy of a Brick computer’s files', () => {
 
   it('a bucket that fails while a big archive is still coming ends the save with an error instead of hanging', async () => {
     failUpload = true;
-    // 40 MB of a valid gzip that nobody reads: without the clean-up the stream stops on backpressure and never settles
-    const big = gzipSync(randomBytes(40 * 1024 * 1024));
+    // A valid gzip of 4 MiB that nobody reads, well past the buffers on the way (stored, not compressed, so it is made at once and the bytes
+    // are the same every run): without the clean-up the stream stops on backpressure and never settles
+    const data = Buffer.alloc(4 * 1024 * 1024);
+    for (let at = 0; at < data.length; at += 1) data[at] = (at * 31 + (at >> 8)) & 0xff;
+    const big = gzipSync(data, { level: 0 });
+    let start!: () => void;
+    sourceStarted = new Promise<void>((resolve) => (start = resolve));
     const endless = Readable.toWeb(
       Readable.from(
         (function* () {
-          for (let at = 0; at < big.length; at += 64 * 1024) yield big.subarray(at, at + 64 * 1024);
+          for (let at = 0; at < big.length; at += 64 * 1024) {
+            if (at === 0) start();
+            yield big.subarray(at, at + 64 * 1024);
+          }
         })(),
       ),
     ) as unknown as ReadableStream<Uint8Array>;
