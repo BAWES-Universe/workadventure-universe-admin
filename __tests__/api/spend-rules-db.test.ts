@@ -249,6 +249,24 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await checkSpend({ payerPersonId: omar.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: 99_000_000 }, NOW)).toEqual({ ok: true });
     });
 
+    it('reads no totals for a rule that is not about the step: another Brick’s', async () => {
+      const sara = await person('sara');
+      const second = await createBrickFor(sara.id);
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 1_000 });
+      await spend(sara.id, sara.brickId, 5_000);
+      const reads = jest.spyOn(prisma.meterEvent, 'aggregate');
+      try {
+        // Another Brick is not held to it, and nothing the rule counts is read for it
+        expect(await checkSpend({ payerPersonId: sara.id, botId: second, taskKey: null, chargeClass: 'computer', amountMicros: 1 }, NOW)).toEqual({ ok: true });
+        expect(reads).not.toHaveBeenCalled();
+        // The rule's own step does read, and is held
+        expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: 1 }, NOW)).toMatchObject({ ok: false, why: 'cap' });
+        expect(reads).toHaveBeenCalled();
+      } finally {
+        reads.mockRestore();
+      }
+    });
+
     it('a day’s cap starts again at 00:00 UTC, and a task’s cap counts that task only', async () => {
       const sara = await person('sara');
       await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'day', capMicros: 300_000 });
