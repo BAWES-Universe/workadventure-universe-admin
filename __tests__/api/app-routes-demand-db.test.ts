@@ -446,8 +446,48 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
 
     it('does not count an App that is already there', async () => {
       await list();
-      expect(await (await ask('Notion', sara)).json()).toEqual({ counted: false, reason: 'exists' });
-      expect(await (await ask('Gmail', sara)).json()).toEqual({ counted: false, reason: 'exists' });
+      // Ready-made Apps are there only while the provider is on
+      setAdapterForTests(fake());
+      try {
+        expect(await (await ask('Notion', sara)).json()).toEqual({ counted: false, reason: 'exists' });
+        expect(await (await ask('Gmail', sara)).json()).toEqual({ counted: false, reason: 'exists' });
+      } finally {
+        setAdapterForTests(undefined);
+      }
+    });
+
+    it('does not show, count or list as more an ask for an App that is there now (asked while Apps were off)', async () => {
+      await list();
+      await prisma.appAsk.deleteMany({ where: { nameKey: 'gmail' } });
+      setAdapterForTests(null);
+      try {
+        expect(await (await ask('Gmail', sara)).json()).toEqual({ counted: true });
+        expect(await (await ask(`Wished ${tag}`, sara)).json()).toEqual({ counted: true });
+        asBoss();
+        const off = await demand();
+        expect(off.asked.map((item) => item.name)).toEqual(expect.arrayContaining(['Gmail', `Wished ${tag}`]));
+        // Apps come back on: Gmail is there now, so its ask is no longer demand; the other one still is
+        setAdapterForTests(fake());
+        asBoss();
+        const on = await demand();
+        expect(on.asked.map((item) => item.name)).not.toContain('Gmail');
+        expect(on.asked.map((item) => item.name)).toContain(`Wished ${tag}`);
+        expect(on.totals.asks).toBe(off.totals.asks - 1);
+      } finally {
+        await prisma.appAsk.deleteMany({ where: { nameKey: { in: ['gmail', `wished ${tag}`] } } });
+        setAdapterForTests(undefined);
+      }
+    });
+
+    it('counts an ask for a ready-made App while Apps are off, since nothing of it can be used then', async () => {
+      await list();
+      setAdapterForTests(null);
+      try {
+        expect(await (await ask('Gmail', sara)).json()).toEqual({ counted: true });
+      } finally {
+        await prisma.appAsk.deleteMany({ where: { nameKey: 'gmail' } });
+        setAdapterForTests(undefined);
+      }
     });
 
     it('stops one person pumping a name: a daily limit per App and per person', async () => {

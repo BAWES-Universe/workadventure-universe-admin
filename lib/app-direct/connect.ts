@@ -153,6 +153,20 @@ function readDefinition(row: { definition: unknown; definitionHash: string }): D
   return parsed.data;
 }
 
+/** A reserved try lapses this long after the longest a call can take (the form's call limit), if it was never released. */
+const RESERVATION_GRACE_SECONDS = 30;
+
+/**
+ * The tries a form has used. A try reserved for a call whose outcome was never written (the database failed at that moment, or the
+ * process stopped) is used once it lapses: nobody can tell whether the service refused the key, so it is counted, never given back.
+ * That is kept in the row itself, so every instance sees it and a restart loses nothing; a failed write can never give a key a free guess.
+ * The worst case is one try lost for a call that the service did not refuse AND whose write failed.
+ */
+function usedTries(row: { tries: number; reservedTries: number; reservedAt: Date | null }, cutoff: Date): number {
+  return row.tries + (row.reservedTries > 0 && (!row.reservedAt || row.reservedAt <= cutoff) ? row.reservedTries : 0);
+}
+const lapseCutoff = (callSeconds: number) => new Date(Date.now() - (callSeconds + RESERVATION_GRACE_SECONDS) * 1000);
+
 /** What the form shows. Only the person it was opened for can read it; anyone else gets "not found". */
 export async function readKeyForm(requestId: string, ownerId: string): Promise<KeyFormView> {
   const row = await prisma.appKeyRequest.findFirst({ where: { id: requestId, ownerId } });
@@ -183,7 +197,7 @@ export async function readKeyForm(requestId: string, ownerId: string): Promise<K
     check: checkOperation ? checkOperation.label : null,
     payments: definition.payment ? { checkoutHosts: definition.payment.checkoutHosts, paidWhen: definition.payment.lookup.successStates, testAndLive: !!definition.modes } : null,
     replacing: replacing ? { keyLast4: replacing.keyLast4, mode: replacing.keyMode } : null,
-    triesLeft: Math.max(0, limits.keyTries - row.tries),
+    triesLeft: Math.max(0, limits.keyTries - usedTries(row, lapseCutoff(limits.keyCallSeconds))),
     expiresAt: row.expiresAt,
   };
 }
@@ -205,7 +219,7 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
   if (row.usedAt) throw new KeyFormError(410, 'used', 'This form was already used');
   if (row.expiresAt.getTime() <= Date.now()) throw new KeyFormError(410, 'expired', 'This form has closed');
   const limits = await getBrickLimits();
-  if (row.tries >= limits.keyTries) throw new KeyFormError(429, 'too_many', 'Too many tries');
+  if (usedTries(row, lapseCutoff(limits.keyCallSeconds)) >= limits.keyTries) throw new KeyFormError(429, 'too_many', 'Too many tries');
   // What is wrong with the key is never said: only that it is not one this form can take
   // A pasted key often carries a trailing space or line break; that is never part of it
   const typed = typeof input.key === 'string' ? input.key.trim() : input.key;
@@ -215,6 +229,37 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
 
   // Prove the key with the definition's own non-changing request. A key the service refuses costs a try.
   if (definition.check) {
+    // A try is reserved BEFORE the service is asked, in one step that also holds the limit: keys sent at the same moment cannot all pass
+    // a count that none of them has added to yet. It becomes a used try only when the service refuses the key, and is given back when it
+    // does not. A reservation that is never released (the database failed at that moment, or the process stopped) is a try whose outcome
+    // is unknown: once it lapses it is counted as used, in this same row, so it is never a free guess and every instance sees it.
+    const now = new Date();
+    const cutoff = lapseCutoff(limits.keyCallSeconds);
+    // The run of reservations this one joined (`reserved_epoch`) comes back with it: when the reserved tries of a form lapse they are folded
+    // into `tries` and the run moves on, so a call still in flight from the earlier run neither takes a try from the new run nor counts twice
+    const reserved = await prisma.$queryRaw<{ epoch: number }[]>`
+      UPDATE "app_key_requests"
+      SET "reserved_epoch" = CASE WHEN "reserved_at" > ${cutoff} THEN "reserved_epoch" ELSE "reserved_epoch" + 1 END,
+          "tries" = CASE WHEN "reserved_at" > ${cutoff} THEN "tries" ELSE "tries" + "reserved_tries" END,
+          "reserved_tries" = CASE WHEN "reserved_at" > ${cutoff} THEN "reserved_tries" + 1 ELSE 1 END, "reserved_at" = ${now}
+      WHERE "id" = ${row.id} AND "used_at" IS NULL
+        AND "tries" + "reserved_tries" < ${limits.keyTries}
+      RETURNING "reserved_epoch" AS epoch`;
+    if (reserved.length !== 1) throw new KeyFormError(429, 'too_many', 'Too many tries');
+    const epoch = reserved[0].epoch;
+    const release = async (refused: boolean) => {
+      try {
+        // Only a call of the run now held releases or counts anything: a call from an earlier run was already counted as used when it lapsed
+        await prisma.$executeRaw`
+          UPDATE "app_key_requests"
+          SET "reserved_tries" = CASE WHEN "reserved_epoch" = ${epoch} THEN GREATEST("reserved_tries" - 1, 0) ELSE "reserved_tries" END,
+              "tries" = "tries" + (CASE WHEN "reserved_epoch" = ${epoch} THEN ${refused ? 1 : 0}::int ELSE 0 END)
+          WHERE "id" = ${row.id}`;
+      } catch (error) {
+        // Nothing is kept in memory: the reservation stays in the row and counts as used once it lapses
+        console.error('[AppDirect] Could not release a form try:', error instanceof Error ? error.message : 'unknown');
+      }
+    };
     let status: number;
     try {
       const request = buildRequest(definition, definition.check.operation, definition.check.arguments, key);
@@ -223,14 +268,17 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
       if (answer.redirected) throw new KeyFormError(502, 'unreachable', 'The service did not answer as expected');
       status = answer.status;
     } catch (error) {
+      await release(false);
       if (error instanceof KeyFormError) throw error;
       if (error instanceof GuardError || error instanceof RequestError) throw new KeyFormError(502, 'unreachable', 'The service could not be reached');
       throw error;
     }
+    // The service refused it: that is what the try was for
     if (definition.check.rejected.includes(status)) {
-      await prisma.appKeyRequest.update({ where: { id: row.id }, data: { tries: { increment: 1 } } });
+      await release(true);
       throw new KeyFormError(422, 'rejected', "The service didn't accept this key");
     }
+    await release(false);
     if (status >= 500) throw new KeyFormError(502, 'unreachable', 'The service could not be reached');
   }
 

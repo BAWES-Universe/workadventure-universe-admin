@@ -32,6 +32,15 @@ import { decryptApiKey } from '@/lib/encryption';
 import { disconnect, effectiveServer, listConnections, WITH_CONNECTION } from '@/lib/app-connections';
 import { openKeyForm, readKey, readKeyForm, submitKey, KeyFormError } from '@/lib/app-direct/connect';
 import type { GuardDeps } from '@/lib/app-direct/guard';
+
+/** Waits until a condition read from the database holds (a call in flight has reached the point the test is about). */
+const waitFor = async (holds: () => Promise<boolean>) => {
+  for (let i = 0; i < 200; i++) {
+    if (await holds()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('The condition never held');
+};
 import { GET as listServices } from '@/app/api/me/apps/key-services/route';
 import { POST as openForm } from '@/app/api/me/apps/key-forms/route';
 import { GET as readForm } from '@/app/api/me/apps/key-forms/[formId]/route';
@@ -181,6 +190,78 @@ run('key apps, in a real database', () => {
     await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, { resolve: async () => [{ address: '93.184.216.34', family: 4 }], send: async () => ({ status: 302, redirected: true, body: '', truncated: false, contentType: null }) })).rejects.toMatchObject({ status: 502, code: 'unreachable' });
     await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(503).deps)).rejects.toMatchObject({ status: 502 });
     expect((await readKeyForm(id, sara)).triesLeft).toBe(5);
+  });
+
+  it.each([
+    ['the service refused the key', 401, 'rejected'],
+    ['the service could not be reached', 503, 'unreachable'],
+  ])('a try whose outcome the database could not write (%s) counts as used once it lapses, so a failed write never gives a key a free guess', async (_label, status, _code) => {
+    const id = await open();
+    await prisma.appKeyRequest.update({ where: { id }, data: { tries: 4 } });
+    const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const original = prisma.$executeRaw.bind(prisma);
+    // Every release fails (the database is gone at that moment); the reservation before it is a separate query and works
+    const spy = jest.spyOn(prisma, '$executeRaw').mockImplementation(((...args: unknown[]) => Promise.reject(new Error('connection lost'))) as never);
+    try {
+      await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(status).deps)).rejects.toMatchObject({ status: status === 401 ? 422 : 502 });
+    } finally {
+      spy.mockRestore();
+      quiet.mockRestore();
+    }
+    expect(await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true, reservedTries: true } })).toEqual({ tries: 4, reservedTries: 1 });
+    // While the reservation could still be a call in flight, the last try is not given to a second one
+    const quietService = service(404);
+    await expect(submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, quietService.deps)).rejects.toMatchObject({ status: 429, code: 'too_many' });
+    // After the longest a call can take it has lapsed: nobody can tell whether the service refused the key, so the try is used, in the row
+    // itself (nothing lives in this process), and the form shows and keeps it
+    await prisma.appKeyRequest.update({ where: { id }, data: { reservedAt: new Date(Date.now() - 10 * 60_000) } });
+    expect((await readKeyForm(id, sara)).triesLeft).toBe(0);
+    await expect(submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, quietService.deps)).rejects.toMatchObject({ status: 429, code: 'too_many' });
+    expect(quietService.seen).toHaveLength(0);
+  });
+
+  it('counts the lapsed tries of a form once, however many calls reserve at the same moment, and a late call from that run counts nothing more', async () => {
+    const id = await open();
+    await prisma.appKeyRequest.update({ where: { id }, data: { tries: 1, reservedTries: 1, reservedAt: new Date(Date.now() - 10 * 60_000) } });
+    await Promise.all([1, 2, 3].map(() => submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(503).deps).catch(() => null)));
+    // The one lapsed try is used once (1 + 1), and every call released its own reservation
+    expect(await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true, reservedTries: true } })).toEqual({ tries: 2, reservedTries: 0 });
+  });
+
+  it('a call still in flight from before its reservation lapsed takes no try away from the call in flight now, but its refusal still counts', async () => {
+    const id = await open();
+    await prisma.appKeyRequest.update({ where: { id }, data: { tries: 1 } });
+    // The first call is asked and waits in the service; the second call (after the reservation lapsed) is reserved in the next run; then the first call ends
+    let finishFirst: (answer: { status: number; redirected: boolean; body: string; truncated: boolean; contentType: null }) => void = () => undefined;
+    const slow = {
+      resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+      send: () => new Promise<{ status: number; redirected: boolean; body: string; truncated: boolean; contentType: null }>((resolve) => (finishFirst = resolve)),
+    };
+    const first = submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow as never);
+    await waitFor(async () => (await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { reservedTries: true } })).reservedTries === 1);
+    const start = await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { reservedEpoch: true } });
+    // The reservation lapses (the call has taken longer than the longest a call can take)
+    await prisma.appKeyRequest.update({ where: { id }, data: { reservedAt: new Date(Date.now() - 10 * 60_000) } });
+    let finishSecond: (answer: { status: number; redirected: boolean; body: string; truncated: boolean; contentType: null }) => void = () => undefined;
+    const second = submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, { resolve: slow.resolve, send: () => new Promise((resolve) => (finishSecond = resolve)) } as never);
+    await waitFor(async () => (await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { reservedEpoch: true } })).reservedEpoch === start.reservedEpoch + 1);
+    expect((await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { reservedTries: true } })).reservedTries).toBe(1);
+    // The first call ends, with a refusal: its try was counted as used when its reservation lapsed, so it counts nothing more, and it releases nothing that belongs to the second call
+    finishFirst({ status: 401, redirected: false, body: '', truncated: false, contentType: null });
+    await expect(first).rejects.toMatchObject({ code: 'rejected' });
+    expect(await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true, reservedTries: true } })).toEqual({ tries: 2, reservedTries: 1 });
+    // The second ends: its own reservation is released
+    finishSecond({ status: 503, redirected: false, body: '', truncated: false, contentType: null });
+    await expect(second).rejects.toMatchObject({ status: 502 });
+    expect(await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true, reservedTries: true } })).toEqual({ tries: 2, reservedTries: 0 });
+  });
+
+  it('counts a try only when the service refuses the key: a refusal uses one, an answer that is not a refusal uses none', async () => {
+    const id = await open();
+    await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(401).deps)).rejects.toMatchObject({ code: 'rejected' });
+    expect(await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true, reservedTries: true } })).toEqual({ tries: 1, reservedTries: 0 });
+    await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(503).deps)).rejects.toMatchObject({ status: 502 });
+    expect(await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true, reservedTries: true } })).toEqual({ tries: 1, reservedTries: 0 });
   });
 
   it('closes a form after its time, and a form can be used once, also when two keys arrive at the same moment', async () => {
@@ -362,6 +443,29 @@ run('key apps, in a real database', () => {
         mockSend.current = null;
       }
     });
+  });
+
+  it('takes the try before the service is asked, so keys sent at the same moment cannot get past the limit together', async () => {
+    try {
+      await saveServerLimits({ bricks: { keyFormMinutes: 5, keyTries: 2 } }, sara);
+      const id = await open();
+      let asked = 0;
+      const slow: GuardDeps = {
+        resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+        send: async () => {
+          asked += 1;
+          // Every look is still on its way while the others start: none has added to the count yet
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return { status: 401, redirected: false, body: '{}', truncated: false, contentType: 'application/json' };
+        },
+      };
+      const results = await Promise.allSettled(Array.from({ length: 6 }, () => submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow)));
+      expect(asked).toBe(2);
+      expect(results.filter((r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'rejected')).toHaveLength(2);
+      expect(results.filter((r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'too_many')).toHaveLength(4);
+    } finally {
+      await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
+    }
   });
 
   it('keeps the form time and tries as Limits settings, not numbers in the code', async () => {

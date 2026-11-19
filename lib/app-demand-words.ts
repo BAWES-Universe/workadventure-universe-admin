@@ -22,7 +22,8 @@ export function failedWords(app: Pick<AppRow, 'ended' | 'failed'>): string | nul
 
 /** "$118.40 to us · 4% failed". An App with no priced run says so instead of "$0.00". */
 export function costLine(app: Pick<AppRow, 'costMicros' | 'unpriced' | 'ended' | 'failed' | 'uses'>): string[] {
-  const cost = app.costMicros === null ? (app.uses > 0 ? 'No price yet' : 'Not used yet') : `${dollars(app.costMicros)} to us`;
+  // A total that leaves some runs out says so, the same as the sheet does: it is never shown as the whole cost
+  const cost = app.costMicros === null ? (app.uses > 0 ? 'No price yet' : 'Not used yet') : app.unpriced > 0 ? `${dollars(app.costMicros)} to us so far` : `${dollars(app.costMicros)} to us`;
   return [cost, failedWords(app)].filter((part): part is string => !!part);
 }
 

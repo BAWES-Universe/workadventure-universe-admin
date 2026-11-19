@@ -80,6 +80,11 @@ describe('what the agent says while it works', () => {
     await expect(all(bodyOf('event: response.output_text.delta\n', line))).rejects.toThrow('too long');
   });
 
+  it('refuses an unfinished last line that is too long when the stream ends on it, after complete lines in the same chunk', async () => {
+    const tail = `data: ${'x'.repeat(1024 * 1024 + 10)}`;
+    await expect(all(bodyOf(`event: response.output_text.delta\n${tail}`))).rejects.toThrow('too long');
+  });
+
   it('refuses a frame of endless empty data lines', async () => {
     const lines = 'data:\n'.repeat(1024 * 1024);
     const parts: string[] = ['event: response.output_text.delta\n'];
