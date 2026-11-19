@@ -645,26 +645,6 @@ describe('a paying page on the public share link', () => {
     host.destroy();
   });
 
-  it('without Web Locks, two tabs that wrote their own first code at the same moment end up with the one the storage holds', async () => {
-    const shared = new Map<string, string>();
-    const key = `universe-pay-recovery:${ART}`;
-    // Tab two never sees tab one's write before it has written its own: it read the storage while it was still empty, and its write comes last
-    let wrote = false;
-    const staleView = { get: (name: string) => (wrote ? shared.get(name) : undefined), set: (name: string, value: string) => { wrote = true; shared.set(name, value); } } as unknown as Map<string, string>;
-    const one = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, shared, false, 'a');
-    const two = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, staleView, false, 'b');
-    one.tap({ request: 'r1', restore: true });
-    two.tap({ request: 'r1', restore: true });
-    await jest.advanceTimersByTimeAsync(400);
-    const codeOne = one.calls[0].body.recoveryCode;
-    const codeTwo = two.calls[0].body.recoveryCode;
-    expect(codeOne).toBeDefined();
-    expect(codeOne).toBe(codeTwo);
-    expect(shared.get(key)).toBe(codeOne);
-    one.host.destroy();
-    two.host.destroy();
-  });
-
   it('without Web Locks, a tab that is slow to write its first code can never replace the code another tab has bought under: IndexedDB decides', async () => {
     const shared = new Map<string, string>();
     const key = `universe-pay-recovery:${ART}`;
@@ -686,13 +666,76 @@ describe('a paying page on the public share link', () => {
     two.host.destroy();
   });
 
-  it('without Web Locks and without IndexedDB, falls back to settling through the storage', async () => {
+  it('with nothing that can make tabs take turns, writes no code to the shared storage: a slow tab can never replace the code another tab bought under, and each tab’s receipt link is its own', async () => {
     const shared = new Map<string, string>();
+    const key = `universe-pay-recovery:${ART}`;
+    let wrote = false;
+    const staleView = { get: (name: string) => (wrote ? shared.get(name) : undefined), set: (name: string, value: string) => { wrote = true; shared.set(name, value); } } as unknown as Map<string, string>;
+    const answer = (call: Call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false, buyer: 'guest' } });
+    const one = setup(answer, true, shared, false, 'a', null);
+    one.tap({ request: 'r1' });
+    await jest.advanceTimersByTimeAsync(5_000);
+    const two = setup(answer, true, staleView, false, 'b', null);
+    two.tap({ request: 'r1' });
+    await jest.advanceTimersByTimeAsync(5_000);
+    const codeOne = one.calls[0].body.recoveryCode;
+    const codeTwo = two.calls[0].body.recoveryCode;
+    expect(codeOne).toBeDefined();
+    expect(codeTwo).toBeDefined();
+    // Each tab bought under its own code, and the storage was never written to: neither can be replaced
+    expect(codeOne).not.toBe(codeTwo);
+    expect(shared.has(key)).toBe(false);
+    expect(one.lines.at(-1)?.receipt).toBe(`${PAGE}#receipt=${codeOne}`);
+    expect(two.lines.at(-1)?.receipt).toBe(`${PAGE}#receipt=${codeTwo}`);
+    one.host.destroy();
+    two.host.destroy();
+  });
+
+  it('uses the code a tab kept even with no way to take turns, and a failed IndexedDB claim writes nothing', async () => {
+    const key = `universe-pay-recovery:${ART}`;
+    const kept = 'k'.repeat(43);
+    const shared = new Map<string, string>([[key, kept]]);
     const one = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, shared, false, 'a', null);
     one.tap({ request: 'r1', restore: true });
-    await jest.advanceTimersByTimeAsync(400);
-    expect(one.calls[0].body.recoveryCode).toBe(shared.get(`universe-pay-recovery:${ART}`));
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(one.calls[0].body.recoveryCode).toBe(kept);
     one.host.destroy();
+    // An IndexedDB that refuses the open: nothing is written either
+    const refusing = { open: () => { const request = {} as { onerror?: () => void }; void Promise.resolve().then(() => request.onerror?.()); return request; } } as unknown as Pick<IDBFactory, 'open'>;
+    const empty = new Map<string, string>();
+    const two = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, empty, false, 'c', refusing);
+    two.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(two.calls[0].body.recoveryCode).toBeDefined();
+    expect(empty.has(key)).toBe(false);
+    two.host.destroy();
+  });
+
+  it('when taking the Web Locks turn fails, never falls back to an uncoordinated write: IndexedDB decides, and with none the code stays in the page', async () => {
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: { request: () => Promise.reject(new Error('refused')) } } });
+    const key = `universe-pay-recovery:${ART}`;
+    const shared = new Map<string, string>();
+    const idb = fakeIndexedDB();
+    const one = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, shared, true, 'a', idb);
+    one.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(1_000);
+    const claimed = one.calls[0].body.recoveryCode;
+    expect(shared.get(key)).toBe(claimed);
+    one.host.destroy();
+    // Another tab, whose own storage view is empty and whose locks also refuse, gets the claimed code from IndexedDB
+    const two = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, new Map(), true, 'b', idb);
+    two.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(two.calls[0].body.recoveryCode).toBe(claimed);
+    two.host.destroy();
+    // And with no IndexedDB, nothing is written
+    const bare = new Map<string, string>();
+    const three = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, bare, true, 'd', null);
+    three.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(three.calls[0].body.recoveryCode).toBeDefined();
+    expect(bare.has(key)).toBe(false);
+    three.host.destroy();
   });
 
   it('does not stay busy for ever when another tab holds the recovery code lock: the 30 s deadline covers the wait too', async () => {

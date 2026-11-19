@@ -165,7 +165,6 @@ const defaultRandom = (length: number): string => {
 };
 
 /** How long a browser without Web Locks waits, after writing its first code, before reading back which code the storage holds. */
-const SETTLE_MS = 150;
 const waitFor = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 /** The promise's answer, or a rejection as soon as the signal aborts (whichever comes first). */
 function untilAborted<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -287,7 +286,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
    * Settles this browser's code before anything is sent with it. Two tabs that both find the storage empty would each make a code and the last
    * write would win, leaving the other tab buying under a code that is no longer kept: so the making is serialised across tabs (Web Locks,
    * where the browser has them) and the storage is read again inside the lock, so every tab ends up with the one that was written first. A
-   * browser without locks claims the first code in IndexedDB (atomic across tabs); one with neither writes, waits a moment, then reads back what the storage holds and uses that.
+   * browser without locks claims the first code in IndexedDB (atomic across tabs); one with neither keeps a code of its own in the page only, never in the shared storage, and its receipt link is the way back.
    */
   const settleCode = (): Promise<string> => {
     if (memoryCode) return Promise.resolve(memoryCode);
@@ -297,17 +296,19 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         try {
           return await locks.request(storageKey, () => recoveryCode());
         } catch {
-          return recoveryCode();
+          // The lock could not be taken: no turn was taken, so the code is settled the next way (never by an uncoordinated write)
         }
       }
-      // No locks: a code kept is used as it is. When none is kept, the first code is claimed in IndexedDB, whose transaction (read, and write only
-      // if empty) is atomic across tabs, so a tab that is slow to write can never replace the code another tab has already bought under
+      // A code already kept is used as it is
       try {
         const existing = options.storage?.getItem(storageKey);
         if (existing && RECOVERY_CODE.test(existing)) return (memoryCode = existing);
       } catch {
-        return recoveryCode();
+        // Storage that refuses keeps nothing: the code lives in this page
+        return (memoryCode = random(43));
       }
+      // None is kept: the first code is claimed in IndexedDB, whose transaction (read, and write only if empty) is atomic across tabs, so a tab
+      // that is slow to write can never replace the code another tab has already bought under
       const claimed = await claimFirstCode(random(43));
       if (claimed) {
         memoryCode = claimed;
@@ -318,19 +319,10 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         }
         return claimed;
       }
-      // Neither Web Locks nor IndexedDB: nothing in this browser can make tabs take turns, so this is the best that can be done. Each tab writes
-      // its own, waits a moment (long enough for another tab that read the empty storage at the same time to have written) and uses what the
-      // storage holds then
-      const made = recoveryCode();
-      if (!options.storage) return made;
-      await waitFor(SETTLE_MS);
-      try {
-        const kept = options.storage.getItem(storageKey);
-        if (kept && RECOVERY_CODE.test(kept)) memoryCode = kept;
-      } catch {
-        // Keeps the one made
-      }
-      return memoryCode ?? made;
+      // Nothing in this browser can make tabs take turns (no Web Locks, and IndexedDB is missing, blocked or failed). Writing a code to the shared
+      // storage could then replace the one another tab has already bought under, so none is written: this page's code lives in this page, and its
+      // receipt link (offered after a payment) is how the purchase is found again from there
+      return (memoryCode = random(43));
     })();
     return codeReady;
   };
