@@ -155,7 +155,9 @@ run('goal and task cards, in a real database', () => {
 
     const gone = await goalOf(sara, { words: 'Two' });
     const approved = await createRequest(sara.brickId, card(sara, gone.id), NOW);
-    await decide(sara.brickId, approved.action.id, { actorKey: sara.uuid, revision: approved.action.revision, decision: 'approve' }, at(MINUTE));
+    // The card is approved first, so deleting the goal is shown to end an approved card and not only a waiting one
+    const decided = await decide(sara.brickId, approved.action.id, { actorKey: sara.uuid, revision: approved.action.revision, decision: 'approve' }, at(MINUTE));
+    expect(decided.action.status).toBe('approved');
     await changeItem(sara.brickId, gone.id, { userId: sara.uuid, action: 'delete' }, at(2 * MINUTE));
     expect(await cardsOf(gone.id)).toEqual(['closed:cancelled']);
 
