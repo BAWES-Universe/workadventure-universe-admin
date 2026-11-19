@@ -166,6 +166,17 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await proposeRule({ botId: sara.brickId, speakerId: omar.id, sayingKey: 'shared-id', scope: 'person', period: 'day', capMicros: 2_000_000 })).toMatchObject({ ok: true, created: false, rule: { words: expect.stringContaining('$2.00 a day') } });
     });
 
+    it('a message id is a replay only of what that message said, even after the rule was corrected', async () => {
+      const sara = await person('sara');
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'edited-id', scope: 'person', period: 'month', capMicros: 1_000_000 });
+      if (!made.ok) throw new Error('not made');
+      expect((await changeRule(made.rule.id, sara.id, { capMicros: 3_000_000 })).ok).toBe(true);
+      // Another proposal under the same id is not that message: nothing is saved and nothing shown
+      expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'edited-id', scope: 'person', period: 'month', capMicros: 50_000_000 })).toEqual({ ok: false, reason: 'key_reused' });
+      // The same message again still finds its rule, as it stands now
+      expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'edited-id', scope: 'person', period: 'month', capMicros: 1_000_000 })).toMatchObject({ ok: true, created: false });
+    });
+
     it('asks one short question when it is not clear, saves nothing, and saves when it is answered', async () => {
       const sara = await person('sara');
       const asked = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'm2', scope: 'bot', capMicros: 1_000_000 });

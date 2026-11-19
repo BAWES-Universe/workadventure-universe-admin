@@ -108,6 +108,11 @@ export function chatRuleKey(botId: string, speakerId: string, sayingKey: string)
   return whole.length <= 255 ? whole : `chat:${botId}:${speakerId}:sha256:${createHash('sha256').update(sayingKey).digest('hex')}`.slice(0, 255);
 }
 
+/** What a message proposed, normalized: the same words give the same hash, a different amount, period or reach another. */
+export function fingerprintOf(draft: RuleDraft): string {
+  return createHash('sha256').update(JSON.stringify([draft.scope, draft.botId, draft.taskKey, draft.period, draft.capMicros, draft.onlyOwnAccounts, draft.covers])).digest('hex');
+}
+
 export type Proposed =
   | { ok: true; rule: RuleCard; created: boolean }
   | { ok: false; reason: 'invalid'; error: string }
@@ -122,6 +127,8 @@ export type Proposed =
  */
 function isReplayOf(row: Prisma.SpendRuleGetPayload<object>, draft: RuleDraft, ownerPersonId: string): boolean {
   if (row.ownerPersonId !== ownerPersonId) return false;
+  // Against what the message first said, however the rule was corrected after: the same id with another amount is another message
+  if (row.proposalFingerprint) return row.proposalFingerprint === fingerprintOf(draft);
   if (row.version > 1) return true;
   return (
     row.scope === draft.scope &&
@@ -159,6 +166,7 @@ export async function proposeRule(input: DraftInput & { speakerId: string; sayin
     const row = await prisma.spendRule.create({
       data: {
         ruleKey: ruleKey ?? `chat:${input.botId}:${randomUUID()}`,
+        proposalFingerprint: fingerprintOf(draft),
         ownerPersonId: owner.ownerPersonId,
         scope: draft.scope,
         botId: draft.botId,

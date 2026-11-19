@@ -2116,6 +2116,9 @@ model SpendRule {
   // The plain sentence shown back to the person
   words           String    @db.VarChar(300)
   version         Int       @default(1)
+  // What the message that made it said (a hash of its normalized draft): a later edit never changes it, so the same message again
+  // is told apart from a different one however the rule has been corrected since. Empty for a rule made before it was kept.
+  proposalFingerprint String? @map("proposal_fingerprint") @db.VarChar(64)
   // active or ended
   state           String    @default("active") @db.VarChar(6)
   createdById     String    @map("created_by_id")
