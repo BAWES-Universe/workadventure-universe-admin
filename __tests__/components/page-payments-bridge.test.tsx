@@ -30,7 +30,7 @@ function mount(hash: string, answer: Record<string, unknown> | ((method: string)
   render(<PagePaymentsBridge artifactId="art-1" />);
   const ask = async (data: Record<string, unknown>) => {
     await act(async () => {
-      window.dispatchEvent(new MessageEvent('message', { data: { universe: 'use-app', app: 'shop', ...data }, source: frameWindow as unknown as Window }));
+      window.dispatchEvent(new MessageEvent('message', { data: { universe: 'use-app', app: 'shop', session: 's1', ...data }, source: frameWindow as unknown as Window }));
     });
   };
   return { ask, bodies, frameWindow, iframe };

@@ -48,13 +48,8 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
     const unsubscribe = made.subscribe(setLine);
     const onMessage = (event: MessageEvent) => made.onMessage(event);
     window.addEventListener('message', onMessage);
-    // A reload or another version of the page is another opening: what an earlier one asked is never told to it
-    const element = frame();
-    const onLoad = () => made.frameLoaded();
-    element?.addEventListener('load', onLoad);
     return () => {
       window.removeEventListener('message', onMessage);
-      element?.removeEventListener('load', onLoad);
       unsubscribe();
       made.destroy();
       host.current = null;

@@ -44,7 +44,8 @@ function setup(answers: (call: Call) => { status?: number; body: Record<string, 
   const lines: PayLine[] = [];
   host.subscribe((line) => lines.push(line));
   const told = () => (frame.postMessage as jest.Mock).mock.calls.map((call) => call[0]);
-  const tap = (data: Record<string, unknown>, source: unknown = frame) => host.onMessage({ source, data: { universe: 'use-app', app: 'shop', ...data } });
+  // Every message of a page carries its request id and the session its document gave itself (one document unless a test says otherwise)
+  const tap = (data: Record<string, unknown>, source: unknown = frame) => host.onMessage({ source, data: { universe: 'use-app', app: 'shop', session: 's1', ...data } });
   return { host, frame, calls, lines, told, tap, popup, store, fetchMock };
 }
 
@@ -103,11 +104,11 @@ describe('a paying page on the public share link', () => {
     expect(calls[0].body.intentId).toMatch(/^[A-Za-z0-9_-]{8,64}$/);
     expect(calls[0].body.recoveryCode).toMatch(/^[A-Za-z0-9_-]{32,128}$/);
     expect(popup.location.href).toBe(started.checkoutUrl);
-    expect(told()).toEqual([{ universe: 'app-result', status: 'started', request: 'req_1' }]);
+    expect(told()).toEqual([{ universe: 'app-result', session: 's1', status: 'started', request: 'req_1' }]);
     await jest.advanceTimersByTimeAsync(3_000);
     expect(told()).toEqual([
-      { universe: 'app-result', status: 'started', request: 'req_1' },
-      { universe: 'app-result', status: 'paid', request: 'req_1' },
+      { universe: 'app-result', session: 's1', status: 'started', request: 'req_1' },
+      { universe: 'app-result', session: 's1', status: 'paid', request: 'req_1' },
     ]);
     host.destroy();
   });
@@ -117,7 +118,7 @@ describe('a paying page on the public share link', () => {
     test.tap({ request: 'req_1' });
     await flush();
     await jest.advanceTimersByTimeAsync(3_000);
-    expect(test.told().at(-1)).toEqual({ universe: 'app-result', status: 'paid', request: 'req_1', test: true });
+    expect(test.told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'paid', request: 'req_1', test: true });
     expect(test.lines.at(-1)?.paid).toEqual({ test: true });
     test.host.destroy();
   });
@@ -150,64 +151,41 @@ describe('a paying page on the public share link', () => {
     await flush();
     expect(calls.filter((call) => call.init?.method === 'POST')).toHaveLength(1);
     expect(told()).toEqual([
-      { universe: 'app-result', status: 'busy', request: 'b' },
-      { universe: 'app-result', status: 'started', request: 'a' },
+      { universe: 'app-result', session: 's1', status: 'busy', request: 'b' },
+      { universe: 'app-result', session: 's1', status: 'started', request: 'a' },
     ]);
     host.destroy();
   });
 
-  it('gives the same request id from a new opening a truthful busy, never silence, and tells the old result to nobody', async () => {
-    const { tap, told, host } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
-    tap({ request: 'a' });
+  it('tells a page that asks to restore as its scripts run: the request and its session are echoed', async () => {
+    const { tap, told, host } = setup(() => ({ body: { status: 'paid', testPayment: false, orderId: 'o-1' } }));
+    tap({ request: 'r1', restore: true, session: 's-one' });
     await flush();
-    // The page was open and the buyer was paying for a while before it reloaded
-    await jest.advanceTimersByTimeAsync(2_500);
-    host.frameLoaded();
-    tap({ request: 'a' });
-    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'busy', request: 'a' });
-    // The checkout of the earlier opening ends: its page is gone, so no status is sent to the one that is there
+    expect(told()).toEqual([{ universe: 'app-result', status: 'paid', request: 'r1', session: 's-one' }]);
+    host.destroy();
+  });
+
+  it('gives a second document the same request id a truthful busy under its own session, and tells the first one’s result to nobody', async () => {
+    const { tap, told, host, lines } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
+    tap({ request: 'a', session: 's-one' });
+    await flush();
+    await jest.advanceTimersByTimeAsync(500);
+    // Document B (a reload, or another version) with a session of its own and the same request id
+    tap({ request: 'a', session: 's-two' });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'busy', request: 'a', session: 's-two' });
     const before = told().length;
     await jest.advanceTimersByTimeAsync(3_000);
+    // A's payment was found, and nobody that is there now is told
+    expect(lines.at(-1)?.paid).toEqual({ test: false });
     expect(told()).toHaveLength(before);
     host.destroy();
   });
 
-  it('tells a page that asked while it was still loading, before its frame’s load event: its first request is its own', async () => {
-    const { tap, told, host } = setup((call) => ({ body: call.body.restore ? { status: 'paid', testPayment: false, orderId: 'o-1' } : started }));
-    // A page's scripts run, and may ask to restore, before the frame says it has loaded
-    tap({ request: 'r1', restore: true });
-    host.frameLoaded();
-    await flush();
-    expect(told()).toEqual([{ universe: 'app-result', status: 'paid', request: 'r1' }]);
-    host.destroy();
-  });
-
-  it('never moves a checkout to the document that is loading: a start made just before a load is told to nobody that is there now', async () => {
-    // Document A starts a checkout (a person tapped), and document B loads in the same frame half a second later: B is not told A's result
-    const early = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
-    early.tap({ request: 'a' });
-    await flush();
-    await jest.advanceTimersByTimeAsync(500);
-    early.host.frameLoaded();
-    // B asks for a payment of its own with the same id while A's is still open: busy, under its own id
-    early.tap({ request: 'a' });
-    expect(early.told().at(-1)).toEqual({ universe: 'app-result', status: 'busy', request: 'a' });
-    await jest.advanceTimersByTimeAsync(3_000);
-    // A's payment was found, and nobody that is there now is told
-    expect(early.lines.at(-1)?.paid).toEqual({ test: false });
-    expect(early.told()).toEqual([
-      { universe: 'app-result', status: 'started', request: 'a' },
-      { universe: 'app-result', status: 'busy', request: 'a' },
-    ]);
-    early.host.destroy();
-  });
-
-  it('binds a request that carries its document’s session to that document: it is told even when the frame loads meanwhile, with the session echoed', async () => {
+  it('answers the document that asked, and no other: the same document tapping again is the same request', async () => {
     const { tap, told, host } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
-    // The page was tapped before its frame's load event: the load does not take its checkout away
+    tap({ request: 'a', session: 's-one' });
     tap({ request: 'a', session: 's-one' });
     await flush();
-    host.frameLoaded();
     await jest.advanceTimersByTimeAsync(3_000);
     expect(told()).toEqual([
       { universe: 'app-result', status: 'started', request: 'a', session: 's-one' },
@@ -216,27 +194,18 @@ describe('a paying page on the public share link', () => {
     host.destroy();
   });
 
-  it('never tells a checkout to a document that has spoken since with another session, and tells it busy under its own session', async () => {
-    const { tap, told, host } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
-    tap({ request: 'a', session: 's-one' });
+  it('never answers or starts anything for a request without a valid session (or request id): the line says the page needs an update', async () => {
+    const { host, frame, calls, told, lines } = setup(() => ({ body: started }));
+    const send = (data: Record<string, unknown>) => host.onMessage({ source: frame, data: { universe: 'use-app', app: 'shop', ...data } });
+    send({ request: 'a' });
+    send({ request: 'a', session: 'bad session!' });
+    send({ request: 'a', session: '' });
+    send({ session: 's1' });
+    send({ request: 'a', session: 's1'.repeat(40) });
     await flush();
-    await jest.advanceTimersByTimeAsync(500);
-    host.frameLoaded();
-    // Document B, with a session of its own and the same request id
-    tap({ request: 'a', session: 's-two' });
-    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'busy', request: 'a', session: 's-two' });
-    await jest.advanceTimersByTimeAsync(3_000);
-    // A's payment ended, and B is told nothing of it
-    expect(told()).toHaveLength(2);
-    host.destroy();
-  });
-
-  it('binds a restore with a session too: it is not moved at a load, and is told with its session', async () => {
-    const { tap, told, host } = setup(() => ({ body: { status: 'paid', testPayment: false, orderId: 'o-1' } }));
-    tap({ request: 'r1', restore: true, session: 's-one' });
-    host.frameLoaded();
-    await flush();
-    expect(told()).toEqual([{ universe: 'app-result', status: 'paid', request: 'r1', session: 's-one' }]);
+    expect(calls).toHaveLength(0);
+    expect(told()).toEqual([]);
+    expect(lines.at(-1)).toMatchObject({ needsUpdate: true, canCheck: true, checking: false });
     host.destroy();
   });
 
@@ -263,7 +232,7 @@ describe('a paying page on the public share link', () => {
     const starts = calls.filter((call) => call.init?.method === 'POST');
     expect(starts).toHaveLength(2);
     expect(starts[1].body.intentId).toBe(starts[0].body.intentId);
-    expect(told()).toEqual([{ universe: 'app-result', status: 'started', request: 'a' }]);
+    expect(told()).toEqual([{ universe: 'app-result', session: 's1', status: 'started', request: 'a' }]);
     host.destroy();
   });
 
@@ -271,7 +240,7 @@ describe('a paying page on the public share link', () => {
     const { tap, calls, told, lines, host } = setup((call) => (call.body.check ? { body: { status: 'paid', testPayment: false, orderId: 'o-1' } } : 'lost'));
     tap({ request: 'a' });
     await jest.advanceTimersByTimeAsync(10_000);
-    expect(told()).toEqual([{ universe: 'app-result', status: 'unavailable', request: 'a' }]);
+    expect(told()).toEqual([{ universe: 'app-result', session: 's1', status: 'unavailable', request: 'a' }]);
     expect(lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: true });
     const wish = calls[0].body.intentId;
     expect(calls.every((call) => call.body.intentId === wish)).toBe(true);
@@ -279,15 +248,17 @@ describe('a paying page on the public share link', () => {
     await flush();
     expect(calls.at(-1)?.body).toMatchObject({ check: true, intentId: wish });
     // Found: the page that asked, in the opening it asked in, hears it under its own request
-    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'paid', request: 'a' });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'paid', request: 'a' });
     host.destroy();
   });
 
-  it('does not tell a payment found later to a page of another opening', async () => {
-    const { tap, told, host, lines } = setup((call) => (call.body.check ? { body: { status: 'paid', testPayment: false } } : 'lost'));
-    tap({ request: 'a' });
+  it('does not tell a payment found later to a document that has spoken since', async () => {
+    const { tap, told, host, lines } = setup((call) => (call.body.check ? { body: { status: 'paid', testPayment: false } } : call.body.restore ? { body: { status: 'none', testPayment: false } } : 'lost'));
+    tap({ request: 'a', session: 's-one' });
     await jest.advanceTimersByTimeAsync(10_000);
-    host.frameLoaded();
+    // Another document speaks (a reload that asks to restore)
+    tap({ request: 'b', restore: true, session: 's-two' });
+    await flush();
     const before = told().length;
     host.checkPayment();
     await flush();
@@ -302,7 +273,7 @@ describe('a paying page on the public share link', () => {
     await flush();
     expect(calls[0].body).toMatchObject({ restore: true });
     expect(calls[0].body.intentId).toBeUndefined();
-    expect(told()).toEqual([{ universe: 'app-result', status: 'paid', request: 'r1', test: true }]);
+    expect(told()).toEqual([{ universe: 'app-result', session: 's1', status: 'paid', request: 'r1', test: true }]);
     host.destroy();
   });
 
@@ -310,14 +281,14 @@ describe('a paying page on the public share link', () => {
     const none = setup(() => ({ body: { status: 'none', testPayment: false, orderId: null } }));
     none.tap({ request: 'r1', restore: true });
     await flush();
-    expect(none.told()).toEqual([{ universe: 'app-result', status: 'none', request: 'r1' }]);
+    expect(none.told()).toEqual([{ universe: 'app-result', session: 's1', status: 'none', request: 'r1' }]);
     none.host.destroy();
     const open = setup((call) => (call.body.restore ? { body: { status: 'checking', orderId: 'o-2' } } : { body: { status: 'paid', testPayment: false } }));
     open.tap({ request: 'r2', restore: true });
     await flush();
     expect(open.told()).toEqual([]);
     await jest.advanceTimersByTimeAsync(3_000);
-    expect(open.told()).toEqual([{ universe: 'app-result', status: 'paid', request: 'r2' }]);
+    expect(open.told()).toEqual([{ universe: 'app-result', session: 's1', status: 'paid', request: 'r2' }]);
     open.host.destroy();
     const link = setup((call) => (call.body.restore ? { body: { status: 'checking', orderId: 'o-3', checkoutUrl: started.checkoutUrl } } : { body: { status: 'checking' } }));
     link.tap({ request: 'r3', restore: true });
@@ -358,7 +329,7 @@ describe('a paying page on the public share link', () => {
     tap({ request: 'a' });
     await flush();
     await jest.advanceTimersByTimeAsync(20 * 60_000 + 100);
-    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'cant_confirm', request: 'a' });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'cant_confirm', request: 'a' });
     expect(lines.at(-1)).toMatchObject({ problem: 'cant_confirm', canCheck: true, checking: false });
     host.destroy();
   });
@@ -419,9 +390,9 @@ describe('a paying page on the public share link', () => {
       randomId: (length) => `${'q'.repeat(length - String(++n).length)}${n}`,
       pageUrl: PAGE,
     });
-    host.onMessage({ source: frame, data: { universe: 'use-app', app: 'shop', request: 'r1', restore: true } });
+    host.onMessage({ source: frame, data: { universe: 'use-app', app: 'shop', request: 'r1', session: 's1', restore: true } });
     await flush();
-    host.onMessage({ source: frame, data: { universe: 'use-app', app: 'shop', request: 'r2', restore: true } });
+    host.onMessage({ source: frame, data: { universe: 'use-app', app: 'shop', request: 'r2', session: 's1', restore: true } });
     await flush();
     expect(bodies).toHaveLength(2);
     expect(bodies[1].recoveryCode).toBe(bodies[0].recoveryCode);
@@ -440,12 +411,12 @@ describe('a paying page on the public share link', () => {
     const limit = setup(() => ({ status: 429, body: { code: 'limit' } }));
     limit.tap({ request: 'a' });
     await flush();
-    expect(limit.told()).toEqual([{ universe: 'app-result', status: 'limit', request: 'a' }]);
+    expect(limit.told()).toEqual([{ universe: 'app-result', session: 's1', status: 'limit', request: 'a' }]);
     limit.host.destroy();
     const bad = setup(() => ({ body: { ...started, checkoutUrl: 'http://checkout.examplepay.com/x' } }));
     bad.tap({ request: 'a' });
     await flush();
-    expect(bad.told()).toEqual([{ universe: 'app-result', status: 'unavailable', request: 'a' }]);
+    expect(bad.told()).toEqual([{ universe: 'app-result', session: 's1', status: 'unavailable', request: 'a' }]);
     expect(bad.popup.location.href).toBe('');
     bad.host.destroy();
     expect([safeCheckout('https://a.example/x'), safeCheckout('https://u:p@a.example/'), safeCheckout(null)]).toEqual(['https://a.example/x', undefined, undefined]);
@@ -463,11 +434,11 @@ describe('a paying page on the public share link', () => {
     await flush();
     await jest.advanceTimersByTimeAsync(3_000);
     expect(looks).toBe(1);
-    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'not_paid', request: 'a' });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'not_paid', request: 'a' });
     expect(lines.at(-1)).toMatchObject({ problem: 'not_paid', canCheck: true });
     host.checkPayment();
     await flush();
-    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'paid', request: 'a' });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'paid', request: 'a' });
     // Never a status without a request id
     expect(told().every((message) => typeof message.request === 'string' && message.request.length > 0)).toBe(true);
     host.destroy();
@@ -506,7 +477,7 @@ describe('a paying page on the public share link', () => {
     host.restorePurchase();
     await flush();
     expect(lines.at(-1)).toMatchObject({ paid: { test: false }, restored: { paidAt: '2026-11-18T08:00:00.000Z' } });
-    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'paid', request: 'r1' });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'paid', request: 'r1' });
     host.destroy();
   });
 
@@ -565,7 +536,7 @@ describe('a paying page on the public share link', () => {
     expect(lines.at(-1)?.checking ?? false).toBe(false);
     await jest.advanceTimersByTimeAsync(30_000);
     expect(lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: true });
-    expect(told().at(-1)).toEqual({ universe: 'app-result', status: 'unavailable', request: 'r1' });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'unavailable', request: 'r1' });
     // Pressed again: it is not blocked, and a stalled one is cancelled too
     host.checkPayment();
     await flush();
