@@ -1417,7 +1417,8 @@ run('payments for pages, in a real database', () => {
             return { status: 503, body: {} };
           };
           const outcome = await begin(artifactId, wishId, code);
-          expect(outcome.status).toBe('unavailable');
+          // It says an order may exist, so the host offers Check payment (a clear refusal below does not)
+          expect(outcome).toMatchObject({ status: 'unavailable', unsure: true });
           const made = (await orders(artifactId)).find((row) => row.intentId === wishId);
           expect(made).toMatchObject({ status: 'creating' });
           expect((await prisma.appPageOrderEvent.findMany({ where: { orderId: made!.id } })).map((line) => line.reason)).toContain(trouble === '5xx' ? 'start_service_trouble' : 'start_unsure');
@@ -1432,8 +1433,23 @@ run('payments for pages, in a real database', () => {
         // A clear refusal (the service said no) still closes the order
         gateway({ createStatus: 400 });
         const refused = wish();
-        expect((await begin(artifactId, refused, code)).status).toBe('unavailable');
+        const clear = await begin(artifactId, refused, code);
+        expect(clear.status).toBe('unavailable');
+        expect(clear).not.toHaveProperty('unsure');
         expect((await orders(artifactId)).find((row) => row.intentId === refused)).toMatchObject({ status: 'not_paid' });
+      });
+
+      it('says `unsure` in the 409 of both routes when an order may exist, and not when nothing was made', async () => {
+        const { artifactId } = await pending();
+        mockSend.current = () => {
+          throw new GuardError('timeout', 'no answer');
+        };
+        const response = await publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: { intentId: wish(), recoveryCode: word() }, headers: { 'x-forwarded-for': '203.0.113.77' } }), params({ artifactId }));
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({ code: 'unavailable', unsure: true });
+        const game = await gamePay(request(`/api/artifacts/${artifactId}/pay`, { method: 'POST', token: ADMIN_TOKEN, body: { viewer: { person: { signedIn: false, name: 'Visitor' }, inChat: true, chat: { kind: 'dm', ref: `chat-${tag}` } }, start: true, intentId: wish(), recoveryCode: word() } }), params({ id: artifactId }));
+        expect(game.status).toBe(409);
+        expect(await game.json()).toMatchObject({ error: 'unavailable', unsure: true });
       });
 
       it('never starts a payment for a buyer who only holds a receipt link’s code, in Check payment or in Restore', async () => {

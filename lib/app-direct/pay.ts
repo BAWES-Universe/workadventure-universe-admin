@@ -280,7 +280,8 @@ export async function listPageJobs(ownerId: string, connectionId?: string): Prom
 
 export type CheckoutOutcome =
   | { status: 'ok'; orderId: string; checkoutUrl: string; amount: string; currency: string; app: string; reused: boolean }
-  | { status: 'unavailable' }
+  /** `unsure`: an order may exist for this wish (the answer was lost, cut or late), so the host offers Check payment; without it nothing was made. */
+  | { status: 'unavailable'; unsure?: true }
   | { status: 'limit' };
 
 export interface StartCheckout {
@@ -450,7 +451,7 @@ async function runStart(
   // asks again or Check payment does, until its open time is up
   const unsure = async (reason: string) => {
     await moveOrder(order.id, { from: 'creating', to: 'creating', reason, lease, data: { checkedAt: new Date() } }).catch(() => undefined);
-    return { status: 'unavailable' } as const;
+    return { status: 'unavailable', unsure: true } as const;
   };
   const { create } = payment;
   const operation = definition.operations.find((candidate) => candidate.id === create.operation);
@@ -518,7 +519,7 @@ async function runStart(
   const kept = await moveOrder(order.id, { from: 'creating', to: 'pending', reason: 'checkout_ready', lease, data: { providerRef, checkoutUrl } });
   // Closed by someone else while the service was being asked (a sweep that gave up on it), or taken over by a later attempt, which saves the
   // same checkout itself: this attempt gives nobody a link
-  if (!kept) return { status: 'unavailable' };
+  if (!kept) return { status: 'unavailable', unsure: true };
   return { status: 'ok', orderId: order.id, checkoutUrl, amount: minorToText(order.amountMinor, order.currency), currency: order.currency, app: definition.short, reused: false };
 }
 
@@ -530,24 +531,26 @@ async function runStart(
  */
 async function carryOn(orderId: string, limits: Awaited<ReturnType<typeof getBrickLimits>>, how: { resume: boolean; wait: boolean }, deps: GuardDeps): Promise<CheckoutOutcome> {
   const unavailable = { status: 'unavailable' } as const;
+  // An order exists for this wish: the buyer can be told to ask about it
+  const maybeMade = { status: 'unavailable', unsure: true } as const;
   const patience = limits.keyCallSeconds * 1000 + START_GRACE_MS;
   const lastTried = (order: { createdAt: Date; checkedAt: Date | null }) => Math.max(order.createdAt.getTime(), order.checkedAt?.getTime() ?? 0);
   for (let round = 0; round < 2; round += 1) {
     const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, include: { connection: true, job: { include: { connection: true, artifact: { select: { expiresAt: true } } } } } });
     if (!order) return unavailable;
     if (order.status === 'pending' || order.status === 'paid') {
-      if (!order.checkoutUrl) return unavailable;
+      if (!order.checkoutUrl) return maybeMade;
       const definition = order.connection && order.connection.kind === 'direct' ? definitionOf(order.connection) : null;
       return { status: 'ok', orderId: order.id, checkoutUrl: order.checkoutUrl, amount: minorToText(order.amountMinor, order.currency), currency: order.currency, app: definition?.short ?? order.connection?.name ?? 'the payment page', reused: true };
     }
-    if (order.status !== 'creating') return unavailable;
+    if (order.status !== 'creating') return maybeMade;
     // A start is only carried on for the buyer who made the wish (their own account or recovery code): a receipt link's code finds purchases
     // and never makes the service do anything
-    if (!how.resume) return unavailable;
+    if (!how.resume) return maybeMade;
     // Still being started by another request: it is waited for, and its answer is this one's answer (a Restore does not wait)
     const left = lastTried(order) + patience - Date.now();
     if (left > 0) {
-      if (!how.wait) return unavailable;
+      if (!how.wait) return maybeMade;
       await sleep(Math.min(250, left));
       round -= 1;
       continue;
@@ -556,7 +559,7 @@ async function carryOn(orderId: string, limits: Awaited<ReturnType<typeof getBri
     // time an order may stay open
     if (Date.now() - order.createdAt.getTime() > limits.checkoutOpenHours * HOUR) {
       await moveOrder(order.id, { from: 'creating', to: 'not_paid', reason: 'start_never_finished', data: { closedAt: new Date(order.createdAt.getTime() + limits.checkoutOpenHours * HOUR) } }).catch(() => undefined);
-      return unavailable;
+      return maybeMade;
     }
     const cut = new Date(Date.now() - patience);
     const tookAt = new Date();
@@ -568,7 +571,7 @@ async function carryOn(orderId: string, limits: Awaited<ReturnType<typeof getBri
     const terms = checkoutTerms(order.job);
     const fail = async (reason: string) => {
       await moveOrder(order.id, { from: 'creating', to: 'not_paid', reason, lease: { checkedAt: tookAt }, data: { closedAt: new Date() } }).catch(() => undefined);
-      return unavailable;
+      return maybeMade;
     };
     if (!origin || !terms) return fail('resume_page_changed');
     // The offer is the one the wish was made for: a price or currency the owner has changed since is a different offer, never started under
@@ -577,7 +580,7 @@ async function carryOn(orderId: string, limits: Awaited<ReturnType<typeof getBri
     if (terms.job.amountMinor !== order.amountMinor || terms.job.currency !== order.currency) return fail('resume_offer_changed');
     return runStart(order, { connection: terms.connection, definition: terms.definition, payment: terms.payment, origin }, { checkedAt: tookAt }, deps);
   }
-  return unavailable;
+  return maybeMade;
 }
 
 /**

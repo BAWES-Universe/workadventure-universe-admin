@@ -520,6 +520,12 @@ describe('a paying page on the public share link', () => {
     await flush();
     expect(refused.lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: false });
     refused.host.destroy();
+    // A refusal that says an order may have been made (the start was unsure) keeps Check payment
+    const unsure = setup(() => ({ status: 409, body: { code: 'unavailable', unsure: true } }));
+    unsure.tap({ request: 'a' });
+    await flush();
+    expect(unsure.lines.at(-1)).toMatchObject({ problem: 'unavailable', canCheck: true });
+    unsure.host.destroy();
   });
 
   it('offers no receipt of its own for a purchase a receipt link found: it is "back", and this browser’s code would not bring it back', async () => {

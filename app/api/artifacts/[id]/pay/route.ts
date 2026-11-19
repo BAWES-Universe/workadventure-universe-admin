@@ -77,5 +77,5 @@ export const POST = artifactRoute('POST /api/artifacts/:id/pay', 'game', schema,
   const outcome = await startCheckout({ artifactId: params.id, visitor, intentId: body.intentId, buyerKey: body.intentId ? buyerKey : null, alsoBuyerKeys });
   if (outcome.status === 'ok') return { orderId: outcome.orderId, checkoutUrl: outcome.checkoutUrl, amount: outcome.amount, currency: outcome.currency, app: outcome.app, reused: outcome.reused, buyer };
   if (outcome.status === 'limit') throw new ArtifactError('limit', 429, 'Too many tries for now.');
-  throw new ArtifactError('unavailable', 409, 'Payments are unavailable.');
+  throw new ArtifactError('unavailable', 409, 'Payments are unavailable.', outcome.unsure ? { unsure: true } : undefined);
 });

@@ -410,9 +410,9 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         if (!answer.ok || !orderId || !url) {
           popup?.close();
           const limit = answer.status === 429 || answer.body?.code === 'limit';
-          // Trouble on the way (a 5xx, or a good answer that holds nothing usable) may have left an order behind: Check payment asks about the same
+          // Trouble on the way (a 5xx, a refusal that says `unsure`, or a good answer that holds nothing usable) may have left an order behind: Check payment asks about the same
           // wish. A definite answer (the page is gone, the owner stopped it, too many tries) does not
-          const unsure = !limit && (answer.status >= 500 || (answer.ok && (!orderId || !url)));
+          const unsure = !limit && (answer.status >= 500 || answer.body?.unsure === true || (answer.ok && (!orderId || !url)));
           return end({ problem: limit ? 'limit' : 'unavailable', canCheck: unsure }, limit ? 'limit' : 'unavailable', request, ticket);
         }
         if (popup) popup.location.href = url;
