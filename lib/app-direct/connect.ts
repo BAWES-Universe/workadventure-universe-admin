@@ -248,17 +248,23 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
     // shut for a service that did not refuse the key.
     const now = new Date();
     const cutoff = new Date(now.getTime() - (limits.keyCallSeconds + RESERVATION_GRACE_SECONDS) * 1000);
-    const reserved = await prisma.$executeRaw`
+    // The run of reservations this one joined (`reserved_epoch`) comes back with it: when the reserved tries of a form lapse and start again, the
+    // run moves on, and a call still in flight from the earlier run must not take a try away from the new one when it finishes
+    const reserved = await prisma.$queryRaw<{ epoch: number }[]>`
       UPDATE "app_key_requests"
-      SET "reserved_tries" = CASE WHEN "reserved_at" > ${cutoff} THEN "reserved_tries" + 1 ELSE 1 END, "reserved_at" = ${now}
+      SET "reserved_epoch" = CASE WHEN "reserved_at" > ${cutoff} THEN "reserved_epoch" ELSE "reserved_epoch" + 1 END,
+          "reserved_tries" = CASE WHEN "reserved_at" > ${cutoff} THEN "reserved_tries" + 1 ELSE 1 END, "reserved_at" = ${now}
       WHERE "id" = ${row.id} AND "used_at" IS NULL
-        AND "tries" + (CASE WHEN "reserved_at" > ${cutoff} THEN "reserved_tries" ELSE 0 END) < ${limits.keyTries}`;
-    if (reserved !== 1) throw new KeyFormError(429, 'too_many', 'Too many tries');
+        AND "tries" + (CASE WHEN "reserved_at" > ${cutoff} THEN "reserved_tries" ELSE 0 END) < ${limits.keyTries}
+      RETURNING "reserved_epoch" AS epoch`;
+    if (reserved.length !== 1) throw new KeyFormError(429, 'too_many', 'Too many tries');
+    const epoch = reserved[0].epoch;
     const release = async (refused: boolean) => {
       try {
         await prisma.$executeRaw`
           UPDATE "app_key_requests"
-          SET "reserved_tries" = GREATEST("reserved_tries" - 1, 0), "tries" = "tries" + ${refused ? 1 : 0}
+          SET "reserved_tries" = CASE WHEN "reserved_epoch" = ${epoch} THEN GREATEST("reserved_tries" - 1, 0) ELSE "reserved_tries" END,
+              "tries" = "tries" + ${refused ? 1 : 0}
           WHERE "id" = ${row.id}`;
       } catch (error) {
         // A reservation that is not released lapses on its own. A refusal is a try that was used: it is kept (here, in memory) until

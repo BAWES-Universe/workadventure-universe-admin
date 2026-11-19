@@ -1521,6 +1521,8 @@ model AppKeyRequest {
   tries          Int      @default(0)
   reservedTries  Int      @default(0) @map("reserved_tries")
   reservedAt     DateTime? @map("reserved_at")
+  // Which run of reservations a call joined: it moves on when the reserved tries lapse and start again, so a call still in flight from before never releases a try of the new run
+  reservedEpoch  Int      @default(0) @map("reserved_epoch")
   expiresAt      DateTime @map("expires_at")
   usedAt         DateTime? @map("used_at")
   createdAt      DateTime @default(now()) @map("created_at")
