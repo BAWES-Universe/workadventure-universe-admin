@@ -101,6 +101,8 @@ describe('the Agent37 client', () => {
       const named = client([json(503, { code: 'try_again' }), json(200, { exit_code: 0, stdout: '', stderr: '' })]);
       await named.api.exec('abc', 'true', { name: 'awake:1' });
       expect(named.calls).toHaveLength(2);
+      // The same name on the first ask and on the retry: that is what lets Agent37 tell the retry from a new command
+      expect(JSON.parse(String(named.calls[0].init.body)).name).toBe('awake:1');
       expect(JSON.parse(String(named.calls[1].init.body)).name).toBe('awake:1');
       const plain = client([json(503, { code: 'try_again' }), json(200, { exit_code: 0 })]);
       await expect(plain.api.exec('abc', 'true')).rejects.toMatchObject({ status: 503 });
