@@ -363,6 +363,41 @@ export async function listPrograms(categoryId?: CategoryId, opts: { kind?: Progr
   return programs.filter((program) => program.rules.length > 0).map((program) => viewOf(program, program.rules[0], program.rules.length));
 }
 
+/**
+ * An active exception program, read inside the caller's transaction under the locks a save of it takes (its funding account and its category's rules), so what
+ * the caller then writes back is built from the rule as it is now and not from a read made before another admin's save. Null when it is gone or ended.
+ */
+export async function readExceptionForUpdateIn(tx: Tx, programId: string): Promise<ProgramView | null> {
+  const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true, program: { select: { categoryId: true } } } });
+  if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId), lockOfRules(peek.program.categoryId)]);
+  const row = await loadProgramRow(tx, programId);
+  if (!row || row.status !== 'active' || row.kind !== 'exception' || row.rules.length === 0) return null;
+  return viewOf(row, row.rules[0], row.rules.length);
+}
+
+/**
+ * Every lock a save that touches several rules will need, taken at once in ONE sorted order before the first of them is used. Locks taken one rule
+ * after another, each sorted only within its own call, could be met in the other order by a second transaction that holds a later one and waits for
+ * an earlier one. The funding accounts and categories of the named rules are looked for, locked, and looked for again (a rule moved to another
+ * account in between would need one more), until nothing new turns up.
+ */
+export async function lockForSavesIn(tx: Tx, need: { programIds?: string[]; categoryIds?: string[]; accountIds?: string[] }): Promise<void> {
+  const held = new Set<string>();
+  for (let round = 0; round < 4; round++) {
+    const rules = need.programIds?.length ? await tx.grantRule.findMany({ where: { programId: { in: need.programIds }, state: 'current' }, select: { fundingAccountId: true, program: { select: { categoryId: true } } } }) : [];
+    const names = new Set<string>([
+      ...(need.categoryIds ?? []).map(lockOfRules),
+      ...(need.accountIds ?? []).map(lockOfAccount),
+      ...rules.flatMap((rule) => [lockOfAccount(rule.fundingAccountId), lockOfRules(rule.program.categoryId)]),
+    ]);
+    const fresh = [...names].filter((name) => !held.has(name));
+    if (fresh.length === 0) return;
+    // Only what is not held yet is asked for, so the first round is the whole sorted set and a later one is just what moved
+    await lockAll(tx, fresh);
+    for (const name of fresh) held.add(name);
+  }
+}
+
 /** One program: its current rule, and every earlier version as it was. */
 export async function getProgram(programId: string): Promise<{ program: ProgramView; versions: RuleView[] } | null> {
   const row = await loadProgramRow(prisma, programId);
@@ -372,9 +407,9 @@ export async function getProgram(programId: string): Promise<{ program: ProgramV
 }
 
 /** The names of the first 50 people to show beside a clash. Only what is displayed is limited: the clash itself carries every id. */
-async function chooseNames(userIds: string[]): Promise<{ userId: string; name: string | null }[]> {
+async function chooseNames(db: Pick<Tx, 'user'>, userIds: string[]): Promise<{ userId: string; name: string | null }[]> {
   if (userIds.length === 0) return [];
-  const users = await prisma.user.findMany({ where: { id: { in: userIds.slice(0, 50) } }, select: { id: true, name: true } });
+  const users = await db.user.findMany({ where: { id: { in: userIds.slice(0, 50) } }, select: { id: true, name: true } });
   return users.map((user) => ({ userId: user.id, name: user.name }));
 }
 
@@ -389,10 +424,18 @@ async function clashesOf(db: Tx, candidate: RuleFacts, now: Date, programIds?: {
 
 /** Saves a new program, or a new version of one (`programId`). A clash between rules is refused. */
 async function save(kind: ProgramKind, input: GrantInput & { programId?: string }, issuer: Issuer, now: Date, after?: (tx: Tx) => Promise<void>): Promise<ProgramView> {
+  return prisma.$transaction((tx) => saveIn(tx, kind, input, issuer, now, after));
+}
+
+/**
+ * The save itself, inside the caller's transaction: several saves (and ends) can then be one commit, so a refusal part-way leaves none of them
+ * behind and nothing has to be put back afterwards.
+ */
+async function saveIn(tx: Tx, kind: ProgramKind, input: GrantInput & { programId?: string }, issuer: Issuer, now: Date, after?: (tx: Tx) => Promise<void>): Promise<ProgramView> {
   const checked = checkGrant(kind, input, now);
   const programId = input.programId ?? randomUUID();
   if (input.requestKey !== undefined && (!input.requestKey || input.requestKey.length > 255)) throw new CreditRefused('requestKey must be 1 to 255 characters', 'request_key');
-  const view = await prisma.$transaction(async (tx) => {
+  {
     // One save of a category's rules at a time, so two admins at the same moment cannot both save a clashing rule
     // and the accounts it touches, so issuing under the old rule and saving the new one never interleave
     const currentAccountId = input.programId ? (await tx.grantRule.findFirst({ where: { programId: input.programId, state: 'current' }, select: { fundingAccountId: true } }))?.fundingAccountId : undefined;
@@ -443,7 +486,7 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     const clashes = await clashesOf(tx, candidate, now, { exclude: programId });
     if (clashes.length > 0) {
       const labels = await tx.grantProgram.findMany({ where: { id: { in: clashes.map((c) => c.programId) } }, select: { id: true, label: true } });
-      throw new ClashRefused(await Promise.all(clashes.map(async (c) => ({ programId: c.programId, label: labels.find((l) => l.id === c.programId)?.label ?? c.programId, userIds: c.userIds, people: await chooseNames(c.userIds), totalPeople: c.userIds.length }))));
+      throw new ClashRefused(await Promise.all(clashes.map(async (c) => ({ programId: c.programId, label: labels.find((l) => l.id === c.programId)?.label ?? c.programId, userIds: c.userIds, people: await chooseNames(tx, c.userIds), totalPeople: c.userIds.length }))));
     }
     const preview = await previewIn(tx, checked, ids, now, { forProgramId: programId });
     const budget = preview.budget;
@@ -506,8 +549,7 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     // What must change together with this rule (the same save, the same commit): it fails, and so does the rule
     if (after) await after(tx);
     return viewOf(saved as ProgramRow, (saved as ProgramRow).rules[0], (saved as ProgramRow).rules.length);
-  });
-  return view;
+  }
 }
 
 /** The category's default: how much, how often, and who gets it. Saving again makes a new version of the same program. */
@@ -529,6 +571,11 @@ export async function saveException(input: GrantInput & { programId?: string }, 
   return save('exception', input, issuer, now);
 }
 
+/** An exception saved inside the caller's transaction: it commits or undoes together with everything else the caller does there. */
+export async function saveExceptionIn(tx: Tx, input: GrantInput & { programId?: string }, issuer: Issuer, now: Date = new Date()): Promise<ProgramView> {
+  return saveIn(tx, 'exception', input, issuer, now);
+}
+
 /** A gift: a one-time extra, to people you pick or a universe's members (or everyone), each or shared, one dollar amount for what it covers. */
 export async function createGift(input: GrantInput, issuer: Issuer, now: Date = new Date()): Promise<ProgramView> {
   return save('gift', input, issuer, now);
@@ -541,11 +588,33 @@ export async function endProgram(programId: string, issuer: Issuer, now: Date = 
 
 /** Ends several programs in one commit: all of them end, or none does (a refusal on the second leaves the first as it was). */
 export async function endPrograms(programIds: string[], issuer: Issuer, now: Date = new Date()): Promise<('ended' | 'already_ended' | 'not_found')[]> {
-  return prisma.$transaction(async (tx) => {
-    const results: ('ended' | 'already_ended' | 'not_found')[] = [];
-    for (const programId of programIds) results.push(await endProgramIn(tx, programId, issuer, now));
-    return results;
-  });
+  return prisma.$transaction((tx) => endProgramsIn(tx, programIds, issuer, now));
+}
+
+/** Ends programs inside the caller's transaction: they end together with everything else the caller does there. */
+export async function endProgramsIn(tx: Tx, programIds: string[], issuer: Issuer, now: Date = new Date()): Promise<('ended' | 'already_ended' | 'not_found')[]> {
+  const results: ('ended' | 'already_ended' | 'not_found')[] = [];
+  // All of their locks in one sorted order first (see `lockForSavesIn`), so ending two rules never meets another save of them the other way round
+  if (programIds.length > 1) await lockForSavesIn(tx, { programIds });
+  for (const programId of programIds) results.push(await endProgramIn(tx, programId, issuer, now));
+  return results;
+}
+
+async function endProgramIn(tx: Tx, programId: string, issuer: Issuer, now: Date): Promise<'ended' | 'already_ended' | 'not_found'> {
+  // Under the funding account's lock and the category's rules lock (issuing holds the rules lock shared, and may still be issuing from a
+  // version waiting to be replaced that another account funds): an issuing that read the rule before this ends it sees it ended and gives nothing
+  const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true, program: { select: { categoryId: true } } } });
+  if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId), lockOfRules(peek.program.categoryId)]);
+  const program = await tx.grantProgram.findUnique({ where: { id: programId }, include: { rules: { where: { state: 'current' }, take: 1 } } });
+  if (!program) return 'not_found';
+  if (program.status === 'ended') return 'already_ended';
+  const rule = program.rules[0];
+  if (rule) {
+    await checkMayFundFrom(tx, rule.fundingAccountId, issuer, 'You cannot end this one');
+  }
+  await tx.grantProgram.update({ where: { id: programId }, data: { status: 'ended', endedAt: now } });
+  await tx.grantRule.updateMany({ where: { programId, state: 'current' }, data: { state: 'ended', supersededAt: now } });
+  return 'ended';
 }
 
 async function endProgramIn(tx: Tx, programId: string, issuer: Issuer, now: Date): Promise<'ended' | 'already_ended' | 'not_found'> {

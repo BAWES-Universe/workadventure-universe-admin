@@ -33,9 +33,9 @@ const db = prisma as unknown as {
   $executeRaw: jest.Mock;
   $transaction: jest.Mock;
 };
-const addNotice = db.userNotice.create;
+const addNotice = db.userNotice.createMany;
 const mayManage = canManageBotMcpServers as jest.Mock;
-const created = (index = 0) => addNotice.mock.calls[index][0].data;
+const created = (index = 0) => addNotice.mock.calls[index][0].data[0];
 const dismissed = () => db.userNotice.updateMany.mock.calls.map(([call]) => call.where.id);
 
 const BOT = { id: 'bot-1', name: 'Tavily Researcher', createdById: 'maker', roomId: 'room-1', mcpServers: [{ connectedById: 'yousef' }, { connectedById: 'sara' }], room: { world: { universe: { name: 'autonode-labs' } } } };
@@ -50,7 +50,7 @@ beforeEach(() => {
   db.userNotice.findMany.mockResolvedValue([]);
   db.userNotice.findFirst.mockResolvedValue(null);
   db.$transaction.mockImplementation((work: (tx: unknown) => unknown) => work(prisma));
-  db.userNotice.create.mockResolvedValue({});
+  db.userNotice.createMany.mockResolvedValue({ count: 1 });
   db.botMcpServer.update.mockResolvedValue({});
   db.user.findUnique.mockResolvedValue({ email: 'someone@example.test' });
   mayManage.mockResolvedValue(true);
@@ -322,7 +322,7 @@ describe('the card on Orbit home, when things happen together', () => {
     expect(dismissed()).toEqual(['n1']);
   });
 
-  it('treats a card made twice for the same instant as already told, not a failure', async () => {
+  it('makes a card that already exists for the same instant as an insert that skips it, so the duplicate can never roll the other cards back', async () => {
     db.botMcpServer.findMany.mockResolvedValue([tavily]);
     db.userNotice.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' }));
     await expect(syncToolSignInNotices('bot-1', { serverId: 's1', at: T1 })).resolves.toBe(true);

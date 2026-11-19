@@ -58,13 +58,15 @@ export async function openRequests(): Promise<OpenRequest[]> {
  * Extra usage was given: what the person asked for before it began is answered. Safe to say twice, and a replay of an old grant
  * (`askedUntil` is when that grant began) leaves a newer ask open, since that grant never answered it.
  */
-export async function answerRequests(personId: string, grantKey: string, now: Date = new Date(), askedUntil: Date = now, what: AskedFor = 'computer'): Promise<number> {
+export async function answerRequests(personId: string, grantKey: string, now: Date = new Date(), askedUntil: Date = now, what: AskedFor = 'computer', within?: Prisma.TransactionClient): Promise<number> {
   // Only what this grant is for: extra computer usage never closes an ask for Instant Apps credit, which it did not give
   // Under the lock an ask holds until it is saved: a grant that answers while an ask is being written waits for it, so it never misses one
   // that was already asked for before the grant began
-  return prisma.$transaction(async (tx) => {
+  const answer = async (tx: Prisma.TransactionClient) => {
     await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${`meter_request:${personId}:${what}`}))`);
     const { count } = await tx.meterRequest.updateMany({ where: { personId, what, answeredAt: null, createdAt: { lte: askedUntil } }, data: { answeredAt: now, grantKey } });
     return count;
-  });
+  };
+  // Inside the grant's own transaction the answer is saved with the grant or not at all, so a grant that is saved never leaves an ask it answered open
+  return within ? answer(within) : prisma.$transaction(answer);
 }

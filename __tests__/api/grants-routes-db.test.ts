@@ -46,6 +46,33 @@ async function person(name: string, createdAt?: Date): Promise<string> {
   return user.id;
 }
 
+/** Records, for each transaction the shared client opens, the advisory locks it asks for in the order it asks (until the returned spy is restored). */
+function recordLocks() {
+  const real = prisma.$transaction.bind(prisma) as (fn: unknown, options?: unknown) => Promise<unknown>;
+  const asked: string[][] = [];
+  const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options?: unknown) => {
+    if (typeof fn !== 'function') return real(fn, options);
+    return real(async (tx: any) => {
+      const names: string[] = [];
+      asked.push(names);
+      const recorded = new Proxy(tx, {
+        get(target, property) {
+          if (property === '$executeRaw') {
+            return (strings: TemplateStringsArray, ...values: unknown[]) => {
+              if (strings.join('').includes('pg_advisory_xact_lock')) names.push(String(values[0]));
+              return target.$executeRaw(strings, ...values);
+            };
+          }
+          const value = target[property];
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      return (fn as (t: unknown) => Promise<unknown>)(recorded);
+    }, options);
+  }) as never);
+  return { asked, spy };
+}
+
 const envBefore = process.env.SUPER_ADMINS;
 
 async function wipeBooks() {
@@ -513,6 +540,88 @@ run('the grants routes, on the real books', () => {
       // The other rule had only Omar and Noor, so nobody is left in it: it ended
       expect(exceptions.find((e: any) => e.instant_apps.amountMicros === 5 * MILLION)).toBeUndefined();
     });
+
+    it('saves a clash the admin settled on the one connection of its transaction: with a pool of a single connection it still answers, never waiting on a second one', async () => {
+      const [omar, noor, faisal, yousef] = [await person('Omar'), await person('Noor'), await person('Faisal'), await person('Yousef')];
+      expect((await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor, faisal] }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } } })).status).toBe(201);
+      // A writer that is not the shared client: a pool with room for one connection. A read inside the save's transaction that is made on another client
+      // (the other rule's read, the people's names beside a clash) waits for a connection that never frees, and under load the same wait takes the real pool
+      const { Pool } = await import('pg');
+      const { PrismaPg } = await import('@prisma/adapter-pg');
+      const { PrismaClient } = await import('@prisma/client');
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+      const single = new PrismaClient({ adapter: new PrismaPg(pool) });
+      const shared = (globalThis as unknown as { prisma: unknown }).prisma;
+      let answer: unknown = 'never';
+      try {
+        (globalThis as unknown as { prisma: unknown }).prisma = single;
+        await jest.isolateModulesAsync(async () => {
+          const { saveExceptionFor } = await import('@/lib/grants-admin');
+          const request = { what: 'exception', audience: { kind: 'people', userIds: [omar, noor, yousef] }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 25 * MILLION, interval: 'monthly' }, clashChoice: 'this' } as never;
+          // The first try meets the clash (its names are read), the second takes Omar and Noor out of the other rule (it is read, and saved with Faisal alone)
+          const finished = saveExceptionFor(request, { userId: admin.id, superAdmin: true }).then(() => 'saved', (error: Error) => `refused: ${error.message}`);
+          answer = await Promise.race([finished, new Promise((resolve) => setTimeout(() => resolve('waited on a second connection'), 15_000))]);
+        });
+      } finally {
+        (globalThis as unknown as { prisma: unknown }).prisma = shared;
+        await single.$disconnect();
+        await pool.end();
+      }
+      expect(answer).toBe('saved');
+      const { exceptions } = await overview();
+      expect(exceptions.find((e: any) => e.instant_apps.amountMicros === 5 * MILLION).audience.people.map((p: any) => p.name)).toEqual(['Faisal']);
+    }, 40_000);
+
+    it('meets its locks in one ascending order, never one rule’s locks and then an earlier name for the next, so no other transaction can wait on it the other way round', async () => {
+      const [omar, noor, faisal, yousef] = [await person('Omar'), await person('Noor'), await person('Faisal'), await person('Yousef')];
+      expect((await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor, faisal] }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } } })).status).toBe(201);
+      // The other rule is funded from another account, whose name sorts before the platform's: a take-out locks that account and the category first, and
+      // the save of the rest needs the platform account after them (a second transaction holding that one and asking for the category would wait on this one)
+      const account = await prisma.fundingAccount.create({ data: { id: `a-other-${tag}`, kind: 'person', ownerKey: `other-${tag}`, name: 'Other', budgetMicros: BigInt(100_000_000) } });
+      await prisma.fundingAccountAdmin.create({ data: { accountId: account.id, userId: admin.id } });
+      await prisma.$executeRawUnsafe(`UPDATE grant_rules SET funding_account_id = '${account.id}'`);
+      const { asked, spy } = recordLocks();
+      try {
+        const saved = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor, yousef] }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 25 * MILLION, interval: 'monthly' }, clashChoice: 'this' } });
+        expect(saved.status).toBe(201);
+      } finally {
+        spy.mockRestore();
+      }
+      // The try that takes people out of the other rule is the one with the most locks
+      const longest = asked.reduce((best, names) => (names.length > best.length ? names : best), [] as string[]);
+      expect(longest.length).toBeGreaterThan(2);
+      const firstTimes = [...new Set(longest)];
+      expect(firstTimes).toEqual([...firstTimes].sort());
+      const { exceptions } = await overview();
+      expect(exceptions.find((e: any) => e.instant_apps.amountMicros === 5 * MILLION).audience.people.map((p: any) => p.name)).toEqual(['Faisal']);
+      await wipeBooks();
+      await prisma.fundingAccountAdmin.deleteMany({ where: { accountId: account.id } });
+      await prisma.fundingAccount.delete({ where: { id: account.id } });
+    }, 30_000);
+
+    it('ends two rules funded from different accounts with their locks in one ascending order too', async () => {
+      const [omar, noor, faisal, yousef] = [await person('Omar'), await person('Noor'), await person('Faisal'), await person('Yousef')];
+      const body = (ids: string[], amount: number) => ({ audience: { kind: 'people', userIds: ids }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: amount * MILLION, interval: 'monthly' } });
+      expect((await call(postException, '/x', { method: 'POST', body: body([omar, noor], 5) })).status).toBe(201);
+      expect((await call(postException, '/x', { method: 'POST', body: body([faisal, yousef], 6) })).status).toBe(201);
+      const accounts = await Promise.all(['a-one', 'b-two'].map((name) => prisma.fundingAccount.create({ data: { id: `${name}-${tag}`, kind: 'person', ownerKey: `${name}-${tag}`, name, budgetMicros: BigInt(100_000_000) } })));
+      for (const account of accounts) await prisma.fundingAccountAdmin.create({ data: { accountId: account.id, userId: admin.id } });
+      const programs = await prisma.grantProgram.findMany({ where: { kind: 'exception', status: 'active' }, orderBy: { createdAt: 'asc' }, select: { id: true } });
+      for (const [index, program] of programs.entries()) await prisma.grantRule.updateMany({ where: { programId: program.id }, data: { fundingAccountId: accounts[index].id } });
+      const { asked, spy } = recordLocks();
+      try {
+        const { endPrograms } = await import('@/lib/credit-rules');
+        expect(await endPrograms(programs.map((program) => program.id), { userId: admin.id, superAdmin: true })).toEqual(['ended', 'ended']);
+      } finally {
+        spy.mockRestore();
+      }
+      const firstTimes = [...new Set(asked[0])];
+      expect(firstTimes.length).toBeGreaterThan(2);
+      expect(firstTimes).toEqual([...firstTimes].sort());
+      await wipeBooks();
+      await prisma.fundingAccountAdmin.deleteMany({ where: { accountId: { in: accounts.map((account) => account.id) } } });
+      await prisma.fundingAccount.deleteMany({ where: { id: { in: accounts.map((account) => account.id) } } });
+    }, 30_000);
 
     it('gives the other rule its people back when the choice still can’t be saved', async () => {
       const [omar, noor, faisal] = [await person('Omar'), await person('Noor'), await person('Faisal')];

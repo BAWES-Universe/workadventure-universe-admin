@@ -419,6 +419,41 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await openRequests()).map((request) => request.personId)).toEqual([sara.id]);
     });
 
+    it('saves the answer with the grant: a grant whose answer could not be written is not saved, and the retry answers every ask, also one made after the first try', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 1_000, new Date());
+      await askForMore(sara.id, new Date(Date.now() - 1_000));
+      asAdmin();
+      const key = randomUUID();
+      const send = () => personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, { grantKey: key, amount: 'five', endsAt: new Date(Date.now() + 10 * 86_400_000).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id: sara.id }) });
+      // The database refuses to write the answer (here by a trigger), at the moment the grant is being saved
+      await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION refuse_answer() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'answer refused'; END; $$ LANGUAGE plpgsql`);
+      await prisma.$executeRawUnsafe(`CREATE TRIGGER refuse_answer BEFORE UPDATE ON "meter_requests" FOR EACH ROW EXECUTE FUNCTION refuse_answer()`);
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        expect((await send()).status).toBe(500);
+      } finally {
+        quiet.mockRestore();
+        await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS refuse_answer ON "meter_requests"');
+      }
+      // Nothing of the grant is saved, so the ask it was for is still open, and the person is not left with a grant that answered nothing
+      expect(await prisma.meterGrant.count({ where: { personId: sara.id } })).toBe(0);
+      const [first] = await openRequests();
+      expect(first.personId).toBe(sara.id);
+      // That ask is settled some other way (someone answers it on another page), and she asks again before the retry: a genuinely later ask, made after the
+      // first try. (An ask made while one is still open adds nothing, so the first has to be out of the way for there to be a later one)
+      await prisma.meterRequest.updateMany({ where: { id: first.id }, data: { answeredAt: new Date(), grantKey: 'settled-elsewhere' } });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await askForMore(sara.id);
+      const [later] = await openRequests();
+      expect(later.id).not.toBe(first.id);
+      // The retry is a new grant and answers the later ask, which only a retry that reads asks made after the first try can do
+      expect((await send()).status).toBe(201);
+      expect(await openRequests()).toEqual([]);
+      expect((await prisma.meterRequest.findUniqueOrThrow({ where: { id: later.id } })).grantKey).toBe(`${sara.id}:${key}`);
+    });
+
     describe('a grant sent again after its end date passed', () => {
       const give = (sara: { id: string }, json: object) => personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, json), { params: Promise.resolve({ id: sara.id }) });
       const grantRows = (personId: string) => prisma.meterGrant.count({ where: { personId } });
