@@ -7,6 +7,10 @@ describe('the name read from an app’s address (game #2001, Add your own app)',
     ['https://firecrawl.dev/mcp', 'Firecrawl'],
     ['https://auth.example.co.uk/oauth', 'Example'],
     ['https://MCP.Notion.com', 'Notion'],
+    // A shared host's own name is never the app's: the registrant's label is
+    ['https://mcp.acme.github.io/sse', 'Acme'],
+    ['https://tool.acme.vercel.app', 'Acme'],
+    ['https://acme.herokuapp.com', 'Acme'],
   ])('reads %s as %s', (address, name) => expect(nameFromAddress(address)).toBe(name));
 
   it.each(['http://127.0.0.1/mcp', 'https://[::1]/mcp', 'http://localhost/mcp', 'not a link', '', null, undefined])('reads nothing from %s', (address) => {

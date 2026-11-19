@@ -89,6 +89,26 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
     setOpen(true);
   }
 
+  /** Whether extra usage was saved under this key, asked without giving anything: 'unsure' when it could not be asked. */
+  async function savedUnder(grantKey: string): Promise<'saved' | 'not_saved' | 'unsure'> {
+    setSaving(true);
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/users/${encodeURIComponent(userId)}/extra-usage/status?grantKey=${encodeURIComponent(grantKey)}`);
+      const data = (await response.json().catch(() => null)) as { saved?: unknown } | null;
+      if (!response.ok || typeof data?.saved !== 'boolean') {
+        addToast({ description: 'Could not check the last try. Try again.', variant: 'error' });
+        return 'unsure';
+      }
+      return data.saved ? 'saved' : 'not_saved';
+    } catch {
+      addToast({ description: 'Could not check the last try. Check your connection and try again.', variant: 'error' });
+      return 'unsure';
+    } finally {
+      setSaving(false);
+    }
+  }
+
   /** `done`: saved. `refused`: the server said no, so nothing was given. `unsure`: no answer came back, so it may have been saved. */
   async function send(method: 'POST' | 'PATCH', body: Record<string, unknown>): Promise<'done' | 'refused' | 'unsure'> {
     setSaving(true);
@@ -127,7 +147,7 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
   const extra = usage.extra;
   const used = dollars(usage.computerMonthMicros);
   // No limit shows first: a running no-limit grant counts even when the usual allowance is not set
-  const computer = usage.noLimit ? `${used} this month, no limit` : !usage.allowanceSet ? `${used} this month` : `${used} of ${dollars(usage.allowanceMicros ?? 0)} this month`;
+  const computer = usage.noLimit ? `${used} this month, no limit` : !usage.allowanceSet ? `${used} this month` : usage.leftMicros === null ? `${used} of ${dollars(usage.allowanceMicros ?? 0)} this month` : `${used} this month, ${dollars(usage.leftMicros)} left of ${dollars(usage.allowanceMicros ?? 0)}`;
   // An ask shows beside a running grant too: someone can use up a raised allowance and ask again
   const asked = usage.asked;
 
@@ -270,13 +290,13 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
                 }
                 const sig = JSON.stringify({ amount, until, date: until === 'date' ? date : null, bill, note: bill === 'to_bill' ? note : null });
                 if (pendingKey.current && pendingKey.current.sig !== sig) {
-                  // The last try got no answer and this is something else. That one may still be saved, even late, so it is sent
-                  // again first with the same key: the server gives it once, however many times it is sent, and says what became of it.
-                  // Nothing else is given until that is known.
-                  const earlier = await send('POST', pendingKey.current.request);
+                  // The last try got no answer and this is something else. That one may have been saved, so it is looked up (a read:
+                  // nothing is given for it now) before anything else is given.
+                  const earlier = await savedUnder(pendingKey.current.key);
                   if (earlier === 'unsure') return;
                   pendingKey.current = null;
-                  if (earlier === 'done') {
+                  if (earlier === 'saved') {
+                    await load();
                     addToast({ description: 'The last try went through. Use Change if that is not what you want now.', variant: 'success' });
                     setOpen(false);
                     return;

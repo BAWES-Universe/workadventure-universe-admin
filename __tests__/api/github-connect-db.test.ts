@@ -208,6 +208,25 @@ run('Connect GitHub for Bricks, in a real database', () => {
     }
   });
 
+  it('setting up again while the kept app’s secrets cannot be read replaces that app, and is not refused as another setup', async () => {
+    mockUser.current = { id: sara, isSuperAdmin: true };
+    await prisma.appSetting.create({ data: { key: 'github-app', value: { appId: 123, slug: 'old', clientId: 'Iv1.old', htmlUrl: 'https://github.com/apps/old', secrets: 'cannot-be-decrypted' } } });
+    forgetGitHubApp();
+    const form = await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: {} }))).json();
+    const state = new URL(form.action).searchParams.get('state') as string;
+    pretendGitHub({ 'POST https://api.github.com/app-manifests/fresh/conversions': { status: 201, body: { id: 124, slug: 'new', client_id: 'Iv1.new', client_secret: 'app-secret', webhook_secret: null, pem: PEM, html_url: 'https://github.com/apps/new' } } });
+    const adminsBefore = process.env.SUPER_ADMINS;
+    try {
+      process.env.SUPER_ADMINS = `sara-${tag}@example.test`;
+      expect((await created(request(`/api/admin/github-app/created?code=fresh&state=${encodeURIComponent(state)}`))).status).toBe(200);
+    } finally {
+      if (adminsBefore === undefined) delete process.env.SUPER_ADMINS;
+      else process.env.SUPER_ADMINS = adminsBefore;
+    }
+    forgetGitHubApp();
+    expect((await getGitHubApp())?.appId).toBe(124);
+  });
+
   it('connects once, signs in on GitHub with PKCE, keeps the token in Orbit and sends a person with no install on to pick where it works', async () => {
     await makeApp();
     mockUser.current = { id: sara };
@@ -412,6 +431,10 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(login).toBe('sara-gh');
     expect(await gitHubToken(id)).toMatchObject({ status: 'ok', token: 'ghp_good_key_123' });
     expect(await readConnection(id, sara)).toMatchObject({ connected: true });
+    // A sign-in started before the key was saved can no longer finish over it
+    await prisma.appConnection.update({ where: { id }, data: { signInNonce: 'a-sign-in-started-earlier' } });
+    expect((await saveKey(request('/api/me/apps/github/key', { method: 'POST', body: { key: 'ghp_good_key_123' } }))).status).toBe(200);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInNonce).toBeNull();
     await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }));
     expect(await readConnection(id, sara)).toMatchObject({ connected: false });
   });

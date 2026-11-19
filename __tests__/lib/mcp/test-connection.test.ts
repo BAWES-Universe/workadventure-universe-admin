@@ -5,6 +5,8 @@
 jest.mock('@/lib/mcp/outbound-guard', () => ({
   ...jest.requireActual('@/lib/mcp/outbound-guard'),
   isAllowedServerIp: jest.fn(async () => ({ allowed: true })),
+  // The request itself goes through the pretend fetch (the pinned connection has its own test)
+  pinnedFetch: jest.fn(async (url: string, init?: RequestInit) => global.fetch(url, init)),
 }));
 
 import { testMcpConnection } from '@/lib/mcp/test-connection';
@@ -22,7 +24,7 @@ type Sent = { url: string; headers: Record<string, string>; message: { id?: stri
 function pretend(answer: (sent: Sent) => Response) {
   const sent: Sent[] = [];
   global.fetch = jest.fn(async (url: string | URL | Request, init?: RequestInit) => {
-    const one: Sent = { url: String(url), headers: { ...(init?.headers as Record<string, string>) }, message: JSON.parse(String(init?.body)) };
+    const one: Sent = { url: String(url), headers: { ...(init?.headers as Record<string, string>) }, message: init?.body ? JSON.parse(String(init.body)) : { method: String(init?.method) } };
     sent.push(one);
     return answer(one);
   }) as unknown as typeof fetch;
@@ -36,7 +38,7 @@ describe('testMcpConnection', () => {
     );
     const result = await testMcpConnection(base);
     expect(result).toMatchObject({ success: true, toolNames: ['a'] });
-    expect(sent.map((one) => one.message.method)).toEqual(['initialize', 'notifications/initialized', 'tools/list']);
+    expect(sent.map((one) => one.message.method)).toEqual(['initialize', 'notifications/initialized', 'tools/list', 'DELETE']);
     expect(sent[1].headers['Mcp-Session-Id']).toBe('sess-1');
     expect(sent[2].headers['Mcp-Session-Id']).toBe('sess-1');
   });
@@ -160,5 +162,99 @@ describe('testMcpConnection', () => {
     const away = other.find((one) => one.url === 'https://elsewhere.example.net/mcp');
     expect(away).toBeDefined();
     expect(Object.keys(away!.headers).map((key) => key.toLowerCase()).sort()).toEqual(['accept', 'content-type']);
+  });
+
+  const listing = (tools: unknown[] = [{ name: 'a' }], over: Partial<{ init: Response; seen: (one: Sent) => void }> = {}) =>
+    pretend((one) => {
+      over.seen?.(one);
+      if (one.message.method === 'initialize') return over.init ?? json({ jsonrpc: '2.0', id: 'init', result: {} });
+      if (one.message.method === 'tools/list') return json({ jsonrpc: '2.0', id: '1', result: { tools } });
+      return new Response(null, { status: 202 });
+    });
+
+  describe('review findings on the connection test', () => {
+    it('keeps a required input that the schema does not declare in its properties', async () => {
+      listing([{ name: 'search', inputSchema: { type: 'object', properties: { limit: {} }, required: ['query'] } }]);
+      const result = await testMcpConnection(base);
+      expect(result.tools?.[0].inputs).toEqual(expect.arrayContaining([{ name: 'query', required: true }, { name: 'limit', required: false }]));
+    });
+
+    it('takes only the message whose id is the request id, on a plain answer and on a stream alike', async () => {
+      pretend(({ message }) => (message.method === 'initialize' ? json({ jsonrpc: '2.0', id: 'init', result: {} }) : message.method !== 'tools/list' ? new Response(null, { status: 202 }) : json({ jsonrpc: '2.0', id: 'other', result: { tools: [{ name: 'a' }] } })));
+      expect(await testMcpConnection(base)).toMatchObject({ success: false });
+      pretend(({ message }) => (message.method === 'initialize' ? json({ jsonrpc: '2.0', id: 'init', result: {} }) : message.method !== 'tools/list' ? new Response(null, { status: 202 }) : sse(`data: ${JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [{ name: 'a' }] } })}\n\n`)));
+      expect(await testMcpConnection(base)).toMatchObject({ success: false });
+    });
+
+    it('stops reading an answer that is larger than the limit, on a plain answer and on a stream alike', async () => {
+      const big = 'x'.repeat(3 * 1024 * 1024);
+      pretend(({ message }) => (message.method === 'initialize' ? json({ jsonrpc: '2.0', id: 'init', result: {} }) : message.method !== 'tools/list' ? new Response(null, { status: 202 }) : json({ jsonrpc: '2.0', id: '1', result: { tools: [{ name: 'a', description: big }] } })));
+      expect(await testMcpConnection(base)).toMatchObject({ success: false });
+      // One chunk that crosses the limit is not read at all, even when the answer is in it
+      pretend(({ message }) => (message.method === 'initialize' ? json({ jsonrpc: '2.0', id: 'init', result: {} }) : message.method !== 'tools/list' ? new Response(null, { status: 202 }) : sse(`data: ${JSON.stringify({ jsonrpc: '2.0', id: '1', result: { tools: [{ name: 'a', description: big }] } })}\n\n`)));
+      expect(await testMcpConnection(base)).toMatchObject({ success: false });
+    });
+
+    it('never returns the configured credentials, even when an app sends one back as a bare error message', async () => {
+      const keyed = { ...base, authType: 'api-key', headers: { 'X-Tenant': 'tenant-secret-77' } };
+      jest.resetModules();
+      const key = 'plainkey123456';
+      jest.doMock('@/lib/encryption', () => ({ decryptApiKey: () => key }));
+      const { testMcpConnection: run } = await import('@/lib/mcp/test-connection');
+      pretend(({ message }) => (message.method === 'initialize' ? json({ jsonrpc: '2.0', id: 'init', error: { message: `${key} is not allowed for tenant-secret-77` } }) : new Response(null, { status: 202 })));
+      const opened = await run({ ...keyed, authConfig: 'x' });
+      expect(JSON.stringify(opened)).not.toContain(key);
+      expect(JSON.stringify(opened)).not.toContain('tenant-secret-77');
+      pretend(() => new Response(`${key}`, { status: 401, statusText: key, headers: { 'www-authenticate': `Basic realm="${key}"` } }));
+      const refused = await run({ ...keyed, authConfig: 'x' });
+      expect(JSON.stringify(refused)).not.toContain(key);
+      jest.dontMock('@/lib/encryption');
+    });
+
+    it('sends fixed protocol headers, not custom ones, to another origin on a redirect', async () => {
+      const custom = { ...base, headers: { Accept: 'text/plain; secret=1', 'Content-Type': 'text/plain; secret=2' } };
+      const other = pretend((one) => (one.url.startsWith('https://app.example.com') ? new Response(null, { status: 307, headers: { location: 'https://elsewhere.example.net/mcp' } }) : new Response('no', { status: 401 })));
+      await testMcpConnection(custom);
+      const away = other.find((one) => one.url === 'https://elsewhere.example.net/mcp');
+      expect(away?.headers).toEqual({ 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' });
+    });
+
+    it('sends the session id only to the origin that issued it, and the negotiated version everywhere', async () => {
+      const sent = pretend((one) => {
+        if (one.url === 'https://app.example.com/mcp') return new Response(null, { status: 307, headers: { location: 'https://issuer.example.net/mcp' } });
+        if (one.message.method === 'initialize') return json({ jsonrpc: '2.0', id: 'init', result: { protocolVersion: '2025-06-18' } }, { 'mcp-session-id': 'sess-9' });
+        if (one.message.method === 'tools/list') return json({ jsonrpc: '2.0', id: '1', result: { tools: [{ name: 'a' }] } });
+        return new Response(null, { status: 202 });
+      });
+      await testMcpConnection(base);
+      const original = sent.filter((one) => one.url === 'https://app.example.com/mcp');
+      expect(original.length).toBeGreaterThan(1);
+      for (const one of original.slice(1)) expect(one.headers['Mcp-Session-Id']).toBeUndefined();
+      const issuer = sent.filter((one) => one.url === 'https://issuer.example.net/mcp' && one.message.method === 'tools/list');
+      expect(issuer[0].headers['Mcp-Session-Id']).toBe('sess-9');
+      expect(issuer[0].headers['MCP-Protocol-Version']).toBe('2025-06-18');
+      expect(original[1].headers['MCP-Protocol-Version']).toBe('2025-06-18');
+    });
+
+    it('answers a CR-only event without waiting for another chunk', async () => {
+      pretend(({ message }) => {
+        if (message.method === 'initialize') return json({ jsonrpc: '2.0', id: 'init', result: {} });
+        if (message.method !== 'tools/list') return new Response(null, { status: 202 });
+        const body = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ jsonrpc: '2.0', id: '1', result: { tools: [{ name: 'a' }] } })}\r\r`)); } });
+        return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      });
+      expect(await testMcpConnection(base)).toMatchObject({ success: true, toolNames: ['a'] });
+    });
+
+    it('closes the session it opened, and says a non-JSON answer in fixed words', async () => {
+      const sent = listing([{ name: 'a' }], { init: json({ jsonrpc: '2.0', id: 'init', result: {} }, { 'mcp-session-id': 'sess-2' }) });
+      await testMcpConnection(base);
+      const closing = sent.find((one) => one.message.method === 'DELETE');
+      expect(closing?.headers['Mcp-Session-Id']).toBe('sess-2');
+      pretend(() => new Response('<html>secret-token-abcdef</html>', { status: 200, headers: { 'content-type': 'application/json' } }));
+      const bad = await testMcpConnection(base);
+      expect(bad.success).toBe(false);
+      expect(bad.error).not.toContain('secret-token-abcdef');
+    });
   });
 });
