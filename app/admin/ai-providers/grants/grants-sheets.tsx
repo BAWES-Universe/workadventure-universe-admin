@@ -365,6 +365,13 @@ export function GiftSheet({ open, onClose, onSaved }: { open: boolean; onClose: 
     pending.current = null;
   }, [open]);
 
+  const zoneName = (() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone;
+    } catch {
+      return '';
+    }
+  })();
   const endsAtDate = until ? new Date(`${until}T23:59:59`) : null;
   const endsAt = endsAtDate && !Number.isNaN(endsAtDate.getTime()) && endsAtDate.getTime() > Date.now() ? endsAtDate.toISOString() : null;
   const who = recipientsOf(audience);
@@ -471,6 +478,7 @@ export function GiftSheet({ open, onClose, onSaved }: { open: boolean; onClose: 
           <Group label="Until">
             <Input type="date" className="h-11" aria-label="Ends on" value={until} onChange={(event) => setUntil(event.target.value)} />
             {until && !endsAt && <p className="text-sm text-muted-foreground">Pick a day in the future. Every gift ends.</p>}
+            {endsAt && <p className="text-sm text-muted-foreground">Ends at the end of that day in your time zone{zoneName ? ` (${zoneName})` : ''}. The list and the preview show the same day.</p>}
           </Group>
           <Group label="Gift or bill">
             <Segmented<Settlement>
