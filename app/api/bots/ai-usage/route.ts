@@ -117,10 +117,16 @@ export async function POST(request: NextRequest) {
       // (lib/voice-note-turns.ts): a reservation reads the notes on their way and then the replies used inside one hold of it, so a row is never
       // written between those two reads and a note that was answered is never missed by one of them. Other rows are written as before
       if (error !== true && greeting !== true) {
-        return prisma.$transaction(async (tx) => {
-          await lockSpeech(tx);
-          return tx.botsAiUsage.create({ data });
-        }, SPEECH_LOCK);
+        try {
+          return await prisma.$transaction(async (tx) => {
+            await lockSpeech(tx);
+            return tx.botsAiUsage.create({ data });
+          }, SPEECH_LOCK);
+        } catch (err) {
+          // The lock was busy for too long or no connection came in time: the row is still written, without it. The worst that can follow is one
+          // reply counted twice by a reservation that was running at that moment, never a reply that drops out of the counts and the books
+          console.error('Could not write a reply row under the speech lock, writing it without:', err);
+        }
       }
       return prisma.botsAiUsage.create({ data });
     })()

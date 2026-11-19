@@ -405,6 +405,22 @@ run('the grants routes, on the real books', () => {
     expect((await overview()).exceptions[0].computers).toEqual({ mode: 'same' });
   });
 
+  it('does not call a computers rule "as it was" when the people it is saved for changed: the save is refused and nothing changes', async () => {
+    const [omar, noor] = [await person('Omar'), await person('Noor')];
+    const audience = { kind: 'people', userIds: [omar, noor] };
+    await call(postException, '/x', { method: 'POST', body: { audience, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'same' } } });
+    const { saveException } = await import('@/lib/credit-rules');
+    await saveException({ categoryId: 'computers', amount: 5 * MILLION, schedule: 'monthly', recipients: { kind: 'people', userIds: [omar, noor] }, claimStartsAt: new Date() }, { userId: admin.id, superAdmin: true });
+    const opened = (await overview()).exceptions[0];
+    // The same rule sent back for fewer people, with the Apps amount changed
+    const narrowed = { audience: { kind: 'people', userIds: [omar] }, replaceId: opened.id, instant_apps: { mode: 'own', amountMicros: 12 * MILLION, interval: 'monthly' }, computers: opened.computers };
+    const answer = await call<any>(postException, '/x', { method: 'POST', body: narrowed });
+    expect(answer.status).toBe(400);
+    expect((await answer.json()).code).toBe('computers_not_yet');
+    // Nothing changed: the Apps rule is still 10 for both people
+    expect((await overview()).exceptions[0]).toMatchObject({ instant_apps: { mode: 'own', amountMicros: 10 * MILLION }, computers: { mode: 'own', amountMicros: 5 * MILLION } });
+  });
+
   it('never half-saves an exception: if the second category is refused, the first is put back', async () => {
     await saveMeterSettings({ rolloutBudgetMicros: 5 * MILLION }, admin.id);
     const [omar, noor] = [await person('Omar'), await person('Noor')];

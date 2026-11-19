@@ -415,7 +415,8 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     // A month before the first saved figure is worked out with that first figure: it is all that is known of it, and what every month used until now
     let applied = figureOf(changes[0]);
     for (const change of changes) {
-      if (change.effectiveFrom >= month.end) break;
+      // A figure scheduled for a day that has not come yet is not the allowance of any month: a report of a month before it is not worked out with it
+      if (change.effectiveFrom >= month.end || change.effectiveFrom > now) break;
       applied = figureOf(change);
     }
     return applied;

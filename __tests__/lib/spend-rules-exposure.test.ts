@@ -57,6 +57,20 @@ describe('exposureOf', () => {
     const at = (n: number) => min(n).getTime();
     const TEN = 10 * 60_000;
 
+    it('a lease whose row was inserted a moment after its first stretch was taken is still counted from that first stretch', () => {
+      // The row's createdAt came a second after the first term's moment: counting from createdAt would take that second off the first stretch
+      const lease = {
+        amountMicros: BigInt(0.3 * MIL),
+        renewals: 1,
+        createdAt: new Date(min(0).getTime() + 1000),
+        expiresAt: min(15),
+        terms: [{ at: at(0), micros: 0.1 * MIL, stretchMs: TEN }, { at: at(5), micros: 0.2 * MIL, stretchMs: TEN }],
+      };
+      expect(exposureOf([lease], 10)).toBe(0.25 * MIL);
+      // A period that began before the lease counts it from its first stretch too
+      expect(exposureOf([lease], 10, undefined, min(-30))).toBe(0.25 * MIL);
+    });
+
     it('$0.10 for ten minutes, then renewed at minute 5 at $0.20 for ten minutes: the lease through minute 15 can cost $0.25, not the $0.225 an average gives', () => {
       const lease = {
         amountMicros: BigInt(0.3 * MIL),

@@ -160,8 +160,12 @@ export async function proposeRule(input: DraftInput & { speakerId: string; sayin
   // The speaker is in the key: the same message id said by two people (on a Brick they both talk to) is two different rules, and one
   // person's replay never finds, or shows, another person's rule
   const ruleKey = input.sayingKey ? chatRuleKey(input.botId, input.speakerId, input.sayingKey) : null;
+  // Rules made before long ids were hashed were saved under the whole key cut to the column's 255 characters: the same message said again
+  // finds that rule too, and is not made twice
+  const whole = input.sayingKey ? `chat:${input.botId}:${input.speakerId}:${input.sayingKey}` : '';
+  const keys = ruleKey ? (whole.length > 255 ? [ruleKey, whole.slice(0, 255)] : [ruleKey]) : [];
   if (ruleKey) {
-    const seen = await prisma.spendRule.findUnique({ where: { ruleKey } });
+    const seen = await prisma.spendRule.findFirst({ where: { ruleKey: { in: keys } } });
     if (seen) return isReplayOf(seen, draft, owner.ownerPersonId) ? { ok: true, rule: await cardOf(seen), created: false } : { ok: false, reason: 'key_reused' };
   }
   try {
@@ -187,7 +191,7 @@ export async function proposeRule(input: DraftInput & { speakerId: string; sayin
     // Two sends of the same message at once: the first made the rule, the second finds it
     const code = (error as { code?: string } | null)?.code;
     if (ruleKey && code === 'P2002') {
-      const winner = await prisma.spendRule.findUnique({ where: { ruleKey } });
+      const winner = await prisma.spendRule.findFirst({ where: { ruleKey: { in: keys } } });
       if (winner) return isReplayOf(winner, draft, owner.ownerPersonId) ? { ok: true, rule: await cardOf(winner), created: false } : { ok: false, reason: 'key_reused' };
     }
     throw error;
@@ -348,10 +352,13 @@ async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Dat
   // careful), never missed (a cap passed). Reading them together could miss it.
   if (wantsComputer(rule.covers)) {
     const held = await db.meterReservation.findMany({ where: { AND: holds }, select: { amountMicros: true, renewals: true, createdAt: true, expiresAt: true, terms: true } });
+    // What crossed into the period is read before the total it comes off: an event that lands between the two reads is then counted whole (a step
+    // too careful), never taken off without having been added (a cap passed)
+    const crossed = start ? await crossedBefore(db, events, start) : 0;
     const taken = await db.meterEvent.aggregate({ where: { AND: events }, _sum: { costMicros: true } });
     const unpriced = await unpricedCallRoom(db, events);
     const settings = await getMeterSettings(db);
-    spentMicros += toNumber(taken._sum.costMicros) + unpriced - (start ? await crossedBefore(db, events, start) : 0);
+    spentMicros += toNumber(taken._sum.costMicros) + unpriced - crossed;
     heldMicros += exposureOf(held, settings.renewMinutes, now, start);
   }
   if (wantsApps(rule.covers)) {

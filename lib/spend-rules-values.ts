@@ -304,13 +304,15 @@ export function exposureOf(rows: ReadonlyArray<Lease>, renewMinutes: number, _no
       continue;
     }
     const ends = row.expiresAt.getTime();
-    const floor = since ? Math.max(since.getTime(), row.createdAt.getTime()) : row.createdAt.getTime();
+    // A lease with terms starts when its first stretch was taken (recorded with it), not when its row happened to be written
+    const began = terms ? terms[0].at : row.createdAt.getTime();
+    const floor = since ? Math.max(since.getTime(), began) : began;
     if (terms) {
       // Whole micros: each piece is (micros x time) / stretch, summed as a fraction and rounded up once
       let cost = 0;
       for (let index = 0; index < terms.length; index++) {
         const term = terms[index];
-        const from = Math.max(floor, index === 0 ? row.createdAt.getTime() : term.at);
+        const from = Math.max(floor, term.at);
         const to = Math.min(ends, index + 1 < terms.length ? terms[index + 1].at : ends);
         if (to > from) cost += (term.micros * (to - from)) / term.stretchMs;
       }

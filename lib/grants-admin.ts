@@ -225,8 +225,10 @@ export const COMPUTER_CREDIT_WORDS = 'For now computer jobs follow one monthly a
  * A computers rule saved before they followed one monthly allowance, sent back exactly as it is (the edit sheet sends every category it
  * opened with): it is left alone, so changing another category of the same exception is never refused because of it.
  */
-export function keepsComputersRule(category: MoneyCategory, setting: ExceptionSetting, current: ProgramView | undefined): boolean {
+export function keepsComputersRule(category: MoneyCategory, setting: ExceptionSetting, current: ProgramView | undefined, recipients: Recipient): boolean {
   if (category !== 'computers' || !current || setting.mode === 'same') return false;
+  // Only for the same people: a rule sent back with another audience would be a rule for people it was never made for, and is not "as it was"
+  if (recipientKey(current.recipients) !== recipientKey(recipients)) return false;
   const was = settingOf(current);
   if (was.mode !== setting.mode) return false;
   return was.mode !== 'own' || (setting.mode === 'own' && was.amountMicros === setting.amountMicros && was.interval === setting.interval);
@@ -380,7 +382,7 @@ export async function previewFor(request: PreviewRequest, now: Date = new Date()
     const openedRule = openedComputers && request.computers.mode !== 'same' ? (await listPrograms(undefined, { kind: 'exception' })).find((program) => program.programId === openedComputers) : undefined;
     for (const category of MONEY_CATEGORIES) {
       const setting = request[category];
-      if (keepsComputersRule(category, setting, openedRule)) continue;
+      if (keepsComputersRule(category, setting, openedRule, recipients)) continue;
       const input = settingInput(category, setting, recipients, now);
       if (!input) continue;
       const preview = await previewGrant('exception', input, now);
@@ -494,6 +496,8 @@ async function undo(done: { before: ProgramView | undefined; after: ProgramView 
  */
 export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 'exception' }> & { clashChoice?: 'this' | 'other' }, issuer: Issuer, now: Date = new Date()): Promise<void> {
   let recipients = recipientOf(request.audience);
+  // The people as the admin opened them (before any clash takes some out of this rule)
+  const opened = recipients;
   const existing = request.replaceId ? readExceptionId(request.replaceId) : null;
   if (request.replaceId && !existing) throw new GrantsRefused('That exception was not found', 404);
   // The same people already have a rule for this category: this is a change to it, never a second one
@@ -521,7 +525,7 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
       for (const category of MONEY_CATEGORIES) {
         const current = findExisting(category);
         // A computers rule from before is sent back as it was: it stays as it is, neither saved again nor ended
-        if (keepsComputersRule(category, request[category], current)) continue;
+        if (keepsComputersRule(category, request[category], current, opened)) continue;
         const input = settingInput(category, request[category], recipients, now);
         if (!input) {
           if (current) toEnd.push(current);

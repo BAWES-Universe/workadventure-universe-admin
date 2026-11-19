@@ -2052,6 +2052,15 @@ export async function recoverControl(now: Date = new Date(), batch: number = SWE
   return finished;
 }
 
+/**
+ * Whether the person has the computer, read with its row held (FOR SHARE) to the end of the caller's transaction: a hand back, which writes
+ * that row first, waits for the step that holds it. A computer with no row counts as the person's, as in `humanHasControl`.
+ */
+async function personHoldsComputer(tx: Prisma.TransactionClient, botId: string): Promise<boolean> {
+  const rows = await tx.$queryRaw<{ control_state: string }[]>`SELECT "control_state" FROM "brick_computers" WHERE "bot_id" = ${botId} FOR SHARE`;
+  return rows.length === 0 || rows[0].control_state === 'human_ready';
+}
+
 export type Filling = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'not_in_control' | 'nothing_ready' | 'changed' };
 
 /**
@@ -2076,6 +2085,8 @@ export async function fillInDetails(botId: string, ownerId: string, shown?: { wh
   const key = detailsKey(shown.what, shown.where);
   // The check and the approval are one transaction: what Brick named cannot change between them, so the approval is for exactly what was shown
   const approved = await prisma.$transaction(async (tx) => {
+    // The person must still have the machine when the approval is written: the computer's row is held for the rest of this step, so a hand back waits for it
+    if (!(await personHoldsComputer(tx, botId))) return 'not_in_control' as const;
     const same = await tx.computerJob.updateMany({ where: { id: job.id, status: 'waiting', control: 'person', readyWhat: shown.what, readyWhere: shown.where }, data: { readyWhat: shown.what } });
     if (same.count === 0) return false;
     await tx.computerEffect.upsert({
@@ -2087,6 +2098,7 @@ export async function fillInDetails(botId: string, ownerId: string, shown?: { wh
     await tx.computerEffect.updateMany({ where: { jobId: job.id, effectKey: key, state: 'failed' }, data: { state: 'approved', settledAt: null } });
     return true;
   });
+  if (approved === 'not_in_control') return { ok: false, reason: 'not_in_control' };
   if (!approved) return { ok: false, reason: 'changed' };
   const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id }, include: JOB_INCLUDE });
   return { ok: true, job: jobView(after) };
@@ -2137,6 +2149,9 @@ export async function planEffect(jobId: string, input: { key: string; kind: Effe
       // The person's hands: checked again here, with the job held so a hand-back (or the end of the job) waits for this claim. The read
       // above may be old by now, and a tap is only ever spent while the person still has the machine
       if (AFTER_TAKE_OVER.includes(input.kind)) {
+        // The computer's own row first (a hand back writes it before it moves the jobs), held to the end of this claim: control cannot go back to
+        // Brick between this check and the claim, and a row that says anything but "the person is ready" means the hands are changing
+        if (!(await personHoldsComputer(tx, job.botId))) return 'hand_over_first' as const;
         const now = await tx.$queryRaw<{ status: string; control: string }[]>`SELECT "status", "control" FROM "computer_jobs" WHERE "id" = ${jobId} FOR SHARE`;
         if (now.length === 0 || now[0].status !== 'waiting' || now[0].control !== 'person') return 'hand_over_first' as const;
       }

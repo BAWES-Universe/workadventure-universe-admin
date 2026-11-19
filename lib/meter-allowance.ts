@@ -255,6 +255,8 @@ export async function reserveRoom(
         expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE),
         // The first stretch, at the price it was taken at (see `terms` on the schema)
         terms: [{ at: now.getTime(), micros: input.amountMicros, stretchMs: settings.renewMinutes * MINUTE }],
+        // The same moment as the first stretch, so the lease starts when it was authorized and not when the insert happened to run
+        createdAt: now,
       },
     });
     return { ok: true, reservation: viewOf(row), created: true };
@@ -310,6 +312,9 @@ export async function renewRoom(input: { key: string; moreMicros?: number }, ask
     // Each stretch keeps the price it was taken at: this renewal's stretch is priced at the room it holds (one that adds no room keeps the price the
     // lease last had). A lease with no terms (an older row) stays without, and is counted as equal stretches.
     const terms = termsOf(row.terms);
+    // A request stamped before the last stretch on record was overtaken by a renewal that took the lock first: there is nothing to add, and the
+    // lease stays as that renewal left it (appending an older stretch would put the history out of order and pull the end back)
+    if (terms && now.getTime() < terms[terms.length - 1].at) return { ok: true, reservation: viewOf(row), created: false };
     const nextTerms = terms ? [...terms, { at: now.getTime(), micros: more > 0 ? more : terms[terms.length - 1].micros, stretchMs }] : null;
     if (more > 0) {
       // More room for a job that runs is a new step for the rules too: the same ones that let it start decide whether it may take more.

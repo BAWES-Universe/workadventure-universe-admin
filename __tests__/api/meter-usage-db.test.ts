@@ -964,6 +964,45 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(report.given.find((row) => row.grantKey === `g-${tag}-sara`)?.aboveUsualMicros).toBe(3_000);
     });
 
+    it('does not work a month out with an allowance that is only scheduled for a later day of it', async () => {
+      await setUp();
+      const sara = await person('sara');
+      const faisal = await person('faisal');
+      // The usual is 1,000, and 8,000 is scheduled for the 25th, which has not come at the time of the report
+      await prisma.meterAllowanceChange.deleteMany({});
+      await prisma.meterAllowanceChange.createMany({ data: [{ effectiveFrom: new Date('1970-01-01T00:00:00Z'), allowanceMicros: BigInt(1_000) }, { effectiveFrom: new Date('2026-11-25T00:00:00Z'), allowanceMicros: BigInt(8_000) }] });
+      await recordGrant({ grantKey: `g-${tag}-sara`, personId: sara.id, settlement: 'to_bill', multiplier: 2, startsAt: days(-30), endsAt: days(10), givenById: faisal.id, note: 'Agreed' });
+      await spendComputer(sara, 3_000, days(-2));
+      const report = await costsReport(range.from, range.to, NOW);
+      expect(report.given.find((row) => row.grantKey === `g-${tag}-sara`)?.aboveUsualMicros).toBe(1_000);
+    });
+
+    it('scheduling an allowance works from the time it got the lock, not the time it was asked', async () => {
+      await prisma.meterAllowanceChange.deleteMany({});
+      await saveMeterSettings({ memberAllowanceMicros: 1_000 }, 'admin');
+      // A change already waiting for a moment that will have passed by the time the lock is had
+      const waitingFor = new Date(Date.now() + 200);
+      await prisma.meterAllowanceChange.create({ data: { effectiveFrom: waitingFor, allowanceMicros: BigInt(5_000) } });
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+      const other = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('meter:settings'))`;
+        locked();
+        await held;
+      });
+      await lockTaken;
+      const scheduling = scheduleMemberAllowance(7_000, new Date('2099-01-01T00:00:00Z'), 'admin');
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      release();
+      await other;
+      await scheduling;
+      // The waiting change's day came while the save waited: it is in force, not one a later change replaces
+      const rows = await prisma.meterAllowanceChange.findMany({ orderBy: { effectiveFrom: 'asc' } });
+      expect(rows.map((row) => (row.allowanceMicros === null ? null : Number(row.allowanceMicros)))).toEqual([1_000, 5_000, 7_000]);
+    });
+
     it('keeps the allowance of each month as it was saved: saving a new one later never rewrites an earlier month', async () => {
       await prisma.meterAllowanceChange.deleteMany({});
       await saveMeterSettings({ memberAllowanceMicros: 2_000 }, 'admin');

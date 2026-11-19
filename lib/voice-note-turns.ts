@@ -56,6 +56,8 @@ export const BUFFER_MAX_BYTES = 64 * 1024;
 const STARTING_MS = NOTE_START_MS;
 /** A note that has not become an answer after this long is no longer counted as a reply on its way. */
 const ON_THE_WAY_MS = 15 * 60 * 1000;
+/** How long after a note is answered its reply may still be missing from the usage rows (the bot server reports the two separately). */
+const ANSWER_GAP_MS = 2 * 60 * 1000;
 /** What a reservation answers with when the ask has to be made again from the top. */
 const AGAIN = Symbol('again');
 
@@ -306,6 +308,9 @@ export async function reserveVoiceNote(
             { state: { in: ['reserved', 'hearing'] }, createdAt: { gt: new Date(now.getTime() - ON_THE_WAY_MS) } },
             { state: { in: ['heard', 'answering'] }, bufferUntil: { gt: now } },
             { state: { in: ['heard', 'answering'] }, bufferUntil: null, createdAt: { gt: new Date(now.getTime() - ON_THE_WAY_MS) } },
+            // A note answered a moment ago: its reply's usage row is reported separately and may land after the answer, so for a short while
+            // it is counted here as well (twice at worst, with the row, never missed). Only that short while: its answer is kept for much longer
+            { state: { in: ['answered', 'delivered'] }, bufferUntil: { gt: new Date(now.getTime() + BUFFER_MS - ANSWER_GAP_MS) } },
           ],
           personKey: slot.pending.guestsOnly ? { startsWith: 'guest:' } : slot.pending.personKey,
           ...(slot.pending.botId ? { botId: slot.pending.botId } : {}),
@@ -534,7 +539,10 @@ export async function recordVoiceNote(id: string, input: Record<string, unknown>
   if (event === 'delivered') {
     if (turn.state === 'delivered') return ok('delivered');
     if (turn.state !== 'answered') throw new VoiceNoteError(`A ${turn.state} turn has no answer to deliver`, 409);
-    await prisma.voiceNoteTurn.updateMany({ where: { id: turn.id, state: 'answered' }, data: { state: 'delivered', buffer: null, bufferUntil: null } });
+    await prisma.voiceNoteTurn.updateMany({ where: { id: turn.id, state: 'answered' },
+      // The answer is gone, but its time is kept: a note delivered a moment after it was answered is still counted as on its way for the short
+      // while its reply row may take to land (the clause in reserveVoiceNote); the sweep clears the time once it has passed
+      data: { state: 'delivered', buffer: null } });
     return ok('delivered');
   }
 
