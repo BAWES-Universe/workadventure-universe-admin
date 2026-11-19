@@ -14,7 +14,8 @@ const bodySchema = z.object({ input: z.string().min(1).max(200_000) }).strict();
  * POST /api/computer/jobs/:jobId/turn { input } - the runner sends the agent on a running job's computer a message, and gets its events
  * as Server-Sent Events: created, text, tool (name and short label only, never what the tool was given), completed or failed. The job
  * decides the machine and the conversation. 409 when the job is not running under Brick's hands (`not_running`, `person_has_it`,
- * `no_machine`) or the agent is already working on a turn (`busy`, with its id: reconnect to it with GET .../stream instead).
+ * `no_machine`) or the agent is already working on a turn (`busy`, with its id: reconnect to it with GET .../stream instead), or another start of a
+ * turn on the job holds its claim (`starting`: wait a few seconds and ask again; it is not a failed turn and it lapses by itself after about 45 seconds).
  * The runner going away does not cancel the turn. Auth: service token only.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {

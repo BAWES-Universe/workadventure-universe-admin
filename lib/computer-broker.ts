@@ -67,13 +67,20 @@ async function claimOnJob(jobId: string, field: Claim, staleMs: number, waitMs: 
 const releaseOnJob = (jobId: string, field: Claim, mark: Date) => prisma.computerJob.updateMany({ where: { id: jobId, [field]: mark }, data: { [field]: null } }).catch(() => undefined);
 
 /** Writing a key takes at most the machine's own limit and a little more. */
-const PREPARE_CLAIM_STALE_MS = 90_000;
-const PREPARE_CLAIM_WAIT_MS = 60_000;
+const PREPARE_CLAIM_STALE_MS = 45_000;
+// The runner gives up each call after 8 seconds and ends the job after 3 tries, so a second prepare waits only a little for the first
+// and then says "preparing": the runner asks again without counting it as a failure
+const PREPARE_CLAIM_WAIT_MS = 5_000;
 // A turn's id is kept within the agent's own start limit (30 s) and a little more; a claim left by a server that stopped lapses soon after, so
 // the runner is not told to wait for minutes behind it
 const TURN_CLAIM_STALE_MS = 45_000;
 
-export type Prepared = { ok: true; expiresAt: Date } | NotLive | { ok: false; reason: 'bad_relay' | 'failed' };
+export type Prepared =
+  | { ok: true; expiresAt: Date }
+  | NotLive
+  /** Another prepare of the job holds its claim: the caller waits a few seconds and asks again, it is not a failure. */
+  | { ok: false; reason: 'preparing' }
+  | { ok: false; reason: 'bad_relay' | 'failed' };
 
 /**
  * Gives the job's computer what it needs to ask for a model: a new key and the relay's address, written where the image's local
@@ -87,7 +94,7 @@ export async function prepareJob(jobId: string, relay: unknown, now: Date = new 
   // prepare at the same moment cannot end this one's key after it was written, or write an older key over a newer one
   const claim = await claimOnJob(jobId, 'prepareClaimedAt', PREPARE_CLAIM_STALE_MS, PREPARE_CLAIM_WAIT_MS);
   if (claim === 'gone') return { ok: false, reason: 'not_found' };
-  if (claim === 'busy') return { ok: false, reason: 'failed' };
+  if (claim === 'busy') return { ok: false, reason: 'preparing' };
   try {
     return await prepareClaimed(jobId, address, now);
   } finally {
@@ -136,6 +143,8 @@ export type StartedTurn =
   | NotLive
   /** The agent is already working on a turn: its id is given, so the caller reconnects to it instead of starting another. */
   | { ok: false; reason: 'busy'; responseId: string | null }
+  /** Another start of a turn on the job holds its claim (it may be on its way, or left by a server that stopped): there is no turn to reconnect to, the caller waits a few seconds and asks again, it is not a failure. */
+  | { ok: false; reason: 'starting' }
   | { ok: false; reason: 'failed' };
 
 /**
@@ -167,10 +176,9 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   // one. The claim is let go when the turn's id is kept (or the start fails); one nobody released lapses by itself.
   const claim = await claimOnJob(job.jobId, 'turnClaimedAt', TURN_CLAIM_STALE_MS, 0);
   if (claim === 'gone') return { ok: false, reason: 'not_found' };
-  // Held by a start still on its way (its id is not kept yet) or left by a server that stopped: there is no turn to reconnect to, so this is not
-  // "busy" (the runner would reconnect, find none and count an empty turn). It is said as a failure to start now, which the runner asks
-  // again later, and the claim lapses by itself
-  if (claim === 'busy') return job.responseId ? { ok: false, reason: 'busy', responseId: job.responseId } : { ok: false, reason: 'failed' };
+  // Held by a start still on its way, or left by a server that stopped: there is no turn id to hand back (and one just cleared must never be
+  // sent as "busy"), so the caller is told "starting": it waits a few seconds and asks again, and the claim lapses by itself
+  if (claim === 'busy') return { ok: false, reason: 'starting' };
   // The runner's connection must not cut the turn off before its id is kept: once the agent has accepted it, it runs on the machine, and
   // an id that was never stored leaves nothing to cancel or reconnect to. So the request's own signal is not handed on; the start has its
   // own limit instead, for the agent's answer only: once it has accepted the turn the limit is lifted, because cutting the stream before its id arrived would leave a turn running on the machine with nothing to cancel.

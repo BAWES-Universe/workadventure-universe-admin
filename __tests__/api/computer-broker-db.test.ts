@@ -305,8 +305,8 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       ];
       const [one, two] = await Promise.all([startTurn(jobId, 'one'), startTurn(jobId, 'two')]);
       expect([one.ok, two.ok].sort()).toEqual([false, true]);
-      // The other one's turn has no id yet, so there is nothing to reconnect to: it is told to ask again later, never "busy"
-      expect([one, two].find((turn) => !turn.ok)).toEqual({ ok: false, reason: 'failed' });
+      // The other one's turn has no id yet, so there is nothing to reconnect to: it is told it is starting (ask again, not a failure), never "busy"
+      expect([one, two].find((turn) => !turn.ok)).toEqual({ ok: false, reason: 'starting' });
       expect(fake.openedTurns).toHaveLength(1);
       const started = [one, two].find((turn) => turn.ok);
       if (!started || !started.ok) throw new Error('no turn');
@@ -319,15 +319,33 @@ run('the broker, the fence and keep-awake, in a real database', () => {
     it('a claim left by a server that stopped is not waited behind for minutes: it is asked again later while it is fresh, and lapses after about 45 seconds', async () => {
       const { jobId } = await running();
       fake.turns = [[{ type: 'created', id: 'resp-a', sessionId: 'sess-1' }, { type: 'completed', outputText: '', usage: null }]];
-      // Left claimed a moment ago, with no turn id: the runner is told to ask again, never "busy" (that sends it to reconnect to nothing)
+      // Left claimed a moment ago, with no turn id: the runner is told "starting" (wait and ask again, not a bad turn), never "busy" (reconnect to nothing) or a failure
       await prisma.computerJob.update({ where: { id: jobId }, data: { turnClaimedAt: new Date(Date.now() - 10_000) } });
-      expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'failed' });
+      expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'starting' });
       expect(fake.openedTurns).toHaveLength(0);
       // After about 45 seconds nobody holds it any more
       await prisma.computerJob.update({ where: { id: jobId }, data: { turnClaimedAt: new Date(Date.now() - 50_000) } });
       expect((await startTurn(jobId, 'go')).ok).toBe(true);
       expect(fake.openedTurns).toHaveLength(1);
     });
+
+    it('says "starting", never "busy", for a held claim even when a turn id the job kept was just cleared', async () => {
+      const { jobId } = await running();
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-gone', agentSessionId: 'sess-gone', turnClaimedAt: new Date() } });
+      expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'starting' });
+      expect(fake.openedTurns).toHaveLength(0);
+    });
+
+    it('a second prepare waits only a few seconds for the first, then says "preparing"; a claim older than about 45 seconds lapses', async () => {
+      const { jobId } = await running();
+      await prisma.computerJob.update({ where: { id: jobId }, data: { prepareClaimedAt: new Date() } });
+      const started = Date.now();
+      expect(await prepareJob(jobId, RELAY, NOW)).toEqual({ ok: false, reason: 'preparing' });
+      expect(Date.now() - started).toBeLessThan(8_000);
+      expect(fake.commands.filter((entry) => entry.command.includes('relay.json'))).toHaveLength(0);
+      await prisma.computerJob.update({ where: { id: jobId }, data: { prepareClaimedAt: new Date(Date.now() - 50_000) } });
+      expect(await prepareJob(jobId, RELAY, NOW)).toMatchObject({ ok: true });
+    }, 30_000);
 
     it('writes one key at a time for a job: a second prepare at the same moment waits, so the key left on the machine is the one that is good', async () => {
       const { jobId } = await running();
