@@ -39,17 +39,18 @@ function post(overrides: Record<string, unknown> = {}, deviceOverrides: Record<s
 /** Lets the sending that goes on after the answer finish. */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-describe('the push gateway', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    (prisma.pushDevice.findMany as jest.Mock).mockResolvedValue([device]);
-    (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'user-s' });
-    (prisma.friendship.findUnique as jest.Mock).mockResolvedValue({ status: 'accepted' });
-    (getPushSettings as jest.Mock).mockResolvedValue(DEFAULT_PUSH_SETTINGS);
-    (getActivity as jest.Mock).mockResolvedValue(null);
-    (sharesMemberWorld as jest.Mock).mockResolvedValue(false);
-  });
+// For every test in the file, so one that runs alone gets the same mocks as it does in the whole file
+beforeEach(() => {
+  jest.clearAllMocks();
+  (prisma.pushDevice.findMany as jest.Mock).mockResolvedValue([device]);
+  (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'user-s' });
+  (prisma.friendship.findUnique as jest.Mock).mockResolvedValue({ status: 'accepted' });
+  (getPushSettings as jest.Mock).mockResolvedValue(DEFAULT_PUSH_SETTINGS);
+  (getActivity as jest.Mock).mockResolvedValue(null);
+  (sharesMemberWorld as jest.Mock).mockResolvedValue(false);
+});
 
+describe('the push gateway', () => {
   it('notifies this one device of a friend’s direct message: name, line, one per chat', async () => {
     expect(await handleGatewayNotification(post())).toEqual({ rejected: [] });
     await settle();
