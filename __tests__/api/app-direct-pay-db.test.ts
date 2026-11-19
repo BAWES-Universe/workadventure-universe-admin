@@ -2,7 +2,7 @@
  * Payments for pages (game #2044, step 3) against a real database: the owner's job per page, the visitor's checkout, and the check that
  * decides "paid". Runs only with ROLES_DB_TEST=yes and a DATABASE_URL to a migrated throwaway database:
  *
- *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest --runInBand __tests__/api/app-direct-pay-db.test.ts
+ *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npm run test:db (docs/DB_TESTS.md), or this file alone on a database nothing else is using
  */
 import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
@@ -32,6 +32,8 @@ jest.mock('@/lib/app-direct/guard', () => {
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { disconnect } from '@/lib/app-connections';
+import { encryptApiKey } from '@/lib/encryption';
+import { snapshotSettings } from '../helpers/shared-settings';
 import { definitionSchema, hashDefinition } from '@/lib/app-direct/definition';
 import { openKeyForm, submitKey } from '@/lib/app-direct/connect';
 import { getBrickLimits, saveServerLimits } from '@/lib/bot-limits';
@@ -50,12 +52,14 @@ const tag = randomUUID().slice(0, 8);
 const SERVICE_TOKEN = `service-${tag}`;
 const ADMIN_TOKEN = `admin-${tag}`;
 const KEY = `sk_test_${randomUUID().replace(/-/g, '')}`;
+/** The second account's key is another key of another kind (a real one), so a request built from the first one's is seen. */
+const SECOND_KEY = `sk_live_${randomUUID().replace(/-/g, '')}`;
 const envBefore = { service: process.env.BOT_SERVICE_TOKEN, admin: process.env.ADMIN_API_TOKEN, key: process.env.ENCRYPTION_KEY, api: process.env.NEXT_PUBLIC_API_URL };
 
 let sara = '';
 let omar = '';
 let brick = '';
-let limitsBefore: { value: unknown } | null = null;
+let restoreSettings: () => Promise<void> = async () => undefined;
 const artifacts: string[] = [];
 
 const request = (path: string, init: { method?: string; body?: unknown; token?: string; headers?: Record<string, string> } = {}) =>
@@ -120,6 +124,16 @@ const settle = async (orderId: string) => {
   await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 24 * 3_600_000) } });
   return verifyOrder(orderId);
 };
+/** Waits (at most a few seconds) until a session of this database reports being blocked on a lock in a query containing `fragment`. */
+async function waitUntilBlocked(fragment: string, ms = 8_000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    const blocked = await prisma.$queryRaw<{ pid: number }[]>`SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${`%${fragment}%`}`;
+    if (blocked.length > 0) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return false;
+}
 const notices = () => prisma.userNotice.findMany({ where: { userId: sara, kind: 'page_payment' } });
 
 run('payments for pages, in a real database', () => {
@@ -128,7 +142,7 @@ run('payments for pages, in a real database', () => {
     process.env.ADMIN_API_TOKEN = ADMIN_TOKEN;
     process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'a'.repeat(64);
     process.env.NEXT_PUBLIC_API_URL = 'https://orbit.example.org';
-    limitsBefore = await prisma.appSetting.findUnique({ where: { key: 'bot-limits' } });
+    restoreSettings = await snapshotSettings(['bot-limits']);
     await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
     const person = (name: string) => prisma.user.create({ data: { uuid: `${name}-${tag}`, email: `${name}-${tag}@example.test`, name } });
     sara = (await person('sara')).id;
@@ -141,7 +155,7 @@ run('payments for pages, in a real database', () => {
     mockUser.current = null;
     await prisma.appPageOrder.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     // The rows that count uses of a key stay when the app is disconnected, so they are cleared here (and the rows that count payment looks)
-    await prisma.appKeyCall.deleteMany({ where: { ownerId: { in: [sara, omar, 'page-payments'] } } });
+    await prisma.appKeyCall.deleteMany({ where: { OR: [{ ownerId: { in: [sara, omar] } }, { ownerId: 'page-payments', callId: { startsWith: `look:${sara}:` } }, { ownerId: 'page-payments', callId: { startsWith: `look:${omar}:` } }] } });
     await prisma.appPageJob.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.artifact.deleteMany({ where: { id: { in: artifacts.splice(0) } } });
     await prisma.appKeyRequest.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
@@ -153,7 +167,7 @@ run('payments for pages, in a real database', () => {
 
   afterAll(async () => {
     await prisma.user.deleteMany({ where: { id: { in: [sara, omar] } } });
-    if (limitsBefore) await prisma.appSetting.create({ data: { key: 'bot-limits', value: limitsBefore.value as object } });
+    await restoreSettings();
     for (const [key, value] of [['BOT_SERVICE_TOKEN', envBefore.service], ['ADMIN_API_TOKEN', envBefore.admin], ['ENCRYPTION_KEY', envBefore.key], ['NEXT_PUBLIC_API_URL', envBefore.api]] as const) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -211,7 +225,8 @@ run('payments for pages, in a real database', () => {
       expect((await job(serverId, randomUUID())).status).toBe(404);
       const document = await makeArtifact({ kind: 'markdown' });
       expect((await job(serverId, document)).status).toBe(400);
-      expect(await prisma.appPageJob.count()).toBe(0);
+      // Counted by the artifacts asked about, not by owner: a job written under the wrong owner is still found
+      expect(await prisma.appPageJob.count({ where: { artifactId: { in: [others, document] } } })).toBe(0);
     });
 
     it('is only for the owner asking', async () => {
@@ -219,7 +234,7 @@ run('payments for pages, in a real database', () => {
       const artifactId = await makeArtifact();
       expect((await job(serverId, artifactId, { requesterKey: `omar-${tag}` })).status).toBe(403);
       expect((await job(serverId, artifactId, { requesterKey: undefined })).status).toBe(403);
-      expect(await prisma.appPageJob.count()).toBe(0);
+      expect(await prisma.appPageJob.count({ where: { artifactId } })).toBe(0);
     });
 
     it('needs the service token', async () => {
@@ -855,8 +870,9 @@ run('payments for pages, in a real database', () => {
       void _id;
       void _created;
       void _updated;
-      const second = await prisma.appConnection.create({ data: { ...scalars, name: 'Second account', catalogKey: `direct:second-${tag}` } as never });
-      gateway();
+      const second = await prisma.appConnection.create({ data: { ...scalars, name: 'Second account', catalogKey: `direct:second-${tag}`, keyCipher: encryptApiKey(SECOND_KEY), keyLast4: SECOND_KEY.slice(-4), keyMode: 'live' } as never });
+      expect(second.keyMode).not.toBe(original.keyMode);
+      const sent = gateway();
       const real = prisma.$transaction.bind(prisma);
       const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((fn: unknown, ...rest: unknown[]) => {
         return (async () => {
@@ -870,7 +886,13 @@ run('payments for pages, in a real database', () => {
         const order = await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } });
         // The order is on the app the locked job pointed to, and the request went out with that app's key mode
         expect(order.connectionId).toBe(second.id);
-        expect(order.mode).toBe(second.keyMode);
+        expect(order.mode).toBe('live');
+        // ...and what went to the gateway was built with that app's key, never the first one's
+        const posts = sent.filter((entry) => entry.method === 'POST');
+        expect(posts).toHaveLength(1);
+        const headers = Object.values(posts[0].headers).join(' ');
+        expect(headers).toContain(SECOND_KEY);
+        expect(headers).not.toContain(KEY);
       } finally {
         spy.mockRestore();
       }
@@ -885,8 +907,8 @@ run('payments for pages, in a real database', () => {
       void _id;
       void _created;
       void _updated;
-      const second = await prisma.appConnection.create({ data: { ...scalars, name: 'Second account', catalogKey: `direct:locked-${tag}` } as never });
-      gateway();
+      const second = await prisma.appConnection.create({ data: { ...scalars, name: 'Second account', catalogKey: `direct:locked-${tag}`, keyCipher: encryptApiKey(SECOND_KEY), keyLast4: SECOND_KEY.slice(-4), keyMode: 'live' } as never });
+      const sent = gateway();
       const touch = (id: string) => prisma.$executeRaw`UPDATE "app_connections" SET "name" = "name" WHERE "id" = ${id}`;
       const seen = { secondWaited: false, firstFree: false };
       let replaced: Promise<unknown> = Promise.resolve();
@@ -912,8 +934,9 @@ run('payments for pages, in a real database', () => {
                         });
                         await touch(firstId);
                         seen.firstFree = true;
-                        await new Promise((resolve) => setTimeout(resolve, 400));
-                        seen.secondWaited = !replacedDone;
+                        // The replacement on the second app is seen waiting: PostgreSQL itself says another session's update is blocked on a lock
+                        // (bounded: a replacement that was never blocked fails the wait, it is not mistaken for one that waited)
+                        seen.secondWaited = await waitUntilBlocked('UPDATE "app_connections"') && !replacedDone;
                         return inner.apply(model, args);
                       };
                     },
@@ -928,7 +951,12 @@ run('payments for pages, in a real database', () => {
       try {
         const { orderId } = await checkout(artifactId, '198.51.100.69');
         await replaced;
-        expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).connectionId).toBe(second.id);
+        const order = await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } });
+        expect(order.connectionId).toBe(second.id);
+        expect(order.mode).toBe('live');
+        const posts = sent.filter((entry) => entry.method === 'POST');
+        expect(posts).toHaveLength(1);
+        expect(Object.values(posts[0].headers).join(' ')).toContain(SECOND_KEY);
         // The app the page was on when the lock was taken was held; the one it had left was not
         expect(seen).toEqual({ secondWaited: true, firstFree: true });
       } finally {
@@ -1108,7 +1136,7 @@ run('payments for pages, in a real database', () => {
       const { orderId } = await checkout(artifactId, '198.51.100.53');
       await settle(orderId);
       expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(1);
-      expect(await prisma.appKeyCall.count({ where: { ownerId: 'page-payments' } })).toBe(1);
+      expect(await prisma.appKeyCall.count({ where: { ownerId: 'page-payments', callId: { startsWith: `look:${sara}:` } } })).toBe(1);
       // This owner's room for looks is spent: the next look waits, and says so to a notice
       const again = await settle(orderId);
       expect(again).toMatchObject({ status: 'checking' });
@@ -1156,7 +1184,7 @@ run('payments for pages, in a real database', () => {
       const { orderId } = await checkout(artifactId, '198.51.100.71');
       await settle(orderId);
       await settle(orderId);
-      expect(await prisma.appKeyCall.count({ where: { ownerId: 'page-payments' } })).toBe(2);
+      expect(await prisma.appKeyCall.count({ where: { ownerId: 'page-payments', callId: { startsWith: `look:${sara}:` } } })).toBe(2);
       // One order and two looks: counted together that would be the three the platform may send, and a second checkout would be refused
       expect((await start(artifactId, '198.51.100.72')).status).toBe(200);
       expect(sent.filter((entry) => entry.method === 'POST')).toHaveLength(2);
@@ -1183,7 +1211,7 @@ run('payments for pages, in a real database', () => {
       const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       expect((await job(serverId, artifactId)).status).toBe(200);
-      gateway();
+      const sent = gateway();
       // The owner replaces the terms between the first read and the lock
       const real = prisma.$transaction.bind(prisma);
       const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((fn: unknown, ...rest: unknown[]) => {
@@ -1196,6 +1224,12 @@ run('payments for pages, in a real database', () => {
         const { orderId } = await checkout(artifactId, '198.51.100.55');
         const order = await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } });
         expect(order.amountMinor).toBe(9_000);
+        // ...and the gateway was asked for that same amount (9 of a currency with three decimals is 9,000 minor units), for the same order
+        const posts = sent.filter((entry) => entry.method === 'POST');
+        expect(posts).toHaveLength(1);
+        const asked = JSON.parse(posts[0].body ?? '{}');
+        expect(asked.amount).toBe(9);
+        expect(asked.reference?.order).toBe(orderId);
       } finally {
         spy.mockRestore();
       }

@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "jest --testPathIgnorePatterns=__tests__/integration",
+    "test:db": "ROLES_DB_TEST=yes jest --runInBand --testPathPatterns='__tests__/(api|lib)/.*(-db|ownership-offer)\\.test\\.ts$'",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:api": "./scripts/test-api.sh",
