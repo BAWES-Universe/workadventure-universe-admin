@@ -95,6 +95,12 @@ describe('taking a sign-in back at the app (best effort)', () => {
 
   it('gives up within the deadline when the name lookup of the destination check stalls, and sends nothing', async () => {
     jest.useFakeTimers();
+    // AbortSignal.timeout runs on a timer of its own that the fake clock does not move: its deadline is made with the clock the test moves
+    const timeout = jest.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+      const control = new AbortController();
+      setTimeout(() => control.abort(new DOMException('The operation timed out.', 'TimeoutError')), ms);
+      return control.signal;
+    });
     try {
       (checkOutboundUrl as jest.Mock).mockImplementation(() => new Promise(() => undefined));
       const fetchMock = jest.fn();
@@ -103,7 +109,9 @@ describe('taking a sign-in back at the app (best effort)', () => {
       await jest.advanceTimersByTimeAsync(5_100);
       expect(await done).toBe(false);
       expect(fetchMock).not.toHaveBeenCalled();
+      expect(timeout).toHaveBeenCalled();
     } finally {
+      timeout.mockRestore();
       jest.useRealTimers();
     }
   });

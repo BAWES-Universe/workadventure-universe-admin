@@ -189,6 +189,55 @@ async function ownerKeyDayLimitSeconds(hearing: NoteHearing): Promise<number | n
 const onBotDay = (turn: Pick<VoiceNoteTurn, 'botId' | 'payer'>) => Boolean(turn.botId) && turn.payer === 'owner';
 
 /**
+ * The replies still to come from notes already reserved, for one limit, counted under the reservations' lock (their usage rows do not exist yet):
+ * - a note not yet heard counts for the time it is expected to take;
+ * - a note heard counts for as long as its words are kept (the answer stage can still run from them), not for a time from when it was reserved;
+ * - a note whose answer is being made counts while its lease is live, however long ago it was reserved (a heard note takes its answer lease up to as
+ *   long as its words are kept after it was heard), and not when its reply was already reported: that reply is a usage row
+ *   (counted by the caller), made after the answer stage began. Each such row is matched to one note, the earliest started first, so two notes being
+ *   answered with one reply reported leave one on the way.
+ */
+async function notesOnTheWay(tx: Prisma.TransactionClient, slot: ReplySlot, now: Date): Promise<number> {
+  const mine: Prisma.VoiceNoteTurnWhereInput = {
+    scope: 'bot',
+    released: false,
+    personKey: slot.pending.guestsOnly ? { startsWith: 'guest:' } : slot.pending.personKey,
+    ...(slot.pending.botId ? { botId: slot.pending.botId } : {}),
+    ...(slot.pending.notOwnKey ? { replySource: { in: ['universe-ai', 'provider'] } } : {}),
+  };
+  const recently = { gt: new Date(now.getTime() - ON_THE_WAY_MS) };
+  const waiting = await tx.voiceNoteTurn.count({
+    where: {
+      ...mine,
+      OR: [
+        { state: { in: ['reserved', 'hearing'] }, createdAt: recently },
+        { state: 'heard', bufferUntil: { gt: now } },
+        // A heard note with no time kept for its words (made before they were kept): counted for as long as a note on its way is
+        { state: 'heard', bufferUntil: null, createdAt: recently },
+        // A note answered a moment ago: its reply's usage row is reported separately and may land after the answer, so for a short while
+        // it is counted here as well (twice at worst, with the row, never missed). Only that short while: its answer is kept for much longer
+        { state: { in: ['answered', 'delivered'] }, bufferUntil: { gt: new Date(now.getTime() + BUFFER_MS - ANSWER_GAP_MS) } },
+      ],
+    },
+  });
+  const answering = await tx.voiceNoteTurn.findMany({
+    where: { ...mine, state: 'answering', leaseUntil: { gt: now } },
+    select: { updatedAt: true },
+    orderBy: { updatedAt: 'asc' },
+  });
+  if (answering.length === 0) return waiting;
+  const reported = await tx.botsAiUsage.findMany({ where: { AND: [slot.usage, { timestamp: { gte: answering[0].updatedAt } }] }, select: { timestamp: true }, orderBy: { timestamp: 'asc' } });
+  let next = 0;
+  let unreported = 0;
+  for (const turn of answering) {
+    while (next < reported.length && reported[next].timestamp < turn.updatedAt) next += 1;
+    if (next < reported.length) next += 1;
+    else unreported += 1;
+  }
+  return waiting + unreported;
+}
+
+/**
  * Reserves one voice note before anything is paid. `seconds` is the length the bot server measured from the audio itself (never the
  * header or the device's number). `contentHash` is the bot server's hash of what the turn holds (the note's file and version, the
  * text, the history it was sent with): the same `clientTurnId` with another hash is refused.
@@ -299,24 +348,7 @@ export async function reserveVoiceNote(
     for (const slot of slots) {
       // The notes on their way are read first, then the replies used: a note answered in between is then counted twice at worst (as on its
       // way and as used), never missed
-      const onTheWay = await tx.voiceNoteTurn.count({
-        where: {
-          scope: 'bot',
-          released: false,
-          // A note is on its way until it is answered: a heard one stays answerable as long as its text is kept, not only 15 minutes
-          OR: [
-            { state: { in: ['reserved', 'hearing'] }, createdAt: { gt: new Date(now.getTime() - ON_THE_WAY_MS) } },
-            { state: { in: ['heard', 'answering'] }, bufferUntil: { gt: now } },
-            { state: { in: ['heard', 'answering'] }, bufferUntil: null, createdAt: { gt: new Date(now.getTime() - ON_THE_WAY_MS) } },
-            // A note answered a moment ago: its reply's usage row is reported separately and may land after the answer, so for a short while
-            // it is counted here as well (twice at worst, with the row, never missed). Only that short while: its answer is kept for much longer
-            { state: { in: ['answered', 'delivered'] }, bufferUntil: { gt: new Date(now.getTime() + BUFFER_MS - ANSWER_GAP_MS) } },
-          ],
-          personKey: slot.pending.guestsOnly ? { startsWith: 'guest:' } : slot.pending.personKey,
-          ...(slot.pending.botId ? { botId: slot.pending.botId } : {}),
-          ...(slot.pending.notOwnKey ? { replySource: { in: ['universe-ai', 'provider'] } } : {}),
-        },
-      });
+      const onTheWay = await notesOnTheWay(tx, slot, now);
       const used = await tx.botsAiUsage.count({ where: slot.usage });
       if (used + onTheWay >= slot.limit) {
         await tx.botReplyLimitHit.createMany({ data: [slot.hit], skipDuplicates: true });
@@ -471,30 +503,39 @@ export async function leaseVoiceNoteStage(id: string, input: { stage?: unknown; 
     if (turn.state === 'reserved') {
       // Started under the reservations' lock, still young enough at that moment (the clock moved on while the hearing was looked
       // up): a reservation counts as being heard until it is too old, then never starts, so nothing passes the notes at once.
-      // The hearing is looked up again under the lock too: a lend the owner took back while this waited for it is not heard with.
+      // Nothing is looked up while the lock is held: the look-up reads on its own connections, so every lease waiting here with one
+      // connection taken and asking for another could use up the pool and stop all of them until a time-out. The hearing is looked
+      // up again once the lock is let go instead, and a lend the owner took back while this waited for the lock gives the note back
+      // before anything was sent (the bot server has not been told it may start yet)
       const adapters = readAdapterList(input.adapters);
       const started = await prisma.$transaction(async (tx) => {
         await lockSpeech(tx);
-        const current = await hearingFor(turn, adapters);
-        if (!current) return { lost: true as const };
         const at = now.getTime() + (Date.now() - entered);
         const moved = await tx.voiceNoteTurn.updateMany({
           where: { id: turn.id, state: 'reserved', generation: turn.generation, createdAt: { gt: new Date(at - STARTING_MS) } },
           data: { state: 'hearing', generation, leaseUntil },
         });
-        return { lost: false as const, count: moved.count, hearing: current };
+        return { count: moved.count };
       }, SPEECH_LOCK);
-      if (started.lost) {
-        await failUnused(turn);
-        return { granted: false, reason: 'no-hearing' };
-      }
       if (started.count === 0) {
         const after = await findTurn(turn.id);
         if (after.state !== 'reserved') return { granted: false, reason: 'held' };
         await failUnused(after);
         return { granted: false, reason: 'expired' };
       }
-      return { ...granted, hearing: started.hearing };
+      let current: NoteHearing | null;
+      try {
+        current = await hearingFor(turn, adapters);
+      } catch (error) {
+        // The hearing can't be read just now: it was not started, so it is put back as it was, to be asked again
+        await prisma.voiceNoteTurn.updateMany({ where: { id: turn.id, state: 'hearing', generation }, data: { state: 'reserved', generation: turn.generation, leaseUntil: null } });
+        throw error;
+      }
+      if (!current) {
+        await failUnused({ ...turn, state: 'hearing', generation });
+        return { granted: false, reason: 'no-hearing' };
+      }
+      return { ...granted, hearing: current };
     }
     const done = await moveOn(turn, { state: 'hearing', generation, leaseUntil }, true);
     if (done.count === 0) return { granted: false, reason: 'held' };

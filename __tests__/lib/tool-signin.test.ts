@@ -121,11 +121,11 @@ describe('the bot server’s report', () => {
 
   it('keeps the first time as "since": only a connection that is not already expired changes', async () => {
     db.botMcpServer.findFirst.mockResolvedValue({ id: 's1' });
-    // Per report: the loss, then (once its cards are made) the marker is cleared
-    db.botMcpServer.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 }).mockResolvedValue({ count: 1 });
+    // The first report's write is the first call; the cards' marker is cleared after it, and the second report finds the connection already expired
+    db.botMcpServer.updateMany.mockResolvedValue({ count: 0 });
+    db.botMcpServer.updateMany.mockResolvedValueOnce({ count: 1 });
+    db.botMcpServer.findUnique.mockResolvedValueOnce({ botId: 'bot-1', signInLostAt: T1, noticesPendingAt: new Date() });
     db.botMcpServer.findMany.mockResolvedValue([tavily]);
-    // What the notices step reads back: the loss is saved and its cards are still owed
-    db.botMcpServer.findUnique.mockResolvedValueOnce({ botId: 'bot-1', signInLostAt: T1, noticesPendingAt: T1 }).mockResolvedValue({ botId: 'bot-1', signInLostAt: T1, noticesPendingAt: null });
     expect(await reportToolSignIn('bot-1', 's1', { state: 'expired', at: T1, status: 401 })).toEqual({ changed: true });
     expect(await reportToolSignIn('bot-1', 's1', { state: 'expired', at: T2, status: 401 })).toEqual({ changed: false });
     expect(db.botMcpServer.updateMany.mock.calls[0][0]).toEqual({
@@ -177,7 +177,7 @@ describe('the bot server’s report', () => {
     db.botMcpServer.updateMany.mockResolvedValue({ count: 0 });
     db.botMcpServer.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 1 });
     db.botMcpServer.findMany.mockResolvedValue([]);
-    db.botMcpServer.findUnique.mockResolvedValueOnce({ botId: 'bot-1', signInLostAt: null, noticesPendingAt: T1 }).mockResolvedValue({ botId: 'bot-1', signInLostAt: null, noticesPendingAt: null });
+    db.botMcpServer.findUnique.mockResolvedValueOnce({ botId: 'bot-1', signInLostAt: null, noticesPendingAt: new Date() });
     db.userNotice.findMany.mockResolvedValue([{ id: 'n1', userId: 'yousef' }]);
     expect(await reportToolSignIn('bot-1', 's1', { state: 'ok' })).toEqual({ changed: true });
     expect(await reportToolSignIn('bot-1', 's1', { state: 'ok' })).toEqual({ changed: false });
@@ -321,16 +321,12 @@ describe('the card on Orbit home, when things happen together', () => {
     expect(dismissed()).toEqual(['n1']);
   });
 
-  it('makes a card that already exists for the same instant as an insert that skips it, so the duplicate can never roll the other cards back', async () => {
+  it('treats a card made twice for the same instant, or one the person already dismissed for it, as already told: it is skipped inside the step, never an error', async () => {
     db.botMcpServer.findMany.mockResolvedValue([tavily]);
+    db.userNotice.createMany.mockResolvedValue({ count: 0 });
     await expect(syncToolSignInNotices('bot-1', { serverId: 's1', at: T1 })).resolves.toBe(true);
     expect(addNotice.mock.calls[0][0].skipDuplicates).toBe(true);
-  });
-
-  it('says it did not finish when the transaction fails, a duplicate error included, so the marker stays and the cards are tried again', async () => {
-    db.botMcpServer.findMany.mockResolvedValue([tavily]);
-    addNotice.mockRejectedValue(new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' }));
-    await expect(syncToolSignInNotices('bot-1', { serverId: 's1', at: T1 })).resolves.toBe(false);
+    expect(created().dedupeKey).toBe(`tool-signin:bot-1:${T1.toISOString()}`);
   });
 });
 
@@ -375,8 +371,7 @@ describe('who is told', () => {
 
 describe('reconnecting', () => {
   it('remembers who did it, clears what was down with the time, and takes the card down', async () => {
-    // The first read is before the clear; the second, by the notices step, finds the cleared row still marked as owing its cards
-    db.botMcpServer.findUnique.mockResolvedValueOnce({ botId: 'bot-1', signInLostAt: T1, noAnswerAt: null }).mockResolvedValue({ botId: 'bot-1', signInLostAt: null, noticesPendingAt: T1 });
+    db.botMcpServer.findUnique.mockResolvedValue({ botId: 'bot-1', signInLostAt: T1, noAnswerAt: null, noticesPendingAt: new Date() });
     db.botMcpServer.findMany.mockResolvedValue([]);
     db.userNotice.findMany.mockResolvedValue([{ id: 'n1', userId: 'yousef' }]);
     await markToolReconnected('s1', 'sara');
@@ -390,8 +385,7 @@ describe('reconnecting', () => {
   });
 
   it('clears the lost sign-in even when who did it cannot be saved (that account may be gone)', async () => {
-    // The first read is before the clear; the second, by the notices step, finds the cleared row still marked as owing its cards
-    db.botMcpServer.findUnique.mockResolvedValueOnce({ botId: 'bot-1', signInLostAt: T1, noAnswerAt: null }).mockResolvedValue({ botId: 'bot-1', signInLostAt: null, noticesPendingAt: T1 });
+    db.botMcpServer.findUnique.mockResolvedValue({ botId: 'bot-1', signInLostAt: T1, noAnswerAt: null, noticesPendingAt: new Date() });
     db.botMcpServer.findMany.mockResolvedValue([]);
     db.userNotice.findMany.mockResolvedValue([{ id: 'n1', userId: 'yousef' }]);
     db.botMcpServer.update.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('foreign key'));

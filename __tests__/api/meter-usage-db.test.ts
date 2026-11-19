@@ -30,6 +30,7 @@ import { GET as usageGet } from '@/app/api/me/usage/route';
 import { POST as askPost } from '@/app/api/me/usage/ask-for-more/route';
 import { GET as costsGet } from '@/app/api/admin/meter-costs/route';
 import { GET as personGet, PATCH as personPatch, POST as personPost } from '@/app/api/admin/users/[id]/extra-usage/route';
+import { waitForLockWait } from '../helpers/wait-for-lock';
 import { GET as statusGet } from '@/app/api/admin/users/[id]/extra-usage/status/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -169,14 +170,23 @@ run('usage for people, and cost for us, in a real database', () => {
 
     it('a grant that answers while an ask is still being written waits for it, so the ask is answered', async () => {
       const sara = await person('sara');
+      let written!: () => void;
+      let finish!: () => void;
+      const wasWritten = new Promise<void>((resolve) => (written = resolve));
+      const mayFinish = new Promise<void>((resolve) => (finish = resolve));
       const holder = prisma.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`meter_request:${sara.id}:computer`}))`;
         await tx.meterRequest.create({ data: { personId: sara.id, what: 'computer', createdAt: hours(-1) } });
-        await new Promise((resolve) => setTimeout(resolve, 600));
+        written();
+        await mayFinish;
       });
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await wasWritten;
       // The ask is not committed yet: an answer that did not wait would see nothing to answer
-      expect(await answerRequests(sara.id, 'grant-x', NOW, NOW, 'computer')).toBe(1);
+      const answering = answerRequests(sara.id, 'grant-x', NOW, NOW, 'computer');
+      // Let go of the ask only once the answer is seen waiting for the lock the ask holds
+      await waitForLockWait(prisma, '%pg_advisory_xact_lock%');
+      finish();
+      expect(await answering).toBe(1);
       await holder;
       expect(await prisma.meterRequest.count({ where: { personId: sara.id, answeredAt: null } })).toBe(0);
     });
@@ -192,6 +202,20 @@ run('usage for people, and cost for us, in a real database', () => {
         expect(usage.computer).toMatchObject({ unavailable: true, canAskForMore: false });
         expect(usage.chat).toMatchObject({ left: 1, words: 'plenty' });
         expect(usage.credit).toEqual([]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('says the computer part is unavailable when the settings cannot be read, never leaves it out as if there were no allowance', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 300);
+      const spy = jest.spyOn(prisma.appSetting, 'findUnique').mockRejectedValue(new Error('database hiccup'));
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const usage = await memberUsage(sara.id, NOW);
+        expect(usage.computer).toMatchObject({ unavailable: true, canAskForMore: false });
       } finally {
         spy.mockRestore();
       }
@@ -850,32 +874,63 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await patch(sara.id, { grantKey: gift.grant.grantKey, action: 'billed' })).status).toBe(400);
     });
 
-    it('say whether a give was saved under a key, without giving anything: saved only for that person, and a key nobody used is not saved', async () => {
+    it('say whether a give was saved under a key, without giving anything: a give made through the route is found under the key the sheet sent, only for that person, and a key nobody used is not saved', async () => {
       asAdmin();
       const sara = await person('sara');
       const omar = await person('omar');
-      const real = (n: number) => new Date(Date.now() + n * 86_400_000);
       const ask = (id: string, key?: string) => statusGet(adminCall(`/api/admin/users/${id}/extra-usage/status${key === undefined ? '' : `?grantKey=${encodeURIComponent(key)}`}`), { params: Promise.resolve({ id }) });
+      const give = (id: string, key: string) => personPost(body('POST', `/api/admin/users/${id}/extra-usage`, { grantKey: key, amount: 'double', endsAt: new Date(Date.now() + 5 * 86_400_000).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id }) });
       expect((await ask(sara.id)).status).toBe(400);
-      expect((await ask(sara.id, 'x'.repeat(256))).status).toBe(400);
-      // The limit is on the key as it is stored (the person's id and the key), so a key the give would refuse is refused here too
-      const roomFor = 255 - `${sara.id}:`.length;
-      expect((await ask(sara.id, 'x'.repeat(roomFor + 1))).status).toBe(400);
-      expect((await ask(sara.id, 'x'.repeat(roomFor))).status).toBe(200);
+      // The route stores `<person>:<key>` (255 at most): a key too long for that is refused the same way here, never cut short
+      expect((await ask(sara.id, 'x'.repeat(255 - sara.id.length))).status).toBe(400);
+      expect((await ask(sara.id, 'x'.repeat(255 - sara.id.length - 1))).status).toBe(200);
       const before = await prisma.meterGrant.count({});
-      const key = `g-${tag}-s`;
-      const none = await ask(sara.id, key);
-      expect(await none.json()).toEqual({ saved: false });
+      expect(await (await ask(sara.id, `g-${tag}-never`)).json()).toEqual({ saved: false });
       expect(await prisma.meterGrant.count({})).toBe(before);
-      // Saved through the give itself, as the sheet does: the sheet's key is the one asked about
-      const give = await personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, { grantKey: key, amount: 'double', endsAt: real(5).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id: sara.id }) });
-      expect(give.status).toBe(201);
-      const stored = await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: `${sara.id}:${key}` } });
-      const saved = await (await ask(sara.id, key)).json();
-      expect(saved).toEqual({ saved: true, startsAt: stored.startsAt.toISOString(), endsAt: stored.endsAt.toISOString() });
+      // Given through the route, found by the key the sheet sent
+      expect((await give(sara.id, `g-${tag}-s`)).status).toBe(201);
+      const stored = await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: `${sara.id}:g-${tag}-s` } });
+      expect(await (await ask(sara.id, `g-${tag}-s`)).json()).toEqual({ saved: true, startsAt: stored.startsAt.toISOString(), endsAt: stored.endsAt.toISOString() });
       // The same key under another person's name says nothing about them
-      expect(await (await ask(omar.id, key)).json()).toEqual({ saved: false });
+      expect(await (await ask(omar.id, `g-${tag}-s`)).json()).toEqual({ saved: false });
       expect(await prisma.meterGrant.count({})).toBe(before + 1);
+    });
+
+    it('"not saved" is the last word on a key: the check waits for a try still running under it, and a try that reaches the server after it is refused, so a give under a new key is never doubled', async () => {
+      asAdmin();
+      const sara = await person('sara');
+      const ask = (key: string) => statusGet(adminCall(`/api/admin/users/${sara.id}/extra-usage/status?grantKey=${encodeURIComponent(key)}`), { params: Promise.resolve({ id: sara.id }) });
+      const give = (key: string) => personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, { grantKey: key, amount: 'double', endsAt: new Date(Date.now() + 5 * 86_400_000).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id: sara.id }) });
+      // 1. A try is still running under the key (it holds the key's lock and has not written yet): the check waits, then finds what the try came to
+      const stored = `${sara.id}:g-${tag}-slow`;
+      let ready!: () => void;
+      let finish!: () => void;
+      const holding = new Promise<void>((resolve) => (ready = resolve));
+      const mayFinish = new Promise<void>((resolve) => (finish = resolve));
+      const original = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`grant:${stored}`}))`;
+        ready();
+        await mayFinish;
+        await recordGrant({ grantKey: stored, personId: sara.id, settlement: 'gift', multiplier: 2, startsAt: new Date(), endsAt: new Date(Date.now() + 5 * 86_400_000), givenById: sara.id }, tx);
+      });
+      await holding;
+      const asking = ask(`g-${tag}-slow`);
+      await waitForLockWait(prisma, '%pg_advisory_xact_lock%');
+      finish();
+      await original;
+      expect(await (await asking).json()).toMatchObject({ saved: true });
+      // 2. Nothing was saved: the check says so, once and for all. A try that only now arrives under that key is refused and gives nothing
+      expect(await (await ask(`g-${tag}-late`)).json()).toEqual({ saved: false });
+      const late = await give(`g-${tag}-late`);
+      expect(late.status).toBe(409);
+      expect(await late.json()).toMatchObject({ code: 'key_closed' });
+      expect(await prisma.meterGrant.count({ where: { personId: sara.id, grantKey: `${sara.id}:g-${tag}-late` } })).toBe(0);
+      // The new key the admin goes on with is given once
+      expect((await give(`g-${tag}-new`)).status).toBe(201);
+      // 3. A key that was saved stays saved, and the check does not close it
+      expect((await give(`g-${tag}-done`)).status).toBe(201);
+      expect(await (await ask(`g-${tag}-done`)).json()).toMatchObject({ saved: true });
+      expect((await give(`g-${tag}-done`)).status).toBe(200);
     });
 
     it('turn down dates that are not dates, run backwards, or ask for more than a year of figures', async () => {
@@ -1017,6 +1072,8 @@ run('usage for people, and cost for us, in a real database', () => {
 
     it('lists who asked for more, and everything given with "To bill" or "A gift" and what it cost above the usual', async () => {
       await setUp();
+      // The figure was saved before the days this report is read as of (a figure saved after the moment a report is read for is not yet anyone's allowance)
+      await prisma.meterAllowanceChange.updateMany({ data: { effectiveFrom: new Date('1970-01-01T00:00:00Z') } });
       const sara = await person('sara');
       const faisal = await person('faisal');
       await askForMore(sara.id, NOW);
@@ -1102,6 +1159,19 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(rows.map((row) => (row.allowanceMicros === null ? null : Number(row.allowanceMicros)))).toEqual([1_000, 5_000, 7_000]);
     });
 
+    it('a figure scheduled to start later gives no allowance to the months before it: the report skips them, as it did before anything was scheduled', async () => {
+      await setUp();
+      const sara = await person('sara');
+      const faisal = await person('faisal');
+      // No usual saved now, and the first (only) figure starts after this month: this month has no allowance to count above
+      await prisma.meterAllowanceChange.deleteMany({});
+      await prisma.meterAllowanceChange.create({ data: { effectiveFrom: days(30), allowanceMicros: BigInt(1_000) } });
+      await recordGrant({ grantKey: `g-${tag}-future`, personId: sara.id, settlement: 'to_bill', multiplier: 2, startsAt: days(-5), endsAt: days(5), givenById: faisal.id });
+      await spendComputer(sara, 5_000, days(-2));
+      const report = await costsReport(range.from, range.to, NOW);
+      expect(report.given.find((row) => row.grantKey === `g-${tag}-future`)?.aboveUsualMicros).toBe(0);
+    });
+
     it('keeps the allowance of each month as it was saved: saving a new one later never rewrites an earlier month', async () => {
       await prisma.meterAllowanceChange.deleteMany({});
       await saveMeterSettings({ memberAllowanceMicros: 2_000 }, 'admin');
@@ -1139,6 +1209,9 @@ run('usage for people, and cost for us, in a real database', () => {
 
     it('reads the computer spending once for everyone, whatever the number of people and months their grants span', async () => {
       await setUp();
+      // The usual has been 1,000 since before these months (the baseline row the migration writes for a figure that was already set)
+      await prisma.meterAllowanceChange.deleteMany({});
+      await prisma.meterAllowanceChange.create({ data: { effectiveFrom: new Date('1970-01-01T00:00:00Z'), allowanceMicros: BigInt(1_000) } });
       const sara = await person('sara');
       const faisal = await person('faisal');
       // Sara's grant crosses from October into November, Faisal's is in November: three months of grants between them, two people

@@ -2314,6 +2314,12 @@ run('the bounded Instant executor, in a real database', () => {
         data: { eventId: `hide-11-${tag}`, kind: 'model_call', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'person', route: 'chat', jobId: 'hide-11', quantity: BigInt(1), unit: 'use', costMicros: BigInt(0), basis: 'measured', detail: { taskKey: 'hide-11' } },
       });
       await closeReceipt({ botId: brick, taskKey: 'hide-11', personId: sara, state: 'refunded' });
+      // A thinking line whose cost is not known yet is not "nothing taken" (the Costs report counts it unpriced): the receipt stays
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-12', title: 'Thinking not priced yet', category: 'apps' });
+      await prisma.meterEvent.create({
+        data: { eventId: `hide-12-${tag}`, kind: 'model_call', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'person', route: 'chat', jobId: 'hide-12', quantity: BigInt(1), unit: 'use', costMicros: null, basis: 'measured', detail: { taskKey: 'hide-12' } },
+      });
+      await closeReceipt({ botId: brick, taskKey: 'hide-12', personId: sara, state: 'refunded' });
       // A task with no category is not an Apps task here: left as it was
       await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-5', title: 'No category', category: null });
       await closeReceipt({ botId: brick, taskKey: 'hide-5', personId: sara, state: 'refunded' });
@@ -2328,7 +2334,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(titles).not.toContain('Shares the run, no charge');
       expect(titles).toContain('Owns the run charge');
       expect(titles).not.toContain('Another task’s charge');
-      expect(titles).toEqual(expect.arrayContaining(['Ran and failed', 'Has books, refunded', 'Run-wide charge', 'No category', 'Finished']));
+      expect(titles).toEqual(expect.arrayContaining(['Ran and failed', 'Has books, refunded', 'Run-wide charge', 'Thinking not priced yet', 'No category', 'Finished']));
       // The limit counts what is listed: hidden receipts do not take a place
       expect((await activityFor(sara, 6)).length).toBe(6);
     });

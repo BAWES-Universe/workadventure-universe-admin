@@ -256,6 +256,38 @@ describe('what a Brick can do on GitHub', () => {
     expect(read.commentsUnavailable).toBe(true);
   });
 
+  it('says the comments could not be read in full when one of the two pages it needs failed, and keeps the ones it got', async () => {
+    const comment = (n: number) => ({ user: { login: 's' }, body: `c${n}`, created_at: '2026-11-14T00:00:00Z' });
+    const issue = { number: 7, title: 't', state: 'open', body: 'b', labels: [], user: { login: 's' }, html_url: 'https://github.com/acme/tools/issues/7', comments: 31 };
+    const read = async (routes: [string, string, number, unknown][]) => JSON.parse((await runGitHubTool('ghu_x', 'github_get_issue', { repo: 'acme/tools', number: 7 }, fakeGitHub(routes).impl)).text) as { comments: { body: string }[]; commentsUnavailable?: boolean };
+    // The earlier page failed, the last read: only comment 31, and it is said
+    const partial = await read([
+      ['GET', '/repos/acme/tools/issues/7', 200, issue],
+      ['GET', '/repos/acme/tools/issues/7/comments?per_page=30&page=1', 503, { message: 'down' }],
+      ['GET', '/repos/acme/tools/issues/7/comments?per_page=30&page=2', 200, [comment(31)]],
+    ]);
+    expect(partial.comments.map((one) => one.body)).toEqual(['c31']);
+    expect(partial.commentsUnavailable).toBe(true);
+    // Both read: nothing is said
+    const whole = await read([
+      ['GET', '/repos/acme/tools/issues/7', 200, issue],
+      ['GET', '/repos/acme/tools/issues/7/comments?per_page=30&page=1', 200, Array.from({ length: 30 }, (_, i) => comment(i + 1))],
+      ['GET', '/repos/acme/tools/issues/7/comments?per_page=30&page=2', 200, [comment(31)]],
+    ]);
+    expect(whole.commentsUnavailable).toBeUndefined();
+  });
+
+  it('says a repository search is unavailable when a later page could not be read, rather than that nothing matches', async () => {
+    const repo = (n: number) => ({ full_name: `acme/r${n}`, private: false, default_branch: 'main', description: null, pushed_at: '2026-11-01T00:00:00Z' });
+    const { impl } = fakeGitHub([
+      ['GET', '/user/repos?per_page=100&sort=pushed', 200, Array.from({ length: 100 }, (_, i) => repo(i))],
+      ['GET', '/user/repos?per_page=100&sort=pushed&page=2', 503, { message: 'down' }],
+    ]);
+    const result = await runGitHubTool('t', 'github_list_repos', { query: 'r250' }, impl);
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/listing repositories/);
+  });
+
   it('looks for a repository name beyond the first hundred, and keeps the one page when no name is asked', async () => {
     const repo = (n: number) => ({ full_name: `acme/r${n}`, private: false, default_branch: 'main', description: null, pushed_at: '2026-11-01T00:00:00Z' });
     const first = Array.from({ length: 100 }, (_, i) => repo(i));

@@ -885,7 +885,7 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
   // and this side never recorded is then found again by the retry, which finishes it at the amount the books confirm, never refusing it
   // on a limit that moved in between.
   const planned = await prisma.$transaction(
-    async (tx): Promise<{ go: { amount: number; runId: string; personId: string } } | { done: GiveBackOutcome }> => {
+    async (tx): Promise<{ go: { amount: number; runId: string; personId: string; intentId: string } } | { done: GiveBackOutcome }> => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('instant:goodwill'))`;
       const run = await tx.instantRun.findUnique({ where: { id: input.runId } });
       if (!run || run.personId !== input.personId) return { done: { status: 'refused', reason: 'not_found' } };
@@ -893,7 +893,7 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
       const earlier = await tx.instantRefund.findUnique({ where: { refundKey } });
       if (earlier?.confirmedAt) return { done: { status: 'refused', reason: 'already_given' } };
       // An intent the books may already have acted on: finished at its own amount, before any limit is applied to a new give-back
-      if (earlier) return { go: { amount: asNumber(earlier.amountMicros), runId: run.id, personId: run.personId } };
+      if (earlier) return { go: { amount: asNumber(earlier.amountMicros), runId: run.id, personId: run.personId, intentId: earlier.id } };
       if (!limitsSet) return { done: { status: 'refused', reason: 'not_set' } };
       const [person, everyone] = await Promise.all([
         // A give-back let go of (the books never confirmed it) no longer counts: only the ones that stand or may still stand
@@ -904,8 +904,8 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
       const amount = Math.min(asNumber(run.customerMicros) - asNumber(run.refundedMicros), limits.goodwillMaxMicros!);
       if (amount < 1) return { done: { status: 'refused', reason: 'not_charged' } };
       if (asNumber(everyone._sum.amountMicros) + amount > limits.goodwillBudgetMicros!) return { done: { status: 'refused', reason: 'budget' } };
-      await tx.instantRefund.create({ data: { refundKey, runId: run.id, personId: run.personId, kind: 'goodwill', amountMicros: BigInt(amount) } });
-      return { go: { amount, runId: run.id, personId: run.personId } };
+      const made = await tx.instantRefund.create({ data: { refundKey, runId: run.id, personId: run.personId, kind: 'goodwill', amountMicros: BigInt(amount) } });
+      return { go: { amount, runId: run.id, personId: run.personId, intentId: made.id } };
     },
     { maxWait: 15_000, timeout: 30_000 },
   );
@@ -923,7 +923,8 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
   if (!answer.ok) {
     // "Unavailable" may be the books failing after they acted: the intent stays and a later ask finishes it. Any other no is a decision:
     // nothing was given, so the intent goes
-    if (answer.reason !== 'unavailable') await prisma.instantRefund.deleteMany({ where: { refundKey, confirmedAt: null } });
+    // (Only this intent: the key may by now belong to a newer one that a later ask made after another no dropped this one)
+    if (answer.reason !== 'unavailable') await prisma.instantRefund.deleteMany({ where: { id: planned.go.intentId, confirmedAt: null } });
     return { status: 'refused', reason: 'unavailable' };
   }
 
@@ -996,7 +997,7 @@ export async function sweepGoodwill(deps: Deps & { batch?: number } = {}): Promi
       const { count } = await prisma.instantRefund.updateMany({ where: { id: intent.id, confirmedAt: null, releasedAt: null }, data: { releasedAt: now } });
       if (count > 0) {
         result.released += 1;
-        console.error('[Instant] Let go of a give-back the books never confirmed:', intent.refundKey);
+        console.error('[Instant] Let go of a give-back the books never confirmed (kept to finish it when they answer):', intent.refundKey);
       }
     }
   }

@@ -170,6 +170,10 @@ describe('summarizeTestResult', () => {
     const cut: McpTestResult = { success: true, toolCount: 20, toolNames: ['a'], incomplete: true };
     expect(summarizeTestResult(cut, { testedAt: '2026-09-22T11:00:00Z', now }).label).toBe('Connected — it can do at least 20 things');
     expect(summarizeTestResult({ ...cut, incomplete: false }, { now }).label).toBe('Connected — it can do 20 things');
+    // A note stored beside a result that worked (a protocol version the check does not know) is shown, and the result stays green
+    const noted = summarizeTestResult({ ...cut, note: 'The app answered with protocol version 2099-01-01, which this check does not know. What it can do was read anyway.' }, { testedAt: '2026-09-22T11:00:00Z', now });
+    expect(noted.tone).toBe('ok');
+    expect(noted.detail).toContain('2099-01-01');
   });
 
   it('renders a legacy failure without the new fields', () => {

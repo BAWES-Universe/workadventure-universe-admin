@@ -647,30 +647,59 @@ run('apps a person connects once, in a real database', () => {
     expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).not.toBeNull();
   });
 
-  it('a good call of the key is written down even when nothing was lost, at most once a minute, so an older refusal that reports late never marks the key lost', async () => {
+  it('every good call of the key is written down, even when nothing was lost, so a refusal seen between two good calls that reports late never marks the key lost', async () => {
     const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
     const a = (await grantToBrick(sara, connection.id, saraBrick))!;
-    const refusedAt = new Date(Date.now() - 2_000);
-    const worked = new Date(Date.now() - 500);
-    await reportKeyWorked(connection.id, 1, worked);
-    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt).toEqual(worked);
-    // Another good call inside the minute does not write again
-    await reportKeyWorked(connection.id, 1, new Date(worked.getTime() + 10_000));
-    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt).toEqual(worked);
-    // A call refused before the good one, reported after it, is old news
+    const first = new Date(Date.now() - 5_000);
+    const refusedAt = new Date(Date.now() - 3_000);
+    const second = new Date(Date.now() - 1_000);
+    await reportKeyWorked(connection.id, 1, first);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt).toEqual(first);
+    // Another good call a moment later is written too: the refusal that came between them is older than the newest good call
+    await reportKeyWorked(connection.id, 1, second);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt).toEqual(second);
+    // Reported after both: old news
     expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: refusedAt })).toEqual({ changed: false });
     expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).toBeNull();
-    // A good call within the minute is not written, so a refusal that started inside that minute may be older than one that was not
-    // written down: it is old news too, never a loss for a key that may have worked since (refusal at W+5s, good call at W+10s)
-    const refusedInside = new Date(worked.getTime() + 5_000);
-    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: refusedInside })).toEqual({ changed: false });
-    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).toBeNull();
-    // A refusal that started more than a minute after the good call that was written down is a loss
-    await prisma.appConnection.update({ where: { id: connection.id }, data: { lastWorkedAt: new Date(Date.now() - 2 * 60_000) } });
+    // A refusal after the newest good call is a loss
     expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: new Date() })).toEqual({ changed: true });
-    // A minute later the next good call is written
-    await reportKeyWorked(connection.id, 1, new Date(Date.now() + 61_000));
-    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt!.getTime()).toBeGreaterThan(worked.getTime() + 60_000);
+    // A good call that is older than what is written never moves it back
+    await reportKeyWorked(connection.id, 1, new Date(second.getTime() - 500));
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt).toEqual(second);
+  });
+
+  it('a refusal saved between the read of a good call and its write is cleared by it, not left standing beside the newer success', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    await grantToBrick(sara, connection.id, saraBrick);
+    const real = prisma.appConnection.findUnique.bind(prisma.appConnection);
+    const refusedAt = new Date(Date.now() - 2_000);
+    const spy = jest.spyOn(prisma.appConnection, 'findUnique').mockImplementationOnce(((args: never) =>
+      real(args).then(async (row) => {
+        // The connection reads as not lost; a delayed refusal of an earlier call is saved before the good call writes
+        await prisma.appConnection.update({ where: { id: connection.id }, data: { signInLostAt: refusedAt, signInLostStatus: 401 } });
+        return row;
+      })) as never);
+    await reportKeyWorked(connection.id, 1, new Date(Date.now() - 500));
+    spy.mockRestore();
+    expect(await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).toMatchObject({ signInLostAt: null, signInLostStatus: null });
+  });
+
+  it('finishes the rest of the cards of an outage even when one card for it was dismissed by its person: the retry makes no second card and undoes nothing', async () => {
+    const earlier = new Date(Date.now() - 20_000);
+    const later = new Date(Date.now() - 10_000);
+    // Omar (the universe's owner) may be told; Sara made the bot but may no longer manage its tools
+    const down = await prisma.botMcpServer.create({ data: { botId: roomBot, name: 'Omar tool', serverUrl: 'https://omar.example.com/mcp', authType: 'bearer', connectedById: omar, signInLostAt: later, signInLostStatus: 401 } });
+    const key = (at: Date) => `tool-signin:${roomBot}:${at.toISOString()}`;
+    // Omar dismissed his card for this very outage; Sara still has an open card of an earlier one that must now come down
+    await prisma.userNotice.create({ data: { userId: omar, kind: 'tool-signin', dedupeKey: key(later), title: 'Dismissed', body: 'old', badge: 'Down', dismissedAt: new Date() } });
+    await prisma.userNotice.create({ data: { userId: sara, kind: 'tool-signin', dedupeKey: key(earlier), title: 'Open', body: 'old', badge: 'Down' } });
+    const { syncToolSignInNotices } = await import('@/lib/tool-signin');
+    expect(await syncToolSignInNotices(roomBot, { serverId: down.id, at: later })).toBe(true);
+    // Sara's card came down in the same step that met Omar's dismissed one (it is not undone while the step is told as done)
+    expect((await prisma.userNotice.findFirstOrThrow({ where: { userId: sara, kind: 'tool-signin' } })).dismissedAt).not.toBeNull();
+    // Omar has no second card for the outage he dismissed
+    expect(await prisma.userNotice.count({ where: { userId: omar, kind: 'tool-signin', dismissedAt: null } })).toBe(0);
+    expect(await prisma.userNotice.count({ where: { userId: omar, kind: 'tool-signin' } })).toBe(1);
   });
 
   it('a good call is ordered by when its request went out: a refusal of a request sent after it stays a loss even if the good answer came back later', async () => {

@@ -403,6 +403,17 @@ const later = (view: OrderView): OrderView => {
 };
 export const isWaiting = (view: OrderView): boolean => waiting.has(view);
 
+/**
+ * Answers for an order that is closed and will never be asked about again (past the hours a late payment is still looked for, or nothing is left
+ * to ask with): a page that refreshes itself to see a late payment stops refreshing on one. A look that only did not settle this time is not this.
+ */
+const over = new WeakSet<OrderView>();
+const nothingMoreToAsk = (view: OrderView): OrderView => {
+  over.add(view);
+  return view;
+};
+export const checksHaveEnded = (view: OrderView): boolean => over.has(view);
+
 const stateOf = (status: string): OrderState => (status === 'paid' ? 'paid' : status === 'not_paid' ? 'not_paid' : status === 'cant_confirm' ? 'cant_confirm' : 'checking');
 
 /**
@@ -430,7 +441,7 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
   const wasClosed = order.status === 'not_paid';
   // The late window runs from when the order was closed (an order closed because its time ran out closed at the end of that time)
   const closedAt = order.closedAt ?? new Date(order.createdAt.getTime() + limits.checkoutOpenHours * HOUR);
-  if (wasClosed && now.getTime() - closedAt.getTime() > limits.latePaymentHours * HOUR) return view(order.status);
+  if (wasClosed && now.getTime() - closedAt.getTime() > limits.latePaymentHours * HOUR) return nothingMoreToAsk(view(order.status));
   // What the order may still become: a pending one anything, a closed one only paid (or cannot-confirm for a payment that does not match)
   const open = { in: ['pending', 'not_paid'] };
 
@@ -440,7 +451,7 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
   // the checkout began (a new key, a new catalog) is not a reason to give up on a payment that may be real: the look below uses the
   // definition now in force, and "paid" still needs the exact amount, currency, reference and mode.
   if (!connection || !definition?.payment || !order.providerRef) {
-    if (wasClosed) return view(order.status);
+    if (wasClosed) return nothingMoreToAsk(view(order.status));
     await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'cant_confirm' } });
     return view('cant_confirm');
   }
@@ -470,7 +481,7 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     key = readKey(connection);
   } catch {
     // A key that cannot be read can never be used to ask again: a closed order stays as it is, an open one can no longer be confirmed
-    if (wasClosed) return view(order.status);
+    if (wasClosed) return nothingMoreToAsk(view(order.status));
     await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'cant_confirm' } });
     return view('cant_confirm');
   }
