@@ -293,6 +293,8 @@ run('what a computer may ask of Orbit, in a real database', () => {
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
       await call(token, 'late', 9_000);
       await sweepComputers(minutes(30));
+      // The sweep itself wrote the unknown figure: this is replacement, not the first settlement of a call the sweep never touched
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:late` } })).toMatchObject({ basis: 'unknown', costMicros: null });
       const facts = { costMicros: 4_000, basis: 'measured' as const, payer: { kind: 'universe' as const }, route: 'universe-ai' as const };
       expect(await settleModelCall(jobId, 'late', facts, minutes(31))).toEqual({ ok: true });
       expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:late` } })).toMatchObject({ basis: 'measured', costMicros: BigInt(4_000) });
