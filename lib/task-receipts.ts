@@ -256,15 +256,15 @@ export async function closeReceipt(
   });
 }
 
-type JobRow = { status: string } | null;
-const jobOf = (tx: Tx, task: Task): Promise<JobRow> => tx.computerJob.findFirst({ where: { id: task.taskKey, botId: task.botId, personId: task.personId }, select: { status: true } });
+type JobRow = { status: string; endedBy: string | null; startedAt: Date | null } | null;
+const jobOf = (tx: Tx, task: Task): Promise<JobRow> => tx.computerJob.findFirst({ where: { id: task.taskKey, botId: task.botId, personId: task.personId }, select: { status: true, endedBy: true, startedAt: true } });
 
 /**
- * What a task came to, from its Instant runs and its computer job if it has one. The job's own record is the computer's work: a task that
- * ran a job did something, so runs that all failed do not make it refunded (the time the books took for the job stays on the receipt; a job
- * that failed on our side is shown as refunded when nothing was taken, as it always was).
+ * What a task came to, from its Instant runs and its computer job if it has one. A job that ran is the task's work: runs that all failed do
+ * not make it refunded (the time the books took for the job stays on the receipt). A job that never ran, or that failed on our side
+ * (`givenBackJob`), did nothing for the person, so its Apps all failing is refunded, nothing taken, as for a task with no job.
  */
-const outcomeWith = (view: ReturnType<typeof outcomeOfRuns>, job: JobRow): ReceiptOutcome => (job !== null && view.outcome === 'refunded' ? 'done' : view.outcome);
+const outcomeWith = (view: ReturnType<typeof outcomeOfRuns>, job: JobRow): ReceiptOutcome => (view.outcome === 'refunded' && job !== null && job.startedAt !== null && !givenBackJob(job.status, job.endedBy) ? 'done' : view.outcome);
 
 /**
  * A receipt that has ended whose runs now say it came to something else is put right from the run records (a run that landed after the word

@@ -325,6 +325,17 @@ run('receipts that always settle (O1)', () => {
       await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'done', endedAt: at(5) } });
       expect(await settleCheckingReceipts(50, at(6))).toBe(1);
       expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'done', actions: [{ run: failed.id, outcome: 'failed' }] });
+      // A job that never ran (refused by a rule before it started) or failed on our side did nothing for the person: its Apps all failing is refunded, nothing taken
+      const never = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Never ran', status: 'stopped', endedBy: 'rule', endedAt: at(1) } });
+      await open(never.id, { category: 'computer' });
+      await makeRun(never.id, 'failed', { reason: 'provider_failed' });
+      await closeReceipt({ botId: brick, taskKey: never.id, personId: sara, state: 'done' }, at(3));
+      expect(await receipt(never.id)).toMatchObject({ state: 'refunded', outcome: 'refunded' });
+      const broke = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Failed on our side', status: 'failed', endedBy: 'error', startedAt: START, endedAt: at(2) } });
+      await open(broke.id, { category: 'computer' });
+      await makeRun(broke.id, 'failed', { reason: 'provider_failed' });
+      await closeReceipt({ botId: brick, taskKey: broke.id, personId: sara, state: 'done' }, at(3));
+      expect(await receipt(broke.id)).toMatchObject({ state: 'refunded', outcome: 'refunded' });
       // A task with no job still ends refunded when none of its actions worked
       await open('no-job-all-failed');
       await makeRun('no-job-all-failed', 'failed', { reason: 'provider_failed' });
