@@ -174,7 +174,7 @@ describe('GET /api/room/access, a guest signing in with a chat with the Brick fo
 
 describe('GET /api/room/access, a guest id that could not be kept', () => {
   it('shows the retry screen when the hand-over failed and the id could not be written down either, so the game asks again with it', async () => {
-    (adoptGuestChat as jest.Mock).mockRejectedValueOnce(new GuestChatNotKeptError('both failed'));
+    (adoptGuestChat as jest.Mock).mockRejectedValueOnce(new GuestChatNotKeptError(new Error('hand-over'), new Error('keep')));
     const body = await enter(`&previousGuestUuid=${GUEST}`);
     expect(body).toMatchObject({ status: 'error', type: 'retry', code: 'GUEST_CHAT_NOT_KEPT' });
     expect(Sentry.captureException).toHaveBeenCalled();
