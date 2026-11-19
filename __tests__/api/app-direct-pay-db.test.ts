@@ -34,6 +34,7 @@ import { createBrick } from '@/lib/brick-create';
 import { disconnect } from '@/lib/app-connections';
 import { encryptApiKey } from '@/lib/encryption';
 import { snapshotSettings } from '../helpers/shared-settings';
+import { waitUntilBlocked } from '../helpers/waits';
 import { definitionSchema, hashDefinition } from '@/lib/app-direct/definition';
 import { openKeyForm, submitKey } from '@/lib/app-direct/connect';
 import { getBrickLimits, saveServerLimits } from '@/lib/bot-limits';
@@ -124,16 +125,6 @@ const settle = async (orderId: string) => {
   await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 24 * 3_600_000) } });
   return verifyOrder(orderId);
 };
-/** Waits (at most a few seconds) until a session of this database reports being blocked on a lock in a query containing `fragment`. */
-async function waitUntilBlocked(fragment: string, ms = 8_000): Promise<boolean> {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    const blocked = await prisma.$queryRaw<{ pid: number }[]>`SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${`%${fragment}%`}`;
-    if (blocked.length > 0) return true;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  return false;
-}
 const notices = () => prisma.userNotice.findMany({ where: { userId: sara, kind: 'page_payment' } });
 
 run('payments for pages, in a real database', () => {
