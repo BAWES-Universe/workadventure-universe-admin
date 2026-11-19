@@ -64,7 +64,8 @@ export async function personUsage(personId: string, now: Date = new Date(), view
             WHERE kind = 'stored_bytes' AND person_key = ${personKey} AND bot_id IS NOT NULL
             ORDER BY bot_id, occurred_at DESC, recorded_at DESC
           ) latest`),
-        openRequestFor(personId, 'computer'),
+        // Read inside the snapshot too: asked through the pool while this transaction holds its connection, it would wait on a connection that is not free
+        openRequestFor(personId, 'computer', tx),
         runningExtra(personId, now, tx),
         memberAllowance(personId, now, settings, tx),
       ]);

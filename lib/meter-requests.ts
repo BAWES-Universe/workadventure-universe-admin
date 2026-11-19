@@ -43,8 +43,8 @@ export async function askForMore(personId: string, now: Date = new Date(), what:
 }
 
 /** The request a person has open, if any. */
-export async function openRequestFor(personId: string, what?: AskedFor): Promise<OpenRequest | null> {
-  const open = await prisma.meterRequest.findFirst({ where: { personId, answeredAt: null, ...(what ? { what } : {}) }, orderBy: { createdAt: 'desc' } });
+export async function openRequestFor(personId: string, what?: AskedFor, db: Pick<typeof prisma, 'meterRequest'> = prisma): Promise<OpenRequest | null> {
+  const open = await db.meterRequest.findFirst({ where: { personId, answeredAt: null, ...(what ? { what } : {}) }, orderBy: { createdAt: 'desc' } });
   return open ? { id: open.id, personId: open.personId, what: open.what, createdAt: open.createdAt } : null;
 }
 
