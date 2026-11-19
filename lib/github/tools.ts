@@ -202,6 +202,8 @@ async function organizationThatHasNotAllowed(request: Request, owner: string, re
   if (status === 404 && repo) {
     const readable = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
     if (readable.ok) return null;
+    // GitHub could not say (a server error, or told to slow down): not known to be an approval problem, so the plain refusal stands
+    if (readable.status >= 500 || readable.status === 429) return null;
   }
   const login = who.data.login.toLowerCase();
   // GitHub lists a person's installations 100 a page: every page is read before an organization is said to be missing

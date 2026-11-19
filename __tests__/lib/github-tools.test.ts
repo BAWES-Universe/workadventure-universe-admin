@@ -314,6 +314,19 @@ describe('what a Brick can do on GitHub', () => {
       expect(github.calls.some((call) => call.url.includes('/user/installations'))).toBe(false);
     });
 
+    it('keeps the plain refusal when GitHub cannot say whether the repository is readable', async () => {
+      const github = fakeGitHub([
+        ['GET', '/repos/acme-corp/website/contents/nope.md', 404, { message: 'Not Found' }],
+        ['GET', '/users/acme-corp', 200, { type: 'Organization', login: 'acme-corp' }],
+        ['GET', '/repos/acme-corp/website', 500, { message: 'Server Error' }],
+        ['GET', '/user/installations?per_page=100&page=1', 200, { installations: [] }],
+      ]);
+      const result = await runGitHubTool('t', 'github_read_file', { repo: 'acme-corp/website', path: 'nope.md' }, github.impl);
+      expect(result).toMatchObject({ isError: true, status: 404 });
+      expect(result.orgNeedsOk).toBeUndefined();
+      expect(github.calls.some((call) => call.url.includes('/user/installations'))).toBe(false);
+    });
+
     it('reads every page of a person\'s installations before saying the organization is missing', async () => {
       const filler = Array.from({ length: 100 }, (_, i) => ({ account: { login: `org-${i}` } }));
       const onSecond = fakeGitHub([
