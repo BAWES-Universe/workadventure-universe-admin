@@ -99,6 +99,14 @@ export class Agent37Error extends Error {
   }
 }
 
+/** A turn was never sent to the agent: the machine could not be found (before any request to the agent was made). */
+export class TurnNotSent extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TurnNotSent';
+  }
+}
+
 /** The call never got an answer (no connection, or it took too long). What it did at Agent37 is not known. */
 export class Agent37Unreached extends Error {
   constructor(message: string) {

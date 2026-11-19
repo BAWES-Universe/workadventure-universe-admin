@@ -30,7 +30,7 @@ import { GET as teamGet, DELETE as teamDisconnect } from '@/app/api/me/team-apps
 import { POST as addManagerRoute } from '@/app/api/me/team-apps/[connectionId]/managers/route';
 import { DELETE as removeManagerRoute } from '@/app/api/me/team-apps/[connectionId]/managers/[personId]/route';
 import { GET as available, POST as letBotUse } from '@/app/api/bots/[id]/apps/available/route';
-import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
+import { POST as checkUse } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { GET as listServers, POST as addServer } from '@/app/api/bots/[id]/mcp-servers/route';
 import { GET as botSignInStart } from '@/app/api/bots/[id]/mcp-servers/[serverId]/oauth/start/route';
 import { GET as signInStart } from '@/app/api/me/apps/[connectionId]/sign-in/route';
@@ -71,7 +71,7 @@ const letGuide = async (userId: string, connectionId: string, botId = guide) => 
   return letBotUse(request(`/api/bots/${botId}/apps/available`, { method: 'POST', body: { connectionId } }), params({ id: botId }));
 };
 const check = async (botId: string, serverId: string, body: Record<string, unknown> = {}) => {
-  const response = await useCheck(request(`/api/bots/${botId}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body }), params({ id: botId, serverId }));
+  const response = await checkUse(request(`/api/bots/${botId}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body }), params({ id: botId, serverId }));
   return { status: response.status, body: await response.json() };
 };
 async function lentAndLet(extra: Record<string, unknown> = {}) {
@@ -320,6 +320,22 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       // They come back with the role: it carries on, as before
       await prisma.worldMember.create({ data: { worldId: worldA, userId: nora, tags: ['admin'] } });
       expect((await check(guide, serverId, { callId: 'back', heading: 'lookUp' })).body.allowed).toBe(true);
+    });
+
+    it('a person who no longer has Manage bots in a universe cannot change the limits of their lend there, and can still take it back', async () => {
+      const app = await keyApp(nora);
+      as(nora);
+      expect((await lendTo(app.id, { universeId: universeA, usesPerDay: 5 })).status).toBe(201);
+      await prisma.worldMember.delete({ where: { userId_worldId: { userId: nora, worldId: worldA } } });
+      try {
+        const widen = await changeLendRoute(request(`/api/me/apps/${app.id}/lends/${universeA}`, { method: 'PATCH', body: { usesPerDay: 1_000 } }), params({ connectionId: app.id, universeId: universeA }));
+        expect(widen.status).toBe(403);
+        expect((await prisma.appLend.findFirstOrThrow({ where: { connectionId: app.id } })).usesPerDay).toBe(5);
+        expect((await takeBackRoute(request(`/api/me/apps/${app.id}/lends/${universeA}`, { method: 'DELETE' }), params({ connectionId: app.id, universeId: universeA }))).status).toBe(204);
+        expect(await prisma.appLend.count({ where: { connectionId: app.id } })).toBe(0);
+      } finally {
+        await prisma.worldMember.create({ data: { worldId: worldA, userId: nora, tags: ['admin'] } });
+      }
     });
 
     it('stops a bot at the Limits setting, five unless a super admin changes it, the same for apps added by hand and lent ones', async () => {

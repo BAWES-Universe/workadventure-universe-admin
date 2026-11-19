@@ -251,9 +251,9 @@ run('the grants routes, on the real books', () => {
 
   it('gives a shared gift as one amount for the whole group, never a copy for each', async () => {
     const [omar, noor] = [await person('Omar'), await person('Noor')];
-    await call(postGift, '/x', { method: 'POST', body: { grantKey: randomUUID(), audience: { kind: 'people', userIds: [omar, noor] }, scope: 'both', amountMicros: 20 * MILLION, shared: true, endsAt: new Date(Date.now() + 20 * 86_400_000).toISOString(), settlement: 'gift' } });
+    await call(postGift, '/x', { method: 'POST', body: { grantKey: randomUUID(), audience: { kind: 'people', userIds: [omar, noor] }, scope: 'computers', amountMicros: 20 * MILLION, shared: true, endsAt: new Date(Date.now() + 20 * 86_400_000).toISOString(), settlement: 'gift' } });
     const [gift] = (await overview()).gifts;
-    expect(gift).toMatchObject({ shared: true, amountMicros: 20 * MILLION, totalMicros: 20 * MILLION, scope: 'both' });
+    expect(gift).toMatchObject({ shared: true, amountMicros: 20 * MILLION, totalMicros: 20 * MILLION, scope: 'computers' });
   });
 
   it('refuses a gift that ends in the past, a gift to be billed with no agreement, and a shared gift to everyone', async () => {
@@ -339,35 +339,13 @@ run('the grants routes, on the real books', () => {
     expect((await overview()).gifts[0]).toMatchObject({ ended: true });
   });
 
-  it('refuses credit for computers alone, in a gift, an exception and its preview, with the plain words and nothing saved, and still allows a gift for both', async () => {
-    const [omar, noor] = [await person('Omar'), await person('Noor')];
-    const endsAt = new Date(Date.now() + 20 * 86_400_000).toISOString();
-    const gift = (scope: string) => call<any>(postGift, '/x', { method: 'POST', body: { grantKey: randomUUID(), audience: { kind: 'people', userIds: [omar, noor] }, scope, amountMicros: 5 * MILLION, shared: false, endsAt, settlement: 'gift' } });
-    const refusedGift = await gift('computers');
-    expect(refusedGift.status).toBe(400);
-    expect(await refusedGift.json()).toMatchObject({ code: 'computers_not_yet', error: expect.stringContaining('computers alone is not available yet') });
-    expect((await overview()).gifts).toHaveLength(0);
-    for (const computers of [{ mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' }, { mode: 'none' }]) {
-      const body = { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'same' }, computers };
-      const refused = await call<any>(postException, '/x', { method: 'POST', body });
-      expect(refused.status).toBe(400);
-      expect((await refused.json()).code).toBe('computers_not_yet');
-      const preview = await (await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', ...body } })).json();
-      expect(preview.problem).toContain('computers alone is not available yet');
-    }
-    expect((await overview()).exceptions).toHaveLength(0);
-    // Credit for both is spendable on Instant Apps, so it stays; so does a gift for Instant Apps
-    expect((await gift('both')).status).toBe(201);
-    expect((await gift('apps')).status).toBe(201);
-  });
-
   it('saves an exception for people you pick, one rule for each category, and ends it', async () => {
     const [omar, noor] = [await person('Omar'), await person('Noor')];
-    const saved = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'same' } } });
+    const saved = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'none' } } });
     expect(saved.status).toBe(201);
     const o = await overview();
     expect(o.exceptions).toHaveLength(1);
-    expect(o.exceptions[0]).toMatchObject({ instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' } });
+    expect(o.exceptions[0]).toMatchObject({ instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'none' } });
     expect(o.exceptions[0].audience.people.map((p: any) => p.name).sort()).toEqual(['Noor', 'Omar']);
     const gone = await call(deleteException, '/x', { method: 'DELETE' }, ctx({ id: o.exceptions[0].id }));
     expect(gone.status).toBe(200);
@@ -377,11 +355,8 @@ run('the grants routes, on the real books', () => {
 
   it('ends both categories of an exception together: when the second cannot end, the first stays as it was', async () => {
     const [omar, noor] = [await person('Omar'), await person('Noor')];
-    const saved = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'same' } } });
+    const saved = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } } });
     expect(saved.status).toBe(201);
-    // A computers rule for the same people from before computers-only credit was refused, made through the books
-    const { saveException } = await import('@/lib/credit-rules');
-    await saveException({ categoryId: 'computers', amount: 5 * MILLION, schedule: 'monthly', recipients: { kind: 'people', userIds: [omar, noor] }, claimStartsAt: new Date() }, { userId: admin.id, superAdmin: true });
     const o = await overview();
     expect(o.exceptions).toHaveLength(1);
     const computersRule = await prisma.grantProgram.findFirst({ where: { categoryId: 'computers', kind: 'exception', status: 'active' }, select: { id: true } });
@@ -405,7 +380,7 @@ run('the grants routes, on the real books', () => {
     expect(await prisma.grantProgram.count({ where: { kind: 'exception', status: 'active' } })).toBe(0);
   });
 
-  it('changes another category of an exception that already has a computers rule from before, sent back as it was, and leaves that rule alone', async () => {
+  it('changes another category of an exception and sends the computers rule back as it was, and then changes the computers rule too', async () => {
     const [omar, noor] = [await person('Omar'), await person('Noor')];
     const audience = { kind: 'people', userIds: [omar, noor] };
     await call(postException, '/x', { method: 'POST', body: { audience, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'same' } } });
@@ -424,15 +399,15 @@ run('the grants routes, on the real books', () => {
     expect(after[0]).toMatchObject({ instant_apps: { mode: 'own', amountMicros: 12 * MILLION }, computers: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } });
     // The computers rule is the same rule, not ended and saved again
     expect(await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'computers', kind: 'exception', status: 'active' }, select: { id: true } })).toEqual(computersBefore);
-    // A different computers rule is still refused, and "As everyone" still ends it
+    // A different computers rule is saved like any other category's (credit for computers is spent by computer jobs), and "As everyone" still ends it
     const changed = await call<any>(postException, '/x', { method: 'POST', body: { ...body, replaceId: after[0].id, computers: { mode: 'own', amountMicros: 6 * MILLION, interval: 'monthly' } } });
-    expect(changed.status).toBe(400);
-    expect((await changed.json()).code).toBe('computers_not_yet');
+    expect(changed.status).toBe(201);
+    expect((await overview()).exceptions[0].computers).toMatchObject({ mode: 'own', amountMicros: 6 * MILLION, interval: 'monthly' });
     expect((await call(postException, '/x', { method: 'POST', body: { ...body, replaceId: after[0].id, computers: { mode: 'same' } } })).status).toBe(201);
     expect((await overview()).exceptions[0].computers).toEqual({ mode: 'same' });
   });
 
-  it('does not call a computers rule "as it was" when the people it is saved for changed: the save is refused and nothing changes', async () => {
+  it('saves an edit that narrows the people for every category together, the computers rule included', async () => {
     const [omar, noor] = [await person('Omar'), await person('Noor')];
     const audience = { kind: 'people', userIds: [omar, noor] };
     await call(postException, '/x', { method: 'POST', body: { audience, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'same' } } });
@@ -442,19 +417,18 @@ run('the grants routes, on the real books', () => {
     // The same rule sent back for fewer people, with the Apps amount changed
     const narrowed = { audience: { kind: 'people', userIds: [omar] }, replaceId: opened.id, instant_apps: { mode: 'own', amountMicros: 12 * MILLION, interval: 'monthly' }, computers: opened.computers };
     const answer = await call<any>(postException, '/x', { method: 'POST', body: narrowed });
-    expect(answer.status).toBe(400);
-    expect((await answer.json()).code).toBe('computers_not_yet');
-    // Nothing changed: the Apps rule is still 10 for both people
-    expect((await overview()).exceptions[0]).toMatchObject({ instant_apps: { mode: 'own', amountMicros: 10 * MILLION }, computers: { mode: 'own', amountMicros: 5 * MILLION } });
+    expect(answer.status).toBe(201);
+    const [narrowedView] = (await overview()).exceptions;
+    expect(narrowedView.audience.people.map((p: any) => p.name)).toEqual(['Omar']);
+    expect(narrowedView).toMatchObject({ instant_apps: { mode: 'own', amountMicros: 12 * MILLION }, computers: { mode: 'own', amountMicros: 5 * MILLION } });
   });
 
   it('never half-saves an exception: if the second category is refused, the first is put back', async () => {
     await saveMeterSettings({ rolloutBudgetMicros: 5 * MILLION }, admin.id);
     const [omar, noor] = [await person('Omar'), await person('Noor')];
-    // The first category saves, and the second is refused: the first is put back (here the second is refused because computers-only credit is not available yet)
     const refused = await call<any>(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: 1 * MILLION, interval: 'once' }, computers: { mode: 'own', amountMicros: 3 * MILLION, interval: 'once' } } });
     expect(refused.status).toBe(400);
-    expect((await refused.json()).code).toBe('computers_not_yet');
+    expect((await refused.json()).code).toBe('over_budget');
     expect((await overview()).exceptions).toHaveLength(0);
   });
 
@@ -472,7 +446,7 @@ run('the grants routes, on the real books', () => {
   it('previews an exception that sets one category to No grant and the other to its own amount with the funding of the amount, once and monthly apart', async () => {
     await saveMeterSettings({ rolloutBudgetMicros: 100 * MILLION }, admin.id);
     const [omar, noor] = [await person('Omar'), await person('Noor')];
-    const preview = await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: 5 * MILLION, interval: 'once' }, computers: { mode: 'same' } } });
+    const preview = await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'none' }, computers: { mode: 'own', amountMicros: 5 * MILLION, interval: 'once' } } });
     const view = await preview.json();
     expect(view.numbers).toMatchObject({ interval: 'once', mostOnceMicros: 10 * MILLION, mostMonthlyMicros: null, issuedNowMicros: 10 * MILLION });
   });
@@ -496,11 +470,11 @@ run('the grants routes, on the real books', () => {
     async function twoRules() {
       const [omar, noor, faisal] = [await person('Omar'), await person('Noor'), await person('Faisal')];
       // Two groups of the same narrowness (more than one person each) that share Omar and Noor, and say different things
-      const first = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } } });
+      const first = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'none' }, computers: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } } });
       expect(first.status).toBe(201);
       return { omar, noor, faisal };
     }
-    const second = (ids: string[]) => ({ audience: { kind: 'people', userIds: ids }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 25 * MILLION, interval: 'monthly' } });
+    const second = (ids: string[]) => ({ audience: { kind: 'people', userIds: ids }, instant_apps: { mode: 'same' }, computers: { mode: 'own', amountMicros: 25 * MILLION, interval: 'monthly' } });
 
     it('says the clash in the preview with the people named, and refuses to save it unchosen', async () => {
       const { omar, noor, faisal } = await twoRules();
@@ -508,7 +482,7 @@ run('the grants routes, on the real books', () => {
       const view = await preview.json();
       expect(view.clash.people.sort()).toEqual(['Noor', 'Omar']);
       expect(view.clash.thisText).toBe('$25 a month');
-      expect(view.clash.other.text).toBe('Instant Apps $5 a month');
+      expect(view.clash.other.text).toBe('Computers $5 a month');
       const refused = await call<any>(postException, '/x', { method: 'POST', body: second([omar, noor, faisal]) });
       expect(refused.status).toBe(409);
       expect((await refused.json()).code).toBe('clash');
@@ -517,15 +491,15 @@ run('the grants routes, on the real books', () => {
 
     it('says the clash in the preview when the new rule is "No grant", so the choice can be made before saving', async () => {
       const { omar, noor, faisal } = await twoRules();
-      const none = { audience: { kind: 'people', userIds: [omar, noor, faisal] }, computers: { mode: 'same' }, instant_apps: { mode: 'none' } };
+      const none = { audience: { kind: 'people', userIds: [omar, noor, faisal] }, instant_apps: { mode: 'same' }, computers: { mode: 'none' } };
       const preview = await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', ...none } });
       const view = await preview.json();
       expect(view.clash.people.sort()).toEqual(['Noor', 'Omar']);
       expect(view.clash.thisText).toBe('no grant');
-      expect(view.clash.other.text).toBe('Instant Apps $5 a month');
+      expect(view.clash.other.text).toBe('Computers $5 a month');
       expect((await call<any>(postException, '/x', { method: 'POST', body: none })).status).toBe(409);
       // The same "No grant" over people whose rule already says "No grant" is no clash
-      const same = { audience: { kind: 'people', userIds: [omar, noor] }, computers: { mode: 'same' }, instant_apps: { mode: 'same' } };
+      const same = { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'none' }, computers: { mode: 'same' } };
       const again = await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', ...same } });
       expect((await again.json()).clash).toBeNull();
     });
@@ -535,10 +509,10 @@ run('the grants routes, on the real books', () => {
       const saved = await call(postException, '/x', { method: 'POST', body: { ...second([omar, noor, faisal]), clashChoice: 'this' } });
       expect(saved.status).toBe(201);
       const { exceptions } = await overview();
-      const mine = exceptions.find((e: any) => e.instant_apps.amountMicros === 25 * MILLION);
+      const mine = exceptions.find((e: any) => e.computers.amountMicros === 25 * MILLION);
       expect(mine.audience.people.map((p: any) => p.name).sort()).toEqual(['Faisal', 'Noor', 'Omar']);
       // The other rule had only Omar and Noor, so nobody is left in it: it ended
-      expect(exceptions.find((e: any) => e.instant_apps.amountMicros === 5 * MILLION)).toBeUndefined();
+      expect(exceptions.find((e: any) => e.computers.amountMicros === 5 * MILLION)).toBeUndefined();
     });
 
     it('saves a clash the admin settled on the one connection of its transaction: with a pool of a single connection it still answers, never waiting on a second one', async () => {
@@ -625,7 +599,8 @@ run('the grants routes, on the real books', () => {
 
     it('gives the other rule its people back when the choice still can’t be saved', async () => {
       const [omar, noor, faisal] = [await person('Omar'), await person('Noor'), await person('Faisal')];
-      const first = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } } });
+      // One rule over Omar and Noor sets two categories. Taking them out of one category's rule is not enough: the other clashes too
+      const first = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: 9 * MILLION, interval: 'monthly' }, computers: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } } });
       expect(first.status).toBe(201);
       // The choice is made ("this one": Omar and Noor leave the old rule, which ends), and then the new rule itself cannot be saved
       await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION grants_test_refuse_rule() RETURNS trigger AS $$ BEGIN IF NEW.amount = 25000000 THEN RAISE EXCEPTION 'cannot save for the test'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql`);
@@ -641,17 +616,18 @@ run('the grants routes, on the real books', () => {
         await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS grants_test_refuse_rule()');
       }
       const { exceptions } = await overview();
-      // Nothing was left half-done: the old rule holds both people as it did, and the new one is not there
+      // Nothing was left half-done: the old rule still holds both people, and the new one is not there
       expect(exceptions).toHaveLength(1);
       expect(exceptions[0].audience.people.map((p: any) => p.name).sort()).toEqual(['Noor', 'Omar']);
-      expect(exceptions[0].instant_apps.amountMicros).toBe(5 * MILLION);
+      expect(exceptions[0].instant_apps.amountMicros).toBe(9 * MILLION);
+      expect(exceptions[0].computers.amountMicros).toBe(5 * MILLION);
     });
 
     it('clears every person the two rules disagree about, however many there are', async () => {
       const crowd: string[] = [];
       for (let i = 0; i < 60; i++) crowd.push(await person(`Crowd${i}`));
       const extra = await person('Extra');
-      const mk = (ids: string[], dollars: number) => ({ audience: { kind: 'people', userIds: ids }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: dollars * MILLION, interval: 'monthly' } });
+      const mk = (ids: string[], dollars: number) => ({ audience: { kind: 'people', userIds: ids }, instant_apps: { mode: 'same' }, computers: { mode: 'own', amountMicros: dollars * MILLION, interval: 'monthly' } });
       expect((await call(postException, '/x', { method: 'POST', body: mk(crowd, 1) })).status).toBe(201);
       const refused = await call<any>(postException, '/x', { method: 'POST', body: mk([...crowd, extra], 2) });
       expect(refused.status).toBe(409);
@@ -664,7 +640,7 @@ run('the grants routes, on the real books', () => {
       const { exceptions } = await overview();
       expect(exceptions).toHaveLength(1);
       expect(exceptions[0].audience.people.length).toBe(61);
-      expect(exceptions[0].instant_apps.amountMicros).toBe(2 * MILLION);
+      expect(exceptions[0].computers.amountMicros).toBe(2 * MILLION);
     });
 
     it('"the other one" takes those people out of this rule', async () => {
@@ -673,15 +649,15 @@ run('the grants routes, on the real books', () => {
       const saved = await call(postException, '/x', { method: 'POST', body: { ...second([omar, noor, faisal, extra]), clashChoice: 'other' } });
       expect(saved.status).toBe(201);
       const { exceptions } = await overview();
-      const mine = exceptions.find((e: any) => e.instant_apps.amountMicros === 25 * MILLION);
+      const mine = exceptions.find((e: any) => e.computers.amountMicros === 25 * MILLION);
       expect(mine.audience.people.map((p: any) => p.name).sort()).toEqual(['Faisal', 'Lina']);
-      expect(exceptions.find((e: any) => e.instant_apps.amountMicros === 5 * MILLION)).toBeDefined();
+      expect(exceptions.find((e: any) => e.computers.amountMicros === 5 * MILLION)).toBeDefined();
     });
 
     it('never saves a rule that would be left with nobody', async () => {
       const { omar, noor, faisal } = await twoRules();
       // A wider rule that already holds Omar and Noor with a different figure, then a narrower one made only of them
-      const wider = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor, faisal] }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 7 * MILLION, interval: 'monthly' }, clashChoice: 'this' } });
+      const wider = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor, faisal] }, instant_apps: { mode: 'same' }, computers: { mode: 'own', amountMicros: 7 * MILLION, interval: 'monthly' }, clashChoice: 'this' } });
       expect(wider.status).toBe(201);
       const refused = await call<any>(postException, '/x', { method: 'POST', body: { ...second([omar, noor]), clashChoice: 'other' } });
       expect(refused.status).toBe(400);
@@ -692,7 +668,7 @@ run('the grants routes, on the real books', () => {
       const { omar, noor } = await twoRules();
       await prisma.universeMember.createMany({ data: [omar, noor].map((userId) => ({ universeId, userId })) });
       try {
-        const preview = await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', audience: { kind: 'universe', universeId, mode: 'snapshot' }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 25 * MILLION, interval: 'monthly' } } });
+        const preview = await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', audience: { kind: 'universe', universeId, mode: 'snapshot' }, instant_apps: { mode: 'same' }, computers: { mode: 'own', amountMicros: 25 * MILLION, interval: 'monthly' } } });
         const view = await preview.json();
         expect(view.clash?.people.sort()).toEqual(['Noor', 'Omar']);
       } finally {

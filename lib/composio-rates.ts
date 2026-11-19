@@ -22,7 +22,7 @@
  * WHAT IS STILL NOT SETTLED (said here, not guessed away):
  *  - The page says per-app prices for managed apps apply to signups on or after 3 Nov 2026. Whether our account is under that
  *    rule is not stated (the first invoice or the dashboard's per-app rates will show).
- *  - Orbit runs a single app step through POST /tools/execute (`useReadyMade`), which is the REST side of Composio's
+ *  - Orbit runs a single app step through POST /tools/execute (`runReadyMade`), which is the REST side of Composio's
  *    `tools.execute()`: its docs call that "direct execution", so the add-on is counted. The docs do not name the REST endpoint
  *    in so many words; the first invoice settles it.
  *  - Whether the sandbox's own 10,000 free runs apply on Pro, and whether a sandbox run is also a tool call, are not stated: a run

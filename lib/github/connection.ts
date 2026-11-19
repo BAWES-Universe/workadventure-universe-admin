@@ -96,6 +96,11 @@ export async function connectGitHub(ownerId: string): Promise<{ id: string; crea
   }
 }
 
+/** The person's GitHub connection if they have one; never makes one (asking to switch back is not a reason to connect). */
+export async function existingGitHub(ownerId: string): Promise<{ id: string } | null> {
+  return prisma.appConnection.findFirst({ where: { ownerId, catalogKey: GITHUB_CATALOG_KEY }, select: { id: true } });
+}
+
 /* ------------------------------------ sign in ------------------------------------ */
 
 const STATE_SECONDS = 600;

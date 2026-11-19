@@ -4,7 +4,7 @@ import { checkAppUse } from '@/lib/app-connections';
 import { prisma } from '@/lib/db';
 import { json, preflight, readBody, serviceRoute } from '@/lib/bot-action-api';
 import { adapterIsOn } from '@/lib/app-adapter';
-import { useReadyMade } from '@/lib/app-adapter/ready-made';
+import { runReadyMade } from '@/lib/app-adapter/ready-made';
 
 export const runtime = 'nodejs';
 
@@ -45,7 +45,7 @@ export async function POST(request: NextRequest) {
     if (!verdict.readyMade) return json(request, { error: 'Not found' }, 404);
     const row = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { connectionId: true, connection: { select: { ownerId: true } } } });
     if (!row?.connectionId || !row.connection?.ownerId) return json(request, { allowed: false, reason: 'gone' }, 404);
-    const outcome = await useReadyMade({ botId, connectionId: row.connectionId, ownerId: row.connection.ownerId, tool, arguments: body.data.arguments, callId });
+    const outcome = await runReadyMade({ botId, connectionId: row.connectionId, ownerId: row.connection.ownerId, tool, arguments: body.data.arguments, callId });
     switch (outcome.status) {
       case 'done':
         return json(request, { ok: outcome.ok, data: outcome.data });

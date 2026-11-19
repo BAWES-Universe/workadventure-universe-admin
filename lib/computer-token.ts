@@ -76,9 +76,16 @@ export async function verifyJobToken(token: string, scope: TokenScope, now: Date
 }
 
 /** Every key of a job ends: the job is over, or the person took the machine. Safe to say twice. */
-export async function revokeJobTokens(jobId: string, now: Date = new Date()): Promise<number> {
-  const { count } = await prisma.computerJobToken.updateMany({ where: { jobId, revokedAt: null }, data: { revokedAt: now } });
+export async function revokeJobTokens(jobId: string, now: Date = new Date(), onlyWhile?: { prepareClaim: Date }): Promise<number> {
+  // `onlyWhile`: a prepare that holds the job's claim ends the keys only while it still holds it, in the same statement as the check, so one that
+  // paused past its claim (another took it and made a key) never ends the key that was made since
+  const { count } = await prisma.computerJobToken.updateMany({ where: { jobId, revokedAt: null, ...(onlyWhile ? { job: { prepareClaimedAt: onlyWhile.prepareClaim } } : {}) }, data: { revokedAt: now } });
   return count;
+}
+
+/** Ends one key by itself (the one a caller made and must not leave good). Safe to say twice. */
+export async function revokeToken(token: string, now: Date = new Date()): Promise<void> {
+  await prisma.computerJobToken.updateMany({ where: { digest: digestOf(token), revokedAt: null }, data: { revokedAt: now } });
 }
 
 /** The job's lease renewed: its keys that are still good live another 15 minutes. A key that ended is not brought back. */

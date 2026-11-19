@@ -42,7 +42,7 @@ import { DELETE as removeApp } from '@/app/api/me/apps/[connectionId]/bricks/[bo
 import { GET as signInStart } from '@/app/api/me/apps/[connectionId]/sign-in/route';
 import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { PATCH as patchServer, DELETE as deleteServer } from '@/app/api/bots/[id]/mcp-servers/[serverId]/route';
-import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
+import { POST as checkUse } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { GET as signInReturn } from '@/app/api/oauth/mcp-callback/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -331,7 +331,7 @@ run('apps a person connects once, in a real database', () => {
 
     // the very next use finds nothing
     expect(await checkAppUse(saraBrick, a.id, asSara)).toBeNull();
-    const answer = await (await useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: asSara }), params({ id: saraBrick, serverId: a.id }))).json();
+    const answer = await (await checkUse(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: asSara }), params({ id: saraBrick, serverId: a.id }))).json();
     expect(answer).toMatchObject({ allowed: false, reason: 'gone' });
     // every approval for it ended and its waiting card is closed ...
     expect((await prisma.botActionGrant.findUniqueOrThrow({ where: { id: grantId } })).revokedAt).not.toBeNull();
@@ -411,7 +411,7 @@ run('apps a person connects once, in a real database', () => {
     const refused = [{ requesterKey: `omar-${tag}` }, { requesterKey: `omar-${tag}@example.test` }, { requesterKey: 'a-guest-session' }, {}];
     for (const input of refused) expect(await checkAppUse(saraBrick, a.id, input)).toEqual({ allowed: false, reason: 'not_owner', viaConnection: true });
     // and the answer over the wire says nothing about the app
-    const wire = await (await useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `omar-${tag}` } }), params({ id: saraBrick, serverId: a.id }))).json();
+    const wire = await (await checkUse(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `omar-${tag}` } }), params({ id: saraBrick, serverId: a.id }))).json();
     expect(wire).toEqual({ allowed: false, reason: 'not_owner', viaConnection: true });
     expect(JSON.stringify(wire)).not.toMatch(/Calendar|mcp\.example|sara/);
   });
@@ -430,7 +430,7 @@ run('apps a person connects once, in a real database', () => {
   it('asks the bot server’s check only with the service token', async () => {
     const connection = await newOAuthApp(sara);
     const a = (await grantToBrick(sara, connection.id, saraBrick))!;
-    const asked = (token?: string) => useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token, body: { forOwner: true } }), params({ id: saraBrick, serverId: a.id }));
+    const asked = (token?: string) => checkUse(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token, body: { forOwner: true } }), params({ id: saraBrick, serverId: a.id }));
     expect((await asked()).status).toBe(401);
     expect((await asked('wrong')).status).toBe(401);
     expect((await asked(ADMIN_TOKEN)).status).toBe(401);
@@ -521,6 +521,64 @@ run('apps a person connects once, in a real database', () => {
     const stale = await back(older);
     expect(stale.headers.get('location')).toContain('message=sign_in_expired');
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('two sign-ins begun at the same moment leave a ticket and a number that belong to one of them, so exactly one can finish', async () => {
+    const connection = await newOAuthApp(sara);
+    mockUser.current = { id: sara };
+    const start = async () => new URL((await (await signInStart(request(`/api/me/apps/${connection.id}/sign-in?redirectUrl=${encodeURIComponent('http://localhost/admin')}`), params({ connectionId: connection.id }))).json()).authorizeUrl).searchParams.get('state')!;
+    // The first one's write that moves the number up is slow, so the second begins and writes in the middle of it
+    const real = prisma.appConnection.update.bind(prisma.appConnection) as unknown as (args: { data?: Record<string, unknown> }) => Promise<unknown>;
+    let slowed = false;
+    const spy = jest.spyOn(prisma.appConnection, 'update').mockImplementation(((args: { data?: Record<string, unknown> }) => {
+      if (!slowed && args?.data?.signInGeneration) {
+        slowed = true;
+        return new Promise((resolve) => setTimeout(resolve, 200)).then(() => real(args));
+      }
+      return real(args);
+    }) as never);
+    let states: string[] = [];
+    try {
+      states = await Promise.all([start(), start()]);
+    } finally {
+      spy.mockRestore();
+    }
+    global.fetch = jest.fn(async () => new Response(JSON.stringify({ access_token: 'signed-in', refresh_token: 'r', expires_in: 3600 }), { status: 200 })) as unknown as typeof fetch;
+    const back = (s: string) => signInReturn(request(`/api/oauth/mcp-callback?code=abc&state=${encodeURIComponent(s)}`));
+    const answers = [];
+    for (const state of states) answers.push((await back(state)).headers.get('location') ?? '');
+    expect(answers.filter((location) => location.includes('oauth=success'))).toHaveLength(1);
+  });
+
+  it('an older sign-in still being exchanged when a newer one begins and finishes never writes its tokens over the newer one', async () => {
+    const connection = await newOAuthApp(sara);
+    mockUser.current = { id: sara };
+    const start = async () => new URL((await (await signInStart(request(`/api/me/apps/${connection.id}/sign-in?redirectUrl=${encodeURIComponent('http://localhost/admin')}`), params({ connectionId: connection.id }))).json()).authorizeUrl).searchParams.get('state')!;
+    const back = (s: string) => signInReturn(request(`/api/oauth/mcp-callback?code=abc&state=${encodeURIComponent(s)}`));
+    const tokens = (access: string) => new Response(JSON.stringify({ access_token: access, refresh_token: `r-${access}`, expires_in: 3600 }), { status: 200 });
+    // The first sign-in's token request is slow: it waits until the test lets it go
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let calls = 0;
+    global.fetch = jest.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        await gate;
+        return tokens('older');
+      }
+      return tokens('newer');
+    }) as unknown as typeof fetch;
+    const older = back(await start());
+    for (let wait = 0; wait < 100 && calls === 0; wait++) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls).toBe(1);
+    // A newer sign-in begins, and finishes first
+    const newer = await back(await start());
+    expect(newer.headers.get('location')).toContain('oauth=success');
+    release();
+    const late = await older;
+    // The older one is refused, and what is stored is the newer one's
+    expect(late.headers.get('location')).toContain('message=sign_in_expired');
+    expect(JSON.parse(decryptApiKey((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).authConfig!))).toMatchObject({ accessToken: 'newer', refreshToken: 'r-newer' });
   });
 
   it('refuses a return that carries someone else’s sign-in for a person’s connection', async () => {

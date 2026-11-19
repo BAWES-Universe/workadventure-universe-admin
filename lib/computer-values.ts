@@ -91,3 +91,13 @@ export const silentEnding = (endedBy: string | null): boolean => endedBy === 'pe
 /** Why a report can never be delivered: nobody to deliver it to, not allowed to, the conversation it began in is gone, or the chat turned it down. */
 export const UNDELIVERABLE_WHY = ['no_chat', 'not_allowed', 'origin_gone', 'refused'] as const;
 export type UndeliverableWhy = (typeof UNDELIVERABLE_WHY)[number];
+
+/**
+ * The tag every turn sent to a job's agent starts with. The machine's local model address (the image's `universe-proxy`) finds it in a call's body and
+ * passes the call on with THAT job's key, so two jobs that run at once on one machine (read-only jobs may) are each booked their own calls: their room, the
+ * rules that count a task, and what is given back when one of them fails on our side. It is never authority: what a key may do comes from Orbit's records,
+ * and a call with no tag, or one for a job the machine holds no key of, goes on the key last written.
+ */
+export const JOB_TAG_PREFIX = '[universe-job:';
+export const JOB_TAG_NOTE = ' (a tag for the system, there is no need to repeat it)';
+export const jobTagOf = (jobId: string): string => `${JOB_TAG_PREFIX}${jobId}]${JOB_TAG_NOTE}`;

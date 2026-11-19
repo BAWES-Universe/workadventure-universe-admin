@@ -3,6 +3,8 @@ import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
 import { allowanceNow, missingSettings, monthOf, type AllowanceState, type MeterSettings } from '@/lib/meter-values';
 import { checkSpend, exposureOf } from '@/lib/spend-rules';
+import { computerBase, computerCredit, computerDraws, issueComputerCredit } from '@/lib/computer-credit';
+import type { Db } from '@/lib/credit-store';
 import { termsOf, type ChargeClass } from '@/lib/spend-rules-values';
 
 /**
@@ -77,24 +79,44 @@ const viewOf = (row: { reservationKey: string; personKey: string; botId: string 
 
 const asNumber = (value: bigint | number | null | undefined): number => (value === null || value === undefined ? 0 : Number(value));
 
-/** One member's computer month: what they spent in order and the extra usage they were given, worked into what is left. */
-export async function memberAllowance(personId: string, now: Date, settings: MeterSettings, db: Pick<Tx, 'meterEvent' | 'meterGrant'> = prisma): Promise<AllowanceState | null> {
+/** A member's computer month, with what it is made of. */
+export interface MemberAllowance extends AllowanceState {
+  /** The monthly allowance for this member: the default, or what an exception that reaches them says (a different amount, or none). */
+  baseMicros: number;
+  /** Credit given on purpose that they can draw on now (a gift, credit to be billed): part of what is left, drawn before the allowance. */
+  creditMicros: number;
+  /** What that credit was given: the "of" beside it. */
+  creditTotalMicros: number;
+}
+
+type AllowanceDb = Db & Pick<Tx, 'meterEvent' | 'meterGrant'>;
+
+/**
+ * One member's computer month: what they spent in order and the extra usage they were given, worked into what is left, and beside it the
+ * credit given to them on purpose (lib/computer-credit.ts), which is drawn first. What a step drew from credit is not counted against the
+ * allowance, so credit is spent once and the allowance is never charged for it.
+ */
+export async function memberAllowance(personId: string, now: Date, settings: MeterSettings, db: AllowanceDb = prisma): Promise<MemberAllowance | null> {
   if (settings.memberAllowanceMicros === null) return null;
   const month = monthOf(now);
-  const [events, grants] = await Promise.all([
+  const [events, grants, draws, base] = await Promise.all([
     // What a member spends from the computer allowance: computer-pool work we pay for, tied to them. Their chat is another allowance.
     db.meterEvent.findMany({
       where: { pool: 'computer', payerKind: 'universe', personKey: `person:${personId}`, costMicros: { not: null }, occurredAt: { gte: month.start, lt: month.end } },
-      select: { occurredAt: true, costMicros: true },
+      select: { eventId: true, occurredAt: true, costMicros: true },
     }),
     db.meterGrant.findMany({ where: { personId, cancelledAt: null, endsAt: { gt: month.start }, startsAt: { lt: month.end } }, select: { grantKey: true, startsAt: true, endsAt: true, multiplier: true, noLimit: true } }),
+    computerDraws(db, personId, month.start, month.end),
+    computerBase(db, personId, now, settings.memberAllowanceMicros),
   ]);
-  return allowanceNow(
-    settings.memberAllowanceMicros,
-    events.map((event) => ({ at: event.occurredAt, micros: asNumber(event.costMicros) })),
+  const state = allowanceNow(
+    base,
+    events.map((event) => ({ at: event.occurredAt, micros: Math.max(0, asNumber(event.costMicros) - (draws.get(event.eventId) ?? 0)) })),
     grants.map((grant) => ({ key: grant.grantKey, startsAt: grant.startsAt, endsAt: grant.endsAt, multiplier: grant.noLimit ? null : grant.multiplier })),
     now,
   );
+  const credit = await computerCredit(db, personId, now);
+  return { ...state, leftMicros: state.leftMicros === null ? null : state.leftMicros + credit.availableMicros, baseMicros: base, creditMicros: credit.availableMicros, creditTotalMicros: credit.totalMicros };
 }
 
 export interface Envelope {
@@ -227,6 +249,17 @@ export async function reserveRoom(
 ): Promise<Room> {
   wholeMicros(input.amountMicros, 'amountMicros');
   if (!input.key || input.key.length > 255) throw new RangeError('key is required (up to 255 characters)');
+  const room = await reserveRoomOnce(input, asked);
+  // The allowance is used up: credit given to this person that has not reached them yet (it is issued when it is first needed) may cover it. Looked for
+  // only now, so a step that has room never pays for the look, and asked once more, so a step is never refused for credit that was due
+  if (!room.ok && room.reason === 'allowance' && (await issueComputerCredit(input.personId, asked ?? new Date())) > 0) return reserveRoomOnce(input, asked);
+  return room;
+}
+
+async function reserveRoomOnce(
+  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; newJob?: boolean },
+  asked?: Date,
+): Promise<Room> {
   return prisma.$transaction(async (tx): Promise<Room> => {
     await lockPool(tx);
     // The time is read once the lock is held, unless the caller fixed it

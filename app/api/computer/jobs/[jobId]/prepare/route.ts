@@ -11,7 +11,8 @@ const bodySchema = z.object({ relay: z.string().min(1).max(300) }).strict();
 /**
  * POST /api/computer/jobs/:jobId/prepare { relay } - the runner readies a running job's computer to ask for a model: Orbit makes a new
  * key (every earlier key of the job ends) and writes it, with the relay's address, onto the machine where its local model address reads
- * them on each call. The key never comes back to the caller. Answers { ok: true, expiresAt, git } (git: whether the computer was given its git login) or { ok: false, reason }. Auth: service token only.
+ * them on each call. The key never comes back to the caller. Answers { ok: true, expiresAt, git } (git: whether the computer was given its git login) or { ok: false, reason }. 
+ * 409 `preparing` when another prepare of the job is writing its key (waited for about 5 seconds first: ask again, it is not a failure; the claim lapses after about 45 seconds). Auth: service token only.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {
   try {

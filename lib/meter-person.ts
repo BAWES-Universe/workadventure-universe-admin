@@ -99,7 +99,7 @@ export async function personUsage(personId: string, now: Date = new Date(), view
     chatWeekMicros: Number(chat._sum.costMicros ?? 0),
     bricks,
     computerMonthMicros: Number(computer._sum.costMicros ?? 0),
-    allowanceMicros: base === null ? null : noLimit ? null : base * (extra?.multiplier ?? 1),
+    allowanceMicros: base === null || !allowance ? null : noLimit ? null : allowance.baseMicros * (extra?.multiplier ?? 1) + allowance.creditTotalMicros,
     // What new work can still take, as admission counts it (spending and what is held, with the extra drawn first); not the allowance less spending, which reads wrong once an extra ends
     leftMicros: allowance && !allowance.unlimited && !noLimit ? Math.max(0, (allowance.leftMicros ?? 0) - held) : null,
     noLimit,

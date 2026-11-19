@@ -436,10 +436,20 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
             costMicros: { not: null },
             occurredAt: { gte: monthOf(new Date(Math.min(...spans.map((span) => span.first.getTime())))).start, lt: monthOf(new Date(Math.max(...spans.map((span) => span.last.getTime())))).end },
           },
-          select: { personKey: true, occurredAt: true, costMicros: true },
+          select: { eventId: true, personKey: true, occurredAt: true, costMicros: true },
         });
-  const spendingOf = new Map<string, typeof spending>();
-  for (const event of spending) {
+  // What credit given for computers paid is not the allowance's: only the rest of each step is what the extra usage drew on
+  const drawn = new Map<string, number>();
+  if (spending.length > 0) {
+    const holds = await prisma.creditHold.findMany({
+      where: { personId: { in: [...byPerson.keys()] }, category: 'computers', state: 'settled', effectKey: { in: spending.map((event) => event.eventId) } },
+      select: { effectKey: true, customerMicros: true, refundedMicros: true },
+    });
+    for (const hold of holds) if (hold.effectKey) drawn.set(hold.effectKey, Number(hold.customerMicros ?? 0) - Number(hold.refundedMicros));
+  }
+  const spendingOf = new Map<string, { personKey: string; occurredAt: Date; costMicros: number }[]>();
+  for (const { eventId, ...row } of spending) {
+    const event = { ...row, costMicros: Math.max(0, toNumber(row.costMicros) - (drawn.get(eventId) ?? 0)) };
     const list = spendingOf.get(event.personKey);
     if (list) list.push(event);
     else spendingOf.set(event.personKey, [event]);

@@ -65,7 +65,8 @@ import {
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
 const tag = randomUUID().slice(0, 8);
-const NOW = new Date('2026-11-15T12:00:00Z');
+// Rows get their own times from the database's clock and from `@updatedAt` (now): the tests' clock starts at the real now, so "ten minutes later" is later than those rows whatever day it is run
+const NOW = new Date();
 const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
 // The database stamps a machine's last change and a Brick's last look with the real clock, and the sweep reads them against the `now` it is given
 // (the test's own, earlier than the real one): the rows are put back to the test's clock before a sweep, so the test never depends on the day it runs

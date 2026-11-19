@@ -18,7 +18,7 @@ jest.mock('@/lib/db', () => {
     bot: { findUnique: jest.fn(), findMany: jest.fn() },
     user: { findUnique: jest.fn() },
     botMcpServer: { findFirst: jest.fn(), findUnique: jest.fn(), findMany: jest.fn(), updateMany: jest.fn(), update: jest.fn() },
-    userNotice: { findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), create: jest.fn(), updateMany: jest.fn() },
+    userNotice: { findMany: jest.fn(), update: jest.fn(), createMany: jest.fn(), updateMany: jest.fn() },
     $executeRaw: jest.fn(),
   };
   prisma.$transaction = jest.fn((work: (tx: unknown) => unknown) => work(prisma));
@@ -29,7 +29,7 @@ const db = prisma as unknown as {
   bot: { findUnique: jest.Mock; findMany: jest.Mock };
   user: { findUnique: jest.Mock };
   botMcpServer: Record<'findFirst' | 'findUnique' | 'findMany' | 'updateMany' | 'update', jest.Mock>;
-  userNotice: Record<'findMany' | 'findFirst' | 'update' | 'create' | 'updateMany', jest.Mock>;
+  userNotice: Record<'findMany' | 'update' | 'createMany' | 'updateMany', jest.Mock>;
   $executeRaw: jest.Mock;
   $transaction: jest.Mock;
 };
@@ -48,7 +48,6 @@ beforeEach(() => {
   jest.resetAllMocks();
   db.bot.findUnique.mockResolvedValue(BOT);
   db.userNotice.findMany.mockResolvedValue([]);
-  db.userNotice.findFirst.mockResolvedValue(null);
   db.$transaction.mockImplementation((work: (tx: unknown) => unknown) => work(prisma));
   db.userNotice.createMany.mockResolvedValue({ count: 1 });
   db.botMcpServer.update.mockResolvedValue({});
@@ -324,8 +323,14 @@ describe('the card on Orbit home, when things happen together', () => {
 
   it('makes a card that already exists for the same instant as an insert that skips it, so the duplicate can never roll the other cards back', async () => {
     db.botMcpServer.findMany.mockResolvedValue([tavily]);
-    db.userNotice.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' }));
     await expect(syncToolSignInNotices('bot-1', { serverId: 's1', at: T1 })).resolves.toBe(true);
+    expect(addNotice.mock.calls[0][0].skipDuplicates).toBe(true);
+  });
+
+  it('says it did not finish when the transaction fails, a duplicate error included, so the marker stays and the cards are tried again', async () => {
+    db.botMcpServer.findMany.mockResolvedValue([tavily]);
+    addNotice.mockRejectedValue(new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' }));
+    await expect(syncToolSignInNotices('bot-1', { serverId: 's1', at: T1 })).resolves.toBe(false);
   });
 });
 

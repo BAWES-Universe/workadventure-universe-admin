@@ -1,9 +1,10 @@
 import { Prisma } from '@prisma/client';
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { parsePlayUri } from '@/lib/utils';
 import { windowStart } from '@/lib/reply-limits';
 import { FAIR_USAGE_WINDOW_HOURS } from '@/lib/bot-limit-values';
-import { getBrickLimits, getServerLimits, servedLimits } from '@/lib/bot-limits';
+import { getBrickLimits, getServerLimits, getServerLimitsOrThrow, servedLimits } from '@/lib/bot-limits';
 import { providerPayload } from '@/lib/ai-provider-payload';
 import { UNIVERSE_AI_MISSING, resolveUniverseAiProvider } from '@/lib/universe-ai';
 import { DEFAULT_BRICK_LOOK, DEFAULT_BRICK_NAME, ensureDefaultBrick } from '@/lib/brick-default';
@@ -208,9 +209,13 @@ export async function finishGuestBrickReply(turnIdInput: unknown, input: { faile
 // Signing in: the chat goes to one account, once
 // ---------------------------------------------------------------------------------------------------------------------
 
-/** How long a guest's chat can still be handed to an account: as long as a guest's files stay (Limits, Files in chats). */
-async function handoverWindow(now: Date): Promise<Date> {
-  const { files } = await getServerLimits();
+/**
+ * How long a guest's chat can still be handed to an account: as long as a guest's files stay (Limits, Files in chats). `strict`: for a
+ * decision that deletes or gives up something (a hand-over, a kept one), a limits read that fails throws, instead of the recommended days
+ * standing in for the saved ones (a window shorter than the saved one would make a kept guest id look too old, or a chat look never to have been had).
+ */
+async function handoverWindow(now: Date, strict = false): Promise<Date> {
+  const { files } = strict ? await getServerLimitsOrThrow() : await getServerLimits();
   return new Date(now.getTime() - files.guestDays * 24 * HOUR);
 }
 
@@ -225,7 +230,7 @@ async function handoverWindow(now: Date): Promise<Date> {
  * nothing here but totals.
  */
 export async function adoptGuestChat(guestId: string, userId: string, now: Date = new Date()): Promise<{ adopted: boolean }> {
-  const since = await handoverWindow(now);
+  const since = await handoverWindow(now, true);
   // Another account's own id is never a guest's to hand over
   if (await prisma.user.findUnique({ where: { uuid: guestId }, select: { id: true } })) return { adopted: false };
   if (await prisma.guestBrickHandover.findUnique({ where: { guestKey: guestId }, select: { guestKey: true } })) return { adopted: false };
@@ -240,6 +245,64 @@ export async function adoptGuestChat(guestId: string, userId: string, now: Date 
     ON CONFLICT ("guest_key") DO NOTHING
     RETURNING "guest_key"`);
   return { adopted: claimed.length > 0 };
+}
+
+/**
+ * The same hand-over, but a failure keeps it: the game sends the guest id only once, so the id is written down for this account
+ * before the error goes on, and `finishKeptGuestChats` tries again the next time the person gets into a room. The write is one
+ * statement that needs nothing the failed step needed.
+ */
+export async function adoptGuestChatKeepingIt(guestId: string, userId: string, now: Date = new Date()): Promise<{ adopted: boolean }> {
+  try {
+    return await adoptGuestChat(guestId, userId, now);
+  } catch (error) {
+    try {
+      await prisma.$executeRaw(Prisma.sql`
+        INSERT INTO "guest_brick_pending_handovers" ("guest_key", "user_id", "kept_at") VALUES (${guestId}, ${userId}, ${now})
+        ON CONFLICT ("guest_key") DO NOTHING`);
+    } catch (keepError) {
+      // Neither the hand-over nor writing the id down worked: the id is nowhere, and the game sends it only once. Said apart, so the caller does not go on as if it were kept
+      throw new GuestChatNotKeptError(error, keepError);
+    }
+    throw error;
+  }
+}
+
+/** A guest id that could not be handed over and could not be written down to be handed over later: nothing holds it, so the visit must be asked again with it. */
+export class GuestChatNotKeptError extends Error {
+  constructor(
+    readonly handOverError: unknown,
+    readonly keepError: unknown,
+  ) {
+    super('A guest chat could not be handed over or kept for later');
+  }
+}
+
+/**
+ * Finishes the hand-overs kept for this account. A kept one is gone once it is done (adopted, or there was nothing to hand over)
+ * or once the window for handing over has passed; one that fails again stays for the next time.
+ */
+export async function finishKeptGuestChats(userId: string, now: Date = new Date()): Promise<number> {
+  const kept = await prisma.guestBrickPendingHandover.findMany({ where: { userId }, orderBy: { keptAt: 'asc' }, take: 5 });
+  if (kept.length === 0) return 0;
+  // A limits read that fails throws, and every kept id stays for the next time: none is dropped as too old on the recommended days
+  const since = await handoverWindow(now, true);
+  let finished = 0;
+  for (const row of kept) {
+    if (row.keptAt < since) {
+      await prisma.guestBrickPendingHandover.deleteMany({ where: { guestKey: row.guestKey } });
+      continue;
+    }
+    try {
+      await adoptGuestChat(row.guestKey, userId, now);
+    } catch (error) {
+      Sentry.captureException(error);
+      continue;
+    }
+    await prisma.guestBrickPendingHandover.deleteMany({ where: { guestKey: row.guestKey } });
+    finished += 1;
+  }
+  return finished;
 }
 
 /**

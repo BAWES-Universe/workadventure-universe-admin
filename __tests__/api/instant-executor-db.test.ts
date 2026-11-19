@@ -1200,14 +1200,14 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await sweepGoodwill({ funds: f.funds })).toMatchObject({ looked: 0 });
       // The books answer now: the sweep finishes it and it is confirmed
       const later = new Date(Date.now() + 10 * MIN);
-      expect(await sweepGoodwill({ funds: f.funds, now: later })).toEqual({ looked: 1, settled: 1, released: 0 });
+      expect(await sweepGoodwill({ funds: f.funds, now: later })).toEqual({ looked: 1, settled: 1, released: 0, abandoned: 0 });
       expect((await prisma.instantRefund.findFirstOrThrow({ where: { runId: first } })).confirmedAt).not.toBeNull();
       expect(Number((await runOf(first)).refundedMicros)).toBe(5_000);
       // A give-back the books stay unreachable about: tried again each sweep, and let go after the wait so it stops using the budget
       await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 600 });
       f.funds.refund.mockResolvedValue({ ok: false, refundedMicros: 0, reason: 'unavailable' });
       expect(await giveBack({ personId: sara, runId: second }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'unavailable' });
-      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 20 * MIN) })).toEqual({ looked: 1, settled: 0, released: 0 });
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 20 * MIN) })).toEqual({ looked: 1, settled: 0, released: 0, abandoned: 0 });
       expect(await prisma.instantRefund.count({ where: { runId: second, confirmedAt: null } })).toBe(1);
       expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN) })).toEqual({ looked: 1, settled: 0, released: 1 });
       // Let go of, not deleted: the row stays (marked), and no longer counts against the budget

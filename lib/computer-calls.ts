@@ -1,9 +1,10 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { givenBackJob } from '@/lib/computer-values';
 import { recordMeterEvent } from '@/lib/meter';
 import { releaseRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
 import { verifyJobToken } from '@/lib/computer-token';
+import { givenBackJob } from '@/lib/computer-values';
+import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
 
 /**
  * A model call a Brick's computer makes (build handoff v2, section 5): room is taken BEFORE the call, and what it really cost is
@@ -113,6 +114,8 @@ export async function giveBackModelCalls(jobId: string, personId: string): Promi
     SET "person_key" = 'unknown', "person_id" = NULL,
         "detail" = COALESCE("detail", '{}'::jsonb) || jsonb_build_object('givenBack', true, 'forPersonId', ${personId}::text)
     WHERE "job_id" = ${jobId} AND "kind" = 'model_call' AND "pool" = 'computer' AND "payer_kind" = 'universe' AND "person_key" = ${`person:${personId}`}`);
+  // What the job drew from credit given for computers goes back into the lots it came from (each draw once: asked again it gives nothing more)
+  await giveBackComputerCredit(jobId);
 }
 
 /** The figures of a finished call go to the books once, and its room is settled. Safe to say twice. Not for a call nobody authorized. */
@@ -135,6 +138,9 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
   const givenBack = !paidByOther && givenBackJob(job.status, job.endedBy);
   const givenBackDetail = givenBack ? { givenBack: true, forPersonId: job.personId } : {};
   const reportedDetail = { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}), ...(overrun > 0 ? { overrunMicros: overrun } : {}), ...givenBackDetail };
+  // Credit given on purpose (a gift for computers) is drawn first, before the event is written, so the allowance never counts what credit paid:
+  // asked twice it is the same draw. A call on the owner's own key, with no price known, or on a job that failed on our side draws nothing
+  if (!givenBack && !paidByOther && cost !== null && cost > 0) await drawComputerCredit({ eventId, personId: job.personId, botId: job.botId, jobId: job.id, costMicros: cost, chargeClass: 'computer_model' }, now);
   const written = await recordMeterEvent({
     eventId,
     kind: 'model_call',
@@ -173,8 +179,20 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
     const now2 = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { status: true, endedBy: true } });
     if (now2 && givenBackJob(now2.status, now2.endedBy)) await giveBackModelCalls(job.id, job.personId);
   }
-  // A price that is not known settles at the room that was held (never 0); one that is settles at what it was, at least 1
-  if (reservation) await settleRoom({ key: reservation.reservationKey, settledMicros: Math.max(1, cost ?? Number(reservation.amountMicros)) }, now);
+  // The job may have failed while this call was being written: its calls are given back when it ends, and this one was written after that
+  // looked. Look again (the answer is only ever "failed on our side" once, so this is cheap and settles the race either way)
+  if (!givenBack && !paidByOther) {
+    const now2 = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { status: true, endedBy: true } });
+    if (now2 && givenBackJob(now2.status, now2.endedBy)) await giveBackModelCalls(job.id, job.personId);
+  }
+  // The room settles at what the books hold for this call, never at what this report says: a report sent again after a first one that wrote
+  // the event but did not settle (or with another figure) must settle at the event's own cost. A price that is not known settles at the
+  // room that was held (never 0); one that is settles at what it was, at least 1
+  if (reservation) {
+    const stored = await prisma.meterEvent.findUnique({ where: { eventId }, select: { costMicros: true } });
+    const booked = stored ? (stored.costMicros === null ? null : Number(stored.costMicros)) : cost;
+    await settleRoom({ key: reservation.reservationKey, settledMicros: Math.max(1, booked ?? Number(reservation.amountMicros)) }, now);
+  }
   return { ok: true };
 }
 

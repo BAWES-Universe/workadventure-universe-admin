@@ -38,6 +38,12 @@ export async function getServerLimits(db: Pick<Prisma.TransactionClient, 'appSet
   }
 }
 
+/** The same limits, but a read that fails throws: for a decision that must not be made on the recommended values when the saved ones could not be read (a hand-over's window, which decides what is deleted). */
+export async function getServerLimitsOrThrow(db: Pick<Prisma.TransactionClient, 'appSetting'> = prisma): Promise<ServerLimits> {
+  const row = await db.appSetting.findUnique({ where: { key: SETTING_KEY } });
+  return readServerLimits(row?.value);
+}
+
 type ServerChange = Partial<{ [K in keyof ServerLimits]: ServerLimits[K] extends object ? Partial<ServerLimits[K]> : ServerLimits[K] }>;
 
 /** Limits that can't be saved together, with the line that says why (shown as it is). */

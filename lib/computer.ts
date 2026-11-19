@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { getBrickLimits } from '@/lib/bot-limits';
+import { drawComputerCredit } from '@/lib/computer-credit';
 import { DISK_ROOM_PREFIX, diskRoomKey, memberAllowance, releaseRoom, renewRoom, reserveDiskRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
@@ -200,7 +201,9 @@ async function monthOfPerson(personId: string, now: Date): Promise<ComputerView[
   if (!state || settings.memberAllowanceMicros === null) return null;
   const endsAt = monthOf(now).end;
   if (state.unlimited || state.leftMicros === null) return { leftFraction: 1, unlimited: true, endsAt };
-  return { leftFraction: Math.max(0, Math.min(1, state.leftMicros / settings.memberAllowanceMicros)), unlimited: false, endsAt };
+  // Against what they have now: their month (the default, or what an exception says for them) and credit given to them for computers
+  const total = state.baseMicros + state.creditTotalMicros;
+  return { leftFraction: total > 0 ? Math.max(0, Math.min(1, state.leftMicros / total)) : 0, unlimited: false, endsAt };
 }
 
 /** What the owner sees about a Brick's computer. Null when the Brick is not theirs. Reads only: it never makes or wakes anything. */
@@ -598,6 +601,12 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
   if (await computersArePaused()) {
     // Waiting in line, nothing to ask for: not the "allowance" or "turn" reason an earlier try may have left
     await queue('busy');
+    return 'queued';
+  }
+
+  // A turn of a job that ended may still run on this machine: nothing starts beside it until the machine is proved asleep (tried again here and by every sweep)
+  if (!(await settleTurnHold(job.botId))) {
+    await queue('turn');
     return 'queued';
   }
 
@@ -1145,28 +1154,38 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     const held = job.status === 'running' || job.status === 'waiting';
     const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
     seconds = job.secondsRun + stretch;
-    ended = await prisma.computerJob.updateMany({
-      where: { id: jobId, status: job.status },
-      data: {
-        status,
-        endedBy,
-        endedAt: now,
-        queuedFor: null,
-        waitingFor: null,
-        readyWhat: null,
-        readyWhere: null,
-        control: 'brick',
-        stretchStarted: null,
-        secondsRun: seconds,
-        agentResponseId: null,
-        brief: null,
-        // What it waited for is kept when nobody answered, so Brick can say which step it waited at; no wait is left to tell about
-        endWaitingFor: endedBy === 'unanswered' ? job.waitingFor : null,
-        handoverUntold: false,
-        // The person's own Stop, a computer turned off and a Brick deleted are never told: they just did it
-        endToldAt: silentEnding(endedBy) ? now : null,
-      },
-    });
+    const endData = {
+      status,
+      endedBy,
+      endedAt: now,
+      queuedFor: null,
+      waitingFor: null,
+      readyWhat: null,
+      readyWhere: null,
+      control: 'brick',
+      stretchStarted: null,
+      secondsRun: seconds,
+      agentResponseId: null,
+      brief: null,
+      // What it waited for is kept when nobody answered, so Brick can say which step it waited at; no wait is left to tell about
+      endWaitingFor: endedBy === 'unanswered' ? job.waitingFor : null,
+      handoverUntold: false,
+      // The person's own Stop, a computer turned off and a Brick deleted are never told: they just did it
+      endToldAt: silentEnding(endedBy) ? now : null,
+    } as const;
+    if (held && job.firstTurnSentAt && !job.agentResponseId) {
+      // The job's first turn was sent and never named: it may still run on the machine with nothing to cancel it by. The machine carries a hold from the
+      // moment the job is over (one commit with the end), so no other job or turn starts beside that turn until the machine is proved asleep
+      const botId = job.botId;
+      const status0 = job.status;
+      ended = await prisma.$transaction(async (tx) => {
+        const done = await tx.computerJob.updateMany({ where: { id: jobId, status: status0 }, data: endData });
+        if (done.count === 1) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
+        return done;
+      });
+    } else {
+      ended = await prisma.computerJob.updateMany({ where: { id: jobId, status: job.status }, data: endData });
+    }
   }
   // Someone else ended it between the read and the write: that one counts and settles
   if (!job || ended.count === 0) return;
@@ -1195,7 +1214,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // The job is over either way: the machine still rests and the line still moves, and the sweep gives the room back
     console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown');
   }
-  // A job that failed on our side takes nothing from the person's month, and neither do the model calls it made (the sweep tries again if this fails)
+  // A job that failed on our side takes nothing from the person's month, and neither do the model calls it made, nor the credit they drew (the sweep tries again if this fails)
   if (givenBackJob(status, endedBy)) {
     await giveBackModelCalls(job.id, job.personId).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
   }
@@ -1209,7 +1228,9 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     await releaseIfUnheld(job.botId).catch((error) => console.error('[Computer] Could not release control:', error instanceof Error ? error.message : 'unknown'));
     if (outside) {
       endFiles = await closeOutIfUnheld(job.botId);
-      await restIfUnheld(job.botId, now, job.id);
+      // A machine under a hold (a turn of this or an earlier job may still run on it) is put to sleep and proved, not only rested
+      if (await underTurnHold(job.botId)) await settleTurnHold(job.botId);
+      else await restIfUnheld(job.botId, now, job.id);
     }
   }
   // Everything this ending does is finished: only now may Brick tell the person how it went (its time is in the books, its files are listed)
@@ -1312,6 +1333,8 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
   // the person's: what it ran stays in the books as our own cost (the provider still bills it), but is not written against them, so it
   // never draws from their month. A job that ran and ended any other way (done, stopped by them, out of room, nobody answered) is theirs.
   const givenBack = givenBackJob(why.status, why.endedBy);
+  // Credit given on purpose (a gift for computers) is drawn first, before the event is written, so the allowance never counts what credit paid. Never for a job that failed on our side: it takes nothing from the person
+  if (!givenBack && cost !== null && cost > 0) await drawComputerCredit({ eventId: `computer:${job.id}:time`, personId: job.personId, botId: job.botId, jobId: job.id, costMicros: cost, chargeClass: 'computer_job' }, at);
   await recordMeterEvent({
     eventId: `computer:${job.id}:time`,
     kind: 'computer_time',
@@ -1381,18 +1404,30 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
 }
 
 /**
- * A job that failed on our side has its model calls given back when it ends. If that write did not go through, or a call was recorded
- * in the same moment, the next sweep finds the call still written against the person and gives it back too. Never throws.
+ * A job that failed on our side has its model calls, and the credit it drew, given back when it ends. If that write did not go through, or a call was recorded
+ * in the same moment, the next sweep finds the call still written against the person (or credit the job still holds drawn) and gives it back too. Never throws.
  */
 async function giveBackMissingModelCalls(batch: number, botId?: string): Promise<void> {
   const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
+  // A job whose give-back keeps failing for a reason of its own still matches on every sweep, so a plain "oldest first" would let it (and others like it)
+  // take the whole batch for ever, and a plain LIMIT would take whichever the database returns. Half the batch is the oldest and half the newest of the jobs
+  // that match, so a job that can never be given back holds one slot at most and never keeps a newer one out
+  const half = Math.max(1, Math.ceil(batch / 2));
   try {
     const jobs = await prisma.$queryRaw<Array<{ id: string; personId: string }>>(Prisma.sql`
-      SELECT DISTINCT j."id", j."person_id" AS "personId"
-      FROM "computer_jobs" j
-      WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error') ${only}
-        AND EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
-      LIMIT ${batch}`);
+      SELECT "id", "personId" FROM (
+        SELECT j."id", j."person_id" AS "personId",
+          ROW_NUMBER() OVER (ORDER BY j."ended_at" ASC NULLS LAST, j."id") AS "oldest",
+          ROW_NUMBER() OVER (ORDER BY j."ended_at" DESC NULLS LAST, j."id") AS "newest"
+        FROM "computer_jobs" j
+        WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error') ${only}
+          AND (
+            EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
+            -- ...or credit the job drew that has not gone back (a give-back that failed once is found again: giving back is safe to repeat)
+            OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros")
+          )
+      ) matching
+      WHERE "oldest" <= ${half} OR "newest" <= ${half}`);
     for (const job of jobs) await giveBackModelCalls(job.id, job.personId);
   } catch (error) {
     console.error('[Computer] Could not look for a failed job’s model calls:', error instanceof Error ? error.message : 'unknown');
@@ -1495,6 +1530,9 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
     const provider = providerFor(machine);
     if (provider && machine.providerRef) await stopMachine(machine.botId, machine.providerRef, provider, ['stopping']);
   }
+  // A machine that may still run the turn of a job that ended is put to sleep and proved, and only then do the jobs behind it start
+  const turnHolds = await prisma.brickComputer.findMany({ where: { NOT: { turnUnprovenSince: null } }, select: { botId: true }, take: 200 });
+  for (const machine of turnHolds) await settleTurnHold(machine.botId);
   const idle = await prisma.brickComputer.findMany({ where: { machine: 'working', NOT: { providerRef: null }, updatedAt: { lte: new Date(now.getTime() - 2 * 60 * 1000) } }, select: { botId: true }, take: 200 });
   for (const machine of idle) await restIfUnheld(machine.botId, now);
   // A machine a job holds is kept awake while it works
@@ -1781,6 +1819,64 @@ async function fenceControl(botId: string, now: Date = new Date()): Promise<void
 
 export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' | 'in_progress' | 'not_secured' };
 
+/** The first turns of a Brick's jobs that were marked as sent and never named: gone only when nothing can still be running them (see fenceTakeOver). */
+async function clearFirstTurnMarks(botId: string): Promise<void> {
+  await prisma.computerJob.updateMany({ where: { botId, NOT: { firstTurnSentAt: null }, agentResponseId: null }, data: { firstTurnSentAt: null } });
+}
+
+/** Whether a job ended here with a first turn that may still run on this machine (see `settleTurnHold`). */
+export async function underTurnHold(botId: string): Promise<boolean> {
+  const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { turnUnprovenSince: true } });
+  return !!row?.turnUnprovenSince;
+}
+
+/**
+ * A job whose first turn was marked as sent and never named can end while that turn still runs on the machine (nothing can be asked for it, and a
+ * machine that is not put to rest, or a rest that failed, leaves it running). The machine then carries a hold in its own row (`turnUnprovenSince`,
+ * kept with the job's end in one commit, so it survives a failed call and a restart): no job is started on it and no turn is opened on it until the
+ * machine is proved asleep (or there is none). This is the one place that asks for that proof and lifts the hold. It stops the machine only when no
+ * other job holds it (`exceptJobId` is the caller that is itself waiting to start a turn, which does not count): a job's work, or a person at the
+ * screen, is never put to sleep under them; the hold then waits for them to end. Returns whether the machine is free of the hold. Never throws.
+ */
+export async function settleTurnHold(botId: string, exceptJobId?: string): Promise<boolean> {
+  try {
+    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true, provider: true, machine: true, turnUnprovenSince: true } });
+    if (!row?.turnUnprovenSince) return true;
+    const seen = row.turnUnprovenSince;
+    // Only the hold that was seen is lifted: a newer one, set by another job's end while this looked, stays
+    const lift = () => prisma.brickComputer.updateMany({ where: { botId, turnUnprovenSince: seen }, data: { turnUnprovenSince: null } });
+    if (await agentCannotRun(botId)) {
+      await lift();
+      await clearFirstTurnMarks(botId);
+      return true;
+    }
+    const holders = await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] }, ...(exceptJobId ? { id: { not: exceptJobId } } : {}) } });
+    if (holders > 0) return false;
+    const provider = providerFor(row);
+    if (!provider || !row.providerRef) return false;
+    // Its work is saved before it is stopped, as every other stop does (a copy that fails is not claimed and never holds the stop up; a machine that is not awake is not woken to be copied)
+    if (await provider.awake(row.providerRef).catch(() => false)) await saveCopy(botId, row.providerRef, provider);
+    if (!(await stopMachine(botId, row.providerRef, provider))) return false;
+    await lift();
+    // Proved asleep: no first turn of any job on this machine can still be running, so their marks go (as after a take-over fence that stopped it)
+    await clearFirstTurnMarks(botId);
+    return true;
+  } catch (error) {
+    console.error('[Computer] Could not settle a machine’s turn hold:', error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
+}
+
+/**
+ * Whether nothing of the agent can still be running on the Brick's machine: there is no machine, or it is proved asleep (`stopped`: the provider
+ * said so). The machine's fence is not that: it ends the keys and stops what the agent started, but keeps the agent's gateway (and everything
+ * above it), and a job's first turn runs inside the gateway, so a turn that never said its id survives a fence that was proved clear.
+ */
+export async function agentCannotRun(botId: string): Promise<boolean> {
+  const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true, machine: true } });
+  return !row || !row.providerRef || row.machine === 'none' || row.machine === 'stopped';
+}
+
 /**
  * Every job working on the machine becomes the person's, the one that writes and any that only read: none is left running under
  * Brick's hands while the person has the keyboard. Asked again until none is left: a job that began while the others were being
@@ -1859,6 +1955,11 @@ async function leadFence(botId: string, epoch: number | null, now: Date): Promis
       if (epoch !== null) await releaseLease(botId, 'fencing', epoch);
       return 'unproved';
     }
+    // A job's first turn that never said its id (marked in its row before it was sent) is NOT stopped by the fence unless the machine itself was: the
+    // fence keeps the agent's gateway, the turn runs inside it, and its model calls are only paused by the keys that ended. So the mark stays, and the
+    // start after the hand-back ends the job instead of opening a second first turn beside the one that runs (two charges). It goes only when the
+    // machine is proved asleep (the fence could not be proved and stopped it, or there is no machine): then nothing runs and a start opens a turn as any other
+    if (await agentCannotRun(botId)) await clearFirstTurnMarks(botId);
     // A job that began while the fence ran is looked for once more: it is the person's too, and the fence is run again for it
     if ((await prisma.computerJob.count({ where: { botId, status: 'running' } })) === 0) break;
     if (++rounds >= 3) {
@@ -1931,7 +2032,7 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
  * A take-over fence that could not be proved stops the machine (see fenceMachine). The jobs handed back need it working again, so it is
  * woken here; if it will not come back the jobs end, their room given back, rather than wait on a machine that is not there.
  */
-async function wakeIfStopped(botId: string): Promise<void> {
+export async function wakeIfStopped(botId: string): Promise<void> {
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   const provider = providerFor(row);
   if (!row?.providerRef || !provider || (row.machine !== 'stopped' && row.machine !== 'stopping')) return;

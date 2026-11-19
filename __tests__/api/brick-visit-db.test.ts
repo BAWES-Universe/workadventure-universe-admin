@@ -521,7 +521,9 @@ run('bringing a Brick along, in a real database', () => {
 
     it('2b. refuses with the line only when nothing else can answer: Universe AI is not there to stand in', async () => {
       await onKey();
-      await prisma.botsAiProvider.update({ where: { providerId: serverProviderId }, data: { enabled: false } });
+      // Every server provider that could stand in is off, not only this file's: other suites of the same database leave a "Universe AI" row of their own on
+      const standIns = (await prisma.botsAiProvider.findMany({ where: { ownerId: null, enabled: true }, select: { providerId: true } })).map((row) => row.providerId);
+      await prisma.botsAiProvider.updateMany({ where: { providerId: { in: standIns } }, data: { enabled: false } });
       try {
         const refused = await credentials(omar.uuid);
         expect(refused.status).toBe(403);
@@ -529,7 +531,7 @@ run('bringing a Brick along, in a real database', () => {
         // Its owner is served their own key as always
         expect((await (await credentials(sara.uuid)).json()).source).toBe('own-key');
       } finally {
-        await prisma.botsAiProvider.update({ where: { providerId: serverProviderId }, data: { enabled: true } });
+        await prisma.botsAiProvider.updateMany({ where: { providerId: { in: standIns } }, data: { enabled: true } });
       }
     });
 

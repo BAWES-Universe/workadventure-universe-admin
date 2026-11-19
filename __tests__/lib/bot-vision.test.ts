@@ -188,6 +188,13 @@ describe('moving a bot off a key (#709)', () => {
     expect(await dropOthersVisionKey({ vision: PICK }, 'khalid')).toEqual({});
   });
 
+  it('reads the key on the client it is given (a transaction’s), never on the shared one', async () => {
+    const own = { botsAiProvider: { findUnique: jest.fn().mockResolvedValue({ ownerId: 'sara' }) } };
+    expect(await dropOthersVisionKey({ vision: PICK, walkSpeed: 2 }, 'khalid', own as never)).toEqual({ walkSpeed: 2 });
+    expect(own.botsAiProvider.findUnique).toHaveBeenCalledWith({ where: { providerId: 'key-1' }, select: { ownerId: true } });
+    expect(db.findUnique).not.toHaveBeenCalled();
+  });
+
   it('keeps a pick on the mover’s own key, and any pick that is not a key', async () => {
     db.findUnique.mockResolvedValue({ ownerId: 'khalid' });
     expect(await dropOthersVisionKey({ vision: PICK }, 'khalid')).toBeNull();

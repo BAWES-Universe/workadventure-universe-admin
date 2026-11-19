@@ -4,7 +4,7 @@ import { GET as oauthStart } from '@/app/api/bots/[id]/mcp-servers/[serverId]/oa
 import { ensureFreshOAuthConfig } from '@/lib/mcp/oauth-refresh';
 import { testMcpConnection } from '@/lib/mcp/test-connection';
 import { managesConnection } from '@/lib/app-team-access';
-import { newSignInNonce } from '@/lib/app-connections';
+import { beginConnectionSignIn } from '@/lib/app-connections';
 import { prisma } from '@/lib/db';
 import * as authSession from '@/lib/auth-session';
 
@@ -31,6 +31,8 @@ jest.mock('@/lib/app-connections', () => ({
   WITH_CONNECTION: { connection: true },
   effectiveServer: (row: Record<string, unknown>) => ({ ...row, ...(row.connection as object) }),
   newSignInNonce: jest.fn().mockResolvedValue('nonce-1'),
+  beginConnectionSignIn: jest.fn().mockResolvedValue({ nonce: 'nonce-1', generation: 1 }),
+  newSignInGeneration: jest.fn().mockResolvedValue(1),
 }));
 jest.mock('@/lib/github/check', () => ({ testGitHub: jest.fn() }));
 jest.mock('@/lib/app-adapter/ready-made', () => ({ testReadyMade: jest.fn() }));
@@ -99,7 +101,7 @@ describe('starting a sign-in with the admin token', () => {
     getSessionUser.mockResolvedValue(null);
     const response = await startSignIn({ authorization: 'Bearer admin-secret' });
     expect(response.status).toBe(403);
-    expect(newSignInNonce).not.toHaveBeenCalled();
+    expect(beginConnectionSignIn).not.toHaveBeenCalled();
   });
 
   it('still works for a bot’s own app (no connection, nothing to replace)', async () => {
@@ -116,6 +118,6 @@ describe('starting a sign-in with the admin token', () => {
     });
     const response = await startSignIn({ authorization: 'Bearer admin-secret' });
     expect(response.status).toBe(200);
-    expect(newSignInNonce).not.toHaveBeenCalled();
+    expect(beginConnectionSignIn).not.toHaveBeenCalled();
   });
 });
