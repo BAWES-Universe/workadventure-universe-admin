@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { agentCannotRun, providerFor, fenceMachine, finishJob, settleTurnHold, underTurnHold, wakeIfStopped } from '@/lib/computer';
 import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
 import { jobTagOf } from '@/lib/computer-values';
+import { withoutTags } from '@/lib/computer-turn-tags';
 import { Agent37Error, TurnNotSent } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
 
@@ -305,7 +306,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     if (error instanceof Agent37Error && error.code === 'session_busy') return { ok: false, reason: 'busy', responseId: error.runningResponseId };
     return { ok: false, reason: 'failed' };
   }
-  return { ok: true, events: keeping(fresh.job, provider, events, { timer, controller: own, claim }) };
+  return { ok: true, events: withoutTags(keeping(fresh.job, provider, events, { timer, controller: own, claim })) };
 }
 
 /**
@@ -528,7 +529,7 @@ export async function reattachJobTurn(jobId: string, signal?: AbortSignal): Prom
   if (!live.job.responseId) return { ok: false, reason: 'no_turn' };
   try {
     const events = await live.provider.reattachTurn(live.job.ref, live.job.responseId, signal);
-    return { ok: true, events: keeping(live.job, live.provider, events) };
+    return { ok: true, events: withoutTags(keeping(live.job, live.provider, events)) };
   } catch (error) {
     if (error instanceof Agent37Error && error.status === 404) {
       await prisma.computerJob.updateMany({ where: { id: jobId, agentResponseId: live.job.responseId }, data: { agentResponseId: null } });

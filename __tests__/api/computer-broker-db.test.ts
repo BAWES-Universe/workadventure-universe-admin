@@ -386,6 +386,37 @@ run('the broker, the fence and keep-awake, in a real database', () => {
   });
 
   describe('a turn', () => {
+    it('never passes the job’s tag on from the agent’s own words, however its text is split, in a turn or in a reconnect to it', async () => {
+      const { jobId } = await running();
+      const tagged = `[universe-job:${jobId}] (a tag for the system, there is no need to repeat it)`;
+      const said = `Done ${tagged}`;
+      fake.turns = [[{ type: 'created', id: 'resp-1', sessionId: 'sess-1' }, { type: 'text', text: said.slice(0, 20) }, { type: 'text', text: said.slice(20) }, { type: 'completed', outputText: said, usage: null }]];
+      const started = await startTurn(jobId, 'Say it');
+      if (!started.ok) throw new Error('no turn');
+      const seen = await drain(started.events);
+      expect(JSON.stringify(seen)).not.toContain('universe-job');
+      expect(seen.filter((event) => event.type === 'text').map((event) => (event as { text: string }).text).join('')).toBe('Done ');
+      expect(seen.at(-1)).toMatchObject({ type: 'completed', outputText: 'Done ' });
+      // Orbit keeps none of the agent's words: nothing it stored holds the tag
+      const row = await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
+      expect(JSON.stringify(row)).not.toContain('universe-job');
+      // a reconnect passes on what the agent says through the same cleaning
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-9', agentSessionId: 'sess-1' } });
+      const reattach = jest.spyOn(fake, 'reattachTurn').mockImplementation((async () =>
+        (async function* (): AsyncGenerator<TurnEvent> {
+          yield { type: 'created', id: 'resp-9', sessionId: 'sess-1' };
+          yield { type: 'text', text: `again ${tagged}` };
+          yield { type: 'completed', outputText: `again ${tagged}`, usage: null };
+        })()) as never);
+      try {
+        const again = await reattachJobTurn(jobId);
+        if (!again.ok) throw new Error('no reconnect');
+        expect(JSON.stringify(await drain(again.events))).not.toContain('universe-job');
+      } finally {
+        reattach.mockRestore();
+      }
+    });
+
     it('is sent to the job’s machine, its ids are kept while it runs, and cleared when it ends', async () => {
       const { jobId } = await running();
       fake.turns = [[{ type: 'created', id: 'resp-1', sessionId: 'sess-1' }, { type: 'text', text: 'Hello' }, { type: 'completed', outputText: 'Hello', usage: null }]];

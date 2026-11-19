@@ -70,4 +70,5 @@ export function roomFor(minutes: number, microsPerMinute: number | null): number
  * and a call with no tag, or one for a job the machine holds no key of, goes on the key last written.
  */
 export const JOB_TAG_PREFIX = '[universe-job:';
-export const jobTagOf = (jobId: string): string => `${JOB_TAG_PREFIX}${jobId}] (a tag for the system, there is no need to repeat it)`;
+export const JOB_TAG_NOTE = ' (a tag for the system, there is no need to repeat it)';
+export const jobTagOf = (jobId: string): string => `${JOB_TAG_PREFIX}${jobId}]${JOB_TAG_NOTE}`;
