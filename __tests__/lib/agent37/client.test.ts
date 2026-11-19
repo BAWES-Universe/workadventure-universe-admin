@@ -123,7 +123,10 @@ describe('the Agent37 client', () => {
     });
 
     it('says the machine was not reached, never idle, when the answer about the session is not JSON', async () => {
-      const { api } = client([new Response('<html>bad gateway page</html>', { status: 200 }), new Response('{"active_response_id": "resp', { status: 200 })]);
+      const { api } = client([new Response('<html>bad gateway page</html>', { status: 200 }), new Response('{"active_response_id": "resp', { status: 200 }), new Response(' \n', { status: 200 }), new Response('', { status: 200 })]);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+      // Whitespace only, and nothing at all, are no answer either: never "idle"
       await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
       await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
     });

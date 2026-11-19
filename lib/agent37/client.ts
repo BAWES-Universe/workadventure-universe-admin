@@ -163,12 +163,13 @@ export class Agent37Client {
     // An answer whose body could not be read says nothing: it is not read as an empty one (a check would take it for "idle")
     if (unreadable && response.ok) throw new Agent37Unreached('body');
     let json: unknown = null;
-    let malformed = false;
+    // Text that does not parse is malformed, whatever it holds (a page, a cut-off answer, only whitespace); no text at all is no answer either
+    let malformed = text.trim() === '';
     try {
-      json = text ? JSON.parse(text) : null;
+      json = text.trim() ? JSON.parse(text) : null;
     } catch {
       json = null;
-      malformed = text.trim() !== '';
+      malformed = true;
     }
     if (!response.ok) {
       const { code, message } = describe(json);
