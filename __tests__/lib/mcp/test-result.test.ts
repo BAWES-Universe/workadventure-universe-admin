@@ -165,6 +165,12 @@ describe('summarizeTestResult', () => {
     expect(summary.detail).toBe('tested 53 days ago');
   });
 
+  it('says "at least" when the list of what the app can do was not read to its end', () => {
+    const cut: McpTestResult = { success: true, toolCount: 20, toolNames: ['a'], incomplete: true };
+    expect(summarizeTestResult(cut, { testedAt: '2026-09-22T11:00:00Z', now }).label).toBe('Connected — it can do at least 20 things');
+    expect(summarizeTestResult({ ...cut, incomplete: false }, { now }).label).toBe('Connected — it can do 20 things');
+  });
+
   it('renders a legacy failure without the new fields', () => {
     const legacy: McpTestResult = {
       success: false,
