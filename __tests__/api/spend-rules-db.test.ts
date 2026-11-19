@@ -761,6 +761,23 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(second?.lines).toEqual([]);
     });
 
+    it('a Brick\'s own thinking for a task is the owner\'s usage: the owner\'s receipt lists it, a receipt of someone else who asked does not (it would add a line they did not pay and name a key that is not theirs)', async () => {
+      const sara = await person('sara');
+      const omar = await person('omar');
+      // Omar, who does not own the Brick, asked it for a task; the Brick's model calls for the run are the owner's (the ai-usage report counts a task's calls under the owner)
+      await openReceipt({ botId: sara.brickId, personId: omar.id, taskKey: 'omar-task', runId: 'run-own', title: 'Omar asked', category: 'apps' }, NOW);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'sara-task', runId: 'run-own', title: 'Sara asked', category: 'apps' }, new Date(NOW.getTime() + 1000));
+      await prisma.meterEvent.create({
+        data: { eventId: `owner-think-${tag}`, kind: 'model_call', pool: 'chat', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'person', payerPersonId: sara.id, route: 'own-key', quantity: BigInt(1), unit: 'call', costMicros: BigInt(1000), basis: 'measured', detail: { runId: 'run-own', channel: 'task' } },
+      });
+      await closeReceipt({ botId: sara.brickId, taskKey: 'omar-task', personId: omar.id, state: 'done' }, NOW);
+      await closeReceipt({ botId: sara.brickId, taskKey: 'sara-task', personId: sara.id, state: 'done' }, new Date(NOW.getTime() + 1000));
+      const [asked] = await activityFor(omar.id);
+      expect(asked).toMatchObject({ title: 'Omar asked', lines: [] });
+      const [owned] = await activityFor(sara.id);
+      expect(owned.lines).toEqual([expect.objectContaining({ note: 'Your own key' })]);
+    });
+
     it('a job a rule refused before it ever ran is not an Activity line, and one that ran and was stopped by a rule is', async () => {
       const sara = await person('sara');
       await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Never ran', status: 'stopped', endedBy: 'rule', endedAt: NOW } });

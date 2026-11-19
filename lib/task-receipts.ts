@@ -246,6 +246,8 @@ async function eventsFor(headers: readonly Header[], personId: string): Promise<
   const keys = headers.map((header) => header.taskKey);
   const bots = [...new Set(headers.map((header) => header.botId))];
   const runs = [...new Set(headers.map((header) => header.runId).filter((run): run is string => !!run))];
+  // Only the reader's own events: a Brick's own thinking for a task is booked to its owner (the ai-usage report counts a task's calls under them), so the receipt of
+  // someone else who asked does not list it: it is not a line they paid, and its note ("Your own key") would name a key that is not theirs
   const [rows, opened] = await Promise.all([
     prisma.$queryRaw<Array<{ kind: string; route: string | null; quantity: bigint; costMicros: bigint | null; detail: unknown; jobId: string | null; botId: string | null }>>(Prisma.sql`
     SELECT "kind", "route", "quantity", "cost_micros" AS "costMicros", "detail", "job_id" AS "jobId", "bot_id" AS "botId"
@@ -254,9 +256,9 @@ async function eventsFor(headers: readonly Header[], personId: string): Promise<
       AND ("job_id" = ANY(${keys}::text[])
        OR ("job_id" IS NULL AND "bot_id" = ANY(${bots}::text[]) AND "detail"->>'taskKey' = ANY(${keys}::text[]))
        OR ("job_id" IS NULL AND "bot_id" = ANY(${bots}::text[]) AND ${runs.length > 0 ? Prisma.sql`"detail"->>'runId' = ANY(${runs}::text[])` : Prisma.sql`FALSE`}))`),
-    runs.length === 0 ? Promise.resolve([]) : prisma.taskReceipt.findMany({ where: { runId: { in: runs } }, select: { id: true, botId: true, runId: true }, orderBy: [{ startedAt: 'asc' }, { id: 'asc' }] }),
+    runs.length === 0 ? Promise.resolve([]) : prisma.taskReceipt.findMany({ where: { runId: { in: runs }, personId }, select: { id: true, botId: true, runId: true }, orderBy: [{ startedAt: 'asc' }, { id: 'asc' }] }),
   ]);
-  // The receipt that owns each run's own events: the first one opened for it
+  // The receipt that owns each run's own events: the first one opened for it among this person's own (the events are only theirs, so a receipt of someone else on the same run never takes them)
   const ownerOfRun = new Map<string, string>();
   for (const row of opened) {
     const key = `${row.botId}:${row.runId}`;
@@ -321,7 +323,7 @@ async function receiptsNewest(personId: string, limit: number): Promise<ReceiptR
           -- A charged use made under the task's run that names no task of its own is shown on a receipt of that run (see eventsFor): never hide it. Uncharged lines (the Brick's own thinking) are not money taken.
           OR (m."job_id" IS NULL AND r."run_id" IS NOT NULL AND m."detail"->>'runId' = r."run_id" AND m."detail"->>'taskKey' IS NULL AND ((m."kind" = 'app_use' AND m."route" = 'instant') OR m."kind" = 'computer_time')
             -- ...only on the receipt that owns the run's own events: the first one opened for it, as eventsFor says
-            AND NOT EXISTS (SELECT 1 FROM task_receipts o WHERE o."bot_id" = r."bot_id" AND o."run_id" = r."run_id" AND (o."started_at" < r."started_at" OR (o."started_at" = r."started_at" AND o."id" < r."id"))))
+            AND NOT EXISTS (SELECT 1 FROM task_receipts o WHERE o."bot_id" = r."bot_id" AND o."run_id" = r."run_id" AND o."person_id" = r."person_id" AND (o."started_at" < r."started_at" OR (o."started_at" = r."started_at" AND o."id" < r."id"))))
         ))
       )
     ORDER BY COALESCE(r."ended_at", r."started_at") DESC, r."id" DESC
