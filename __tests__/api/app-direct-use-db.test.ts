@@ -515,6 +515,8 @@ run('using a key app, in a real database', () => {
     expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
     // Or a new key does, whatever else happened
     mockSend.current = () => ({ status: 403 });
+    // (The good call was a minute ago or more: a refusal right behind a recorded good call is not read as a loss)
+    await prisma.appConnection.update({ where: { id }, data: { lastWorkedAt: new Date(Date.now() - 2 * 60_000) } });
     await call(saraBrick, app.serverId, app.definitionHash);
     expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).not.toBeNull();
     mockSend.current = () => ({ status: 404 });

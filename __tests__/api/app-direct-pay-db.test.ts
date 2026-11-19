@@ -6,6 +6,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
+import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 
 const mockUser: { current: { id: string; isGuest?: boolean } | null } = { current: null };
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockUser.current) }));
@@ -377,6 +378,8 @@ run('payments for pages, in a real database', () => {
       const { orderId } = await checkout(first);
       // The service refuses this one lookup (for example a charge it no longer shows this key)
       mockSend.current = () => ({ status: 403 });
+      // The checkout's good call was a minute ago or more (a refusal right behind a recorded good call is not read as a loss)
+      await prisma.appConnection.update({ where: { id }, data: { lastWorkedAt: new Date(Date.now() - 2 * 60_000) } });
       await settle(orderId);
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).not.toBeNull();
       // Another page still gets its checkout, which clears the mark
@@ -718,6 +721,7 @@ run('payments for pages, in a real database', () => {
       gateway();
       const { orderId } = await checkout(artifactId);
       mockSend.current = () => ({ status: 401, body: { errors: [{ code: '1103' }] } });
+      await prisma.appConnection.update({ where: { id: connectionId }, data: { lastWorkedAt: new Date(Date.now() - 2 * 60_000) } });
       expect(await settle(orderId)).toMatchObject({ status: 'checking' });
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connectionId } })).signInLostAt).not.toBeNull();
       expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('pending');
@@ -779,6 +783,32 @@ run('payments for pages, in a real database', () => {
       expect(finished).toBe(false);
       release();
       await other;
+      expect((await mine).status).toBe('ok');
+    });
+
+    it('takes its turn on the key calls\' count with every other use of a key, so a call and a checkout cannot both take the last place', async () => {
+      const { artifactId } = await pending();
+      gateway();
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let locked: () => void = () => undefined;
+      const taken = new Promise<void>((resolve) => (locked = resolve));
+      // A key call (lib/app-direct/use.ts) is in the middle of counting and writing its row
+      const call = prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('key-calls:everyone', 0))`;
+          locked();
+          await held;
+        },
+        { timeout: 20_000 },
+      );
+      await taken;
+      let finished = false;
+      const mine = startCheckout({ artifactId, visitor: 'one' }).then((outcome) => ((finished = true), outcome));
+      await waitUntilBlockedOnLock();
+      expect(finished).toBe(false);
+      release();
+      await call;
       expect((await mine).status).toBe('ok');
     });
   });

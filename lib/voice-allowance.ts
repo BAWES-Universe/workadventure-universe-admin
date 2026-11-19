@@ -54,7 +54,10 @@ function places(served: Served, guest: boolean, spoken: number, used: number, ex
   const window = guest ? served.window.guest : served.window.signedIn;
   if (!guest && extra?.noLimit) return { byVoice: Infinity, byText: Infinity };
   const times = guest ? 1 : (extra?.multiplier ?? 1);
-  return { byVoice: window.voiceReplies * times - spoken, byText: window.replies * times - used - window.textReserve * times };
+  // The replies kept for text, and the voice replies, are worked out from the window the person really has, after its multiple, the way the
+  // text limit does (lib/reply-limits.ts): scaling the usual window's own figures would leave a one-reply window with a 2x grant no place at all
+  const total = window.replies * times;
+  return { byVoice: voiceReplies(total, served.limits, guest) - spoken, byText: total - used - textReserve(total, served.limits.textReserveShare) };
 }
 
 /**

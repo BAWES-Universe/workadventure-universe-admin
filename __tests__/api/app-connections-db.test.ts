@@ -34,7 +34,7 @@ import {
   WITH_CONNECTION,
 } from '@/lib/app-connections';
 import { ensureFreshOAuthConfig, LEASE_MS } from '@/lib/mcp/oauth-refresh';
-import { reportKeyWorked, reportToolSignIn } from '@/lib/tool-signin';
+import { reportKeyWorked, reportToolSignIn, syncToolSignInNotices } from '@/lib/tool-signin';
 import { GET as listApps, POST as addApp } from '@/app/api/me/apps/route';
 import { DELETE as disconnectApp } from '@/app/api/me/apps/[connectionId]/route';
 import { POST as letUse } from '@/app/api/me/apps/[connectionId]/bricks/route';
@@ -602,7 +602,13 @@ run('apps a person connects once, in a real database', () => {
     // A call refused before the good one, reported after it, is old news
     expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: refusedAt })).toEqual({ changed: false });
     expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).toBeNull();
-    // A refusal seen after it is a loss
+    // A good call within the minute is not written, so a refusal that started inside that minute may be older than one that was not
+    // written down: it is old news too, never a loss for a key that may have worked since (refusal at W+5s, good call at W+10s)
+    const refusedInside = new Date(worked.getTime() + 5_000);
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: refusedInside })).toEqual({ changed: false });
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).toBeNull();
+    // A refusal that started more than a minute after the good call that was written down is a loss
+    await prisma.appConnection.update({ where: { id: connection.id }, data: { lastWorkedAt: new Date(Date.now() - 2 * 60_000) } });
     expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: new Date() })).toEqual({ changed: true });
     // A minute later the next good call is written
     await reportKeyWorked(connection.id, 1, new Date(Date.now() + 61_000));
@@ -622,6 +628,25 @@ run('apps a person connects once, in a real database', () => {
     await prisma.appConnection.update({ where: { id: connection.id }, data: { signInLostAt: null, signInLostStatus: null, lastWorkedAt: null } });
     await reportKeyWorked(connection.id, 1, refusedSentAt);
     expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: goodSentAt })).toEqual({ changed: false });
+  });
+
+  it('makes no card for an outage that is no longer the current one, and a card that is already there never undoes the rest of the sync', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    const at = new Date(Date.now() - 1_000);
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at })).toEqual({ changed: true });
+    await prisma.userNotice.deleteMany({ where: { userId: sara, kind: 'tool-signin' } });
+    // A sync that was told of an earlier outage of the same tool (it was connected again and went down again since) makes no card for it
+    expect(await syncToolSignInNotices(saraBrick, { serverId: a.id, at: new Date(at.getTime() - 3_600_000) })).toBe(true);
+    expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'tool-signin' } })).toBe(0);
+    // A card of this very outage that the person dismissed is there already: the sync finds it, makes nothing, and still does its other work
+    // (here an open card of somebody who can no longer be told is taken down)
+    await prisma.userNotice.create({ data: { userId: sara, kind: 'tool-signin', dedupeKey: `tool-signin:${saraBrick}:${at.toISOString()}`, title: 'old', body: 'old', badge: 'x', dismissedAt: new Date(), data: {} } });
+    const strayKey = `tool-signin:${saraBrick}:${new Date(at.getTime() - 5_000).toISOString()}`;
+    await prisma.userNotice.create({ data: { userId: omar, kind: 'tool-signin', dedupeKey: strayKey, title: 'stray', body: 'stray', badge: 'x', data: {} } });
+    expect(await syncToolSignInNotices(saraBrick, { serverId: a.id, at })).toBe(true);
+    expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'tool-signin', dismissedAt: null } })).toBe(0);
+    expect((await prisma.userNotice.findFirstOrThrow({ where: { userId: omar, dedupeKey: strayKey } })).dismissedAt).not.toBeNull();
   });
 
   it('finishes the cards of a loss on the next report when the lookup of the Bricks failed after the loss was saved, without making a card the person dismissed', async () => {
