@@ -270,7 +270,8 @@ describe('POST /api/bricks: New Brick (game #1996)', () => {
       expect(checkAiProviderRef).toHaveBeenCalledWith('key-1', 'universe-ai', home);
       expect(checkBotModel).toHaveBeenCalledWith(undefined, { ...home, ref: 'key-1', currentRef: 'universe-ai', currentModel: null });
       expect(db.bot.update).toHaveBeenLastCalledWith({ where: { id: BRICK_ID }, data: { aiProviderRef: 'key-1', aiModel: null, updatedById: SARA.id } });
-      expect(dropOthersVisionKey).toHaveBeenCalledWith(brick.behaviorConfig, SARA.id);
+      // Inside the transaction, so on the transaction's own connection (never a second one while that is held)
+      expect(dropOthersVisionKey).toHaveBeenCalledWith(brick.behaviorConfig, SARA.id, expect.objectContaining({ $queryRaw: db.$queryRaw }));
       expect(clearBotRunsOnNotices).toHaveBeenCalledWith(BRICK_ID);
     });
 

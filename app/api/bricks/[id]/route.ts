@@ -109,7 +109,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       let behaviorConfig = change.behaviorConfig ? keepToolCallSetting(storedConfig, { ...storedConfig, ...change.behaviorConfig }) : undefined;
       // Moving it to another key moves its images off a key that is not its owner's
       if (nextRef !== brick.aiProviderRef) {
-        const withoutVision = await dropOthersVisionKey(behaviorConfig ?? storedConfig, owner.userId);
+        const withoutVision = await dropOthersVisionKey(behaviorConfig ?? storedConfig, owner.userId, tx);
         if (withoutVision) behaviorConfig = withoutVision;
       }
       await tx.bot.update({
