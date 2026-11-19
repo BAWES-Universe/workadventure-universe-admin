@@ -28,6 +28,7 @@ import { GET as usageGet } from '@/app/api/me/usage/route';
 import { POST as askPost } from '@/app/api/me/usage/ask-for-more/route';
 import { GET as costsGet } from '@/app/api/admin/meter-costs/route';
 import { GET as personGet, PATCH as personPatch, POST as personPost } from '@/app/api/admin/users/[id]/extra-usage/route';
+import { GET as statusGet } from '@/app/api/admin/users/[id]/extra-usage/status/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -692,6 +693,7 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await personGet(adminCall(`/api/admin/users/${sara.id}/extra-usage`), ctx)).status).toBe(403);
       expect((await personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, {}), ctx)).status).toBe(403);
       expect((await personPatch(body('PATCH', `/api/admin/users/${sara.id}/extra-usage`, {}), ctx)).status).toBe(403);
+      expect((await statusGet(adminCall(`/api/admin/users/${sara.id}/extra-usage/status?grantKey=k`), ctx)).status).toBe(403);
       session.mockResolvedValue(null);
       expect((await costsGet(adminCall('/api/admin/meter-costs'))).status).toBe(403);
     });
@@ -732,6 +734,26 @@ run('usage for people, and cost for us, in a real database', () => {
       // A gift cannot be marked billed through the route either
       const gift = await recordGrant({ grantKey: `g-${tag}-f`, personId: sara.id, settlement: 'gift', multiplier: 2, startsAt: real(-1), endsAt: real(5), givenById: sara.id });
       expect((await patch(sara.id, { grantKey: gift.grant.grantKey, action: 'billed' })).status).toBe(400);
+    });
+
+    it('say whether a give was saved under a key, without giving anything: saved only for that person, and a key nobody used is not saved', async () => {
+      asAdmin();
+      const sara = await person('sara');
+      const omar = await person('omar');
+      const real = (n: number) => new Date(Date.now() + n * 86_400_000);
+      const ask = (id: string, key?: string) => statusGet(adminCall(`/api/admin/users/${id}/extra-usage/status${key === undefined ? '' : `?grantKey=${encodeURIComponent(key)}`}`), { params: Promise.resolve({ id }) });
+      expect((await ask(sara.id)).status).toBe(400);
+      expect((await ask(sara.id, 'x'.repeat(256))).status).toBe(400);
+      const before = await prisma.meterGrant.count({});
+      const none = await ask(sara.id, `g-${tag}-s`);
+      expect(await none.json()).toEqual({ saved: false });
+      expect(await prisma.meterGrant.count({})).toBe(before);
+      const { grant } = await recordGrant({ grantKey: `g-${tag}-s`, personId: sara.id, settlement: 'gift', multiplier: 2, startsAt: real(-1), endsAt: real(5), givenById: sara.id });
+      const saved = await (await ask(sara.id, grant.grantKey)).json();
+      expect(saved).toEqual({ saved: true, startsAt: grant.startsAt.toISOString(), endsAt: grant.endsAt.toISOString() });
+      // The same key under another person's name says nothing about them
+      expect(await (await ask(omar.id, grant.grantKey)).json()).toEqual({ saved: false });
+      expect(await prisma.meterGrant.count({})).toBe(before + 1);
     });
 
     it('turn down dates that are not dates, run backwards, or ask for more than a year of figures', async () => {
