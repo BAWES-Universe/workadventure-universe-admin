@@ -322,6 +322,7 @@ run('the meter, in a real database', () => {
       const key = `person:${sara.id}`;
       // Spent and settled by the provider, spent and not settled yet, and a reservation that lapsed
       await recordMeterEvent(event({ personKey: key, personId: sara.id, costMicros: 1_000 }));
+      await prisma.meterEvent.updateMany({ data: { recordedAt: NOW } });
       await settleEventsThrough(NOW);
       await recordMeterEvent(event({ personKey: key, personId: sara.id, costMicros: 250, occurredAt: minutes(5) }));
       await reserveRoom({ key: `lapsed-${tag}`, personId: sara.id, amountMicros: 40 }, NOW);
@@ -484,9 +485,22 @@ run('the meter, in a real database', () => {
       await setUp();
       await recordMeterEvent(event({ personKey: `person:${sara.id}`, personId: sara.id, costMicros: 10, occurredAt: NOW }));
       await recordMeterEvent(event({ personKey: `person:${sara.id}`, personId: sara.id, costMicros: 20, occurredAt: minutes(30) }));
+      await prisma.meterEvent.updateMany({ where: { costMicros: 10 }, data: { recordedAt: NOW } });
+      await prisma.meterEvent.updateMany({ where: { costMicros: 20 }, data: { recordedAt: minutes(30) } });
       expect(await settleEventsThrough(minutes(10))).toBe(1);
       expect(await settleEventsThrough(minutes(10))).toBe(0);
       expect(await currentEnvelope(minutes(40))).toMatchObject({ committedMicros: 10, unsettledMicros: 20 });
+    });
+
+    it('settles by when an event was recorded, never by when it happened: one written after the provider’s pass is not covered by it', async () => {
+      const sara = await person('sara');
+      await setUp();
+      // It happened before the moment the provider settled through, but it was written after it
+      await recordMeterEvent(event({ personKey: `person:${sara.id}`, personId: sara.id, costMicros: 10, occurredAt: NOW }));
+      await prisma.meterEvent.updateMany({ data: { recordedAt: minutes(30) } });
+      expect(await settleEventsThrough(minutes(10))).toBe(0);
+      expect(await currentEnvelope(minutes(40))).toMatchObject({ committedMicros: 0, unsettledMicros: 10 });
+      expect(await settleEventsThrough(minutes(31))).toBe(1);
     });
   });
 });
