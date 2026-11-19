@@ -151,8 +151,13 @@ export async function openReceipt(input: OpenInput, now: Date = new Date()): Pro
   if (found.personId !== input.personId) throw new RangeError('taskKey belongs to another person');
   // Opening again is a sign the task is alive: a receipt still running (and on a lease) is renewed, never moved to another state
   if (created.count === 0 && found.state === 'running' && found.leaseUntil !== null) {
-    await prisma.taskReceipt.updateMany({ where: { id: found.id, state: 'running', leaseUntil: { lt: leaseFrom(now) } }, data: { leaseUntil: leaseFrom(now) } });
-    found = (await prisma.taskReceipt.findUnique({ where: { id: found.id } })) ?? found;
+    // Under the receipt's lock, like settling is: a renewal and a settlement of the same task never overlap
+    const task = { botId: input.botId, taskKey: input.taskKey };
+    found = await prisma.$transaction(async (tx) => {
+      await receiptLock(tx, task.botId, task.taskKey);
+      await tx.taskReceipt.updateMany({ where: { id: found!.id, state: 'running', leaseUntil: { lt: leaseFrom(now) } }, data: { leaseUntil: leaseFrom(now) } });
+      return (await tx.taskReceipt.findUnique({ where: { id: found!.id } })) ?? found!;
+    });
   }
   const id = activityIdOf(found.id);
   // The payer is the one stored on the receipt: a replay after ownership changed still names who paid then
@@ -286,11 +291,15 @@ export async function renewReceipt(input: Task & { generation?: number }, now: D
 
 /**
  * Orbit's own sign of life for a task: one of its runs is about to go out, so a running receipt's lease is extended whether or not the bot
- * server renews it. One statement, no lock; never throws a person-facing error.
+ * server renews it. Under the receipt's lock, so it never overlaps a settlement that read the old lease: either the extension commits first
+ * (and the settlement sees a live lease) or the settlement does (and the receipt is no longer running, so nothing is extended). Never throws a person-facing error.
  */
 export async function touchLeaseForRun(task: Task, now: Date = new Date()): Promise<void> {
   const next = leaseFrom(now);
-  await prisma.taskReceipt.updateMany({ where: { botId: task.botId, personId: task.personId, taskKey: task.taskKey, state: 'running', leaseUntil: { not: null, lt: next } }, data: { leaseUntil: next } });
+  await prisma.$transaction(async (tx) => {
+    await receiptLock(tx, task.botId, task.taskKey);
+    await tx.taskReceipt.updateMany({ where: { botId: task.botId, personId: task.personId, taskKey: task.taskKey, state: 'running', leaseUntil: { not: null, lt: next } }, data: { leaseUntil: next } });
+  });
 }
 
 /**
@@ -329,18 +338,21 @@ export async function settleReceipt(task: Task, now: Date = new Date(), unwatche
       }
       return reopenForOpenRun(tx, row);
     }
+    // A computer's job is its own record, whatever category the receipt was opened under
+    const job = await tx.computerJob.findFirst({ where: { id: task.taskKey, botId: task.botId, personId: task.personId }, select: { status: true } });
     if (view.actions.length > 0) {
-      // A running receipt on no lease (a computer's) is the job's: with the job over (or no job of that key after a lease's age) it is as good as lapsed
-      if (row.state === 'running' && !lapsed && !(row.leaseUntil === null && (await jobEnded(tx, row, task, now)))) return 'running';
       if (isTerminal(row.state)) return reconcileEnded(tx, row, view, now);
+      // A task whose computer job is still running is not over, whatever its Instant runs came to: it waits (running or checking) for the job, then ends from the runs
+      if (job && !isOver(job.status)) return row.state as ReceiptNow;
+      // A running receipt on no lease (a computer's) is the job's: with the job over (or no job of that key after a lease's age) it is as good as lapsed
+      if (row.state === 'running' && !lapsed && !(row.leaseUntil === null && jobEnded(row, job, now))) return 'running';
       return endReceipt(tx, row, view.outcome, view.actions, now);
     }
     // No Instant run that went out (none at all, or every one refused before it ran)
     if (isTerminal(row.state)) return row.state as ReceiptState;
-    // A computer's job is its own record, whatever category the receipt was opened under (one opened without a category for a job's id is the
-    // job's too): a receipt waits for it while it runs, and ends with it. A running one with no lease ends when its job is over, or, when no
-    // job of that key exists at all, once it is as old as a lease; a checking one, or one whose lease ran out, only after the bot server's own retries.
-    const job = await tx.computerJob.findFirst({ where: { id: task.taskKey, botId: task.botId, personId: task.personId }, select: { status: true } });
+    // A receipt waits for its job while it runs, and ends with it (one opened without a category for a job's id is the job's too). A running one
+    // with no lease ends when its job is over, or, when no job of that key exists at all, once it is as old as a lease; a checking one, or one
+    // whose lease ran out, only after the bot server's own retries.
     if (job && !isOver(job.status)) return row.state as ReceiptNow;
     if (job || row.category === 'computer') {
       const waited = row.state === 'running' ? job !== null || row.startedAt.getTime() + RECEIPT_LEASE_MS <= now.getTime() : unwatchedBefore !== null && row.updatedAt < unwatchedBefore;
@@ -354,10 +366,7 @@ export async function settleReceipt(task: Task, now: Date = new Date(), unwatche
 }
 
 /** A running receipt on no lease: its computer job is over, or no job of its key exists after a lease's age (it is the job's own record that says so). */
-async function jobEnded(tx: Tx, row: Row, task: Task, now: Date): Promise<boolean> {
-  const job = await tx.computerJob.findFirst({ where: { id: task.taskKey, botId: task.botId, personId: task.personId }, select: { status: true } });
-  return job ? isOver(job.status) : row.startedAt.getTime() + RECEIPT_LEASE_MS <= now.getTime();
-}
+const jobEnded = (row: Row, job: { status: string } | null, now: Date): boolean => (job ? isOver(job.status) : row.startedAt.getTime() + RECEIPT_LEASE_MS <= now.getTime());
 
 /** How long a receipt in checking with no Instant run waits before it is ended: well past the bot server's own retries (it gives up after 150 s). Internal, not a person-facing limit. */
 export const UNWATCHED_CHECKING_WAIT_MS = 15 * 60 * 1000;
@@ -367,7 +376,7 @@ export const UNWATCHED_CHECKING_WAIT_MS = 15 * 60 * 1000;
  *  - running, with a lease that has run out; a computer's running receipt (no lease) once its job is over, or once it is a lease old with no job at all;
  *  - in checking: those with Instant runs once every run has ended, those with none after `UNWATCHED_CHECKING_WAIT_MS`
  *    (a computer's receipt only once its job is over);
- *  - ended, with a run of its task that has not ended (it turned up after the word).
+ *  - ended, with a run of its task that has not ended (it turned up after the word), or one that ended and the receipt has not recorded (the hook that records it did not finish).
  * Returns how many left `running` or `checking` in this pass.
  */
 export async function settleCheckingReceipts(limit: number, now: Date = new Date(), unwatchedWaitMs: number = UNWATCHED_CHECKING_WAIT_MS): Promise<number> {
@@ -387,9 +396,15 @@ export async function settleCheckingReceipts(limit: number, now: Date = new Date
         (r."updated_at" < ${unwatchedBefore}
           AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key")
           AND NOT EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key" AND j."status" NOT IN ('done', 'stopped', 'failed')))
-        OR (EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key") AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" IN (${open})))
+        OR (EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key") AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" IN (${open}))
+          AND NOT EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key" AND j."status" NOT IN ('done', 'stopped', 'failed')))
       ))
-      OR (r."state" IN ('done', 'refunded') AND EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" IN (${open})))
+      OR (r."state" IN ('done', 'refunded') AND (
+        EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" IN (${open}))
+        -- A run that went out and ended, and is not among the actions the receipt recorded: it landed after the word and the hook that records it did not finish (a retry of the same work, never a new action)
+        OR EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" <> 'refused' AND i."state" NOT IN (${open})
+          AND NOT (COALESCE(r."actions", '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('run', i."id"))))
+      ))
     )
     ORDER BY COALESCE(r."lease_until", r."updated_at") ASC
     LIMIT ${limit}`);

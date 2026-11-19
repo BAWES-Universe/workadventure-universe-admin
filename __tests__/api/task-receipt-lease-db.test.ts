@@ -19,7 +19,7 @@ import { setInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 import { resumeInstant, saveInstantLimits } from '@/lib/instant/state';
 import { forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
 import { instantRulesAndReceipts } from '@/lib/instant/rules-and-receipts';
-import { activityFor, closeReceipt, openReceipt, RECEIPT_LEASE_MS, renewReceipt, settleCheckingReceipts, settleReceipt, UNWATCHED_CHECKING_WAIT_MS } from '@/lib/task-receipts';
+import { activityFor, closeReceipt, openReceipt, RECEIPT_LEASE_MS, renewReceipt, settleCheckingReceipts, settleReceipt, touchLeaseForRun, UNWATCHED_CHECKING_WAIT_MS } from '@/lib/task-receipts';
 import { NOTHING_TAKEN, OUTCOME_WORDS, actionWords, outcomeNote } from '@/lib/task-receipt-words';
 import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
 
@@ -211,6 +211,102 @@ run('receipts that always settle (O1)', () => {
     });
   });
 
+  describe('a computer job’s Instant runs end, but the job is still running', () => {
+    const after = (taskKey: string, runId: string) => instantRulesAndReceipts.afterRun?.({ botId: brick, personId: sara, tool: 'EXA_SEARCH', arguments: {}, callId: 'c', taskKey }, { status: 'done', runId, ok: true, data: {}, chargedMicros: 1, pending: false });
+
+    it('a checking receipt of a job is not ended by its run ending (afterRun) while the job runs; it ends from the runs once the job is over', async () => {
+      const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Job in checking', status: 'running', startedAt: START } });
+      await open(job.id, { category: 'computer' });
+      const unsure = await makeRun(job.id, 'ambiguous');
+      expect(await closeReceipt({ botId: brick, taskKey: job.id, personId: sara, state: 'done' }, at(3))).toMatchObject({ state: 'checking' });
+      await prisma.instantRun.update({ where: { id: unsure.id }, data: { state: 'succeeded', customerState: 'charged', customerMicros: BigInt(9_000) } });
+      await after(job.id, unsure.id);
+      expect((await receipt(job.id)).state).toBe('checking');
+      expect(await settleReceipt({ botId: brick, personId: sara, taskKey: job.id }, at(900))).toBe('checking');
+      await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'done', endedAt: at(950) } });
+      expect(await settleCheckingReceipts(50, at(951))).toBe(1);
+      expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'done', actions: [{ run: unsure.id, outcome: 'worked' }] });
+    });
+
+    it('a lapsed receipt of a job opened with no category is not ended by a completed run while the job runs', async () => {
+      const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Job, no category', status: 'running', startedAt: START } });
+      await open(job.id, { category: null });
+      const ran = await makeRun(job.id, 'succeeded', { customerMicros: BigInt(9_000) });
+      await after(job.id, ran.id);
+      expect(await settleReceipt({ botId: brick, personId: sara, taskKey: job.id }, at(600))).toBe('running');
+      expect((await receipt(job.id)).state).toBe('running');
+      await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'done', endedAt: at(700) } });
+      expect(await settleReceipt({ botId: brick, personId: sara, taskKey: job.id }, at(701))).toBe('done');
+      expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'done' });
+    });
+
+    it('a receipt whose runs were all refused, while its job runs, is not picked again and again by the sweep: a receipt behind it is settled', async () => {
+      const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Job, refused runs', status: 'running', startedAt: START } });
+      await open(job.id, { category: 'computer' });
+      await makeRun(job.id, 'refused', { reason: 'rule' });
+      await closeReceipt({ botId: brick, taskKey: job.id, personId: sara, state: 'checking' }, at(1));
+      await open('behind-1');
+      const behind = await makeRun('behind-1', 'ambiguous');
+      await closeReceipt({ botId: brick, taskKey: 'behind-1', personId: sara, state: 'done' }, at(1));
+      await prisma.instantRun.update({ where: { id: behind.id }, data: { state: 'succeeded', customerState: 'charged', customerMicros: BigInt(9_000) } });
+      // Only one receipt fits in the pass: it must be the one that can be settled
+      expect(await settleCheckingReceipts(1, at(30))).toBe(1);
+      expect((await receipt('behind-1')).state).toBe('done');
+      expect((await receipt(job.id)).state).toBe('checking');
+    });
+  });
+
+  describe('a run that landed after the word, whose recording did not finish', () => {
+    it('the sweep puts the ended receipt right from the run records, once, and never picks it again', async () => {
+      await open('late-1');
+      await closeReceipt({ botId: brick, taskKey: 'late-1', personId: sara, state: 'refunded' }, at(1));
+      expect(await receipt('late-1')).toMatchObject({ state: 'refunded', outcome: 'refunded' });
+      // The run succeeded and was charged, but the hook that tells the receipt never ran (it failed and was caught)
+      const ran = await makeRun('late-1', 'succeeded', { customerMicros: BigInt(9_000), toolkit: 'gmail' });
+      expect(await settleCheckingReceipts(50, at(2))).toBe(1);
+      expect(await receipt('late-1')).toMatchObject({ state: 'done', outcome: 'done', actions: [{ run: ran.id, label: 'gmail', outcome: 'worked' }] });
+      // It is not selected again: with one place in the pass, a receipt that does need settling is the one that is
+      await open('late-2');
+      const unsure = await makeRun('late-2', 'ambiguous');
+      await closeReceipt({ botId: brick, taskKey: 'late-2', personId: sara, state: 'done' }, at(1));
+      await prisma.instantRun.update({ where: { id: unsure.id }, data: { state: 'succeeded', customerState: 'charged', customerMicros: BigInt(9_000) } });
+      expect(await settleCheckingReceipts(1, at(3))).toBe(1);
+      expect((await receipt('late-2')).state).toBe('done');
+    });
+
+    it('a refused run, or a run already recorded, never makes an ended receipt be picked', async () => {
+      await open('late-3');
+      await makeRun('late-3', 'refused', { reason: 'rule' });
+      await closeReceipt({ botId: brick, taskKey: 'late-3', personId: sara, state: 'done', chargedMicros: 4_000 }, at(1));
+      expect(await settleCheckingReceipts(50, at(2))).toBe(0);
+      expect(await receipt('late-3')).toMatchObject({ state: 'done', chargedMicros: BigInt(4_000) });
+    });
+  });
+
+  describe('a lease extension and a settlement of the same task never overlap', () => {
+    it('a run about to go out, at the same moment the lease is read as run out: the receipt ends up whole either way (running with a live lease, or ended with none)', async () => {
+      const keys = Array.from({ length: 8 }, (_, i) => `race-${i}`);
+      // Real clock: each lease ran out a minute ago
+      for (const key of keys) await open(key, {}, new Date(Date.now() - 11 * MIN));
+      const settleAt = new Date();
+      await Promise.all(keys.flatMap((key) => [touchLeaseForRun({ botId: brick, personId: sara, taskKey: key }, new Date()), settleReceipt({ botId: brick, personId: sara, taskKey: key }, settleAt)]));
+      for (const key of keys) {
+        const row = await receipt(key);
+        if (row.state === 'running') expect(row.leaseUntil && row.leaseUntil.getTime()).toBeGreaterThan(Date.now());
+        else expect(row).toMatchObject({ state: 'refunded', leaseUntil: null });
+      }
+    });
+
+    it('a repeat of the open, at the same moment, is no different', async () => {
+      await open('race-open', {}, new Date(Date.now() - 11 * MIN));
+      const settleAt = new Date();
+      await Promise.all([open('race-open', {}, new Date()), settleReceipt({ botId: brick, personId: sara, taskKey: 'race-open' }, settleAt)]);
+      const row = await receipt('race-open');
+      if (row.state === 'running') expect(row.leaseUntil && row.leaseUntil.getTime()).toBeGreaterThan(Date.now());
+      else expect(row).toMatchObject({ leaseUntil: null });
+    });
+  });
+
   describe('case 1: the bot process is lost mid-turn (no close ever arrives, and nobody writes again)', () => {
     it('a task that never ran anything ends as refunded, nothing taken, by the sweep once its lease has run out; and not before', async () => {
       const p = fakeProvider();
@@ -350,9 +446,13 @@ run('receipts that always settle (O1)', () => {
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
       await setLimits();
-      await open('slow-2');
+      // Opened on the real clock (the hook's own), eight minutes ago: its lease has two minutes left, so only the run's own extension can make it longer
+      await open('slow-2', {}, new Date(Date.now() - 8 * MIN));
+      const before = (await receipt('slow-2')).leaseUntil;
+      expect(before && before.getTime()).toBeLessThan(Date.now() + 3 * MIN);
       await runInstant({ botId: brick, personId: sara, tool: 'EXA_SEARCH', arguments: { query: 'x' }, callId: callId(), taskKey: 'slow-2' }, { adapter: p.adapter, funds: f.funds });
       const leased = (await receipt('slow-2')).leaseUntil;
+      expect(leased && before && leased.getTime()).toBeGreaterThan((before as Date).getTime() + 5 * MIN);
       expect(leased && leased.getTime()).toBeGreaterThan(Date.now() + RECEIPT_LEASE_MS - MIN);
       // Still running and not swept while its lease is on, even though its run has ended
       expect(await settleCheckingReceipts(50, new Date())).toBe(0);
