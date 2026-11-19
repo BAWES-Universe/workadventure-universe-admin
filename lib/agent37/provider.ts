@@ -220,6 +220,9 @@ export class Agent37ComputerProvider implements ComputerProvider {
       await this.client.startInstance(ref);
       await this.untilHealthy(ref, instance.url);
       up = await again(await this.up(ref));
+      // Still waiting for a restart after the one just made (the boot it was told by could not be read): Hermes has not read its config, so
+      // the computer is not ready. Asked again by the next job, which restarts it once more.
+      if (up.restart) throw new Error('The computer still needs a restart');
     }
     if (!up.ready) throw new Error(`The computer is not ready${up.reason ? ` (${up.reason})` : ''}`);
     // Last, once the computer is as it should be and before any job has used it: the note the take-over fence tells the agent's processes by
