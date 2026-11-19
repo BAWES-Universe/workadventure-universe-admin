@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
@@ -74,6 +75,20 @@ export async function POST(request: NextRequest) {
     const named = await resolveUsagePerson(talked, isGuest);
     const task = readUsageChannel(channel) === 'task';
 
+    // This report's own id, made here and never taken from the request: every write of this report carries it, so a write that meets the row an
+    // earlier write of the same report left (its commit went through and only the answer was lost) is told so by the database, exactly
+    const reportKey = randomUUID();
+    const writeOnce = async (row: Parameters<typeof prisma.botsAiUsage.create>[0]['data']) => {
+      try {
+        return await prisma.botsAiUsage.create({ data: row });
+      } catch (err) {
+        if ((err as { code?: string } | null)?.code !== 'P2002') throw err;
+        const written = await prisma.botsAiUsage.findUnique({ where: { reportKey } });
+        if (!written) throw err;
+        return written;
+      }
+    };
+
     // Fire-and-forget: Don't await, just start the operation
     // This ensures bot operation isn't blocked if tracking fails
     (async () => {
@@ -112,6 +127,7 @@ export async function POST(request: NextRequest) {
         greeting: greeting === true,
         // The run of a goal or task the call was made for (game #2002), kept only as the bot server's word for it
         brickRunId: typeof sentRunId === 'string' && sentRunId ? sentRunId.slice(0, 36) : null,
+        reportKey,
       };
       // A row that counts as a reply (not an error, not a greeting) is written under the lock every voice note reservation counts under
       // (lib/voice-note-turns.ts): a reservation reads the notes on their way and then the replies used inside one hold of it, so a row is never
@@ -125,25 +141,12 @@ export async function POST(request: NextRequest) {
         } catch (err) {
           // The lock was busy for too long or no connection came in time: the row is still written, without it, so a reply never drops out of the
           // counts and the books. Written without the lock, a reservation running at that moment may miss it for that one hold. If the failure
-          // came after the first write was committed and the look below finds nothing (or fails), the reply is in the counts twice and stays
-          // so: that is the safe side. Telling a repeat of one report from a second identical reply for certain needs an id of the report
-          // stored on the row (a new column, its migration, and the bot server sending one on every report), which is not here.
+          // came after the first write was committed (the answer to the commit was lost), this write meets the row's report key and answers with
+          // the row that is there: the reply is in the counts once, exactly, whether or not anything could be looked up.
           console.error('Could not write a reply row under the speech lock, writing it without:', err);
-          // The failure may have come after the row was committed (the answer to the commit was lost): a row with exactly this report's figures, at
-          // exactly its moment, is this report's own row and is not written twice. Where the answer is not known the row is written: a row
-          // too many is the safe side of a reply that drops out of the counts.
-          try {
-            const already = await prisma.botsAiUsage.findFirst({
-              where: { botId, providerId, talkedUserId: talked, timestamp: data.timestamp, tokensUsed, apiCalls, error: false, greeting: false, brickRunId: data.brickRunId },
-              orderBy: { id: 'asc' },
-            });
-            if (already) return already;
-          } catch (lookup) {
-            console.error('Could not look for a row this report already wrote:', lookup);
-          }
         }
       }
-      return prisma.botsAiUsage.create({ data });
+      return writeOnce(data);
     })()
       // The meter's books (game #1998) copy the call from the row that was just counted. They never hold up or fail the report
       .then(async (row) =>
