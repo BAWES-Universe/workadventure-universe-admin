@@ -112,10 +112,10 @@ export async function makeBrickFromChat(viaBrickId: string, input: z.infer<typeo
   if (!ownerId) return { ok: false, status: 404, error: 'Brick not found' };
   // One at a time per person and name (a lock held for the transaction): two asks for the same name that arrive
   // together would otherwise each find no such Brick and each make one.
-  const lookOrMake = () =>
+  const lookOrMake = (skipLook = false) =>
     prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-make:${ownerId}:${brick.name.toLowerCase()}`}))`;
-      if (!evenIfThere) {
+      if (!evenIfThere && !skipLook) {
         const there = await tx.bot.findFirst({
           where: { ownerId, roomId: null, deletedAt: null, name: { equals: brick.name, mode: 'insensitive' } },
           select: { id: true },
@@ -128,16 +128,13 @@ export async function makeBrickFromChat(viaBrickId: string, input: z.infer<typeo
   // A Brick found can be deleted before the list is read: then the look is made again under the same lock, so two asks that both lost it
   // find the one the first of them makes, and never make two
   for (let attempt = 0; ; attempt++) {
-    const outcome = await lookOrMake();
+    // Deleted again and again: only the last try makes the one they asked for without looking, and it is still made under the lock, so it
+    // is never made beside one that a simultaneous ask made (every try before looked under the lock)
+    const outcome = await lookOrMake(attempt >= 4);
     const bricks = await listBricks(ownerId);
     if (outcome.made) return { ok: true, made: true, brick: outcome.brick, bricks };
     const card = bricks.find((one) => one.id === outcome.id);
     if (card) return { ok: true, made: false, brick: card, bricks };
-    // Deleted again and again: they get the one they asked for
-    if (attempt >= 2) {
-      const made = await makeBrick(ownerId, brick);
-      return { ok: true, made: true, brick: made, bricks: await listBricks(ownerId) };
-    }
   }
 }
 

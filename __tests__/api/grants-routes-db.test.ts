@@ -508,7 +508,8 @@ run('the grants routes, on the real books', () => {
       const silenced = jest.spyOn(console, 'error').mockImplementation(() => undefined);
       try {
         const refused = await call<any>(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor, faisal] }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 25 * MILLION, interval: 'monthly' }, clashChoice: 'this' } });
-        expect(refused.status).toBeGreaterThanOrEqual(400);
+        // An unexpected error is a 500, not one of the refusals (400, 409) the screen can say something about
+        expect(refused.status).toBe(500);
       } finally {
         silenced.mockRestore();
         await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS grants_test_refuse_rule ON grant_rules');

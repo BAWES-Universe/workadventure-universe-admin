@@ -74,6 +74,7 @@ import { leaseVoiceNoteStage, recordVoiceNote, reserveVoiceNote, sweepStaleReser
 import { checkVoiceAllowance, releaseVoiceReply } from '@/lib/voice-allowance';
 import { speechReserved } from '@/lib/speech-reserved';
 import { addVoiceNoteCleanup, claimVoiceNoteCleanups, settleVoiceNoteCleanup } from '@/lib/voice-note-cleanups';
+import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -832,7 +833,8 @@ run('voice notes for every bot, in a real database', () => {
       });
       await lockTaken;
       const leasing = leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS });
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      // The lease has reached the database and is waiting on the lock the other transaction holds
+      await waitUntilBlockedOnLock();
       await prisma.voiceProvider.update({ where: { id: providers[0] }, data: { enabled: false } });
       try {
         release();

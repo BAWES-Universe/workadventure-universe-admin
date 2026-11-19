@@ -362,7 +362,7 @@ A1=$!
 printf 'import time\\ntime.sleep(304)\\n' > ${dir}/agent/chromium.py
 python3 ${dir}/agent/chromium.py /usr/local/bin/universe-proxy &
 A2=$!
-cp /bin/sh ${dir}/bin/x11vnc
+cp /bin/sh ${dir}/bin/x11vnc && chown 65534:65534 ${dir}/bin/x11vnc
 ${dir}/bin/x11vnc -c 'sleep 305; true' -display :99 -rfbport 5901 &
 A3=$!
 # the same kind of thing, started after the note: the agent's
@@ -403,10 +403,10 @@ fi
 sh -c 'sleep 302' &
 # the desktop's own program names, started by the agent: a screen of its own on another display, a window manager that runs a command,
 # and what a window manager the agent made starts
-cp /bin/sh ${dir}/bin/Xvfb
+cp /bin/sh ${dir}/bin/Xvfb && chown 65534:65534 ${dir}/bin/Xvfb
 ${dir}/bin/Xvfb -c 'sleep 308; true' :100 &
 X1=$!
-cp /bin/sh ${dir}/bin/openbox
+cp /bin/sh ${dir}/bin/openbox && chown 65534:65534 ${dir}/bin/openbox
 ${dir}/bin/openbox -c 'sleep 309; true' --startup 'sleep 1' &
 X2=$!
 ${dir}/bin/openbox -c 'sleep 310 & wait; true' &

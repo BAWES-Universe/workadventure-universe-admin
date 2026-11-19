@@ -46,6 +46,16 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
   // usage once. It is kept until the server has answered (saved or refused), and a different request gets a new key.
   const pendingKey = useRef<{ key: string; sig: string; request: Record<string, unknown> } | null>(null);
   const [saving, setSaving] = useState(false);
+  // Everything one tap does (the lookup, the give, the reload, closing) holds the sheet, so a second tap during a slow reload never makes a new key
+  const holds = useRef(0);
+  const hold = () => {
+    holds.current += 1;
+    setSaving(true);
+  };
+  const release = () => {
+    holds.current = Math.max(0, holds.current - 1);
+    if (holds.current === 0) setSaving(false);
+  };
 
   const read = useCallback(async (): Promise<PersonUsage> => {
     const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -91,7 +101,7 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
 
   /** Whether extra usage was saved under this key, asked without giving anything: 'unsure' when it could not be asked. */
   async function savedUnder(grantKey: string): Promise<'saved' | 'not_saved' | 'unsure'> {
-    setSaving(true);
+    hold();
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/admin/users/${encodeURIComponent(userId)}/extra-usage/status?grantKey=${encodeURIComponent(grantKey)}`);
@@ -105,13 +115,13 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
       addToast({ description: 'Could not check the last try. Check your connection and try again.', variant: 'error' });
       return 'unsure';
     } finally {
-      setSaving(false);
+      release();
     }
   }
 
   /** `done`: saved. `refused`: the server said no, so nothing was given. `unsure`: no answer came back, so it may have been saved. */
   async function send(method: 'POST' | 'PATCH', body: Record<string, unknown>): Promise<'done' | 'refused' | 'unsure'> {
-    setSaving(true);
+    hold();
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/admin/users/${encodeURIComponent(userId)}/extra-usage`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -137,7 +147,18 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
       addToast({ description: 'That didn’t save. Check your connection and try again.', variant: 'error' });
       return 'unsure';
     } finally {
-      setSaving(false);
+      release();
+    }
+  }
+
+  /** One tap, start to end: a tap that comes while an earlier one is still working is ignored. */
+  async function guarded(run: () => Promise<void>) {
+    if (holds.current > 0) return;
+    hold();
+    try {
+      await run();
+    } finally {
+      release();
     }
   }
 
@@ -274,7 +295,8 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
               className="h-11 px-5"
               disabled={!endsOn || saving}
               data-testid="extra-usage-confirm"
-              onClick={async () => {
+              onClick={() =>
+                guarded(async () => {
                 if (changing && extra) {
                   // Only what the admin changed is sent, so another admin's change is not undone and an end date nobody touched does not move
                   const change: Record<string, unknown> = { grantKey: extra.grantKey, action: 'change' };
@@ -309,7 +331,8 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
                 const outcome = await send('POST', pendingKey.current.request);
                 if (outcome !== 'unsure') pendingKey.current = null;
                 if (outcome === 'done') setOpen(false);
-              }}
+                })
+              }
             >
               {saving && <Loader2 size={16} className="animate-spin" aria-hidden="true" />}
               {changing ? 'Save' : 'Give extra usage'}
