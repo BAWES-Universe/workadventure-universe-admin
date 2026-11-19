@@ -6,6 +6,8 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/meter-usage-db.test.ts
  */
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Prisma } from '@prisma/client';
 import { NextRequest } from 'next/server';
 
@@ -964,6 +966,29 @@ run('usage for people, and cost for us, in a real database', () => {
       const rows = await prisma.meterAllowanceChange.findMany({ orderBy: { effectiveFrom: 'asc' } });
       // Both saved figures are kept in order, the waiting ones were replaced by the later save (a save now replaces what waited)
       expect(rows.map((row) => (row.allowanceMicros === null ? null : Number(row.allowanceMicros)))).toEqual([2_000, 1_000, null]);
+    });
+
+    it('the migration saves "no allowance" too, so an allowance set later never reaches back over the months that had none', async () => {
+      const sql = readFileSync(join(__dirname, '../../prisma/migrations/20261119120000_meter_allowance_history/migration.sql'), 'utf8');
+      const fill = sql.slice(sql.indexOf('INSERT INTO "meter_allowance_changes"'));
+      const history = async (saved: Prisma.InputJsonValue | null) => {
+        await prisma.meterAllowanceChange.deleteMany({});
+        await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
+        if (saved !== null) await prisma.appSetting.create({ data: { key: 'meter', value: saved } });
+        for (const statement of fill.split(';').map((part) => part.trim()).filter((part) => part.startsWith('INSERT'))) await prisma.$executeRawUnsafe(statement);
+        return (await prisma.meterAllowanceChange.findMany({ orderBy: { effectiveFrom: 'asc' } })).map((row) => (row.allowanceMicros === null ? null : Number(row.allowanceMicros)));
+      };
+      // No allowance saved at all, no settings row, and an allowance emptied again: each starts the history with a row that has no figure
+      expect(await history(null)).toEqual([null]);
+      expect(await history({ memberAllowanceMicros: null })).toEqual([null]);
+      expect(await history({ someOtherSetting: 5 })).toEqual([null]);
+      // A saved figure is kept as it was
+      expect(await history({ memberAllowanceMicros: 2_000 })).toEqual([2_000]);
+      // The report: an allowance of 2,000 set now is not read back over a month that had none
+      await history(null);
+      await saveMeterSettings({ memberAllowanceMicros: 2_000 }, 'admin');
+      const rows = await prisma.meterAllowanceChange.findMany({ orderBy: { effectiveFrom: 'asc' } });
+      expect(rows.map((row) => (row.allowanceMicros === null ? null : Number(row.allowanceMicros)))).toEqual([null, 2_000]);
     });
 
     it('reads the computer spending once for everyone, whatever the number of people and months their grants span', async () => {
