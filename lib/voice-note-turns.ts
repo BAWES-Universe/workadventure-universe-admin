@@ -193,7 +193,8 @@ const onBotDay = (turn: Pick<VoiceNoteTurn, 'botId' | 'payer'>) => Boolean(turn.
  * The replies still to come from notes already reserved, for one limit, counted under the reservations' lock (their usage rows do not exist yet):
  * - a note not yet heard counts for the time it is expected to take;
  * - a note heard counts for as long as its words are kept (the answer stage can still run from them), not for a time from when it was reserved;
- * - a note whose answer is being made counts only while its lease is live, and not when its reply was already reported: that reply is a usage row
+ * - a note whose answer is being made counts while its lease is live, however long ago it was reserved (a heard note takes its answer lease up to as
+ *   long as its words are kept after it was heard), and not when its reply was already reported: that reply is a usage row
  *   (counted by the caller), made after the answer stage began. Each such row is matched to one note, the earliest started first, so two notes being
  *   answered with one reply reported leave one on the way.
  */
@@ -210,7 +211,7 @@ async function notesOnTheWay(tx: Prisma.TransactionClient, slot: ReplySlot, now:
     where: { ...mine, OR: [{ state: { in: ['reserved', 'hearing'] }, createdAt: recently }, { state: 'heard', bufferUntil: { gt: now } }] },
   });
   const answering = await tx.voiceNoteTurn.findMany({
-    where: { ...mine, state: 'answering', leaseUntil: { gt: now }, createdAt: recently },
+    where: { ...mine, state: 'answering', leaseUntil: { gt: now } },
     select: { updatedAt: true },
     orderBy: { updatedAt: 'asc' },
   });

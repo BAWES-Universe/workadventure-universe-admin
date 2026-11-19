@@ -520,6 +520,19 @@ run('voice notes for every bot, in a real database', () => {
       expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
     });
 
+    it('counts a note whose answer is being made while its lease is live, however long ago it was reserved (a heard note takes its answer lease late)', async () => {
+      const capped = await newBot('Capped late');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 1 } });
+      const person = `late-${randomUUID()}`;
+      const first = turnOf(await reserveFor(capped, person, { seconds: 10 }));
+      // Reserved 40 minutes ago, heard soon after, its answer lease taken only now: a live lease with no reply reported yet is one reply on its way
+      await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { state: 'answering', generation: 2, createdAt: new Date(Date.now() - 40 * 60_000), leaseUntil: new Date(Date.now() + 2 * 60_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit' });
+      // The lease runs out with nothing reported: it holds no place
+      await prisma.voiceNoteTurn.update({ where: { id: first.id }, data: { leaseUntil: new Date(Date.now() - 1_000) } });
+      expect(await reserveFor(capped, person, { seconds: 10 })).toMatchObject({ ok: true });
+    });
+
     it('counts the places an account already holds when it appears after the limits were collected for the guest it was taken for', async () => {
       const capped = await newBot('Capped account');
       await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 1 } });
