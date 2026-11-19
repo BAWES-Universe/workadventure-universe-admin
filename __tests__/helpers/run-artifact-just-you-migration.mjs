@@ -69,9 +69,12 @@ const freshPass = (await db.query(`SELECT cookie_hash, redeemed_at, created_at I
 await db.exec(`DELETE FROM artifacts WHERE id = 'a1'`);
 const afterArtifactGone = { passes: await passIds(), retired: (await db.query('SELECT key FROM artifact_retired_files')).rows.length };
 
-// ... and with its person's account
+// ... and with its person's account. The artifact p5 hangs on moves to Omar first, so the pass can only go through its own link to Sara
+// (the user -> artifact -> pass chain cannot be what removes it), and the artifact is still there afterwards
+await db.exec(`UPDATE artifacts SET owner_id = 'omar' WHERE id = 'a2'`);
 await db.exec(`DELETE FROM users WHERE id = 'sara'`);
 const afterOwnerGone = await passIds();
+const artifactSurvived = (await db.query(`SELECT id FROM artifacts WHERE id = 'a2'`)).rows.length === 1;
 
-console.log(JSON.stringify({ before, after, checks, passesBefore, freshPass, afterArtifactGone, afterOwnerGone }));
+console.log(JSON.stringify({ before, after, checks, passesBefore, freshPass, afterArtifactGone, afterOwnerGone, artifactSurvived }));
 await db.close();
