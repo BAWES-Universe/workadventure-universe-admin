@@ -528,7 +528,7 @@ run('apps a person connects once, in a real database', () => {
     mockUser.current = { id: sara };
     const start = async () => new URL((await (await signInStart(request(`/api/me/apps/${connection.id}/sign-in?redirectUrl=${encodeURIComponent('http://localhost/admin')}`), params({ connectionId: connection.id }))).json()).authorizeUrl).searchParams.get('state')!;
     // The first one's write that moves the number up is slow, so the second begins and writes in the middle of it
-    const real = prisma.appConnection.update.bind(prisma.appConnection) as (args: { data?: Record<string, unknown> }) => Promise<unknown>;
+    const real = prisma.appConnection.update.bind(prisma.appConnection) as unknown as (args: { data?: Record<string, unknown> }) => Promise<unknown>;
     let slowed = false;
     const spy = jest.spyOn(prisma.appConnection, 'update').mockImplementation(((args: { data?: Record<string, unknown> }) => {
       if (!slowed && args?.data?.signInGeneration) {

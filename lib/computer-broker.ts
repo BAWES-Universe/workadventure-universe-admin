@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/db';
 import { providerFor, fenceMachine } from '@/lib/computer';
-import { mintJobToken, revokeJobTokens } from '@/lib/computer-token';
+import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
 import { Agent37Error } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
 
@@ -96,38 +96,52 @@ export async function prepareJob(jobId: string, relay: unknown, now: Date = new 
   if (claim === 'gone') return { ok: false, reason: 'not_found' };
   if (claim === 'busy') return { ok: false, reason: 'preparing' };
   try {
-    return await prepareClaimed(jobId, address, now);
+    return await prepareClaimed(jobId, address, now, claim);
   } finally {
     await releaseOnJob(jobId, 'prepareClaimedAt', claim);
   }
 }
 
-async function prepareClaimed(jobId: string, address: string, now: Date): Promise<Prepared> {
+/** Whether the prepare that made this claim still holds it (another takes a claim that was left too long). */
+const holdsPrepareClaim = async (jobId: string, claim: Date) => (await prisma.computerJob.count({ where: { id: jobId, prepareClaimedAt: claim } })) === 1;
+
+async function prepareClaimed(jobId: string, address: string, now: Date, claim: Date): Promise<Prepared> {
   const live = await liveJob(jobId);
   if (!live.ok) return live;
-  await revokeJobTokens(jobId, now);
+  // A prepare that was held up past its claim (a stopped process, a database that did not answer) finds another one has it now: it changes no key and
+  // writes nothing, and the caller asks again. The keys end only while the claim is still this one's, in the very statement that checks it
+  if (!(await holdsPrepareClaim(jobId, claim))) return { ok: false, reason: 'preparing' };
+  await revokeJobTokens(jobId, now, { prepareClaim: claim });
+  if (!(await holdsPrepareClaim(jobId, claim))) return { ok: false, reason: 'preparing' };
   // Only for the job as it stands now: a take-over after the look above gets no key
   const minted = await mintJobToken(jobId, 'model', now, { generation: live.job.generation });
   if (!minted.ok) return { ok: false, reason: minted.reason };
+  // Not written when the claim went to another while the key was made: that one makes and writes its own, and this key is ended
+  if (!(await holdsPrepareClaim(jobId, claim))) {
+    await revokeToken(minted.token, now);
+    return { ok: false, reason: 'preparing' };
+  }
   const file = JSON.stringify({ url: address, token: minted.token });
   // Written whole to a new file and moved over the old one, so a call never reads half of it. Only the machine's own user can read it.
   // Under a lock, and only over a key of an older or the same control number: a write that was delayed past a take-over and a hand-back
-  // finds a newer key there and leaves it alone.
+  // finds a newer key there and leaves it alone. Of two writes under the same control number the one whose claim was made later wins (a claim is
+  // made later than any it replaced), so a write that was delayed past its claim never puts its ended key over the newer one.
   const generation = live.job.generation;
-  // What was last written is noted as "job number" (one job's later write is not stopped by another job's number)
+  const mark = claim.getTime();
+  // What was last written is noted as "job number claim" (one job's later write is not stopped by another job's number)
   const command =
-    `umask 077 && d="$HOME/.universe" && mkdir -p "$d" && ( flock 9 || exit 1; read -r who cur < "$d/relay.gen" 2>/dev/null; ` +
-    `if [ "$who" = '${jobId}' ] && [ -n "$cur" ] && [ "$cur" -gt ${generation} ] 2>/dev/null; then exit 0; fi; ` +
-    `printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json" && printf '%s %s' '${jobId}' ${generation} > "$d/relay.gen" ) 9>"$d/relay.lock"`;
+    `umask 077 && d="$HOME/.universe" && mkdir -p "$d" && ( flock 9 || exit 1; read -r who cur mk < "$d/relay.gen" 2>/dev/null; ` +
+    `if [ "$who" = '${jobId}' ] && [ -n "$cur" ] && { [ "$cur" -gt ${generation} ] || { [ "$cur" -eq ${generation} ] && [ -n "$mk" ] && [ "$mk" -gt ${mark} ]; }; } 2>/dev/null; then exit 0; fi; ` +
+    `printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json" && printf '%s %s %s' '${jobId}' ${generation} ${mark} > "$d/relay.gen" ) 9>"$d/relay.lock"`;
   try {
     const done = await live.provider.exec(live.job.ref, command, { timeoutMs: 30_000 });
     if (done.exitCode !== 0) {
-      await revokeJobTokens(jobId, now);
+      await revokeJobTokens(jobId, now, { prepareClaim: claim });
       return { ok: false, reason: 'failed' };
     }
   } catch (error) {
     console.error('[Computer] Could not prepare a machine:', error instanceof Error ? error.message : 'unknown');
-    await revokeJobTokens(jobId, now);
+    await revokeJobTokens(jobId, now, { prepareClaim: claim });
     return { ok: false, reason: 'failed' };
   }
   // The person may have taken over while the key was being written: the key is then of an older control number (it is refused), and the
@@ -135,6 +149,8 @@ async function prepareClaimed(jobId: string, address: string, now: Date): Promis
   const after = await liveJob(jobId);
   if (!after.ok) return after;
   if (after.job.generation !== generation) return { ok: false, reason: 'not_running' };
+  // The claim went to another while the key was being written: that one's key is the one that stays, and the caller asks again
+  if (!(await holdsPrepareClaim(jobId, claim))) return { ok: false, reason: 'preparing' };
   return { ok: true, expiresAt: minted.expiresAt };
 }
 
@@ -179,6 +195,18 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   // Held by a start still on its way, or left by a server that stopped: there is no turn id to hand back (and one just cleared must never be
   // sent as "busy"), so the caller is told "starting": it waits a few seconds and asks again, and the claim lapses by itself
   if (claim === 'busy') return { ok: false, reason: 'starting' };
+  // Looked at again now that the claim is held: the job was read before it, and a start that kept its turn's id (or a take-over) in between changed what
+  // is true. A turn the job holds now is busy (its id is given, to reconnect to), and the conversation to start on is the one it has now
+  const fresh = await liveJob(job.jobId);
+  if (!fresh.ok) {
+    await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+    return fresh;
+  }
+  if (fresh.job.responseId) {
+    await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+    return { ok: false, reason: 'busy', responseId: fresh.job.responseId };
+  }
+  const sessionId = fresh.job.sessionId;
   // The runner's connection must not cut the turn off before its id is kept: once the agent has accepted it, it runs on the machine, and
   // an id that was never stored leaves nothing to cancel or reconnect to. So the request's own signal is not handed on; the start has its
   // own limit instead, for the agent's answer only: once it has accepted the turn the limit is lifted, because cutting the stream before its id arrived would leave a turn running on the machine with nothing to cancel.
@@ -191,7 +219,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       return { ok: false, reason: 'failed' };
     }
-    events = await provider.openTurn(job.ref, { text, sessionId: job.sessionId }, own.signal);
+    events = await provider.openTurn(fresh.job.ref, { text, sessionId }, own.signal);
     // The agent has answered, so the turn is accepted: the limit was for that answer. Its id follows on the stream, however long that takes.
     clearTimeout(timer);
   } catch (error) {
@@ -201,7 +229,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     console.error('[Computer] Could not start a turn:', error instanceof Error ? error.message : 'unknown');
     return { ok: false, reason: 'failed' };
   }
-  return { ok: true, events: keeping(job, provider, events, { timer, controller: own, claim }) };
+  return { ok: true, events: keeping(fresh.job, provider, events, { timer, controller: own, claim }) };
 }
 
 /** How long the agent has to accept a turn and say its id. */
@@ -220,6 +248,33 @@ async function* keeping(
 ): AsyncGenerator<TurnEvent> {
   let responseId: string | null = null;
   let over = false;
+  // The start's claim is kept fresh while the turn is waited for: the agent may take longer than the claim's lapse to say its id (the start limit is
+  // lifted once it has accepted the turn), and a second start must not take the claim and open another turn meanwhile. A server that stops stops
+  // renewing it, and it lapses as before. The mark changes with each renewal, so it is the latest one that is let go of.
+  let mark = start?.claim ?? null;
+  let renewing: Promise<void> | null = null;
+  const beat =
+    mark !== null && start
+      ? setInterval(() => {
+          renewing = (async () => {
+            if (mark === null) return;
+            const next = new Date();
+            const renewed = await prisma.computerJob.updateMany({ where: { id: job.jobId, turnClaimedAt: mark }, data: { turnClaimedAt: next } });
+            if (renewed.count === 1) mark = next;
+          })().catch(() => undefined);
+          return renewing;
+        }, TURN_CLAIM_STALE_MS / 3)
+      : null;
+  beat?.unref?.();
+  // Stops the renewing (and waits for one in flight) and lets go of the claim as it stands now
+  const letGoOfClaim = async () => {
+    if (beat) clearInterval(beat);
+    await renewing;
+    if (mark !== null) {
+      await releaseOnJob(job.jobId, 'turnClaimedAt', mark);
+      mark = null;
+    }
+  };
   try {
     for (;;) {
       // Read one event at a time: a reader that goes away while this waits for the id is only heard after the id is kept
@@ -245,7 +300,7 @@ async function* keeping(
           data: { agentSessionId: event.sessionId ?? job.sessionId, agentResponseId: event.id },
         });
         // The id is kept (or the turn is refused): the start is over, and the next one is decided by the job's own turn from here
-        if (start?.claim) await releaseOnJob(job.jobId, 'turnClaimedAt', start.claim);
+        await letGoOfClaim();
         if (kept.count === 0) {
           // The person took over (or the job ended) between asking and the agent starting, or another turn holds the job: this turn must not run
           await cancelOrFence(job, provider, event.id);
@@ -262,7 +317,7 @@ async function* keeping(
   } finally {
     if (start) clearTimeout(start.timer);
     // The turn's id is kept by now, or the stream ended without one: the start is over either way
-    if (start?.claim) await releaseOnJob(job.jobId, 'turnClaimedAt', start.claim);
+    await letGoOfClaim();
     // The stream is let go of: the turn itself goes on on the machine unless it ended
     await events.return(undefined).catch(() => undefined);
     if (responseId && over) await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: responseId }, data: { agentResponseId: null } }).catch(() => undefined);

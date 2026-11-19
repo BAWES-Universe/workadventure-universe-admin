@@ -111,9 +111,9 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         const written = readFileSync(join(home, '.universe', 'relay.json'), 'utf8');
         expect(written).toContain(RELAY);
         // A write of an older control number of the same job finds the newer one there and changes nothing
-        const newer = command.replace(/ (\d+) > "\$d\/relay\.gen"/, ' 5 > "$d/relay.gen"').replace(/-gt (\d+) \]/, '-gt 5 ]');
+        const newer = command.replace(/ (\d+) (\d+) > "\$d\/relay\.gen"/, ' 5 $2 > "$d/relay.gen"').replace(/-gt (\d+) \]/, '-gt 5 ]');
         expect(runIt(newer).status).toBe(0);
-        const older = command.replace('"url":"' + RELAY + '"', '"url":"https://older.example.test"').replace(/-gt \d+ \]/, '-gt 0 ]').replace(/ \d+ > "\$d\/relay\.gen"/, ' 0 > "$d/relay.gen"');
+        const older = command.replace('"url":"' + RELAY + '"', '"url":"https://older.example.test"').replace(/-gt \d+ \]/, '-gt 0 ]').replace(/ (\d+) (\d+) > "\$d\/relay\.gen"/, ' 0 $2 > "$d/relay.gen"');
         expect(runIt(older).status).toBe(0);
         expect(readFileSync(join(home, '.universe', 'relay.json'), 'utf8')).not.toContain('older.example.test');
         // Another job's write is never held back by this job's number
@@ -122,6 +122,78 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         expect(readFileSync(join(home, '.universe', 'relay.json'), 'utf8')).toContain('other.example.test');
       } finally {
         rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it('a write delayed past its claim never puts its ended key over the one the claim after it wrote, though both are of the same control number', async () => {
+      const { jobId } = await running();
+      await prepareJob(jobId, RELAY, NOW);
+      const first = fake.commands.at(-1)?.command ?? '';
+      // The claim's mark is in the command: a later claim has a later one
+      const marked = (mark: number) => first.replace(/ (\d+) > "\$d\/relay\.gen"/, ` ${mark} > "$d/relay.gen"`).replace(/-gt (\d+) \]; \}; \}/, `-gt ${mark} ]; }; }`);
+      const mine = Number(/ (\d+) > "\$d\/relay\.gen"/.exec(first)?.[1]);
+      const home = mkdtempSync(join(tmpdir(), 'universe-relay-'));
+      const runIt = (text: string) => spawnSync('sh', ['-c', text], { env: { ...process.env, HOME: home }, encoding: 'utf8' });
+      try {
+        // The later claim writes first, then the delayed write of the earlier claim arrives: it changes nothing
+        const later = marked(mine + 1_000).replace('"url":"' + RELAY + '"', '"url":"https://later.example.test"');
+        const earlier = marked(mine).replace('"url":"' + RELAY + '"', '"url":"https://earlier.example.test"');
+        expect(runIt(later).status).toBe(0);
+        expect(runIt(earlier).status).toBe(0);
+        expect(readFileSync(join(home, '.universe', 'relay.json'), 'utf8')).toContain('later.example.test');
+        // ...and the later one over the earlier one does write
+        const home2 = mkdtempSync(join(tmpdir(), 'universe-relay-'));
+        try {
+          const run2 = (text: string) => spawnSync('sh', ['-c', text], { env: { ...process.env, HOME: home2 }, encoding: 'utf8' });
+          expect(run2(earlier).status).toBe(0);
+          expect(run2(later).status).toBe(0);
+          expect(readFileSync(join(home2, '.universe', 'relay.json'), 'utf8')).toContain('later.example.test');
+        } finally {
+          rmSync(home2, { recursive: true, force: true });
+        }
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it('a prepare held up past its claim, which another prepare has taken, changes no key and writes nothing, and says "preparing"', async () => {
+      const { jobId } = await running();
+      // The first prepare is held at its look at the job; its claim is then taken by another that made and wrote its key
+      let letGo: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (letGo = resolve));
+      let reached: () => void = () => undefined;
+      const atTheLook = new Promise<void>((resolve) => (reached = resolve));
+      const real = prisma.computerJob.findUnique.bind(prisma.computerJob) as (args: unknown) => Promise<unknown>;
+      let held = false;
+      const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: unknown) =>
+        real(args).then(async (row) => {
+          if (!held) {
+            held = true;
+            reached();
+            await gate;
+          }
+          return row;
+        })) as never);
+      let slow: ReturnType<typeof prepareJob> | null = null;
+      try {
+        slow = prepareJob(jobId, RELAY, NOW);
+        await atTheLook;
+        // The claim lapsed (a stopped process) and another prepare took it, made its key and wrote it
+        await prisma.computerJob.update({ where: { id: jobId }, data: { prepareClaimedAt: new Date(Date.now() - 50_000) } });
+        spy.mockRestore();
+        expect(await prepareJob(jobId, RELAY, minutes(1))).toMatchObject({ ok: true });
+        const written = fake.commands.filter((entry) => entry.command.includes('relay.json'));
+        expect(written).toHaveLength(1);
+        const goodToken = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(written[0].command)?.[1] ?? '';
+        letGo();
+        expect(await slow).toEqual({ ok: false, reason: 'preparing' });
+        // The key the other one wrote is still good, and the slow one wrote nothing
+        expect((await verifyJobToken(goodToken, 'model', minutes(2))).ok).toBe(true);
+        expect(fake.commands.filter((entry) => entry.command.includes('relay.json'))).toHaveLength(1);
+      } finally {
+        letGo();
+        spy.mockRestore();
+        await slow?.catch(() => undefined);
       }
     });
 
@@ -327,6 +399,73 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       await prisma.computerJob.update({ where: { id: jobId }, data: { turnClaimedAt: new Date(Date.now() - 50_000) } });
       expect((await startTurn(jobId, 'go')).ok).toBe(true);
       expect(fake.openedTurns).toHaveLength(1);
+    });
+
+    it('keeps its claim fresh while it waits for the agent to say the turn\'s id, so a second start never takes it and opens another turn', async () => {
+      const { jobId } = await running();
+      let letGo: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (letGo = resolve));
+      const open = jest.spyOn(fake, 'openTurn').mockImplementation((async () =>
+        (async function* () {
+          await gate;
+          yield { type: 'created', id: 'resp-slow', sessionId: 'sess-slow' } as TurnEvent;
+          yield { type: 'completed', outputText: '', usage: null } as TurnEvent;
+        })()) as never);
+      const beats: Array<() => unknown> = [];
+      const realInterval = global.setInterval;
+      const interval = jest.spyOn(global, 'setInterval').mockImplementation(((handler: () => unknown, ms?: number, ...rest: unknown[]) => {
+        if (ms === 15_000) {
+          beats.push(handler);
+          return realInterval(() => undefined, 1_000_000);
+        }
+        return (realInterval as unknown as (...args: unknown[]) => NodeJS.Timeout)(handler, ms, ...rest);
+      }) as never);
+      try {
+        const started = await startTurn(jobId, 'go');
+        if (!started.ok) throw new Error('no turn');
+        const waiting = started.events.next();
+        for (let wait = 0; wait < 100 && beats.length === 0; wait++) await new Promise((resolve) => setTimeout(resolve, 20));
+        // The agent has accepted the turn and has not said its id: the claim is renewed every 15 seconds
+        expect(beats).toHaveLength(1);
+        const before = (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt!;
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await beats[0]();
+        const after = (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt!;
+        expect(after.getTime()).toBeGreaterThan(before.getTime());
+        letGo();
+        expect((await waiting).value).toMatchObject({ type: 'created', id: 'resp-slow' });
+        await started.events.return(undefined);
+        // Let go of at the mark it stands at now
+        expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt).toBeNull();
+      } finally {
+        letGo();
+        open.mockRestore();
+        interval.mockRestore();
+      }
+    });
+
+    it('looks at the job again once it holds the claim: a turn another start kept in between is busy (its id is given), and nothing is opened', async () => {
+      const { jobId } = await running();
+      const real = prisma.computerJob.updateMany.bind(prisma.computerJob) as (args: { data?: Record<string, unknown> }) => Promise<{ count: number }>;
+      let done = false;
+      const spy = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation(((args: { data?: Record<string, unknown> }) => {
+        if (!done && args?.data && 'turnClaimedAt' in args.data) {
+          done = true;
+          // Another start kept its turn's id just before this one's claim was taken
+          return prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-kept', agentSessionId: 'sess-kept' } }).then(() => real(args));
+        }
+        return real(args);
+      }) as never);
+      try {
+        // The turn the job holds is still running on the machine
+        jest.spyOn(fake, 'activeTurn').mockResolvedValue('resp-kept');
+        expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'busy', responseId: 'resp-kept' });
+      } finally {
+        spy.mockRestore();
+        jest.restoreAllMocks();
+      }
+      expect(fake.openedTurns).toHaveLength(0);
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).turnClaimedAt).toBeNull();
     });
 
     it('says "starting", never "busy", for a held claim even when a turn id the job kept was just cleared', async () => {
