@@ -57,3 +57,32 @@ it('ends the watch at twenty minutes and says so, though a look at the order is 
   });
   expect(signals.length).toBe(looks);
 });
+
+it('never starts a look at the order once the watch\'s time is up, even when the looks before it answered at once', async () => {
+  const starts: number[] = [];
+  let began = 0;
+  fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    if (init?.method === 'POST') return Promise.resolve({ ok: true, json: () => Promise.resolve({ orderId: 'o1', checkoutUrl: 'https://pay.example/c', app: 'Pay' }) });
+    starts.push(Date.now());
+    // Every look answers at once: the next one is only the poll timer's
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'pending' }) });
+  });
+  render(
+    <div>
+      <iframe data-artifact-frame="" title="page" />
+      <PagePaymentsBridge artifactId="a1" />
+    </div>,
+  );
+  const frame = document.querySelector('iframe')!;
+  began = Date.now();
+  await act(async () => {
+    window.dispatchEvent(new MessageEvent('message', { data: { universe: 'use-app', app: 'pay' }, source: frame.contentWindow }));
+  });
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(20 * MIN + 10_000);
+  });
+  expect(starts.length).toBeGreaterThan(10);
+  // The last look began before the end of the twenty minutes, never at it or after it
+  expect(starts.filter((at) => at - began >= 20 * MIN)).toEqual([]);
+  expect(screen.getByText('We could not confirm the payment')).toBeTruthy();
+});
