@@ -19,6 +19,8 @@ describe('the words of Apps: use and demand', () => {
 
   it('says "No price yet" instead of $0.00 for runs with no price, and "Not used yet" for an App with none', () => {
     expect(costLine({ ...base, costMicros: 118_400_000, ended: 100, failed: 4 })).toEqual(['$118.40 to us', '4% failed']);
+    // A total that leaves some runs out is not shown as the whole cost
+    expect(costLine({ ...base, costMicros: 118_400_000, unpriced: 3, ended: 100, failed: 4 })).toEqual(['$118.40 to us so far', '4% failed']);
     expect(costLine({ ...base })).toEqual(['No price yet']);
     expect(costLine({ ...base, uses: 0 })).toEqual(['Not used yet']);
   });
@@ -66,6 +68,17 @@ describe('cleanAskName: only an App name is kept', () => {
     expect(cleanAskName('Talabat 🍔')).toBeNull();
     // Letters with marks of their own (Arabic, Hindi) stay names
     expect(cleanAskName('طَلَبات')).not.toBeNull();
+  });
+
+  it('turns away a short sentence, and keeps real names that read a little like one', () => {
+    for (const text of ['My project is confidential', 'Our team has a budget', 'please add Zoho', 'I want a bank app', 'Add this app to my list.', 'It was not working', 'Can you add Notion']) {
+      expect(cleanAskName(text)).toBeNull();
+    }
+    for (const text of ['You Need A Budget', 'We Heart It', 'My Fitness Pal', 'Talabat orders', 'Dr. Oetker', 'Stack Exchange.com']) {
+      expect(cleanAskName(text)).not.toBeNull();
+    }
+    // Two words are never judged
+    expect(cleanAskName('Is Down')).not.toBeNull();
   });
 
   it('keeps nothing that is not a name', () => {

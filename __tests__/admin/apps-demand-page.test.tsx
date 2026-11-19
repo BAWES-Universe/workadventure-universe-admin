@@ -202,6 +202,57 @@ describe('Apps: use and demand', () => {
     expect(within(screen.getByTestId('apps-sheet')).queryByTestId('apps-sheet-error')).not.toBeInTheDocument();
   });
 
+  it('does not say the page is reloaded when reading it again failed', async () => {
+    const ready = report({ apps: [app({ own: { ready: true, why: [], passedChecksOn: null, topPriceMicros: 100 } })] });
+    let reads = 0;
+    fetchMock.mockImplementation((url: string, init?: { method?: string }) => {
+      if (init?.method === 'PUT') return Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ code: 'stale', route: 'universe', version: 1 }) });
+      reads += 1;
+      return reads === 1 ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(ready) }) : Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+    });
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    fireEvent.click(within(sheet).getByTestId('apps-route-universe'));
+    fireEvent.click(within(sheet).getByTestId('apps-route-save'));
+    const said = await within(await screen.findByTestId('apps-sheet')).findByTestId('apps-sheet-error');
+    expect(said).toHaveTextContent('could not be reloaded');
+    expect(said).not.toHaveTextContent('It is reloaded');
+  });
+
+  it('moves between the two routes with the arrow keys, Tab stops only on the picked one, and the one that is off is skipped', async () => {
+    const ready = report({ apps: [app({ own: { ready: true, why: [], passedChecksOn: null, topPriceMicros: 100 } })] });
+    answer(ready);
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    const composio = within(sheet).getByTestId('apps-route-composio');
+    const universe = within(sheet).getByTestId('apps-route-universe');
+    expect([composio.tabIndex, universe.tabIndex]).toEqual([0, -1]);
+    fireEvent.keyDown(composio, { key: 'ArrowDown' });
+    expect(universe).toHaveAttribute('aria-checked', 'true');
+    expect(universe).toHaveFocus();
+    expect([composio.tabIndex, universe.tabIndex]).toEqual([-1, 0]);
+    fireEvent.keyDown(universe, { key: 'ArrowUp' });
+    expect(composio).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('shows no figures of the days that were selected before while the new days are read', async () => {
+    let finish: (value: unknown) => void = () => undefined;
+    fetchMock.mockImplementation((url: string) =>
+      String(url).includes('days=7') ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(report()) }),
+    );
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-range-7'));
+    expect(screen.queryByText('14,017')).not.toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes('days=7'))).toBe(true));
+    await act(async () => finish({ ok: true, status: 200, json: () => Promise.resolve(report({ days: 7, totals: { uses: 99, people: 5, costMicros: 1_000_000, asks: 1 } })) }));
+    expect(await screen.findByText('99')).toBeInTheDocument();
+  });
+
   it('goes back to Orbit home for anyone who is not a super admin, and offers a retry when the read fails', async () => {
     answer(403);
     const { unmount } = render(<AppsDemandPage />);

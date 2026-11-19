@@ -418,6 +418,20 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await check(guide, serverId, { callId: 'after', heading: 'lookUp' })).body).toMatchObject({ allowed: false, reason: 'gone' });
     });
 
+    it('finds the grant switched off when a check was waiting for it, and records and lets through nothing', async () => {
+      const { app, serverId } = await lentAndLet({ usesPerDay: 5 });
+      let waiting: Promise<string> | null = null;
+      await prisma.$transaction(async (tx) => {
+        // What switching it off holds first: the grant, for update. A check that starts now has to wait for it.
+        await tx.$queryRaw`SELECT "id" FROM "bot_mcp_servers" WHERE "id" = ${serverId} FOR UPDATE`;
+        waiting = recordUse({ connectionId: app.id, universeId: universeA, botId: guide, callId: 'switched', limit: 5, serverId, lend: true });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await tx.botMcpServer.update({ where: { id: serverId }, data: { enabled: false } });
+      });
+      expect(await waiting).toBe('off');
+      expect(await prisma.appUse.count({ where: { botId: guide } })).toBe(0);
+    });
+
     it('never deadlocks when an app is disconnected at the very moment it is used', async () => {
       for (let round = 0; round < 8; round += 1) {
         const { app, serverId } = await lentAndLet({ usesPerDay: 5 });

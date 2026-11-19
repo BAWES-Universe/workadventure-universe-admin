@@ -450,6 +450,17 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
       expect(await (await ask('Gmail', sara)).json()).toEqual({ counted: false, reason: 'exists' });
     });
 
+    it('counts an ask for a ready-made App while Apps are off, since nothing of it can be used then', async () => {
+      await list();
+      setAdapterForTests(null);
+      try {
+        expect(await (await ask('Gmail', sara)).json()).toEqual({ counted: true });
+      } finally {
+        await prisma.appAsk.deleteMany({ where: { nameKey: 'gmail' } });
+        setAdapterForTests(undefined);
+      }
+    });
+
     it('stops one person pumping a name: a daily limit per App and per person', async () => {
       let counted = 0;
       for (let i = 0; i < 30; i += 1) if ((await (await ask(`Pump ${tag}`, sara)).json()).counted) counted += 1;

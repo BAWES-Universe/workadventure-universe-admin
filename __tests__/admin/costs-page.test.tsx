@@ -187,6 +187,25 @@ describe('the Costs page', () => {
     expect(await screen.findByTestId('costs-goes')).toBeTruthy();
   });
 
+  it('does not paint the figures of the dates before under new valid dates while they are read', async () => {
+    let calls = 0;
+    let release: (value: unknown) => void = () => {};
+    fetchMock.mockImplementation(() => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(report()) });
+      return new Promise((resolve) => { release = resolve; });
+    });
+    render(<CostsPage />);
+    await screen.findByTestId('costs-goes');
+    expect(screen.getByText('$39.80')).toBeTruthy();
+    // One valid date to another: the old figures are gone at once, not after the next effect
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '2026-10-01' } });
+    expect(screen.queryByText('$39.80')).toBeNull();
+    await waitFor(() => expect(calls).toBe(2));
+    release({ ok: true, status: 200, json: () => Promise.resolve(report()) });
+    expect(await screen.findByTestId('costs-goes')).toBeTruthy();
+  });
+
   it('shows the dates now chosen even when a slower read of older dates comes back last', async () => {
     const slow = report({ totals: { costMicros: 1_000_000, people: 1, guests: 1, bricks: 1, computers: 1 }, from: '2026-10-01' });
     const quick = report();
