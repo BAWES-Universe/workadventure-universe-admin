@@ -219,6 +219,8 @@ describe('Apps: use and demand', () => {
     const said = await within(await screen.findByTestId('apps-sheet')).findByTestId('apps-sheet-error');
     expect(said).toHaveTextContent('could not be reloaded');
     expect(said).not.toHaveTextContent('It is reloaded');
+    // It says what to do: the sheet cannot reload the Apps itself, so it is told to try loading them again, then open the App again
+    expect(said).toHaveTextContent('try loading the Apps again, then open the App again');
   });
 
   it('moves between the two routes with the arrow keys, Tab stops only on the picked one, and the one that is off is skipped', async () => {

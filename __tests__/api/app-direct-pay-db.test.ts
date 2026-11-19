@@ -36,7 +36,7 @@ import { disconnect } from '@/lib/app-connections';
 import { definitionSchema, hashDefinition } from '@/lib/app-direct/definition';
 import { openKeyForm, submitKey } from '@/lib/app-direct/connect';
 import { getBrickLimits, saveServerLimits } from '@/lib/bot-limits';
-import { isWaiting, orderForArtifact, startCheckout, verifyOrder } from '@/lib/app-direct/pay';
+import { checksHaveEnded, isWaiting, orderForArtifact, startCheckout, verifyOrder } from '@/lib/app-direct/pay';
 import { POST as makeJob } from '@/app/api/bots/[id]/key-apps/[serverId]/page-jobs/route';
 import { GET as listPages } from '@/app/api/me/apps/pages/route';
 import { DELETE as stopPage } from '@/app/api/me/apps/pages/[jobId]/route';
@@ -617,9 +617,22 @@ run('payments for pages, in a real database', () => {
         // The window runs from when it was closed: closed more than the late hours ago, it is not asked about again
         await prisma.appPageOrder.update({ where: { id: orderId }, data: { createdAt: new Date(Date.now() - 80 * 3_600_000), closedAt: new Date(Date.now() - 60 * 3_600_000) } });
         const sent = gateway({ record: (order) => paidRecord(order) });
-        expect(await settle(orderId)).toMatchObject({ status: 'not_paid' });
+        const answer = await settle(orderId);
+        expect(answer).toMatchObject({ status: 'not_paid' });
+        // The page that refreshes itself for a late payment is told no look is made any more, so it stops
+        expect(checksHaveEnded(answer)).toBe(true);
         expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(0);
         expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('not_paid');
+      });
+
+      it('still asks again while it is inside the late-payment hours, and says checks go on', async () => {
+        const { artifactId } = await pending();
+        const orderId = await closeByExpiry(artifactId, '198.51.100.35');
+        await prisma.appPageOrder.update({ where: { id: orderId }, data: { closedAt: new Date(Date.now() - 3_600_000) } });
+        gateway({ record: (order) => paidRecord(order, { status: 'FAILED' }) });
+        const answer = await settle(orderId);
+        expect(answer).toMatchObject({ status: 'not_paid' });
+        expect(checksHaveEnded(answer)).toBe(false);
       });
     });
 

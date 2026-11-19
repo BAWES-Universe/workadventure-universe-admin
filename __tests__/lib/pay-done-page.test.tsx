@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 /** The page a buyer lands on after paying: what keeps checking by itself. */
 const verifyOrder = jest.fn();
-jest.mock('@/lib/app-direct/pay', () => ({ verifyOrder: (...args: unknown[]) => verifyOrder(...args) }));
+const ended = new WeakSet<object>();
+jest.mock('@/lib/app-direct/pay', () => ({ verifyOrder: (...args: unknown[]) => verifyOrder(...args), checksHaveEnded: (view: object) => ended.has(view) }));
 
 import PaymentDone from '@/app/pay/done/page';
 
@@ -19,5 +20,13 @@ describe('the payment done page', () => {
     expect(await page('not_paid')).toContain('content="15"');
     expect(await page('paid')).not.toContain('refresh');
     expect(await page('cant_confirm')).not.toContain('refresh');
+  });
+
+  it('does not keep refreshing a not-received order that is no longer looked at (past the late-payment hours)', async () => {
+    const view = { status: 'not_paid' };
+    ended.add(view);
+    verifyOrder.mockResolvedValueOnce(view);
+    const html = renderToStaticMarkup(await PaymentDone({ searchParams: Promise.resolve({ o: order }) }));
+    expect(html).not.toContain('refresh');
   });
 });

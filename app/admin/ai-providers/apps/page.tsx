@@ -200,7 +200,7 @@ function RouteSheet({ app, days, note, onNote, onClose, onSaved }: { app: AppRow
           // The page is read again first, and the words say what happened: "reloaded" only when it was
           const reloaded = await onSaved();
           if (reloaded) onNote('Someone moved this App since you opened it. It is reloaded: look again and save.');
-          else setError('Someone moved this App since you opened it, and the page could not be reloaded. Close this and open the App again.');
+          else setError('Someone moved this App since you opened it, and the page could not be reloaded. Close this, try loading the Apps again, then open the App again.');
           return;
         }
         setError(body?.why?.join(' ') ?? 'Our own version is not ready to run this App yet.');
