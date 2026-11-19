@@ -334,7 +334,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
   ]);
   const nameOf = new Map(users.map((user) => [user.id, user.name?.trim() || user.email || 'Someone']));
   const botOf = new Map(bots.map((bot) => [bot.id, bot]));
-  const running = grants.filter((grant) => grant.startsAt <= now && grant.endsAt > now);
+  const running = grants.filter((grant) => !grant.cancelledAt && grant.startsAt <= now && grant.endsAt > now);
   // The same one the person's page reports: the largest running, and the later end of two the same
   const extraOf = new Map<string, Date>();
   for (const personId of new Set(running.map((grant) => grant.personId))) {
@@ -401,9 +401,9 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
   const above = new Map<string, number>();
   // One read for everyone, not one per person and month: the spending of all of them over the whole span of their grants, sorted out
   // by person and month here
-  const spans = [...byPerson.values()].map((list) => grantSpan(list, now));
+  const spans = [...byPerson.values()].filter((list) => list.some((grant) => !grant.cancelledAt)).map((list) => grantSpan(list.filter((grant) => !grant.cancelledAt), now));
   const spending =
-    settings.memberAllowanceMicros === null || byPerson.size === 0
+    settings.memberAllowanceMicros === null || spans.length === 0
       ? []
       : await prisma.meterEvent.findMany({
           where: {
@@ -422,8 +422,10 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     else spendingOf.set(event.personKey, [event]);
   }
   for (const [personId, list] of byPerson) {
-    const figures = aboveUsual(settings.memberAllowanceMicros, list, spendingOf.get(`person:${personId}`) ?? [], now);
-    list.forEach((grant, index) => above.set(grant.grantKey, figures[index]));
+    // A grant taken back before it started never ran: it has no window, and the others are worked out as if it was never given
+    const ran = list.filter((grant) => !grant.cancelledAt);
+    const figures = aboveUsual(settings.memberAllowanceMicros, ran, spendingOf.get(`person:${personId}`) ?? [], now);
+    ran.forEach((grant, index) => above.set(grant.grantKey, figures[index]));
   }
   const given: GivenRow[] = shownGrants.map((grant) => ({
     grantKey: grant.grantKey,
@@ -434,7 +436,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     noLimit: grant.noLimit,
     startsAt: grant.startsAt.toISOString(),
     endsAt: grant.endsAt.toISOString(),
-    ended: grant.endsAt <= now,
+    ended: !!grant.cancelledAt || grant.endsAt <= now,
     givenByName: nameOf.get(grant.givenById) ?? 'a super admin',
     settlement: grant.settlement === 'to_bill' ? 'to_bill' : 'gift',
     billedAt: grant.billedAt?.toISOString() ?? null,

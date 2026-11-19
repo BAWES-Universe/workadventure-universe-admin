@@ -2067,6 +2067,8 @@ model MeterGrant {
   // What was agreed, for extra usage to be billed
   note        String?   @db.VarChar(1000)
   billedAt    DateTime? @map("billed_at")
+  // Taken back before it started: it never ran, and its dates stay as they were given
+  cancelledAt DateTime? @map("cancelled_at")
   createdAt   DateTime  @default(now()) @map("created_at")
 
   @@index([personId, endsAt])
