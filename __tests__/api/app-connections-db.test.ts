@@ -589,6 +589,71 @@ run('apps a person connects once, in a real database', () => {
     expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).not.toBeNull();
   });
 
+  it('a good call of the key is written down even when nothing was lost, at most once a minute, so an older refusal that reports late never marks the key lost', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    const refusedAt = new Date(Date.now() - 2_000);
+    const worked = new Date(Date.now() - 500);
+    await reportKeyWorked(connection.id, 1, worked);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt).toEqual(worked);
+    // Another good call inside the minute does not write again
+    await reportKeyWorked(connection.id, 1, new Date(worked.getTime() + 10_000));
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt).toEqual(worked);
+    // A call refused before the good one, reported after it, is old news
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: refusedAt })).toEqual({ changed: false });
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).toBeNull();
+    // A refusal seen after it is a loss
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: new Date() })).toEqual({ changed: true });
+    // A minute later the next good call is written
+    await reportKeyWorked(connection.id, 1, new Date(Date.now() + 61_000));
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt!.getTime()).toBeGreaterThan(worked.getTime() + 60_000);
+  });
+
+  it('finishes the cards of a loss on the next report when the lookup of the Bricks failed after the loss was saved, without making a card the person dismissed', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    const lookup = jest.spyOn(prisma.botMcpServer, 'findMany').mockRejectedValueOnce(new Error('connection reset'));
+    const silenced = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const at = new Date();
+    try {
+      // The loss is saved and said; the cards could not follow
+      expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at })).toEqual({ changed: true });
+    } finally {
+      lookup.mockRestore();
+      silenced.mockRestore();
+    }
+    const pending = await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } });
+    expect(pending.signInLostAt).not.toBeNull();
+    expect(pending.noticesPendingAt).not.toBeNull();
+    expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'tool-signin', dismissedAt: null } })).toBe(0);
+    // The same report again changes nothing in the state, and finishes the cards
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at })).toEqual({ changed: false });
+    expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'tool-signin', dismissedAt: null } })).toBe(1);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).noticesPendingAt).toBeNull();
+    // The person dismisses it; a later report of the same loss never makes it again
+    await prisma.userNotice.updateMany({ where: { userId: sara, kind: 'tool-signin' }, data: { dismissedAt: new Date() } });
+    await prisma.appConnection.update({ where: { id: connection.id }, data: { noticesPendingAt: new Date() } });
+    await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at });
+    expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'tool-signin', dismissedAt: null } })).toBe(0);
+  });
+
+  it('the app’s own sign-in return clears the connection’s lost sign-in and the cards of every Brick that uses it', async () => {
+    const connection = await newOAuthApp(sara);
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    await grantToBrick(sara, connection.id, saraStudio);
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401 })).toEqual({ changed: true });
+    expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'tool-signin', dismissedAt: null } })).toBe(2);
+    mockUser.current = { id: sara };
+    const started = await (await signInStart(request(`/api/me/apps/${connection.id}/sign-in?redirectUrl=${encodeURIComponent('http://localhost/admin')}`), params({ connectionId: connection.id }))).json();
+    const state = new URL(started.authorizeUrl).searchParams.get('state')!;
+    global.fetch = jest.fn(async () => new Response(JSON.stringify({ access_token: 'signed-in', refresh_token: 'r', expires_in: 3600 }), { status: 200 })) as unknown as typeof fetch;
+    const back = await signInReturn(request(`/api/oauth/mcp-callback?code=abc&state=${encodeURIComponent(state)}`));
+    expect(back.headers.get('location')).toContain('oauth=success');
+    expect(await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).toMatchObject({ signInLostAt: null, signInLostStatus: null, noAnswerAt: null, noticesPendingAt: null, connectedById: sara });
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).reconnectedAt).not.toBeNull();
+    expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'tool-signin', dismissedAt: null } })).toBe(0);
+  });
+
   it('refuses to sign a grant in on its own: its connection does', async () => {
     const connection = await newOAuthApp(sara);
     const a = (await grantToBrick(sara, connection.id, saraBrick))!;
