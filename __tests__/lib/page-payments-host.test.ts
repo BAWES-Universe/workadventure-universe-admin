@@ -9,8 +9,13 @@ const ART = 'art-1';
 
 type Call = { url: string; init: RequestInit | undefined; body: Record<string, unknown> };
 
-function setup(answers: (call: Call) => { status?: number; body: Record<string, unknown> } | 'lost' | 'hang', withStorage = true, shared?: Map<string, string>) {
+function setup(answers: (call: Call) => { status?: number; body: Record<string, unknown> } | 'lost' | 'hang', withStorage = true, shared?: Map<string, string>, withLocks = true, fill = 'r') {
   jest.useFakeTimers();
+  // A browser with Web Locks (one tab at a time per name) unless the test is about one without
+  if (withLocks && !(globalThis as { navigator?: { locks?: unknown } }).navigator?.locks) {
+    let tail: Promise<unknown> = Promise.resolve();
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: { request: (_name: string, run: () => unknown) => (tail = tail.then(() => run())) } } });
+  }
   const frame = { postMessage: jest.fn() } as unknown as Window;
   const calls: Call[] = [];
   const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
@@ -32,7 +37,7 @@ function setup(answers: (call: Call) => { status?: number; body: Record<string, 
     openWindow: () => popup,
     fetch: fetchMock as unknown as typeof fetch,
     storage: withStorage ? { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => void store.set(key, value) } : null,
-    randomId: (length) => `${'r'.repeat(length - String(++n).length)}${n}`,
+    randomId: (length) => `${fill.repeat(length - String(++n).length)}${n}`,
     pageUrl: PAGE,
   });
   const lines: PayLine[] = [];
@@ -47,6 +52,7 @@ const flush = () => jest.advanceTimersByTimeAsync(0);
 
 afterEach(() => {
   jest.useRealTimers();
+  delete (globalThis as { navigator?: unknown }).navigator;
 });
 
 describe('a paying page on the public share link', () => {
@@ -560,6 +566,26 @@ describe('a paying page on the public share link', () => {
     await jest.advanceTimersByTimeAsync(21 * 60_000);
     expect(lines.at(-1)).toMatchObject({ problem: 'cant_confirm', canCheck: true });
     host.destroy();
+  });
+
+  it('without Web Locks, two tabs that wrote their own first code at the same moment end up with the one the storage holds', async () => {
+    const shared = new Map<string, string>();
+    const key = `universe-pay-recovery:${ART}`;
+    // Tab two never sees tab one's write before it has written its own: it read the storage while it was still empty, and its write comes last
+    let wrote = false;
+    const staleView = { get: (name: string) => (wrote ? shared.get(name) : undefined), set: (name: string, value: string) => { wrote = true; shared.set(name, value); } } as unknown as Map<string, string>;
+    const one = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, shared, false, 'a');
+    const two = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }), true, staleView, false, 'b');
+    one.tap({ request: 'r1', restore: true });
+    two.tap({ request: 'r1', restore: true });
+    await jest.advanceTimersByTimeAsync(400);
+    const codeOne = one.calls[0].body.recoveryCode;
+    const codeTwo = two.calls[0].body.recoveryCode;
+    expect(codeOne).toBeDefined();
+    expect(codeOne).toBe(codeTwo);
+    expect(shared.get(key)).toBe(codeOne);
+    one.host.destroy();
+    two.host.destroy();
   });
 
   it('offers no receipt of its own for a purchase a receipt link found: it is "back", and this browser’s code would not bring it back', async () => {

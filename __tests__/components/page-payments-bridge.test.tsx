@@ -13,6 +13,9 @@ const CODE = 'Q'.repeat(43);
 function mount(hash: string, answer: Record<string, unknown> | ((method: string) => Record<string, unknown>)) {
   window.history.replaceState(null, '', `/a/k7Qm2xR9${hash}`);
   window.localStorage.clear();
+  // A browser with Web Locks (one tab at a time): the first recovery code is made at once, as it is in every current browser
+  let tail: Promise<unknown> = Promise.resolve();
+  Object.defineProperty(navigator, 'locks', { configurable: true, value: { request: (_name: string, run: () => unknown) => (tail = tail.then(() => run())) } });
   const frameWindow = { postMessage: jest.fn() };
   const iframe = document.createElement('iframe');
   iframe.setAttribute('data-artifact-frame', '');
@@ -35,6 +38,7 @@ function mount(hash: string, answer: Record<string, unknown> | ((method: string)
 
 afterEach(() => {
   jest.useRealTimers();
+  delete (navigator as unknown as { locks?: unknown }).locks;
   document.body.innerHTML = '';
 });
 

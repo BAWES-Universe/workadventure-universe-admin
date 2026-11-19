@@ -155,6 +155,8 @@ const defaultRandom = (length: number): string => {
   return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join('');
 };
 
+/** How long a browser without Web Locks waits, after writing its first code, before reading back which code the storage holds. */
+const SETTLE_MS = 150;
 const waitFor = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePaymentsHost {
@@ -212,7 +214,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
    * Settles this browser's code before anything is sent with it. Two tabs that both find the storage empty would each make a code and the last
    * write would win, leaving the other tab buying under a code that is no longer kept: so the making is serialised across tabs (Web Locks,
    * where the browser has them) and the storage is read again inside the lock, so every tab ends up with the one that was written first. A
-   * browser without locks writes, then reads back what the storage holds and uses that.
+   * browser without locks writes, waits a moment, then reads back what the storage holds and uses that.
    */
   const settleCode = (): Promise<string> => {
     if (memoryCode) return Promise.resolve(memoryCode);
@@ -225,9 +227,20 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
           return recoveryCode();
         }
       }
-      const made = recoveryCode();
+      // No locks: nothing can make two tabs take turns, so they are given time to settle. One that finds a code kept uses it; one that finds
+      // none writes its own, waits a moment (long enough for another tab that read the empty storage at the same time to have written its own)
+      // and uses what the storage holds then, which is the same for every tab that was in the race
       try {
-        const kept = options.storage?.getItem(storageKey);
+        const existing = options.storage?.getItem(storageKey);
+        if (existing && RECOVERY_CODE.test(existing)) return (memoryCode = existing);
+      } catch {
+        return recoveryCode();
+      }
+      const made = recoveryCode();
+      if (!options.storage) return made;
+      await waitFor(SETTLE_MS);
+      try {
+        const kept = options.storage.getItem(storageKey);
         if (kept && RECOVERY_CODE.test(kept)) memoryCode = kept;
       } catch {
         // Keeps the one made
