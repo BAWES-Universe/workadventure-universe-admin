@@ -9,6 +9,7 @@ import { prisma } from '@/lib/db';
 import { setAdapterForTests, type InstantAdapter, type InstantCall, type InstantLog, type ReadyMadeAdapter } from '@/lib/app-adapter';
 import { evaluatePause, exposureIn, giveBack, instantRunKey, reconcileRun, runInstant, setInstantHooks } from '@/lib/instant/executor';
 import { setInstantFunds, shutFunds, type InstantFunds } from '@/lib/instant/funds';
+import { createInstantFunds } from '@/lib/funding/instant-funds';
 import { getInstantPause, resumeInstant, saveInstantLimits } from '@/lib/instant/state';
 import { checkPriceDrift, forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
 import { denyInstantOnSessions } from '@/lib/instant/sessions';
@@ -467,6 +468,44 @@ run('the bounded Instant executor, in a real database', () => {
       await reconcileRun(open.id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 6 * MIN) });
       expect(await runOf(open.id)).toMatchObject({ state: 'refused' });
       expect(f.left()).toBe(1_000_000);
+    });
+
+    it('with the real credit books: a hold written before the books failed is given back, never left held under a closed run', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const month = new Date().toISOString().slice(0, 7);
+      const account = await prisma.fundingAccount.create({ data: { kind: 'person', ownerKey: `${sara}-real-${tag}`, name: 'Sara', budgetMicros: BigInt(100_000_000) } });
+      const lot = await prisma.creditLot.create({
+        data: { slotKey: 'base:instant_apps', subjectKey: `person:${sara}`, periodKey: month, fundingAccountId: account.id, personId: sara, source: 'default', amountMicros: BigInt(1_000_000), covers: ['instant_apps'], startsAt: new Date(`${month}-01T00:00:00Z`) },
+      });
+      const funds = createInstantFunds();
+      // The hold is written and committed, then the connection is lost before the answer reaches the adapter
+      const original = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+      let failed = false;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) =>
+        original(...args).then(async (result) => {
+          if (!failed && (await prisma.creditHold.count({ where: { personId: sara } })) > 0) {
+            failed = true;
+            throw new Error('connection lost after commit');
+          }
+          return result;
+        })) as never);
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const outcome = await runInstant(ask({ arguments: { query: 'real-lost' } }), { adapter: p.adapter, funds });
+        expect(outcome).toMatchObject({ status: 'refused', reason: 'credit_unavailable' });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(failed).toBe(true);
+      // Nothing is left held: the person's credit is whole again, and the provider was never called
+      const holds = await prisma.creditHold.findMany({ where: { personId: sara } });
+      expect(holds.length).toBeGreaterThan(0);
+      expect(holds.every((hold) => hold.state === 'released')).toBe(true);
+      expect(p.sent).toHaveLength(0);
+      await prisma.creditHold.deleteMany({ where: { personId: sara } });
+      await prisma.creditLot.deleteMany({ where: { id: lot.id } });
+      await prisma.fundingAccount.deleteMany({ where: { id: account.id } });
     });
 
     it('when the books do not take the release, the hold stays and the sweep says it again', async () => {

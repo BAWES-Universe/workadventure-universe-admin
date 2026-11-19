@@ -46,6 +46,17 @@ describe('wiring the Instant credit books', () => {
     expect(answer).toEqual({ ok: false, reason: 'unavailable' });
   });
 
+  it('reserve: an error from the books is "unsure", because the hold may have been written before it was raised; a refusal that holds nothing is not', async () => {
+    const { holdCredit } = await import('@/lib/credit-spend');
+    const { createInstantFunds } = await import('@/lib/funding/instant-funds');
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    (holdCredit as jest.Mock).mockRejectedValueOnce(new Error('connection lost after commit'));
+    const input = { key: 'k', personId: 'p', amountMicros: 1, charge: { class: 'instant' as const, route: 'composio', provider: 'composio' } };
+    expect(await createInstantFunds().reserve(input)).toEqual({ ok: false, reason: 'unavailable', unsure: true });
+    (holdCredit as jest.Mock).mockResolvedValueOnce({ ok: false, reason: 'credit_used_up' });
+    expect(await createInstantFunds().reserve(input)).toEqual({ ok: false, reason: 'credit_used_up' });
+  });
+
   it('release: a hold that exists is released; none held closes the key; a hold that landed meanwhile is released on the second look', async () => {
     const spend = await import('@/lib/credit-spend');
     const { createInstantFunds } = await import('@/lib/funding/instant-funds');
