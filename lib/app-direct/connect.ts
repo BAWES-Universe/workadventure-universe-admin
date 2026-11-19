@@ -195,6 +195,24 @@ export interface KeyConnected {
 }
 
 /**
+ * Holds one of a form's tries while the service is asked about a key. The form's row is locked while the used tries and the holds still running are
+ * counted, so keys sent at the same moment cannot all pass. Null when the form has no try left (or was used). Holds that ran out are cleared on the way.
+ */
+async function holdTry(requestId: string, limit: number, callSeconds: number): Promise<string | null> {
+  return prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<Array<{ tries: number }>>`SELECT "tries" FROM "app_key_requests" WHERE "id" = ${requestId} AND "used_at" IS NULL FOR UPDATE`;
+    if (locked.length !== 1) return null;
+    const now = new Date();
+    await tx.appKeyHold.deleteMany({ where: { requestId, expiresAt: { lte: now } } });
+    const holding = await tx.appKeyHold.count({ where: { requestId } });
+    if (locked[0].tries + holding >= limit) return null;
+    // Long enough for the service's own answer limit and a little more
+    const made = await tx.appKeyHold.create({ data: { requestId, expiresAt: new Date(now.getTime() + (callSeconds + 15) * 1000) }, select: { id: true } });
+    return made.id;
+  });
+}
+
+/**
  * The key is typed. Checked with the definition's own look-up (never a charge or a send), then stored encrypted. Replacing is
  * atomic: the new key is checked first, and the old one stops being used in the same step the new one starts. Switching between
  * a test and a real key asks first (`mode_change`, sent again with `confirmChange`).
@@ -215,11 +233,12 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
 
   // Prove the key with the definition's own non-changing request. A key the service refuses costs a try.
   if (definition.check) {
-    // The try is taken BEFORE the service is asked, in one step that also holds the limit: keys sent at the same moment cannot all pass
-    // a count that none of them has added to yet. A try that does not end with the service refusing the key is given back below.
-    const reserved = await prisma.appKeyRequest.updateMany({ where: { id: row.id, usedAt: null, tries: { lt: limits.keyTries } }, data: { tries: { increment: 1 } } });
-    if (reserved.count !== 1) throw new KeyFormError(429, 'too_many', 'Too many tries');
-    const giveBack = () => prisma.appKeyRequest.updateMany({ where: { id: row.id, tries: { gt: 0 } }, data: { tries: { decrement: 1 } } });
+    // The try is held BEFORE the service is asked, in one step that also holds the limit: keys sent at the same moment cannot all pass a count that none
+    // of them has added to yet. A hold is a row of its own, so it is given back by what it is (never by a count that moves twice or not at all), and one that
+    // nobody gave back lapses by itself: a refund that could not be written costs no try for good. Only a key the service refuses makes it a used try.
+    const hold = await holdTry(row.id, limits.keyTries, limits.keyCallSeconds);
+    if (!hold) throw new KeyFormError(429, 'too_many', 'Too many tries');
+    const giveBack = () => prisma.appKeyHold.deleteMany({ where: { id: hold } });
     let status: number;
     try {
       const request = buildRequest(definition, definition.check.operation, definition.check.arguments, key);
@@ -233,8 +252,12 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
       if (error instanceof GuardError || error instanceof RequestError) throw new KeyFormError(502, 'unreachable', 'The service could not be reached');
       throw error;
     }
-    // The service refused it: that is what the try was for
-    if (definition.check.rejected.includes(status)) throw new KeyFormError(422, 'rejected', "The service didn't accept this key");
+    // The service refused it: that is what the try was for. The try is used and the hold ends in one step, and a failure here is not swallowed: a refusal is
+    // never left uncounted (the hold stays, and lapses by itself)
+    if (definition.check.rejected.includes(status)) {
+      await prisma.$transaction([prisma.appKeyRequest.update({ where: { id: row.id }, data: { tries: { increment: 1 } } }), prisma.appKeyHold.deleteMany({ where: { id: hold } })]);
+      throw new KeyFormError(422, 'rejected', "The service didn't accept this key");
+    }
     await giveBack().catch(() => undefined);
     if (status >= 500) throw new KeyFormError(502, 'unreachable', 'The service could not be reached');
   }

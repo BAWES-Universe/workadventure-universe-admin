@@ -1481,9 +1481,24 @@ model AppKeyRequest {
 
   owner      User           @relation("AppKeyRequestOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   connection AppConnection? @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  holds      AppKeyHold[]
 
   @@index([ownerId])
   @@map("app_key_requests")
+}
+
+// A try held while the service is asked about a typed key: it counts against the form's limit until the check is over (a refusal then makes it a
+// used try, anything else gives it back). A hold nobody gave back (a server that stopped, a database that did not answer) ends by itself at `expiresAt`.
+model AppKeyHold {
+  id        String   @id @default(uuid())
+  requestId String   @map("request_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  request AppKeyRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId])
+  @@map("app_key_holds")
 }
 
 // One use of a key app by a Brick, written before the request is sent under the bot server's call id, so a retry of the same call never

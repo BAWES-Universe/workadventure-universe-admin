@@ -411,6 +411,35 @@ run('key apps, in a real database', () => {
     }
   });
 
+  it('a try whose give-back could not be written costs the person nothing for good: the hold lapses by itself, and the form still takes a key', async () => {
+    try {
+      await saveServerLimits({ bricks: { keyFormMinutes: 5, keyTries: 2 } }, sara);
+      const id = await open();
+      // One key is refused: a used try. The next try is held, the service answers (not a refusal), and the give-back fails (the database did not answer)
+      await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(401).deps)).rejects.toMatchObject({ code: 'rejected' });
+      const realDelete = prisma.appKeyHold.deleteMany.bind(prisma.appKeyHold) as (args: unknown) => Promise<unknown>;
+      const realUpdate = prisma.appKeyRequest.updateMany.bind(prisma.appKeyRequest) as (args: unknown) => Promise<unknown>;
+      const down = () => Promise.reject(new Error('the database did not answer'));
+      // Every way of giving the try back fails (a hold is deleted; a count would be moved down)
+      const deleting = jest.spyOn(prisma.appKeyHold, 'deleteMany').mockImplementation(((args: { where?: { id?: string } }) => (args?.where?.id ? down() : realDelete(args))) as never);
+      const counting = jest.spyOn(prisma.appKeyRequest, 'updateMany').mockImplementation(((args: { data?: { tries?: { decrement?: number } } }) => (args?.data?.tries?.decrement ? down() : realUpdate(args))) as never);
+      try {
+        await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(503).deps)).rejects.toMatchObject({ code: 'unreachable' });
+      } finally {
+        deleting.mockRestore();
+        counting.mockRestore();
+      }
+      // Until it lapses the try the service never refused is still held, so the form says "too many" for a moment...
+      await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(404).deps)).rejects.toMatchObject({ code: 'too_many' });
+      // ...and when its time is up the form takes the key: the service did not refuse that try
+      await prisma.appKeyHold.updateMany({ where: { requestId: id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+      const done = await submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(404).deps);
+      expect(done).toMatchObject({ created: true });
+    } finally {
+      await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
+    }
+  });
+
   it('keeps the form time and tries as Limits settings, not numbers in the code', async () => {
     try {
       await saveServerLimits({ bricks: { keyFormMinutes: 1, keyTries: 2 } }, sara);
