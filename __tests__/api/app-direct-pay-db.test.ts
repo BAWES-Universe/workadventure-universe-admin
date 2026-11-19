@@ -1456,6 +1456,39 @@ run('payments for pages, in a real database', () => {
         expect(rows.map((row) => row.buyerKey)).toEqual([`acct:${sara}`, buyerOf(code)]);
       });
 
+      it('tells the game who Orbit used as the buyer on every answer: a real account is "account"; a guest account or an anonymous guest is "guest"', async () => {
+        const { artifactId } = await pending();
+        gateway({ record: (order) => paidRecord(order) });
+        const guestAccount = await prisma.user.create({ data: { uuid: `guestacct-${tag}`, email: `guestacct-${tag}@example.test`, name: 'Guest', isGuest: true } });
+        try {
+          const code = word();
+          // A real account: start, order view, check, restore
+          const intentId = wish();
+          const real = await (await game(artifactId, { viewer: viewerOf(`sara-${tag}`), start: true, intentId })).json();
+          expect(real).toMatchObject({ buyer: 'account', reused: false });
+          expect(real.orderId).toBeDefined();
+          expect(await (await game(artifactId, { viewer: viewerOf(`sara-${tag}`), order: real.orderId })).json()).toMatchObject({ buyer: 'account', orderId: real.orderId });
+          expect(await (await game(artifactId, { viewer: viewerOf(`sara-${tag}`), check: true, intentId })).json()).toMatchObject({ buyer: 'account', orderId: real.orderId });
+          expect(await (await game(artifactId, { viewer: viewerOf(`sara-${tag}`), restore: true })).json()).toMatchObject({ buyer: 'account', orderId: real.orderId });
+          // A signed-in person whose Orbit account is a guest account is a guest to Orbit, bound to the recovery code
+          const gIntent = wish();
+          const guestStart = await (await game(artifactId, { viewer: viewerOf(`guestacct-${tag}`), start: true, intentId: gIntent, recoveryCode: code })).json();
+          expect(guestStart).toMatchObject({ buyer: 'guest' });
+          expect((await orders(artifactId)).find((row) => row.id === guestStart.orderId)?.buyerKey).toBe(buyerOf(code));
+          expect(await (await game(artifactId, { viewer: viewerOf(`guestacct-${tag}`), order: guestStart.orderId })).json()).toMatchObject({ buyer: 'guest' });
+          expect(await (await game(artifactId, { viewer: viewerOf(`guestacct-${tag}`), check: true, intentId: gIntent, recoveryCode: code })).json()).toMatchObject({ buyer: 'guest', orderId: guestStart.orderId });
+          expect(await (await game(artifactId, { viewer: viewerOf(`guestacct-${tag}`), restore: true, recoveryCode: code })).json()).toMatchObject({ buyer: 'guest', orderId: guestStart.orderId });
+          // An anonymous guest with a recovery code, and one nobody can find (an identifier that is no account)
+          expect(await (await game(artifactId, { viewer: viewerOf(null), start: true, intentId: wish(), recoveryCode: word() })).json()).toMatchObject({ buyer: 'guest' });
+          expect(await (await game(artifactId, { viewer: viewerOf(null), restore: true, recoveryCode: word() })).json()).toMatchObject({ buyer: 'guest', status: 'none' });
+          expect(await (await game(artifactId, { viewer: viewerOf(`nobody-${tag}`), restore: true, recoveryCode: word() })).json()).toMatchObject({ buyer: 'guest', status: 'none' });
+          // The fields that were there are unchanged
+          expect(Object.keys(real).sort()).toEqual(['amount', 'app', 'buyer', 'checkoutUrl', 'currency', 'orderId', 'reused']);
+        } finally {
+          await prisma.user.delete({ where: { id: guestAccount.id } }).catch(() => undefined);
+        }
+      });
+
       it('restores for the same account from the game, but not for another account or for a guest without the code', async () => {
         const { artifactId } = await pending();
         gateway({ record: (order) => paidRecord(order) });
