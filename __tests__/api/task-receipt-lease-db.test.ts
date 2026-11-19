@@ -356,6 +356,37 @@ run('receipts that always settle (O1)', () => {
     });
   });
 
+  describe('a long pause between runs of one task (the lease runs out between them)', () => {
+    const after = (taskKey: string, runId: string) => instantRulesAndReceipts.afterRun?.({ botId: brick, personId: sara, tool: 'EXA_SEARCH', arguments: {}, callId: 'c', taskKey }, { status: 'done', runId, ok: true, data: {}, chargedMicros: 1, pending: false });
+
+    it('the receipt is ended from the first run alone, then follows the second run when it lands: money and outcome always agree with the run records, and the bot server’s late close is a harmless no-op', async () => {
+      await open('gap-1');
+      const first = await makeRun('gap-1', 'succeeded', { customerMicros: BigInt(9_000), sentAt: START });
+      expect(await settleCheckingReceipts(50, at(30))).toBe(1);
+      expect(await receipt('gap-1')).toMatchObject({ state: 'done', outcome: 'done', actions: [{ run: first.id, outcome: 'worked' }] });
+      // The task goes on: a second run goes out and fails; the receipt is put right from the records
+      const second = await makeRun('gap-1', 'failed', { reason: 'provider_failed' });
+      await after('gap-1', second.id);
+      expect(await receipt('gap-1')).toMatchObject({ state: 'done', outcome: 'partial', generation: 1 });
+      expect((await receipt('gap-1')).actions).toEqual([
+        { run: first.id, label: 'exa', outcome: 'worked' },
+        { run: second.id, label: 'exa', outcome: 'failed' },
+      ]);
+      // The bot server's own close (any generation it holds) changes nothing: the records already say it all
+      expect(await closeReceipt({ botId: brick, taskKey: 'gap-1', personId: sara, state: 'done', generation: 1 }, at(31))).toMatchObject({ ok: true, state: 'done', generation: 1 });
+      expect(await receipt('gap-1')).toMatchObject({ state: 'done', outcome: 'partial' });
+    });
+
+    it('a task with nothing yet that is ended by its lease and then runs: refunded first, then done from the run, never hidden money', async () => {
+      await open('gap-2');
+      await settleCheckingReceipts(50, at(30));
+      expect((await receipt('gap-2')).state).toBe('refunded');
+      const late = await makeRun('gap-2', 'succeeded', { customerMicros: BigInt(9_000) });
+      await after('gap-2', late.id);
+      expect(await receipt('gap-2')).toMatchObject({ state: 'done', outcome: 'done' });
+    });
+  });
+
   describe('case 4: a mixed task', () => {
     it('one action worked and one failed: partly done, with each action’s own line; the bot server saying done does not make it plain done', async () => {
       await open('mixed-1');
