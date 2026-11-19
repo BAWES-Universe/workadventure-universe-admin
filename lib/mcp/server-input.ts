@@ -22,7 +22,13 @@ export const createMcpServerSchema = z.object({
     { message: 'Server URL must not point to internal or private addresses' }
   ).refine(
     // The client posts to it with fetch: another scheme (ftp:, say) can never be reached, so it is refused here, not at the first test
-    (url) => ['http:', 'https:'].includes(new URL(url).protocol),
+    (url) => {
+      try {
+        return ['http:', 'https:'].includes(new URL(url).protocol);
+      } catch {
+        return false;
+      }
+    },
     { message: 'serverUrl must start with http:// or https://' }
   ),
   authType: z.enum(['none', 'bearer', 'api-key', 'oauth'], {
