@@ -344,6 +344,49 @@ run('more Bricks, deleting one and Undo, in a real database', () => {
     expect(await prisma.brickRemoval.count({ where: { botId: undone.id } })).toBe(0);
   });
 
+  it('writes the removal with the delete itself: two removers at once leave one record and one removal, and a delete that fails leaves no record', async () => {
+    const wren = await person('wren');
+    const both = await makeBrick(wren.id, { name: 'Both Brick' });
+    await deleteBrick(both.id, wren.id, NOW);
+    // The owner's page and the sweep pick the same Brick at the same moment
+    const results = await Promise.all([removeGoneBricks(later(8), wren.id), removeGoneBricks(later(8))]);
+    expect(results.flat().filter((id) => id === both.id)).toHaveLength(1);
+    expect(await row(both.id)).toBeNull();
+    expect(await prisma.brickRemoval.count({ where: { botId: both.id } })).toBe(1);
+    expect(await recentlyRemovedBricks(later(8))).toContain(both.id);
+
+    // A delete that fails (the database away at that moment) leaves no record for a Brick that is still there
+    const failing = await makeBrick(wren.id, { name: 'Failing Brick' });
+    await deleteBrick(failing.id, wren.id, NOW);
+    const real = prisma.$queryRaw.bind(prisma) as (...args: unknown[]) => unknown;
+    const spy = jest.spyOn(prisma, '$queryRaw').mockImplementation(((...args: unknown[]) => {
+      const text = JSON.stringify((args[0] as { strings?: string[] })?.strings ?? args[0]);
+      if (text.includes('brick_removals')) throw new Error('database away');
+      return real(...args);
+    }) as never);
+    try {
+      await expect(removeGoneBricks(later(8), wren.id)).rejects.toThrow('database away');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await row(failing.id)).not.toBeNull();
+    expect(await prisma.brickRemoval.count({ where: { botId: failing.id } })).toBe(0);
+    expect(await recentlyRemovedBricks(later(8))).not.toContain(failing.id);
+  });
+
+  it('names every removal that is kept, however many there are', async () => {
+    const wide = await person('wide');
+    const ids = Array.from({ length: 5_003 }, () => `wide-${randomUUID()}`);
+    await prisma.brickRemoval.createMany({ data: ids.map((botId, index) => ({ botId, removedAt: new Date(later(1).getTime() + index) })) });
+    try {
+      const named = new Set(await recentlyRemovedBricks(later(2)));
+      expect(ids.every((id) => named.has(id))).toBe(true);
+    } finally {
+      await prisma.brickRemoval.deleteMany({ where: { botId: { in: ids } } });
+    }
+    expect(wide.id).toBeTruthy();
+  });
+
   it('never makes the Brick everyone gets again: not while it waits deleted, not after Undo twice, and not after it is gone for good', async () => {
     const dana = await person('dana');
     const { brick } = await ensureDefaultBrick(dana.id);

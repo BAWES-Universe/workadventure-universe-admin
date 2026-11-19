@@ -97,12 +97,13 @@ const REMOVAL_KEPT_DAYS = 7;
 /**
  * The Bricks removed for good in the last days, whoever removed them: what the bot server is told on each sweep so it can close their
  * chats. Telling it again is harmless (a chat already closed stays closed), and an answer that never got through loses nothing.
- * Older ones are let go of here.
+ * Older ones are let go of here. Every id still kept is named, however many: a cut at some number would leave the newest ones unheard of for all
+ * seven days (the oldest are first, and they stay), and an id is a few dozen bytes.
  */
 export async function recentlyRemovedBricks(now: Date = new Date()): Promise<string[]> {
   const cutoff = new Date(now.getTime() - REMOVAL_KEPT_DAYS * DAY_MS);
   await prisma.brickRemoval.deleteMany({ where: { removedAt: { lt: cutoff } } });
-  const rows = await prisma.brickRemoval.findMany({ where: { removedAt: { gte: cutoff } }, select: { botId: true }, orderBy: { removedAt: 'asc' }, take: 5_000 });
+  const rows = await prisma.brickRemoval.findMany({ where: { removedAt: { gte: cutoff } }, select: { botId: true }, orderBy: { removedAt: 'asc' } });
   return rows.map((row) => row.botId);
 }
 
@@ -137,17 +138,21 @@ export async function removeGoneBricks(now: Date = new Date(), ownerId?: string,
         await markWaiting(id, now);
         continue;
       }
-      // Still only one whose time has passed: the condition is asked again in the delete itself
-      const where = { id, roomId: null, goneAt: { lte: now } };
-      // Written down BEFORE the delete: whoever asked for this (the owner opening their Bricks page counts), the bot server hears of the
-      // removal on its next sweep, and an id is never lost to a request that failed or whose answer was never read
-      await prisma.brickRemoval.upsert({ where: { botId: id }, create: { botId: id, removedAt: now }, update: { removedAt: now } });
-      const { count } = await deleteWithHiddenBotData(where, () => prisma.bot.deleteMany({ where }));
-      if (count === 0) {
-        // Nothing was removed by this call. If the Brick is still there (Undo got to it, or its time is not here), the record written above is taken back. If it is
-        // GONE, another call removed it (the sweep and the owner's page can pick the same Brick), and the record is theirs: it is kept, or the bot server would never
-        // hear of the removal
-        if (await prisma.bot.findUnique({ where: { id }, select: { id: true } })) await prisma.brickRemoval.deleteMany({ where: { botId: id } });
+      // Still only one whose time has passed: the condition is asked again in the delete itself. The removal is written down by the very statement
+      // that deletes the Brick, so the two are one: no record without a Brick this call removed (a delete that threw, a Brick Undo got to first), and
+      // none taken back or written over when another call (the sweep and the owner's page can pick the same Brick) removed it first, whose record stays.
+      // The bot server hears of the removal on its next sweep, whoever asked for it, and an id is never lost to a request that failed or whose answer was never read
+      const done = await deleteWithHiddenBotData({ id, roomId: null, goneAt: { lte: now } }, () =>
+        prisma.$queryRaw<Array<{ botId: string }>>(Prisma.sql`
+          WITH "removed" AS (
+            DELETE FROM "bots" WHERE "id" = ${id} AND "room_id" IS NULL AND "gone_at" <= ${now} RETURNING "id"
+          )
+          INSERT INTO "brick_removals" ("bot_id", "removed_at") SELECT "id", ${now} FROM "removed"
+          ON CONFLICT ("bot_id") DO UPDATE SET "removed_at" = EXCLUDED."removed_at"
+          RETURNING "bot_id" AS "botId"`)
+      );
+      if (done.length === 0) {
+        // Nothing was removed by this call (Undo got to it, its time is not here, or another call removed it): there is nothing of this call's to write or to take back
         waiting.push(id);
         await markWaiting(id, now);
         continue;
