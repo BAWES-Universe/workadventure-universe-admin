@@ -46,6 +46,9 @@ USER node
 export const UNIVERSE_UP = String.raw`#!/bin/sh
 # Brings this computer's parts up. Safe to run any number of times, and the supervisor at the end runs it again every few seconds.
 # Prints lines Orbit reads: ready=1 or ready=0 reason=..., and restart=1 while Hermes' newly written config still waits for a restart.
+# Every program it runs is the system's own, whatever PATH it was started with, so this is the first thing it does (before the first program, not after it).
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 HOME_DIR="$HOME"
 [ -n "$HOME_DIR" ] || HOME_DIR=/home/node
 STATE="$HOME_DIR/.universe"
@@ -54,8 +57,6 @@ GEOMETRY="$AGENT37_SCREEN_GEOMETRY"
 [ -n "$GEOMETRY" ] || GEOMETRY=1440x900
 WIDTH="$(echo "$GEOMETRY" | cut -dx -f1)"
 HEIGHT="$(echo "$GEOMETRY" | cut -dx -f2)"
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-export PATH
 export DISPLAY=:99
 CHILD=0
 [ "$1" = "--child" ] && CHILD=1
@@ -659,6 +660,8 @@ echo "marked=1"
 /** Lists the files a person would look for: regular files in the home folder (not hidden ones, not the tools' own folders), newest first. */
 export const UNIVERSE_FILES = String.raw`#!/bin/sh
 # One line for each file: size in bytes, TAB, modified (seconds), TAB, path from the home folder. At most 201 lines (the caller says "more" for the 201st).
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 HOME_DIR="$HOME"
 [ -n "$HOME_DIR" ] || HOME_DIR=/home/node
 cd "$HOME_DIR" 2>/dev/null || exit 0

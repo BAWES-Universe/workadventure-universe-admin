@@ -126,16 +126,16 @@ describe('what the scripts the fence keeps may run', () => {
   const script = (name: string) => imageFiles().find((file) => file.name === name)!.text;
 
   it('start from a fixed PATH, so a program the agent put first in its own PATH is never one the supervisor runs', () => {
-    for (const name of ['universe-supervise', 'universe-up', 'universe-clean']) {
+    for (const name of ['universe-supervise', 'universe-up', 'universe-clean', 'universe-mark', 'universe-files']) {
       const text = script(name);
       const line = text.split('\n').find((one) => one.startsWith('PATH='));
       expect(line).toBeDefined();
       // Whatever PATH the agent starts it with, `sleep` is the system's
       const run = spawnSync('sh', ['-c', `${line}; export PATH; command -v sleep`], { env: { ...process.env, PATH: `${folder}:/bin:/usr/bin`, HOME: folder }, encoding: 'utf8' });
       expect(run.stdout.trim()).toMatch(/^\/(usr\/)?bin\/sleep$/);
-      // and it is set before the first program is run
-      const first = Math.min(...['mkdir', 'sleep', 'pkill'].map((word) => text.indexOf(word)).filter((at) => at >= 0));
-      expect(text.indexOf(line!)).toBeLessThan(first);
+      // and it is set before ANY program is run: nothing but the shebang, comments and blank lines comes before it (`cut` and `find` count too)
+      const before = text.split('\n').slice(0, text.split('\n').indexOf(line!));
+      expect(before.filter((one) => one.trim() !== '' && !one.startsWith('#'))).toEqual([]);
     }
   });
 
