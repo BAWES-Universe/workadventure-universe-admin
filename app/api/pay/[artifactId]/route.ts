@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { buyerKeysOf, checkPurchase, INTENT_ID, isOpenByLink, orderForArtifact, pageTakesPayments, restorePurchase, startCheckout } from '@/lib/app-direct/pay';
+import { askKeysOf, buyerKeysOf, checkPurchase, INTENT_ID, isOpenByLink, orderForArtifact, pageTakesPayments, restorePurchase, startCheckout } from '@/lib/app-direct/pay';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed } from '@/lib/me-route';
 
@@ -39,6 +39,8 @@ const bodySchema = z.object({
   intentId: z.string().regex(INTENT_ID).optional(),
   /** What this browser keeps for a guest buyer: only its hash is stored. A signed-in Orbit session needs none. */
   recoveryCode: z.string().max(200).optional(),
+  /** The code of a receipt link this browser opened: used only to find the purchases made under it (Restore, Check payment), never to make a new one. */
+  receiptCode: z.string().max(200).optional(),
   check: z.boolean().optional(),
   restore: z.boolean().optional(),
 });
@@ -67,10 +69,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const buyerKey = buyerKeys[0] ?? null;
   // Who the buyer is, for the host: a guest keeps a receipt link (which holds the recovery code); an account has nothing to keep
   const buyer = session ? 'account' : 'guest';
-  if (body.restore) return buyerKey ? respond({ ...(await restorePurchase({ artifactId, buyerKeys })), buyer }) : respond({ error: 'Say who is asking', code: 'buyer_required' }, 400);
+  if (body.restore) return buyerKey ? respond({ ...(await restorePurchase({ artifactId, buyerKeys: askKeysOf(buyerKeys, body.receiptCode) })), buyer }) : respond({ error: 'Say who is asking', code: 'buyer_required' }, 400);
   if (body.check) {
     if (!buyerKey || !body.intentId) return respond({ error: 'Say who is asking, and about which purchase', code: 'buyer_required' }, 400);
-    const view = await checkPurchase({ artifactId, buyerKeys, intentId: body.intentId });
+    const view = await checkPurchase({ artifactId, buyerKeys: askKeysOf(buyerKeys, body.receiptCode), intentId: body.intentId });
     return view ? respond({ ...view, buyer }) : respond({ error: 'Not found' }, 404);
   }
   if (body.intentId && !buyerKey) return respond({ error: 'Say who is asking', code: 'buyer_required' }, 400);

@@ -41,7 +41,9 @@ describe('the payment line on the shared page', () => {
     expect(window.location.hash).toBe('');
     expect(window.location.pathname).toBe('/a/k7Qm2xR9');
     await ask({ request: 'r1', restore: true });
-    expect(bodies[0].recoveryCode).toBe(CODE);
+    // Asked under the link's code, and the browser's own code is a different one
+    expect(bodies[0].receiptCode).toBe(CODE);
+    expect(bodies[0].recoveryCode).not.toBe(CODE);
     expect(screen.getByRole('status').textContent).toContain('Your purchase from 19 Nov is back.');
     // Found again, so no receipt to save and nothing to press
     expect(screen.queryByRole('button')).toBeNull();

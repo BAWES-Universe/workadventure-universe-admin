@@ -110,6 +110,15 @@ export function buyerKeysOf(input: { accountId?: string | null; recoveryCode?: u
   return [...(input.accountId ? [accountBuyerKey(input.accountId)] : []), ...(guest ? [guest] : [])];
 }
 
+/**
+ * The keys a buyer may ASK under (Restore purchase, Check payment): their own, and the one a receipt link they opened holds. A receipt link's
+ * code only ever finds the purchases made under it; it is never a key to make a new one under, so it is never in the list a start uses.
+ */
+export function askKeysOf(ownKeys: string[], receiptCode: unknown): string[] {
+  const receipt = guestBuyerKey(receiptCode);
+  return receipt && !ownKeys.includes(receipt) ? [...ownKeys, receipt] : ownKeys;
+}
+
 // ---- The owner's side: a job per page --------------------------------------------------------------------------
 
 /**

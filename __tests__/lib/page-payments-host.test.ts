@@ -427,16 +427,42 @@ describe('a paying page on the public share link', () => {
     host.destroy();
   });
 
-  it('adopts the code of a receipt link as this browser’s recovery code, and refuses anything that is not one', async () => {
-    const { host, tap, calls, store } = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }));
-    const code = 'R'.repeat(43);
+  it('keeps a receipt link’s code apart from the browser’s own: it is sent only with Restore and Check payment, never stored over the own code, and never makes a purchase', async () => {
+    const { host, tap, calls, store } = setup((call) => (call.init?.method === 'POST' && !call.body.restore && !call.body.check ? { body: started } : { body: { status: 'none', testPayment: false, buyer: 'guest' } }));
+    const link = 'R'.repeat(43);
     expect(host.useReceiptCode('short')).toBe(false);
     expect(host.useReceiptCode('x'.repeat(40) + '!')).toBe(false);
-    expect(host.useReceiptCode(code)).toBe(true);
-    expect(store.get(`universe-pay-recovery:${ART}`)).toBe(code);
+    // The browser already has its own code
+    tap({ request: 'r0', restore: true });
+    await flush();
+    const own = calls[0].body.recoveryCode as string;
+    expect(host.useReceiptCode(link)).toBe(true);
+    expect(store.get(`universe-pay-recovery:${ART}`)).toBe(own);
+    expect(store.get(`universe-pay-receipt:${ART}`)).toBe(link);
     tap({ request: 'r1', restore: true });
     await flush();
-    expect(calls[0].body.recoveryCode).toBe(code);
+    expect(calls[1].body).toMatchObject({ restore: true, recoveryCode: own, receiptCode: link });
+    // A purchase made now is made under the browser's own code, and the link's code is not even sent with it
+    tap({ request: 'r2' });
+    await flush();
+    const start = calls.at(-1)!;
+    expect(start.body.intentId).toBeDefined();
+    expect(start.body.recoveryCode).toBe(own);
+    expect(start.body.receiptCode).toBeUndefined();
     host.destroy();
+  });
+
+  it('remembers a receipt link’s code for the next load of the page, since the address no longer holds it', async () => {
+    const link = 'R'.repeat(43);
+    const first = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }));
+    first.host.useReceiptCode(link);
+    const kept = new Map(first.store);
+    first.host.destroy();
+    const next = setup(() => ({ body: { status: 'none', testPayment: false, buyer: 'guest' } }));
+    kept.forEach((value, key) => next.store.set(key, value));
+    next.tap({ request: 'r1', restore: true });
+    await flush();
+    expect(next.calls[0].body.receiptCode).toBe(link);
+    next.host.destroy();
   });
 });

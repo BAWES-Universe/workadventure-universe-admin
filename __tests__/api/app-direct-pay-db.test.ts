@@ -1542,6 +1542,29 @@ run('payments for pages, in a real database', () => {
         expect(await (await web(artifactId, { restore: true, recoveryCode: code })).json()).toMatchObject({ status: 'paid' });
       });
 
+      it('a receipt link’s code only finds the purchases made under it: a new purchase is never made under it, and it cannot find the browser’s own purchases for anyone else', async () => {
+        const { artifactId } = await pending();
+        gateway({ record: (order) => paidRecord(order) });
+        const sender = word();
+        const mine = word();
+        // The sender paid; this browser has its own code and opens the sender's receipt link
+        const theirs = await (await web(artifactId, { intentId: wish(), recoveryCode: sender })).json();
+        await old(theirs.orderId);
+        expect(await (await web(artifactId, { restore: true, recoveryCode: mine })).json()).toMatchObject({ status: 'none' });
+        expect(await (await web(artifactId, { restore: true, recoveryCode: mine, receiptCode: sender }, '203.0.113.20')).json()).toMatchObject({ status: 'paid', orderId: theirs.orderId });
+        // A start carrying the link's code is made under the browser's own code only
+        const intentId = wish();
+        const started = await (await web(artifactId, { intentId, recoveryCode: mine, receiptCode: sender }, '203.0.113.21')).json();
+        expect(started.orderId).not.toBe(theirs.orderId);
+        expect((await orders(artifactId)).find((row) => row.id === started.orderId)?.buyerKey).toBe(buyerOf(mine));
+        // The sender, holding only the code they sent, finds nothing of this browser's purchase (and not its open checkout link)
+        expect(await (await web(artifactId, { restore: true, recoveryCode: sender }, '203.0.113.22')).json()).toMatchObject({ status: 'paid', orderId: theirs.orderId });
+        expect((await (await web(artifactId, { check: true, intentId, recoveryCode: sender }, '203.0.113.23')).json()).orderId).toBeUndefined();
+        // This browser finds both of its purchases by asking under its own code and the link's
+        await old(started.orderId);
+        expect((await (await web(artifactId, { check: true, intentId, recoveryCode: mine, receiptCode: sender }, '203.0.113.24')).json())).toMatchObject({ status: 'paid', orderId: started.orderId });
+      });
+
       it('binds an Orbit session on the public link to the account, and restores it for the same account in the game', async () => {
         const { artifactId } = await pending();
         gateway({ record: (order) => paidRecord(order) });

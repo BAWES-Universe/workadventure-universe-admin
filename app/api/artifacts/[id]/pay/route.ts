@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { artifactRoute, viewerSchema } from '@/lib/artifact-http';
 import { requireMayOpen } from '@/lib/artifact-service';
 import { ArtifactError } from '@/lib/artifacts';
-import { buyerKeysOf, checkPurchase, INTENT_ID, orderForArtifact, pageTakesPayments, restorePurchase, startCheckout } from '@/lib/app-direct/pay';
+import { askKeysOf, buyerKeysOf, checkPurchase, INTENT_ID, orderForArtifact, pageTakesPayments, restorePurchase, startCheckout } from '@/lib/app-direct/pay';
 import { findUserByIdentifier } from '@/lib/user-identifier';
 
 export const runtime = 'nodejs';
@@ -18,6 +18,7 @@ const schema = z
     intentId: intentId.optional(),
     /** What a guest's window keeps for them: only its hash is stored. A signed-in person needs none (their account is the buyer). */
     recoveryCode: z.string().max(200).optional(),
+    receiptCode: z.string().max(200).optional(),
     /** Check payment: where the order made for `intentId` stands. */
     check: z.boolean().optional(),
     /** Restore purchase: this buyer's verified paid order for the page's offer. */
@@ -53,11 +54,11 @@ export const POST = artifactRoute('POST /api/artifacts/:id/pay', 'game', schema,
   const buyerKeys = buyerKey ? [buyerKey, ...alsoBuyerKeys] : [];
   if (body.restore) {
     if (!buyerKey) throw new ArtifactError('buyer_required', 400, 'Say who is asking.');
-    return restorePurchase({ artifactId: params.id, buyerKeys });
+    return restorePurchase({ artifactId: params.id, buyerKeys: askKeysOf(buyerKeys, body.receiptCode) });
   }
   if (body.check) {
     if (!buyerKey || !body.intentId) throw new ArtifactError('buyer_required', 400, 'Say who is asking, and about which purchase.');
-    const view = await checkPurchase({ artifactId: params.id, buyerKeys, intentId: body.intentId });
+    const view = await checkPurchase({ artifactId: params.id, buyerKeys: askKeysOf(buyerKeys, body.receiptCode), intentId: body.intentId });
     if (!view) throw new ArtifactError('not_found', 404, 'No such order.');
     return view;
   }

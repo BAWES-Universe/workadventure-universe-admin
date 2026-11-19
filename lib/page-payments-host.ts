@@ -132,7 +132,7 @@ export interface PagePaymentsHost {
   restorePurchase: () => void;
   /** The buyer closed a line that can be closed (Restore purchase, or "no purchase found"). */
   dismiss: () => void;
-  /** The shared page was opened with a receipt link: its code is this browser's recovery code from now on. False when the code is not one. */
+  /** The shared page was opened with a receipt link: its code is kept for finding the purchases made under it, never for making new ones. False when it is not a code. */
   useReceiptCode: (code: string) => boolean;
   destroy: () => void;
 }
@@ -152,6 +152,8 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   const ask = options.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
   const random = options.randomId ?? defaultRandom;
   const storageKey = `universe-pay-recovery:${options.artifactId}`;
+  /** The code of a receipt link, kept apart from the browser's own: it only ever finds the purchases made under it, and no new purchase is made under it. */
+  const receiptKey = `universe-pay-receipt:${options.artifactId}`;
   const base = `/api/pay/${encodeURIComponent(options.artifactId)}`;
   const listeners = new Set<(line: PayLine) => void>();
   let line: PayLine = NO_PAY_LINE;
@@ -171,6 +173,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   /** The last restore the page itself asked for: a Restore purchase that finds the purchase is told to the page under it. */
   let lastRestore: { request: string; ticket: Ticket } | null = null;
   let memoryCode: string | null = null;
+  let memoryReceipt: string | null = null;
 
   const publish = (update: Partial<PayLine>, keep = false) => {
     line = { ...(keep ? line : { ...NO_PAY_LINE, receipt: line.receipt }), buyer, ...update };
@@ -195,6 +198,18 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     return memoryCode;
   };
 
+  /** The code of a receipt link this browser opened (kept for asking only), or null. */
+  const receiptCode = (): string | null => {
+    if (memoryReceipt) return memoryReceipt;
+    try {
+      const stored = options.storage?.getItem(receiptKey);
+      if (stored && RECOVERY_CODE.test(stored)) memoryReceipt = stored;
+    } catch {
+      // No code kept
+    }
+    return memoryReceipt;
+  };
+
   /** The link of an order that is still open, when the answer holds one the host may open (plain https only). */
   const resumeOf = (body: Record<string, unknown> | null): { url: string; app: string; popup: Window | null } | null => {
     const url = safeCheckout(typeof body?.checkoutUrl === 'string' ? body.checkoutUrl : null);
@@ -206,7 +221,10 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
   const receiptFor = (): string | null => (buyer === 'guest' && options.pageUrl ? `${options.pageUrl.split('#')[0]}#receipt=${recoveryCode()}` : null);
 
   const post = async (body: Record<string, unknown>, signal?: AbortSignal): Promise<Answer> => {
-    const response = await ask(base, { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, recoveryCode: recoveryCode() }), signal });
+    // A receipt link's code goes only with a question (Restore, Check payment), never with the start of a purchase
+    const own = recoveryCode();
+    const link = body.restore || body.check ? receiptCode() : null;
+    const response = await ask(base, { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, recoveryCode: own, ...(link && link !== own ? { receiptCode: link } : {}) }), signal });
     const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     if (json && (json.buyer === 'guest' || json.buyer === 'account')) buyer = json.buyer;
     return { ok: response.ok, status: response.status, body: json };
@@ -459,9 +477,10 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
     },
     useReceiptCode(code) {
       if (destroyed || !RECOVERY_CODE.test(code)) return false;
-      memoryCode = code;
+      // Never this browser's own code: that one makes every new purchase, and a link someone sent must not make theirs the sender's
+      memoryReceipt = code;
       try {
-        options.storage?.setItem(storageKey, code);
+        options.storage?.setItem(receiptKey, code);
       } catch {
         // Kept for this page's life only
       }
