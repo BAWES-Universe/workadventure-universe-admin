@@ -105,25 +105,26 @@ export async function sendJson(url: string, method: 'GET' | 'POST' | 'PUT' | 'PA
  * older figures never lands on top of the figures now on the sheet. `null` asks for nothing (the sheet is closed or not ready).
  */
 export function usePreview(request: PreviewRequest | null): { preview: PreviewView | null; loading: boolean } {
-  const [state, setState] = useState<{ preview: PreviewView | null; loading: boolean }>({ preview: null, loading: false });
+  // The answer is kept with the request it was for, and shown only while that is the request now made: figures of $5 are not left on screen under $50
+  const [state, setState] = useState<{ preview: PreviewView | null; loading: boolean; key: string | null }>({ preview: null, loading: false, key: null });
   const latest = useRef(0);
   const key = request ? JSON.stringify(request) : null;
   useEffect(() => {
     const mine = ++latest.current;
     if (!key) {
-      setState({ preview: null, loading: false });
+      setState({ preview: null, loading: false, key: null });
       return;
     }
-    setState((current) => ({ preview: current.preview, loading: true }));
+    setState((current) => ({ ...current, loading: true }));
     const timer = setTimeout(async () => {
       const result = await sendJson('/api/admin/grants/preview', 'POST', JSON.parse(key));
       if (mine !== latest.current) return;
-      if (result.ok && result.data) setState({ preview: result.data as unknown as PreviewView, loading: false });
-      else setState({ preview: { numbers: null, clash: null, problem: result.error ?? 'The preview isn’t available right now.' }, loading: false });
+      if (result.ok && result.data) setState({ preview: result.data as unknown as PreviewView, loading: false, key });
+      else setState({ preview: { numbers: null, clash: null, problem: result.error ?? 'The preview isn’t available right now.' }, loading: false, key });
     }, 250);
     return () => clearTimeout(timer);
   }, [key]);
-  return state;
+  return { preview: state.key === key ? state.preview : null, loading: state.loading };
 }
 
 // ---- The recipients picker ----
@@ -173,7 +174,9 @@ type Match = { id: string; name: string; woka?: string[]; detail?: string };
 /** Search by name, one search at a time: only the latest answer shows. */
 function Finder({ kind, onPick, picked }: { kind: 'people' | 'universes'; onPick: (match: Match) => void; picked: string[] }) {
   const [q, setQ] = useState('');
-  const [matches, setMatches] = useState<Match[] | null>(null);
+  // The results are kept with the search they answer: after typing on, the rows of the earlier search are not offered
+  const [found, setFound] = useState<{ q: string; kind: string; matches: Match[] } | null>(null);
+  const matches = found && found.q === q && found.kind === kind ? found.matches : null;
   const [failed, setFailed] = useState(false);
   const latest = useRef(0);
   useEffect(() => {
@@ -182,9 +185,9 @@ function Finder({ kind, onPick, picked }: { kind: 'people' | 'universes'; onPick
     const timer = setTimeout(async () => {
       const result = await sendJson(`/api/admin/grants/find?kind=${kind}&q=${encodeURIComponent(q)}`, 'GET');
       if (mine !== latest.current) return;
-      if (result.ok && result.data && Array.isArray(result.data.results)) setMatches(result.data.results as Match[]);
+      if (result.ok && result.data && Array.isArray(result.data.results)) setFound({ q, kind, matches: result.data.results as Match[] });
       else {
-        setMatches(null);
+        setFound(null);
         setFailed(true);
       }
     }, 200);

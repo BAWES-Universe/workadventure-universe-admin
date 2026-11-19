@@ -287,6 +287,25 @@ describe('gifts', () => {
     await waitFor(() => expect(screen.getByTestId('grants-save')).toBeDisabled());
   });
 
+  it('does not offer the people of an earlier search once typing goes on', async () => {
+    render(<GrantsPage />);
+    fireEvent.click(await screen.findByTestId('grants-give'));
+    const search = await screen.findByLabelText('Search people by name');
+    fireEvent.change(search, { target: { value: 'o' } });
+    await screen.findByText('Omar', { selector: 'button *' });
+    // Typing on: until the next answer comes, nobody from the search before is offered
+    let release: (value: unknown) => void = () => undefined;
+    const original = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) =>
+      String(url).startsWith('/api/admin/grants/find') ? new Promise((resolve) => { release = resolve; }) : original(url, init),
+    );
+    fireEvent.change(search, { target: { value: 'oz' } });
+    expect(screen.queryByText('Omar', { selector: 'button *' })).not.toBeInTheDocument();
+    await waitFor(() => expect(calls('GET', 'q=oz')).toHaveLength(1));
+    release({ ok: true, status: 200, json: () => Promise.resolve({ results: [{ id: 'omar', name: 'Omar', woka: [] }] }) });
+    expect(await screen.findByText('Omar', { selector: 'button *' })).toBeInTheDocument();
+  });
+
   it('records what was agreed only for extra usage that will be billed', async () => {
     render(<GrantsPage />);
     await pickOmar();
