@@ -34,7 +34,7 @@ import {
   WITH_CONNECTION,
 } from '@/lib/app-connections';
 import { ensureFreshOAuthConfig, LEASE_MS } from '@/lib/mcp/oauth-refresh';
-import { reportToolSignIn } from '@/lib/tool-signin';
+import { reportKeyWorked, reportToolSignIn } from '@/lib/tool-signin';
 import { GET as listApps, POST as addApp } from '@/app/api/me/apps/route';
 import { DELETE as disconnectApp } from '@/app/api/me/apps/[connectionId]/route';
 import { POST as letUse } from '@/app/api/me/apps/[connectionId]/bricks/route';
@@ -571,6 +571,22 @@ run('apps a person connects once, in a real database', () => {
     await markConnectionReconnected(connection.id, sara);
     expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: seenAt })).toEqual({ changed: false });
     expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).toBeNull();
+  });
+
+  it('a success of the old key does not clear a refusal of the key that replaced it', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    await prisma.appConnection.update({ where: { id: connection.id }, data: { keyVersion: 4, signInLostAt: new Date(Date.now() - 60_000), signInLostStatus: 401 } });
+    const real = prisma.appConnection.findUnique.bind(prisma.appConnection);
+    const spy = jest.spyOn(prisma.appConnection, 'findUnique').mockImplementationOnce(((args: never) =>
+      real(args).then(async (row) => {
+        // The owner replaces the key, and its first call is refused, between the read and the write
+        await prisma.appConnection.update({ where: { id: connection.id }, data: { keyVersion: 5, signInLostAt: new Date(Date.now() - 1_000), signInLostStatus: 403 } });
+        return row;
+      })) as never);
+    await reportKeyWorked(connection.id, 4);
+    spy.mockRestore();
+    expect(await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).toMatchObject({ keyVersion: 5, signInLostStatus: 403 });
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).not.toBeNull();
   });
 
   it('refuses to sign a grant in on its own: its connection does', async () => {
