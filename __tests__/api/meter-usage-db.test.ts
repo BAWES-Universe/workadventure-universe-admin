@@ -163,6 +163,20 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await memberUsage(sara.id, NOW)).chat.left).toBe(1);
     });
 
+    it('a grant that answers while an ask is still being written waits for it, so the ask is answered', async () => {
+      const sara = await person('sara');
+      const holder = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`meter_request:${sara.id}:computer`}))`;
+        await tx.meterRequest.create({ data: { personId: sara.id, what: 'computer', createdAt: hours(-1) } });
+        await new Promise((resolve) => setTimeout(resolve, 600));
+      });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      // The ask is not committed yet: an answer that did not wait would see nothing to answer
+      expect(await answerRequests(sara.id, 'grant-x', NOW, NOW, 'computer')).toBe(1);
+      await holder;
+      expect(await prisma.meterRequest.count({ where: { personId: sara.id, answeredAt: null } })).toBe(0);
+    });
+
     it('keeps the chat bar and the credit when the computer part cannot be read, and says the computer part is unavailable', async () => {
       await setUp();
       const sara = await person('sara');

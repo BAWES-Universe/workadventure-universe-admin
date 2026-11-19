@@ -164,6 +164,12 @@ run('the meter, in a real database', () => {
       expect(compared.replies.state).toBe('same');
     });
 
+    it('counts nothing for a reply window that has run its hours, even while its row is still there', async () => {
+      const kai = await person('kai');
+      await prisma.replyWindow.create({ data: { key: `ua:person:${kai.id}`, startedAt: new Date(Date.now() - 6 * 3_600_000) } });
+      expect(await compareReplyWindow(kai.id)).toMatchObject({ since: null, today: 0, books: 0 });
+    });
+
     it('leaves work a Brick did on its own out of the comparison with today’s window count', async () => {
       const dana = await person('dana');
       await prisma.replyWindow.create({ data: { key: `ua:person:${dana.id}`, startedAt: new Date(Date.now() - 60 * 60_000) } });
