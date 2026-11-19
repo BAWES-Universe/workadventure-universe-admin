@@ -21,7 +21,7 @@ jest.mock('@/lib/tool-signin', () => ({ syncToolSignInNotices: jest.fn(async () 
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { createBrick } from '@/lib/brick-create';
-import { deleteBrick } from '@/lib/brick-delete';
+import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { checkBotAccess } from '@/lib/bot-access';
 import { startVisit, whereIsBrick } from '@/lib/brick-visit';
 import { dropHomesWithoutAccess, homeOfBrick, moveBrick, takeOutBrick } from '@/lib/brick-home';
@@ -55,6 +55,10 @@ let secondBrickId = '';
 let roomBotId = '';
 let serverProviderId = '';
 const tokensBefore = { service: process.env.BOT_SERVICE_TOKEN, admin: process.env.ADMIN_API_TOKEN };
+// What setup made, recorded the moment each thing exists, so teardown works after a setup that stopped halfway
+const made = { users: [] as string[], universes: [] as string[] };
+const sweepRooms: string[] = [];
+const realCanManageBots = jest.requireActual('@/lib/bot-permissions').canManageBots as typeof canManageBots;
 
 const as = (user: Person | null) => session.mockResolvedValue(user ? { id: user.id, email: user.email, name: 'x', isSuperAdmin: false } : null);
 const ids = (id: string) => ({ params: Promise.resolve({ id }) });
@@ -73,6 +77,7 @@ run('a Brick that lives in a room, in a real database', () => {
     process.env.ADMIN_API_TOKEN = ADMIN_TOKEN;
     const person = async (name: string): Promise<Person> => {
       const user = await prisma.user.create({ data: { uuid: `${name}-${tag}`, email: `${name}-${tag}@example.test`, name } });
+      made.users.push(user.id);
       return { id: user.id, uuid: user.uuid, email: user.email! };
     };
     sara = await person('sara');
@@ -80,6 +85,7 @@ run('a Brick that lives in a room, in a real database', () => {
     host = await person('host');
     const make = async (slug: string, ownerId: string, visits = false) => {
       const universe = await prisma.universe.create({ data: { slug: `${slug}-${tag}`, name: `${slug} place`, ownerId, allowVisitingBricks: visits } });
+      made.universes.push(universe.id);
       const world = await prisma.world.create({ data: { universeId: universe.id, slug: 'hq', name: 'HQ' } });
       const room = await prisma.room.create({ data: { worldId: world.id, slug: 'lobby', name: 'Lobby' } });
       await prisma.room.create({ data: { worldId: world.id, slug: 'cafe', name: 'Cafe' } });
@@ -100,24 +106,45 @@ run('a Brick that lives in a room, in a real database', () => {
   });
 
   afterAll(async () => {
-    await prisma.botsAiProvider.deleteMany({ where: { providerId: { in: [serverProviderId, keyId] } } });
-    await prisma.universe.deleteMany({ where: { id: { in: [own.universeId, hosted.universeId, closed.universeId] } } });
-    await prisma.user.deleteMany({ where: { id: { in: [sara.id, omar.id, host.id] } } });
-    if (tokensBefore.service === undefined) delete process.env.BOT_SERVICE_TOKEN;
-    else process.env.BOT_SERVICE_TOKEN = tokensBefore.service;
-    if (tokensBefore.admin === undefined) delete process.env.ADMIN_API_TOKEN;
-    else process.env.ADMIN_API_TOKEN = tokensBefore.admin;
-    await prisma.$disconnect();
+    try {
+      await prisma.botsAiProvider.deleteMany({ where: { providerId: { in: [serverProviderId, keyId].filter(Boolean) } } });
+      await prisma.universe.deleteMany({ where: { id: { in: made.universes } } });
+      await prisma.user.deleteMany({ where: { id: { in: made.users } } });
+    } finally {
+      if (tokensBefore.service === undefined) delete process.env.BOT_SERVICE_TOKEN;
+      else process.env.BOT_SERVICE_TOKEN = tokensBefore.service;
+      if (tokensBefore.admin === undefined) delete process.env.ADMIN_API_TOKEN;
+      else process.env.ADMIN_API_TOKEN = tokensBefore.admin;
+      await prisma.$disconnect();
+    }
+  });
+
+  afterEach(async () => {
+    // The rooms a sweep case made for itself go with their homes, whether its assertions held or not
+    await prisma.room.deleteMany({ where: { id: { in: sweepRooms } } });
+    sweepRooms.length = 0;
   });
 
   beforeEach(async () => {
+    // Nothing a test left, whether it failed halfway or not: no permission answer still queued, the shared Bricks neither deleted nor placed
+    (canManageBots as jest.Mock).mockReset().mockImplementation(realCanManageBots);
     await prisma.brickHome.deleteMany({ where: { botId: { in: [brickId, secondBrickId] } } });
     await prisma.brickVisit.deleteMany({ where: { userId: sara.id } });
-    await prisma.bot.updateMany({ where: { id: { in: [brickId, secondBrickId] } }, data: { aiProviderRef: UNIVERSE_AI_REF, aiModel: null, enabled: true } });
+    await prisma.bot.updateMany({ where: { id: { in: [brickId, secondBrickId] } }, data: { aiProviderRef: UNIVERSE_AI_REF, aiModel: null, enabled: true, deletedAt: null, goneAt: null, enabledBeforeDelete: null } });
+    await prisma.worldMember.deleteMany({ where: { userId: omar.id, worldId: (await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } })).id } });
     await prisma.aiKeyLend.deleteMany({ where: { providerId: keyId } });
     await prisma.worldMember.upsert({ where: { userId_worldId: { userId: sara.id, worldId: (await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } })).id } }, update: { tags: ['admin'] }, create: { userId: sara.id, worldId: (await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } })).id, tags: ['admin'] } });
     as(sara);
   });
+
+  /** A room of its own in the hosted universe, for one sweep case: the case reads and sweeps this room alone, so no home another test made can be in its way. */
+  const sweepRoom = async () => {
+    const world = await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } });
+    const slug = `sweep-${randomUUID().slice(0, 8)}`;
+    const room = await prisma.room.create({ data: { worldId: world.id, slug, name: slug } });
+    sweepRooms.push(room.id);
+    return { id: room.id, url: hosted.roomUrl.replace(/\/lobby$/, `/${slug}`), world };
+  };
 
   describe('giving a Brick a home', () => {
     it('places it with its spot, says where it lives on its page, and moves it when placed again: one home at most', async () => {
@@ -271,7 +298,13 @@ run('a Brick that lives in a room, in a real database', () => {
       await deleteBrick(brickId, sara.id);
       expect(await home(brickId)).toBeNull();
       expect(await prisma.brickVisit.count({ where: { botId: brickId } })).toBe(0);
-      await prisma.bot.update({ where: { id: brickId }, data: { deletedAt: null, goneAt: null, enabled: true, enabledBeforeDelete: null } });
+      // The real Undo: the Brick is back, and neither its home nor its visit comes with it
+      const back = await undoBrickDelete(brickId, sara.id);
+      expect(back).toMatchObject({ id: brickId, enabled: true });
+      expect((await prisma.bot.findUniqueOrThrow({ where: { id: brickId } })).deletedAt).toBeNull();
+      expect(await home(brickId)).toBeNull();
+      expect(await prisma.brickVisit.count({ where: { botId: brickId } })).toBe(0);
+      expect(await homeOfBrick(brickId, sara.id)).toBeNull();
     });
 
     it('is not on the map while the Brick is switched off', async () => {
@@ -461,81 +494,104 @@ run('a Brick that lives in a room, in a real database', () => {
       expect((await home(brickId))?.behaviorConfig).toEqual({ ...SPOT, speed: 70, goesToPeople: true, wanderSpeed: 25 });
     });
 
-    it('a manager’s edit or removal is for the room they were checked in: a Brick moved on since is left alone', async () => {
+    it('a manager’s edit or removal is for the room they were checked in: a Brick moved on after the check is left alone', async () => {
+      // The Brick is in the hosted room; the owner moves it to their own room after the manager's check for the hosted room has succeeded and before the write
+      const movedAfterTheCheck = () =>
+        (canManageBots as jest.Mock).mockImplementationOnce(async (...args: Parameters<typeof canManageBots>) => {
+          const answer = await realCanManageBots(...args);
+          expect(answer).toBe(true);
+          expect((await put(brickId, own.roomUrl, { behaviorConfig: SPOT })).status).toBe(200);
+          return answer;
+        });
       await put(brickId, hosted.roomUrl, { behaviorConfig: SPOT });
-      // The owner moves it to their own universe's room; the manager of the old room still holds the old reading
-      await put(brickId, own.roomUrl, { behaviorConfig: SPOT });
+      movedAfterTheCheck();
       expect(await moveBrick(brickId, host.id, { behaviorConfig: { speed: 99 } })).toBe(false);
+      expect(await home(brickId)).toMatchObject({ roomId: own.roomId, behaviorConfig: SPOT });
+
+      await put(brickId, hosted.roomUrl, { behaviorConfig: SPOT });
+      movedAfterTheCheck();
       expect(await takeOutBrick(brickId, host.id)).toBe('not_found');
-      const row = await home(brickId);
-      expect(row?.roomId).toBe(own.roomId);
-      expect(row?.behaviorConfig).toEqual(SPOT);
+      expect(await home(brickId)).toMatchObject({ roomId: own.roomId, behaviorConfig: SPOT });
       expect(await takeOutBrick(brickId, sara.id)).toBe('taken_out');
     });
     it('a home placed again while its old one was being judged stays: only the row that failed the check goes', async () => {
-      const world = await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } });
       for (const via of ['read', 'sweep'] as const) {
-        await put(brickId, hosted.roomUrl, { behaviorConfig: SPOT });
-        await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: world.id } });
-        // Between the denial and the delete, its placer gets access back and places it again in the same room
-        const real = jest.requireActual('@/lib/bot-permissions').canManageBots as typeof canManageBots;
-        (canManageBots as jest.Mock).mockImplementationOnce(async (...args: Parameters<typeof canManageBots>) => {
-          const answer = await real(...args);
-          await prisma.worldMember.create({ data: { userId: sara.id, worldId: world.id, tags: ['admin'] } });
-          expect((await put(brickId, hosted.roomUrl, { behaviorConfig: { ...SPOT, speed: 77 } })).status).toBe(200);
-          return answer;
-        });
-        if (via === 'read') await homeOfBrick(brickId, sara.id);
-        else await dropHomesWithoutAccess();
+        const room = await sweepRoom();
+        await put(brickId, room.url, { behaviorConfig: SPOT });
+        await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: room.world.id } });
+        // Its placer gets access back and places it again in the same room, then the judgement that was already made is delivered
+        const placedAgain = async () => {
+          await prisma.worldMember.create({ data: { userId: sara.id, worldId: room.world.id, tags: ['admin'] } });
+          expect((await put(brickId, room.url, { behaviorConfig: { ...SPOT, speed: 77 } })).status).toBe(200);
+        };
+        if (via === 'read') {
+          // A read asks once: between the denial and the delete, the placement is made again
+          (canManageBots as jest.Mock).mockImplementationOnce(async (...args: Parameters<typeof canManageBots>) => {
+            const answer = await realCanManageBots(...args);
+            await placedAgain();
+            return answer;
+          });
+          await homeOfBrick(brickId, sara.id);
+        } else {
+          // A sweep asks twice (once to read, once more before it deletes): the denial of the second ask is taken before the access is restored and the
+          // Brick placed again, and delivered afterwards, so the sweep tries to delete the placement it read and the new one has to survive it
+          (canManageBots as jest.Mock)
+            .mockImplementationOnce(async (...args: Parameters<typeof canManageBots>) => realCanManageBots(...args))
+            .mockImplementationOnce(async (...args: Parameters<typeof canManageBots>) => {
+              const denial = await realCanManageBots(...args);
+              expect(denial).toBe(false);
+              await placedAgain();
+              return denial;
+            });
+          expect(await dropHomesWithoutAccess(room.id)).toBe(0);
+        }
         expect((await home(brickId))?.behaviorConfig).toEqual({ ...SPOT, speed: 77 });
         await deleteHome(call('DELETE', `/api/bricks/${brickId}/home`), ids(brickId));
       }
     });
     it('removes every stale home in one call however it is paged, mixed with healthy ones', async () => {
-      const world = await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } });
-      const ids5: string[] = [];
-      for (let i = 0; i < 5; i++) ids5.push((await createBrick({ ownerId: sara.id, name: `Stale ${i}` })).id);
+      // One room, two placers: Sara's homes go stale when she loses the room, Omar's stay healthy, and they are interleaved by id however the ids fall
+      const room = await sweepRoom();
+      await prisma.worldMember.create({ data: { userId: omar.id, worldId: room.world.id, tags: ['admin'] } });
+      const stale: string[] = [];
+      for (let i = 0; i < 5; i++) stale.push((await createBrick({ ownerId: sara.id, name: `Stale ${i}` })).id);
       const healthy: string[] = [];
-      for (let i = 0; i < 3; i++) healthy.push((await createBrick({ ownerId: sara.id, name: `Healthy ${i}` })).id);
-      for (const id of ids5) await put(id, hosted.roomUrl);
-      for (const id of healthy) await put(id, own.roomUrl);
-      await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: world.id } });
-      expect(await dropHomesWithoutAccess(undefined, 2)).toBe(5);
-      expect(await prisma.brickHome.count({ where: { botId: { in: ids5 } } })).toBe(0);
+      for (let i = 0; i < 3; i++) healthy.push((await createBrick({ ownerId: omar.id, name: `Healthy ${i}` })).id);
+      for (const id of stale) expect((await prisma.brickHome.create({ data: { botId: id, roomId: room.id, placedById: sara.id, behaviorType: 'idle', behaviorConfig: {} } })).botId).toBe(id);
+      for (const id of healthy) expect((await prisma.brickHome.create({ data: { botId: id, roomId: room.id, placedById: omar.id, behaviorType: 'idle', behaviorConfig: {} } })).botId).toBe(id);
+      await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: room.world.id } });
+      expect(await dropHomesWithoutAccess(room.id, 2)).toBe(5);
+      expect(await prisma.brickHome.count({ where: { botId: { in: stale } } })).toBe(0);
       expect(await prisma.brickHome.count({ where: { botId: { in: healthy } } })).toBe(3);
-      await prisma.worldMember.create({ data: { userId: sara.id, worldId: world.id, tags: ['admin'] } });
     });
     it('keeps sweeping when a home on a page boundary is taken out by someone else between two pages', async () => {
-      const world = await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } });
+      const room = await sweepRoom();
       const made: string[] = [];
       for (let i = 0; i < 4; i++) made.push((await createBrick({ ownerId: sara.id, name: `Boundary ${i}` })).id);
-      for (const id of made) await put(id, hosted.roomUrl);
-      await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: world.id } });
-      const sorted = [...made, brickId, secondBrickId].filter((id) => made.includes(id)).sort();
-      const real = jest.requireActual('@/lib/bot-permissions').canManageBots as typeof canManageBots;
-      // Page one is the two lowest ids; its last row is gone before page two is read
+      for (const id of made) await put(id, room.url);
+      await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: room.world.id } });
+      // The room holds only these four, so page one is the two lowest ids and its last row is gone before page two is read
+      const sorted = [...made].sort();
       (canManageBots as jest.Mock).mockImplementationOnce(async (...args: Parameters<typeof canManageBots>) => {
         await prisma.brickHome.delete({ where: { botId: sorted[1] } });
-        return real(...args);
+        return realCanManageBots(...args);
       });
-      expect(await dropHomesWithoutAccess(undefined, 2)).toBe(3);
-      expect(await prisma.brickHome.count({ where: { botId: { in: made } } })).toBe(0);
-      await prisma.worldMember.create({ data: { userId: sara.id, worldId: world.id, tags: ['admin'] } });
+      expect(await dropHomesWithoutAccess(room.id, 2)).toBe(3);
+      expect(await prisma.brickHome.count({ where: { roomId: room.id } })).toBe(0);
     });
     it('does not apply a denial found on an early page to homes whose placer has access again by the time the sweep ends', async () => {
-      const world = await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } });
+      const room = await sweepRoom();
       const made: string[] = [];
       for (let i = 0; i < 4; i++) made.push((await createBrick({ ownerId: sara.id, name: `Late ${i}` })).id);
-      for (const id of made) await put(id, hosted.roomUrl);
-      await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: world.id } });
-      const real = jest.requireActual('@/lib/bot-permissions').canManageBots as typeof canManageBots;
+      for (const id of made) await put(id, room.url);
+      await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: room.world.id } });
       // Page one finds the placer denied; before the sweep ends their access is back
       (canManageBots as jest.Mock).mockImplementationOnce(async (...args: Parameters<typeof canManageBots>) => {
-        const answer = await real(...args);
-        await prisma.worldMember.create({ data: { userId: sara.id, worldId: world.id, tags: ['admin'] } });
+        const answer = await realCanManageBots(...args);
+        await prisma.worldMember.create({ data: { userId: sara.id, worldId: room.world.id, tags: ['admin'] } });
         return answer;
       });
-      expect(await dropHomesWithoutAccess(undefined, 2)).toBe(0);
+      expect(await dropHomesWithoutAccess(room.id, 2)).toBe(0);
       expect(await prisma.brickHome.count({ where: { botId: { in: made } } })).toBe(4);
     });
   });
