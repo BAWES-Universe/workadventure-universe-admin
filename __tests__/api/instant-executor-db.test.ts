@@ -950,6 +950,10 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await evaluatePause()).toBe(false);
       // Confirmed, for a run in the window: that is a failure of the runs being counted
       await prisma.instantRun.update({ where: { id: ids[0] }, data: { finishedAt: new Date() } });
+      // Confirmed at zero: the person got nothing back, so it is not a failure of the runs being counted
+      await prisma.instantRefund.updateMany({ where: { refundKey: `gw-a-${tag}` }, data: { amountMicros: BigInt(0) } });
+      expect(await evaluatePause()).toBe(false);
+      await prisma.instantRefund.updateMany({ where: { refundKey: `gw-a-${tag}` }, data: { amountMicros: BigInt(1_000) } });
       expect(await evaluatePause()).toBe(true);
     });
 
@@ -1392,11 +1396,19 @@ run('the bounded Instant executor, in a real database', () => {
       const f = fakeFunds(1_000_000);
       const a = await charged(f, p, 'a');
       f.funds.refund.mockResolvedValueOnce({ ok: true, refundedMicros: 0 });
-      expect(await giveBack({ personId: sara, runId: a }, { funds: f.funds })).toEqual({ status: 'given', amountMicros: 0 });
+      // The person is told nothing was given back (never "given 0")
+      expect(await giveBack({ personId: sara, runId: a }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'not_charged' });
       const row = await prisma.instantRefund.findFirstOrThrow({ where: { runId: a } });
       expect(row.confirmedAt).not.toBeNull();
       expect(Number(row.amountMicros)).toBe(0);
       expect(Number((await runOf(a)).refundedMicros)).toBe(0);
+      // The amount check allows a confirmed zero and never a negative amount, confirmed or not
+      await expect(prisma.instantRefund.updateMany({ where: { runId: a }, data: { amountMicros: BigInt(-1) } })).rejects.toThrow();
+      await expect(prisma.instantRefund.updateMany({ where: { runId: a }, data: { confirmedAt: null, amountMicros: BigInt(0) } })).rejects.toThrow();
+      // Asked again, the same answer, and the books are not asked again
+      f.funds.refund.mockClear();
+      expect(await giveBack({ personId: sara, runId: a }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'not_charged' });
+      expect(f.funds.refund).not.toHaveBeenCalled();
       // An answer that says yes without an amount leaves the intent for the next ask
       const b = await charged(f, p, 'b');
       f.funds.refund.mockResolvedValueOnce({ ok: true } as never);
@@ -1418,6 +1430,19 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN + 7 * 60 * MIN) })).toEqual({ looked: 1, settled: 1, released: 0 });
       expect(Number((await prisma.instantRefund.findFirstOrThrow({ where: { runId: a } })).amountMicros)).toBe(0);
       expect(Number((await runOf(a)).refundedMicros)).toBe(0);
+    });
+
+    it('a give-back the books confirmed at zero does not use up one of the person\'s monthly give-backs', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 1, unreachableWaitMinutes: 600 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const a = await charged(f, p, 'a');
+      const b = await charged(f, p, 'b');
+      f.funds.refund.mockResolvedValueOnce({ ok: true, refundedMicros: 0 });
+      expect(await giveBack({ personId: sara, runId: a }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'not_charged' });
+      // The one allowed give-back this month is still there to use
+      expect(await giveBack({ personId: sara, runId: b }, { funds: f.funds })).toEqual({ status: 'given', amountMicros: 5_000 });
+      expect(await giveBack({ personId: sara, runId: await charged(f, p, 'c') }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'person_limit' });
     });
 
     it('"key already used" from the books means a give-back stands under the key: it is looked up and recorded at their amount, and kept when that is not known', async () => {
@@ -1472,14 +1497,23 @@ run('the bounded Instant executor, in a real database', () => {
       // While the sweep waits on the books, the row is let go of and made again (the same row, a new age)
       let open!: () => void;
       const gate = new Promise<void>((resolve) => (open = resolve));
+      let reached!: () => void;
+      const arrived = new Promise<void>((resolve) => (reached = resolve));
       f.funds.refund.mockImplementationOnce((async () => {
+        // The sweep has selected the old row and is asking the books: this is the signal, not a count of polls
+        reached();
         await gate;
         return { ok: false, refundedMicros: 0, reason: 'unavailable' };
       }) as never);
       const sweeping = sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN) });
-      for (let i = 0; i < 100 && f.funds.refund.mock.calls.length < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 25));
-      await prisma.instantRefund.updateMany({ where: { runId: a }, data: { releasedAt: null, createdAt: new Date() } });
-      open();
+      try {
+        let timer: NodeJS.Timeout | undefined;
+        const timeout = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error('the sweep never reached the books')), 20_000)));
+        await Promise.race([arrived, timeout]).finally(() => clearTimeout(timer));
+        await prisma.instantRefund.updateMany({ where: { runId: a }, data: { releasedAt: null, createdAt: new Date() } });
+      } finally {
+        open();
+      }
       expect(await sweeping).toEqual({ looked: 1, settled: 0, released: 0 });
       expect((await prisma.instantRefund.findFirstOrThrow({ where: { runId: a } })).releasedAt).toBeNull();
     });
@@ -1503,6 +1537,32 @@ run('the bounded Instant executor, in a real database', () => {
       // It counts in the month it was made in, from then
       expect(row.createdAt.getTime()).toBeGreaterThanOrEqual(later.getTime() - 1_000);
       expect(Number((await runOf(a)).refundedMicros)).toBe(5_000);
+    });
+
+    it('a give-back let go of that the books say they never made, when the limits now refuse a new one, keeps its intent so a refund they make afterwards is still recorded', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 600 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const a = await charged(f, p, 'a');
+      const { sweepGoodwill } = await import('@/lib/instant/executor');
+      f.funds.refund.mockImplementation((async () => ({ ok: false, refundedMicros: 0, reason: 'unavailable' })) as never);
+      await giveBack({ personId: sara, runId: a }, { funds: f.funds });
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN) })).toEqual({ looked: 1, settled: 0, released: 1 });
+      // The books' first request was still in flight: their look finds nothing yet, and the limits no longer allow a new give-back
+      await setLimits({ goodwillMaxMicros: null, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 600 });
+      f.funds.refundLookup.mockResolvedValueOnce({ status: 'none' });
+      f.funds.refund.mockClear();
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN + 7 * 60 * MIN) })).toEqual({ looked: 1, settled: 0, released: 0 });
+      expect(f.funds.refund).not.toHaveBeenCalled();
+      const kept = await prisma.instantRefund.findFirstOrThrow({ where: { runId: a } });
+      expect(kept.confirmedAt).toBeNull();
+      expect(kept.releasedAt).not.toBeNull();
+      // That request then commits: the next look finds it, and it is recorded at their amount
+      f.funds.refundLookup.mockResolvedValueOnce({ status: 'found', refundedMicros: 5_000 });
+      expect(await sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN + 14 * 60 * MIN) })).toEqual({ looked: 1, settled: 1, released: 0 });
+      expect((await prisma.instantRefund.findFirstOrThrow({ where: { runId: a } })).confirmedAt).not.toBeNull();
+      expect(Number((await runOf(a)).refundedMicros)).toBe(5_000);
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 5, unreachableWaitMinutes: 600 });
     });
 
     it('a give-back let go of that cannot be asked about is left as it is', async () => {
