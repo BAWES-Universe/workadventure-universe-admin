@@ -58,6 +58,7 @@ model User {
   brickTemplateStars BrickTemplateStar[]
   brickTemplateMadeBy BrickTemplateUse[] @relation("BrickTemplateUseMaker")
   guestBrickHandovers GuestBrickHandover[]
+  guestBrickPendingHandovers GuestBrickPendingHandover[]
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
   botAccessRules    BotAccessRule[]
@@ -1047,6 +1048,19 @@ model GuestBrickHandover {
 
   @@index([userId])
   @@map("guest_brick_handovers")
+}
+
+// A hand-over of a guest's chat that could not be finished when the person signed in (game #1997). The game sends the guest id only
+// once, so it is kept here until the next time that person gets into a room; once it is done (or the window passed) the row goes.
+model GuestBrickPendingHandover {
+  guestKey  String   @id @map("guest_key") @db.VarChar(255)
+  userId    String   @map("user_id")
+  keptAt    DateTime @default(now()) @map("kept_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("guest_brick_pending_handovers")
 }
 
 // A suggestion to make a Brick for a kind of job that keeps coming back (game #1996). One row per person and topic, and

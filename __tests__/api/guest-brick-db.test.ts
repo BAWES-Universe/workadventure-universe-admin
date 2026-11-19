@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
-import { adoptGuestChat, claimGuestBrickReply, finishGuestBrickReply, guestBrickFor, guestChatHandedTo, takeCarriedGuestChat } from '@/lib/guest-brick';
+import { adoptGuestChat, adoptGuestChatKeepingIt, finishKeptGuestChats, claimGuestBrickReply, finishGuestBrickReply, guestBrickFor, guestChatHandedTo, takeCarriedGuestChat } from '@/lib/guest-brick';
 import { ensureDefaultBrick } from '@/lib/brick-default';
 import { checkReplyAllowance } from '@/lib/reply-limits';
 import { saveServerLimits } from '@/lib/bot-limits';
@@ -66,6 +66,7 @@ run('the Brick for guests, in a real database', () => {
     else await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
     await prisma.guestBrickReply.deleteMany({ where: { guestKey: { in: guests } } });
     await prisma.guestBrickHandover.deleteMany({ where: { guestKey: { in: guests } } });
+    await prisma.guestBrickPendingHandover.deleteMany({ where: { guestKey: { in: guests } } });
     await prisma.replyWindow.deleteMany({ where: { OR: [{ key: { startsWith: 'gb:' }, ...{} }, { key: { in: guests.map((id) => `ua:guest:${id}`) } }] } });
     if (universes.length) await prisma.universe.deleteMany({ where: { id: { in: universes } } });
     if (providerId) await prisma.botsAiProvider.deleteMany({ where: { providerId } });
@@ -211,6 +212,41 @@ run('the Brick for guests, in a real database', () => {
       // The same sign-in sent twice, or from a second tab, hands over nothing more
       expect(await adoptGuestChat(guestId, sara.id)).toEqual({ adopted: false });
       expect(await prisma.guestBrickHandover.count({ where: { guestKey: guestId } })).toBe(1);
+    });
+
+    it('keeps a hand-over that failed, and finishes it the next time the person gets in, once and no more', async () => {
+      const a = await universe('kept');
+      const sara = await person('sara-kept');
+      const guestId = guest();
+      await claim(guestId, a.roomUrl);
+      const failing = jest.spyOn(prisma.guestBrickHandover, 'findUnique').mockRejectedValueOnce(new Error('db hiccup'));
+      await expect(adoptGuestChatKeepingIt(guestId, sara.id)).rejects.toThrow('db hiccup');
+      failing.mockRestore();
+      expect(await prisma.guestBrickHandover.count({ where: { guestKey: guestId } })).toBe(0);
+      expect(await prisma.guestBrickPendingHandover.count({ where: { guestKey: guestId, userId: sara.id } })).toBe(1);
+      // The next visit finishes it, and the row is gone
+      expect(await finishKeptGuestChats(sara.id)).toBe(1);
+      expect(await prisma.guestBrickHandover.count({ where: { guestKey: guestId, userId: sara.id } })).toBe(1);
+      expect(await prisma.guestBrickPendingHandover.count({ where: { guestKey: guestId } })).toBe(0);
+      expect(await finishKeptGuestChats(sara.id)).toBe(0);
+    });
+
+    it('keeps a failed kept hand-over for the time after, and drops one whose window passed', async () => {
+      const a = await universe('kept-2');
+      const sara = await person('sara-kept-2');
+      const guestId = guest();
+      await claim(guestId, a.roomUrl);
+      await prisma.guestBrickPendingHandover.create({ data: { guestKey: guestId, userId: sara.id } });
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const failing = jest.spyOn(prisma.guestBrickReply, 'count').mockRejectedValueOnce(new Error('db hiccup'));
+      expect(await finishKeptGuestChats(sara.id)).toBe(0);
+      failing.mockRestore();
+      expect(await prisma.guestBrickPendingHandover.count({ where: { guestKey: guestId } })).toBe(1);
+      // Older than the window: dropped, never handed over
+      await prisma.guestBrickPendingHandover.update({ where: { guestKey: guestId }, data: { keptAt: new Date(Date.now() - 400 * 24 * 3600 * 1000) } });
+      expect(await finishKeptGuestChats(sara.id)).toBe(0);
+      expect(await prisma.guestBrickPendingHandover.count({ where: { guestKey: guestId } })).toBe(0);
+      expect(await prisma.guestBrickHandover.count({ where: { guestKey: guestId } })).toBe(0);
     });
 
     it('goes to one account only, even when two accounts sign in at the same moment with the same guest id', async () => {

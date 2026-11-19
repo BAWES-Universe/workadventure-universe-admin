@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { parsePlayUri } from '@/lib/utils';
 import { windowStart } from '@/lib/reply-limits';
@@ -240,6 +241,48 @@ export async function adoptGuestChat(guestId: string, userId: string, now: Date 
     ON CONFLICT ("guest_key") DO NOTHING
     RETURNING "guest_key"`);
   return { adopted: claimed.length > 0 };
+}
+
+/**
+ * The same hand-over, but a failure keeps it: the game sends the guest id only once, so the id is written down for this account
+ * before the error goes on, and `finishKeptGuestChats` tries again the next time the person gets into a room. The write is one
+ * statement that needs nothing the failed step needed.
+ */
+export async function adoptGuestChatKeepingIt(guestId: string, userId: string, now: Date = new Date()): Promise<{ adopted: boolean }> {
+  try {
+    return await adoptGuestChat(guestId, userId, now);
+  } catch (error) {
+    await prisma.$executeRaw(Prisma.sql`
+      INSERT INTO "guest_brick_pending_handovers" ("guest_key", "user_id", "kept_at") VALUES (${guestId}, ${userId}, ${now})
+      ON CONFLICT ("guest_key") DO NOTHING`).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * Finishes the hand-overs kept for this account. A kept one is gone once it is done (adopted, or there was nothing to hand over)
+ * or once the window for handing over has passed; one that fails again stays for the next time.
+ */
+export async function finishKeptGuestChats(userId: string, now: Date = new Date()): Promise<number> {
+  const kept = await prisma.guestBrickPendingHandover.findMany({ where: { userId }, orderBy: { keptAt: 'asc' }, take: 5 });
+  if (kept.length === 0) return 0;
+  const since = await handoverWindow(now);
+  let finished = 0;
+  for (const row of kept) {
+    if (row.keptAt < since) {
+      await prisma.guestBrickPendingHandover.deleteMany({ where: { guestKey: row.guestKey } });
+      continue;
+    }
+    try {
+      await adoptGuestChat(row.guestKey, userId, now);
+    } catch (error) {
+      Sentry.captureException(error);
+      continue;
+    }
+    await prisma.guestBrickPendingHandover.deleteMany({ where: { guestKey: row.guestKey } });
+    finished += 1;
+  }
+  return finished;
 }
 
 /**

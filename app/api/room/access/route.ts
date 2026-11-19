@@ -9,7 +9,7 @@ import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalo
 import { notifyRoomAccess } from '@/lib/discord';
 import { isBotIdentifier } from '@/lib/bot-visitor';
 import { isLinkableGuestId, linkGuestVisits } from '@/lib/guest-sign-in-link';
-import { adoptGuestChat } from '@/lib/guest-brick';
+import { adoptGuestChatKeepingIt, finishKeptGuestChats } from '@/lib/guest-brick';
 import { currentOutfit, recordOutfitPick } from '@/lib/user-outfits';
 import { companionWearableHere, wearableHere } from '@/lib/woka-wearable';
 import { canSeeRoom } from '@/lib/room-visibility';
@@ -200,6 +200,15 @@ export async function GET(request: NextRequest) {
         userName = name || null;
         userEmail = null;
       }
+      // A hand-over of a guest's chat that failed when they signed in (the game sends that id only once) is finished now: it was kept
+      // for them, and a failure here never stops them getting in
+      if (user && isAuthenticated && !user.isGuest && !unverifiedAccount && !isBotIdentifier(finalUuid)) {
+        try {
+          await finishKeptGuestChats(user.id);
+        } catch (error) {
+          Sentry.captureException(error);
+        }
+      }
       // Someone who just signed in: the visits they made as a guest on this device join their account (#630). Only for
       // an account whose token we verified, and a failure here never stops them getting in.
       if (user && isAuthenticated && !user.isGuest && !unverifiedAccount && !isBotIdentifier(finalUuid) && isLinkableGuestId(previousGuestUuid, user.uuid)) {
@@ -210,7 +219,7 @@ export async function GET(request: NextRequest) {
         }
         // Their chat with the Brick for guests joins the account's one Brick the same way (game #1997), once
         try {
-          await adoptGuestChat(previousGuestUuid, user.id);
+          await adoptGuestChatKeepingIt(previousGuestUuid, user.id);
         } catch (error) {
           Sentry.captureException(error);
         }
