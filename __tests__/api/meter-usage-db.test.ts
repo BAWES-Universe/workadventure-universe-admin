@@ -324,6 +324,19 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(usage).toMatchObject({ allowanceSet: false, noLimit: true, allowanceMicros: null });
       expect(usage.extra?.noLimit).toBe(true);
     });
+
+    it('says what new work can still take, not the allowance less spending: 1,200 spent through a 2x grant that has ended leaves 800 of the 1,000 usual, and the bar agrees', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 1_200, days(-2));
+      await recordGrant({ grantKey: `g-${tag}-past`, personId: sara.id, settlement: 'gift', multiplier: 2, startsAt: days(-4), endsAt: days(-1), givenById: sara.id });
+      const page = await personUsage(sara.id, NOW);
+      expect(page).toMatchObject({ computerMonthMicros: 1_200, allowanceMicros: 1_000, leftMicros: 800 });
+      // A running no-limit grant and no allowance set have nothing left to say
+      await recordGrant({ grantKey: `g-${tag}-open`, personId: sara.id, settlement: 'gift', noLimit: true, startsAt: days(-1), endsAt: days(5), givenById: sara.id });
+      expect((await personUsage(sara.id, NOW)).leftMicros).toBeNull();
+    });
+
   });
 
   describe('extra usage', () => {

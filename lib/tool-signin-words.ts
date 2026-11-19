@@ -25,12 +25,12 @@ export function describeToolSignIn(data: ToolSignInNoticeData, formatTime?: (iso
     return {
       title: `${listOf(names)} stopped working`,
       badge: 'Key stopped working',
-      body: `${data.universe ? `In ${data.universe}. ` : ''}${servers.length === 1 ? `${names[0]} stopped accepting your key${when}.` : `${listOf(names)} stopped accepting your keys.`} Your Bricks carry on without ${servers.length === 1 ? 'it' : 'them'}. Open Apps and tap Replace key.`,
+      body: `${data.universe ? `In ${data.universe}. ` : ''}${servers.length === 1 ? `${names[0]} stopped accepting your key${when}.` : `${listOf(names)} stopped accepting your keys.`} Your Bricks carry on without ${servers.length === 1 ? 'it' : 'them'}. In the game, open Chat, then Bricks, then Apps, and tap Replace key.`,
     };
   }
   // A mix: the connections of the bot are told as before, and the key apps get their own sentence (they are never removed and added again)
   const rest = servers.filter((server) => server.kind !== 'direct');
-  const directNote = direct.length ? ` ${listOf(direct.map((server) => server.name))} ${direct.length === 1 ? 'stopped accepting your key' : 'stopped accepting your keys'}: open Apps and tap Replace key.` : '';
+  const directNote = direct.length ? ` ${listOf(direct.map((server) => server.name))} ${direct.length === 1 ? 'stopped accepting your key' : 'stopped accepting your keys'}: in the game, open Chat, then Bricks, then Apps, and tap Replace key.` : '';
   // The tools page can only change a connection by adding it again, so everything that is not an OAuth sign-in leads there
   const keysOnly = rest.every((server) => server.kind !== 'oauth');
   const anyKey = rest.some((server) => server.kind !== 'oauth');

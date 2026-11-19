@@ -147,7 +147,7 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
   const extra = usage.extra;
   const used = dollars(usage.computerMonthMicros);
   // No limit shows first: a running no-limit grant counts even when the usual allowance is not set
-  const computer = usage.noLimit ? `${used} this month, no limit` : !usage.allowanceSet ? `${used} this month` : `${used} of ${dollars(usage.allowanceMicros ?? 0)} this month`;
+  const computer = usage.noLimit ? `${used} this month, no limit` : !usage.allowanceSet ? `${used} this month` : usage.leftMicros === null ? `${used} of ${dollars(usage.allowanceMicros ?? 0)} this month` : `${used} this month, ${dollars(usage.leftMicros)} left of ${dollars(usage.allowanceMicros ?? 0)}`;
   // An ask shows beside a running grant too: someone can use up a raised allowance and ask again
   const asked = usage.asked;
 
