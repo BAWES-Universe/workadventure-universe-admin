@@ -80,6 +80,8 @@ run('the list of apps to connect, in a real database', () => {
     expect((await add(entry('gmail', { authType: 'bearer', authConfig: 'one-key-for-everyone' }))).status).toBe(400);
     expect((await add(entry('gmail', { serverUrl: 'http://127.0.0.1/mcp' }))).status).toBe(400);
     expect((await add(entry('gmail', { key: 'Bad Key!' }))).status).toBe(400);
+    // The built-in GitHub entry is not listed again under its own name
+    expect((await add(entry('gmail', { key: 'github' }))).status).toBe(400);
     expect((await add(entry('gmail', { authConfig: JSON.stringify({ clientId: 'x' }) }))).status).toBe(400);
     expect((await add(entry('gmail', { authConfig: JSON.stringify({ clientId: 'x', authorizeUrl: 'https://a.example.com/a', tokenUrl: 'https://a.example.com/t', revocationUrl: 'http://10.0.0.1/revoke' }) }))).status).toBe(400);
     // The sign-in and the client secret go to the revocation address: never over plain http, even to a public host
