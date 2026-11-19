@@ -965,6 +965,24 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
       await prisma.brickComputer.updateMany({ where: { botId: machine.botId, machine: 'resting', restClaimedAt: machine.restClaimedAt }, data: { machine: 'working', restClaimedAt: null } });
     }
   }
+  // A take-over's fence that a server began and never finished (it stopped half way) leaves its marker, and until the marker is gone the person has no
+  // input on the screen and no details tap, because the agent may still be acting. A marker older than FENCE_STALE_MS is dealt with here, so the person
+  // is not left waiting for a second tap: when a job is still the person's the fence is made again (under a claim of its own, so one sweep does it), and
+  // the marker goes only when that is proved; when nothing is the person's any more there is nothing to prove, and it just goes
+  const unproven = await prisma.brickComputer.findMany({ where: { fencingSince: { lt: new Date(now.getTime() - FENCE_STALE_MS) } }, select: { botId: true, fencingSince: true }, orderBy: { fencingSince: 'asc' }, take: 50 });
+  for (const machine of unproven) {
+    try {
+      if ((await prisma.computerJob.count({ where: { botId: machine.botId, status: 'waiting', control: 'person' } })) === 0) {
+        await prisma.brickComputer.updateMany({ where: { botId: machine.botId, fencingSince: machine.fencingSince }, data: { fencingSince: null } });
+        continue;
+      }
+      const claim = await claimFence(machine.botId);
+      // Another server took the claim first (it is making the fence), or the machine row is gone: nothing more to do here
+      if (claim instanceof Date) await makeFence(machine.botId, claim);
+    } catch (error) {
+      console.error('[Computer] A fence left half made could not be made again:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
   // A machine that was to be put to sleep and is not proved asleep is stopped again until it is
   const stopping = await prisma.brickComputer.findMany({ where: { machine: 'stopping', NOT: { providerRef: null } }, select: { botId: true, providerRef: true, provider: true }, take: 200 });
   for (const machine of stopping) {
