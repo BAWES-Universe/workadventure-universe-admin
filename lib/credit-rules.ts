@@ -388,11 +388,19 @@ async function clashesOf(db: Tx, candidate: RuleFacts, now: Date, programIds?: {
 }
 
 /** Saves a new program, or a new version of one (`programId`). A clash between rules is refused. */
-async function save(kind: ProgramKind, input: GrantInput & { programId?: string }, issuer: Issuer, now: Date, after?: (tx: Tx) => Promise<void>, onlyIfVersion?: number): Promise<ProgramView> {
+async function save(kind: ProgramKind, input: GrantInput & { programId?: string }, issuer: Issuer, now: Date, after?: (tx: Tx) => Promise<void>): Promise<ProgramView> {
+  return prisma.$transaction((tx) => saveIn(tx, kind, input, issuer, now, after));
+}
+
+/**
+ * The save itself, inside the caller's transaction: several saves (and ends) can then be one commit, so a refusal part-way leaves none of them
+ * behind and nothing has to be put back afterwards.
+ */
+async function saveIn(tx: Tx, kind: ProgramKind, input: GrantInput & { programId?: string }, issuer: Issuer, now: Date, after?: (tx: Tx) => Promise<void>): Promise<ProgramView> {
   const checked = checkGrant(kind, input, now);
   const programId = input.programId ?? randomUUID();
   if (input.requestKey !== undefined && (!input.requestKey || input.requestKey.length > 255)) throw new CreditRefused('requestKey must be 1 to 255 characters', 'request_key');
-  const view = await prisma.$transaction(async (tx) => {
+  {
     // One save of a category's rules at a time, so two admins at the same moment cannot both save a clashing rule
     // and the accounts it touches, so issuing under the old rule and saving the new one never interleave
     const currentAccountId = input.programId ? (await tx.grantRule.findFirst({ where: { programId: input.programId, state: 'current' }, select: { fundingAccountId: true } }))?.fundingAccountId : undefined;
@@ -411,9 +419,6 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     const ids = await snapshotIds(tx, checked.recipient);
     const existing = input.programId ? await loadProgramRow(tx, programId) : null;
     if (input.programId && !existing) throw new CreditRefused('That program does not exist', 'not_found');
-    // Putting back what a refused save changed: only while the rule is still the one that save wrote (checked here, under the same locks as the
-    // write), so another admin's newer change is never written over
-    if (onlyIfVersion !== undefined && existing && (existing.status !== 'active' || existing.rules[0]?.version !== onlyIfVersion)) throw new CreditRefused('That rule was changed by someone else since', 'changed');
     if (existing) {
       if (existing.status !== 'active') throw new CreditRefused('That program has ended. Make a new one instead.', 'ended');
       if (existing.kind !== kind || existing.categoryId !== checked.categoryId) throw new CreditRefused('A program keeps its kind and category', 'kind');
@@ -509,8 +514,7 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     // What must change together with this rule (the same save, the same commit): it fails, and so does the rule
     if (after) await after(tx);
     return viewOf(saved as ProgramRow, (saved as ProgramRow).rules[0], (saved as ProgramRow).rules.length);
-  });
-  return view;
+  }
 }
 
 /** The category's default: how much, how often, and who gets it. Saving again makes a new version of the same program. */
@@ -532,9 +536,9 @@ export async function saveException(input: GrantInput & { programId?: string }, 
   return save('exception', input, issuer, now);
 }
 
-/** Puts a rule back to what it was, only while it is still at `version` (the one the refused save wrote). A rule changed or ended since is left as it is: 'changed' code. */
-export async function saveExceptionIfUnchanged(input: GrantInput & { programId: string }, version: number, issuer: Issuer, now: Date = new Date()): Promise<ProgramView> {
-  return save('exception', input, issuer, now, undefined, version);
+/** An exception saved inside the caller's transaction: it commits or undoes together with everything else the caller does there. */
+export async function saveExceptionIn(tx: Tx, input: GrantInput & { programId?: string }, issuer: Issuer, now: Date = new Date()): Promise<ProgramView> {
+  return saveIn(tx, 'exception', input, issuer, now);
 }
 
 /** A gift: a one-time extra, to people you pick or a universe's members (or everyone), each or shared, one dollar amount for what it covers. */
@@ -549,30 +553,25 @@ export async function endProgram(programId: string, issuer: Issuer, now: Date = 
 
 /** Ends several programs in one commit: all of them end, or none does (a refusal on the second leaves the first as it was). */
 export async function endPrograms(programIds: string[], issuer: Issuer, now: Date = new Date()): Promise<('ended' | 'already_ended' | 'not_found')[]> {
-  return prisma.$transaction(async (tx) => {
-    const results: ('ended' | 'already_ended' | 'not_found')[] = [];
-    for (const programId of programIds) results.push(await endProgramIn(tx, programId, issuer, now));
-    return results;
-  });
+  return prisma.$transaction((tx) => endProgramsIn(tx, programIds, issuer, now));
 }
 
-/** Ends a program that a refused save just made, only while it is still at `version`: a rule another admin changed since is left alone. */
-export async function endProgramIfUnchanged(programId: string, version: number, issuer: Issuer, now: Date = new Date()): Promise<'ended' | 'already_ended' | 'not_found' | 'changed'> {
-  return prisma.$transaction((tx) => endProgramIn(tx, programId, issuer, now, version));
+/** Ends programs inside the caller's transaction: they end together with everything else the caller does there. */
+export async function endProgramsIn(tx: Tx, programIds: string[], issuer: Issuer, now: Date = new Date()): Promise<('ended' | 'already_ended' | 'not_found')[]> {
+  const results: ('ended' | 'already_ended' | 'not_found')[] = [];
+  for (const programId of programIds) results.push(await endProgramIn(tx, programId, issuer, now));
+  return results;
 }
 
-async function endProgramIn(tx: Tx, programId: string, issuer: Issuer, now: Date): Promise<'ended' | 'already_ended' | 'not_found'>;
-async function endProgramIn(tx: Tx, programId: string, issuer: Issuer, now: Date, onlyIfVersion: number): Promise<'ended' | 'already_ended' | 'not_found' | 'changed'>;
-async function endProgramIn(tx: Tx, programId: string, issuer: Issuer, now: Date, onlyIfVersion?: number): Promise<'ended' | 'already_ended' | 'not_found' | 'changed'> {
+async function endProgramIn(tx: Tx, programId: string, issuer: Issuer, now: Date): Promise<'ended' | 'already_ended' | 'not_found'> {
   // Under the funding account's lock and the category's rules lock (issuing holds the rules lock shared, and may still be issuing from a
   // version waiting to be replaced that another account funds): an issuing that read the rule before this ends it sees it ended and gives nothing
   const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true, program: { select: { categoryId: true } } } });
   if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId), lockOfRules(peek.program.categoryId)]);
   const program = await tx.grantProgram.findUnique({ where: { id: programId }, include: { rules: { where: { state: 'current' }, take: 1 } } });
   if (!program) return 'not_found';
-  if (program.status === 'ended') return onlyIfVersion === undefined ? 'already_ended' : 'changed';
+  if (program.status === 'ended') return 'already_ended';
   const rule = program.rules[0];
-  if (onlyIfVersion !== undefined && rule?.version !== onlyIfVersion) return 'changed';
   if (rule) {
     await checkMayFundFrom(tx, rule.fundingAccountId, issuer, 'You cannot end this one');
   }

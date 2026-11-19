@@ -6,13 +6,12 @@ import { wokaLayersForMany } from '@/lib/woka-avatar';
 import {
   ClashRefused,
   endProgram,
-  endProgramIfUnchanged,
   endPrograms,
+  endProgramsIn,
   listPrograms,
   previewGrant,
   saveDefault,
-  saveException,
-  saveExceptionIfUnchanged,
+  saveExceptionIn,
   createGift,
   type GrantInput,
   type Issuer,
@@ -20,7 +19,7 @@ import {
   type ProgramView,
 } from '@/lib/credit-rules';
 import { markCreditBilled } from '@/lib/credit-billing';
-import { CreditRefused, isCreditRefused, readRecipient, type MoneyCategory, type Recipient, type Schedule } from '@/lib/credit-values';
+import { CreditRefused, readRecipient, type MoneyCategory, type Recipient, type Schedule } from '@/lib/credit-values';
 import { PLATFORM_ACCOUNT_ID, exposureOf } from '@/lib/credit-funding';
 import { currentRules, idsReached, type Tx } from '@/lib/credit-store';
 import { MONEY_CATEGORIES, type AudienceView, type ClashView, type ExceptionSetting, type ExceptionView, type GiftScope, type GiftView, type GrantsOverview, type MoneyDefaultView, type PersonView, type PreviewNumbers, type PreviewRequest, type PreviewView, type Recipients } from '@/lib/grants-view';
@@ -426,74 +425,39 @@ function inputOfProgram(program: ProgramView): GrantInput {
   return { categoryId: program.categoryId, amount: program.amount, schedule: program.schedule, recipients: program.recipients, share: program.share, claimStartsAt: program.claimStartsAt, claimEndsAt: program.claimEndsAt, lotExpiresAt: program.lotExpiresAt, label: program.label };
 }
 
-/** What taking people out of another rule changed, so a refused save can put the other rule back. */
-interface TakenOut {
-  before: ProgramView;
-  ended: boolean;
-}
-
-async function takeOut(programId: string, people: string[], issuer: Issuer, now: Date, taken: TakenOut[]): Promise<void> {
+/**
+ * Takes people out of another rule (inside the save's own transaction, so a save that is refused afterwards leaves it as it was): the rule
+ * ends when nobody is left in it, and is saved again with the rest otherwise.
+ */
+async function takeOut(tx: Tx, programId: string, people: string[], issuer: Issuer, now: Date): Promise<void> {
   const other = (await listPrograms(undefined, { kind: 'exception' })).find((program) => program.programId === programId);
   if (!other) return;
   if (other.recipients.kind !== 'people') {
     throw new GrantsRefused('That other rule is for a universe’s members, so these people can’t be taken out of it. End that rule, or give each of them a rule of their own (a person’s own rule comes first).', 400, 'clash');
   }
   const left = other.recipients.userIds.filter((id) => !people.includes(id));
-  if (left.length === 0) {
-    await endProgram(programId, issuer, now);
-    taken.push({ before: other, ended: true });
-  } else {
-    await saveException({ ...inputOfProgram(other), recipients: { kind: 'people', userIds: left }, programId }, issuer, now);
-    taken.push({ before: other, ended: false });
-  }
+  if (left.length === 0) await endProgramsIn(tx, [programId], issuer, now);
+  else await saveExceptionIn(tx, { ...inputOfProgram(other), recipients: { kind: 'people', userIds: left }, programId }, issuer, now);
 }
 
-/**
- * Gives other rules back the people a refused save had taken out of them. A shortened rule is saved as it was. A rule that had to
- * end can't be reopened, so it is made again with the same figures and people (its old id is gone, its people have it again).
- */
-async function putBack(taken: TakenOut[], issuer: Issuer, now: Date): Promise<void> {
-  let failed = 0;
-  for (const { before, ended } of [...taken].reverse()) {
-    try {
-      await saveException({ ...inputOfProgram(before), programId: ended ? undefined : before.programId }, issuer, now);
-    } catch (error) {
-      failed += 1;
-      console.error('[Grants] Could not give a rule back its people after a refused save:', error instanceof Error ? error.message : 'unknown');
-    }
-  }
-  // Never let the screen say "nothing changed" when another rule could not be put back
-  if (failed > 0) throw new GrantsRefused('That didn’t save, and another rule could not be fully put back. Check the exceptions list before trying again.', 500);
-}
-
-/** Puts back what a refused save had already changed: a new rule ends, a changed one goes back to what it was. */
-async function undo(done: { before: ProgramView | undefined; after: ProgramView }[], issuer: Issuer, now: Date): Promise<number> {
-  let failed = 0;
-  for (const { before, after } of done.reverse()) {
-    try {
-      // Only while the rule is still the one this save wrote: another admin's newer change to it is theirs, and stays
-      if (before) await saveExceptionIfUnchanged({ ...inputOfProgram(before), programId: before.programId }, after.version, issuer, now);
-      else await endProgramIfUnchanged(after.programId, after.version, issuer, now);
-    } catch (error) {
-      if (isCreditRefused(error) && error.code === 'changed') continue;
-      failed += 1;
-      console.error('[Grants] Could not put back a rule after a refused save:', error instanceof Error ? error.message : 'unknown');
-    }
-  }
-  return failed;
-}
+/** How long one save of an exception may take as a whole (it holds the rules it touches while it does). */
+const SAVE_EXCEPTION_MS = 30_000;
 
 /**
  * Saves an exception: one rule for each money category it sets, over the same people. A category set to "As everyone" has no rule (an
  * existing one ends). A clash is refused with the people named; with `clashChoice` the admin says which rule applies to them: "this"
  * takes them out of the other rule, "other" takes them out of this one.
+ *
+ * The whole save is ONE commit: every category's rule, the rules that end, and the people taken out of another rule. A refusal anywhere
+ * leaves nothing of it behind, so nothing is ever put back by a second write that another admin's change could have got in front of, and
+ * two saves that both fail never leave a failed rule standing.
  */
 export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 'exception' }> & { clashChoice?: 'this' | 'other' }, issuer: Issuer, now: Date = new Date()): Promise<void> {
   let recipients = recipientOf(request.audience);
   const existing = request.replaceId ? readExceptionId(request.replaceId) : null;
   if (request.replaceId && !existing) throw new GrantsRefused('That exception was not found', 404);
   // The same people already have a rule for this category: this is a change to it, never a second one
-  let active = await listPrograms(undefined, { kind: 'exception' });
+  const active = await listPrograms(undefined, { kind: 'exception' });
   // The people as the admin opened them: taking clashing people out of this rule later never makes the save look for another rule
   const openedKey = recipientKey(recipients);
   const findExisting = (category: MoneyCategory): ProgramView | undefined => {
@@ -507,51 +471,39 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
     return active.find((program) => program.categoryId === category && recipientKey(program.recipients) === openedKey);
   };
 
-  // Changes to other rules made to settle a clash: put back if the save is refused after all
-  const taken: TakenOut[] = [];
+  // The rules the admin chose to take people out of, once a clash was settled that way (the second try)
+  let takeFrom: { programId: string; userIds: string[] }[] = [];
   for (let attempt = 0; attempt < 2; attempt++) {
-    // What this attempt changed, so a refusal part-way puts it back: one rule for each category is saved on its own, never half-saved
-    const done: { before: ProgramView | undefined; after: ProgramView }[] = [];
     try {
-      const toEnd: ProgramView[] = [];
-      for (const category of MONEY_CATEGORIES) {
-        const current = findExisting(category);
-        const input = settingInput(category, request[category], recipients, now);
-        if (!input) {
-          if (current) toEnd.push(current);
-          continue;
-        }
-        done.push({ before: current, after: await saveException({ ...input, programId: current?.programId }, issuer, now) });
-      }
-      // Ending comes last: it is the one step that cannot be put back
-      if (toEnd.length > 0) await endPrograms(toEnd.map((program) => program.programId), issuer, now);
+      await prisma.$transaction(
+        async (tx) => {
+          for (const clash of takeFrom) await takeOut(tx, clash.programId, clash.userIds, issuer, now);
+          const toEnd: ProgramView[] = [];
+          for (const category of MONEY_CATEGORIES) {
+            const current = findExisting(category);
+            const input = settingInput(category, request[category], recipients, now);
+            if (!input) {
+              if (current) toEnd.push(current);
+              continue;
+            }
+            await saveExceptionIn(tx, { ...input, programId: current?.programId }, issuer, now);
+          }
+          if (toEnd.length > 0) await endProgramsIn(tx, toEnd.map((program) => program.programId), issuer, now);
+        },
+        { timeout: SAVE_EXCEPTION_MS, maxWait: 10_000 },
+      );
       return;
     } catch (error) {
-      const notPutBack = await undo(done, issuer, now);
-      if (notPutBack > 0) {
-        // Never let the screen say "nothing changed", or go on to a second try, while a rule this save changed is still changed
-        await putBack(taken, issuer, now).catch(() => undefined);
-        throw new GrantsRefused('That didn’t save, and part of it could not be put back. Check the exceptions list before trying again.', 500);
-      }
-      if (!(error instanceof ClashRefused) || !request.clashChoice || attempt > 0) {
-        await putBack(taken, issuer, now);
-        throw error;
-      }
-      // The admin chose which rule applies to the people the two disagree about
-      try {
-        const clashing = new Set(error.clashes.flatMap((clash) => clash.userIds));
-        if (request.clashChoice === 'this') {
-          for (const clash of error.clashes) await takeOut(clash.programId, clash.userIds, issuer, now, taken);
-        } else {
-          if (recipients.kind !== 'people') throw new GrantsRefused('This rule is for a universe’s members, so those people can’t be taken out of it. Pick “This one”, or give each of them a rule of their own.', 400, 'clash');
-          const left = recipients.userIds.filter((id) => !clashing.has(id));
-          if (left.length === 0) throw new GrantsRefused('Nobody would be left in this rule. Pick “This one”, or change the people.', 400, 'clash');
-          recipients = { kind: 'people', userIds: left };
-        }
-        active = await listPrograms(undefined, { kind: 'exception' });
-      } catch (settling) {
-        await putBack(taken, issuer, now);
-        throw settling;
+      if (!(error instanceof ClashRefused) || !request.clashChoice || attempt > 0) throw error;
+      // The admin chose which rule applies to the people the two disagree about. Nothing was saved by the try that was refused
+      const clashing = new Set(error.clashes.flatMap((clash) => clash.userIds));
+      if (request.clashChoice === 'this') {
+        takeFrom = error.clashes.map((clash) => ({ programId: clash.programId, userIds: clash.userIds }));
+      } else {
+        if (recipients.kind !== 'people') throw new GrantsRefused('This rule is for a universe’s members, so those people can’t be taken out of it. Pick “This one”, or give each of them a rule of their own.', 400, 'clash');
+        const left = recipients.userIds.filter((id) => !clashing.has(id));
+        if (left.length === 0) throw new GrantsRefused('Nobody would be left in this rule. Pick “This one”, or change the people.', 400, 'clash');
+        recipients = { kind: 'people', userIds: left };
       }
     }
   }

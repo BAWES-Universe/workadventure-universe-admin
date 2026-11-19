@@ -422,44 +422,72 @@ run('the grants routes, on the real books', () => {
     expect(o.exceptions[0].instant_apps.amountMicros).toBe(20 * MILLION);
   });
 
-  it('does not put back a rule over another admin’s newer change when a save is refused after it changed that rule', async () => {
-    const [omar, noor] = [await person('Omar'), await person('Noor')];
-    const audience = { kind: 'people', userIds: [omar, noor] };
-    expect((await call(postException, '/x', { method: 'POST', body: { audience, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'same' } } })).status).toBe(201);
-    const credit = await import('@/lib/credit-rules');
-    // A computers rule from before computers-only credit was refused: this save ends it, which is the step that fails
-    await credit.saveException({ categoryId: 'computers', amount: 5 * MILLION, schedule: 'monthly', recipients: { kind: 'people', userIds: [omar, noor] }, claimStartsAt: new Date() }, { userId: admin.id, superAdmin: true });
-    const opened = (await overview()).exceptions[0];
-    const appsProgram = await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'instant_apps', kind: 'exception', status: 'active' }, select: { id: true } });
-    // The save changes the Apps rule to $20; then, before the end of the computers rule fails, another admin saves $30 on the same rule
-    // The computers rule cannot be ended (the database refuses it), which is what fails this save after it changed the Apps rule
-    const computersRule = await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'computers', kind: 'exception', status: 'active' }, select: { id: true } });
-    await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION grants_test_refuse_end() RETURNS trigger AS $$ BEGIN IF NEW.id = '${computersRule.id}' AND NEW.status = 'ended' THEN RAISE EXCEPTION 'cannot end for the test'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql`);
-    await prisma.$executeRawUnsafe('CREATE TRIGGER grants_test_refuse_end BEFORE UPDATE ON grant_programs FOR EACH ROW EXECUTE FUNCTION grants_test_refuse_end()');
-    // Just before that end is tried, another admin saves $30 on the same Apps rule
-    const original = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
-    let ended = false;
-    const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
-      const work = String(args[0]);
-      if (!ended && work.includes('endProgramIn')) {
-        ended = true;
-        return credit.saveException({ categoryId: 'instant_apps', amount: 30 * MILLION, schedule: 'monthly', recipients: { kind: 'people', userIds: [omar, noor] }, claimStartsAt: new Date(), programId: appsProgram.id }, { userId: admin.id, superAdmin: true }).then(() => original(...args));
-      }
-      return original(...args);
-    }) as never);
-    const silenced = jest.spyOn(console, 'error').mockImplementation(() => undefined);
-    try {
-      const refused = await call(postException, '/x', { method: 'POST', body: { replaceId: opened.id, audience, instant_apps: { mode: 'own', amountMicros: 20 * MILLION, interval: 'monthly' }, computers: { mode: 'same' } } });
-      expect(refused.status).toBeGreaterThanOrEqual(500);
-      expect(ended).toBe(true);
-    } finally {
-      spy.mockRestore();
-      silenced.mockRestore();
-      await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS grants_test_refuse_end ON grant_programs');
-      await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS grants_test_refuse_end()');
+  describe('a save that is refused at its last step', () => {
+    /** A rule for Apps at $10 and one for computers at $5 over the same two people; ending the computers rule is slow and then refused, which is the step that fails a save. */
+    async function setUpSlowRefusal() {
+      const [omar, noor] = [await person('Omar'), await person('Noor')];
+      const audience = { kind: 'people', userIds: [omar, noor] };
+      expect((await call(postException, '/x', { method: 'POST', body: { audience, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'same' } } })).status).toBe(201);
+      const credit = await import('@/lib/credit-rules');
+      await credit.saveException({ categoryId: 'computers', amount: 5 * MILLION, schedule: 'monthly', recipients: { kind: 'people', userIds: [omar, noor] }, claimStartsAt: new Date() }, { userId: admin.id, superAdmin: true });
+      const opened = (await overview()).exceptions[0];
+      const appsProgram = await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'instant_apps', kind: 'exception', status: 'active' }, select: { id: true } });
+      const computersRule = await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'computers', kind: 'exception', status: 'active' }, select: { id: true } });
+      await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION grants_test_refuse_end() RETURNS trigger AS $$ BEGIN IF NEW.id = '${computersRule.id}' AND NEW.status = 'ended' THEN PERFORM pg_sleep(0.8); RAISE EXCEPTION 'cannot end for the test'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql`);
+      await prisma.$executeRawUnsafe('CREATE TRIGGER grants_test_refuse_end BEFORE UPDATE ON grant_programs FOR EACH ROW EXECUTE FUNCTION grants_test_refuse_end()');
+      const save = (amount: number) => call(postException, '/x', { method: 'POST', body: { replaceId: opened.id, audience, instant_apps: { mode: 'own', amountMicros: amount * MILLION, interval: 'monthly' }, computers: { mode: 'same' } } });
+      const cleanUp = async () => {
+        await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS grants_test_refuse_end ON grant_programs');
+        await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS grants_test_refuse_end()');
+      };
+      return { omar, noor, appsProgram, save, cleanUp, credit };
     }
-    // The other admin's $30 stands: it was not rolled back to the $10 this refused save started from, and the message did not call it a failed put-back
-    expect((await overview()).exceptions[0].instant_apps).toMatchObject({ amountMicros: 30 * MILLION });
+    const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    it('leaves nothing of itself behind: the Apps rule is as it was, not at the new figure', async () => {
+      const { save, cleanUp } = await setUpSlowRefusal();
+      const silenced = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        expect((await save(20)).status).toBeGreaterThanOrEqual(500);
+      } finally {
+        silenced.mockRestore();
+        await cleanUp();
+      }
+      expect((await overview()).exceptions[0].instant_apps).toMatchObject({ amountMicros: 10 * MILLION });
+    });
+
+    it('two saves of the same rule that are both refused leave it as it was before either: neither puts back a figure the other wrote', async () => {
+      const { save, cleanUp } = await setUpSlowRefusal();
+      const silenced = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        // The first writes $20 and is held up at its last step; the second starts then, writes $30, and is refused too
+        const first = save(20);
+        await later(300);
+        const second = save(30);
+        const answers = await Promise.all([first, second]);
+        expect(answers.map((answer) => answer.status >= 500)).toEqual([true, true]);
+      } finally {
+        silenced.mockRestore();
+        await cleanUp();
+      }
+      expect((await overview()).exceptions[0].instant_apps).toMatchObject({ amountMicros: 10 * MILLION });
+    });
+
+    it('does not undo another admin’s successful change to the rule: it stands, saved after the refused save let go', async () => {
+      const { save, cleanUp, credit, omar, noor, appsProgram } = await setUpSlowRefusal();
+      const silenced = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const refused = save(20);
+        await later(300);
+        // Another admin saves $30 on the same Apps rule while the first save is still going
+        await credit.saveException({ categoryId: 'instant_apps', amount: 30 * MILLION, schedule: 'monthly', recipients: { kind: 'people', userIds: [omar, noor] }, claimStartsAt: new Date(), programId: appsProgram.id }, { userId: admin.id, superAdmin: true });
+        expect((await refused).status).toBeGreaterThanOrEqual(500);
+      } finally {
+        silenced.mockRestore();
+        await cleanUp();
+      }
+      expect((await overview()).exceptions[0].instant_apps).toMatchObject({ amountMicros: 30 * MILLION });
+    });
   });
 
   it('says no clash with the exception a preview would itself change, when no id was named', async () => {
