@@ -523,6 +523,33 @@ run('apps a person connects once, in a real database', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('two sign-ins begun at the same moment leave a ticket and a number that belong to one of them, so exactly one can finish', async () => {
+    const connection = await newOAuthApp(sara);
+    mockUser.current = { id: sara };
+    const start = async () => new URL((await (await signInStart(request(`/api/me/apps/${connection.id}/sign-in?redirectUrl=${encodeURIComponent('http://localhost/admin')}`), params({ connectionId: connection.id }))).json()).authorizeUrl).searchParams.get('state')!;
+    // The first one's write that moves the number up is slow, so the second begins and writes in the middle of it
+    const real = prisma.appConnection.update.bind(prisma.appConnection) as (args: { data?: Record<string, unknown> }) => Promise<unknown>;
+    let slowed = false;
+    const spy = jest.spyOn(prisma.appConnection, 'update').mockImplementation(((args: { data?: Record<string, unknown> }) => {
+      if (!slowed && args?.data?.signInGeneration) {
+        slowed = true;
+        return new Promise((resolve) => setTimeout(resolve, 200)).then(() => real(args));
+      }
+      return real(args);
+    }) as never);
+    let states: string[] = [];
+    try {
+      states = await Promise.all([start(), start()]);
+    } finally {
+      spy.mockRestore();
+    }
+    global.fetch = jest.fn(async () => new Response(JSON.stringify({ access_token: 'signed-in', refresh_token: 'r', expires_in: 3600 }), { status: 200 })) as unknown as typeof fetch;
+    const back = (s: string) => signInReturn(request(`/api/oauth/mcp-callback?code=abc&state=${encodeURIComponent(s)}`));
+    const answers = [];
+    for (const state of states) answers.push((await back(state)).headers.get('location') ?? '');
+    expect(answers.filter((location) => location.includes('oauth=success'))).toHaveLength(1);
+  });
+
   it('an older sign-in still being exchanged when a newer one begins and finishes never writes its tokens over the newer one', async () => {
     const connection = await newOAuthApp(sara);
     mockUser.current = { id: sara };

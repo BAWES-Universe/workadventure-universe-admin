@@ -520,6 +520,16 @@ export async function newSignInGeneration(target: { connectionId: string } | { s
   return row.signInGeneration;
 }
 
+/**
+ * A sign-in of an app begins: the ticket and the generation are set by ONE write, and both come back from it. Made apart, two sign-ins begun at the same
+ * moment could leave the ticket of one with the number of the other, a pair nobody holds, and neither could finish.
+ */
+export async function beginConnectionSignIn(connectionId: string): Promise<{ nonce: string; generation: number }> {
+  const nonce = randomBytes(24).toString('base64url');
+  const row = await prisma.appConnection.update({ where: { id: connectionId }, data: { signInNonce: nonce, signInGeneration: { increment: 1 } }, select: { signInGeneration: true } });
+  return { nonce, generation: row.signInGeneration };
+}
+
 /** Uses the ticket exactly once: true for the first return that carries the current one, false for anything else. */
 export async function takeSignInNonce(connectionId: string, nonce: string | undefined): Promise<boolean> {
   if (!nonce) return false;
