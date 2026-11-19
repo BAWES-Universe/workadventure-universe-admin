@@ -125,7 +125,8 @@ run('the list of apps to connect, in a real database', () => {
     const all = await (await catalog(request('/api/me/apps/catalog'))).json();
     const mine = (apps: { key: string }[]) => apps.filter((app) => app.key.endsWith(tag)).map((app) => app.key).sort();
     expect(mine(all.apps)).toEqual([key('gmail'), key('notion')].sort());
-    expect(JSON.stringify(all)).not.toMatch(/platform|authConfig|serverUrl|example\.com/);
+    // The words of the sign-in and the link are looked for in the entries this test made (another enabled app may say "platform" in its own line)
+    expect(JSON.stringify(all.apps.filter((app: { key: string }) => app.key.endsWith(tag)))).not.toMatch(/platform|authConfig|serverUrl|example\.com/);
     // Only the name, what it does, its icon and whether they have it: nothing else of an entry ever reaches a person
     for (const app of all.apps) expect(Object.keys(app).sort()).toEqual(['blurb', 'connectionId', 'icon', 'key', 'name']);
     const found = await (await catalog(request('/api/me/apps/catalog?q=DOCS'))).json();
@@ -226,7 +227,21 @@ run('the list of apps to connect, in a real database', () => {
       });
       asBoss();
       const removing = adminRemove(request(`/api/admin/app-catalog/${created.app.id}`, { method: 'DELETE' }), params({ id: created.app.id }));
-      await Promise.all([...taps, removing]);
+      const [tapResponses, removal] = await Promise.all([Promise.all(taps), removing]);
+      expect(removal.status).toBe(204);
+      for (const [index, tapped] of tapResponses.entries()) {
+        const owner = [sara, omar][index];
+        // A tap is either a connection that was made (201) or an entry that was already gone (404): never a refusal of some other kind
+        expect([201, 404]).toContain(tapped.status);
+        if (tapped.status === 201) {
+          // Made, then let go of the key when the entry was removed: it may be theirs still, but never holds the key
+          const made = await tapped.json();
+          const row = await prisma.appConnection.findUnique({ where: { id: made.id } });
+          expect(row === null || (row.ownerId === owner && row.catalogKey === null)).toBe(true);
+        } else {
+          expect(await prisma.appConnection.count({ where: { ownerId: owner, catalogKey: key(name) } })).toBe(0);
+        }
+      }
       expect(await prisma.appConnection.count({ where: { catalogKey: key(name) } })).toBe(0);
       expect(await prisma.appCatalogEntry.count({ where: { key: key(name) } })).toBe(0);
     }
@@ -251,15 +266,24 @@ run('the list of apps to connect, in a real database', () => {
     const stored = JSON.parse(decryptApiKey((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).authConfig!));
     const { encryptApiKey } = await import('@/lib/encryption');
     await prisma.appConnection.update({ where: { id }, data: { authConfig: encryptApiKey(JSON.stringify({ ...stored, accessToken: 'a', refreshToken: 'r' })) } });
+    // A Brick uses it: the grant is taken away (the Bricks stop) before the app is asked to take the sign-in back
+    expect(await grantToBrick(sara, id, saraBrick)).not.toBeNull();
     const seen: string[] = [];
+    const whenAsked: { connection: number; grants: number }[] = [];
     const before = global.fetch;
-    global.fetch = jest.fn(async (address: string | URL | Request) => { seen.push(String(address)); throw new Error('the app is down'); }) as unknown as typeof fetch;
+    global.fetch = jest.fn(async (address: string | URL | Request) => {
+      seen.push(String(address));
+      // What stands when the app is asked (read here, asserted below: a failure inside the double would be swallowed as "the app is down")
+      whenAsked.push({ connection: await prisma.appConnection.count({ where: { id } }), grants: await prisma.botMcpServer.count({ where: { connectionId: id } }) });
+      throw new Error('the app is down');
+    }) as unknown as typeof fetch;
     try {
       expect(await disconnect(sara, id)).toBe(true);
     } finally {
       global.fetch = before;
     }
     expect(seen).toEqual(['https://accounts.example.com/revoke']);
+    expect(whenAsked).toEqual([{ connection: 0, grants: 0 }]);
     expect(await prisma.appConnection.count({ where: { id } })).toBe(0);
   });
 
@@ -290,7 +314,7 @@ run('the list of apps to connect, in a real database', () => {
       expect(row(first.apps, 'notion')).toMatchObject({ connectionId: null, connected: false, usable: false });
       // An app that needs no sign-in works as soon as it is connected
       expect(row(first.apps, 'weather')).toMatchObject({ connected: true, usable: false });
-      expect(JSON.stringify(first)).not.toMatch(/platform|authConfig|serverUrl|example\.com/);
+      expect(JSON.stringify(mine(first.apps))).not.toMatch(/platform|authConfig|serverUrl|example\.com/);
       for (const app of first.apps) expect(Object.keys(app).sort()).toEqual(['blurb', 'connected', 'connectionId', 'key', 'name', 'usable']);
 
       // They signed in, and the Brick was let use it
@@ -333,14 +357,29 @@ run('the list of apps to connect, in a real database', () => {
     const bodies: string[] = [];
     const before = global.fetch;
     global.fetch = jest.fn(async (_address: string | URL | Request, init?: RequestInit) => { bodies.push(String(init?.body)); return new Response('', { status: 200 }); }) as unknown as typeof fetch;
+    // The attempts to take the lease are seen: the answer of each claim of a lease that is held is a count of 0
+    const realUpdateMany = prisma.appConnection.updateMany.bind(prisma.appConnection) as (args: { where?: Record<string, unknown> }) => Promise<{ count: number }>;
+    let failedClaims = 0;
+    const claims = jest.spyOn(prisma.appConnection, 'updateMany').mockImplementation(((args: { where?: Record<string, unknown> }) =>
+      realUpdateMany(args).then((result) => {
+        if (args?.where && 'OR' in args.where && result.count === 0) failedClaims += 1;
+        return result;
+      })) as never);
+    let gone: Promise<boolean> | null = null;
     try {
-      const gone = disconnect(sara, id);
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      gone = disconnect(sara, id);
+      // Wait for the disconnect to try the lease while the old one is held (bounded: it fails the test if it never tries)
+      for (let wait = 0; wait < 400 && failedClaims === 0; wait += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(failedClaims).toBeGreaterThan(0);
       expect(bodies).toEqual([]);
       expect(await prisma.appConnection.count({ where: { id } })).toBe(1);
       await prisma.appConnection.update({ where: { id }, data: { authConfig: signedIn('new'), refreshLeaseUntil: null } });
       expect(await gone).toBe(true);
     } finally {
+      // Whatever failed above: the test's lease is let go and the disconnect is joined before the fetch and the rows go back
+      await prisma.appConnection.updateMany({ where: { id }, data: { refreshLeaseUntil: null } }).catch(() => undefined);
+      if (gone) await gone.catch(() => undefined);
+      claims.mockRestore();
       global.fetch = before;
     }
     expect(bodies).toHaveLength(1);

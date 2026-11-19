@@ -29,6 +29,20 @@ jest.mock('@/lib/app-connections', () => {
     }),
   };
 });
+// A change that commits after the request was built and before the use is taken (the call asks for its limits at that moment)
+const mockBeforeAdmission: { current: (() => Promise<void>) | null } = { current: null };
+jest.mock('@/lib/bot-limits', () => {
+  const actual = jest.requireActual('@/lib/bot-limits');
+  return {
+    ...actual,
+    getBrickLimits: jest.fn(async (...args: Parameters<typeof actual.getBrickLimits>) => {
+      const hook = mockBeforeAdmission.current;
+      mockBeforeAdmission.current = null;
+      if (hook) await hook();
+      return actual.getBrickLimits(...args);
+    }),
+  };
+});
 jest.mock('@/lib/app-direct/guard', () => {
   const actual = jest.requireActual('@/lib/app-direct/guard');
   return {
@@ -61,6 +75,7 @@ import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { GET as readTools } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/route';
 import { confirmTools } from '@/lib/mcp-tool-policy';
 import { saveServerLimits } from '@/lib/bot-limits';
+import { snapshotSettings } from '../helpers/shared-settings';
 jest.mock('@/lib/app-direct/catalog', () => jest.requireActual('../helpers/example-gateway').catalogWithExample());
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -78,7 +93,7 @@ let saraStudio = '';
 let omarBrick = '';
 let roomBot = '';
 let universeId = '';
-let limitsBefore: { value: unknown } | null = null;
+let restoreSettings: () => Promise<void> = async () => undefined;
 
 const request = (path: string, init: { method?: string; body?: unknown; token?: string } = {}) =>
   new NextRequest(`http://localhost${path}`, {
@@ -105,7 +120,7 @@ run('using a key app, in a real database', () => {
     process.env.BOT_SERVICE_TOKEN = SERVICE_TOKEN;
     process.env.ADMIN_API_TOKEN = ADMIN_TOKEN;
     process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'a'.repeat(64);
-    limitsBefore = await prisma.appSetting.findUnique({ where: { key: 'bot-limits' } });
+    restoreSettings = await snapshotSettings(['bot-limits']);
     await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
     const person = (name: string) => prisma.user.create({ data: { uuid: `${name}-${tag}`, email: `${name}-${tag}@example.test`, name } });
     sara = (await person('sara')).id;
@@ -125,7 +140,7 @@ run('using a key app, in a real database', () => {
     mockAfterCheck.current = null;
     mockUser.current = null;
     // The rows that count uses of a key stay when an app is disconnected, so they are cleared here
-    await prisma.appKeyCall.deleteMany({ where: { ownerId: { in: [sara, omar, 'page-payments'] } } });
+    await prisma.appKeyCall.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.appKeyRequest.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.appConnection.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.botMcpServer.deleteMany({ where: { botId: { in: [saraBrick, saraStudio, omarBrick, roomBot] } } });
@@ -137,7 +152,7 @@ run('using a key app, in a real database', () => {
   afterAll(async () => {
     await prisma.universe.deleteMany({ where: { id: universeId } });
     await prisma.user.deleteMany({ where: { id: { in: [sara, omar] } } });
-    if (limitsBefore) await prisma.appSetting.create({ data: { key: 'bot-limits', value: limitsBefore.value as object } });
+    await restoreSettings();
     for (const [key, value] of [['BOT_SERVICE_TOKEN', envBefore.service], ['ADMIN_API_TOKEN', envBefore.admin], ['ENCRYPTION_KEY', envBefore.key]] as const) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -208,9 +223,10 @@ run('using a key app, in a real database', () => {
     expect(app.operations[0].inputSchema).toEqual({ type: 'object', properties: { chargeId: { type: 'string', description: 'The payment id, like chg_TS01...', maxLength: 80 } }, required: ['chargeId'], additionalProperties: false });
     const text = JSON.stringify(body);
     expect(text).not.toContain(KEY);
-    expect(text).not.toContain(KEY.slice(-4));
+    // No credential field of any kind, by name (a random four characters can turn up in a hash by chance, so the end of the key is not searched for)
+    for (const field of ['keyLast4', 'keyCipher', 'keyMode', 'authConfig']) expect(text).not.toContain(field);
+    expect(Object.keys(app)).not.toEqual(expect.arrayContaining(['keyLast4']));
     expect(text).not.toContain('api.examplepay.com');
-    expect(text).not.toContain('keyCipher');
     expect(await keyAppsOf(omarBrick)).toEqual([]);
     expect((await listKeyApps(request(`/api/bots/${saraBrick}/key-apps`), params({ id: saraBrick }))).status).toBe(401);
   });
@@ -318,8 +334,12 @@ run('using a key app, in a real database', () => {
     expect((await ask(roomBot, { requesterKey: `sara-${tag}`, service: 'examplepay' })).status).toBe(404);
     expect((await ask(saraBrick, { requesterKey: `nobody-${tag}`, service: 'examplepay' })).status).toBe(404);
     await prisma.user.update({ where: { id: sara }, data: { isGuest: true } });
-    expect((await ask(saraBrick, { requesterKey: `sara-${tag}`, service: 'examplepay' })).status).toBe(404);
-    await prisma.user.update({ where: { id: sara }, data: { isGuest: false } });
+    try {
+      expect((await ask(saraBrick, { requesterKey: `sara-${tag}`, service: 'examplepay' })).status).toBe(404);
+    } finally {
+      // Later cases use Sara: she is put back whatever the assertion said
+      await prisma.user.update({ where: { id: sara }, data: { isGuest: false } });
+    }
     // The shape: a service or a draft with where it came from, nothing else
     expect((await ask(saraBrick, { requesterKey: `sara-${tag}` })).status).toBe(400);
     expect((await ask(saraBrick, { requesterKey: `sara-${tag}`, draft: { nonsense: true } })).status).toBe(400);
@@ -542,27 +562,24 @@ run('using a key app, in a real database', () => {
       expect(await prisma.appKeyCall.count({ where: { ownerId: sara } })).toBe(0);
     });
 
-    it('builds the request again with the new key when the key was replaced after it was admitted, never sending the old one', async () => {
+    it('builds the request again with the new key when the key was replaced after it was built, never sending the old one', async () => {
       const id = await connectGateway();
       const [app] = await keyAppsOf(saraBrick);
       const fresh = `sk_test_${randomUUID().replace(/-/g, '')}`;
       const seen: string[] = [];
-      mockAfterCheck.current = async () => {
+      // The old key's request is built; before the use is taken the owner replaces the key (the replacement checks the new key at the service first)
+      mockBeforeAdmission.current = async () => {
         mockSend.current = () => ({ status: 404 });
         const form = await openKeyForm({ ownerId: sara, connectionId: id });
         await submitKey({ requestId: form.id, ownerId: sara, key: fresh });
+        mockSend.current = (target) => (seen.push(target.headers.Authorization ?? target.headers.authorization ?? ''), { status: 200 });
       };
       mockSend.current = () => ({ status: 404 });
-      // The check inside the replacement is the first thing sent; then this call's own request
-      const sendSpy = (target: { headers: Record<string, string> }) => (seen.push(target.headers.Authorization ?? target.headers.authorization ?? ''), { status: 200 });
-      const hookBefore = mockAfterCheck.current;
-      mockAfterCheck.current = async () => {
-        await hookBefore();
-        mockSend.current = sendSpy;
-      };
       const response = await call(saraBrick, app.serverId, app.definitionHash);
       expect(response.status).toBe(200);
+      // Only the rebuilt request reached the service: the one built with the old key was never sent
       expect(seen).toEqual([`Bearer ${fresh}`]);
+      expect(await prisma.appKeyCall.count({ where: { ownerId: sara } })).toBe(1);
     });
 
     it('ignores a refusal that comes back from a key that was replaced while the request was out', async () => {
@@ -587,17 +604,31 @@ run('using a key app, in a real database', () => {
     it('clears a refusal another call reported while this one was out, and never one for a key that was replaced', async () => {
       const id = await connectGateway();
       const [app] = await keyAppsOf(saraBrick);
-      // Two calls at once: one refused, one accepted (the accepted one began when nothing was marked)
-      let order = 0;
-      mockSend.current = async () => {
-        order += 1;
-        if (order === 1) return { status: 401 };
-        await new Promise((resolve) => setTimeout(resolve, 30));
-        return { status: 200 };
-      };
-      const [first, second] = await Promise.all([call(saraBrick, app.serverId, app.definitionHash), call(saraBrick, app.serverId, app.definitionHash)]);
-      expect([first.status, second.status].sort()).toEqual([200, 502]);
-      expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
+      // Two calls at once: one refused, one accepted (the accepted one began when nothing was marked). Each answer is held until both
+      // requests are at the service, and the refusal is let through and stored first: only then is the accepted one answered
+      const arrived: ((answer: Answer) => void)[] = [];
+      mockSend.current = () => new Promise<Answer>((resolve) => arrived.push(resolve));
+      const first = call(saraBrick, app.serverId, app.definitionHash);
+      const second = call(saraBrick, app.serverId, app.definitionHash);
+      try {
+        // Bounded well under the test's own limit (10 s), so a request that never comes fails the test with time left for the clean-up below
+        for (let wait = 0; wait < 160 && arrived.length < 2; wait += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+        expect(arrived).toHaveLength(2);
+        arrived[0]({ status: 401 });
+        const refused = await Promise.race([first, second]);
+        expect(refused.status).toBe(502);
+        expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).not.toBeNull();
+        arrived[1]({ status: 200 });
+        const accepted = await Promise.all([first, second]).then((both) => both.find((one) => one !== refused)!);
+        expect(accepted.status).toBe(200);
+        expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
+      } finally {
+        // Whatever failed above: a request that reaches the service from now on is answered at once (it would otherwise wait for a resolver nobody
+        // holds), every request still held is answered, and both calls are joined, so nothing is left running over the clean-up of the rows
+        mockSend.current = () => ({ status: 200 });
+        for (const answer of arrived) answer({ status: 200 });
+        await Promise.allSettled([first, second]);
+      }
     });
 
     it('keeps what was used this hour when the app is disconnected and connected again', async () => {

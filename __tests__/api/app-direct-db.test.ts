@@ -38,6 +38,7 @@ import { GET as readForm } from '@/app/api/me/apps/key-forms/[formId]/route';
 import { POST as sendKey } from '@/app/api/me/apps/key-forms/[formId]/key/route';
 import { GET as listApps } from '@/app/api/me/apps/route';
 import { saveServerLimits } from '@/lib/bot-limits';
+import { snapshotSettings } from '../helpers/shared-settings';
 import { EXAMPLE_GATEWAY } from '../helpers/example-gateway';
 jest.mock('@/lib/app-direct/catalog', () => jest.requireActual('../helpers/example-gateway').catalogWithExample());
 
@@ -50,7 +51,7 @@ let sara = '';
 let omar = '';
 let saraBrick = '';
 const envKey = process.env.ENCRYPTION_KEY;
-let limitsBefore: { value: unknown } | null = null;
+let restoreSettings: () => Promise<void> = async () => undefined;
 
 const request = (path: string, body?: unknown) =>
   new NextRequest(`http://localhost${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -74,7 +75,7 @@ run('key apps, in a real database', () => {
   beforeAll(async () => {
     process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'a'.repeat(64);
     // The recommended limits, whatever an earlier run of anything left on this database
-    limitsBefore = await prisma.appSetting.findUnique({ where: { key: 'bot-limits' } });
+    restoreSettings = await snapshotSettings(['bot-limits']);
     await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
     const person = (name: string) => prisma.user.create({ data: { uuid: `${name}-${tag}`, email: `${name}-${tag}@example.test`, name } });
     sara = (await person('sara')).id;
@@ -90,8 +91,7 @@ run('key apps, in a real database', () => {
 
   afterAll(async () => {
     await prisma.user.deleteMany({ where: { id: { in: [sara, omar] } } });
-    await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
-    if (limitsBefore) await prisma.appSetting.create({ data: { key: 'bot-limits', value: limitsBefore.value as object } });
+    await restoreSettings();
     if (envKey === undefined) delete process.env.ENCRYPTION_KEY;
     else process.env.ENCRYPTION_KEY = envKey;
     await prisma.$disconnect();
@@ -192,6 +192,11 @@ run('key apps, in a real database', () => {
     const id = await open();
     const results = await Promise.allSettled([submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(404).deps), submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, service(404).deps)]);
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    // The one that lost lost because the form was already used, not because of some other failure
+    const lost = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+    expect(lost).toHaveLength(1);
+    expect(lost[0].reason).toBeInstanceOf(KeyFormError);
+    expect(lost[0].reason).toMatchObject({ status: 410, code: 'used' });
     expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(1);
   });
 

@@ -145,7 +145,7 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await prisma.spendRule.count({ where: { ownerPersonId: sara.id } })).toBe(1);
       // Only meanings are columns: there is no place for the words a person wrote
       const columns = Object.keys((await prisma.spendRule.findFirst({ where: { ownerPersonId: sara.id } })) ?? {});
-      expect(columns).not.toEqual(expect.arrayContaining(['text', 'message', 'said']));
+      for (const forbidden of ['text', 'message', 'said']) expect(columns).not.toContain(forbidden);
     });
 
     it('the same message id said by two people is two rules: a replay never finds or shows another person\'s rule', async () => {
@@ -310,11 +310,18 @@ run('rules said in chat and task receipts, in a real database', () => {
       const refused = await step(`instant-a-${tag}`, 50_000);
       expect(refused).toEqual({ ok: false, reason: 'rule', ruleId: expect.any(String), why: 'cap', leftMicros: 10_000, words: expect.stringContaining('No more than $0.01 a month') });
       expect(await prisma.creditHold.count({ where: { personId: sara.id } })).toBe(0);
-      // Within the rule it goes on to the books (here nothing is funded, so the books answer, not the rule)
-      expect(await step(`instant-b-${tag}`, 5_000)).not.toMatchObject({ reason: 'rule' });
-      // A hold that is already there is asked about again: it is that hold, not a new step
-      await hold(sara.id, sara.brickId, 'instant-c', { state: 'held', amount: 10_000 });
-      expect(await step(`instant-c-${tag}`, 10_000)).not.toMatchObject({ reason: 'rule' });
+      // Within the rule it goes on to the books, which are funded here, and takes the whole of the rule's room in one hold
+      const account = await prisma.fundingAccount.create({ data: { kind: 'person', ownerKey: sara.id, name: 'Sara', budgetMicros: BigInt(100_000_000) } });
+      await prisma.creditLot.create({
+        data: { slotKey: 'base:instant_apps', subjectKey: `person:${sara.id}`, periodKey: '2026-11', fundingAccountId: account.id, personId: sara.id, source: 'default', amountMicros: BigInt(1_000_000), covers: ['instant_apps'], startsAt: new Date('2026-11-01T00:00:00Z') },
+      });
+      const key = `instant-b-${tag}`;
+      expect(await step(key, 10_000)).toMatchObject({ ok: true });
+      expect(await prisma.creditHold.count({ where: { personId: sara.id, state: 'held' } })).toBe(1);
+      // A hold that is already there is asked about again: it is that hold, not a new step (as a new one it would be over the rule's room, which is all used)
+      expect(await step(key, 10_000)).toMatchObject({ ok: true, created: false });
+      expect(await prisma.creditHold.count({ where: { personId: sara.id, state: 'held' } })).toBe(1);
+      expect(await step(`instant-new-${tag}`, 10_000)).toMatchObject({ ok: false, reason: 'rule' });
     });
 
     it('two Instant steps asked at the same moment meet at the person’s lock: a cap with room for one lets exactly one through', async () => {
@@ -712,6 +719,9 @@ run('rules said in chat and task receipts, in a real database', () => {
       });
       // Another person's task with the same key shows nothing of it here
       await spend(sara.id, sara.brickId, 777_000, { jobId: 'other-task', instant: true });
+      // And another person's step under the very same task key on the same Brick is not Sara's either: the receipt is by person as well as by task
+      const omar = await person('omar');
+      await spend(omar.id, sara.brickId, 888_000, { jobId: 'trip', instant: true });
       expect(await closeReceipt({ botId: sara.brickId, taskKey: 'trip', personId: sara.id, state: 'done', chargedMicros: 60_000 }, NOW)).toMatchObject({ ok: true, state: 'done' });
       const [item] = await activityFor(sara.id);
       expect(item).toMatchObject({
@@ -749,6 +759,45 @@ run('rules said in chat and task receipts, in a real database', () => {
       // The run's own thinking is on the first receipt only; the other job's computer time is on neither
       expect(first?.lines).toEqual([expect.objectContaining({ note: 'Universe AI' })]);
       expect(second?.lines).toEqual([]);
+    });
+
+    it('a Brick\'s own thinking for a task is the owner\'s usage: the owner\'s receipt lists it, a receipt of someone else who asked does not (it would add a line they did not pay and name a key that is not theirs)', async () => {
+      const sara = await person('sara');
+      const omar = await person('omar');
+      // Omar, who does not own the Brick, asked it for a task; the Brick's model calls for the run are the owner's (the ai-usage report counts a task's calls under the owner)
+      await openReceipt({ botId: sara.brickId, personId: omar.id, taskKey: 'omar-task', runId: 'run-own', title: 'Omar asked', category: 'apps' }, NOW);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'sara-task', runId: 'run-own', title: 'Sara asked', category: 'apps' }, new Date(NOW.getTime() + 1000));
+      await prisma.meterEvent.create({
+        data: { eventId: `owner-think-${tag}`, kind: 'model_call', pool: 'chat', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'person', payerPersonId: sara.id, route: 'own-key', quantity: BigInt(1), unit: 'call', costMicros: BigInt(1000), basis: 'measured', detail: { runId: 'run-own', channel: 'task' } },
+      });
+      await closeReceipt({ botId: sara.brickId, taskKey: 'omar-task', personId: omar.id, state: 'done' }, NOW);
+      await closeReceipt({ botId: sara.brickId, taskKey: 'sara-task', personId: sara.id, state: 'done' }, new Date(NOW.getTime() + 1000));
+      const [asked] = await activityFor(omar.id);
+      expect(asked).toMatchObject({ title: 'Omar asked', lines: [] });
+      const [owned] = await activityFor(sara.id);
+      expect(owned.lines).toEqual([expect.objectContaining({ note: 'Your own key' })]);
+    });
+
+    it('a refunded Apps receipt of someone who asked is hidden when only the owner has events on its key or run, and the owner\'s own refunded receipt with books of their own still shows', async () => {
+      const sara = await person('sara');
+      const omar = await person('omar');
+      const event = (eventId: string, detail: { runId?: string; taskKey?: string; instant?: boolean }) =>
+        prisma.meterEvent.create({
+          data: { eventId: `${eventId}-${tag}`, kind: 'app_use', pool: 'chat', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(1000), basis: 'measured', detail },
+        });
+      // Omar asked and was refunded; the books hold the owner's events on the same task key and run, and nothing of Omar's
+      await openReceipt({ botId: sara.brickId, personId: omar.id, taskKey: 'omar-key', runId: 'run-omar', title: 'Omar refunded by key', category: 'apps' }, NOW);
+      await event('omar-key', { instant: true, taskKey: 'omar-key' });
+      await openReceipt({ botId: sara.brickId, personId: omar.id, taskKey: 'omar-run', runId: 'run-omar', title: 'Omar refunded by run', category: 'apps' }, new Date(NOW.getTime() + 1000));
+      await event('run-omar', { runId: 'run-omar' });
+      await closeReceipt({ botId: sara.brickId, taskKey: 'omar-key', personId: omar.id, state: 'refunded' }, NOW);
+      await closeReceipt({ botId: sara.brickId, taskKey: 'omar-run', personId: omar.id, state: 'refunded' }, new Date(NOW.getTime() + 1000));
+      // The owner's own refunded receipt with a charge of their own in the books is listed as before
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'sara-key', title: 'Sara refunded with books', category: 'apps' }, NOW);
+      await event('sara-key', { instant: true, taskKey: 'sara-key' });
+      await closeReceipt({ botId: sara.brickId, taskKey: 'sara-key', personId: sara.id, state: 'refunded' }, NOW);
+      expect((await activityFor(omar.id)).map((item) => item.title)).toEqual([]);
+      expect((await activityFor(sara.id)).map((item) => item.title)).toEqual(['Sara refunded with books']);
     });
 
     it('a job a rule refused before it ever ran is not an Activity line, and one that ran and was stopped by a rule is', async () => {

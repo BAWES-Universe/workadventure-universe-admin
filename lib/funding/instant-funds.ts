@@ -7,7 +7,7 @@ import { setInstantFunds, type InstantFunds } from '@/lib/instant/funds';
  * What the Instant executor (O2) needs from the funding books, as the contract in lib/instant/funds.ts. Amounts are whole micros of a
  * dollar and every call is idempotent per key. It takes from the Instant Apps category only, by earliest expiry first, all or nothing:
  * replies and computer money never pay for it, and it never falls back to anything else. Any failure to read or write the books answers
- * "unavailable" (or a plain `ok: false`), so the executor refuses or says it again later, never running an unfunded paid step.
+ * "unavailable" (`unsure` when a hold may exist) or a plain `ok: false`, so the executor refuses or says it again later, never running an unfunded paid step.
  */
 
 /** `clock` is for tests only; the executor never passes it. */
@@ -39,7 +39,9 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
         return { ok: false, reason: held.reason === 'credit_used_up' || held.reason === 'not_set' ? held.reason : 'unavailable' };
       } catch (error) {
         console.error('[Funding] Could not hold Instant credit:', error instanceof Error ? error.message : 'unknown');
-        return { ok: false, reason: 'unavailable' };
+        // An error can come after the hold was written (a lost connection on the way back): it is not "nothing was held". The executor
+        // gives the key back, and keeps the run open when that cannot be said either, so the person's credit is never left held
+        return { ok: false, reason: 'unavailable', unsure: true };
       }
     },
     async settle(input) {

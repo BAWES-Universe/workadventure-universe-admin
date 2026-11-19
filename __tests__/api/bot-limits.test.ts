@@ -37,6 +37,17 @@ beforeAll(() => {
 afterAll(() => {
   process.env.SUPER_ADMINS = env;
 });
+/** The settings row as the database keeps it: a save is what the next read finds (the way the getters really read it). */
+function keepSavedSettings(first: unknown = null): () => unknown {
+  let row: unknown = first;
+  settings.findUnique.mockImplementation(async () => row);
+  settings.upsert.mockImplementation(async (args: { update: { value: unknown }; create: { value: unknown } }) => {
+    row = { key: 'bot-limits', value: row ? args.update.value : args.create.value };
+    return row;
+  });
+  return () => row;
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   settings.findUnique.mockResolvedValue(null);
@@ -159,16 +170,21 @@ describe('/api/admin/bot-limits', () => {
 
   it('saves the numbers for Bricks on top of what is saved, and gives them to whoever deletes or suggests (game #1996)', async () => {
     expect(await getBrickLimits()).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10 });
-    settings.findUnique.mockResolvedValue({ key: 'bot-limits', value: { bricks: { offerAfter: 5 } } });
+    keepSavedSettings({ key: 'bot-limits', value: { bricks: { offerAfter: 5 } } });
     const response = await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { undoDays: 14 } }));
     expect(response.status).toBe(200);
     expect((await response.json()).limits.bricks).toEqual({ undoDays: 14, offerAfter: 5, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10 });
     expect(settings.upsert.mock.calls[0][0].update.value.bricks).toEqual({ undoDays: 14, offerAfter: 5, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10 });
-    expect(await getBrickLimits()).toEqual({ undoDays: 7, offerAfter: 5, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10 });
+    // Read back from what was saved: the new number, with the earlier saved one kept
+    expect(await getBrickLimits()).toEqual({ undoDays: 14, offerAfter: 5, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10 });
+    // A request that is turned down writes nothing: what was saved stays
     expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { undoDays: 0 } }))).status).toBe(400);
+    expect(settings.upsert).toHaveBeenCalledTimes(1);
+    expect(await getBrickLimits()).toMatchObject({ undoDays: 14, offerAfter: 5 });
   });
 
   it('saves the Brick for guests\' own allowance and pool (game #1997), and turns down what can\'t be saved', async () => {
+    keepSavedSettings();
     const response = await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { guestReplies: 20 } }));
     expect(response.status).toBe(200);
     expect((await response.json()).limits.bricks).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 20, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10 });
@@ -176,7 +192,9 @@ describe('/api/admin/bot-limits', () => {
     expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { universePool: 0 } }))).status).toBe(400);
     expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { guestReplies: 1.5 } }))).status).toBe(400);
     expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { nothing: 1 } }))).status).toBe(400);
-    expect(await getBrickLimits()).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10 });
+    // Read back from what was saved: 20, and turned-down requests changed nothing
+    expect(settings.upsert).toHaveBeenCalledTimes(1);
+    expect(await getBrickLimits()).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 20, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10 });
   });
 
   it('turns down "Reads from an earlier file" above "Reads from a page or file", saying why, and saves nothing', async () => {

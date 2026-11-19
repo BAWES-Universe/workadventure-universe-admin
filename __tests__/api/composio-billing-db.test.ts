@@ -10,6 +10,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => moc
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: (email: string | null) => email === 'boss@example.test' }));
 
 import { prisma } from '@/lib/db';
+import { snapshotSettings } from '../helpers/shared-settings';
 import { setAdapterForTests, type ReadyMadeAdapter } from '@/lib/app-adapter';
 import { recordMeterEvent } from '@/lib/meter';
 import { GET, PUT } from '@/app/api/admin/composio-billing/route';
@@ -52,7 +53,12 @@ async function step(day: number, id: string, detail: Record<string, unknown>, co
 const ownRun = (tool: string) => ({ toolkit: 'gmail', tool, kind: 'execution', tier: 'own', tierVerified: true, ownAuth: true, executions: 1, sandboxRuns: 0, zdrCalls: 0 });
 
 run('the Composio bill report', () => {
+  let putBillingBack: () => Promise<void> = async () => {};
   beforeAll(async () => {
+    // The starting billing state is set here, not assumed: what a database already holds (a plan saved by an earlier run that stopped before
+    // its clean-up) is read, cleared so the report starts from its default plan, and put back in afterAll
+    putBillingBack = await snapshotSettings(['composio-billing', 'composio-invoices']);
+    await prisma.appSetting.deleteMany({ where: { key: { in: ['composio-billing', 'composio-invoices'] } } });
     sara = (await prisma.user.create({ data: { uuid: `sara-${tag}`, email: `sara-${tag}@example.test`, name: 'sara' } })).id;
     boss = (await prisma.user.create({ data: { uuid: `boss-${tag}`, email: 'boss@example.test', name: 'boss' } })).id;
   });
@@ -65,8 +71,16 @@ run('the Composio bill report', () => {
     await prisma.appSetting.deleteMany({ where: { key: { in: ['composio-billing', 'composio-invoices'] } } });
   });
   afterAll(async () => {
-    await prisma.user.deleteMany({ where: { id: { in: [sara, boss] } } });
-    await prisma.$disconnect();
+    try {
+      // The settings are put back even when the clean-up of the people fails; the connection is let go last of all
+      try {
+        await prisma.user.deleteMany({ where: { id: { in: [sara, boss] } } });
+      } finally {
+        await putBillingBack();
+      }
+    } finally {
+      await prisma.$disconnect();
+    }
   });
   const asBoss = () => (mockUser.current = { id: boss, email: 'boss@example.test' });
 

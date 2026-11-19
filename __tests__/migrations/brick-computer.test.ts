@@ -13,6 +13,7 @@ type Result = {
   after: { users: Row[]; bots: Row[] };
   countsAfterMigration: { computers: number; jobs: number; effects: number };
   checks: Record<string, unknown>;
+  beforeBrickGone: { computers: number; jobs: number; effects: number };
   afterBrickGone: { computers: number; jobs: number; effects: number };
 };
 
@@ -77,6 +78,10 @@ describe('Brick computers: what the database keeps', () => {
   });
 
   it('takes a Brick’s computer, jobs and effects with it when it is removed for good', () => {
+    // There was something of the Brick's to take, counted by the effects' own ids (not through jobs that are gone by then)
+    expect(result.beforeBrickGone.computers).toBeGreaterThan(0);
+    expect(result.beforeBrickGone.jobs).toBeGreaterThan(0);
+    expect(result.beforeBrickGone.effects).toBeGreaterThan(0);
     expect(result.afterBrickGone).toEqual({ computers: 0, jobs: 0, effects: 0 });
   });
 });

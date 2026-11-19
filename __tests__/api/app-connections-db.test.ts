@@ -42,7 +42,7 @@ import { DELETE as removeApp } from '@/app/api/me/apps/[connectionId]/bricks/[bo
 import { GET as signInStart } from '@/app/api/me/apps/[connectionId]/sign-in/route';
 import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { PATCH as patchServer, DELETE as deleteServer } from '@/app/api/bots/[id]/mcp-servers/[serverId]/route';
-import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
+import { POST as checkUseRoute } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { GET as signInReturn } from '@/app/api/oauth/mcp-callback/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -225,14 +225,43 @@ run('apps a person connects once, in a real database', () => {
     // Another server holds the lease and stores a fresh token a moment later
     await prisma.appConnection.update({ where: { id: connection.id }, data: { refreshLeaseUntil: new Date(Date.now() + LEASE_MS) } });
     const before = (await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).authConfig!;
-    const waiting = ensureFreshOAuthConfig({ serverId: 'unused', connectionId: connection.id, authConfig: before });
-    setTimeout(async () => {
-      await prisma.appConnection.update({
-        where: { id: connection.id },
-        data: { authConfig: encryptApiKey(oauthConfig({ accessToken: 'theirs', refreshToken: 'refresh-2', expiresAt: nowSeconds() + 3600 })), refreshLeaseUntil: null },
-      });
-    }, 400);
-    const outcome = await waiting;
+    // The waiting call's attempts to take the lease are seen: the answer of each claim of a lease that is held is a count of 0
+    const realUpdateMany = prisma.appConnection.updateMany.bind(prisma.appConnection) as (args: { where?: Record<string, unknown> }) => Promise<{ count: number }>;
+    let failedClaims = 0;
+    const claims = jest.spyOn(prisma.appConnection, 'updateMany').mockImplementation(((args: { where?: Record<string, unknown> }) =>
+      realUpdateMany(args).then((result) => {
+        if (args?.where && 'OR' in args.where && result.count === 0) failedClaims += 1;
+        return result;
+      })) as never);
+    let waiting: Promise<Awaited<ReturnType<typeof ensureFreshOAuthConfig>>> | null = null;
+    let theirs: Promise<void> | null = null;
+    let done: PromiseSettledResult<Awaited<ReturnType<typeof ensureFreshOAuthConfig>>> | undefined;
+    let wrote: PromiseSettledResult<void> | undefined;
+    try {
+      waiting = ensureFreshOAuthConfig({ serverId: 'unused', connectionId: connection.id, authConfig: before });
+      // The other server writes only after the waiting call was seen to try the lease and be refused (bounded to 4 s, well under the test's limit: it fails the test with time left for the clean-up if it never tries),
+      // so the lease cannot end before the call looked at it
+      for (let wait = 0; wait < 160 && failedClaims === 0; wait += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(failedClaims).toBeGreaterThan(0);
+      // Its write is a promise of its own, joined with the waiting call before anything else: a failed write is the failure of this test
+      // (not an unhandled rejection), and it cannot land after the teardown has begun
+      theirs = prisma.appConnection
+        .update({
+          where: { id: connection.id },
+          data: { authConfig: encryptApiKey(oauthConfig({ accessToken: 'theirs', refreshToken: 'refresh-2', expiresAt: nowSeconds() + 3600 })), refreshLeaseUntil: null },
+        })
+        .then(() => undefined);
+      [done, wrote] = await Promise.allSettled([waiting, theirs]);
+    } finally {
+      // Whatever failed above: the lease is let go (nothing else waits behind a write that never happened), both calls are joined, and the spy goes
+      await prisma.appConnection.updateMany({ where: { id: connection.id }, data: { refreshLeaseUntil: null } }).catch(() => undefined);
+      await Promise.allSettled([waiting, theirs]);
+      claims.mockRestore();
+    }
+    if (wrote?.status === 'rejected') throw wrote.reason;
+    if (done?.status === 'rejected') throw done.reason;
+    if (!done) throw new Error('the waiting call was not run');
+    const outcome = done.value;
     expect(fetchMock).not.toHaveBeenCalled();
     expect(outcome.status).toBe('fresh');
     expect(outcome.config).toMatchObject({ accessToken: 'theirs' });
@@ -266,7 +295,7 @@ run('apps a person connects once, in a real database', () => {
 
     // the very next use finds nothing
     expect(await checkAppUse(saraBrick, a.id, asSara)).toBeNull();
-    const answer = await (await useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: asSara }), params({ id: saraBrick, serverId: a.id }))).json();
+    const answer = await (await checkUseRoute(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: asSara }), params({ id: saraBrick, serverId: a.id }))).json();
     expect(answer).toMatchObject({ allowed: false, reason: 'gone' });
     // every approval for it ended and its waiting card is closed ...
     expect((await prisma.botActionGrant.findUniqueOrThrow({ where: { id: grantId } })).revokedAt).not.toBeNull();
@@ -346,7 +375,7 @@ run('apps a person connects once, in a real database', () => {
     const refused = [{ requesterKey: `omar-${tag}` }, { requesterKey: `omar-${tag}@example.test` }, { requesterKey: 'a-guest-session' }, {}];
     for (const input of refused) expect(await checkAppUse(saraBrick, a.id, input)).toEqual({ allowed: false, reason: 'not_owner', viaConnection: true });
     // and the answer over the wire says nothing about the app
-    const wire = await (await useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `omar-${tag}` } }), params({ id: saraBrick, serverId: a.id }))).json();
+    const wire = await (await checkUseRoute(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `omar-${tag}` } }), params({ id: saraBrick, serverId: a.id }))).json();
     expect(wire).toEqual({ allowed: false, reason: 'not_owner', viaConnection: true });
     expect(JSON.stringify(wire)).not.toMatch(/Calendar|mcp\.example|sara/);
   });
@@ -365,7 +394,7 @@ run('apps a person connects once, in a real database', () => {
   it('asks the bot server’s check only with the service token', async () => {
     const connection = await newOAuthApp(sara);
     const a = (await grantToBrick(sara, connection.id, saraBrick))!;
-    const asked = (token?: string) => useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token, body: { forOwner: true } }), params({ id: saraBrick, serverId: a.id }));
+    const asked = (token?: string) => checkUseRoute(request(`/api/bots/${saraBrick}/mcp-servers/${a.id}/use`, { method: 'POST', token, body: { forOwner: true } }), params({ id: saraBrick, serverId: a.id }));
     expect((await asked()).status).toBe(401);
     expect((await asked('wrong')).status).toBe(401);
     expect((await asked(ADMIN_TOKEN)).status).toBe(401);

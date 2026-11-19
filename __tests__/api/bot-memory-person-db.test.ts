@@ -14,6 +14,7 @@ jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 
 import { prisma } from '@/lib/db';
+import { waitUntilBlocked } from '../helpers/waits';
 import { getSessionUser } from '@/lib/auth-session';
 import { createBrick } from '@/lib/brick-create';
 import { memoryItemKey } from '@/lib/bot-memory-items';
@@ -174,18 +175,25 @@ run('what a bot remembers about a person (real database)', () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    let holding!: () => void;
+    const holds = new Promise<void>((resolve) => {
+      holding = resolve;
+    });
     // A Forget in the middle of its transaction, holding the person's lock
     const forgetting = prisma.$transaction(async (tx) => {
       await lockPeople(tx, melodyId, [people.sara.uuid]);
       await tx.botMemoryItemForget.create({ data: { botId: melodyId, userUuid: people.sara.uuid, itemKey: chess, kind: 'pref', createdAt: new Date() } });
+      holding();
       await gate;
     });
-    await settle();
+    // The lock is really held before the save begins
+    await holds;
     // A save that began before the Forget was written: it has to wait, and then it reads what was forgotten
     const saving = saveMemoryRow(melodyId, people.sara.uuid, memoryOf({ preferences: [COFFEE, 'chess'] }), (tx, clean) =>
       tx.botsMemory.update({ where: { botId_userUuid: { botId: melodyId, userUuid: people.sara.uuid } }, data: { memories: clean as Prisma.InputJsonValue } }),
     );
-    await settle();
+    // The save is shown waiting on the person's lock (not a guessed pause)
+    expect(await waitUntilBlocked('pg_advisory_xact_lock')).toBe(true);
     release();
     await forgetting;
     await saving;
@@ -199,14 +207,20 @@ run('what a bot remembers about a person (real database)', () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    let holding!: () => void;
+    const holds = new Promise<void>((resolve) => {
+      holding = resolve;
+    });
     const saving = prisma.$transaction(async (tx) => {
       await lockPeople(tx, melodyId, [people.sara.uuid]);
       await tx.botsMemory.update({ where: { botId_userUuid: { botId: melodyId, userUuid: people.sara.uuid } }, data: { memories: memoryOf({ preferences: [COFFEE, 'chess'] }) } });
+      holding();
       await gate;
     });
-    await settle();
+    // The save holds the lock and has written before the Forget starts
+    await holds;
     const forgetting = forgetKeys(melodyId, [people.sara.uuid], new Map([[memoryItemKey('pref', null, 'chess'), 'pref']]));
-    await settle();
+    expect(await waitUntilBlocked('pg_advisory_xact_lock')).toBe(true);
     release();
     await saving;
     await forgetting;

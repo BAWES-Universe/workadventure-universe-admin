@@ -19,7 +19,12 @@ export type HoldRefusal =
 
 export type Hold =
   | { ok: true; created: boolean }
-  | { ok: false; reason: HoldRefusal }
+  /**
+   * `unsure: true` means the books failed in a way that may have left a hold behind (an error raised after the hold was written, say):
+   * the caller gives the key back before it closes anything, and when that cannot be said either it keeps the run open. Without it,
+   * nothing was held.
+   */
+  | { ok: false; reason: HoldRefusal; unsure?: true }
   /** A rule the person said in chat ("no more than $1 a month") does not let this step take that much: the rule's own words, and nothing to ask more credit for. */
   | { ok: false; reason: 'rule'; ruleId: string; why: 'own_accounts' | 'cap'; leftMicros: number | null; words: string };
 

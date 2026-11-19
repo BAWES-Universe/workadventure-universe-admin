@@ -3,7 +3,10 @@
  * never a debt), extra usage raising what a person may do and ending by itself, and the Costs page's figures. Runs only with
  * ROLES_DB_TEST=yes and a DATABASE_URL to a migrated THROWAWAY database:
  *
- *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/meter-usage-db.test.ts
+ *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/meter-usage-db.test.ts --runInBand
+ *
+ * It clears the meter's tables whole, as meter-db.test.ts does: the two suites never run at the same time against one database (npm run test:db
+ * runs every real-database suite one after the other).
  */
 import { randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
@@ -14,6 +17,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn((email: string | null) => email === 'admin@example.test') }));
 
 import { prisma } from '@/lib/db';
+import { controlTheDate, waitUntilBlocked } from '../helpers/waits';
 import { getSessionUser } from '@/lib/auth-session';
 import { createBrick } from '@/lib/brick-create';
 import { recordMeterEvent, saveMeterSettings } from '@/lib/meter';
@@ -296,11 +300,21 @@ run('usage for people, and cost for us, in a real database', () => {
       const ask = () => checkReplyAllowance(sara.brickId, { userId: sara.uuid, isGuest: false, source: 'universe-ai' }, NOW);
       expect((await ask()).allowed).toBe(false);
       const { grant } = await recordGrant({ grantKey: `g-${tag}-1`, personId: sara.id, settlement: 'gift', multiplier: 2, startsAt: days(-1), endsAt: days(5), givenById: sara.id });
-      // Twice the usual 30: 30 used, so there is room; 60 used, so there is not
+      // Exactly the usual 30 used: no room under the usual limit, room under the doubled one, and none again the moment the grant ends
       expect((await ask()).allowed).toBe(true);
-      await addUsage(sara, 30);
-      expect((await ask()).allowed).toBe(false);
       expect(await endGrantNow(grant.grantKey, NOW)).toBe('ended');
+      expect((await ask()).allowed).toBe(false);
+    });
+
+    it('stops at twice the usual limit while the multiple runs: 60 replies are the edge of 30 doubled', async () => {
+      const sara = await person('sara');
+      await prisma.replyWindow.create({ data: { key: `ua:person:${sara.id}`, startedAt: hours(-2) } });
+      await addUsage(sara, 30);
+      const ask = () => checkReplyAllowance(sara.brickId, { userId: sara.uuid, isGuest: false, source: 'universe-ai' }, NOW);
+      await recordGrant({ grantKey: `g-${tag}-1b`, personId: sara.id, settlement: 'gift', multiplier: 2, startsAt: days(-1), endsAt: days(5), givenById: sara.id });
+      expect((await ask()).allowed).toBe(true);
+      await addUsage(sara, 29);
+      expect((await ask()).allowed).toBe(true);
       await addUsage(sara, 1);
       expect((await ask()).allowed).toBe(false);
     });
@@ -311,10 +325,10 @@ run('usage for people, and cost for us, in a real database', () => {
       await addUsage(sara, 40);
       await recordGrant({ grantKey: `g-${tag}-2`, personId: sara.id, settlement: 'gift', noLimit: true, startsAt: days(-1), endsAt: days(5), givenById: sara.id });
       expect((await checkReplyAllowance(sara.brickId, { userId: sara.uuid, isGuest: false, source: 'universe-ai' }, NOW)).allowed).toBe(true);
-      // A guest with the same id is not signed in: nothing lifts theirs
-      await prisma.replyWindow.upsert({ where: { key: `ua:guest:guest-x` }, create: { key: `ua:guest:guest-x`, startedAt: hours(-2) }, update: { startedAt: hours(-2) } });
-      await prisma.botsAiUsage.createMany({ data: Array.from({ length: 10 }, () => ({ botId: sara.brickId, providerId, talkedUserId: 'guest-x', talkedGuest: true, timestamp: hours(-1) })) });
-      expect((await checkReplyAllowance(sara.brickId, { userId: 'guest-x', isGuest: true, source: 'universe-ai' }, NOW)).allowed).toBe(false);
+      // A guest with the very same id is not signed in: nothing lifts theirs
+      await prisma.replyWindow.upsert({ where: { key: `ua:guest:${sara.uuid}` }, create: { key: `ua:guest:${sara.uuid}`, startedAt: hours(-2) }, update: { startedAt: hours(-2) } });
+      await prisma.botsAiUsage.createMany({ data: Array.from({ length: 10 }, () => ({ botId: sara.brickId, providerId, talkedUserId: sara.uuid, talkedGuest: true, timestamp: hours(-1) })) });
+      expect((await checkReplyAllowance(sara.brickId, { userId: sara.uuid, isGuest: true, source: 'universe-ai' }, NOW)).allowed).toBe(false);
     });
 
     it('is one line on the Usage page while it runs, and says nothing about how it was given', async () => {
@@ -375,15 +389,20 @@ run('usage for people, and cost for us, in a real database', () => {
         const sara = await person('sara');
         asAdmin();
         const key = randomUUID();
-        const endsAt = new Date(Date.now() + 400).toISOString();
+        // A comfortable end in the future, so the first try is never refused for how long it took to reach its check; the clock is moved afterwards
+        const endsAt = new Date(Date.now() + 86_400_000).toISOString();
         const first = { grantKey: key, amount: 'five', endsAt, settlement: 'gift' };
         expect((await give(sara, first)).status).toBe(201);
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        // The end has passed: the same try is still the saved grant, and a changed one says the key was used
-        const again = await give(sara, first);
-        expect(again.status).toBe(200);
-        expect((await again.json()).recorded).toBe(false);
-        expect((await give(sara, { ...first, amount: 'double' })).status).toBe(409);
+        controlTheDate(Date.now() + 2 * 86_400_000);
+        try {
+          // The end has passed: the same try is still the saved grant, and a changed one says the key was used
+          const again = await give(sara, first);
+          expect(again.status).toBe(200);
+          expect((await again.json()).recorded).toBe(false);
+          expect((await give(sara, { ...first, amount: 'double' })).status).toBe(409);
+        } finally {
+          jest.useRealTimers();
+        }
         expect(await grantRows(sara.id)).toBe(1);
       });
 
@@ -401,19 +420,34 @@ run('usage for people, and cost for us, in a real database', () => {
         const sara = await person('sara');
         asAdmin();
         const key = randomUUID();
-        const first = { grantKey: key, amount: 'five', endsAt: new Date(Date.now() + 600).toISOString(), settlement: 'gift' };
-        // The first try has passed its checks and is slow to write: the end date passes while it is
-        const restore = beforeNextGrantWrite(() => new Promise((resolve) => setTimeout(resolve, 900)));
+        // A comfortable end in the future: the first try cannot be refused for the time it takes to reach its check
+        const first = { grantKey: key, amount: 'five', endsAt: new Date(Date.now() + 86_400_000).toISOString(), settlement: 'gift' };
+        // The first try has passed its checks and is held at its write until the test lets it go
+        let reached!: () => void;
+        const writing = new Promise<void>((resolve) => (reached = resolve));
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        const restore = beforeNextGrantWrite(async () => {
+          reached();
+          await gate;
+        });
         try {
           const slow = give(sara, first);
-          await new Promise((resolve) => setTimeout(resolve, 750));
+          await writing;
+          // The end date passes while the first try is still writing
+          controlTheDate(Date.now() + 2 * 86_400_000);
           // Sent again after the end has passed: it waits for the first, then finds it saved (the old answer was "end in the past",
-          // which the sheet read as a refusal and gave a new grant)
-          const again = await give(sara, first);
-          expect(again.status).toBe(200);
-          expect((await again.json()).recorded).toBe(false);
+          // which the sheet read as a refusal and gave a new grant). The database says when it is waiting; only then is the first let go
+          const again = give(sara, first);
+          expect(await waitUntilBlocked('pg_advisory_xact_lock')).toBe(true);
+          release();
+          const replayed = await again;
+          expect(replayed.status).toBe(200);
+          expect((await replayed.json()).recorded).toBe(false);
           expect((await slow).status).toBe(201);
         } finally {
+          release();
+          jest.useRealTimers();
           restore();
         }
         expect(await grantRows(sara.id)).toBe(1);
@@ -482,7 +516,11 @@ run('usage for people, and cost for us, in a real database', () => {
       await spendComputer(sara, 1_000, new Date());
       asAdmin();
       // The ask lands after the grant's start time was taken and before the grant is written
-      const restore = beforeNextGrantWrite(() => askForMore(sara.id, new Date()));
+      const restore = beforeNextGrantWrite(async () => {
+        // Strictly later than the moment the grant's start was taken (a few milliseconds is enough that the two cannot be the same millisecond)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        await askForMore(sara.id, new Date());
+      });
       try {
         const given = await personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, { grantKey: randomUUID(), amount: 'five', endsAt: new Date(Date.now() + 10 * 86_400_000).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id: sara.id }) });
         expect(given.status).toBe(201);
@@ -494,6 +532,9 @@ run('usage for people, and cost for us, in a real database', () => {
       const row = await prisma.meterRequest.findFirstOrThrow({ where: { personId: sara.id } });
       expect(row.answeredAt).not.toBeNull();
       expect(row.answeredAt!.getTime()).toBeGreaterThanOrEqual(row.createdAt.getTime());
+      // And the ask really is newer than the grant's start, as the stored rows say: a cutoff at the start would have missed it
+      const grant = await prisma.meterGrant.findFirstOrThrow({ where: { personId: sara.id } });
+      expect(row.createdAt.getTime()).toBeGreaterThan(grant.startsAt.getTime());
     });
 
     it('makes one open request for each person from taps at the same moment, also where the partial index was never made (a database built with db:push)', async () => {

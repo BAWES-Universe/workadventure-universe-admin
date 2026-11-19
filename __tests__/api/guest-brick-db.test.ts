@@ -58,7 +58,7 @@ run('the Brick for guests, in a real database', () => {
     ownerId = (await person('owner')).id;
     settingBefore = await prisma.appSetting.findUnique({ where: { key: 'bot-limits' }, select: { value: true } });
     // Small numbers, so each case can fill them: 3 for a guest, 5 for a universe
-    await saveServerLimits({ bricks: { guestReplies: 3, universePool: 5 } }, ownerId);
+    await saveServerLimits({ bricks: { guestReplies: 3, universePool: 5 }, files: { guestDays: 1 } }, ownerId);
   });
 
   afterAll(async () => {

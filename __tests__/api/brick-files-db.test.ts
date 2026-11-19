@@ -183,15 +183,24 @@ run('a Brick’s files (real database)', () => {
 
   it('hands the bot server what to remove, and forgets it only when told it is done', async () => {
     const sent = await file(brickId, people.sara.id);
-    await deleteFile(as('sara', `/api/bricks/${brickId}/files/${sent.id}`, 'DELETE'), fileParams(brickId, sent.id));
-    expect((await pending(new NextRequest('http://localhost/api/bot-files/removals'))).status).toBe(401);
-    const asked = await pending(botServer('/api/bot-files/removals'));
-    const { removals } = (await asked.json()) as { removals: { id: string; bucket: string; fileId: string }[] };
-    expect(removals.filter((removal) => removal.fileId === sent.fileId)).toHaveLength(1);
-    const ids = removals.map((removal) => removal.id);
-    const done = await confirm(botServer('/api/bot-files/removals', { method: 'POST', body: { ids } }));
-    expect(done.status).toBe(200);
-    expect(await prisma.botFileRemoval.count({ where: { id: { in: ids } } })).toBe(0);
-    expect((await confirm(botServer('/api/bot-files/removals', { method: 'POST', body: { ids: [] } }))).status).toBe(400);
+    // An unrelated removal waiting in the same queue: this test must neither confirm nor lose it
+    const unrelated = await prisma.botFileRemoval.create({ data: { botId: otherBrickId, bucket: 'refs', fileId: `unrelated-${randomUUID()}` } });
+    try {
+      await deleteFile(as('sara', `/api/bricks/${brickId}/files/${sent.id}`, 'DELETE'), fileParams(brickId, sent.id));
+      expect((await pending(new NextRequest('http://localhost/api/bot-files/removals'))).status).toBe(401);
+      const asked = await pending(botServer('/api/bot-files/removals'));
+      const { removals } = (await asked.json()) as { removals: { id: string; bucket: string; fileId: string }[] };
+      const mine = removals.filter((removal) => removal.fileId === sent.fileId);
+      expect(mine).toHaveLength(1);
+      // Only this test's removal is confirmed
+      const ids = mine.map((removal) => removal.id);
+      const done = await confirm(botServer('/api/bot-files/removals', { method: 'POST', body: { ids } }));
+      expect(done.status).toBe(200);
+      expect(await prisma.botFileRemoval.count({ where: { id: { in: ids } } })).toBe(0);
+      expect(await prisma.botFileRemoval.count({ where: { id: unrelated.id } })).toBe(1);
+      expect((await confirm(botServer('/api/bot-files/removals', { method: 'POST', body: { ids: [] } }))).status).toBe(400);
+    } finally {
+      await prisma.botFileRemoval.deleteMany({ where: { id: unrelated.id } });
+    }
   });
 });

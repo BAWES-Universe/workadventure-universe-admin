@@ -225,9 +225,15 @@ describe('the meter’s books (game #1998)', () => {
     usage.create.mockResolvedValue(row());
     books.mockRejectedValueOnce(new Error('books down'));
     const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    const response = await track({});
-    await flush();
-    spy.mockRestore();
-    expect(response.status).toBe(200);
+    try {
+      const response = await track({});
+      await flush();
+      expect(response.status).toBe(200);
+      // The books were asked, and what went wrong is logged: a route that never copied the call would also have answered 200
+      expect(books).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith('Error tracking AI usage:', expect.objectContaining({ message: 'books down' }));
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

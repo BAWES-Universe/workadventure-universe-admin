@@ -109,6 +109,11 @@ function firstSecondsOver(seconds = 11) {
 }
 const inFrame = { 'sec-fetch-dest': 'iframe' };
 
+/** Only the date is controlled (the database fake, timers and promises keep running): a request reads the clock where the test says it is. */
+function controlTheDate(now: number) {
+  jest.useFakeTimers({ now, doNotFake: ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+}
+
 /** Where the owner's page opens: the answer to opening it. */
 async function ownerAddress(id: string, version?: number): Promise<string> {
   const res = await openAs(person('owner'), id, true, version);
@@ -454,23 +459,6 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect((await openAs(person('friend'), id)).status).toBe(200);
     });
 
-    it('changes nothing when a new version lands while the files move', async () => {
-      const id = await makePage();
-      const before = bucketKeys();
-      const copyInBucket = fakeFiles.copy.bind(fakeFiles);
-      jest.spyOn(fakeFiles, 'copy').mockImplementation(async (from, to) => {
-        // A bot saved version 2 in the same moment
-        artifactRow(id).latestVersion = 2;
-        return copyInBucket(from, to);
-      });
-      const res = await shareAs(person('owner'), id, { openScope: 'me' });
-      expect(res.status).toBe(409);
-      expect(res.body.error).toBe('stale_version');
-      expect(artifactRow(id).openScope).toBe('chat');
-      expect(bucketKeys()).toEqual(before);
-      expect(versionRows(id)[0].fileKey).toBe(before.find((key) => key.endsWith('index.html')));
-    });
-
     /** Every file a version of the artifact names is in the bucket, with what it held. */
     const expectWhole = async (id: string, pages: string[]) => {
       const rows = versionRows(id);
@@ -480,6 +468,47 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
         expect(db.files.get(row.media[0].key)).toEqual(SONG.bytes);
       }
     };
+
+    /**
+     * A bot saves version 2 in the same moment as the files move: the hook commits it once, whole (its page, its media, its row), so a
+     * cleanup that took too much would show as files gone from a version that exists.
+     */
+    const landSecondVersionDuring = (id: string) => {
+      const copyInBucket = fakeFiles.copy.bind(fakeFiles);
+      let landed = false;
+      const second = { page: '<html><body><h1>Trip budget, second</h1></body></html>', keys: [] as string[] };
+      jest.spyOn(fakeFiles, 'copy').mockImplementation(async (from, to) => {
+        if (!landed) {
+          landed = true;
+          const dir = `artifacts/${id}/v2-landed`;
+          db.files.set(`${dir}/index.html`, second.page);
+          const media = versionRows(id)[0].media.map((item: { key: string }, index: number) => {
+            db.files.set(`${dir}/media-${index}`, SONG.bytes);
+            return { ...item, key: `${dir}/media-${index}` };
+          });
+          db.versions.push({ id: `v2-${id}`, artifactId: id, number: 2, fileKey: `${dir}/index.html`, media, summary: null, askedById: null, askedByName: null, createdAt: new Date() });
+          second.keys = [`${dir}/index.html`, ...media.map((item: { key: string }) => item.key)];
+          artifactRow(id).latestVersion = 2;
+        }
+        return copyInBucket(from, to);
+      });
+      return second;
+    };
+
+    it('changes nothing when a new version lands while the files move', async () => {
+      const id = await makePage();
+      const before = bucketKeys();
+      const second = landSecondVersionDuring(id);
+      const res = await shareAs(person('owner'), id, { openScope: 'me' });
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('stale_version');
+      expect(artifactRow(id).openScope).toBe('chat');
+      // The copies made for the move are gone; both versions, with every file they name, are as they were
+      expect(bucketKeys()).toEqual([...before, ...second.keys].sort());
+      expect(versionRows(id).map((row) => row.number)).toEqual([1, 2]);
+      expect(versionRows(id)[0].fileKey).toBe(before.find((key) => key.endsWith('index.html')));
+      await expectWhole(id, [PAGE, second.page]);
+    });
 
     it('keeps the new files when the step landed and only its answer was lost: it is "Just you", whole, and done', async () => {
       const id = await makePage();
@@ -543,10 +572,18 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       const id = await makePage();
       const before = bucketKeys();
       jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const copiedTo: string[] = [];
+      const copyInBucket = fakeFiles.copy.bind(fakeFiles);
+      jest.spyOn(fakeFiles, 'copy').mockImplementation(async (from, to) => {
+        copiedTo.push(to);
+        return copyInBucket(from, to);
+      });
       db.nextSteps.push('undone', 'down');
       expect((await shareAs(person('owner'), id, { openScope: 'me' })).status).toBe(500);
       expect(artifactRow(id).openScope).toBe('chat');
-      // The files it had are where they were, and open as before
+      // The files it had are where they were, and open as before; so are the copies staged for the move, which may be what a version names by now
+      expect(copiedTo.length).toBeGreaterThan(0);
+      expect(copiedTo.every((key) => db.files.has(key))).toBe(true);
       expect(before.every((key) => db.files.has(key))).toBe(true);
       expect(db.retired).toEqual([]);
       expect((await openAs(person('friend'), id)).status).toBe(200);
@@ -557,14 +594,11 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       const id = await makePage();
       const before = bucketKeys();
       const steps = jest.spyOn(fakePrisma, '$transaction');
-      const copyInBucket = fakeFiles.copy.bind(fakeFiles);
-      jest.spyOn(fakeFiles, 'copy').mockImplementation(async (from, to) => {
-        artifactRow(id).latestVersion = 2;
-        return copyInBucket(from, to);
-      });
+      const second = landSecondVersionDuring(id);
       expect((await shareAs(person('owner'), id, { openScope: 'me' })).body.error).toBe('stale_version');
       expect(steps).toHaveBeenCalledTimes(1);
-      expect(bucketKeys()).toEqual(before);
+      expect(bucketKeys()).toEqual([...before, ...second.keys].sort());
+      await expectWhole(id, [PAGE, second.page]);
     });
 
     it('is not called done while the bucket still holds a file from before, and picking it again finishes it', async () => {
@@ -835,24 +869,30 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect((await fetchPrivate(strict, inFrame)).status).toBe(403);
       expect((await fetchPrivate(strict, { ...inFrame, cookie: cookieOf(first.headers) })).status).toBe(200);
 
-      process.env.ARTIFACT_PASS_RETRY_SECONDS = '60';
-      const patient = await ownerAddress(id);
-      expect((await fetchPrivate(patient, inFrame)).status).toBe(200);
-      const pass = db.passes[db.passes.length - 1];
-      pass.redeemedAt = new Date(pass.redeemedAt!.getTime() - 59_000);
-      expect((await fetchPrivate(patient, inFrame)).status).toBe(200);
-      pass.redeemedAt = new Date(pass.redeemedAt!.getTime() - 2_000);
-      expect((await fetchPrivate(patient, inFrame)).status).toBe(403);
+      // The retry window is read against a clock the test sets and moves for each request: both sides of each cutoff, never a race with real time
+      const start = Date.now();
+      controlTheDate(start);
+      try {
+        process.env.ARTIFACT_PASS_RETRY_SECONDS = '60';
+        const patient = await ownerAddress(id);
+        expect((await fetchPrivate(patient, inFrame)).status).toBe(200);
+        jest.setSystemTime(start + 59_000);
+        expect((await fetchPrivate(patient, inFrame)).status).toBe(200);
+        jest.setSystemTime(start + 61_000);
+        expect((await fetchPrivate(patient, inFrame)).status).toBe(403);
 
-      // A setting that is no number of seconds is the usual ten
-      process.env.ARTIFACT_PASS_RETRY_SECONDS = 'soon';
-      const usual = await ownerAddress(id);
-      expect((await fetchPrivate(usual, inFrame)).status).toBe(200);
-      const last = db.passes[db.passes.length - 1];
-      last.redeemedAt = new Date(last.redeemedAt!.getTime() - 9_000);
-      expect((await fetchPrivate(usual, inFrame)).status).toBe(200);
-      last.redeemedAt = new Date(last.redeemedAt!.getTime() - 2_000);
-      expect((await fetchPrivate(usual, inFrame)).status).toBe(403);
+        // A setting that is no number of seconds is the usual ten
+        process.env.ARTIFACT_PASS_RETRY_SECONDS = 'soon';
+        jest.setSystemTime(start + 100_000);
+        const usual = await ownerAddress(id);
+        expect((await fetchPrivate(usual, inFrame)).status).toBe(200);
+        jest.setSystemTime(start + 109_000);
+        expect((await fetchPrivate(usual, inFrame)).status).toBe(200);
+        jest.setSystemTime(start + 111_000);
+        expect((await fetchPrivate(usual, inFrame)).status).toBe(403);
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     it('serves both of two requests for the page at the same moment, as a browser that sends one twice needs', async () => {
@@ -903,9 +943,11 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       const id = await makePage();
       await justYou(id);
       const address = await ownerAddress(id);
+      const token = new URL(address).pathname.split('/')[2];
       const spy = jest.spyOn(fakePrisma.artifactPass, 'updateMany').mockImplementationOnce(async () => {
         db.passes[0].redeemedAt = new Date(Date.now() + aheadMs);
-        db.passes[0].cookieHash = 'a'.repeat(64);
+        // The winner's own valid cookie, so the 403 can only come from the retry policy and not from a hash that matches nothing
+        db.passes[0].cookieHash = hashOf(passCookieValue(token, db.passes[0].id as string));
         return { count: 0 };
       });
       const loser = await fetchPrivate(address, inFrame);

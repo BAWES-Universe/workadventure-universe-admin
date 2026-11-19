@@ -5,7 +5,8 @@ import { UniverseDetailPage } from '@/app/admin/universes/[id]/detail';
 
 /**
  * Visiting Bricks (game #2005): one switch per universe in Edit universe, under Visibility, with the words of the mock
- * (Part 15, picture 9). A universe that exists today starts with it off; saving sends what the form shows.
+ * (Part 15, picture 9). The page shows what the server stored (a host who turned it off sees it off), falls back to on when the server
+ * says nothing, and saving sends what the form shows.
  */
 const fetchMock = jest.fn();
 jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[]) => fetchMock(...args) }));
@@ -59,7 +60,7 @@ const openEdit = async () => {
   return screen.findByRole('switch', { name: 'Visiting Bricks' });
 };
 
-test('shows the switch off for a universe that exists today, with the mock’s words', async () => {
+test('shows the switch off for a universe whose host turned it off, with the mock’s words', async () => {
   stored = false;
   const toggle = await openEdit();
   expect(toggle).not.toBeChecked();
@@ -79,9 +80,11 @@ test('turning it on is saved by Save and sends exactly what the form shows', asy
 test('saving other changes sends the switch as it was', async () => {
   stored = false;
   await openEdit();
+  // Another field is edited first: that must not reset the switch
+  fireEvent.change(screen.getByLabelText(/Name/), { target: { value: 'Renamed universe' } });
   fireEvent.click(screen.getByRole('button', { name: /Save/ }));
   await waitFor(() => expect(patches).toHaveLength(1));
-  expect(patches[0].allowVisitingBricks).toBe(false);
+  expect(patches[0]).toMatchObject({ name: 'Renamed universe', allowVisitingBricks: false });
 });
 
 test('a universe that never says shows it on, as a universe made today starts', async () => {

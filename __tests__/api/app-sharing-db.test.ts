@@ -15,6 +15,8 @@ jest.mock('@/lib/mcp/outbound-guard', () => ({
 }));
 
 import { prisma } from '@/lib/db';
+import { snapshotSettings } from '../helpers/shared-settings';
+import { waitUntilBlocked } from '../helpers/waits';
 import { createBrick } from '@/lib/brick-create';
 import { encryptApiKey } from '@/lib/encryption';
 import { managerCandidates } from '@/lib/app-sharing';
@@ -30,7 +32,7 @@ import { GET as teamGet, DELETE as teamDisconnect } from '@/app/api/me/team-apps
 import { POST as addManagerRoute } from '@/app/api/me/team-apps/[connectionId]/managers/route';
 import { DELETE as removeManagerRoute } from '@/app/api/me/team-apps/[connectionId]/managers/[personId]/route';
 import { GET as available, POST as letBotUse } from '@/app/api/bots/[id]/apps/available/route';
-import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
+import { POST as checkUseRoute } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { GET as listServers, POST as addServer } from '@/app/api/bots/[id]/mcp-servers/route';
 import { GET as botSignInStart } from '@/app/api/bots/[id]/mcp-servers/[serverId]/oauth/start/route';
 import { GET as signInStart } from '@/app/api/me/apps/[connectionId]/sign-in/route';
@@ -71,7 +73,7 @@ const letGuide = async (userId: string, connectionId: string, botId = guide) => 
   return letBotUse(request(`/api/bots/${botId}/apps/available`, { method: 'POST', body: { connectionId } }), params({ id: botId }));
 };
 const check = async (botId: string, serverId: string, body: Record<string, unknown> = {}) => {
-  const response = await useCheck(request(`/api/bots/${botId}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body }), params({ id: botId, serverId }));
+  const response = await checkUseRoute(request(`/api/bots/${botId}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body }), params({ id: botId, serverId }));
   return { status: response.status, body: await response.json() };
 };
 async function lentAndLet(extra: Record<string, unknown> = {}) {
@@ -330,6 +332,8 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
         as(sara);
         return addServer(request(`/api/bots/${crowded.id}/mcp-servers`, { method: 'POST', body: { name, serverUrl: `https://hand.example.com/${name}`, authType: 'none' } }), params({ id: crowded.id }));
       };
+      const putBack = await snapshotSettings(['bot-limits']);
+      await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
       try {
         // Nothing saved: five, as before
         expect(await maxAppsPerBot()).toBe(5);
@@ -357,7 +361,7 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
         expect((await letGuide(sara, other.id, crowded.id)).status).toBe(201);
         expect(await prisma.botMcpServer.count({ where: { botId: crowded.id } })).toBe(3);
       } finally {
-        await saveServerLimits({ bricks: { appsPerBot: 5 } }, sara);
+        await putBack();
         await prisma.botMcpServer.deleteMany({ where: { botId: crowded.id } });
         await prisma.bot.delete({ where: { id: crowded.id } });
       }
@@ -369,13 +373,14 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await lendTo(app.id, { universeId: universeA })).status).toBe(201);
       const roomId = (await prisma.bot.findUniqueOrThrow({ where: { id: guide }, select: { roomId: true } })).roomId;
       const busy = await prisma.bot.create({ data: { roomId, name: 'Busy two', createdById: sara, behaviorConfig: {} } });
+      const putBack = await snapshotSettings(['bot-limits']);
       try {
         await saveServerLimits({ bricks: { appsPerBot: 1 } }, sara);
         const answers = await Promise.all([letGuide(sara, app.id, busy.id), letGuide(sara, app.id, busy.id)]);
         expect(answers.map((answer) => answer.status)).toEqual([201, 201]);
         expect(await prisma.botMcpServer.count({ where: { botId: busy.id } })).toBe(1);
       } finally {
-        await saveServerLimits({ bricks: { appsPerBot: 5 } }, sara);
+        await putBack();
         await prisma.botMcpServer.deleteMany({ where: { botId: busy.id } });
         await prisma.bot.delete({ where: { id: busy.id } });
       }
@@ -388,13 +393,14 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       for (const app of [first, second]) expect((await lendTo(app.id, { universeId: universeA })).status).toBe(201);
       const roomId = (await prisma.bot.findUniqueOrThrow({ where: { id: guide }, select: { roomId: true } })).roomId;
       const busy = await prisma.bot.create({ data: { roomId, name: 'Busy', createdById: sara, behaviorConfig: {} } });
+      const putBack = await snapshotSettings(['bot-limits']);
       try {
         await saveServerLimits({ bricks: { appsPerBot: 1 } }, sara);
         const answers = await Promise.all([letGuide(sara, first.id, busy.id), letGuide(sara, second.id, busy.id)]);
         expect(answers.map((answer) => answer.status).sort()).toEqual([201, 422]);
         expect(await prisma.botMcpServer.count({ where: { botId: busy.id } })).toBe(1);
       } finally {
-        await saveServerLimits({ bricks: { appsPerBot: 5 } }, sara);
+        await putBack();
         await prisma.botMcpServer.deleteMany({ where: { botId: busy.id } });
         await prisma.bot.delete({ where: { id: busy.id } });
       }
@@ -408,7 +414,8 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
         // What taking it back holds first: the lend, for update. A check that starts now has to wait for it.
         await tx.$queryRaw`SELECT "id" FROM "app_lends" WHERE "connection_id" = ${app.id} AND "universe_id" = ${universeId} FOR UPDATE`;
         waiting = recordUse({ connectionId: app.id, universeId, botId: guide, callId: 'late', limit: 5, serverId, lend: true });
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        // The check has reached the held lend and is waiting for it (what the database says, not a guess with a sleep)
+        expect(await waitUntilBlocked('app_lends')).toBe(true);
         await tx.botMcpServer.delete({ where: { id: serverId } });
         await tx.appLend.deleteMany({ where: { connectionId: app.id, universeId } });
       });
@@ -433,12 +440,28 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
 
     it('counts a use on the day it is written, whichever moment the transaction began', async () => {
       const { app, serverId } = await lentAndLet({ usesPerDay: 1 });
-      const before = new Date();
-      expect(await recordUse({ connectionId: app.id, universeId: universeA, botId: guide, callId: 'one', limit: 1, serverId, lend: true })).toBe('recorded');
-      const row = await prisma.appUse.findFirstOrThrow({ where: { botId: guide, callId: 'one' } });
-      // Written with the moment the count was taken, not the database's own clock for the transaction
-      expect(row.usedAt.getTime()).toBeGreaterThanOrEqual(before.getTime() - 5);
-      expect(await recordUse({ connectionId: app.id, universeId: universeA, botId: guide, callId: 'two', limit: 1, serverId, lend: true })).toBe('limit_reached');
+      const everythingButTheDate = ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] as const;
+      // Only the date is controlled; the database and the timers keep running
+      jest.useFakeTimers({ now: new Date('2026-11-19T23:59:58Z'), doNotFake: [...everythingButTheDate] });
+      try {
+        expect(await recordUse({ connectionId: app.id, universeId: universeA, botId: guide, callId: 'late-night', limit: 1, serverId, lend: true })).toBe('recorded');
+        // The day's one use is taken. A second call begins before midnight, and gets the lock only after it
+        let second: Promise<string> | null = null;
+        await prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-use:${app.id}:${universeA}`}))`;
+          second = recordUse({ connectionId: app.id, universeId: universeA, botId: guide, callId: 'after-midnight', limit: 1, serverId, lend: true });
+          expect(await waitUntilBlocked('pg_advisory_xact_lock')).toBe(true);
+          jest.setSystemTime(new Date('2026-11-20T00:00:02Z'));
+        });
+        // It counts the new day, which has no use yet, and files it under that day
+        expect(await second).toBe('recorded');
+        const row = await prisma.appUse.findFirstOrThrow({ where: { botId: guide, callId: 'after-midnight' } });
+        expect(row.usedAt.toISOString()).toBe('2026-11-20T00:00:02.000Z');
+        // And that new day is now full
+        expect(await recordUse({ connectionId: app.id, universeId: universeA, botId: guide, callId: 'third', limit: 1, serverId, lend: true })).toBe('limit_reached');
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     it('counts the same call id of two different bots as two uses, so one bot cannot hide behind another’s id', async () => {
@@ -514,7 +537,7 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       await prisma.$transaction(async (tx) => {
         await tx.$queryRaw`SELECT "id" FROM "app_lends" WHERE "connection_id" = ${app.id} AND "universe_id" = ${universeA} FOR UPDATE`;
         letting = letGuide(sara, app.id);
-        await new Promise((resolve) => setTimeout(resolve, 400));
+        expect(await waitUntilBlocked('app_lends')).toBe(true);
         await tx.appLend.deleteMany({ where: { connectionId: app.id } });
       });
       expect((await letting!).status).toBe(404);
@@ -772,13 +795,20 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
     });
 
     it('stays when the person who connected it deletes their account', async () => {
-      const id = (await json(await addTeam(nora))).id as string;
-      await prisma.user.delete({ where: { id: nora } });
-      const row = await prisma.appConnection.findUniqueOrThrow({ where: { id } });
-      expect(row.connectedById).toBeNull();
-      expect(row.universeId).toBe(universeA);
-      nora = (await prisma.user.create({ data: { uuid: `nora2-${tag}`, email: `nora2-${tag}@example.test`, name: 'Nora' } })).id;
-      await prisma.worldMember.create({ data: { worldId: worldA, userId: nora, tags: ['admin'] } });
+      // A person of its own: deleting nora here would take the shared fixture away from every test after this one
+      const leaver = await prisma.user.create({ data: { uuid: `leaver-${tag}`, email: `leaver-${tag}@example.test`, name: 'Leaver' } });
+      await prisma.user.update({ where: { id: leaver.id }, data: { email: `${leaver.id}@example.test` } });
+      await prisma.worldMember.create({ data: { worldId: worldA, userId: leaver.id, tags: ['admin'] } });
+      try {
+        const id = (await json(await addTeam(leaver.id))).id as string;
+        await prisma.user.delete({ where: { id: leaver.id } });
+        const row = await prisma.appConnection.findUniqueOrThrow({ where: { id } });
+        expect(row.connectedById).toBeNull();
+        expect(row.universeId).toBe(universeA);
+      } finally {
+        await prisma.appConnection.deleteMany({ where: { universeId: universeA } });
+        await prisma.user.deleteMany({ where: { id: leaver.id } });
+      }
     });
 
     it('says who can reconnect when its sign-in ended, and a manager starts the sign-in', async () => {

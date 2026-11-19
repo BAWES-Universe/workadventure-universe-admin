@@ -42,6 +42,8 @@ describe('the wind-down command', () => {
     }
     expect(lib.startWindDown).not.toHaveBeenCalled();
     expect(lib.liftWindDown).not.toHaveBeenCalled();
+    // Not even where it stands is read for someone who may not see it
+    expect(lib.windDownStatus).not.toHaveBeenCalled();
   });
 
   it('starts it as the one who asked, and answers where it stands', async () => {

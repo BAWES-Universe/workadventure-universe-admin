@@ -50,6 +50,30 @@ describe.each([
   });
 });
 
+describe('authorize', () => {
+  it('passes a good request on as it was parsed and gives back the books’ answer, never cached', async () => {
+    const answer = { ok: true as const, jobId: 'j1', botId: 'b1', reservedMicros: 5 };
+    lib.calls.authorizeModelCall.mockResolvedValueOnce(answer as never);
+    const response = await authorize(post({ token: 'cjt_x', callId: 'c1', estimateMicros: 5, payer: 'own-key' }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(await response.json()).toEqual(answer);
+    expect(lib.calls.authorizeModelCall).toHaveBeenCalledTimes(1);
+    expect(lib.calls.authorizeModelCall).toHaveBeenCalledWith({ token: 'cjt_x', callId: 'c1', estimateMicros: 5, payer: 'own-key' });
+  });
+  it('hands a refusal on in the books’ own words, the same way', async () => {
+    lib.calls.authorizeModelCall.mockResolvedValueOnce({ ok: false, reason: 'allowance' } as never);
+    const response = await authorize(post({ token: 'cjt_x', callId: 'c2', estimateMicros: 9, payer: 'universe' }));
+    expect(await response.json()).toEqual({ ok: false, reason: 'allowance' });
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+  });
+  it('refuses a payer nobody knows and a negative estimate, before asking anything', async () => {
+    expect((await authorize(post({ token: 'cjt_x', callId: 'c1', estimateMicros: 5, payer: 'stranger' }))).status).toBe(400);
+    expect((await authorize(post({ token: 'cjt_x', callId: 'c1', estimateMicros: -1, payer: 'universe' }))).status).toBe(400);
+    expect(lib.calls.authorizeModelCall).not.toHaveBeenCalled();
+  });
+});
+
 describe('identify', () => {
   it('says whose job a good key is for, and gives the same answer for every key that is not good', async () => {
     lib.token.verifyJobToken.mockResolvedValueOnce({ ok: true, jobId: 'j1', botId: 'b1', personId: 'p1', tokenId: 't1', generation: 0 });

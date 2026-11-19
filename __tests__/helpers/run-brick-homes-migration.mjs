@@ -33,13 +33,19 @@ const accepted = async (sql) => { try { await db.exec(sql); return true; } catch
 const columns = (await db.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'brick_homes' ORDER BY column_name`)).rows.map((row) => row.column_name);
 await db.exec(`INSERT INTO brick_homes (bot_id, room_id, placed_by_id, updated_at) VALUES ('brick1', 'room1', 'sara', now())`);
 const defaults = (await db.query(`SELECT behavior_type, behavior_config FROM brick_homes WHERE bot_id = 'brick1'`)).rows[0];
+// A Brick with no home of its own, so the person probe below can only be refused for the person
+await db.exec(`INSERT INTO bots (id, owner_id, name, updated_at) VALUES ('brick3', 'omar', 'Brick', now())`);
 const checks = {
   secondHomeForTheSameBrick: await accepted(`INSERT INTO brick_homes (bot_id, room_id, placed_by_id, updated_at) VALUES ('brick1', 'room2', 'sara', now())`),
   twoBricksInOneRoom: await accepted(`INSERT INTO brick_homes (bot_id, room_id, placed_by_id, updated_at) VALUES ('brick2', 'room1', 'omar', now())`),
   noRoom: await accepted(`INSERT INTO brick_homes (bot_id, room_id, placed_by_id, updated_at) VALUES ('bot1', 'nothing', 'omar', now())`),
   noBot: await accepted(`INSERT INTO brick_homes (bot_id, room_id, placed_by_id, updated_at) VALUES ('nothing', 'room2', 'omar', now())`),
-  noPerson: await accepted(`INSERT INTO brick_homes (bot_id, room_id, placed_by_id, updated_at) VALUES ('brick2', 'room2', 'nobody', now())`),
+  noPerson: await accepted(`INSERT INTO brick_homes (bot_id, room_id, placed_by_id, updated_at) VALUES ('brick3', 'room2', 'nobody', now())`),
+  // The same insert for a person who exists: proof that the only thing wrong above was the person
+  samePlaceWithARealPerson: await accepted(`INSERT INTO brick_homes (bot_id, room_id, placed_by_id, updated_at) VALUES ('brick3', 'room2', 'omar', now())`),
 };
+await db.exec(`DELETE FROM brick_homes WHERE bot_id = 'brick3'`);
+await db.exec(`DELETE FROM bots WHERE id = 'brick3'`);
 // A Brick still has no room of its own, and a home never gives it one
 const bricksWithARoom = await count(`bots WHERE owner_id IS NOT NULL AND room_id IS NOT NULL`);
 

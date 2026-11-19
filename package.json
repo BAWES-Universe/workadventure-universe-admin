@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "jest --testPathIgnorePatterns=__tests__/integration",
+    "test:db": "ROLES_DB_TEST=yes jest --runInBand --testPathPatterns='__tests__/(api|lib)/.*(-db|ownership-offer)\\.test\\.ts$'",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:api": "./scripts/test-api.sh",
@@ -67,6 +68,7 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.3.2",
+    "@electric-sql/pglite-socket": "0.0.6",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.0",

@@ -13,6 +13,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 jest.mock('@/lib/tool-signin', () => ({ syncToolSignInNotices: jest.fn(async () => undefined) }));
 
 import { prisma } from '@/lib/db';
+import { snapshotSettings } from '../helpers/shared-settings';
 import { ensureDefaultBrick } from '@/lib/brick-default';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { makeBrick } from '@/lib/brick-make';
@@ -57,13 +58,24 @@ async function set(who: { uuid: string; brickId: string }, over: Partial<NewItem
 const runsOf = (itemId: string) => prisma.brickItemRun.findMany({ where: { itemId }, orderBy: { claimedAt: 'asc' } });
 
 run('goals and tasks, in a real database', () => {
+  let putLimitsBack: () => Promise<void> = async () => {};
   beforeAll(async () => {
-    // Settings are the starting ones: 20 at once, 30 minutes shortest, 24 runs a day, 10 minutes a run, 15 minutes late
-    await prisma.appSetting.deleteMany({ where: { key: 'server-limits' } }).catch(() => undefined);
+    // Settings are the starting ones: 20 at once, 30 minutes shortest, 24 runs a day, 10 minutes a run, 15 minutes late. What was saved is
+    // read first and put back in afterAll, so a database with its own limits keeps them
+    putLimitsBack = await snapshotSettings(['bot-limits']);
+    await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
   });
   afterAll(async () => {
-    await prisma.user.deleteMany({ where: { id: { in: people } } });
-    await prisma.$disconnect();
+    try {
+      // The settings are put back even when the clean-up of the people fails; the connection is let go last of all
+      try {
+        await prisma.user.deleteMany({ where: { id: { in: people } } });
+      } finally {
+        await putLimitsBack();
+      }
+    } finally {
+      await prisma.$disconnect();
+    }
   });
 
   it('sets a reminder for the owner only, in the zone kept for them, and refuses what cannot be set with a reason the Brick can say', async () => {
@@ -112,6 +124,8 @@ run('goals and tasks, in a real database', () => {
       expect(both.filter((answer) => answer.ok)).toHaveLength(1);
     } finally {
       await saveServerLimits({ bricks: { itemsPerPerson: 20 } }, hadi.id);
+      // The two reminders left on are this person's own: put away, so no later claim in this file finds them due
+      await prisma.brickItem.updateMany({ where: { ownerId: hadi.id }, data: { state: 'paused', nextDueAt: null } });
     }
   });
 
@@ -135,7 +149,11 @@ run('goals and tasks, in a real database', () => {
     const zed = await person('zed');
     const item = await set(zed);
     const [claimed] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === item.id);
-    await expect(prisma.brickItemRun.create({ data: { itemId: item.id, dueAt: new Date(claimed.dueAt), revision: 1, leaseUntil: at(DAY) } })).rejects.toThrow();
+    // The unique key of the item and its due time, and nothing else (a dropped connection would also throw)
+    const refused = await prisma.brickItemRun.create({ data: { itemId: item.id, dueAt: new Date(claimed.dueAt), revision: 1, leaseUntil: at(DAY) } }).then(() => null, (error: unknown) => error);
+    expect(refused).toMatchObject({ code: 'P2002' });
+    expect(JSON.stringify((refused as { meta?: unknown }).meta ?? {})).toMatch(/item_id|itemId/);
+    expect(await runsOf(item.id)).toHaveLength(1);
   });
 
   it('runs nothing once it is paused, done or deleted, and nothing for a Brick that is off', async () => {
@@ -333,19 +351,22 @@ run('goals and tasks, in a real database', () => {
     const ivy = await person('ivy');
     const kai = await person('kai');
     await saveServerLimits({ bricks: { runsPerDay: 1 } }, ivy.id);
-    // Leave only these two in the queue: what other tests of this file left due would be ahead of both
-    await prisma.brickItem.updateMany({ where: { ownerId: { notIn: [ivy.id, kai.id] }, state: 'on' }, data: { state: 'paused', nextDueAt: null } });
+    // The queue is read by due time, oldest first: this test's items are set a month before anything else in this file, so they are first in line
+    // whatever other tests left due (nothing of anyone else is touched), and a batch of one can only be Ivy's held-back items or Kai's
+    const past = (ms: number) => new Date(NOW.getTime() - 30 * DAY + ms);
     try {
       // Ivy has three watches due long ago and has used her one run today; Kai's is due later
-      for (const name of ['a', 'b', 'c']) await set(ivy, { kind: 'watch', words: name, condition: 'It changes', cadence: { type: 'every', minutes: 60 } });
-      expect((await claimDueRuns(at(HOUR + MIN))).filter((one) => one.userId === ivy.uuid)).toHaveLength(1);
-      const kaiWatch = await set(kai, { kind: 'watch', words: 'k', condition: 'It changes', cadence: { type: 'every', minutes: 90 } });
+      for (const name of ['a', 'b', 'c']) await set(ivy, { kind: 'watch', words: name, condition: 'It changes', cadence: { type: 'every', minutes: 60 } }, past(0));
+      expect((await claimDueRuns(past(HOUR + MIN))).filter((one) => one.userId === ivy.uuid)).toHaveLength(1);
+      const kaiWatch = await set(kai, { kind: 'watch', words: 'k', condition: 'It changes', cadence: { type: 'every', minutes: 90 } }, past(0));
       // A batch of one: if Ivy's held-back items were looked at first, Kai's would never come
-      const batch = await claimDueRuns(at(2 * HOUR), 1);
+      const batch = await claimDueRuns(past(2 * HOUR), 1);
       expect(batch.map((one) => one.itemId)).toContain(kaiWatch.id);
       expect(batch.filter((one) => one.userId === ivy.uuid && one.attempt === 1)).toEqual([]);
     } finally {
       await saveServerLimits({ bricks: { runsPerDay: 24 } }, ivy.id);
+      // Only this test's own items are put away, so later tests find them neither due nor in their way
+      await prisma.brickItem.updateMany({ where: { ownerId: { in: [ivy.id, kai.id] } }, data: { state: 'paused', nextDueAt: null } });
     }
   });
 
@@ -365,7 +386,13 @@ run('goals and tasks, in a real database', () => {
     const states = await prisma.brickItemRun.findMany({ where: { id: { in: claimed.map((one) => one.runId) } }, select: { state: true, attempts: true } });
     expect(states.every((one) => (one.state === 'done' && one.attempts === 1) || (one.state === 'claimed' && one.attempts === 2))).toBe(true);
     expect(finished.filter((one) => one.ok)).toHaveLength(states.filter((one) => one.state === 'done').length);
-    expect(handedOut.filter((one) => claimed.some((c) => c.runId === one.runId)).length).toBeLessThanOrEqual(4);
+    // Every report that was turned away (409) is a run that was handed out again, so its retry reached the caller with the next attempt number; a report that
+    // won produced a done row and no retry for that run
+    const rejected = claimed.filter((_, index) => !finished[index].ok);
+    const handedAgain = await prisma.brickItemRun.findMany({ where: { id: { in: claimed.map((one) => one.runId) }, state: 'claimed' }, select: { id: true } });
+    expect(rejected.map((one) => one.runId).sort()).toEqual(handedAgain.map((row) => row.id).sort());
+    const retries = handedOut.filter((one) => claimed.some((c) => c.runId === one.runId));
+    expect(retries.map((one) => [one.runId, one.attempt]).sort()).toEqual(rejected.map((one) => [one.runId, 2]).sort());
   });
 
   it('snoozes a reminder by the setting: a delivered one-off comes back, a briefing moves once, and a watch or a goal is not snoozed', async () => {
@@ -907,7 +934,10 @@ run('goals and tasks, in a real database', () => {
 
   it('an account that never asked for one has nothing: no items, no runs, whatever the clock says', async () => {
     const quiet = await person('quiet');
-    for (let day = 1; day <= 7; day++) await claimDueRuns(at(day * DAY));
+    // A few at a time: the claim at the end of the week reaches the items the other tests made with the real clock (the test's NOW is a week
+    // behind it), and claiming all of them for each of the seven days is what ran past the time of the test. Nothing here can be claimed for
+    // a person who has no item, whatever the number.
+    for (let day = 1; day <= 7; day++) await claimDueRuns(at(day * DAY), 5);
     expect(await prisma.brickItem.count({ where: { ownerId: quiet.id } })).toBe(0);
     expect(await prisma.brickItemRun.count({ where: { item: { ownerId: quiet.id } } })).toBe(0);
     expect(await prisma.bot.count({ where: { ownerId: quiet.id } })).toBe(1);

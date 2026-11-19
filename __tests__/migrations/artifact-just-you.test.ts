@@ -15,6 +15,7 @@ type Result = {
   freshPass: Row;
   afterArtifactGone: { passes: string[]; retired: number };
   afterOwnerGone: string[];
+  artifactSurvived: boolean;
 };
 
 let result: Result;
@@ -60,5 +61,6 @@ describe('"Just you": the migration', () => {
     expect(result.passesBefore).toEqual(['p1', 'p5']);
     expect(result.afterArtifactGone).toEqual({ passes: ['p5'], retired: 1 });
     expect(result.afterOwnerGone).toEqual([]);
+    expect(result.artifactSurvived).toBe(true);
   });
 });

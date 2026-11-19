@@ -89,6 +89,9 @@ describe('turn', () => {
     expect(text).toContain(': keepalive\n\n');
     expect(text).toContain('event: tool\n');
     expect(text.trimEnd().endsWith('}')).toBe(true);
+    // The runner is told the turn is over: the last frame is the completed event, with its answer
+    const frames = text.split('\n\n').filter((frame) => frame.trim() !== '');
+    expect(frames[frames.length - 1]).toBe('event: completed\ndata: {"type":"completed","outputText":"done","usage":null}');
     expect(lib.startTurn).toHaveBeenCalledWith('job-1', 'Fill the form', expect.any(AbortSignal));
   });
 

@@ -15,7 +15,11 @@ import { effectiveBotVoice } from '@/lib/bot-voice';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
-jest.mock('@/lib/bot-permissions', () => ({ canManageBotMcpServers: jest.fn() }));
+// The real rule for who may manage a Brick (its owner, and nobody else), watched as a mock so the tests can count asks
+jest.mock('@/lib/bot-permissions', () => {
+  const actual = jest.requireActual('@/lib/bot-permissions');
+  return { canManageBotMcpServers: jest.fn(actual.canManageBotMcpServers) };
+});
 jest.mock('@/lib/ai-key-lend', () => ({ lendAccess: jest.fn() }));
 jest.mock('@/lib/db', () => ({ prisma: {} }));
 // A key's company is asked for its models: not here
@@ -84,7 +88,7 @@ beforeEach(() => {
   providers = [ears(), mouth()];
   fakeDb();
   (getSessionUser as jest.Mock).mockReset().mockResolvedValue({ id: 'u-sara', email: 'sara@example.com' });
-  (canManageBotMcpServers as jest.Mock).mockReset().mockResolvedValue(true);
+  (canManageBotMcpServers as jest.Mock).mockClear();
   (lendAccess as jest.Mock).mockReset().mockResolvedValue('manage');
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
 });
@@ -117,6 +121,52 @@ describe('a Brick’s voice settings', () => {
     expect((await call(putVoice, 'PUT', { enabled: true })).status).toBe(404);
     expect(draft).toBeNull();
     expect(bot.voiceEnabled).toBe(false);
+  });
+});
+
+describe('whose voice it is: the current owner, never the one who made it', () => {
+  beforeEach(() => {
+    // The Brick was made by Omar and is Sara's now
+    bot = { ...bot, createdById: 'u-omar', ownerId: 'u-sara' };
+  });
+
+  it('is used by its owner through every route', async () => {
+    expect((await call(getVoice, 'GET')).status).toBe(200);
+    expect((await call(putDraft, 'PUT', FINISHED)).status).toBe(200);
+    expect((await call(publish, 'POST', {})).status).toBe(200);
+    expect((await call(putVoice, 'PUT', { enabled: true })).status).toBe(200);
+    expect(bot.voiceEnabled).toBe(true);
+  });
+
+  it.each([
+    ['the one who made it', 'u-omar'],
+    ['someone with no part in it', 'u-lee'],
+  ])('is not reachable by %s: not for reading, a draft, publishing or turning voice on, and nothing changes', async (_who, userId) => {
+    (getSessionUser as jest.Mock).mockResolvedValue({ id: userId, email: `${userId}@example.com` });
+    for (const [handler, method, body] of [
+      [getVoice, 'GET', undefined],
+      [putDraft, 'PUT', FINISHED],
+      [publish, 'POST', { note: 'Mine now' }],
+      [putVoice, 'PUT', { enabled: true }],
+    ] as const) {
+      const response = await call(handler as Handler, method, body);
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: 'Bot not found' });
+    }
+    expect(draft).toBeNull();
+    expect(revisions).toHaveLength(0);
+    expect(bot).toMatchObject({ voiceEnabled: false, voiceRevision: null });
+  });
+
+  it('leaves what the owner published and turned on exactly as it was when the one who made it tries to change it', async () => {
+    await call(putDraft, 'PUT', FINISHED);
+    await call(publish, 'POST', { note: 'First' });
+    await call(putVoice, 'PUT', { enabled: true });
+    const kept = { revisions: revisions.length, enabled: bot.voiceEnabled, revision: bot.voiceRevision };
+    (getSessionUser as jest.Mock).mockResolvedValue({ id: 'u-omar', email: 'omar@example.com' });
+    expect((await call(putVoice, 'PUT', { enabled: false })).status).toBe(404);
+    expect((await call(publish, 'POST', { note: 'Second' })).status).toBe(404);
+    expect({ revisions: revisions.length, enabled: bot.voiceEnabled, revision: bot.voiceRevision }).toEqual(kept);
   });
 });
 

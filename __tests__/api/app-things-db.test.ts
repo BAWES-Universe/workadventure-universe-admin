@@ -87,10 +87,14 @@ run('what an app can do, in a real database', () => {
 
   it('says the list is incomplete when the app has more pages than are read', async () => {
     const adapter = fake([]);
+    // Each page is chosen by the cursor the previous page handed out: a route that never sends one gets the first page again and never 20 different tools
+    const cursorsSent: unknown[] = [];
     (adapter.callLink as jest.Mock).mockImplementation(async (input: { message: Record<string, unknown> }): Promise<LinkAnswer> => {
       if (input.message.method !== 'tools/list') return { status: 200, contentType: 'application/json', sessionId: 'mcp-1', body: '{"jsonrpc":"2.0","id":1,"result":{}}' };
-      const id = input.message.id as number;
-      return { status: 200, contentType: 'application/json', sessionId: null, body: JSON.stringify({ jsonrpc: '2.0', id, result: { tools: [{ name: `GMAIL_TOOL_${id}` }], nextCursor: `c${id + 1}` } }) };
+      const cursor = (input.message.params as { cursor?: string } | undefined)?.cursor;
+      cursorsSent.push(cursor);
+      const page = cursor ? Number(cursor.slice(1)) : 1;
+      return { status: 200, contentType: 'application/json', sessionId: null, body: JSON.stringify({ jsonrpc: '2.0', id: input.message.id, result: { tools: [{ name: `GMAIL_TOOL_${page}` }], nextCursor: `c${page + 1}` } }) };
     });
     setAdapterForTests(adapter);
     const made = await readyMade();
@@ -98,8 +102,8 @@ run('what an app can do, in a real database', () => {
     mockUser.current = { id: sara };
     const body = await (await ask(made.id)).json();
     expect(body.incomplete).toBe(true);
-    expect(body.things).toHaveLength(20);
-    expect(body.things[0]).toBe('Tool 2');
+    expect(body.things).toEqual(Array.from({ length: 20 }, (_, index) => `Tool ${index + 1}`));
+    expect(cursorsSent.slice(0, 3)).toEqual([undefined, 'c2', 'c3']);
   });
 
   it('gives an empty list, never an error, while a ready-made app is not signed in or the adapter is off', async () => {

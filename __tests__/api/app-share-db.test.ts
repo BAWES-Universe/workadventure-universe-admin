@@ -22,6 +22,7 @@ jest.mock('@/lib/mcp/test-connection', () => ({
 }));
 
 import { prisma } from '@/lib/db';
+import { snapshotSettings } from '../helpers/shared-settings';
 import { createBrick } from '@/lib/brick-create';
 import { encryptApiKey } from '@/lib/encryption';
 import { createConnection, grantToBrick, removeGrant, disconnect } from '@/lib/app-connections';
@@ -112,7 +113,10 @@ const saraKey = () => `sara-${tag}`;
 const setLimits = (change: Partial<typeof BRICK_LIMITS_RECOMMENDED>) => saveServerLimits({ bricks: change }, sara);
 
 run('other people asking a Brick for a job from its owner’s app, in a real database', () => {
+  let putLimitsBack: () => Promise<void> = async () => {};
   beforeAll(async () => {
+    // The global limits are shared by every suite of the run: read them here, put them back in afterAll
+    putLimitsBack = await snapshotSettings(['bot-limits']);
     process.env.BOT_SERVICE_TOKEN = SERVICE_TOKEN;
     process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'a'.repeat(64);
     const person = (name: string) => prisma.user.create({ data: { uuid: `${name}-${tag}`, email: `${name}-${tag}@example.test`, name: name[0].toUpperCase() + name.slice(1) } });
@@ -137,6 +141,7 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
   });
 
   afterAll(async () => {
+    await putLimitsBack();
     await prisma.user.deleteMany({ where: { id: { in: [sara, omar, lena] } } });
     for (const [key, value] of [['BOT_SERVICE_TOKEN', envBefore.service], ['ENCRYPTION_KEY', envBefore.key]] as const) {
       if (value === undefined) delete process.env[key];
@@ -342,7 +347,7 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect((await ask(saraBrick, serverId, omarKey(), 'd4')).body).toMatchObject({ allowed: true, shared: { returns: ['url', 'title'] } });
       expect((await shareRoute('DELETE', app.id, saraBrick)).status).toBe(204);
       expect((await ask(saraBrick, serverId, omarKey(), 'd5')).body).toMatchObject({ allowed: false, reason: 'not_owner' });
-      expect(await prisma.appShareJob.count()).toBe(0);
+      expect(await prisma.appShareJob.count({ where: { share: { serverId } } })).toBe(0);
       // What went through before the stop is in the books as it happened, and the owner can share again later
       expect(await prisma.meterEvent.count({ where: { botId: saraBrick, kind: 'app_use' } })).toBe(2);
       expect((await shareRoute('DELETE', app.id, saraBrick)).status).toBe(404);
