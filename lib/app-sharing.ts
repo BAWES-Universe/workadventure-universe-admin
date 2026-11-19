@@ -74,9 +74,13 @@ export async function lendApp(ownerId: string, connectionId: string, input: z.in
   });
 }
 
+/** Changes the limits of a lend. `no_access` when the person can no longer manage bots in that universe: they may take a lend back, never widen or move it. */
 export async function changeLend(ownerId: string, connectionId: string, universeId: string, patch: z.infer<typeof lendChangeSchema>) {
   const connection = await prisma.appConnection.findFirst({ where: { id: connectionId, ownerId } });
   if (!connection) return null;
+  // A lend that is not there is not found, whatever the person can do in that universe
+  if (!(await prisma.appLend.findUnique({ where: { connectionId_universeId: { connectionId, universeId } }, select: { id: true } }))) return null;
+  if (!(await lendAccess(ownerId, universeId))) return 'no_access' as const;
   const data: Prisma.AppLendUpdateManyMutationInput = {};
   if (patch.things !== undefined) data.things = uniqueThings(patch.things) ?? Prisma.JsonNull;
   if (patch.usesPerDay !== undefined) data.usesPerDay = patch.usesPerDay;

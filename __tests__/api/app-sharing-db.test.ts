@@ -322,6 +322,22 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await check(guide, serverId, { callId: 'back', heading: 'lookUp' })).body.allowed).toBe(true);
     });
 
+    it('a person who no longer has Manage bots in a universe cannot change the limits of their lend there, and can still take it back', async () => {
+      const app = await keyApp(nora);
+      as(nora);
+      expect((await lendTo(app.id, { universeId: universeA, usesPerDay: 5 })).status).toBe(201);
+      await prisma.worldMember.delete({ where: { userId_worldId: { userId: nora, worldId: worldA } } });
+      try {
+        const widen = await changeLendRoute(request(`/api/me/apps/${app.id}/lends/${universeA}`, { method: 'PATCH', body: { usesPerDay: 1_000 } }), params({ connectionId: app.id, universeId: universeA }));
+        expect(widen.status).toBe(403);
+        expect((await prisma.appLend.findFirstOrThrow({ where: { connectionId: app.id } })).usesPerDay).toBe(5);
+        expect((await takeBackRoute(request(`/api/me/apps/${app.id}/lends/${universeA}`, { method: 'DELETE' }), params({ connectionId: app.id, universeId: universeA }))).status).toBe(204);
+        expect(await prisma.appLend.count({ where: { connectionId: app.id } })).toBe(0);
+      } finally {
+        await prisma.worldMember.create({ data: { worldId: worldA, userId: nora, tags: ['admin'] } });
+      }
+    });
+
     it('stops a bot at the Limits setting, five unless a super admin changes it, the same for apps added by hand and lent ones', async () => {
       const { app } = await lentAndLet();
       const roomId = (await prisma.bot.findUniqueOrThrow({ where: { id: guide }, select: { roomId: true } })).roomId;
