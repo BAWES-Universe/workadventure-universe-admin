@@ -79,17 +79,18 @@ export function describeLine(line: PayLine, state: { copied: boolean }): PayView
     return { ...PAY_WORDS.paidAccount, actions: [], closable: false };
   }
   if (line.problem === 'none') return { ...(line.buyer === 'account' ? PAY_WORDS.noneAccount : PAY_WORDS.noneGuest), actions: [], closable: true };
-  if (line.problem === 'not_paid') return { ...PAY_WORDS.notPaid, actions: [check], closable: false };
-  if (line.problem === 'cant_confirm') return { ...PAY_WORDS.notHeard, actions: [check], closable: false };
+  // Whatever else is pressed, a browser that cannot keep the buyer's code keeps offering the receipt link while the payment is not settled
+  const save = line.keepReceipt && line.receipt ? [savePrompt(state.copied)] : [];
+  if (line.problem === 'not_paid') return { ...PAY_WORDS.notPaid, actions: [check, ...save], closable: false };
+  if (line.problem === 'cant_confirm') return { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false };
   // A start whose answer was lost: an order may or may not exist, so it is said like any other payment not heard back about
-  if (line.problem === 'unavailable') return line.canCheck ? { ...PAY_WORDS.notHeard, actions: [check], closable: false } : { ...PAY_WORDS.unavailable, actions: [], closable: false };
+  if (line.problem === 'unavailable') return line.canCheck ? { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false } : { ...PAY_WORDS.unavailable, actions: [], closable: false };
   if (line.problem === 'limit') return { ...PAY_WORDS.limit, actions: [], closable: false };
   if (line.needsUpdate) return { ...PAY_WORDS.needsUpdate, actions: line.checking ? [] : [check], closable: false };
   if (line.checking) {
-    const save = line.keepReceipt && line.receipt ? savePrompt(state.copied) : null;
-    return { ...(save ? PAY_WORDS.saveReceipt : line.slow ? PAY_WORDS.slow : PAY_WORDS.checking), actions: [...resume, ...(save ? [save] : [])], closable: false };
+    return { ...(save.length ? PAY_WORDS.saveReceipt : line.slow ? PAY_WORDS.slow : PAY_WORDS.checking), actions: [...resume, ...save], closable: false };
   }
   if (line.offerRestore) return { ...PAY_WORDS.boughtBefore, actions: [{ kind: 'restore', label: PAY_WORDS.buttons.restorePurchase, style: 'secondary' }], closable: true };
-  if (line.canCheck) return { ...PAY_WORDS.notHeard, actions: [check], closable: false };
+  if (line.canCheck) return { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false };
   return null;
 }

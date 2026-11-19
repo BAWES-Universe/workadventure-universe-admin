@@ -14,6 +14,9 @@ describe('the host line’s wording (mock M1)', () => {
   it('a payment on its way in a browser that cannot keep the code: the receipt link can be copied right away, and says so', () => {
     expect(text({ checking: true, buyer: 'guest', keepReceipt: true, receipt: 'https://x/a#receipt=c' })).toEqual(['Checking your payment…', 'This browser can’t remember it. Save your receipt link now.', ['Copy receipt link'], false]);
     expect(text({ checking: true, buyer: 'guest', keepReceipt: true, receipt: 'https://x/a#receipt=c' }, true)).toEqual(['Checking your payment…', 'This browser can’t remember it. Save your receipt link now.', ['Copied'], false]);
+    // And while the payment is not settled (not heard back about, not paid yet), the receipt link stays on offer next to Check payment
+    expect(text({ problem: 'cant_confirm', canCheck: true, buyer: 'guest', keepReceipt: true, receipt: 'https://x/a#receipt=c' })?.[2]).toEqual(['Check payment', 'Copy receipt link']);
+    expect(text({ problem: 'not_paid', buyer: 'guest', keepReceipt: true, receipt: 'https://x/a#receipt=c' })?.[2]).toEqual(['Check payment', 'Copy receipt link']);
     // A browser that keeps the code has nothing to hurry
     expect(text({ checking: true, buyer: 'guest', receipt: 'https://x/a#receipt=c' })).toEqual(['Checking your payment…', 'Asking the payment service directly.', [], false]);
   });
