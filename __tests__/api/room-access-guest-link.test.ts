@@ -35,14 +35,18 @@ jest.mock('@/lib/avatar-catalog-validator', () => ({
 }));
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn() }));
 // What it hands over is covered in guest-brick-db.test.ts
-jest.mock('@/lib/guest-brick', () => ({ adoptGuestChatKeepingIt: jest.fn().mockResolvedValue({ adopted: false }), finishKeptGuestChats: jest.fn().mockResolvedValue(0) }));
+jest.mock('@/lib/guest-brick', () => ({
+  adoptGuestChatKeepingIt: jest.fn().mockResolvedValue({ adopted: false }),
+  finishKeptGuestChats: jest.fn().mockResolvedValue(0),
+  GuestChatNotKeptError: class GuestChatNotKeptError extends Error {},
+}));
 
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { authenticateRequest } from '@/lib/oidc';
 import { GET as roomAccess } from '@/app/api/room/access/route';
 import { isLinkableGuestId } from '@/lib/guest-sign-in-link';
-import { adoptGuestChatKeepingIt as adoptGuestChat, finishKeptGuestChats } from '@/lib/guest-brick';
+import { adoptGuestChatKeepingIt as adoptGuestChat, finishKeptGuestChats, GuestChatNotKeptError } from '@/lib/guest-brick';
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
 
@@ -164,6 +168,15 @@ describe('GET /api/room/access, a guest signing in with a chat with the Brick fo
     (adoptGuestChat as jest.Mock).mockRejectedValueOnce(new Error('db down'));
     const body = await enter(`&previousGuestUuid=${GUEST}`);
     expect(body.status).toBe('ok');
+    expect(Sentry.captureException).toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/room/access, a guest id that could not be kept', () => {
+  it('shows the retry screen when the hand-over failed and the id could not be written down either, so the game asks again with it', async () => {
+    (adoptGuestChat as jest.Mock).mockRejectedValueOnce(new GuestChatNotKeptError('both failed'));
+    const body = await enter(`&previousGuestUuid=${GUEST}`);
+    expect(body).toMatchObject({ status: 'error', type: 'retry', code: 'GUEST_CHAT_NOT_KEPT' });
     expect(Sentry.captureException).toHaveBeenCalled();
   });
 });

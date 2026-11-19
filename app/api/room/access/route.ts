@@ -9,7 +9,7 @@ import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalo
 import { notifyRoomAccess } from '@/lib/discord';
 import { isBotIdentifier } from '@/lib/bot-visitor';
 import { isLinkableGuestId, linkGuestVisits } from '@/lib/guest-sign-in-link';
-import { adoptGuestChatKeepingIt, finishKeptGuestChats } from '@/lib/guest-brick';
+import { adoptGuestChatKeepingIt, finishKeptGuestChats, GuestChatNotKeptError } from '@/lib/guest-brick';
 import { currentOutfit, recordOutfitPick } from '@/lib/user-outfits';
 import { companionWearableHere, wearableHere } from '@/lib/woka-wearable';
 import { canSeeRoom } from '@/lib/room-visibility';
@@ -222,6 +222,22 @@ export async function GET(request: NextRequest) {
           await adoptGuestChatKeepingIt(previousGuestUuid, user.id);
         } catch (error) {
           Sentry.captureException(error);
+          // A failure that was written down is finished on a later visit and never stops anyone getting in. One that could not even be written down loses
+          // the guest id (the game sends it only once), so the game shows its retry screen and asks again with it, instead of getting in with nothing kept
+          if (error instanceof GuestChatNotKeptError) {
+            const retry: ErrorApiRetryData = {
+              status: "error",
+              type: "retry",
+              title: "Couldn't finish signing you in",
+              subtitle: "We couldn't keep your chat from before you signed in. Trying again.",
+              code: "GUEST_CHAT_NOT_KEPT",
+              details: "This usually clears up in a few seconds.",
+              buttonTitle: "Retry",
+              timeToRetry: 5000,
+              canRetryManual: true,
+            };
+            return NextResponse.json(retry);
+          }
         }
       }
 
