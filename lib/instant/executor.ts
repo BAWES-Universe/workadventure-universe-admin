@@ -809,9 +809,11 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
       // An intent the books may already have acted on: finished at its own amount, before any limit is applied to a new give-back
       if (earlier) return { go: { amount: asNumber(earlier.amountMicros), runId: run.id, personId: run.personId } };
       if (!limitsSet) return { done: { status: 'refused', reason: 'not_set' } };
+      // An intent the books stayed unreachable about for the whole wait is let go: it is still asked about (see sweepGoodwill) but no longer counts here
+      const counted = { kind: 'goodwill', createdAt: { gte: month.start, lt: month.end }, NOT: { confirmedAt: null, createdAt: { lte: goodwillLetGoBefore(now, limits.unreachableWaitMinutes) } } };
       const [person, everyone] = await Promise.all([
-        tx.instantRefund.count({ where: { personId: input.personId, kind: 'goodwill', createdAt: { gte: month.start, lt: month.end } } }),
-        tx.instantRefund.aggregate({ where: { kind: 'goodwill', createdAt: { gte: month.start, lt: month.end } }, _sum: { amountMicros: true } }),
+        tx.instantRefund.count({ where: { personId: input.personId, ...counted } }),
+        tx.instantRefund.aggregate({ where: counted, _sum: { amountMicros: true } }),
       ]);
       if (person >= limits.goodwillPerPersonPerMonth!) return { done: { status: 'refused', reason: 'person_limit' } };
       const amount = Math.min(asNumber(run.customerMicros) - asNumber(run.refundedMicros), limits.goodwillMaxMicros!);
@@ -858,28 +860,39 @@ export interface GoodwillSweep {
   looked: number;
   /** Finished: the books confirmed them, or said no (so the intent was dropped). */
   settled: number;
-  /** Let go: the books stayed unreachable for the whole wait, so the intent no longer uses up the month's budget. */
+  /** Let go: the books stayed unreachable for the whole wait, so the intent no longer uses up the month's budget (it is still asked about). */
   released: number;
+  /** Given up for good: still unconfirmed after `GOODWILL_GIVE_UP_DAYS`, the intent is removed. */
+  abandoned: number;
 }
 
+/** The time before which an unconfirmed intent has waited out `unreachableWaitMinutes`: it is let go from then (derived from its age, so nothing is marked). */
+const goodwillLetGoBefore = (now: Date, unreachableWaitMinutes: number): Date => new Date(now.getTime() - unreachableWaitMinutes * MINUTE);
+
+/** How long a let-go give-back is still asked about before it is given up. The books answer a key they have seen with its first amount for as long as they keep it. */
+const GOODWILL_GIVE_UP_DAYS = 30;
+/** The most let-go give-backs asked about in one sweep, so a books outage cannot crowd out the new ones. */
+const GOODWILL_LET_GO_BATCH = 20;
+
 /**
- * Gives goodwill give-backs that the books never confirmed another try, and lets go of the ones the books could not be reached about for
- * the whole wait. An intent is saved before the books are asked, so one that failed in between stays "unconfirmed" and keeps counting
- * against the month's give-back budget. The books answer a key they have seen with its first amount, so asking again is safe: a retry
- * finishes it (confirmed, or dropped when the books say no). One still unconfirmed after `unreachableWaitMinutes` is released: if the
- * books did act, the person's next ask, or this sweep's next look, finds it again under the same key and records the first amount.
+ * Gives goodwill give-backs that the books never confirmed another try. An intent is saved before the books are asked, so one that failed in between
+ * stays "unconfirmed" and keeps counting against the month's give-back budget. The books answer a key they have seen with its first amount, so asking
+ * again is safe: a retry finishes it (confirmed, or dropped when the books say no). One still unconfirmed after `unreachableWaitMinutes` is let go:
+ * it stops counting against the budget (that follows from its age), but its row STAYS and is asked about again each sweep, so a give-back the books
+ * DID make and we never saw is still found and counted (at the amount the books first said) whenever they can be reached; only after
+ * `GOODWILL_GIVE_UP_DAYS` is it removed.
  */
 export async function sweepGoodwill(deps: Deps & { batch?: number } = {}): Promise<GoodwillSweep> {
   const now = deps.now ?? new Date();
   const limits = await getInstantLimits();
-  const open = await prisma.instantRefund.findMany({
-    where: { kind: 'goodwill', confirmedAt: null, createdAt: { lte: new Date(now.getTime() - GOODWILL_RETRY_AFTER_MINUTES * MINUTE) } },
-    orderBy: { createdAt: 'asc' },
-    take: deps.batch ?? 50,
-    select: { refundKey: true, runId: true, personId: true, createdAt: true },
-  });
-  const result: GoodwillSweep = { looked: open.length, settled: 0, released: 0 };
-  for (const intent of open) {
+  const letGoBefore = goodwillLetGoBefore(now, limits.unreachableWaitMinutes);
+  const askedBefore = new Date(now.getTime() - GOODWILL_RETRY_AFTER_MINUTES * MINUTE);
+  const select = { refundKey: true, runId: true, personId: true, createdAt: true } as const;
+  // Those still inside the wait come first, so a let-go one never crowds a new one out
+  const fresh = await prisma.instantRefund.findMany({ where: { kind: 'goodwill', confirmedAt: null, createdAt: { lte: askedBefore, gt: letGoBefore } }, orderBy: { createdAt: 'asc' }, take: deps.batch ?? 50, select });
+  const letGo = await prisma.instantRefund.findMany({ where: { kind: 'goodwill', confirmedAt: null, createdAt: { lte: letGoBefore } }, orderBy: { createdAt: 'asc' }, take: GOODWILL_LET_GO_BATCH, select });
+  const result: GoodwillSweep = { looked: fresh.length + letGo.length, settled: 0, released: 0, abandoned: 0 };
+  for (const intent of [...fresh, ...letGo]) {
     const outcome = await giveBack({ personId: intent.personId, runId: intent.runId }, { ...deps, now }).catch((error): GiveBackOutcome => {
       console.error('[Instant] Could not finish a give-back:', error instanceof Error ? error.message : 'unknown');
       return { status: 'refused', reason: 'unavailable' };
@@ -889,12 +902,16 @@ export async function sweepGoodwill(deps: Deps & { batch?: number } = {}): Promi
       result.settled += 1;
       continue;
     }
-    if (outcome.status === 'refused' && now.getTime() - intent.createdAt.getTime() >= limits.unreachableWaitMinutes * MINUTE) {
+    if (outcome.status !== 'refused' || intent.createdAt > letGoBefore) continue;
+    // Still unconfirmed after the wait: let go (not counted), and given up only after a long while
+    if (now.getTime() - intent.createdAt.getTime() >= GOODWILL_GIVE_UP_DAYS * 24 * 60 * MINUTE) {
       const { count } = await prisma.instantRefund.deleteMany({ where: { refundKey: intent.refundKey, confirmedAt: null } });
       if (count > 0) {
-        result.released += 1;
-        console.error('[Instant] Let go of a give-back the books never confirmed:', intent.refundKey);
+        result.abandoned += 1;
+        console.error('[Instant] Gave up on a give-back the books never confirmed:', intent.refundKey);
       }
+    } else {
+      result.released += 1;
     }
   }
   return result;

@@ -65,7 +65,7 @@ export interface SweepResult {
   looked: number;
   /** Receipts that left "checking" in this pass. */
   receipts: number;
-  /** Goodwill give-backs the books never confirmed: tried again, or let go after the wait. */
+  /** Goodwill give-backs the books never confirmed: tried again, let go (not counted, still asked about) after the wait, or given up after a long while. */
   goodwill: GoodwillSweep;
   paused: boolean;
   sessions: SessionSweep;
@@ -100,7 +100,7 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
   });
   const goodwill = await sweepGoodwill({ funds, adapter, now }).catch((error): GoodwillSweep => {
     console.error('[Instant] The give-back check failed:', error instanceof Error ? error.message : 'unknown');
-    return { looked: 0, settled: 0, released: 0 };
+    return { looked: 0, settled: 0, released: 0, abandoned: 0 };
   });
   const paused = await evaluatePause(now).catch(() => false);
   const sessions = await denyInstantOnSessions(BATCH, adapter).catch((error): SessionSweep => {
