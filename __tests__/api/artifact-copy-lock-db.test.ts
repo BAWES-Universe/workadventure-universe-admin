@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto';
 import { prisma } from '@/lib/db';
 import { holdForCopy } from '@/lib/artifact-service';
+import { waitForLockWait } from '../helpers/wait-for-lock';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -39,7 +40,8 @@ run('the original of a copy, in a real database', () => {
     const owner = prisma.artifact.update({ where: { id }, data: { openScope: 'me' } }).then(() => {
       changed = true;
     });
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    // The write is seen waiting on the row the copy holds (not guessed from a delay), and has not gone through
+    await waitForLockWait(prisma, '%UPDATE%artifacts%');
     expect(changed).toBe(false);
     letGo();
     // The copy saw the sharing it was read with and was saved; only then does the change go through

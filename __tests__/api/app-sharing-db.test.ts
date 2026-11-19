@@ -15,6 +15,7 @@ jest.mock('@/lib/mcp/outbound-guard', () => ({
 }));
 
 import { prisma } from '@/lib/db';
+import { waitForLockWait } from '../helpers/wait-for-lock';
 import { createBrick } from '@/lib/brick-create';
 import { encryptApiKey } from '@/lib/encryption';
 import { managerCandidates } from '@/lib/app-sharing';
@@ -408,7 +409,8 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
         // What taking it back holds first: the lend, for update. A check that starts now has to wait for it.
         await tx.$queryRaw`SELECT "id" FROM "app_lends" WHERE "connection_id" = ${app.id} AND "universe_id" = ${universeId} FOR UPDATE`;
         waiting = recordUse({ connectionId: app.id, universeId, botId: guide, callId: 'late', limit: 5, serverId, lend: true });
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        // The check is seen waiting for the lend this transaction holds, then the lend is taken back
+        await waitForLockWait(prisma, '%app_lends%');
         await tx.botMcpServer.delete({ where: { id: serverId } });
         await tx.appLend.deleteMany({ where: { connectionId: app.id, universeId } });
       });
@@ -425,7 +427,8 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
         // What switching it off holds first: the grant, for update. A check that starts now has to wait for it.
         await tx.$queryRaw`SELECT "id" FROM "bot_mcp_servers" WHERE "id" = ${serverId} FOR UPDATE`;
         waiting = recordUse({ connectionId: app.id, universeId: universeA, botId: guide, callId: 'switched', limit: 5, serverId, lend: true });
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        // The check is seen waiting for the grant this transaction holds, then the grant is switched off
+        await waitForLockWait(prisma, '%bot_mcp_servers%');
         await tx.botMcpServer.update({ where: { id: serverId }, data: { enabled: false } });
       });
       expect(await waiting).toBe('off');
