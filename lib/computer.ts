@@ -1221,9 +1221,19 @@ const FENCE_STALE_MS = 6 * 60 * 1000;
 const FENCE_WAIT_MS = 5 * 60 * 1000;
 const FENCE_LOOK_MS = 250;
 
-/** The first turns of a Brick's jobs that were marked as sent and never named: gone with the fence (see fenceTakeOver). */
+/** The first turns of a Brick's jobs that were marked as sent and never named: gone only when nothing can still be running them (see fenceTakeOver). */
 async function clearFirstTurnMarks(botId: string): Promise<void> {
   await prisma.computerJob.updateMany({ where: { botId, NOT: { firstTurnSentAt: null }, agentResponseId: null }, data: { firstTurnSentAt: null } });
+}
+
+/**
+ * Whether nothing of the agent can still be running on the Brick's machine: there is no machine, or it is proved asleep (`stopped`: the provider
+ * said so). The machine's fence is not that: it ends the keys and stops what the agent started, but keeps the agent's gateway (and everything
+ * above it), and a job's first turn runs inside the gateway, so a turn that never said its id survives a fence that was proved clear.
+ */
+export async function agentCannotRun(botId: string): Promise<boolean> {
+  const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true, machine: true } });
+  return !row || !row.providerRef || row.machine === 'none' || row.machine === 'stopped';
 }
 
 /**
@@ -1243,10 +1253,11 @@ async function fenceTakeOver(botId: string): Promise<boolean> {
         await fenceControl(botId);
         // Then the machine itself: the turn is cancelled and what the agent started is stopped and proved gone, before the person has the screen
         await fenceMachine(botId);
-        // What the agent had started and not yet named (a job's first turn, marked in its row before it was sent) is stopped by this fence: its keys are
-        // ended and every process it started is stopped and proved gone, or the machine itself is stopped. Nothing runs that nothing names, so the mark goes,
-        // and a start after the hand-back opens a turn as any other
-        await clearFirstTurnMarks(botId);
+        // A job's first turn that never said its id (marked in its row before it was sent) is NOT stopped by the fence unless the machine itself was: the
+        // fence keeps the agent's gateway, the turn runs inside it, and its model calls are only paused by the keys that ended. So the mark stays, and the
+        // start after the hand-back ends the job instead of opening a second first turn beside the one that runs (two charges). It goes only when the
+        // machine is proved asleep (the fence could not be proved and stopped it): then nothing runs and a start opens a turn as any other
+        if (await agentCannotRun(botId)) await clearFirstTurnMarks(botId);
       } finally {
         await prisma.brickComputer.updateMany({ where: { botId, fencingSince: started }, data: { fencingSince: null } });
       }

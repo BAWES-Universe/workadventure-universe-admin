@@ -789,25 +789,94 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         expect(await startTurn(jobId, 'again')).toMatchObject({ ok: true });
       });
 
-      it('the take-over fence stops a first turn that has not said its id (its keys end, what it started is stopped and proved gone), so its mark goes at the take-over: after the hand-back a start opens a turn', async () => {
-        const { sara, jobId } = await running();
-        const letGo = gatedFirstTurn();
+      // A first turn the agent accepted and whose id never came here (the server that sent it stopped): it runs inside the agent's gateway, which the
+      // machine's fence keeps. The claim of that start lapses by itself.
+      const acceptedAndLost = async (jobId: string) => {
+        const sent = jest.spyOn(fake, 'openTurn');
+        sent.mockImplementationOnce((async () =>
+          (async function* (): AsyncGenerator<TurnEvent> {
+            await new Promise(() => undefined);
+          })()) as never);
         const started = await startTurn(jobId, 'go');
         if (!started.ok) throw new Error('no turn');
         expect((await jobRow(jobId)).firstTurnSentAt).not.toBeNull();
+        const lapse = () => prisma.computerJob.update({ where: { id: jobId }, data: { turnClaimedAt: new Date(Date.now() - 5 * 60_000) } });
+        return { sent, lapse };
+      };
+
+      it('the take-over fence does not clear the mark of a first turn that never said its id while the machine keeps working (the fence keeps the agent\'s gateway, where the turn runs): after the hand-back the start ends the job and opens no second turn', async () => {
+        const { sara, jobId } = await running();
+        const { sent, lapse } = await acceptedAndLost(jobId);
+        try {
+          expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
+          // The fence ran and was proved clear, and the machine works on: the turn may still be running inside the gateway
+          expect(fake.commands.map((one) => one.command)).toContain('universe-fence --check');
+          expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+          expect((await jobRow(jobId)).firstTurnSentAt).not.toBeNull();
+          expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
+          await lapse();
+          expect(await startTurn(jobId, 'carry on')).toEqual({ ok: false, reason: 'not_running' });
+          expect(sent).toHaveBeenCalledTimes(1);
+          expect((await jobRow(jobId)).status).toBe('failed');
+        } finally {
+          sent.mockRestore();
+        }
+      });
+
+      it('the take-over fence that could not be proved stops the machine, and with it the first turn: its mark goes, and after the hand-back a start opens a turn', async () => {
+        const { sara, jobId } = await running();
+        const { sent, lapse } = await acceptedAndLost(jobId);
+        try {
+          fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
+          expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
+          expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopped');
+          expect((await jobRow(jobId)).firstTurnSentAt).toBeNull();
+          fake.execAnswer = (command) => (command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {});
+          expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
+          await lapse();
+          const back = await startTurn(jobId, 'carry on');
+          expect(back).toMatchObject({ ok: true });
+          if (back.ok) await drain(back.events);
+          expect(sent).toHaveBeenCalledTimes(2);
+          expect((await jobRow(jobId)).status).toBe('running');
+        } finally {
+          sent.mockRestore();
+        }
+      });
+
+      it('a first turn whose id comes after the job was fenced and that cannot be cancelled by its id keeps its mark (the fence that replaces the cancel keeps the gateway): the next start ends the job and opens no second turn', async () => {
+        const { jobId } = await running();
+        const letGo = gatedFirstTurn();
+        const sent = jest.spyOn(fake, 'openTurn');
+        const started = await startTurn(jobId, 'go');
+        if (!started.ok) throw new Error('no turn');
         const reading = drain(started.events);
-        expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
-        // The fence ran the machine's own check, and the mark is gone with what it stopped
-        expect(fake.commands.map((one) => one.command)).toContain('universe-fence --check');
-        expect((await jobRow(jobId)).firstTurnSentAt).toBeNull();
-        // The agent says its id only now: the turn is not the job's any more
+        await prisma.computerJob.update({ where: { id: jobId }, data: { controlGeneration: { increment: 1 } } });
+        fake.failCancel = true;
         letGo();
         expect(await reading).toEqual([{ type: 'failed', code: 'fenced', message: expect.any(String) }]);
-        expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
-        const back = await startTurn(jobId, 'carry on');
-        expect(back).toMatchObject({ ok: true });
-        if (back.ok) await drain(back.events);
-        expect((await jobRow(jobId)).status).toBe('running');
+        // Three tries to cancel it by its id, then the machine's fence: proved clear, the machine works on
+        expect(fake.calls.filter((call) => call.name === 'cancelTurn').length).toBeGreaterThanOrEqual(3);
+        expect((await jobRow(jobId)).firstTurnSentAt).not.toBeNull();
+        fake.failCancel = false;
+        expect(await startTurn(jobId, 'again')).toEqual({ ok: false, reason: 'not_running' });
+        expect(sent).toHaveBeenCalledTimes(1);
+        expect((await jobRow(jobId)).status).toBe('failed');
+        sent.mockRestore();
+      });
+
+      it('...unless the machine fence that replaced the cancel could not be proved and stopped the machine: then nothing runs, and the mark goes', async () => {
+        const { jobId } = await running();
+        const letGo = gatedFirstTurn();
+        const started = await startTurn(jobId, 'go');
+        if (!started.ok) throw new Error('no turn');
+        const reading = drain(started.events);
+        await prisma.computerJob.update({ where: { id: jobId }, data: { controlGeneration: { increment: 1 } } });
+        fake.failCancel = true;
+        fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
+        letGo();
+        expect(await reading).toEqual([{ type: 'failed', code: 'fenced', message: expect.any(String) }]);
+        expect((await jobRow(jobId)).firstTurnSentAt).toBeNull();
       });
     });
 

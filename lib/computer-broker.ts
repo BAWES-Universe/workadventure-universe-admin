@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { providerFor, fenceMachine, finishJob } from '@/lib/computer';
+import { agentCannotRun, providerFor, fenceMachine, finishJob } from '@/lib/computer';
 import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
 import { Agent37Error, TurnNotSent } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
@@ -425,10 +425,13 @@ async function* keeping(
         await letGoOfClaim();
         if (kept.count === 0) {
           // The person took over (or the job ended) between asking and the agent starting, or another turn holds the job: this turn must not run
-          await cancelOrFence(job, provider, event.id);
-          // The turn is cancelled, or the machine's own fence stopped whatever it started: nothing runs that nothing names, so the first-turn mark goes
-          // (not while the job holds another turn's id, which is what a start looks at first)
-          await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: null }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+          const cancelled = await cancelOrFence(job, provider, event.id);
+          // The turn was cancelled by its id: nothing runs that nothing names, so the first-turn mark goes (not while the job holds another turn's id, which is
+          // what a start looks at first). When the cancel could not be made, the machine's fence took its place, and that keeps the agent's gateway, where the
+          // turn runs: the mark stays (the next start ends the job and opens no second turn) unless the machine itself is proved asleep
+          if (cancelled || (await agentCannotRun(job.botId).catch(() => false))) {
+            await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: null }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+          }
           responseId = null;
           over = true;
           yield { type: 'failed', code: 'fenced', message: 'The turn was stopped because the person took over' };
@@ -455,18 +458,20 @@ async function* keeping(
 
 /**
  * Cancels a turn that must not run. A cancel that cannot be made is tried again; if it still cannot, the turn would run untracked (its id is
- * not the job's), so the machine's own fence stops what the agent started instead. Never throws.
+ * not the job's), so the machine's own fence stops what the agent started instead. True when the turn was cancelled by its id; false when it was
+ * not (the fence does not know that id and keeps the agent's gateway, so the turn may still be running). Never throws.
  */
-async function cancelOrFence(job: Live, provider: NonNullable<ReturnType<typeof providerFor>>, id: string): Promise<void> {
+async function cancelOrFence(job: Live, provider: NonNullable<ReturnType<typeof providerFor>>, id: string): Promise<boolean> {
   for (let attempt = 0; attempt < CANCEL_TRIES; attempt++) {
     try {
       await provider.cancelTurn(job.ref, id);
-      return;
+      return true;
     } catch (error) {
       console.error('[Computer] Could not cancel a turn:', error instanceof Error ? error.message : 'unknown');
     }
   }
   await fenceMachine(job.botId);
+  return false;
 }
 
 const CANCEL_TRIES = 3;
