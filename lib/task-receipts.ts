@@ -278,8 +278,9 @@ const jobFailed = (job: JobRow): boolean => jobRan(job) && job?.status === 'fail
 const outcomeWithJob = (view: ReturnType<typeof outcomeOfRuns>, job: JobRow): ReceiptOutcome => {
   if (!jobRan(job)) return view.outcome;
   const outcome = outcomeOfActions([...view.actions.map((action) => action.outcome), job.status === 'failed' ? 'failed' : 'worked']);
-  // Nothing was verified and a job that ran took the person's time: not "nothing taken"
-  return outcome === 'refunded' ? 'failed' : outcome;
+  // Nothing was verified and a job that ran took the person's time: not "nothing taken" (neither refunded nor unconfirmed, both of which are stored as refunded and
+  // leave the job's time out of what the task took). The action that could not be confirmed still says so on its own line
+  return outcome === 'refunded' || outcome === 'unconfirmed' ? 'failed' : outcome;
 };
 
 /** A task with no Instant action that went out and a computer job that is over: the job's own record says how it went. */
@@ -562,7 +563,7 @@ function outcomeOfHeader(header: Header): ReceiptOutcome {
   if (header.state === 'refunded') return header.outcome === 'unconfirmed' ? 'unconfirmed' : 'refunded';
   if (header.job !== null) {
     const outcome = outcomeOfActions([...header.actions.map((action) => action.outcome), header.job]);
-    return outcome === 'refunded' ? 'failed' : outcome;
+    return outcome === 'refunded' || outcome === 'unconfirmed' ? 'failed' : outcome;
   }
   return header.outcome === 'partial' || header.outcome === 'failed' || header.outcome === 'unconfirmed' ? header.outcome : 'done';
 }

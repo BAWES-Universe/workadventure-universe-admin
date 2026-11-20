@@ -757,6 +757,28 @@ run('receipts that always settle (O1)', () => {
       expect(item?.actions).toEqual([{ label: 'gmail', outcome: 'failed', text: actionWords('gmail', 'failed'), takenText: NOTHING_TAKEN }]);
     });
 
+    it('a failed computer job with an action nobody could confirm is failed, not unconfirmed: the job ran and took the person’s time, so the receipt is never stored as refunded and its time is counted', async () => {
+      const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Send and confirm', status: 'running', startedAt: START } });
+      await open(job.id, { category: 'computer', title: 'Send and confirm' });
+      const gmail = await makeRun(job.id, 'failed', { reason: 'unclear', toolkit: 'gmail', customerState: 'released', customerMicros: BigInt(0), detail: { releasedUnconfirmed: true } });
+      await computerTime(job.id, 30_000);
+      await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'failed', endedAt: at(5) } });
+      // Ended by the close
+      await closeReceipt({ botId: brick, taskKey: job.id, personId: sara, state: 'refunded' }, at(6));
+      expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'failed', actions: [{ run: gmail.id, outcome: 'unknown' }] });
+      const item = (await activityFor(sara)).find((candidate) => candidate.title === 'Send and confirm');
+      expect(item).toMatchObject({ state: 'done', outcome: 'failed', spentMicros: 30_000 });
+      // The App that could not be confirmed still says so on its own line
+      expect(item?.actions).toEqual([expect.objectContaining({ label: 'gmail', outcome: 'unknown' })]);
+      // The same job ended by the sweep, and a receipt that was stored the old way (refunded + unconfirmed) is read as failed
+      const swept = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Swept and confirm', status: 'running', startedAt: START } });
+      await open(swept.id, { category: 'computer', title: 'Swept and confirm' });
+      await makeRun(swept.id, 'failed', { reason: 'unclear', toolkit: 'gmail', customerState: 'released', customerMicros: BigInt(0), detail: { releasedUnconfirmed: true } });
+      await prisma.computerJob.update({ where: { id: swept.id }, data: { status: 'failed', endedAt: at(5) } });
+      await settleCheckingReceipts(50, at(6));
+      expect(await receipt(swept.id)).toMatchObject({ state: 'done', outcome: 'failed' });
+    });
+
     it('a failed computer job with no Instant action at all is failed too, whether the close or the sweep ends it; and from Activity alone when it has no receipt', async () => {
       const closed = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Gave up, closed', status: 'failed', startedAt: START, endedAt: at(5) } });
       await open(closed.id, { category: 'computer', title: 'Gave up, closed' });
