@@ -17,7 +17,10 @@ function isOnTheCalendar(value: string): boolean {
   const parts = ISO_TIMESTAMP.exec(value);
   if (!parts) return false;
   const [year, month, day, hour, minute, second] = [parts[1], parts[2], parts[3], parts[4], parts[5], parts[6] ?? '0'].map(Number);
-  const wall = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  // `Date.UTC` reads the years 0 to 99 as 1900 to 1999, so the year is set apart (0096-02-29 is a real leap day)
+  const wall = new Date(0);
+  wall.setUTCFullYear(year, month - 1, day);
+  wall.setUTCHours(hour, minute, second, 0);
   return wall.getUTCFullYear() === year && wall.getUTCMonth() === month - 1 && wall.getUTCDate() === day && wall.getUTCHours() === hour && wall.getUTCMinutes() === minute && wall.getUTCSeconds() === second;
 }
 
