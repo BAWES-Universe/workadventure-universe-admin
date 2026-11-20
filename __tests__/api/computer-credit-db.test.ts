@@ -40,6 +40,7 @@ import { ensureIssued } from '@/lib/credit-issue';
 import { personUsage } from '@/lib/meter-person';
 import { WorkerDied, afterWorkerDied } from '../helpers/worker-died';
 import { activityFor, closeReceipt, openReceipt, settleCheckingReceipts } from '@/lib/task-receipts';
+import { OUTCOME_WORDS } from '@/lib/task-receipt-words';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 // What happens to a failed job's calls is the release's own rule (`giveBackModelCalls`); the part that needs it runs where it is
@@ -961,6 +962,126 @@ run('credit for computers, on the real books', () => {
       expect(state).toMatchObject({ baseMicros: BASE, creditMicros: 0, leftMicros: BASE });
       const { token } = await job(sara);
       expect(await authorizeModelCall({ token, callId: 'x', estimateMicros: 50_000, payer: 'universe' }, NOW)).toEqual({ ok: false, reason: 'allowance' });
+    });
+  });
+
+  describe('what the payer reads on the receipt of a computer that failed on our side (GPT observations 1 and 3)', () => {
+    const actualRefund = () => jest.requireActual('@/lib/credit-spend').refundHold;
+    const at = (minutes: number) => new Date(NOW.getTime() + minutes * 60_000);
+    const quiet = () => jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    /** A Gmail action of the job's task that went out and was charged 9,000, as the executor's own records hold it. */
+    async function gmailWorked(sara: { id: string; brickId: string }, jobId: string, customerMicros = 9_000) {
+      const run = await prisma.instantRun.create({
+        data: { runKey: `k-${randomUUID()}`, botId: sara.brickId, personId: sara.id, taskKey: jobId, toolSlug: 'GMAIL_SEND_EMAIL', toolkit: 'gmail', argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v', topMicros: BigInt(10_000), holdMicros: BigInt(10_000), state: 'succeeded', customerState: 'charged', customerMicros: BigInt(customerMicros), providerUserId: `u-${randomUUID().slice(0, 6)}` } as never,
+      });
+      await prisma.meterEvent.create({
+        data: { eventId: `instant:${run.id}`, kind: 'app_use', pool: 'chat', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(7_000), basis: 'measured', detail: { instant: true, taskKey: jobId, runId: run.id, app: 'gmail', customerMicros } } as never,
+      });
+      return run;
+    }
+    const itemFor = async (personId: string, title: string) => (await activityFor(personId)).filter((item) => item.title === title);
+
+    it('observation 1: a computer that was refunded and a Gmail that was charged 9,000: the Gmail charge stays visible, the returned computer cost is said, and the net amount is the Gmail charge', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      await call(token, 'b', 50_000, 20_000);
+      const gmail = await gmailWorked(sara, jobId);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Send the report', category: 'computer' }, NOW);
+      await failedOnOurSide(jobId, at(10));
+      // The money rows: the computer's 50,000 went back to the wallet, once; the Gmail charge stands
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      const holds = await prisma.creditHold.findMany({ where: { jobKey: jobId } });
+      expect(holds.map((hold) => Number(hold.refundedMicros)).sort()).toEqual([20_000, 30_000]);
+      expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(2);
+      expect(await prisma.instantRun.findUniqueOrThrow({ where: { id: gmail.id } })).toMatchObject({ state: 'succeeded', customerState: 'charged', customerMicros: BigInt(9_000) });
+      // The bot server says done; the task receipt is read after every way it can be ended
+      await closeReceipt({ botId: sara.brickId, taskKey: jobId, personId: sara.id, state: 'done' }, at(11));
+      await settleCheckingReceipts(50, at(600));
+      const [item, ...rest] = await itemFor(sara.id, 'Send the report');
+      expect(rest).toEqual([]);
+      // What the payer sees (the old build said "Refunded, nothing taken" with no total over this)
+      expect(item).toMatchObject({ state: 'done', outcome: 'partial', outcomeText: OUTCOME_WORDS.partial, spentMicros: 9_000, returnedMicros: 50_000 });
+      expect(item.outcomeText).not.toBe(OUTCOME_WORDS.refunded);
+      expect(item.actions).toEqual([{ label: 'gmail', outcome: 'worked', text: 'Gmail · worked', takenText: null, amountMicros: 9_000 }]);
+      expect(item.outcomeNote).toBe('One step worked and one didn’t. Computer cost of $0.05 was returned. Gmail charged $0.009. You pay $0.009 in all.');
+      expect(item.lines).toEqual(expect.arrayContaining([{ label: 'Instant gmail, 1 use', amountMicros: 9_000 }]));
+      // Said again later (a sweep, a read): the same receipt, the same words, no second refund
+      expect(await itemFor(sara.id, 'Send the report')).toEqual([item]);
+      expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(2);
+    });
+
+    it('observation 3: the wallet cannot post the refund: "$0.05 refund pending" until it does; then the SAME receipt says refunded and the credit came back once', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      await call(token, 'b', 50_000, 20_000);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Weekly report', category: 'computer' }, NOW);
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(async () => {
+        throw new Error('books unreachable');
+      });
+      const mute = quiet();
+      try {
+        await failedOnOurSide(jobId, at(10));
+        await closeReceipt({ botId: sara.brickId, taskKey: jobId, personId: sara.id, state: 'done' }, at(11));
+        await settleCheckingReceipts(50, at(30));
+      } finally {
+        mute.mockRestore();
+      }
+      // The money rows: the obligation is owed, the credit is still on the person
+      const owed = await prisma.computerRefundObligation.findMany({ where: { jobId, state: 'owed' } });
+      expect(owed.reduce((sum, one) => sum + Number(one.amountMicros), 0)).toBe(50_000);
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(950_000);
+      // What the payer sees: a refund that is pending, not "Refunded, nothing taken"
+      const [pending] = await itemFor(sara.id, 'Weekly report');
+      expect(pending).toMatchObject({ state: 'done', outcome: 'refund_pending', outcomeText: '$0.05 refund pending', refundPendingMicros: 50_000, spentMicros: null });
+      expect(pending.outcomeText).not.toBe(OUTCOME_WORDS.refunded);
+      expect(pending).not.toHaveProperty('returnedMicros');
+      expect(pending.outcomeNote).toContain('We’re giving back the computer cost.');
+      // The wallet recovers: the sweep posts the refund (once), the obligation is acknowledged
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(actualRefund());
+      await sweepComputers(at(600));
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      expect(await prisma.computerRefundObligation.count({ where: { jobId, state: 'acknowledged' } })).toBe(2);
+      const holds = await prisma.creditHold.findMany({ where: { jobKey: jobId } });
+      expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(2);
+      // The same receipt (same id), now refunded, with no pending amount
+      const [done] = await itemFor(sara.id, 'Weekly report');
+      expect(done).toMatchObject({ id: pending.id, state: 'refunded', outcome: 'refunded', outcomeText: OUTCOME_WORDS.refunded, spentMicros: null });
+      expect(done).not.toHaveProperty('refundPendingMicros');
+      // Asked again by anything: the credit is not restored twice
+      await sweepComputers(at(700));
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(2);
+    });
+
+    it('a pending refund beside a Gmail that was charged: the Gmail charge and the pending refund are each said, and the net amount waits until it is settled', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      await gmailWorked(sara, jobId);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Mail and report', category: 'computer' }, NOW);
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(async () => {
+        throw new Error('books unreachable');
+      });
+      const mute = quiet();
+      try {
+        await failedOnOurSide(jobId, at(10));
+        await closeReceipt({ botId: sara.brickId, taskKey: jobId, personId: sara.id, state: 'done' }, at(11));
+      } finally {
+        mute.mockRestore();
+      }
+      const [pending] = await itemFor(sara.id, 'Mail and report');
+      expect(pending).toMatchObject({ state: 'done', outcome: 'partial', refundPendingMicros: 30_000, spentMicros: null });
+      expect(pending.outcomeNote).toBe('One step worked and one didn’t. Computer cost of $0.03 refund pending. Gmail charged $0.009.');
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(actualRefund());
+      await sweepComputers(at(600));
+      const [settled] = await itemFor(sara.id, 'Mail and report');
+      expect(settled).toMatchObject({ id: pending.id, state: 'done', outcome: 'partial', spentMicros: 9_000, returnedMicros: 30_000 });
+      expect(settled.outcomeNote).toBe('One step worked and one didn’t. Computer cost of $0.03 was returned. Gmail charged $0.009. You pay $0.009 in all.');
     });
   });
 });
