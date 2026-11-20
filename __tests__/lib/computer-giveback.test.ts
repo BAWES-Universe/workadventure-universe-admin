@@ -69,10 +69,17 @@ describe('the class of one thing the relay saw go wrong (Orbit judges it, not th
     expect(faultClassOf(row('relay_down', { kind: 'not_ours' }))).toBe('unresolved');
   });
 
-  it('is the person’s for every call on their own key, whatever the reason, and nothing for an answered call', () => {
-    expect(faultClassOf(row('relay_down', { source: 'own-key' }))).toBe('person');
-    expect(faultClassOf(row('provider_5xx', { source: 'own-key' }))).toBe('person');
+  it('does not charge by source alone: an own-key call reads by kind and reason, so our relay being down is ours and a timeout is unresolved', () => {
+    expect(faultClassOf(row('relay_down', { source: 'own-key' }))).toBe('ours');
+    expect(faultClassOf(row('provider_5xx', { source: 'own-key', kind: 'uncertain' }))).toBe('unresolved');
+    expect(faultClassOf(row('timeout_after_output', { source: 'own-key', kind: 'uncertain' }))).toBe('unresolved');
+    expect(faultClassOf(row('own_provider', { source: 'own-key', kind: 'not_ours' }))).toBe('person');
+    expect(faultClassOf(row('provider_key_ours', { source: 'own-key' }))).toBe('person');
+  });
+
+  it('is nothing for an answered call', () => {
     expect(faultClassOf(row('relay_down', { kind: 'answered' }))).toBeNull();
+    expect(faultClassOf(row('relay_down', { source: 'own-key', kind: 'answered' }))).toBeNull();
   });
 });
 

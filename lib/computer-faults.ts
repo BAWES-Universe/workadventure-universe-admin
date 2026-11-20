@@ -33,8 +33,9 @@ export const UNRESOLVED_REASONS: readonly string[] = ['provider_5xx', 'provider_
 /** The class of one row; null for a call that was answered (it says nothing about a failure). A reason Orbit does not know is unresolved, never ours. */
 export function faultClassOf(row: { kind: string; reason: string; source: string }): FaultClass | null {
   if (row.kind === 'answered') return null;
-  // A call on the person's own key is theirs, whatever went wrong with it
-  if (row.source === 'own-key') return 'person';
+  // The source alone never charges anyone: the game writes source own-key on EVERY row of a call on the person's own key, including our relay being down.
+  // Their provider refusing their key is theirs; everything else is read by kind and reason below, own key or not
+  if (row.source === 'own-key' && row.reason === 'provider_key_ours') return 'person';
   // Ours or the person's only when the reason and the relay's own word agree; anything else could be either
   if (OURS_REASONS.includes(row.reason) && row.kind === 'fault') return 'ours';
   if (PERSON_REASONS.includes(row.reason) && row.kind === 'not_ours') return 'person';
