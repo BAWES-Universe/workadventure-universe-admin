@@ -37,7 +37,7 @@ import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
 import { recordRefundObligationsForBrick, sweepRefundObligations } from '@/lib/computer-refunds';
-import { decidePendingForPurge, decideRunnerFinish, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, noteEffectSettled, sweepGiveBackDecisions, type Verdict } from '@/lib/computer-giveback';
+import { decidePendingForPurge, decideRunnerFinish, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, markDeliveredLate, noteEffectSettled, sweepGiveBackDecisions, type Verdict } from '@/lib/computer-giveback';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -2342,16 +2342,22 @@ export async function planEffect(jobId: string, input: { key: string; kind: Effe
 
 /** What happened to an effect, confirmed: done (with where it went, as proof) or failed (confirmed not done, so it may be tried again). */
 export async function settleEffect(jobId: string, key: string, state: 'done' | 'failed', evidence?: string | null): Promise<boolean> {
-  const { count } = await prisma.computerEffect.updateMany({
-    where: { jobId, effectKey: key, state: 'planned' },
-    data: { state, settledAt: new Date(), ...(evidence !== undefined ? { evidence: evidence === null ? null : evidence.slice(0, 500) } : {}) },
+  // The effect's own change and the fact that a give-back already made was for work that turned out delivered commit TOGETHER: a flag that cannot be written leaves the
+  // effect planned, and the settle is asked again (the charge is never touched either way)
+  const count = await prisma.$transaction(async (tx) => {
+    const changed = await tx.computerEffect.updateMany({
+      where: { jobId, effectKey: key, state: 'planned' },
+      data: { state, settledAt: new Date(), ...(evidence !== undefined ? { evidence: evidence === null ? null : evidence.slice(0, 500) } : {}) },
+    });
+    if (changed.count > 0 && state === 'done') await markDeliveredLate(tx, jobId);
+    return changed.count;
   });
   if (count > 0) {
     // What Brick named is put in (or confirmed not): the tap is spent, and the next hand-over names its own
     const effect = await prisma.computerEffect.findUnique({ where: { jobId_effectKey: { jobId, effectKey: key } }, select: { kind: true } });
     if (effect?.kind === 'details') await prisma.computerJob.updateMany({ where: { id: jobId }, data: { readyWhat: null, readyWhere: null } });
-    // A give-back that was held for this effect is decided now, and one made while it was unconfirmed is told it was delivered
-    await noteEffectSettled(jobId, state).catch((error) => console.error('[Computer] Could not note a settled effect:', error instanceof Error ? error.message : 'unknown'));
+    // A give-back that was held for this effect is decided now
+    await noteEffectSettled(jobId).catch((error) => console.error('[Computer] Could not note a settled effect:', error instanceof Error ? error.message : 'unknown'));
   }
   return count > 0;
 }

@@ -359,13 +359,17 @@ export async function decidePendingForPurge(botId: string, now: Date = new Date(
   }
 }
 
+/** A give-back made while an effect was unconfirmed is told it was delivered: kept as a fact for support, never taking the give-back back. Inside the caller's transaction, so it commits with the effect's own change. */
+export async function markDeliveredLate(tx: Prisma.TransactionClient, jobId: string): Promise<void> {
+  await tx.computerGiveBackDecision.updateMany({ where: { jobId, state: 'given', basis: 'goodwill' }, data: { deliveredLate: true } });
+}
+
 /**
- * An outside effect of a job was settled. If it is done and the job was already given back as goodwill while it was unconfirmed (or past the bounded close),
- * that is kept as a fact for support; it never takes a give-back back. A decision held for an unconfirmed effect is decided now: done means none, failed
- * means the goodwill rules go on.
+ * An outside effect of a job was settled. A decision held for an unconfirmed effect is decided now: done means none, failed means the goodwill rules go on.
+ * (That a give-back already made was for work that turned out delivered is written down WITH the effect's own change, `markDeliveredLate`, so the two never
+ * come apart: a settle whose flag cannot be written is not a settle, and is asked again.)
  */
-export async function noteEffectSettled(jobId: string, state: 'done' | 'failed'): Promise<void> {
-  if (state === 'done') await prisma.computerGiveBackDecision.updateMany({ where: { jobId, state: 'given', basis: 'goodwill' }, data: { deliveredLate: true } });
+export async function noteEffectSettled(jobId: string): Promise<void> {
   const decision = await prisma.computerGiveBackDecision.findUnique({ where: { jobId }, select: { state: true, basis: true } });
   if (decision?.state === 'pending' && decision.basis === 'effect_unresolved') await resolveDecision(jobId).catch(() => undefined);
 }

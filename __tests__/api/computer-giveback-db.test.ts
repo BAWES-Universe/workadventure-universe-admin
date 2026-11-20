@@ -1115,6 +1115,34 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(await decisionOf(held.id)).toMatchObject({ state: 'refused', basis: 'delivered' });
       });
 
+      it('an effect settled as done and the note that a give-back made while it was unconfirmed was for delivered work commit together: a flag that cannot be written leaves the effect planned, and the retry sets both', async () => {
+        const sara = await person('sara');
+        const ended = await job(sara, ours, async (id) => {
+          await planEffect(id, { key: 'mail-1', kind: 'send' });
+        });
+        const later = new Date(NOW.getTime() + 2 * 24 * 60 * 60_000);
+        await prisma.computerGiveBackDecision.update({ where: { jobId: ended.id }, data: { nextAttemptAt: new Date(NOW.getTime() - 1000), decidedAt: new Date(NOW.getTime() - 2 * 24 * 60 * 60_000) } });
+        await sweepComputers(later);
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'goodwill', deliveredLate: false });
+        // The database refuses the flag (a stand-in for any failure of that write)
+        await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION test_refuse_delivered_late() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'refused'; END; $$ LANGUAGE plpgsql`);
+        await prisma.$executeRawUnsafe(`CREATE TRIGGER test_refuse_delivered_late BEFORE UPDATE ON computer_give_back_decisions FOR EACH ROW WHEN (NEW.delivered_late IS TRUE) EXECUTE FUNCTION test_refuse_delivered_late()`);
+        try {
+          await expect(settleEffect(ended.id, 'mail-1', 'done', 'ali@example.test')).rejects.toThrow();
+        } finally {
+          await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS test_refuse_delivered_late ON computer_give_back_decisions');
+          await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS test_refuse_delivered_late()');
+        }
+        // Nothing half-done: the effect is still planned and the give-back is as it was
+        expect(await prisma.computerEffect.findFirstOrThrow({ where: { jobId: ended.id } })).toMatchObject({ state: 'planned' });
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', deliveredLate: false });
+        // Asked again, both are written, and the give-back stays
+        expect(await settleEffect(ended.id, 'mail-1', 'done', 'ali@example.test')).toBe(true);
+        expect(await prisma.computerEffect.findFirstOrThrow({ where: { jobId: ended.id } })).toMatchObject({ state: 'done' });
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'goodwill', deliveredLate: true });
+        expect(await givenBack(ended.id)).toBe(true);
+      });
+
       it('a provider fault the relay stamped in the future is not counted towards a pause yet', async () => {
         await limitsAre({ ...LAUNCH, pauseMinRuns: 2 });
         const route = 'universe-ai/model-clock';
