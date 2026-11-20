@@ -579,27 +579,40 @@ const BACKFILL_CURSOR_KEY = 'instant-meter-backfill-cursor';
 
 type BackfillCursor = { finishedAt: Date; id: string };
 
-async function readBackfillCursor(): Promise<BackfillCursor | null> {
+/** The cursor as saved, and the saved value exactly as read, which a later save has to find still in place. */
+type SavedCursor = { cursor: BackfillCursor | null; saved: string | null };
+
+async function readBackfillCursor(): Promise<SavedCursor> {
   try {
     const row = await prisma.appSetting.findUnique({ where: { key: BACKFILL_CURSOR_KEY } });
-    const value = row?.value;
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+    if (!row) return { cursor: null, saved: null };
+    const saved = JSON.stringify(row.value);
+    const value = row.value;
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return { cursor: null, saved };
     const { finishedAt, id } = value as { finishedAt?: unknown; id?: unknown };
     const at = typeof finishedAt === 'string' ? new Date(finishedAt) : null;
-    return at && !Number.isNaN(at.getTime()) && typeof id === 'string' ? { finishedAt: at, id } : null;
+    return { cursor: at && !Number.isNaN(at.getTime()) && typeof id === 'string' ? { finishedAt: at, id } : null, saved };
   } catch {
-    // A cursor that cannot be read is a sweep that starts from the oldest run: it never stops a run from being tried
-    return null;
+    // A cursor that cannot be read is a sweep that starts from the oldest run, and one that saves nothing: it never stops a run from being tried
+    return { cursor: null, saved: null };
   }
 }
 
-async function saveBackfillCursor(cursor: BackfillCursor | null): Promise<void> {
+/**
+ * Says where this sweep stopped (`next`, or nothing when it reached the end), but only if the cursor is still the one this sweep started from.
+ * Sweeps may overlap (the endpoint can be called twice at once): the one that saves first has moved the cursor on, and a slower one that
+ * started from the old place finds it changed and leaves it alone, so the cursor never goes back.
+ */
+async function saveBackfillCursor(from: SavedCursor, next: BackfillCursor | null): Promise<void> {
   try {
-    if (cursor) {
-      const value = { finishedAt: cursor.finishedAt.toISOString(), id: cursor.id };
-      await prisma.appSetting.upsert({ where: { key: BACKFILL_CURSOR_KEY }, create: { key: BACKFILL_CURSOR_KEY, value }, update: { value } });
+    const value = next ? JSON.stringify({ finishedAt: next.finishedAt.toISOString(), id: next.id }) : null;
+    if (from.saved === null) {
+      // No cursor when this sweep started: it only writes one if nobody has written one since
+      if (value) await prisma.$executeRaw`INSERT INTO "app_settings" ("key", "value", "updated_at") VALUES (${BACKFILL_CURSOR_KEY}, ${value}::jsonb, now()) ON CONFLICT ("key") DO NOTHING`;
+    } else if (value) {
+      await prisma.$executeRaw`UPDATE "app_settings" SET "value" = ${value}::jsonb, "updated_at" = now() WHERE "key" = ${BACKFILL_CURSOR_KEY} AND "value" = ${from.saved}::jsonb`;
     } else {
-      await prisma.appSetting.deleteMany({ where: { key: BACKFILL_CURSOR_KEY } });
+      await prisma.$executeRaw`DELETE FROM "app_settings" WHERE "key" = ${BACKFILL_CURSOR_KEY} AND "value" = ${from.saved}::jsonb`;
     }
   } catch (error) {
     console.error('[Instant] Could not save where the meter event check stopped:', error instanceof Error ? error.message : 'unknown');
@@ -617,7 +630,8 @@ async function saveBackfillCursor(cursor: BackfillCursor | null): Promise<void> 
  */
 export async function backfillMeterEvents(now: Date = new Date(), batch = 25, maxPages = BACKFILL_MAX_PAGES): Promise<number> {
   let written = 0;
-  let after: BackfillCursor | null = await readBackfillCursor();
+  const started = await readBackfillCursor();
+  let after: BackfillCursor | null = started.cursor;
   let reachedEnd = false;
   for (let page = 0; page < maxPages; page += 1) {
     const past: Prisma.Sql = after ? Prisma.sql`AND (r."finished_at", r."id") > (${after.finishedAt}, ${after.id})` : Prisma.empty;
@@ -649,7 +663,7 @@ export async function backfillMeterEvents(now: Date = new Date(), batch = 25, ma
     const last = missing[missing.length - 1];
     after = { finishedAt: last.finished_at, id: last.id };
   }
-  await saveBackfillCursor(reachedEnd ? null : after);
+  await saveBackfillCursor(started, reachedEnd ? null : after);
   return written;
 }
 

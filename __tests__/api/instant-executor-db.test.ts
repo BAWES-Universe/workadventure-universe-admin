@@ -1198,6 +1198,58 @@ run('the bounded Instant executor, in a real database', () => {
       for (const id of ids) expect(await has(id)).toBe(true);
     }, 60_000);
 
+    it('a slower sweep that started from an older place never moves the cursor back over a newer one', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      const ids: string[] = [];
+      const { backfillMeterEvents } = await import('@/lib/instant/executor');
+      const cursorId = async () => {
+        const row = await prisma.appSetting.findUnique({ where: { key: 'instant-meter-backfill-cursor' } });
+        return row ? (row.value as { id: string }).id : null;
+      };
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let slow: Promise<number> | null = null;
+      try {
+        for (let n = 0; n < 6; n += 1) {
+          const key = callId();
+          await runInstant(ask({ callId: key, arguments: { query: `ovl${n}` } }), { adapter: p.adapter, funds: f.funds });
+          ids.push(await runIdOf(key));
+        }
+        // All six are missing their event and none can be written (so every sweep stops where it read to, and none of them is ever done)
+        for (const [n, id] of ids.entries()) {
+          await prisma.instantRun.update({ where: { id }, data: { finishedAt: new Date(Date.UTC(2020, 0, 1, 0, 0, n)) } });
+          await prisma.meterEvent.deleteMany({ where: { eventId: `instant:${id}` } });
+        }
+        await prisma.$executeRawUnsafe(`ALTER TABLE meter_events ADD CONSTRAINT instant_event_refused CHECK (event_id NOT LIKE 'instant:%') NOT VALID`);
+        // The slow sweep reads the cursor (there is none) and is held there, one page of two runs to do
+        let open!: () => void;
+        const gate = new Promise<void>((resolve) => (open = resolve));
+        const real = prisma.appSetting.findUnique.bind(prisma.appSetting);
+        const reading = jest.spyOn(prisma.appSetting, 'findUnique').mockImplementationOnce(((args: never) => real(args).then(async (row: unknown) => { await gate; return row; })) as never);
+        slow = backfillMeterEvents(new Date(), 2, 1);
+        for (let waited = 0; reading.mock.calls.length === 0; waited += 50) {
+          if (waited >= 5_000) throw new Error('the slow sweep never read the cursor');
+          await pause(50);
+        }
+        // A faster sweep goes two pages on from the same place and saves where it got to: the fourth run
+        await backfillMeterEvents(new Date(), 2, 2);
+        expect(await cursorId()).toBe(ids[3]);
+        open();
+        await slow;
+        // The slow one ends on the second run: that is behind, and must not replace the newer place
+        expect(await cursorId()).toBe(ids[3]);
+        // And the next sweep goes on from the newer place
+        await backfillMeterEvents(new Date(), 2, 1);
+        expect(await cursorId()).toBe(ids[5]);
+      } finally {
+        if (slow) await Promise.allSettled([slow]);
+        jest.restoreAllMocks();
+        quiet.mockRestore();
+        await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT IF EXISTS instant_event_refused');
+      }
+    }, 60_000);
+
     it('a run that finished before midnight and settled after it is on the day it finished, whether its event is written when it settles or later by the sweep', async () => {
       await setLimits({ chargeWaitMinutes: 60 });
       const p = fakeProvider();
