@@ -178,10 +178,14 @@ export interface RefundState {
 export async function refundStatesFor(jobIds: readonly string[]): Promise<Map<string, RefundState>> {
   const out = new Map<string, RefundState>();
   if (jobIds.length === 0) return out;
-  const [holds, obligations] = await Promise.all([
-    prisma.creditHold.findMany({ where: { jobKey: { in: [...jobIds] }, category: 'computers', state: 'settled' }, select: { jobKey: true, holdKey: true, customerMicros: true, refundedMicros: true } }),
-    prisma.computerRefundObligation.findMany({ where: { jobId: { in: [...jobIds] } }, select: { jobId: true, holdKey: true, amountMicros: true, state: true } }),
-  ]);
+  // One snapshot for both reads: a refund acknowledged between them would otherwise show a hold that has not been refunded next to an obligation that is no longer owed (neither returned nor pending)
+  const [holds, obligations] = await prisma.$transaction(
+    [
+      prisma.creditHold.findMany({ where: { jobKey: { in: [...jobIds] }, category: 'computers', state: 'settled' }, select: { jobKey: true, holdKey: true, customerMicros: true, refundedMicros: true } }),
+      prisma.computerRefundObligation.findMany({ where: { jobId: { in: [...jobIds] } }, select: { jobId: true, holdKey: true, amountMicros: true, state: true } }),
+    ],
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  );
   const entry = (id: string): RefundState => {
     let found = out.get(id);
     if (!found) {

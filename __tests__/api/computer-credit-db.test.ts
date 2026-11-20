@@ -18,7 +18,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
-import { attemptRefundObligation, recordRefundObligationsForBrick, refundOverview, retryRefundObligation, sweepRefundObligations } from '@/lib/computer-refunds';
+import { attemptRefundObligation, recordRefundObligationsForBrick, refundOverview, refundStatesFor, retryRefundObligation, sweepRefundObligations } from '@/lib/computer-refunds';
 import { giveBackReadiness } from '@/lib/computer-fault-ops';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
@@ -1096,6 +1096,33 @@ run('credit for computers, on the real books', () => {
       // Said again later (a sweep, a read): the same receipt, the same words, no second refund
       expect(await itemFor(sara.id, 'Send the report')).toEqual([item]);
       expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(2);
+    });
+
+    it('reads what a job’s holds returned and what its obligations still owe from ONE snapshot (repeatable read), so a refund acknowledged between the two reads is never half seen', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      await call(token, 'b', 50_000, 20_000);
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(async () => {
+        throw new Error('books unreachable');
+      });
+      const mute = quiet();
+      try {
+        await failedOnOurSide(jobId, at(10));
+      } finally {
+        mute.mockRestore();
+      }
+      const transaction = jest.spyOn(prisma, '$transaction');
+      try {
+        expect((await refundStatesFor([jobId])).get(jobId)).toEqual({ returnedMicros: 0, pendingMicros: 50_000 });
+        // Both reads are the two halves of one transaction at repeatable read, never two reads that may see different moments
+        const [queries, options] = transaction.mock.calls.find((one) => Array.isArray(one[0]) && one[0].length === 2) ?? [];
+        expect(queries).toHaveLength(2);
+        expect(options).toEqual({ isolationLevel: 'RepeatableRead' });
+      } finally {
+        transaction.mockRestore();
+      }
     });
 
     it('observation 3: the wallet cannot post the refund: "$0.05 refund pending" until it does; then the SAME receipt says refunded and the credit came back once', async () => {
