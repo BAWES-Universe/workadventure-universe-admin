@@ -1215,7 +1215,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`computer:giveback:${personId}`}))`;
           verdict = await judgeJobGiveBack(tx, limits, { id: jobId, personId, startedAt }, now);
         }
-        const done = await tx.computerJob.updateMany({ where, data: verdict.give ? { ...endData, runnerFault: true } : { ...endData, status: 'failed', endedBy: null } });
+        const done = await tx.computerJob.updateMany({ where, data: !verdict.give ? { ...endData, status: 'failed', endedBy: null } : judged ? { ...endData, runnerFault: true } : endData });
         if (done.count === 1 && turnHold) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
         return { done, verdict };
       });
