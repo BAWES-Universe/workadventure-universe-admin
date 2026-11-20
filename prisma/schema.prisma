@@ -3555,6 +3555,8 @@ model ComputerJob {
   // How well the record of where the computer's browser went (computer_job_visits) was taken when the job ended: complete, partial (a gap or a cut
   // in what the computer recorded, or more than is kept), unread (the computer could not be read), none (the computer has no recorder). Empty until the job ends.
   visitsState       String? @map("visits_state") @db.VarChar(8)
+  /// True when the job ended as ours on the computer runner's own word and was given back inside the bound (lib/computer-giveback): only those count towards a person's monthly bound.
+  runnerFault       Boolean @default(false) @map("runner_fault")
 
   // Brick tells the person how a job went, in their chat with it (the report back). Each ending is said once: `endToldAt` is empty until it was
   // said, and set at once for the endings that are never said (the person's own Stop, turned off, deleted). Each time the job waits for its person

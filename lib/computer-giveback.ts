@@ -6,7 +6,7 @@ import { monthOf } from '@/lib/meter-values';
  * Whether a computer job that the runner reported as failing on our side (`finishJob` with cause "ours") is given back.
  * Only that ending goes through here: it is the only one the job's own words can steer. Endings Orbit saw itself (a room that lapsed because the bot server
  * stopped renewing, a room closed, a machine that would not start or wake) are always given back, whatever the bound, so a real outage is never refused.
- * Those endings are stored the same way and so do count among the person's give-backs this month (there is no marker to tell them apart).
+ * Those endings use none of a person's bound either: the runner's own are marked (`runner_fault`) and only those are counted.
  *
  * A job's words are the person's, so a brief can make the agent do the work and then crash its own machine. That ends as "ours", and without a bound the
  * person would get all of it back though the work was seen. So a give-back is bounded the way Instant's "Didn't work" give-back is, from the same Limits,
@@ -66,7 +66,8 @@ export async function judgeJobGiveBack(tx: Prisma.TransactionClient, limits: Giv
   const month = monthOf(now);
   const ran = { personId: job.personId, id: { not: job.id }, startedAt: { not: null }, endedAt: { gte: month.start, lt: month.end } };
   const [given, ended] = await Promise.all([
-    tx.computerJob.count({ where: { ...ran, status: { in: ['failed', 'stopped'] }, endedBy: 'error' } }),
+    // Only the runner's own reports count: an outage's give-backs (a lapsed room, a start that broke) use none of the bound
+    tx.computerJob.count({ where: { ...ran, status: { in: ['failed', 'stopped'] }, endedBy: 'error', runnerFault: true } }),
     // Jobs that ended after running, but not the ones the person ended themselves or turned off: those say nothing about how the work goes
     tx.computerJob.count({ where: { ...ran, status: { in: ['done', 'failed', 'stopped'] }, OR: [{ endedBy: null }, { endedBy: { notIn: ['person', 'off', 'deleted'] } }] } }),
   ]);
