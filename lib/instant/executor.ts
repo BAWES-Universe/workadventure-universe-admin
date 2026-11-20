@@ -561,7 +561,9 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
   // written inside a savepoint, because a failed statement otherwise leaves the whole transaction aborted, and the settlement above would fail with it
   await tx.$executeRaw`SAVEPOINT instant_meter_event`;
   try {
-    await recordMeterEvent(instantMeterEvent(run, micros, basis, now), tx);
+    // The time the run finished (the one `backfillMeterEvents` has to hand), not the time its charge was settled: a run that finished before midnight
+    // and settled after it is on the same day whether or not this write goes through
+    await recordMeterEvent(instantMeterEvent(run, micros, basis, run.finishedAt ?? now), tx);
     await tx.$executeRaw`RELEASE SAVEPOINT instant_meter_event`;
   } catch (error) {
     await tx.$executeRaw`ROLLBACK TO SAVEPOINT instant_meter_event`;

@@ -1160,6 +1160,44 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${ids[0]}` } })).toMatchObject({ occurredAt: new Date(Date.UTC(2020, 0, 1, 0, 0, 0)) });
     }, 60_000);
 
+    it('a run that finished before midnight and settled after it is on the day it finished, whether its event is written when it settles or later by the sweep', async () => {
+      await setLimits({ chargeWaitMinutes: 60 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const finished = new Date(Date.UTC(2026, 5, 10, 23, 50, 0));
+      const settled = new Date(Date.UTC(2026, 5, 11, 1, 0, 0));
+      const ids: string[] = [];
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        for (const eventWriteFails of [false, true]) {
+          const key = callId();
+          p.script.runs.push({ kind: 'done', successful: true, data: { a: 1 }, error: null, logId: `mid-${eventWriteFails}`, chargeMicros: null });
+          await runInstant(ask({ callId: key, arguments: { query: `mid-${eventWriteFails}` } }), { adapter: p.adapter, funds: f.funds });
+          const id = await runIdOf(key);
+          ids.push(id);
+          // No charge yet: the answer was handed over, and the run finished just before midnight
+          await prisma.instantRun.update({ where: { id }, data: { finishedAt: finished, sentAt: finished, checkAfter: new Date(finished.getTime() + 60 * MIN) } });
+          if (eventWriteFails) await prisma.$executeRawUnsafe(`ALTER TABLE meter_events ADD CONSTRAINT instant_event_refused CHECK (event_id NOT LIKE 'instant:%') NOT VALID`);
+          try {
+            await reconcileRun(id, { funds: f.funds, adapter: p.adapter, now: settled });
+          } finally {
+            if (eventWriteFails) await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT instant_event_refused');
+          }
+          expect((await runOf(id)).providerState).toBe('settled');
+        }
+      } finally {
+        quiet.mockRestore();
+      }
+      expect(await prisma.meterEvent.count({ where: { eventId: `instant:${ids[0]}` } })).toBe(1);
+      expect(await prisma.meterEvent.count({ where: { eventId: `instant:${ids[1]}` } })).toBe(0);
+      const { backfillMeterEvents } = await import('@/lib/instant/executor');
+      await backfillMeterEvents(settled, 25);
+      const [written, backfilled] = await Promise.all(ids.map((id) => prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${id}` } })));
+      // Both are on the day (and in the month) the run finished
+      expect(written.occurredAt).toEqual(finished);
+      expect(backfilled.occurredAt).toEqual(finished);
+    }, 30_000);
+
     it('the charge is recorded under the run lock, so a backfill reading the run first cannot leave the event saying "not known" for good', async () => {
       await setLimits();
       const p = fakeProvider();
