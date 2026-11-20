@@ -11,24 +11,25 @@ made with a key of its own kind), a hosted page with **Pay** and **Cancel**, and
 Node 20+, no dependencies. One command:
 
 ```
-CONTROL_TOKEN=<a long random value, 16+ characters> BASE_URL=https://fake-pay.example.org node server.js
+CONTROL_TOKEN=<a long random value, 16+ characters> BASE_URL=https://fake-pay.example.org NOTICE_ORIGINS=https://orbit.example.org node server.js
 ```
 
 or with Docker (build from this folder):
 
 ```
-docker build -t fake-payment-gateway . && docker run -p 8080:8080 -e CONTROL_TOKEN=... -e BASE_URL=https://fake-pay.example.org fake-payment-gateway
+docker build -t fake-payment-gateway . && docker run -p 8080:8080 -e CONTROL_TOKEN=... -e BASE_URL=https://fake-pay.example.org -e NOTICE_ORIGINS=https://orbit.example.org fake-payment-gateway
 ```
 
 | Variable | What |
 |---|---|
 | `CONTROL_TOKEN` | **Required**, no default. Protects every `/control/*` call (header `x-control-token`, or `Authorization: Bearer`). Without a good one the server does not start. |
-| `BASE_URL` | The public address, **https, no port** (Orbit refuses a checkout link that is not https or that has a port). Behind a proxy that sets `X-Forwarded-Proto/Host` it can be left out. |
+| `BASE_URL` | The public address, **https, no port** (Orbit refuses a checkout link that is not https or that has a port). Behind a proxy that sets `X-Forwarded-Proto/Host` it can be left out: each checkout link then uses the address of the request that makes it (never the address of whichever request came first). |
+| `NOTICE_ORIGINS` | **The origins the service may send its notices to**: Orbit staging's public address, e.g. `https://orbit.dev.example.org` (several: separated by commas or spaces). Whoever makes a payment names the address of its notice, so nothing else is ever contacted (loopback and internal addresses included), and a redirect is followed only with a 307/308 and only to a listed origin. With none set, no notice is sent at all (the service says so when it starts). |
 | `PORT` | Default 8080. |
 | `DATA_FILE` | Optional. A file (on a volume) that keeps payments across a restart. |
 
 On Coolify: a new application from this repository with base directory `tools/fake-payment-gateway`, build pack Dockerfile, a domain with https, and the
-two variables above. The service must be reachable from Orbit staging, and it sends notices to Orbit staging's public address, so Orbit must be
+variables above (`CONTROL_TOKEN`, `BASE_URL`, and `NOTICE_ORIGINS` set to Orbit staging's address). The service must be reachable from Orbit staging, and it sends notices to Orbit staging's public address, so Orbit must be
 reachable from it. Check `GET <BASE_URL>/health`.
 
 ## Connect it to Orbit staging
@@ -65,7 +66,7 @@ completes only after the buyer pressed Pay on the hosted page.
 
 ## Tests
 
-- On its own: `node --test selftest/gateway.check.js`.
+- On its own: `npm test` here (or `node --test selftest/gateway.check.js selftest/notice.check.js selftest/server.check.js`): the gateway, the notice allowlist with real local servers, and the server as it runs.
 - Against Orbit (a real database, the fake answering every request Orbit makes and sending its own notices to Orbit's notice route):
   `ROLES_DB_TEST=yes DATABASE_URL=... npx jest --runInBand __tests__/api/fake-gateway-journeys-db.test.ts` from the Orbit repository.
 
