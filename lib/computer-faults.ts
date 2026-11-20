@@ -6,12 +6,16 @@ import { prisma } from '@/lib/db';
  * process, judges whether a failed job is given back (lib/computer-giveback). The relay writes one row per call (or per turn with no call: call id
  * `turn:<n>`) BEFORE the job finishes. The relay says what it saw; the CLASS of each reason is Orbit's:
  *
- *  - `ours`: a fault no job's words can cause. A relay-side fault (no route, the call could not be authorized, a key could not be read, the pool is full,
- *    the relay itself set a field the provider refused) or the provider refusing OUR key or model (401, 402, 403, 404). Always given back, never counted.
+ *  - `ours`: a fault no job's words can cause. A relay-side fault (no route, the call could not be authorized, a key could not be read, the pool is full)
+ *    or the provider refusing OUR key or model (401, 402, 403, 404). Always given back, never counted. The relay must also say so (kind `fault`).
  *  - `person`: caused by the person, with evidence: their allowance or a spending rule stopped the call, the call ran on their own provider key, or the
- *    provider refused a request field the job itself set. Charged like any run.
- *  - `unresolved`: could be a fault of ours or the job's own doing (a provider 5xx or 429, a stream that broke, a timeout, a 400 with no field named, or a
- *    reason Orbit does not know). The bounded goodwill, and one provider failing for many people is an incident that is corrected together.
+ *    provider refused a request field the job itself set. Charged like any run. The relay must also say so (kind `not_ours`).
+ *  - `unresolved`: could be a fault of ours or the job's own doing (a provider 5xx or 429, a stream that broke, a timeout, a 400 with no field named, a field
+ *    only the relay sets, or a reason Orbit does not know). The bounded goodwill, and one provider failing for many people is an incident that is corrected
+ *    together. A turn the runner judged failed that has no row at all is unresolved too (lib/computer-giveback).
+ *
+ * Judged by KIND and reason together: neither the relay's word nor a reason word alone makes a call ours or the person's. A reason Orbit maps to ours that the
+ * relay did not confirm (kind `uncertain`) is unresolved; so is a confirmed kind on a reason Orbit does not map to that class.
  *
  * Rows carry a reason word, a status and a route, never any content of a call.
  */
@@ -22,17 +26,18 @@ export const FAULT_SOURCES = ['universe-ai', 'own-key'] as const;
 export type FaultSource = (typeof FAULT_SOURCES)[number];
 export type FaultClass = 'ours' | 'person' | 'unresolved';
 
-export const OURS_REASONS: readonly string[] = ['relay_down', 'route_unknown', 'authorize_failed', 'key_decrypt_failed', 'pool_busy', 'provider_key_ours', 'field_relay_set'];
+export const OURS_REASONS: readonly string[] = ['relay_down', 'route_unknown', 'authorize_failed', 'key_decrypt_failed', 'pool_busy', 'provider_key_ours'];
 export const PERSON_REASONS: readonly string[] = ['field_job_set', 'allowance', 'rule', 'own_provider'];
-export const UNRESOLVED_REASONS: readonly string[] = ['provider_5xx', 'provider_429', 'stream_cut', 'timeout_no_output', 'timeout_after_output', 'fieldless_400'];
+export const UNRESOLVED_REASONS: readonly string[] = ['provider_5xx', 'provider_429', 'stream_cut', 'timeout_no_output', 'timeout_after_output', 'fieldless_400', 'field_relay_set'];
 
 /** The class of one row; null for a call that was answered (it says nothing about a failure). A reason Orbit does not know is unresolved, never ours. */
 export function faultClassOf(row: { kind: string; reason: string; source: string }): FaultClass | null {
   if (row.kind === 'answered') return null;
   // A call on the person's own key is theirs, whatever went wrong with it
   if (row.source === 'own-key') return 'person';
-  if (OURS_REASONS.includes(row.reason)) return 'ours';
-  if (PERSON_REASONS.includes(row.reason)) return 'person';
+  // Ours or the person's only when the reason and the relay's own word agree; anything else could be either
+  if (OURS_REASONS.includes(row.reason) && row.kind === 'fault') return 'ours';
+  if (PERSON_REASONS.includes(row.reason) && row.kind === 'not_ours') return 'person';
   return 'unresolved';
 }
 

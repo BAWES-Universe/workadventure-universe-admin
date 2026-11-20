@@ -102,7 +102,9 @@ export async function decideRunnerFinish(
   // Class 1: any bad turn of ours makes the ending ours
   if (ours) return { state: 'given', basis: 'universe_fault', counted: false, reason: ours.reason, route: ours.route };
   const person = rows.find((row) => row.cls === 'person');
-  const unresolved = rows.find((row) => row.cls === 'unresolved');
+  // A turn the runner judged failed that has no row at all (a crash, a stream that broke) is unresolved, never the person's
+  const silent = turns && turns.length > 0 ? turns.find((turn) => !rows.some((row) => row.turn === turn)) : undefined;
+  const unresolved = rows.find((row) => row.cls === 'unresolved') ?? (silent !== undefined ? { reason: 'no_row', route: null } : undefined);
   // Class 2: evidence it was the person's, and nothing that points at us
   if (person && !unresolved) return { state: 'refused', basis: 'person_caused', reason: person.reason, route: person.route };
 
