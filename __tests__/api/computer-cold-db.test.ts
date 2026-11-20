@@ -1631,6 +1631,81 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       await prisma.appSetting.deleteMany({ where: { key: STRAY_CURSOR_KEY } });
     });
 
+    it('a prune that read the row before a purge wrote its first failure keeps the earlier time: the wait is the database’s own, not the one read', async () => {
+      const brick = await idleBrick();
+      const old = await copy(brick.botId, 1, 'failed');
+      const early = new Date(NOW.getTime() - 3 * HOUR);
+      const real = prisma.brickComputer.findUnique.bind(prisma.brickComputer);
+      // Between the prune's read of the rows and its guarded update, a purge writes down its own (earlier) first failure, leaving the row's state as it was
+      const spy = jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementationOnce(((args: never) =>
+        prisma.computerArchive.update({ where: { id: old.id }, data: { deletionSince: early } }).then(() => real(args))) as never);
+      down();
+      try {
+        expect(await pruneArchives(brick.botId, null, NOW)).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await prisma.computerArchive.findUniqueOrThrow({ where: { id: old.id } })).deletionSince).toEqual(early);
+      expect(await storageDeletionsWaiting(NOW)).toMatchObject({ count: 1, oldestSince: early, ageMs: 3 * HOUR });
+    });
+
+    it('when the stray-sweep state cannot be read the status says so (never "nothing waits"), while a sweep pass still goes on from the top and writes nothing it cannot check', async () => {
+      const key = 'computer-cold/0-z/9.' + '0'.repeat(8) + '-0000-0000-0000-' + '0'.repeat(12) + '.ubc';
+      bucket.objects.set(key, Buffer.from('stray'));
+      bucket.written.set(key, new Date(NOW.getTime() - 2 * HOUR));
+      down();
+      await expect(removeStrayCopies(NOW)).rejects.toThrow('down');
+      await expect(removeStrayCopies(new Date(NOW.getTime() + 2 * HOUR))).rejects.toThrow('down');
+      expect(await storageDeletionsWaiting(new Date(NOW.getTime() + 2 * HOUR))).toMatchObject({ strayCopiesSince: NOW });
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const realFind = prisma.appSetting.findUnique.bind(prisma.appSetting);
+      // Only the stray-sweep row cannot be read; everything else the readiness page reads works
+      const unreadable = jest.spyOn(prisma.appSetting, 'findUnique').mockImplementation(((args: { where: { key: string } }) => (args.where.key === STRAY_CURSOR_KEY ? Promise.reject(new Error('the database is busy')) : realFind(args as never))) as never);
+      try {
+        // The status caller is told: an overdue failure that cannot be read is not "no wait"
+        await expect(storageDeletionsWaiting(new Date(NOW.getTime() + 30 * HOUR))).rejects.toThrow('busy');
+        const readiness = (await computerReadiness()).checks.find((one) => one.name === 'storage deletions');
+        expect(readiness).toMatchObject({ ok: false, detail: 'The deletions waiting in storage could not be read' });
+        // Cursor recovery is tolerant: the pass lists from the top and deletes, but writes nothing (it cannot tell whether a newer pass wrote since)
+        setArchiveStoreForTests(bucket.store);
+        expect(await removeStrayCopies(new Date(NOW.getTime() + 30 * HOUR))).toBe(1);
+      } finally {
+        unreadable.mockRestore();
+        quiet.mockRestore();
+      }
+      // The failure written before is still there, not cleared by a pass that could not read it
+      expect(await storageDeletionsWaiting(new Date(NOW.getTime() + 30 * HOUR))).toMatchObject({ strayCopiesSince: NOW });
+      await prisma.appSetting.deleteMany({ where: { key: STRAY_CURSOR_KEY } });
+    });
+
+    it('an older pass that finishes after a newer one wrote a failure never clears that failure or moves the cursor back', async () => {
+      for (const name of ['a', 'b', 'c', 'd']) bucket.objects.set(`computer-cold/0-${name}/other.txt`, Buffer.from(name));
+      setStrayPassForTests(2);
+      const real = bucket.store.list;
+      let overtaken = false;
+      // While the older pass is listing, a newer pass records a failure and has already moved the cursor on
+      setArchiveStoreForTests({
+        ...bucket.store,
+        list: async (prefix, max, startAfter) => {
+          if (!overtaken) {
+            overtaken = true;
+            await prisma.appSetting.upsert({ where: { key: STRAY_CURSOR_KEY }, create: { key: STRAY_CURSOR_KEY, value: { after: 'computer-cold/0-d/other.txt', failingSince: NOW.toISOString() } }, update: { value: { after: 'computer-cold/0-d/other.txt', failingSince: NOW.toISOString() } } });
+          }
+          return real(prefix, max, startAfter);
+        },
+      });
+      try {
+        await removeStrayCopies(new Date(NOW.getTime() + HOUR));
+        // The older pass looked at the first page only: what it wrote does not replace the newer state
+        expect((await prisma.appSetting.findUniqueOrThrow({ where: { key: STRAY_CURSOR_KEY } })).value).toEqual({ after: 'computer-cold/0-d/other.txt', failingSince: NOW.toISOString() });
+        expect(await storageDeletionsWaiting(new Date(NOW.getTime() + HOUR))).toMatchObject({ strayCopiesSince: NOW });
+      } finally {
+        setStrayPassForTests(20_000);
+        setArchiveStoreForTests(bucket.store);
+        await prisma.appSetting.deleteMany({ where: { key: STRAY_CURSOR_KEY } });
+      }
+    });
+
     it('the readiness page shows how long, is still ready inside a day, and is not ready once a deletion has waited longer than a day', async () => {
       const brick = await idleBrick();
       const old = await copy(brick.botId, 1, 'superseded', { deletionSince: new Date() });

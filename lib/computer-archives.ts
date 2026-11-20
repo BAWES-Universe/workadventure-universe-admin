@@ -1,5 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Readable } from 'node:stream';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { derivedKey } from '@/lib/encryption';
 import { CopyOutcomeUnknown, deleteSealed, listSealed, openSealedStream, storeSealed, type Sealed } from '@/lib/agent37/saved-copies';
@@ -246,8 +247,10 @@ export async function pruneArchives(botId: string, keepId: string | null = null,
     // that is still uploading) changed the row, so this does not touch it; and once the row is `superseded` nothing proves, publishes or restores from it.
     // A run that stops half way leaves it `superseded`, which every later clean-up deletes
     if (row.state !== 'superseded') {
-      const taken = await prisma.computerArchive.updateMany({ where: { id: row.id, state: row.state }, data: { state: 'superseded', deletionSince: row.deletionSince ?? now } });
-      if (taken.count !== 1) continue;
+      // The time it has waited is the database's own at this moment (COALESCE inside the same guarded statement), never the one read earlier: a purge that wrote
+      // down its first failure after this prune read the row keeps its earlier time
+      const taken = await prisma.$executeRaw`UPDATE computer_archives SET state = 'superseded', deletion_since = COALESCE(deletion_since, ${now}) WHERE id = ${row.id} AND state = ${row.state}`;
+      if (taken !== 1) continue;
     }
     try {
       await store.remove([row.objectKey, `${row.objectKey}.new`]);
@@ -301,26 +304,46 @@ export const STRAY_CURSOR_KEY = 'computer-stray-sweep-cursor';
 export function setStrayPassForTests(max: number): void {
   strayPassMax = max;
 }
-async function readStrayState(): Promise<{ after?: string; failingSince: Date | null }> {
-  const row = await prisma.appSetting.findUnique({ where: { key: STRAY_CURSOR_KEY } }).catch(() => null);
-  const value = row?.value as { after?: unknown; failingSince?: unknown } | null | undefined;
+interface StrayState {
+  after?: string;
+  failingSince: Date | null;
+}
+/** The stored row as it is (null when there is none). Throws when the database cannot be read: what asks for the status must know it could not. */
+async function readStrayRow(): Promise<Prisma.JsonValue | null> {
+  return (await prisma.appSetting.findUnique({ where: { key: STRAY_CURSOR_KEY } }))?.value ?? null;
+}
+function strayStateOf(raw: Prisma.JsonValue | null): StrayState {
+  const value = raw as { after?: unknown; failingSince?: unknown } | null;
   const since = typeof value?.failingSince === 'string' ? new Date(value.failingSince) : null;
   return { after: typeof value?.after === 'string' ? value.after : undefined, failingSince: since && !Number.isNaN(since.getTime()) ? since : null };
 }
-async function readStrayCursor(): Promise<string | undefined> {
-  return (await readStrayState()).after;
+/** Strict: a failed read throws, so the readiness check says it could not be read instead of saying nothing waits. */
+async function readStrayState(): Promise<StrayState> {
+  return strayStateOf(await readStrayRow());
 }
-/** A pass that could not delete what it found says since when (the first time counts), keeping where it was; a pass that deleted everything writes the place alone, which clears it. */
-async function noteStrayFailure(now: Date): Promise<void> {
-  const state = await readStrayState();
-  const value = { after: state.after ?? null, failingSince: (state.failingSince ?? now).toISOString() };
-  await prisma.appSetting.upsert({ where: { key: STRAY_CURSOR_KEY }, create: { key: STRAY_CURSOR_KEY, value }, update: { value } }).catch(() => undefined);
+/**
+ * Writes the stray-sweep state only if it is still what this pass read at its start (compare and swap): a pass that was overtaken by a newer one (its failure
+ * written down meanwhile, its cursor moved on) never clears that failure or moves the cursor back. Returns whether it wrote.
+ */
+async function swapStrayState(before: Prisma.JsonValue | null, value: Prisma.InputJsonValue): Promise<boolean> {
+  const json = JSON.stringify(value);
+  if (before === null) {
+    const made = await prisma.$executeRaw`INSERT INTO app_settings (key, value, updated_at) VALUES (${STRAY_CURSOR_KEY}, ${json}::jsonb, now()) ON CONFLICT (key) DO NOTHING`;
+    return made === 1;
+  }
+  const changed = await prisma.$executeRaw`UPDATE app_settings SET value = ${json}::jsonb, updated_at = now() WHERE key = ${STRAY_CURSOR_KEY} AND value = ${JSON.stringify(before)}::jsonb`;
+  return changed === 1;
 }
-async function writeStrayCursor(after: string | null): Promise<void> {
-  const value = { after };
-  await prisma.appSetting
-    .upsert({ where: { key: STRAY_CURSOR_KEY }, create: { key: STRAY_CURSOR_KEY, value }, update: { value } })
-    .catch((error) => console.error('[Computer] Could not write down how far the sweep for stray copies has looked:', error instanceof Error ? error.message : 'unknown'));
+/** A pass that could not delete what it found says since when (the first time counts), keeping where it was; one that was overtaken leaves what the newer one wrote. */
+async function noteStrayFailure(now: Date, before: Prisma.JsonValue | null): Promise<void> {
+  const state = strayStateOf(before);
+  await swapStrayState(before, { after: state.after ?? null, failingSince: (state.failingSince ?? now).toISOString() }).catch((error) =>
+    console.error('[Computer] Could not write down that the sweep for stray copies failed to delete:', error instanceof Error ? error.message : 'unknown'),
+  );
+}
+/** A pass that deleted everything writes the place alone, which clears a failure (unless a newer pass wrote since this one read). */
+async function writeStrayCursor(after: string | null, before: Prisma.JsonValue | null): Promise<void> {
+  await swapStrayState(before, { after }).catch((error) => console.error('[Computer] Could not write down how far the sweep for stray copies has looked:', error instanceof Error ? error.message : 'unknown'));
 }
 const COPY_OBJECT = /^computer-cold\/[^/]+\/\d+\.([0-9a-f-]{36})\.ubc(?:\.new)?$/;
 
@@ -334,7 +357,13 @@ const COPY_OBJECT = /^computer-cold\/[^/]+\/\d+\.([0-9a-f-]{36})\.ubc(?:\.new)?$
 export async function removeStrayCopies(now: Date = new Date()): Promise<number> {
   // A pass that was full may have left objects unlooked at: the next one starts after the last it saw (written down below, once this page is dealt with),
   // and after the end it starts again from the top
-  const found = await store.list('computer-cold/', strayPassMax, await readStrayCursor());
+  // What the state was when this pass began: a pass that cannot read it (cursor recovery) starts from the top and writes nothing at its end, because it cannot tell
+  // whether a newer pass has written since
+  const before = await readStrayRow().then(
+    (row) => ({ ok: true as const, row }),
+    () => ({ ok: false as const, row: null }),
+  );
+  const found = await store.list('computer-cold/', strayPassMax, before.ok ? strayStateOf(before.row).after : undefined);
   const next = found.length >= strayPassMax ? found[found.length - 1].key : null;
   const old = found
     .filter((object) => now.getTime() - object.modifiedAt.getTime() >= STALE_MS)
@@ -352,12 +381,12 @@ export async function removeStrayCopies(now: Date = new Date()): Promise<number>
     try {
       await store.remove(stray);
     } catch (error) {
-      await noteStrayFailure(now);
+      if (before.ok) await noteStrayFailure(now, before.row);
       throw error;
     }
   }
   // Only now that everything on the page was looked at and what had to go is gone: a pass that failed is looked at again by the next
-  await writeStrayCursor(next);
+  if (before.ok) await writeStrayCursor(next, before.row);
   return stray.length;
 }
 
