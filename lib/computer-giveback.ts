@@ -198,8 +198,6 @@ export async function uncountGiveBack(tx: Prisma.TransactionClient, jobId: strin
 /** An incident's correction of one decision: a goodwill give-back is re-labelled and freed from the bound (true), a held or cap/pause-refused one becomes a give-back (the caller gives it back). */
 export async function correctDecisionForIncident(tx: Prisma.TransactionClient, job: { id: string; personId: string }, incident: { route: string; from: Date; to: Date }): Promise<'uncounted' | 'given' | null> {
   const route = incident.route;
-  // Delivered work is left alone: a job with an outside effect that is done is never given back by a correction (a held decision stays held, and is decided by its evidence)
-  if ((await tx.computerEffect.count({ where: { jobId: job.id, state: 'done' } })) > 0) return null;
   // Only the decision's OWN evidence corrects it, read again here under the person's lock: a fault of an earlier run of the same job, on the same route inside the window,
   // never reverses a decision judged on a later one (the candidate query asks the same, so this is the check on what the decision is at this moment)
   const proof = await tx.$queryRaw<Array<{ one: number }>>(Prisma.sql`
@@ -211,6 +209,10 @@ export async function correctDecisionForIncident(tx: Prisma.TransactionClient, j
     await uncountGiveBack(tx, job.id);
     return 'uncounted';
   }
+  // Delivered work is left alone: a job with an outside effect that is done is never turned into a give-back by a correction (a held decision stays held, and is decided by its
+  // evidence). This blocks only that flip: a goodwill give-back already made (counted against the person's bound) is freed from the bound above, delivered or not, because the
+  // correction lifts the bound and does not change the verdict
+  if ((await tx.computerEffect.count({ where: { jobId: job.id, state: 'done' } })) > 0) return null;
   const flipped = await tx.computerGiveBackDecision.updateMany({
     where: { jobId: job.id, OR: [{ state: 'pending' }, { state: 'refused', basis: { in: ['cap', 'paused'] } }] },
     data: { state: 'given', basis: 'incident', route, nextAttemptAt: null, lastError: null },
@@ -391,6 +393,9 @@ export async function sweepLateEvidence(now: Date = new Date(), batch = 50): Pro
         await prisma.$executeRaw`UPDATE "computer_give_back_decisions" SET "updated_at" = ${one.mark} WHERE "job_id" = ${one.job_id} AND "updated_at" < ${one.mark}`;
       } catch (error) {
         console.error('[Computer] Could not look at late evidence again:', error instanceof Error ? error.message : 'unknown');
+        // A look that throws is marked as looked at all the same (guarded, as the decision sweep reschedules one that throws): left unmarked it would stay first by its time
+        // and keep every slot from the decisions behind it. The row that made it due is still newer than the mark minus the margin, so it comes round again within the margin
+        await prisma.$executeRaw`UPDATE "computer_give_back_decisions" SET "updated_at" = ${one.mark} WHERE "job_id" = ${one.job_id} AND "updated_at" < ${one.mark}`.catch(() => undefined);
       }
     }
   } catch (error) {

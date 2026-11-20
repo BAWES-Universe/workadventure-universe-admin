@@ -627,6 +627,32 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect((await sweepLateEvidence(new Date(), 500)).looked).toBe(0);
     });
 
+    it('a late-evidence look that throws is marked all the same, so the decisions behind it are looked at', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      await job(sara, ours);
+      const first = await job(sara, { ...ours, turns: [1] });
+      const second = await job(sara, { ...ours, turns: [1] });
+      for (const [one, call] of [[first, 'throws-1'], [second, 'throws-2']] as const) {
+        expect(await decisionOf(one.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+        await prisma.computerJobFault.create({ data: { jobId: one.id, callId: call, turn: 1, kind: 'fault', reason: 'provider_key_ours', source: 'universe-ai', route: 'universe-ai/model-a', providerStatus: 401, at: new Date() } });
+      }
+      // Only the first one's look throws (its decision cannot be read this time)
+      const realFind = prisma.computerGiveBackDecision.findUnique.bind(prisma.computerGiveBackDecision);
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const spy = jest.spyOn(prisma.computerGiveBackDecision, 'findUnique').mockImplementation(((args: { where?: { jobId?: string } }) => (args?.where?.jobId === first.id ? Promise.reject(new Error('blip')) : realFind(args as never))) as never);
+      try {
+        // One slot: the first (oldest) is looked at and throws; it is marked, so the next sweep reaches the one behind it
+        await sweepLateEvidence(new Date(), 1);
+        await sweepLateEvidence(new Date(), 1);
+      } finally {
+        spy.mockRestore();
+        quiet.mockRestore();
+      }
+      expect(await decisionOf(second.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+      expect(await decisionOf(first.id)).toMatchObject({ state: 'refused' });
+    });
+
     it('late evidence gives the same verdict as evidence on time: a confirmed fault of ours is given back even where the work was delivered, on the sweep as on the first look (both paths agree)', async () => {
       await limitsAre(LAUNCH);
       const sara = await person('sara');
@@ -1312,6 +1338,32 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(await givenBack(held.id)).toBe(false);
         expect(await resolveDecision(held.id, minutes(30))).toBe('resolved');
         expect(await decisionOf(held.id)).toMatchObject({ state: 'refused', basis: 'delivered' });
+      });
+
+      it('an incident correction frees a counted goodwill give-back from the bound even when its effect was delivered late: the delivered effect blocks only the flip of a held or refused decision', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const route = 'universe-ai/model-late-delivered';
+        const sara = await person('sara');
+        const ended = await job(sara, { ...ours, turns: [1] }, async (id) => {
+          await recordFaults(sara.brickId, id, [fault(1, 'provider_5xx', { route })]);
+          await planEffect(id, { key: 'late-1', kind: 'send' });
+        });
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'pending', basis: 'effect_unresolved' });
+        // The effect is still unconfirmed at the bounded close: given back as goodwill, counted against the bound
+        await prisma.computerGiveBackDecision.update({ where: { jobId: ended.id }, data: { nextAttemptAt: new Date(NOW.getTime() - 1000), decidedAt: new Date(NOW.getTime() - 2 * 24 * 60 * 60_000) } });
+        await sweepComputers(new Date(NOW.getTime() + 2 * 24 * 60 * 60_000));
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+        expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: ended.id } })).runnerFault).toBe(true);
+        // ...then the effect turns out delivered
+        expect(await settleEffect(ended.id, 'late-1', 'done', 'ali@example.test')).toBe(true);
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', deliveredLate: true });
+        // Operations correct the incident: the give-back stays, but it no longer uses the person's bound
+        expect(await correctRouteTogether({ route, from: minutes(-60), to: new Date(NOW.getTime() + 3 * 24 * 60 * 60_000) })).toMatchObject({ corrected: 0, uncounted: 1 });
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'incident' });
+        expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: ended.id } })).runnerFault).toBe(false);
+        expect(await givenBack(ended.id)).toBe(true);
+        // The person's slot is free again: a later unclear failure is still given back
+        expect(await decisionOf((await job(sara, { ...ours, turns: [1] })).id)).toMatchObject({ state: 'given', basis: 'goodwill' });
       });
 
       it('an effect settled as done and the note that a give-back made while it was unconfirmed was for delivered work commit together: a flag that cannot be written leaves the effect planned, and the retry sets both', async () => {
