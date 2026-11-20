@@ -41,6 +41,18 @@ describe('what a task’s receipt says it used', () => {
     expect(spentOf('done', null, lines)).toBeNull();
   });
 
+  it('an Instant use whose charge the books have not acknowledged says "Settlement pending", one being released says so, and neither is a price or a total', () => {
+    const pending = receiptLines([event({ costMicros: 20_000, detail: { instant: true, runId: 'r1', customerMicros: null, customerState: 'held' } })], 'Brick');
+    expect(pending).toEqual([{ label: 'Instant Apps, 1 use', note: 'Settlement pending' }]);
+    expect(spentOf('done', null, pending)).toBeNull();
+    const releasing = receiptLines([event({ costMicros: 20_000, detail: { instant: true, runId: 'r2', customerMicros: null, customerState: 'held', unconfirmed: true } })], 'Brick');
+    expect(releasing).toEqual([{ label: 'Instant Apps, 1 use', note: 'Releasing your hold' }]);
+    expect(spentOf('done', null, releasing)).toBeNull();
+    // A use whose own cost is not known is still "price not known yet"; one charged is its amount
+    expect(receiptLines([event({ costMicros: null, detail: { instant: true, runId: 'r3', customerMicros: null } })], 'Brick')).toEqual([{ label: 'Instant Apps, 1 use', note: 'Price not known yet' }]);
+    expect(receiptLines([event({ costMicros: 20_000, detail: { instant: true, runId: 'r4', customerMicros: 0, customerState: 'released', unconfirmed: true } })], 'Brick')).toEqual([{ label: 'Instant Apps, 1 use', amountMicros: 0 }]);
+  });
+
   it('leaves out disk sizes and other bookkeeping, and a name that is long or missing is not used', () => {
     expect(receiptLines([event({ kind: 'size_change', route: 'computer' }), event({ kind: 'stored_bytes', route: null })], 'Brick')).toEqual([]);
     expect(receiptLines([event({ detail: { app: 'x'.repeat(41) } })], 'Brick')[0].label).toBe('Instant Apps, 1 use');

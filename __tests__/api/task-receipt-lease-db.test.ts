@@ -683,7 +683,7 @@ run('receipts that always settle (O1)', () => {
       expect(item.actions[0]).toMatchObject({ label: 'gmail', outcome: 'worked', text: actionWords('gmail', 'worked'), takenText: null });
     });
 
-    it('a worked action whose price is not known yet has no amount, and the receipt says "Price not known yet" with no total made up', async () => {
+    it('a worked action whose charge the books have not acknowledged has no amount, and the receipt says "Settlement pending" (it may already have been debited) with no total made up', async () => {
       await open('amount-2');
       const known = await makeRun('amount-2', 'succeeded', { customerMicros: BigInt(20_000), toolkit: 'gmail' });
       const unknown = await makeRun('amount-2', 'succeeded', { customerMicros: null, customerState: 'held', toolkit: 'exa' });
@@ -694,7 +694,7 @@ run('receipts that always settle (O1)', () => {
       expect(item.actions[0]).toMatchObject({ outcome: 'worked', amountMicros: 20_000 });
       expect(item.actions[1]).toMatchObject({ outcome: 'worked' });
       expect(item.actions[1]).not.toHaveProperty('amountMicros');
-      expect(item.lines.some((line) => line.note === 'Price not known yet')).toBe(true);
+      expect(item.lines.some((line) => line.note === 'Settlement pending')).toBe(true);
       expect(item.spentMicros).toBeNull();
     });
 

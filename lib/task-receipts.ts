@@ -24,7 +24,8 @@ import {
   type ReceiptOutcome,
   type ReceiptState,
 } from '@/lib/task-receipts-values';
-import { actionWords, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote } from '@/lib/task-receipt-words';
+import { actionWords, HOLD_RELEASED, HOLD_RELEASING, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote, unconfirmedActionWords, unconfirmedWords } from '@/lib/task-receipt-words';
+import { isUnconfirmedRun } from '@/lib/instant/values';
 import { isOver } from '@/lib/computer-values';
 
 /**
@@ -47,8 +48,14 @@ export interface ActivityItem {
   outcome: ReceiptOutcome;
   /** The words for `outcome` ("Partly done"; see `lib/task-receipt-words.ts`). */
   outcomeText: string;
-  /** The sentence under a partly done receipt ("Two steps worked and one didn’t. Nothing was taken for the one that didn’t."); null otherwise. */
+  /** The sentence under a partly done receipt ("Two steps worked and one didn’t. Nothing was taken for the one that didn’t."); null otherwise. For Apps whose result could not be confirmed it is that, in the words of `unconfirmedWords`. */
   outcomeNote: string | null;
+  /**
+   * Only when an App's result could not be confirmed: `releasing` while its credit is still set aside (the credit books have not said it is given back),
+   * `released` after they did (`releasedMicros` is what was set aside and is back). Delivery stays unknown either way. Absent otherwise.
+   */
+  settlement?: 'releasing' | 'released';
+  releasedMicros?: number;
   /** Each Instant action of the task and how it ended. Empty for a task with none (a computer's). */
   actions: ActivityAction[];
   spentMicros: number | null;
@@ -67,6 +74,11 @@ export interface ActivityAction {
   text: string;
   /** "Nothing taken" for an action that did not work; null for one that did (what it took is on the receipt's own lines). */
   takenText: string | null;
+  /** True when the action's result could not be confirmed: it may have finished (`outcome` stays "failed" for readers that know only worked and failed). Absent otherwise. */
+  unconfirmed?: true;
+  /** For an unconfirmed action: its credit is still being released (`releasing`) or was released (`released`, with `releasedMicros`). */
+  settlement?: 'releasing' | 'released';
+  releasedMicros?: number;
   /**
    * What was taken from credit for this action, in whole micros: only for an action that worked and whose price the books know (zero is a
    * price). Absent for an action that did not work (nothing was taken) and while the price is not known yet (the receipt's line says "Price not known yet").
@@ -519,20 +531,60 @@ async function eventsFor(headers: readonly Header[]): Promise<Map<string, LineEv
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
-function itemOf(header: Header, events: readonly LineEvent[], botName: string, readerId: string): ActivityItem {
+/** What a receipt reads of an Instant run besides how it ended: whether its result could not be confirmed, and where its credit stands. The run's own row, never the meter's copy of it. */
+type RunMoney = { state: string; reason: string | null; customerState: string; holdMicros: number };
+
+/** The runs the actions of these receipts point at, read once from their own rows. */
+async function runMoneyFor(headers: readonly Header[]): Promise<Map<string, RunMoney>> {
+  const ids = [...new Set(headers.flatMap((header) => header.actions.map((action) => action.run)))];
+  if (ids.length === 0) return new Map();
+  const rows = await prisma.instantRun.findMany({ where: { id: { in: ids } }, select: { id: true, state: true, reason: true, customerState: true, holdMicros: true } });
+  return new Map(rows.map((row) => [row.id, { state: row.state, reason: row.reason, customerState: row.customerState, holdMicros: Number(row.holdMicros) }]));
+}
+
+function itemOf(header: Header, events: readonly LineEvent[], botName: string, readerId: string, runs: ReadonlyMap<string, RunMoney> = new Map()): ActivityItem {
   const lines = receiptLines(events, botName);
   const who = paidBy(header.payer, readerId);
+  // An App whose result could not be confirmed is never "didn't work" and never "nothing taken" while its credit is still set aside: it says so, and the credit
+  // is "being released" until the credit books say it is given back (then, the amount that came back). The run's own row decides, at the time it is read
+  const unconfirmedOf = (run: string): RunMoney | null => {
+    const found = runs.get(run);
+    return found && isUnconfirmedRun(found) ? found : null;
+  };
+  const unconfirmed = header.actions.filter((action) => action.outcome === 'failed' && unconfirmedOf(action.run) !== null);
+  const releasing = unconfirmed.some((action) => unconfirmedOf(action.run)?.customerState === 'held');
+  const releasedMicros = unconfirmed.reduce((sum, action) => {
+    const found = unconfirmedOf(action.run);
+    return found && found.customerState === 'released' ? sum + found.holdMicros : sum;
+  }, 0);
+  const unconfirmedText = unconfirmed.length === 0 ? null : unconfirmedWords(unconfirmed.map((action) => action.label), releasing, releasedMicros);
+  const refunded = header.state === 'refunded';
   return {
     id: header.id,
     title: header.title,
     at: header.at.toISOString(),
     state: header.state,
     // `state` stays done for a task that partly worked (something worked and may have been taken); a state put right at read time wins over the stored outcome
-    outcome: header.state === 'refunded' ? 'refunded' : header.outcome === 'partial' ? 'partial' : 'done',
-    outcomeText: OUTCOME_WORDS[header.state === 'refunded' ? 'refunded' : header.outcome === 'partial' ? 'partial' : 'done'],
-    outcomeNote: header.state === 'refunded' ? null : outcomeNote(header.outcome ?? 'done', header.actions),
+    outcome: refunded ? 'refunded' : header.outcome === 'partial' ? 'partial' : 'done',
+    // Nothing worked and some result could not be confirmed: not "Refunded, nothing taken" (whether it finished is not known, and the credit may still be set aside)
+    outcomeText: refunded && unconfirmedText !== null ? unconfirmedText : OUTCOME_WORDS[refunded ? 'refunded' : header.outcome === 'partial' ? 'partial' : 'done'],
+    outcomeNote: refunded && unconfirmedText !== null ? null : unconfirmedText !== null && header.outcome === 'partial' ? unconfirmedText : refunded ? null : outcomeNote(header.outcome ?? 'done', header.actions),
+    ...(unconfirmedText === null ? {} : { settlement: releasing ? ('releasing' as const) : ('released' as const), ...(releasing ? {} : { releasedMicros }) }),
     actions: header.actions.map((action): ActivityAction => {
       const taken = action.outcome === 'worked' ? takenForRun(events, action.run) : null;
+      const found = action.outcome === 'failed' ? unconfirmedOf(action.run) : null;
+      if (found) {
+        const stillHeld = found.customerState === 'held';
+        return {
+          label: action.label,
+          outcome: action.outcome,
+          text: unconfirmedActionWords(action.label),
+          takenText: stillHeld ? HOLD_RELEASING : HOLD_RELEASED,
+          unconfirmed: true,
+          settlement: stillHeld ? 'releasing' : 'released',
+          ...(stillHeld ? {} : { releasedMicros: found.holdMicros }),
+        };
+      }
       return { label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome), takenText: action.outcome === 'failed' ? NOTHING_TAKEN : null, ...(taken === null ? {} : { amountMicros: taken }) };
     }),
     spentMicros: spentOf(header.state, header.chargedMicros, lines),
@@ -611,7 +663,7 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
       actions: [],
     }));
   const all = [...headers, ...computerHeaders];
-  const [events, bots] = await Promise.all([eventsFor(all), prisma.bot.findMany({ where: { id: { in: [...new Set(all.map((header) => header.botId))] } }, select: { id: true, name: true } })]);
+  const [events, bots, runs] = await Promise.all([eventsFor(all), prisma.bot.findMany({ where: { id: { in: [...new Set(all.map((header) => header.botId))] } }, select: { id: true, name: true } }), runMoneyFor(all)]);
   const names = new Map(bots.map((bot) => [bot.id, bot.name]));
   // Failed on our side: the same endings `recordComputerTime` gives back
   // (by bot and task key: a job with a receipt of its own is shown as that receipt, whose id is not the job's)
@@ -633,7 +685,7 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
     // A receipt already stored as refunded does not hold either while something is still on the person: until it is given back it reads as done
     const failed = failedJobs.has(`${header.botId}:${header.taskKey}`);
     const state: ReceiptState = failed ? (!mayHaveTaken ? 'refunded' : header.state === 'refunded' ? 'done' : header.state) : header.state;
-    return itemOf({ ...header, state }, forHeader, names.get(header.botId) ?? 'Brick', personId);
+    return itemOf({ ...header, state }, forHeader, names.get(header.botId) ?? 'Brick', personId, runs);
   });
   return items.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : -1)).slice(0, limit);
 }

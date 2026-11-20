@@ -1,4 +1,4 @@
-import { actionWords, appLabel, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote } from '@/lib/task-receipt-words';
+import { actionWords, appLabel, dollarsOf, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote, unconfirmedActionWords, unconfirmedWords } from '@/lib/task-receipt-words';
 
 describe('the words for how a task came to end (mock M2)', () => {
   it('names the three outcomes as the mock does', () => {
@@ -24,5 +24,27 @@ describe('the words for how a task came to end (mock M2)', () => {
   it('has no sentence for any other outcome', () => {
     expect(outcomeNote('done', [{ outcome: 'worked' }])).toBeNull();
     expect(outcomeNote('refunded', [{ outcome: 'failed' }])).toBeNull();
+  });
+});
+
+describe('the words for an App whose result could not be confirmed', () => {
+  it('says we could not confirm it and are releasing the hold while the credit is still reserved, never refunded or nothing taken', () => {
+    expect(unconfirmedWords(['exa'], true, 0)).toBe("We couldn't confirm whether Exa finished. We're releasing your hold.");
+    expect(unconfirmedWords(['exa', 'gmail'], true, 0)).toBe("We couldn't confirm whether Exa and Gmail finished. We're releasing your hold.");
+    expect(unconfirmedWords(['exa', 'exa'], true, 0)).toBe("We couldn't confirm whether Exa finished. We're releasing your hold.");
+  });
+
+  it('shows the amount released once the books have said so, and keeps delivery unknown', () => {
+    expect(unconfirmedWords(['exa'], false, 7_600)).toBe("We couldn't confirm whether Exa finished. Your hold of $0.0076 was released.");
+    expect(unconfirmedWords(['exa'], false, 0)).toBe("We couldn't confirm whether Exa finished. Your hold was released.");
+    expect(unconfirmedActionWords('exa')).toBe("Exa · couldn't confirm");
+  });
+
+  it('writes whole micros as dollars with at least two decimals', () => {
+    expect(dollarsOf(7_600)).toBe('$0.0076');
+    expect(dollarsOf(1_000_000)).toBe('$1.00');
+    expect(dollarsOf(1_500_000)).toBe('$1.50');
+    expect(dollarsOf(992_400)).toBe('$0.9924');
+    expect(dollarsOf(1)).toBe('$0.000001');
   });
 });

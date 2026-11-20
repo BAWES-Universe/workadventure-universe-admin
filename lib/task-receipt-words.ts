@@ -44,3 +44,34 @@ export function outcomeNote(outcome: ReceiptOutcome, actions: readonly Pick<Rece
   const those = failed === 1 ? 'the one that didn’t' : 'the ones that didn’t';
   return `${steps(worked)} worked and ${countWord(failed)} didn’t. Nothing was taken for ${those}.`;
 }
+
+/** Whole micros as dollars for a sentence: at least two decimals, as many more as the amount needs (7,600 micros is "$0.0076"). */
+export function dollarsOf(micros: number): string {
+  const [whole, decimals = ''] = (micros / 1_000_000).toFixed(6).split('.');
+  const trimmed = decimals.replace(/0+$/u, '');
+  return `$${whole}.${trimmed.padEnd(2, '0')}`;
+}
+
+/** One action that could not be confirmed: "Exa · couldn't confirm" (never "didn't work": whether it finished is not known). */
+export const unconfirmedActionWords = (toolkit: string): string => `${appLabel(toolkit)} · couldn't confirm`;
+
+/** What an unconfirmed action's credit is doing: still set aside, or given back. */
+export const HOLD_RELEASING = 'Releasing your hold';
+export const HOLD_RELEASED = 'Hold released';
+
+const listOf = (names: readonly string[]): string => (names.length <= 1 ? (names[0] ?? '') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`);
+
+/**
+ * The sentence for Apps whose result could not be confirmed. While their credit is still reserved: "We couldn't confirm whether Exa finished. We're
+ * releasing your hold." After the credit books acknowledge giving it back: the same, with the amount released. Delivery stays unknown either way: it
+ * never says "refunded" or "nothing taken" for something nobody saw end, and never says the hold is gone before the books said so.
+ */
+export function unconfirmedWords(toolkits: readonly string[], releasing: boolean, releasedMicros: number): string {
+  const names = listOf([...new Set(toolkits.map(appLabel))]);
+  const lead = `We couldn't confirm whether ${names} finished.`;
+  if (releasing) return `${lead} We're releasing your hold.`;
+  return releasedMicros > 0 ? `${lead} Your hold of ${dollarsOf(releasedMicros)} was released.` : `${lead} Your hold was released.`;
+}
+
+/** What a charge the books have not acknowledged yet is called on a receipt: a run held for this may already have been debited. */
+export const SETTLEMENT_PENDING = 'Settlement pending';
