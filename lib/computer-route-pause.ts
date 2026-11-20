@@ -37,7 +37,14 @@ export async function routeIsPaused(route: string, now: Date = new Date()): Prom
  * of that run or of no run; every row of the job when the decision named no turns). A fault of another run of the same job never reverses a decision judged on this one.
  */
 export function incidentFaultMatch(route: string, from: Date, to: Date, ours: readonly string[]): Prisma.Sql {
-  return Prisma.sql`f."route" = ${route} AND f."at" >= ${from} AND f."at" <= ${to} AND f."source" = 'universe-ai' AND f."kind" <> 'answered' AND f."reason" IN (${Prisma.join([...PROVIDER_REASONS, ...ours])})
+  // A provider reason is a failure of a provider whatever the row's kind (unresolved by design, which is what makes an incident a reason to reverse a refusal). A reason that is OURS
+  // ONLY (the relay's own: relay_down, route_unknown, authorize_failed, key_decrypt_failed, pool_busy) counts only on a row the relay called a fault: a row of another kind with
+  // such a reason is unresolved, never evidence of ours, the same reading `faultClassOf` has
+  const oursOnly = ours.filter((reason) => !PROVIDER_REASONS.includes(reason));
+  const reason = oursOnly.length > 0
+    ? Prisma.sql`(f."reason" IN (${Prisma.join([...PROVIDER_REASONS])}) OR (f."reason" IN (${Prisma.join(oursOnly)}) AND f."kind" = 'fault'))`
+    : Prisma.sql`f."reason" IN (${Prisma.join([...PROVIDER_REASONS])})`;
+  return Prisma.sql`f."route" = ${route} AND f."at" >= ${from} AND f."at" <= ${to} AND f."source" = 'universe-ai' AND f."kind" <> 'answered' AND ${reason}
     AND (
       cardinality(d."judged_turns") = 0
       OR (f."turn" = ANY(d."judged_turns") AND f."run" IS NOT DISTINCT FROM d."judged_run")

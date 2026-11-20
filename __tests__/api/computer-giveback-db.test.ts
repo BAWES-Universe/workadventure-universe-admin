@@ -1701,6 +1701,25 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(await correctRouteTogether({ route, from: at(-60), to: at(600) }, 1)).toMatchObject({ corrected: 0, uncounted: 0 });
       });
 
+      it('an incident correction counts a relay’s own reason only on a row the relay called a fault: a row of another kind with such a reason is no evidence of ours', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const route = 'universe-ai/model-contradiction';
+        const sara = await person('sara');
+        expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+        // Refused (the bound is spent); its only row says relay_down but is NOT called a fault (a contradiction: unresolved, as the verdict reads it)
+        const contradicted = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'relay_down', { route, kind: 'not_ours' })]));
+        expect(await decisionOf(contradicted.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+        expect(await correctRouteTogether({ route, from: minutes(-60), to: minutes(600) })).toMatchObject({ corrected: 0, uncounted: 0 });
+        expect(await decisionOf(contradicted.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+        // A row that IS a fault of the relay's, and a provider reason of any kind, still correct
+        const real = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'pool_busy', { route })]));
+        const provider = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx', { route })]));
+        expect([(await decisionOf(real.id))?.state, (await decisionOf(provider.id))?.state]).toEqual(['given', 'refused']);
+        expect(await correctRouteTogether({ route, from: minutes(-60), to: minutes(600) })).toMatchObject({ corrected: 1 });
+        expect(await decisionOf(provider.id)).toMatchObject({ state: 'given', basis: 'incident' });
+        expect(await decisionOf(contradicted.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+      });
+
       it('an incident correction leaves a job alone whose outside effect was delivered while its decision waited: it stays pending and is decided by its evidence', async () => {
         await limitsAre(LAUNCH);
         const route = 'universe-ai/model-delivered';
