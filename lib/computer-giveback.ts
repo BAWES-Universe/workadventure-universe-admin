@@ -194,17 +194,12 @@ export async function writeDecision(
 }
 
 /** An ending Orbit saw itself is always given back; it is recorded so support and the operations view see it with the rest. */
-export async function writeOrbitDecision(tx: Prisma.TransactionClient, job: { id: string; personId: string }): Promise<void> {
+export async function writeOrbitDecision(tx: Prisma.TransactionClient, job: { id: string; personId: string }, reason: 'pool_cut_off' | null = null): Promise<void> {
   await tx.computerGiveBackDecision.upsert({
     where: { jobId: job.id },
-    create: { jobId: job.id, personId: job.personId, state: 'given', basis: 'orbit_fault', causeHint: null, reason: null, route: null, judgedTurns: [] },
+    create: { jobId: job.id, personId: job.personId, state: 'given', basis: 'orbit_fault', causeHint: null, reason, route: null, judgedTurns: [] },
     update: {},
   });
-}
-
-/** Says on a job's orbit_fault decision that our own pool cut it off (nothing is changed if the job has no such decision). Never throws. */
-export async function notePoolCutOff(jobId: string): Promise<void> {
-  await prisma.computerGiveBackDecision.updateMany({ where: { jobId, basis: 'orbit_fault', reason: null }, data: { reason: 'pool_cut_off' } }).catch(() => undefined);
 }
 
 /**

@@ -1439,7 +1439,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       });
     });
 
-    it('a job our own pool cut off mid-run is OUR ending: given back in full, uncounted, kept as an orbit_fault decision that says why (a call refused for the same cause is pool_busy, ours)', async () => {
+    it('a job our own pool cut off mid-run is OUR ending: kept as `pool`, given back in full, uncounted, with an orbit_fault decision that says why (a call refused for the same cause is pool_busy, ours)', async () => {
       await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
       const sara = await person('sara');
       const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Cut off' }, minutes(0));
@@ -1448,7 +1448,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       // The pool has no room for what the job asks to go on
       await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 1, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
       expect(await renewJob(id, minutes(5))).toEqual({ ok: false, reason: 'pool' });
-      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'stopped', endedBy: 'error', runnerFault: false });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'stopped', endedBy: 'pool', runnerFault: false });
       expect(await decisionOf(id)).toMatchObject({ state: 'given', basis: 'orbit_fault', reason: 'pool_cut_off', causeHint: null });
       expect(await givenBack(id)).toBe(true);
       expect((await computerView(sara.brickId, sara.id, minutes(6)))?.month?.leftFraction).toBe(1);

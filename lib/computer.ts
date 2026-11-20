@@ -37,7 +37,7 @@ import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
 import { recordRefundObligationsForBrick, sweepRefundObligations } from '@/lib/computer-refunds';
-import { decidePendingForPurge, decideRunnerFinish, notePoolCutOff, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, markDeliveredLate, noteEffectSettled, sweepGiveBackDecisions, sweepLateEvidence, type Verdict } from '@/lib/computer-giveback';
+import { decidePendingForPurge, decideRunnerFinish, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, markDeliveredLate, noteEffectSettled, sweepGiveBackDecisions, sweepLateEvidence, type Verdict } from '@/lib/computer-giveback';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -999,10 +999,9 @@ export async function renewJob(
     return { ok: false, reason: 'rule', words: room.words };
   }
   const reason = room.reason === 'allowance' ? 'allowance' : room.reason === 'closed' ? 'closed' : 'pool';
-  // Our own pool or envelope having no room is OUR ending, like a closed room: given back in full (time, model calls, the credit they drew), never counted, kept as an orbit_fault decision
-  // whose reason says why. A model call refused for the same cause is `pool_busy`, a fault of ours, so the two endings must not disagree
-  await endJob(jobId, 'stopped', reason === 'allowance' ? 'allowance' : 'error', now);
-  if (reason === 'pool') await notePoolCutOff(jobId);
+  // Our own pool or envelope having no room is OUR ending, like a closed room: kept as `pool` (the person is told our computers were busy) and given back in full (time, model calls, the
+  // credit they drew), never counted, with an orbit_fault decision that says why. A model call refused for the same cause is `pool_busy`, a fault of ours, so the two endings must not disagree
+  await endJob(jobId, 'stopped', reason === 'allowance' ? 'allowance' : reason === 'closed' ? 'error' : 'pool', now);
   return { ok: false, reason };
 }
 
@@ -1199,7 +1198,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // A failure the runner did not call ours is read against the rows too (the turns it named, or the last turn with a row): a confirmed fault of ours is given back, an unresolved one is bounded goodwill, nothing recorded stays the person's
     const hintJudged = runner !== null && runner.hint !== 'ours' && endedBy === null && status === 'failed' && job.startedAt !== null;
     // An ending Orbit saw itself is always given back; it is kept in the same record
-    const orbitSeen = runner === null && endedBy === 'error' && job.startedAt !== null;
+    const orbitSeen = runner === null && (endedBy === 'error' || endedBy === 'pool') && job.startedAt !== null;
     const turnHold = held && !!job.firstTurnSentAt && !job.agentResponseId;
     const where = { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted };
     if (runnerJudged || hintJudged || orbitSeen || turnHold) {
@@ -1223,7 +1222,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         if (done.count === 1) {
           if (turnHold) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
           if (verdict) await writeDecision(tx, ref, verdict, runner?.hint ?? 'ours', verdict.judgedTurns ?? runner?.turns ?? null, now, runner?.run ?? null);
-          else if (orbitSeen) await writeOrbitDecision(tx, ref);
+          else if (orbitSeen) await writeOrbitDecision(tx, ref, endedBy === 'pool' ? 'pool_cut_off' : null);
         }
         return { done, verdict };
       });
@@ -1489,7 +1488,7 @@ async function giveBackMissingModelCalls(batch: number, botId: string | undefine
           ROW_NUMBER() OVER (ORDER BY j."ended_at" ASC NULLS LAST, j."id") AS "oldest",
           ROW_NUMBER() OVER (ORDER BY j."ended_at" DESC NULLS LAST, j."id") AS "newest"
         FROM "computer_jobs" j
-        WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error') ${only}
+        WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" IN ('error', 'pool')) ${only}
           AND (
             EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
             -- ...or the job's own time, written against the person by an end that overlapped the decision that gave the job back (the decision found no event to detach)
@@ -2503,7 +2502,7 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
   // a write that failed shows here). Once the jobs are gone nothing can find those calls to give them back, so the Brick waits for the next sweep
   const owed = await prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
     SELECT COUNT(*)::bigint AS "n" FROM "computer_jobs" j
-    WHERE j."bot_id" = ${botId} AND (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error')
+    WHERE j."bot_id" = ${botId} AND (j."status" IN ('failed', 'stopped') AND j."ended_by" IN ('error', 'pool'))
       AND (
         EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
         -- ...or credit the job drew that has not gone back and that no refund obligation covers yet: an obligation keeps the minimum references to finish the

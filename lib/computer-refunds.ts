@@ -44,7 +44,7 @@ export async function recordRefundObligationsForBrick(botId: string, page = 500)
   let after: string | undefined;
   for (;;) {
     const jobs = await prisma.computerJob.findMany({
-      where: { botId, status: { in: ['failed', 'stopped'] }, endedBy: 'error' },
+      where: { botId, status: { in: ['failed', 'stopped'] }, endedBy: { in: ['error', 'pool'] } },
       select: { id: true },
       orderBy: { id: 'asc' },
       take: page,
