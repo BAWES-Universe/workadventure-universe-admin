@@ -395,16 +395,45 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-a`, scope: 'bot', period: 'month', capMicros: 1_000_000 })).toMatchObject({ ok: true, created: false });
     });
 
-    it('a message whose rule was saved before long ids were hashed (under the key cut to 255 characters) finds that rule when said again', async () => {
-      const sara = await person('sara');
+    it('a rule saved before long ids were hashed (under the key cut to 255 characters) is never taken as this message\'s rule, whatever its state, and is never changed by it', async () => {
       const long = `m-${'y'.repeat(300)}`;
-      const first = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: long, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+      // Active and as made, edited since, ended, and one that says another thing: none of them is "the rule of this message"
+      for (const [name, over] of [
+        ['active', {}],
+        ['edited', { version: 2, capMicros: BigInt(2_000_000) }],
+        ['ended', { state: 'ended' }],
+      ] as const) {
+        const sara = await person(`legacy-${name}`);
+        const first = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: long, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+        if (!first.ok) throw new Error('not made');
+        // Put the rule back under the key the earlier code gave it, as a rule with no fingerprint (the earlier code did not keep one)
+        const old = `chat:${sara.brickId}:${sara.id}:${long}`.slice(0, 255);
+        await prisma.spendRule.update({ where: { id: first.rule.id }, data: { ruleKey: old, proposalFingerprint: null, ...over } });
+        const again = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: long, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+        // The message makes its own rule under its hashed key; the old row is left exactly as it was
+        expect(again).toMatchObject({ ok: true, created: true });
+        if (!again.ok) throw new Error('not made');
+        expect(again.rule.id).not.toBe(first.rule.id);
+        const left = await prisma.spendRule.findUniqueOrThrow({ where: { id: first.rule.id } });
+        expect(left.ruleKey).toBe(old);
+        expect(left.state).toBe(over.state ?? 'active');
+        expect(left.version).toBe(over.version ?? 1);
+        // And a second send of it finds the rule it made, not the old one
+        expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: long, scope: 'bot', period: 'month', capMicros: 1_000_000 })).toMatchObject({ ok: true, created: false, rule: { id: again.rule.id } });
+      }
+    });
+
+    it('an active rule under a cut legacy key is not told to another message that starts the same, with the same words', async () => {
+      const sara = await person('sara');
+      const long = `m-${'q'.repeat(300)}`;
+      const first = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-a`, scope: 'bot', period: 'month', capMicros: 1_000_000 });
       if (!first.ok) throw new Error('not made');
-      // Put the rule back under the key the earlier code gave it
-      const old = `chat:${sara.brickId}:${sara.id}:${long}`.slice(0, 255);
-      await prisma.spendRule.update({ where: { id: first.rule.id }, data: { ruleKey: old } });
-      expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: long, scope: 'bot', period: 'month', capMicros: 1_000_000 })).toMatchObject({ ok: true, created: false });
-      expect(await prisma.spendRule.count({ where: { ownerPersonId: sara.id } })).toBe(1);
+      await prisma.spendRule.update({ where: { id: first.rule.id }, data: { ruleKey: `chat:${sara.brickId}:${sara.id}:${long}-a`.slice(0, 255), proposalFingerprint: null } });
+      const second = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-b`, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+      expect(second).toMatchObject({ ok: true, created: true });
+      // Ending the old rule does not end the new message's rule
+      await prisma.spendRule.update({ where: { id: first.rule.id }, data: { state: 'ended' } });
+      expect(await prisma.spendRule.count({ where: { ownerPersonId: sara.id, state: 'active' } })).toBe(1);
     });
 
     it('a cut legacy key is not an identity: an ended rule under it is not replayed for another message that starts the same', async () => {
