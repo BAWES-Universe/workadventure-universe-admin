@@ -31,11 +31,14 @@ const customJestConfig = {
     '!**/.next/**',
   ],
   testTimeout: 10000,
-  // The database suites (ROLES_DB_TEST) share ONE database and its settings rows (the Instant limits, the meter, the bot limits): they run one at a time, whichever command
-  // starts jest, so one suite can never delete or reseed what another is reading
-  ...(process.env.ROLES_DB_TEST ? { maxWorkers: 1 } : {}),
 }
 
-// createJestConfig is exported this way to ensure that next/jest can load the Next.js config which is async
-module.exports = createJestConfig(customJestConfig)
-
+// createJestConfig is exported this way to ensure that next/jest can load the Next.js config which is async. The database suites (ROLES_DB_TEST) share ONE
+// database and its settings rows (the Instant limits, the meter, the bot limits): they run one at a time, whichever command starts jest, so one suite can never
+// delete or reseed what another is reading. The flag is read AFTER next/jest has loaded the .env files (a flag set in .env.test is not in the environment
+// before that), so it is read inside the async config, never when this file is first evaluated
+const withNextConfig = createJestConfig(customJestConfig)
+module.exports = async () => {
+  const config = await withNextConfig()
+  return { ...config, ...(process.env.ROLES_DB_TEST ? { maxWorkers: 1 } : {}) }
+}
