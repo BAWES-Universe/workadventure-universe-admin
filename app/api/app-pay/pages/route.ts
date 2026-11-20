@@ -16,11 +16,13 @@ const unauthorized = (error: unknown) => error instanceof Error && error.message
 export async function GET(request: NextRequest) {
   try {
     requireServiceToken(request);
-    // A page size is a whole number of 1 or more, or not given. Anything else (1.5, 0, -1, abc) is the caller's mistake, answered as one before the inventory is asked
+    // The page size is read as it always was (a number above 0 is used, anything else is ignored and the inventory's own size and cap apply). One thing is the caller's
+    // mistake and is answered as one before the inventory is asked: a fraction (1.5), which the inventory would hand to the database as a row count
     const rawTake = request.nextUrl.searchParams.get('take');
-    if (rawTake !== null && rawTake !== '' && !/^[1-9]\d{0,8}$/.test(rawTake)) return respond({ error: 'take must be a whole number of 1 or more' }, 400);
+    const take = Number(rawTake);
+    if (rawTake !== null && rawTake !== '' && Number.isFinite(take) && take > 0 && !Number.isInteger(take)) return respond({ error: 'take must be a whole number' }, 400);
     const cursor = request.nextUrl.searchParams.get('cursor');
-    return respond(await inventoryPaymentPages({ ...(rawTake ? { take: Number(rawTake) } : {}), cursor: cursor && /^[A-Za-z0-9-]{1,64}$/.test(cursor) ? cursor : null }));
+    return respond(await inventoryPaymentPages({ ...(Number.isFinite(take) && take > 0 ? { take } : {}), cursor: cursor && /^[A-Za-z0-9-]{1,64}$/.test(cursor) ? cursor : null }));
   } catch (error) {
     if (unauthorized(error)) return respond({ error: 'Unauthorized' }, 401);
     Sentry.captureException(error, { tags: { area: 'page-payments' } });

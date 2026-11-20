@@ -40,6 +40,12 @@ import { getBrickLimits, saveServerLimits } from '@/lib/bot-limits';
 import { GuardError } from '@/lib/app-direct/guard';
 import { classifyPageContract, inventoryPaymentPages } from '@/lib/app-direct/page-contract-inventory';
 import { GET as pagesInventory } from '@/app/api/app-pay/pages/route';
+
+// The real inventory, but its calls are recorded (the route's page-size handling is checked by what it asks the inventory for)
+jest.mock('@/lib/app-direct/page-contract-inventory', () => {
+  const actual = jest.requireActual('@/lib/app-direct/page-contract-inventory');
+  return { ...actual, inventoryPaymentPages: jest.fn(actual.inventoryPaymentPages) };
+});
 import { checkPurchase, checksHaveEnded, guestBuyerKey, isWaiting, lookStats, orderForArtifact, pagePaymentLoad, pollAfterMs, restorePurchase, startCheckout, sweepPageOrders, verifyOrder } from '@/lib/app-direct/pay';
 import { keyAppsOf, runKeyApp } from '@/lib/app-direct/use';
 import { GET as readJob, POST as makeJob } from '@/app/api/bots/[id]/key-apps/[serverId]/page-jobs/route';
@@ -2435,9 +2441,32 @@ run('payments for pages, in a real database', () => {
       expect(Object.keys(rows[0]).sort()).toEqual(['artifactId', 'contract', 'jobActive', 'jobId', 'openScope', 'orders']);
       expect((await pagesInventory(request('/api/app-pay/pages'))).status).toBe(401);
       expect((await pagesInventory(request('/api/app-pay/pages?take=1', { token: SERVICE_TOKEN }))).status).toBe(200);
-      // A page size that is not a whole number of 1 or more is the caller's mistake (400), never an error inside the inventory (500)
-      for (const bad of ['1.5', '0', '-1', 'abc', '2e3', '1,5']) expect((await pagesInventory(request(`/api/app-pay/pages?take=${bad}`, { token: SERVICE_TOKEN }))).status).toBe(400);
-      for (const good of ['', '1', '25']) expect((await pagesInventory(request(`/api/app-pay/pages?take=${good}`, { token: SERVICE_TOKEN }))).status).toBe(200);
+      // The page size is read as it always was: a number above 0 is used and the inventory caps it at 500, anything else is ignored (the default size). Only a fraction is
+      // the caller's mistake (400), answered before the inventory is asked and never an error inside it (500)
+      const asked = jest.mocked(inventoryPaymentPages);
+      try {
+        for (const bad of ['1.5', '0.5', '2.5e0']) {
+          asked.mockClear();
+          expect((await pagesInventory(request(`/api/app-pay/pages?take=${bad}`, { token: SERVICE_TOKEN }))).status).toBe(400);
+          expect(asked).not.toHaveBeenCalled();
+        }
+        for (const good of ['', '1', '25', '01', '1000000000', '2e3', '0', '-1', 'abc', '1,5', '1e400']) expect((await pagesInventory(request(`/api/app-pay/pages?take=${good}`, { token: SERVICE_TOKEN }))).status).toBe(200);
+        // A huge size reaches the inventory as given and is capped there; a number that is not above 0 is not passed on at all
+        asked.mockClear();
+        const huge = await pagesInventory(request('/api/app-pay/pages?take=1000000000', { token: SERVICE_TOKEN }));
+        expect(asked).toHaveBeenCalledWith({ take: 1_000_000_000, cursor: null });
+        expect(((await huge.json()) as { rows: unknown[] }).rows.length).toBeLessThanOrEqual(500);
+        for (const ignored of ['0', '-1', 'abc', '1,5', '1e400', '']) {
+          asked.mockClear();
+          await pagesInventory(request(`/api/app-pay/pages?take=${ignored}`, { token: SERVICE_TOKEN }));
+          expect(asked).toHaveBeenCalledWith({ cursor: null });
+        }
+        asked.mockClear();
+        await pagesInventory(request('/api/app-pay/pages?take=01', { token: SERVICE_TOKEN }));
+        expect(asked).toHaveBeenCalledWith({ take: 1, cursor: null });
+      } finally {
+        asked.mockClear();
+      }
     });
   });
 });
