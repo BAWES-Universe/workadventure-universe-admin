@@ -190,7 +190,7 @@ export function withComputerRefund(lines: readonly ReceiptLine[], refund: { retu
   return lines.map((line) => {
     if (!line.label.startsWith('Computer') || line.amountMicros !== undefined || line.note !== 'Nothing') return line;
     if (refund.pendingMicros > 0) return { label: line.label, note: 'Refund pending' };
-    if (refund.returnedMicros > 0) return { label: line.label, note: 'Returned', returnedMicros: refund.returnedMicros };
+    if (refund.returnedMicros > 0) return { label: line.label, note: 'Given back', returnedMicros: refund.returnedMicros };
     return line;
   });
 }

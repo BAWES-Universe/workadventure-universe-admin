@@ -184,7 +184,7 @@ describe('how a task came to end, from its runs', () => {
   it('the computer’s line says what became of a cost that was given back: pending until the books acknowledge it, then returned; any other line is untouched', () => {
     const lines = [{ label: 'Instant gmail, 1 use', amountMicros: 9_000 }, { label: 'Computer, 5 minutes', note: 'Nothing' }];
     expect(withComputerRefund(lines, { returnedMicros: 0, pendingMicros: 30_000 })[1]).toEqual({ label: 'Computer, 5 minutes', note: 'Refund pending' });
-    expect(withComputerRefund(lines, { returnedMicros: 30_000, pendingMicros: 0 })[1]).toEqual({ label: 'Computer, 5 minutes', note: 'Returned', returnedMicros: 30_000 });
+    expect(withComputerRefund(lines, { returnedMicros: 30_000, pendingMicros: 0 })[1]).toEqual({ label: 'Computer, 5 minutes', note: 'Given back', returnedMicros: 30_000 });
     expect(withComputerRefund(lines, { returnedMicros: 0, pendingMicros: 0 })).toEqual(lines);
     expect(withComputerRefund(lines, { returnedMicros: 30_000, pendingMicros: 0 })[0]).toEqual(lines[0]);
   });

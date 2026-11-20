@@ -30,6 +30,7 @@ import { POST as postJob } from '@/app/api/bots/[id]/computer-jobs/route';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, renewJob, startJob, sweepComputers } from '@/lib/computer';
 import { recordFaults } from '@/lib/computer-faults';
+import { reportsToTell } from '@/lib/computer-report';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_LATEST_MS } from '@/lib/computer-file-cards';
 import { mintJobToken } from '@/lib/computer-token';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
@@ -1156,6 +1157,37 @@ run('rules said in chat and task receipts, in a real database', () => {
         expect(item?.actions).toEqual([{ label: 'gmail', outcome: 'worked', text: 'Gmail · worked', takenText: null, amountMicros: 9_000 }]);
         expect(item?.outcomeNote).toContain('The computer stopped at your spending rule.');
         expect(item?.outcomeNote).toContain('Gmail charged $0.009.');
+      });
+    });
+
+    describe('whatever stopped a job before it finished, the receipt and the Brick’s report never say done (Opus R1b)', () => {
+      const LATER = new Date(NOW.getTime() + 86_400_000);
+      /** A job that ran and was then ended as `stopped` by `endedBy`, its receipt closed the way the bot server closes it ("done"). */
+      async function stoppedBy(endedBy: string, title: string) {
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title }, NOW);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: started.job.id, title, category: 'computer' }, NOW);
+        await prisma.computerJob.update({ where: { id: started.job.id }, data: { status: 'stopped', endedBy, startedAt: NOW, endedAt: new Date(NOW.getTime() + 60_000) } });
+        await closeReceipt({ botId: sara.brickId, taskKey: started.job.id, personId: sara.id, state: 'done' }, new Date(NOW.getTime() + 61_000));
+        return { sara, jobId: started.job.id };
+      }
+
+      it.each([
+        ['rule', STOPPED_AT_RULE, 'rule'],
+        ['allowance', 'Stopped: your computer time ran out', 'month'],
+        ['person', 'Stopped by you', null],
+        ['pool', 'Stopped: our computers were busy', 'failed'],
+      ])('stopped by %s: the receipt says "%s", and the report kind is %s, never done', async (endedBy, words, kind) => {
+        const { sara, jobId } = await stoppedBy(endedBy, `Stopped by ${endedBy}`);
+        const item = (await activityFor(sara.id)).find((one) => one.title === `Stopped by ${endedBy}`);
+        expect(item).toMatchObject({ state: 'done', outcome: 'stopped', outcomeText: words });
+        expect(item?.outcomeText).not.toBe(OUTCOME_WORDS.done);
+        expect((await prisma.taskReceipt.findFirstOrThrow({ where: { taskKey: jobId } })).outcome).not.toBe('done');
+        const reports = (await reportsToTell(50, LATER)).filter((report) => report.jobId === jobId);
+        expect(reports.map((report) => report.kind)).toEqual(kind === null ? [] : [kind]);
+        expect(reports.map((report) => report.kind)).not.toContain('done');
       });
     });
 

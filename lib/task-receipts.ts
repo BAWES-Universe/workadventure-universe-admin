@@ -498,7 +498,7 @@ interface Header {
    * failed on our side so none of its cost is the person's (`returned`). None when no job ran.
    */
   job: 'worked' | 'failed' | 'stopped' | 'returned' | null;
-  /** Why a stopped job stopped (the job's own `ended_by`: rule, person, allowance...). */
+  /** Why a stopped job stopped (the job's own `ended_by`: rule, person, allowance, pool). */
   stoppedBy: string | null;
   /** What became of a computer cost that was given back: what the books acknowledged giving back, and what they still owe the person. */
   refund: { returnedMicros: number; pendingMicros: number };
@@ -594,13 +594,14 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
  */
 function outcomeOfHeader(header: Header): ActivityOutcome {
   // Nothing was taken: refunded, or (when nobody could confirm an action) said as that, never as a failure
-  if (header.state === 'refunded') return header.outcome === 'unconfirmed' ? 'unconfirmed' : 'refunded';
+  // (a job our own pool cut off, whose time was given back, is still a stopped job: said as that, with its time given back)
+  if (header.state === 'refunded') return header.outcome === 'unconfirmed' ? 'unconfirmed' : header.job === 'returned' && header.stoppedBy === 'pool' ? 'stopped' : 'refunded';
   const pending = header.refund.pendingMicros > 0;
   if (header.job !== null) {
     const outcome = outcomeOfActions([...header.actions.map((action) => action.outcome), header.job === 'worked' ? 'worked' : 'failed']);
     if (outcome === 'refunded' || outcome === 'unconfirmed') {
       // Nothing was verified. A cost given back is the books' to say: refunded only once they acknowledged it, and never while Orbit is still deciding
-      if (header.job === 'returned') return pending ? 'refund_pending' : outcome === 'refunded' ? 'failed' : outcome;
+      if (header.job === 'returned') return pending ? 'refund_pending' : header.stoppedBy === 'pool' && outcome === 'refunded' ? 'stopped' : outcome === 'refunded' ? 'failed' : outcome;
       if (header.job === 'stopped') return 'stopped';
       return header.deciding !== null ? 'deciding' : 'failed';
     }
@@ -617,7 +618,7 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
   const stated = outcomeOfHeader(header);
   // "Refunded, nothing taken" is not said while a hold is still on: it reads as not finished (with the release wording) until the books acknowledge the release
   const outcome: ActivityOutcome = holdPending && stated === 'refunded' ? 'failed' : stated;
-  // The computer's line says what became of a cost that was given back: "Refund pending" until the books acknowledge it, then "Returned"
+  // The computer's line says what became of a cost that was given back: "Refund pending" until the books acknowledge it, then "Given back"
   const lines = withComputerRefund(receiptLines(events, botName), header.refund);
   // Once the books acknowledged giving a hold back, the amount that came back is said (never before: a hold still on is "being released")
   const releasedOf = (run: string): number => header.releasedRuns.get(run) ?? 0;
@@ -633,7 +634,7 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
     ...(header.refund.returnedMicros > 0 ? { returnedMicros: header.refund.returnedMicros } : {}),
     ...(header.refund.pendingMicros > 0 ? { refundPendingMicros: header.refund.pendingMicros } : {}),
     ...(header.deciding === null ? {} : { deciding: header.deciding }),
-    ...(header.job === 'stopped' && header.stoppedBy === 'rule' ? { stoppedAtRule: true } : {}),
+    ...(header.stoppedBy === null ? {} : { stoppedBy: header.stoppedBy }),
     ...(appCharges.length > 0 ? { appCharges } : {}),
     ...(spent !== null ? { netMicros: spent } : {}),
   };
@@ -645,7 +646,7 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
     state: (holdPending || header.refund.pendingMicros > 0) && header.state === 'refunded' ? 'done' : header.state,
     // `state` stays done for a task that partly worked or that took something and did not finish; a state put right at read time wins over the stored outcome
     outcome,
-    outcomeText: outcomeTextOf(outcome, { stoppedBy: header.stoppedBy, refundPendingMicros: header.refund.pendingMicros }),
+    outcomeText: outcomeTextOf(outcome, { stoppedBy: header.stoppedBy, refundPendingMicros: header.refund.pendingMicros, givenBack: header.job === 'returned' }),
     outcomeNote: outcomeNote(outcome, header.actions, facts),
     actions: header.actions.map((action): ActivityAction => {
       // A run let go unconfirmed was never charged and is never charged later (its hold goes back whatever late evidence says), so a worked action on it shows no amount taken: its hold wording
@@ -820,7 +821,7 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
     // A job still going has not come out yet; one that never started did nothing
     const over = jobRow !== null && isOver(jobRow.status) && jobRow.startedAt !== null;
     const job: Header['job'] = !over ? null : givenBackJob(jobRow.status, jobRow.endedBy) ? 'returned' : jobRow.status === 'failed' ? 'failed' : jobRow.status === 'stopped' ? 'stopped' : 'worked';
-    return itemOf({ ...header, state, job, stoppedBy: job === 'stopped' ? jobRow?.endedBy ?? null : null, refund: job === 'returned' ? { returnedMicros: money?.returnedMicros ?? 0, pendingMicros: money?.pendingMicros ?? 0 } : { returnedMicros: 0, pendingMicros: 0 }, deciding: job === 'failed' ? money?.deciding ?? null : null, heldRuns: new Set(header.actions.filter((action) => held.has(action.run)).map((action) => action.run)), releasedRuns: new Map(header.actions.filter((action) => released.has(action.run)).map((action) => [action.run, released.get(action.run) as number] as const)), letGoRuns: new Set(header.actions.filter((action) => letGo.has(action.run)).map((action) => action.run)) }, forHeader, names.get(header.botId) ?? 'Brick', personId);
+    return itemOf({ ...header, state, job, stoppedBy: jobRow?.status === 'stopped' ? jobRow.endedBy ?? null : null, refund: job === 'returned' ? { returnedMicros: money?.returnedMicros ?? 0, pendingMicros: money?.pendingMicros ?? 0 } : { returnedMicros: 0, pendingMicros: 0 }, deciding: job === 'failed' ? money?.deciding ?? null : null, heldRuns: new Set(header.actions.filter((action) => held.has(action.run)).map((action) => action.run)), releasedRuns: new Map(header.actions.filter((action) => released.has(action.run)).map((action) => [action.run, released.get(action.run) as number] as const)), letGoRuns: new Set(header.actions.filter((action) => letGo.has(action.run)).map((action) => action.run)) }, forHeader, names.get(header.botId) ?? 'Brick', personId);
   });
   return items.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : -1)).slice(0, limit);
 }

@@ -12,12 +12,24 @@ export const OUTCOME_WORDS: Record<ActivityOutcome, string> = {
   failed: 'Didn’t finish',
   unconfirmed: 'Couldn’t confirm',
   stopped: 'Stopped',
-  deciding: 'Still deciding',
+  deciding: 'Still checking',
   refund_pending: 'Refund pending',
 };
 
-/** What a computer job stopped by the person's own spending rule says: never Done (starting a computer is not proof it finished). */
-export const STOPPED_AT_RULE = 'Stopped at your spending rule';
+/**
+ * What a computer job stopped before it finished says, by what stopped it: never Done (starting a computer is not proof it finished). The pool's words are for a job
+ * Orbit's own computers cut off; once its time is given back the headline says so (see `outcomeTextOf`).
+ */
+export const STOPPED_WORDS = {
+  rule: 'Stopped at your spending rule',
+  allowance: 'Stopped: your computer time ran out',
+  person: 'Stopped by you',
+  pool: 'Stopped: our computers were busy',
+} as const;
+export const STOPPED_AT_RULE = STOPPED_WORDS.rule;
+
+/** What a computer job that is still being looked at says while Orbit has not decided whether to give its cost back (never Done, never refunded). */
+export const STILL_CHECKING = 'We’re still checking this one. If it was our fault, the time comes back.';
 
 /** What a failed action says it took: nothing. A worked action's amount is its own line from the books. */
 export const NOTHING_TAKEN = 'Nothing taken';
@@ -58,8 +70,9 @@ export function dollars(micros: number): string {
 }
 
 /** The headline of a receipt for how it came to end: "Stopped at your spending rule", "$0.03 refund pending", and the plain words for the rest. */
-export function outcomeTextOf(outcome: ActivityOutcome, facts: { stoppedBy?: string | null; refundPendingMicros?: number } = {}): string {
-  if (outcome === 'stopped' && facts.stoppedBy === 'rule') return STOPPED_AT_RULE;
+export function outcomeTextOf(outcome: ActivityOutcome, facts: { stoppedBy?: string | null; refundPendingMicros?: number; givenBack?: boolean } = {}): string {
+  if (outcome === 'stopped' && facts.stoppedBy === 'pool') return facts.givenBack ? `${STOPPED_WORDS.pool}, and its time was given back` : STOPPED_WORDS.pool;
+  if (outcome === 'stopped' && (facts.stoppedBy === 'rule' || facts.stoppedBy === 'allowance' || facts.stoppedBy === 'person')) return STOPPED_WORDS[facts.stoppedBy];
   if (outcome === 'refund_pending' && facts.refundPendingMicros !== undefined && facts.refundPendingMicros > 0) return `${dollars(facts.refundPendingMicros)} refund pending`;
   return OUTCOME_WORDS[outcome];
 }
@@ -90,8 +103,8 @@ export interface NoteFacts {
   deciding?: 'effect' | 'limits';
   /** What each action that worked took, for a task with a computer (the receipt's lines say it for any other): null while its price is not known yet. */
   appCharges?: readonly { label: string; micros: number | null }[];
-  /** A stopped job was stopped by the person's own spending rule (said beside the steps of a partly done task, so the stop is never lost behind "Partly done"). */
-  stoppedAtRule?: boolean;
+  /** What stopped a job that was stopped before it finished (the job's `ended_by`: rule, allowance, person, pool). Said beside the steps of a partly done task, so the stop is never lost behind "Partly done". */
+  stoppedBy?: string | null;
   /** What the person pays for the whole task once it is settled (never said while a refund is pending or a price is not known). */
   netMicros?: number | null;
 }
@@ -101,8 +114,8 @@ export interface NoteFacts {
  *  - partial: "Two steps worked and one didn’t. Nothing was taken for the one that didn’t." (a step that could not be confirmed says so, never "didn’t work")
  *  - failed: "It didn’t finish. Computer time used $0.03. Gmail charged $0."
  *  - stopped: "It stopped before it finished, and nothing was confirmed as done. Computer time used $0.02."
- *  - refund_pending: "We’re giving back the computer cost. It shows in your credit as soon as it’s confirmed."
- *  - deciding: "We’re still deciding whether to give back the computer cost. Computer time $0.03 is charged for now."
+ *  - refund_pending: "We’re returning $0.05 to your credit."
+ *  - deciding: "We’re still checking this one. If it was our fault, the time comes back. Computer time $0.03 is charged for now."
  *  - unconfirmed: "We couldn’t confirm whether Gmail finished. We’re releasing your hold." (then "Your hold of $0.01 was released." once the books say so)
  * A task with a computer also says what the computer cost and what each App took, and, once settled, what the person pays in all: a Gmail charge is never hidden
  * behind a refunded computer. What was taken is only ever said from the books' amounts the caller passes in; a hold still on is said as a hold being released.
@@ -124,7 +137,7 @@ export function outcomeNote(outcome: ActivityOutcome, actions: readonly { outcom
   const computer: string[] = [];
   if (facts.job === 'returned') {
     if (pending) computer.push(`Computer cost of ${dollars(facts.refundPendingMicros ?? 0)} refund pending.`);
-    else if (facts.returnedMicros !== undefined && facts.returnedMicros > 0) computer.push(`Computer cost of ${dollars(facts.returnedMicros)} was returned.`);
+    else if (facts.returnedMicros !== undefined && facts.returnedMicros > 0) computer.push(`Computer cost of ${dollars(facts.returnedMicros)} was given back.`);
   } else if (computerKnown) {
     if (facts.computerMicros === null) computer.push('Computer time price not known yet.');
     else computer.push(facts.deciding !== undefined ? `Computer time ${dollars(facts.computerMicros ?? 0)} is charged for now.` : `Computer time used ${dollars(facts.computerMicros ?? 0)}.`);
@@ -146,22 +159,29 @@ export function outcomeNote(outcome: ActivityOutcome, actions: readonly { outcom
   const net: string[] = hasComputer && facts.netMicros !== undefined && facts.netMicros !== null && !pending && facts.returnedMicros !== undefined && facts.returnedMicros > 0 ? [`You pay ${dollars(facts.netMicros)} in all.`] : [];
 
   const after = [...computer, ...charged, ...taken, ...net];
+  const stoppedSaid = (by: string | null | undefined): string[] =>
+    by === 'rule' ? ['The computer stopped at your spending rule.'] : by === 'allowance' ? ['The computer stopped because your computer time ran out.'] : by === 'person' ? ['You stopped the computer.'] : by === 'pool' ? ['The computer stopped because our computers were busy.'] : [];
   if (outcome === 'partial') {
     if (worked === 0 || failed + unknown === 0) return null;
+    // A computer that failed on our side, beside an App that worked: said as that, with what came back, what the App took and what the person pays in all
+    if (facts.job === 'returned') {
+      const lead = pending
+        ? `The computer part didn’t finish because of a problem on our side. Its time (${dollars(facts.refundPendingMicros ?? 0)}) is refund pending.`
+        : `The computer part didn’t finish because of a problem on our side, and its time${facts.returnedMicros !== undefined && facts.returnedMicros > 0 ? ` (${dollars(facts.returnedMicros)})` : ''} was given back.`;
+      const apps = (facts.appCharges ?? []).map((charge) => (charge.micros === null ? `${appLabel(charge.label)} worked. Its price is not known yet.` : `${appLabel(charge.label)} worked and was charged ${dollars(charge.micros)}.`));
+      return [lead, ...apps, ...taken, ...net].join(' ');
+    }
     const parts = [`${capital(countWord(worked))} ${worked === 1 ? 'step' : 'steps'} worked`];
     const rest = [failed > 0 ? `${countWord(failed)} didn’t` : null, unknown > 0 ? `${countWord(unknown)} couldn’t be confirmed` : null].filter((part): part is string => part !== null);
     // A computer cost that is only provisional while Orbit decides is said beside the steps
-    const deciding = facts.deciding === undefined ? [] : ['We’re still deciding whether to give back the computer cost.'];
-    const stopped = facts.job !== 'stopped' ? [] : [facts.stoppedAtRule ? 'The computer stopped at your spending rule.' : 'The computer was stopped before it finished.'];
+    const deciding = facts.deciding === undefined ? [] : [STILL_CHECKING];
+    const stopped = facts.job !== 'stopped' ? [] : stoppedSaid(facts.stoppedBy).length > 0 ? stoppedSaid(facts.stoppedBy) : ['The computer was stopped before it finished.'];
     return [`${parts[0]} and ${rest.join(' and ')}.`, ...stopped, ...deciding, ...after].join(' ').trim();
   }
   if (outcome === 'failed') return ['It didn’t finish.', ...after].join(' ');
   if (outcome === 'stopped') return ['It stopped before it finished, and nothing was confirmed as done.', ...after].join(' ');
-  if (outcome === 'refund_pending') return ['We’re giving back the computer cost. It shows in your credit as soon as it’s confirmed.', ...charged, ...taken].join(' ');
-  if (outcome === 'deciding') {
-    const lead = facts.deciding === 'effect' ? 'A step outside the computer isn’t confirmed yet, so we’re still deciding whether to give back the computer cost.' : 'We’re still deciding whether to give back the computer cost.';
-    return [lead, ...computer, ...charged, ...taken].join(' ');
-  }
+  if (outcome === 'refund_pending') return [`We’re returning ${dollars(facts.refundPendingMicros ?? 0)} to your credit.`, ...charged, ...taken].join(' ');
+  if (outcome === 'deciding') return [STILL_CHECKING, ...computer, ...charged, ...taken].join(' ');
   // unconfirmed
   const names = labels.length > 0 ? listOf(labels) : 'it';
   return [`We couldn’t confirm whether ${names} finished.`, ...after].join(' ');

@@ -1006,7 +1006,7 @@ run('credit for computers, on the real books', () => {
       expect(item).toMatchObject({ state: 'done', outcome: 'partial', outcomeText: OUTCOME_WORDS.partial, spentMicros: 9_000, returnedMicros: 50_000 });
       expect(item.outcomeText).not.toBe(OUTCOME_WORDS.refunded);
       expect(item.actions).toEqual([{ label: 'gmail', outcome: 'worked', text: 'Gmail · worked', takenText: null, amountMicros: 9_000 }]);
-      expect(item.outcomeNote).toBe('One step worked and one didn’t. Computer cost of $0.05 was returned. Gmail charged $0.009. You pay $0.009 in all.');
+      expect(item.outcomeNote).toBe('The computer part didn’t finish because of a problem on our side, and its time ($0.05) was given back. Gmail worked and was charged $0.009. You pay $0.009 in all.');
       expect(item.lines).toEqual(expect.arrayContaining([{ label: 'Instant gmail, 1 use', amountMicros: 9_000 }]));
       // Said again later (a sweep, a read): the same receipt, the same words, no second refund
       expect(await itemFor(sara.id, 'Send the report')).toEqual([item]);
@@ -1040,7 +1040,7 @@ run('credit for computers, on the real books', () => {
       expect(pending).toMatchObject({ state: 'done', outcome: 'refund_pending', outcomeText: '$0.05 refund pending', refundPendingMicros: 50_000, spentMicros: null });
       expect(pending.outcomeText).not.toBe(OUTCOME_WORDS.refunded);
       expect(pending).not.toHaveProperty('returnedMicros');
-      expect(pending.outcomeNote).toContain('We’re giving back the computer cost.');
+      expect(pending.outcomeNote).toBe('We’re returning $0.05 to your credit.');
       // The wallet recovers: the sweep posts the refund (once), the obligation is acknowledged
       (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(actualRefund());
       await sweepComputers(at(600));
@@ -1101,12 +1101,12 @@ run('credit for computers, on the real books', () => {
       }
       const [pending] = await itemFor(sara.id, 'Mail and report');
       expect(pending).toMatchObject({ state: 'done', outcome: 'partial', refundPendingMicros: 30_000, spentMicros: null });
-      expect(pending.outcomeNote).toBe('One step worked and one didn’t. Computer cost of $0.03 refund pending. Gmail charged $0.009.');
+      expect(pending.outcomeNote).toBe('The computer part didn’t finish because of a problem on our side. Its time ($0.03) is refund pending. Gmail worked and was charged $0.009.');
       (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(actualRefund());
       await sweepComputers(at(600));
       const [settled] = await itemFor(sara.id, 'Mail and report');
       expect(settled).toMatchObject({ id: pending.id, state: 'done', outcome: 'partial', spentMicros: 9_000, returnedMicros: 30_000 });
-      expect(settled.outcomeNote).toBe('One step worked and one didn’t. Computer cost of $0.03 was returned. Gmail charged $0.009. You pay $0.009 in all.');
+      expect(settled.outcomeNote).toBe('The computer part didn’t finish because of a problem on our side, and its time ($0.03) was given back. Gmail worked and was charged $0.009. You pay $0.009 in all.');
     });
   });
 });

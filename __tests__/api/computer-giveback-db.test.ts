@@ -1293,7 +1293,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(deciding).toMatchObject({ state: 'done', outcome: 'deciding', outcomeText: OUTCOME_WORDS.deciding, spentMicros: cost });
       expect(deciding?.outcomeText).not.toBe(OUTCOME_WORDS.done);
       expect(deciding?.outcomeText).not.toBe(OUTCOME_WORDS.refunded);
-      expect(deciding?.outcomeNote).toContain('A step outside the computer isn’t confirmed yet, so we’re still deciding whether to give back the computer cost.');
+      expect(deciding?.outcomeNote).toContain('We’re still checking this one. If it was our fault, the time comes back.');
       expect(deciding?.outcomeNote).toContain('is charged for now.');
       // The effect is settled as not done: the decision is made, the time goes back, and the same line now says refunded
       const effect = await prisma.computerEffect.findFirstOrThrow({ where: { jobId: held.id } });
@@ -1312,7 +1312,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', basis: 'limits_missing' });
       const item = await itemOf(sara.id, held.id);
       expect(item).toMatchObject({ state: 'done', outcome: 'deciding', outcomeText: OUTCOME_WORDS.deciding });
-      expect(item?.outcomeNote).toContain('We’re still deciding whether to give back the computer cost.');
+      expect(item?.outcomeNote).toContain('We’re still checking this one. If it was our fault, the time comes back.');
       expect(item?.outcomeNote).not.toMatch(/limit/i);
       // The Limits are set, and the person's bound is already used: Orbit decides to charge, and it reads as what it is, a job that did not finish (never "refunded")
       await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
