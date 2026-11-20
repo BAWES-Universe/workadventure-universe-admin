@@ -1,5 +1,4 @@
 import type { Prisma } from '@prisma/client';
-import { getInstantLimits } from '@/lib/instant/state';
 import type { InstantLimits } from '@/lib/instant/values';
 import { monthOf } from '@/lib/meter-values';
 
@@ -10,7 +9,8 @@ import { monthOf } from '@/lib/meter-values';
  * person would get all of it back though the work was seen. So a give-back is bounded the way Instant's "Didn't work" give-back is, from the same Limits,
  * and nothing new is set anywhere:
  *
- *  - Nothing is given back for a job that already settled something outside its computer as done (a send, a publish, a payment…): that job delivered.
+ *  - Nothing is given back for a job that settled something outside its computer as done (a send, a publish, a payment…) or tried one whose outcome is not
+ *    known yet: that job delivered, or may have, and a late "done" cannot take a give-back back. An effect confirmed not done does not count.
  *  - A person has a bounded number of give-backs a month (UTC). It is Instant's "Give-backs one person may have in a month" when a super admin set it.
  *    Left empty (as it is at launch: Instant's own button is gone), it is what Instant's pause rule itself tolerates among its smallest batch of runs:
  *    "pauseMinRuns" runs at "pauseFailureRateBps" of them, the number of failures that rule lets pass before it pauses.
@@ -24,6 +24,9 @@ import { monthOf } from '@/lib/meter-values';
  * With no pause numbers in Limits at all (a super admin emptied them; Instant would then refuse to run) there is no bound to read, and a failure on our
  * side is given back as it always was.
  */
+
+/** Read from Limits by the caller BEFORE its transaction opens: a read that fails inside a transaction leaves the transaction aborted. */
+export type GiveBackLimits = Pick<InstantLimits, 'goodwillPerPersonPerMonth' | 'pauseMinRuns' | 'pauseFailureRateBps'>;
 
 export type GiveBackVerdict = { give: true } | { give: false; why: 'outside_effect' | 'person_limit' | 'paused' };
 
@@ -42,16 +45,16 @@ export function personGiveBackPaused(limits: Pick<InstantLimits, 'pauseMinRuns' 
 }
 
 /**
- * Decides whether this job's ending as ours is given back. Run inside the transaction that writes the ending, after the person's give-back lock is
+ * Decides whether this job's ending as ours is given back. `limits` are read before the transaction opens. Run inside the transaction that writes the ending, after the person's give-back lock is
  * taken, so two jobs of one person ending together cannot both take the last give-back. A job that never started ran nothing: it is given back
  * (nothing was charged to give) and uses none of the bound.
  */
-export async function judgeJobGiveBack(tx: Prisma.TransactionClient, job: { id: string; personId: string; startedAt: Date | null }, now: Date): Promise<GiveBackVerdict> {
+export async function judgeJobGiveBack(tx: Prisma.TransactionClient, limits: GiveBackLimits, job: { id: string; personId: string; startedAt: Date | null }, now: Date): Promise<GiveBackVerdict> {
   if (!job.startedAt) return { give: true };
-  // The job delivered something outside its computer: the work was done, so none of it is given back, whatever happened to the machine afterwards
-  if ((await tx.computerEffect.count({ where: { jobId: job.id, state: 'done' } })) > 0) return { give: false, why: 'outside_effect' };
+  // The job delivered something outside its computer, or tried to and the outcome is not known yet (it may settle as done after the job is over, and a
+  // give-back cannot be taken back): the work may be done, so none of it is given back, whatever happened to the machine afterwards
+  if ((await tx.computerEffect.count({ where: { jobId: job.id, state: { in: ['done', 'planned'] } } })) > 0) return { give: false, why: 'outside_effect' };
 
-  const limits = await getInstantLimits(tx);
   const bound = personGiveBackBound(limits);
   if (bound === null) return { give: true };
 
