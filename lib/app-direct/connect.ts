@@ -276,6 +276,7 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
           reconnectedAt: new Date(),
           // The new key has not worked yet: what the old one did says nothing about it
           lastWorkedAt: null,
+          heldRefusalAt: null,
         },
       });
       return { id: updated.id, name: updated.name, created: false };

@@ -615,6 +615,65 @@ run('apps a person connects once, in a real database', () => {
     expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt!.getTime()).toBeGreaterThan(worked.getTime() + 60_000);
   });
 
+  it('two refusals in a row inside the minute after a good call mark the key lost, one alone never does, and the same one twice is still one', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    const row = () => prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } });
+    const worked = new Date(Date.now() - 30_000);
+    await reportKeyWorked(connection.id, 1, worked);
+    // The first refusal may be older than a good call that was not written down: held, not a loss, and not dropped either
+    const first = new Date(worked.getTime() + 5_000);
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: first })).toEqual({ changed: false });
+    expect(await row()).toMatchObject({ signInLostAt: null, heldRefusalAt: first });
+    // The same refusal reported again is not a second one
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: first })).toEqual({ changed: false });
+    expect((await row()).signInLostAt).toBeNull();
+    // Another, before any good call after the first: the key is failing, even though it is inside the minute of the kept good call
+    const second = new Date(worked.getTime() + 8_000);
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 403, at: second })).toEqual({ changed: true });
+    expect(await row()).toMatchObject({ signInLostAt: second, signInLostStatus: 403, heldRefusalAt: null });
+    expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'tool-signin', dismissedAt: null } })).toBeGreaterThan(0);
+  });
+
+  it('a refusal held inside the minute is cleared by a good call after it, which is written down at once, so a key that refuses now and then between good calls is not marked lost', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    const row = () => prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } });
+    const worked = new Date(Date.now() - 30_000);
+    await reportKeyWorked(connection.id, 1, worked);
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: new Date(worked.getTime() + 5_000) })).toEqual({ changed: false });
+    // A good call after it, inside the minute: written down at once (it would not be otherwise), and the held refusal is cleared
+    const good = new Date(worked.getTime() + 10_000);
+    await reportKeyWorked(connection.id, 1, good);
+    expect(await row()).toMatchObject({ lastWorkedAt: good, heldRefusalAt: null });
+    // A refusal of a call made before that good one, reported after it: old news, not even held
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: new Date(worked.getTime() + 8_000) })).toEqual({ changed: false });
+    expect(await row()).toMatchObject({ signInLostAt: null, heldRefusalAt: null });
+    // A newer refusal is held again, and still no loss: refuse, work, refuse is not a key that stopped
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: new Date(worked.getTime() + 15_000) })).toEqual({ changed: false });
+    expect((await row()).signInLostAt).toBeNull();
+    // A good call older than the held refusal does not clear it
+    await reportKeyWorked(connection.id, 1, new Date(worked.getTime() + 12_000));
+    expect((await row()).heldRefusalAt).toEqual(new Date(worked.getTime() + 15_000));
+  });
+
+  it('two no-answer reports inside the minute mark the key as not answering, and a refusal held before a reconnect is forgotten', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    const row = () => prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } });
+    const worked = new Date(Date.now() - 30_000);
+    await reportKeyWorked(connection.id, 1, worked);
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'no-answer', at: new Date(worked.getTime() + 5_000) })).toEqual({ changed: false });
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'no-answer', at: new Date(worked.getTime() + 9_000) })).toEqual({ changed: true });
+    expect(await row()).toMatchObject({ noAnswerAt: new Date(worked.getTime() + 9_000), heldRefusalAt: null });
+    // A refusal held before the owner reconnected the tool says nothing about it afterwards: the next one is only held
+    await prisma.appConnection.update({ where: { id: connection.id }, data: { noAnswerAt: null, lastWorkedAt: new Date(Date.now() - 10_000), heldRefusalAt: new Date(Date.now() - 5_000) } });
+    await markConnectionReconnected(connection.id, sara);
+    const after = new Date(Date.now() + 2_000);
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: after })).toEqual({ changed: false });
+    expect(await row()).toMatchObject({ signInLostAt: null, heldRefusalAt: after });
+  });
+
   it('a good call is ordered by when its request went out: a refusal of a request sent after it stays a loss even if the good answer came back later', async () => {
     const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
     const a = (await grantToBrick(sara, connection.id, saraBrick))!;
