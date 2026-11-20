@@ -2893,7 +2893,8 @@ run('the bounded Instant executor, in a real database', () => {
       await prisma.taskReceipt.updateMany({ where: { personId: sara, taskKey: { in: ['task-c', 'task-other'] } }, data: { state: 'done', endedAt: new Date() } });
       await instantRulesAndReceipts.afterRun?.({ ...input, taskKey: null }, { status: 'checking', runId: noTask.id });
       expect(await state('task-c')).toBe('done');
-      await instantRulesAndReceipts.afterRun?.(input, { status: 'done', runId: withTask.id, ok: true, data: {}, chargedMicros: 1, pending: false });
+      // A refusal before any run was made has no run to look at
+      await instantRulesAndReceipts.afterRun?.(input, { status: 'refused', reason: 'rule' });
       expect(await state('task-c')).toBe('done');
       // A retry of the same call that names another task: the run's own task is the one that moves
       await instantRulesAndReceipts.afterRun?.({ ...input, taskKey: 'task-other' }, { status: 'checking', runId: withTask.id });
@@ -3048,7 +3049,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await receiptState('look-6')).toBe('done');
     });
 
-    it('a receipt the bot server left in checking with no Instant run (its request never arrived) is refunded after the grace, not listed (nothing happened); one with books for its key is done and listed; a young one is left alone', async () => {
+    it('a receipt the bot server left in checking with no Instant run (its request never arrived) is refunded after the grace, not listed (nothing happened); one with only a meter row for its key is refunded too (a row is not proof that an App worked) and is listed, with what the books recorded; a young one is left alone', async () => {
       await openReceipt({ botId: brick, personId: sara, taskKey: 'look-9', title: 'Never arrived', category: 'apps' });
       await openReceipt({ botId: brick, personId: sara, taskKey: 'look-10', title: 'Has books', category: 'apps' });
       for (const key of ['look-9', 'look-10']) expect(await closeReceipt({ botId: brick, taskKey: key, personId: sara, state: 'checking' })).toMatchObject({ ok: true, state: 'checking' });
@@ -3061,7 +3062,8 @@ run('the bounded Instant executor, in a real database', () => {
       expect((await activityFor(sara)).map((item) => item.title)).not.toContain('Never arrived');
       await settleCheckingReceipts(50, new Date(Date.now() + 20 * MIN));
       expect(await receiptState('look-9')).toBe('refunded');
-      expect(await receiptState('look-10')).toBe('done');
+      // A meter row for the task's key is money the books recorded, not proof that an App worked: with no run it ends as refunded, never done
+      expect(await receiptState('look-10')).toBe('refunded');
       const titles = (await activityFor(sara)).map((item) => item.title);
       expect(titles).not.toContain('Never arrived');
       expect(titles).toContain('Has books');

@@ -5,6 +5,58 @@
  */
 
 export type ReceiptState = 'done' | 'refunded' | 'checking';
+/** How a task came to end, from what its actions came to: all worked, some did (partial), none did. A task that is not over has none. */
+export type ReceiptOutcome = 'done' | 'partial' | 'refunded';
+/** How one Instant action of a task ended. A failed one took nothing from the person: its hold went back. */
+export type ActionOutcome = 'worked' | 'failed';
+
+/** What a receipt keeps of each Instant action: the run, the App it was for, and how it ended. Never what was asked or answered. */
+export interface ReceiptAction {
+  run: string;
+  label: string;
+  outcome: ActionOutcome;
+}
+
+/** The states of an Instant run that has not ended: still going out, or its answer did not come back and nobody can say whether it ran. */
+export const RUN_OPEN_STATES = ['reserving', 'held', 'sent', 'ambiguous'] as const;
+
+/** The part of an Instant run's record a receipt reads. */
+export interface RunRecord {
+  id: string;
+  state: string;
+  toolkit: string;
+}
+
+/**
+ * What a task's Instant runs came to, read from the runs' own final states and nothing else (never from the books' meter rows: a model
+ * call's row is not proof that an App worked).
+ *  - `open`: a run has not ended, so the task cannot be settled yet.
+ *  - A refused run never went out (a rule, no credit, not offered, or it crashed before sending), so it is not an action of the task.
+ *  - A succeeded run worked. Every other ended run did not (a failed one, or one nobody could vouch for when its wait ended: the person's favour).
+ *  - Every action worked: done. Some did and some did not: partial. None did, or there was none: refunded, nothing taken.
+ */
+export function outcomeOfRuns(runs: readonly RunRecord[]): { open: boolean; outcome: ReceiptOutcome; actions: ReceiptAction[] } {
+  const open = runs.some((run) => (RUN_OPEN_STATES as readonly string[]).includes(run.state));
+  const actions = runs
+    .filter((run) => run.state !== 'refused' && !(RUN_OPEN_STATES as readonly string[]).includes(run.state))
+    .map((run): ReceiptAction => ({ run: run.id, label: run.toolkit, outcome: run.state === 'succeeded' ? 'worked' : 'failed' }));
+  const worked = actions.filter((action) => action.outcome === 'worked').length;
+  const outcome: ReceiptOutcome = worked === 0 ? 'refunded' : worked === actions.length ? 'done' : 'partial';
+  return { open, outcome, actions };
+}
+
+/** The receipt's state for an outcome: partly done is still done (something worked and may have been taken); only none-worked is refunded. */
+export const stateOfOutcome = (outcome: ReceiptOutcome): 'done' | 'refunded' => (outcome === 'refunded' ? 'refunded' : 'done');
+
+/** Reads the actions a receipt stored back, dropping anything that is not the shape written. */
+export function readActions(value: unknown): ReceiptAction[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): ReceiptAction[] => {
+    if (typeof entry !== 'object' || entry === null) return [];
+    const { run, label, outcome } = entry as Record<string, unknown>;
+    return typeof run === 'string' && typeof label === 'string' && (outcome === 'worked' || outcome === 'failed') ? [{ run, label, outcome }] : [];
+  });
+}
 export type ReceiptCategory = 'apps' | 'computer';
 
 /** One line of "what it used". `amountMicros` is what it took from credit; empty when it took none or the price is not known yet (the note says which). */
@@ -43,6 +95,15 @@ const plural = (n: number, one: string, many: string) => `${n.toLocaleString('en
 function instantTaken(event: LineEvent): number | null {
   if (isRecord(event.detail) && event.detail.instant === true) return typeof event.detail.customerMicros === 'number' ? event.detail.customerMicros : null;
   return event.costMicros;
+}
+
+/**
+ * What one Instant run took from the person, read from that run's own meter event (by the run's id): its charge when the books know it
+ * (a failed run released its hold, so zero), null when there is no record of it yet or its price is not known yet. Never guessed.
+ */
+export function takenForRun(events: readonly LineEvent[], runId: string): number | null {
+  const found = events.find((event) => event.kind === 'app_use' && event.route === 'instant' && isRecord(event.detail) && event.detail.runId === runId);
+  return found ? instantTaken(found) : null;
 }
 
 /** The name of an App an Instant use was for, when the event carries it. Only a short name; never anything a person wrote. */

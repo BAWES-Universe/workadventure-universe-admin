@@ -2303,11 +2303,22 @@ model TaskReceipt {
   problemAt     DateTime? @map("problem_at")
   startedAt     DateTime  @default(now()) @map("started_at")
   endedAt       DateTime? @map("ended_at")
+  // An open receipt is on a lease: the bot server renews it while the task lives. A receipt still running when it runs out is ended by the
+  // sweep from the run records, so no receipt depends on the bot server staying up or the person writing again. Empty for a computer's receipt
+  // (its job is its own record) and once the receipt has ended.
+  leaseUntil    DateTime? @map("lease_until")
+  // Which turn of the task the receipt is on. A close or renewal that carries an older number never ends or extends a newer turn.
+  generation    Int       @default(1)
+  // How the task came to end, from its run records: done (every action worked), partial (some worked and some did not) or refunded (none did)
+  outcome       String?   @db.VarChar(8)
+  // Each Instant action of the task and how it ended (worked or failed), written when the receipt settles: [{ run, label, outcome }]
+  actions       Json?
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at")
 
   @@unique([botId, taskKey])
   @@index([personId, startedAt])
+  @@index([state, leaseUntil])
   @@map("task_receipts")
 }
 

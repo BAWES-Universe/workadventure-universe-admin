@@ -33,6 +33,7 @@ import * as creditSpend from '@/lib/credit-spend';
 import { holdCredit, settleHold } from '@/lib/credit-spend';
 import { ensureIssued } from '@/lib/credit-issue';
 import { personUsage } from '@/lib/meter-person';
+import { activityFor, closeReceipt, openReceipt, settleCheckingReceipts } from '@/lib/task-receipts';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 // What happens to a failed job's calls is the release's own rule (`giveBackModelCalls`); the part that needs it runs where it is
@@ -306,6 +307,46 @@ run('credit for computers, on the real books', () => {
       await settleModelCall(jobId, 'late', { costMicros: 10_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW).catch(() => undefined);
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
       if (givesBack) expect((await month(sara.id, new Date(NOW.getTime() + 10 * 60_000))).leftMicros).toBe(BASE + 1_000_000);
+    });
+
+    it('a failed job is given back exactly once however many things see it: its end, a late call, the sweep and the task receipt (which writes no money at all)', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      await call(token, 'b', 50_000, 20_000);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Weekly report', category: 'computer' }, NOW);
+      // The money rows that a give-back writes, read as plain data so two moments can be compared
+      const books = async () => ({
+        calls: await prisma.meterEvent.findMany({ where: { jobId, kind: 'model_call' }, orderBy: { eventId: 'asc' }, select: { eventId: true, personKey: true, personId: true, costMicros: true, detail: true } }),
+        holds: (await prisma.creditHold.findMany({ where: { jobKey: jobId }, orderBy: { id: 'asc' }, select: { id: true, refundedMicros: true, customerMicros: true, state: true } })).map((hold) => ({ ...hold, refundedMicros: Number(hold.refundedMicros), customerMicros: Number(hold.customerMicros) })),
+        refunds: await prisma.creditRefund.count({ where: { holdId: { in: (await prisma.creditHold.findMany({ where: { jobKey: jobId }, select: { id: true } })).map((hold) => hold.id) } } }),
+      });
+      // The job fails on our side: its calls and the credit they drew go back, once (the one give-back, `giveBackModelCalls`)
+      await failedOnOurSide(jobId, new Date(NOW.getTime() + 10 * 60_000));
+      const given = await books();
+      expect(given.calls).toHaveLength(2);
+      for (const event of given.calls) expect(event).toMatchObject({ personKey: 'unknown', personId: null, detail: expect.objectContaining({ givenBack: true, forPersonId: sara.id }) });
+      expect(given.holds.map((hold) => hold.refundedMicros).sort()).toEqual([20_000, 30_000]);
+      expect(given.refunds).toBe(2);
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      // The task receipt sees the same failed job, by every way it has (the bot server's close, its sweep, the activity list): it says "refunded" and writes nothing
+      // to the money rows, so it cannot give anything back a second time
+      await closeReceipt({ botId: sara.brickId, taskKey: jobId, personId: sara.id, state: 'done' }, new Date(NOW.getTime() + 11 * 60_000));
+      await settleCheckingReceipts(50, new Date(NOW.getTime() + 600 * 60_000));
+      const [line] = (await activityFor(sara.id)).filter((item) => item.title === 'Weekly report');
+      expect(line).toMatchObject({ state: 'refunded' });
+      expect(await books()).toEqual(given);
+      // The computer sweep (twice), a second end and a call that reports late see the same job: each finds nothing left to give back
+      await sweepComputers(new Date(NOW.getTime() + 30 * 60_000));
+      await sweepComputers(new Date(NOW.getTime() + 40 * 60_000));
+      await failedOnOurSide(jobId, new Date(NOW.getTime() + 41 * 60_000));
+      await settleModelCall(jobId, 'late', { costMicros: 10_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW).catch(() => undefined);
+      const after = await books();
+      expect(after.holds).toEqual(given.holds);
+      expect(after.refunds).toBe(2);
+      expect(after.calls.slice(0, 2)).toEqual(given.calls);
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
     });
 
     it('is found again by the sweep when its give-back failed once: the person is not left without the credit of a job that failed on our side', async () => {
