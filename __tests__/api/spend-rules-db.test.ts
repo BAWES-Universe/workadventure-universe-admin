@@ -1175,16 +1175,18 @@ run('rules said in chat and task receipts, in a real database', () => {
       }
 
       it.each([
-        ['rule', STOPPED_AT_RULE, 'rule'],
-        ['allowance', 'Stopped: your computer time ran out', 'month'],
-        ['person', 'Stopped by you', null],
-        ['pool', 'Stopped: our computers were busy', 'failed'],
-      ])('stopped by %s: the receipt says "%s", and the report kind is %s, never done', async (endedBy, words, kind) => {
+        // Our own capacity cut-off is given back (the #1024 rule), so its receipt is refunded and says so; the others are the person's and stay as they were
+        ['rule', 'done', STOPPED_AT_RULE, 'rule'],
+        ['allowance', 'done', 'Stopped: your computer time ran out', 'month'],
+        ['person', 'done', 'Stopped by you', null],
+        ['pool', 'refunded', 'Stopped: our computers were busy, and its time was given back', 'failed'],
+      ])('stopped by %s: the receipt is %s and says "%s", and the report kind is %s, never done', async (endedBy, state, words, kind) => {
         const { sara, jobId } = await stoppedBy(endedBy, `Stopped by ${endedBy}`);
         const item = (await activityFor(sara.id)).find((one) => one.title === `Stopped by ${endedBy}`);
-        expect(item).toMatchObject({ state: 'done', outcome: 'stopped', outcomeText: words });
+        expect(item).toMatchObject({ state, outcome: 'stopped', outcomeText: words });
         expect(item?.outcomeText).not.toBe(OUTCOME_WORDS.done);
-        expect((await prisma.taskReceipt.findFirstOrThrow({ where: { taskKey: jobId } })).outcome).not.toBe('done');
+        // A job we cut off ourselves is given back, so it ran nothing for the person: its stored word stays the bot server's, and what Activity and the report say is put right at read time (refunded, above). The others ran, so their stored outcome is already not done
+        if (endedBy !== 'pool') expect((await prisma.taskReceipt.findFirstOrThrow({ where: { taskKey: jobId } })).outcome).not.toBe('done');
         const reports = (await reportsToTell(50, LATER)).filter((report) => report.jobId === jobId);
         expect(reports.map((report) => report.kind)).toEqual(kind === null ? [] : [kind]);
         expect(reports.map((report) => report.kind)).not.toContain('done');
