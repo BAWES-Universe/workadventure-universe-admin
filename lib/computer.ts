@@ -1253,6 +1253,12 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // The job is over either way: the machine still rests and the line still moves, and the sweep gives the room back
     console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown');
   }
+  // A job that ended as a failure still waiting for its give-back to be decided may have been decided while its time was being written (the decision found no event to
+  // detach): it is read again NOW, after the event exists, and a given-back job's time is written against nobody (the sweep does the same for one this does not reach)
+  if (status === 'failed' && endedBy === null && job.startedAt) {
+    const current = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, endedBy: true } }).catch(() => null);
+    if (current && givenBackJob(current.status, current.endedBy)) await giveBackModelCalls(job.id, job.personId, now).catch((error) => console.error('[Computer] Could not give back a job’s time and model calls:', error instanceof Error ? error.message : 'unknown'));
+  }
   // A job that failed on our side takes nothing from the person's month, and neither do the model calls it made, nor the credit they drew (the sweep tries again if this fails)
   if (givenBackJob(status, endedBy)) {
     await giveBackModelCalls(job.id, job.personId, now).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
@@ -1471,6 +1477,8 @@ async function giveBackMissingModelCalls(batch: number, botId: string | undefine
         WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error') ${only}
           AND (
             EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
+            -- ...or the job's own time, written against the person by an end that overlapped the decision that gave the job back (the decision found no event to detach)
+            OR EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time' AND e."person_key" = 'person:' || j."person_id")
             -- ...or credit the job drew that has not gone back and has no refund obligation yet (an obligation, once written, is asked again by its own sweep with a
             -- growing wait: lib/computer-refunds)
             OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros"

@@ -116,6 +116,13 @@ export interface CallFacts {
  * Safe to say twice (a call already given back no longer matches), and for a job that ran fine or that the person stopped it is never called.
  */
 export async function giveBackModelCalls(jobId: string, personId: string, now: Date = new Date()): Promise<void> {
+  // The job's own computer time too: an end that wrote it against the person before the give-back was decided (a write that overlapped the decision, which then had no event to
+  // detach) is written against nobody here, so a given-back job never keeps a charge on the person for its time
+  await prisma.$executeRaw(Prisma.sql`
+    UPDATE meter_events
+    SET "person_key" = 'unknown', "person_id" = NULL,
+        "detail" = COALESCE("detail", '{}'::jsonb) || jsonb_build_object('givenBack', true, 'forPersonId', ${personId}::text)
+    WHERE "event_id" = ${`computer:${jobId}:time`} AND "person_key" = ${`person:${personId}`}`);
   await prisma.$executeRaw(Prisma.sql`
     UPDATE meter_events
     SET "person_key" = 'unknown', "person_id" = NULL,

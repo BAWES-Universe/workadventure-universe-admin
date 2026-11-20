@@ -9,6 +9,10 @@ import { randomUUID } from 'node:crypto';
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
+jest.mock('@/lib/computer-token', () => {
+  const actual = jest.requireActual('@/lib/computer-token');
+  return { ...actual, revokeJobTokens: jest.fn(actual.revokeJobTokens) };
+});
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn() }));
 
 import * as Sentry from '@sentry/nextjs';
@@ -22,7 +26,7 @@ import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { recordFaults, type FaultInput } from '@/lib/computer-faults';
 import { afterLateEvidence, decidePendingForPurge, decideRunnerFinish, lockPerson, resolveDecision, sweepGiveBackDecisions, sweepLateEvidence } from '@/lib/computer-giveback';
 import { correctRouteTogether, giveBackOverview, giveBackReadiness, routeIsPaused } from '@/lib/computer-fault-ops';
-import { mintJobToken } from '@/lib/computer-token';
+import { mintJobToken, revokeJobTokens } from '@/lib/computer-token';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -645,6 +649,37 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(onTimeDecision).toMatchObject({ state: 'given', basis: 'universe_fault' });
       const lateDecision = await decisionOf(late.id);
       expect({ state: lateDecision?.state, basis: lateDecision?.basis }).toEqual({ state: onTimeDecision?.state, basis: onTimeDecision?.basis });
+    });
+
+    it('a give-back decided while the end is writing the job’s time never leaves that time on the person: the end looks again after writing it, and the sweep detaches what it could not', async () => {
+      await limitsAre(LAUNCH);
+      const sara = await person('sara');
+      // (1) The race itself: the end committed with its decision pending; the effect is confirmed not done (the decision gives the job back, and no time event exists yet to detach)
+      // while the end is still revoking the job's keys, and the end then writes the time with the ending it read before
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, minutes(0));
+      if (!started.ok) throw new Error('no');
+      const jobId = started.job.id;
+      await planEffect(jobId, { key: 'race-1', kind: 'send' });
+      const revoke = revokeJobTokens as jest.Mock;
+      const real = revoke.getMockImplementation();
+      revoke.mockImplementationOnce(async (...args: unknown[]) => {
+        expect(await decisionOf(jobId)).toMatchObject({ state: 'pending' });
+        expect(await settleEffect(jobId, 'race-1', 'failed')).toBe(true);
+        expect(await decisionOf(jobId)).toMatchObject({ state: 'given' });
+        expect(await prisma.meterEvent.findUnique({ where: { eventId: `computer:${jobId}:time` } })).toBeNull();
+        return (real as (...a: unknown[]) => Promise<unknown>)(...args);
+      });
+      await finishJob(jobId, 'failed', minutes(5), null, 'ours', [1]);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'failed', endedBy: 'error' });
+      expect(await givenBack(jobId)).toBe(true);
+      // (2) The same with the end that could not look again (its read failed): the sweep finds the time still on the person and detaches it
+      const stuck = await job(sara, { ...ours, turns: [1] });
+      expect(await decisionOf(stuck.id)).toMatchObject({ state: 'given' });
+      await prisma.$executeRaw`UPDATE meter_events SET "person_key" = ${`person:${sara.id}`}, "person_id" = ${sara.id}, "detail" = "detail" - 'givenBack' - 'forPersonId' WHERE "event_id" = ${`computer:${stuck.id}:time`}`;
+      expect(await givenBack(stuck.id)).toBe(false);
+      await sweepComputers(minutes(60));
+      expect(await givenBack(stuck.id)).toBe(true);
+      expect((await timeOf(stuck.id)).detail).toMatchObject({ givenBack: true, forPersonId: sara.id });
     });
 
     it('never lets a late row take a give-back back, or turn a job the runner did not report as ours into a give-back', async () => {
