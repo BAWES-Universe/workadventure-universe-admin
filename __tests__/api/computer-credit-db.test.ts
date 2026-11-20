@@ -1125,6 +1125,27 @@ run('credit for computers, on the real books', () => {
       }
     });
 
+    it('a Gmail whose provider cost is known but whose charge the books have not acknowledged is "settlement pending" beside a returned computer, never "price not known yet"', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      const run = await prisma.instantRun.create({
+        data: { runKey: `k-${randomUUID()}`, botId: sara.brickId, personId: sara.id, taskKey: jobId, toolSlug: 'GMAIL_SEND_EMAIL', toolkit: 'gmail', argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v', topMicros: BigInt(10_000), holdMicros: BigInt(10_000), state: 'succeeded', customerState: 'held', providerUserId: `u-${randomUUID().slice(0, 6)}` } as never,
+      });
+      // The provider's cost to us is known (7,000); the person's charge is not in the books yet
+      await prisma.meterEvent.create({
+        data: { eventId: `instant:${run.id}`, kind: 'app_use', pool: 'chat', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(7_000), basis: 'measured', detail: { instant: true, taskKey: jobId, runId: run.id, app: 'gmail' } } as never,
+      });
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Mail while settling', category: 'computer' }, NOW);
+      await failedOnOurSide(jobId, at(10));
+      await closeReceipt({ botId: sara.brickId, taskKey: jobId, personId: sara.id, state: 'done' }, at(11));
+      const [item] = await itemFor(sara.id, 'Mail while settling');
+      expect(item.lines.some((line) => line.note === 'Settlement pending')).toBe(true);
+      expect(item.outcomeNote).toContain('Gmail worked. Its charge is settlement pending.');
+      expect(item.outcomeNote).not.toContain('price is not known');
+    });
+
     it('observation 3: the wallet cannot post the refund: "$0.05 refund pending" until it does; then the SAME receipt says refunded and the credit came back once', async () => {
       const sara = await running();
       const { jobId, token } = await job(sara);

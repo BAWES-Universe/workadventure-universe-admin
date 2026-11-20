@@ -159,6 +159,16 @@ export function takenForRun(events: readonly LineEvent[], runId: string): number
   return found ? instantTaken(found) : null;
 }
 
+/**
+ * Whether one Instant run is a charge the credit books have not acknowledged yet: the provider's cost to us is known, the person's charge is not, and the run is not one whose hold is
+ * being given back. The same reading `receiptLines` makes for its "Settlement pending" line, so a note never calls a charge that may already have been debited "a price nobody knows".
+ */
+export function settlingForRun(events: readonly LineEvent[], runId: string): boolean {
+  const found = events.find((event) => event.kind === 'app_use' && event.route === 'instant' && isRecord(event.detail) && event.detail.runId === runId);
+  if (!found || instantTaken(found) !== null || !isRecord(found.detail) || found.detail.instant !== true || found.costMicros === null) return false;
+  return found.detail.unconfirmed !== true && found.detail.state !== 'failed';
+}
+
 /** The name of an App an Instant use was for, when the event carries it. Only a short name; never anything a person wrote. */
 function appName(detail: unknown): string | null {
   const app = isRecord(detail) && typeof detail.app === 'string' ? detail.app.trim() : '';

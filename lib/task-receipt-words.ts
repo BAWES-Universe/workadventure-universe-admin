@@ -102,7 +102,7 @@ export interface NoteFacts {
   /** Why a charge is only provisional: Orbit is still deciding whether the computer cost is given back. */
   deciding?: 'effect' | 'limits';
   /** What each action that worked took, for a task with a computer (the receipt's lines say it for any other): null while its price is not known yet. */
-  appCharges?: readonly { label: string; micros: number | null }[];
+  appCharges?: readonly { label: string; micros: number | null; /** The provider's cost is known and the person's charge is not acknowledged yet: said as settlement pending, never as a price nobody knows. */ settling?: boolean }[];
   /** What stopped a job that was stopped before it finished (the job's `ended_by`: rule, allowance, person, pool). Said beside the steps of a partly done task, so the stop is never lost behind "Partly done". */
   stoppedBy?: string | null;
   /** What the person pays for the whole task once it is settled (never said while a refund is pending or a price is not known). */
@@ -144,7 +144,7 @@ export function outcomeNote(outcome: ActivityOutcome, actions: readonly { outcom
   }
   // What each App that worked took (for a task with a computer; any other task has its lines)
   const charged: string[] = hasComputer
-    ? (facts.appCharges ?? []).map((charge) => (charge.micros === null ? `${appLabel(charge.label)} price not known yet.` : `${appLabel(charge.label)} charged ${dollars(charge.micros)}.`))
+    ? (facts.appCharges ?? []).map((charge) => (charge.micros === null ? (charge.settling ? `${appLabel(charge.label)}: ${SETTLEMENT_PENDING.toLowerCase()}.` : `${appLabel(charge.label)} price not known yet.`) : `${appLabel(charge.label)} charged ${dollars(charge.micros)}.`))
     : [];
   // What was taken for the actions that did not work
   const taken: string[] = [];
@@ -168,7 +168,7 @@ export function outcomeNote(outcome: ActivityOutcome, actions: readonly { outcom
       const lead = pending
         ? `The computer part didn’t finish because of a problem on our side. Its time (${dollars(facts.refundPendingMicros ?? 0)}) is refund pending.`
         : `The computer part didn’t finish because of a problem on our side, and its time${facts.returnedMicros !== undefined && facts.returnedMicros > 0 ? ` (${dollars(facts.returnedMicros)})` : ''} was given back.`;
-      const apps = (facts.appCharges ?? []).map((charge) => (charge.micros === null ? `${appLabel(charge.label)} worked. Its price is not known yet.` : `${appLabel(charge.label)} worked and was charged ${dollars(charge.micros)}.`));
+      const apps = (facts.appCharges ?? []).map((charge) => (charge.micros === null ? (charge.settling ? `${appLabel(charge.label)} worked. Its charge is ${SETTLEMENT_PENDING.toLowerCase()}.` : `${appLabel(charge.label)} worked. Its price is not known yet.`) : `${appLabel(charge.label)} worked and was charged ${dollars(charge.micros)}.`));
       return [lead, ...apps, ...taken, ...net].join(' ');
     }
     const parts = [`${capital(countWord(worked))} ${worked === 1 ? 'step' : 'steps'} worked`];

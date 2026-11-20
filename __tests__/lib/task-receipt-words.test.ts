@@ -85,6 +85,10 @@ describe('the words for how a task came to end (mock M2)', () => {
       );
       // A price not known yet is not a charge of nothing
       expect(outcomeNote('partial', [gmail], { job: 'returned', returnedMicros: 30_000, appCharges: [{ label: 'gmail', micros: null }] })).toContain('Gmail worked. Its price is not known yet.');
+      // A known provider cost whose charge the books have not acknowledged is settlement pending, a returned computer included, never a price nobody knows
+      expect(outcomeNote('partial', [gmail], { job: 'returned', returnedMicros: 30_000, appCharges: [{ label: 'gmail', micros: null, settling: true }] })).toContain('Gmail worked. Its charge is settlement pending.');
+      expect(outcomeNote('partial', [gmail], { job: 'returned', returnedMicros: 30_000, appCharges: [{ label: 'gmail', micros: null, settling: true }] })).not.toContain('price is not known');
+      expect(outcomeNote('failed', [], { job: 'failed', computerMicros: 30_000, appCharges: [{ label: 'gmail', micros: null, settling: true }] })).toBe('It didn’t finish. Computer time used $0.03. Gmail: settlement pending.');
     });
 
     it('stopped, refund pending and deciding each say what is true now', () => {

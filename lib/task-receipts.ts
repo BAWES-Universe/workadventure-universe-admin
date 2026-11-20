@@ -19,6 +19,7 @@ import {
   RUN_OPEN_STATES,
   spentOf,
   stateOfOutcome,
+  settlingForRun,
   takenForRun,
   withComputerRefund,
   type ActionOutcome,
@@ -626,7 +627,7 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
   const computerMicros = header.job === null || header.job === 'returned' ? undefined : (computerTakenOf(events) ?? null);
   // What the person pays net of anything given back, said once it is settled: never while a refund is pending (their credit is not back yet)
   const spent = header.refund.pendingMicros > 0 ? null : spentOf(header.state, header.chargedMicros, lines);
-  const appCharges = header.job === null ? [] : header.actions.filter((action) => action.outcome === 'worked' && !header.letGoRuns.has(action.run)).map((action) => ({ label: action.label, micros: takenForRun(events, action.run) }));
+  const appCharges = header.job === null ? [] : header.actions.filter((action) => action.outcome === 'worked' && !header.letGoRuns.has(action.run)).map((action) => ({ label: action.label, micros: takenForRun(events, action.run), ...(settlingForRun(events, action.run) ? { settling: true } : {}) }));
   const facts: NoteFacts = {
     ...(header.job === null ? {} : { job: header.job, ...(computerMicros === undefined ? {} : { computerMicros }) }),
     holdPending,
