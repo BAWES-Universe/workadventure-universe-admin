@@ -392,10 +392,15 @@ export async function sweepLateEvidence(now: Date = new Date(), batch = 50): Pro
     const due = await prisma.$queryRaw<Array<{ job_id: string; mark: Date }>>(Prisma.sql`
       SELECT d."job_id", clock_timestamp() AS mark FROM "computer_give_back_decisions" d
       WHERE d."cause_hint" = 'ours' AND (d."state" = 'refused' OR (d."state" = 'given' AND d."basis" = 'goodwill'))
-        AND d."updated_at" > ${new Date(now.getTime() - LATE_ROW_HORIZON_DAYS * 24 * 60 * MINUTE)}
         AND (
+          -- A look that threw is retried at its own time, however old the decision is: it is never dropped
           (d."last_error" LIKE 'late_look%' AND d."next_attempt_at" <= ${now})
-          OR (COALESCE(d."last_error", '') NOT LIKE 'late_look%' AND EXISTS (SELECT 1 FROM "computer_job_faults" f WHERE f."job_id" = d."job_id" AND f."created_at" > d."updated_at" - ${Prisma.raw(`interval '${LATE_ROW_MARGIN_MINUTES} minutes'`)}))
+          -- New evidence: a fault row that arrived within the horizon and after the decision was last looked at. The horizon is the NEW row's age, not the decision's: a row
+          -- that arrives for an old decision (an uncertain row confirmed long after) is evidence all the same
+          OR (COALESCE(d."last_error", '') NOT LIKE 'late_look%' AND EXISTS (
+            SELECT 1 FROM "computer_job_faults" f WHERE f."job_id" = d."job_id"
+              AND f."created_at" > ${new Date(now.getTime() - LATE_ROW_HORIZON_DAYS * 24 * 60 * MINUTE)}
+              AND f."created_at" > d."updated_at" - ${Prisma.raw(`interval '${LATE_ROW_MARGIN_MINUTES} minutes'`)}))
         )
       ORDER BY d."updated_at" ASC LIMIT ${batch}`);
     for (const one of due) {

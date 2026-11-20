@@ -780,6 +780,54 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       }
     });
 
+    describe('late evidence is judged by the age of the NEW row, not of the decision', () => {
+      const DAY = 24 * 3_600_000;
+      /** A refused decision (the bound is spent) for a job whose turn 1 has the given fault row, all of it long ago. */
+      const oldRefused = async (rows: FaultInput[]) => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const sara = await person('sara');
+        await job(sara, ours);
+        const refused = await job(sara, { ...ours, turns: [1] }, withFaults(sara, rows));
+        expect(await decisionOf(refused.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+        const long = new Date(Date.now() - 40 * DAY);
+        await prisma.computerGiveBackDecision.update({ where: { jobId: refused.id }, data: { updatedAt: long } });
+        await prisma.computerJobFault.updateMany({ where: { jobId: refused.id }, data: { createdAt: long } });
+        return { sara, refused };
+      };
+
+      it('a fault row that arrives for a decision older than 30 days is looked at: the horizon is the new row’s age', async () => {
+        const { sara, refused } = await oldRefused([fault(1, 'provider_5xx')]);
+        // Nothing new: the old decision is not looked at
+        expect((await sweepLateEvidence(new Date())).looked).toBe(0);
+        await recordFaults(sara.brickId, refused.id, [fault(1, 'provider_key_ours')]);
+        expect((await sweepLateEvidence(new Date())).looked).toBe(1);
+        expect(await decisionOf(refused.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+        expect(await givenBack(refused.id)).toBe(true);
+      });
+
+      it('a confirmation of an old uncertain row is new evidence: settling it sets when Orbit learned it, so the sweep sees it', async () => {
+        const row = fault(1, 'timeout_after_output');
+        const { sara, refused } = await oldRefused([row]);
+        expect((await sweepLateEvidence(new Date())).looked).toBe(0);
+        // The same call, now known to be ours
+        expect(await recordFaults(sara.brickId, refused.id, [{ ...row, kind: 'fault', reason: 'provider_key_ours' }])).toEqual({ stored: 1, conflicts: 0 });
+        expect((await prisma.computerJobFault.findFirstOrThrow({ where: { jobId: refused.id } })).createdAt.getTime()).toBeGreaterThan(Date.now() - 60_000);
+        expect((await sweepLateEvidence(new Date())).looked).toBe(1);
+        expect(await decisionOf(refused.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+      });
+
+      it('a row older than 30 days is no new evidence, and a look that threw is retried however old the decision is', async () => {
+        const { refused } = await oldRefused([fault(1, 'provider_5xx')]);
+        await prisma.computerJobFault.create({ data: { jobId: refused.id, callId: 'ancient', turn: 1, kind: 'fault', reason: 'provider_key_ours', source: 'universe-ai', route: null, at: new Date(), createdAt: new Date(Date.now() - 35 * DAY) } });
+        await prisma.computerGiveBackDecision.update({ where: { jobId: refused.id }, data: { updatedAt: new Date(Date.now() - 50 * DAY) } });
+        expect((await sweepLateEvidence(new Date())).looked).toBe(0);
+        // A look that threw is marked for its retry time: that alone brings it back, however old it is
+        await prisma.computerGiveBackDecision.update({ where: { jobId: refused.id }, data: { lastError: `late_look:${Date.now()}`, nextAttemptAt: new Date(Date.now() - 1000), attempts: 1, updatedAt: new Date(Date.now() - 50 * DAY) } });
+        expect((await sweepLateEvidence(new Date())).looked).toBe(1);
+        expect(await decisionOf(refused.id)).toMatchObject({ state: 'given', basis: 'universe_fault', lastError: null, nextAttemptAt: null });
+      });
+    });
+
     it('late evidence gives the same verdict as evidence on time: a confirmed fault of ours is given back even where the work was delivered, on the sweep as on the first look (both paths agree)', async () => {
       await limitsAre(LAUNCH);
       const sara = await person('sara');

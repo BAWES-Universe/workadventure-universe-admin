@@ -90,7 +90,8 @@ export async function recordFaults(botId: string, jobId: string, rows: FaultInpu
         const settled = await prisma.computerJobFault.updateMany({
           // Only the SAME run's and turn's uncertain row is settled by this one: another run's confirmed fault under the same call id never upgrades it (that falls to the conflict check)
           where: { jobId, callId: data.callId, kind: 'uncertain', run: data.run, turn: data.turn },
-          data: { kind: data.kind, reason: data.reason, source: data.source, route: data.route, providerStatus: data.providerStatus, at: data.at },
+          // The row is new evidence from now on: `createdAt` is when Orbit learned it (the late-evidence sweep reads nothing else of it), so a confirmation of an old uncertain row is seen
+          data: { kind: data.kind, reason: data.reason, source: data.source, route: data.route, providerStatus: data.providerStatus, at: data.at, createdAt: new Date() },
         });
         stored += settled.count;
         if (settled.count > 0) continue;
