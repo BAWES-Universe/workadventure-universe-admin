@@ -668,6 +668,67 @@ run('apps a person connects once, in a real database', () => {
     expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).lastWorkedAt).toEqual(second);
   });
 
+  it('a refusal seen within a minute of a good call is never dropped: right after a good call, between good calls, late after a later good call, and on every call', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    const row = () => prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } });
+    const reset = () => prisma.appConnection.update({ where: { id: connection.id }, data: { signInLostAt: null, signInLostStatus: null, lastWorkedAt: null, noAnswerAt: null, reconnectedAt: null } });
+    const t0 = Date.now() - 50_000;
+    const at = (seconds: number) => new Date(t0 + seconds * 1000);
+
+    // 1. A refusal just after a good call (a few seconds, well inside the minute) is a loss at once: it is not held back for a minute
+    await reportKeyWorked(connection.id, 1, at(0));
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: at(5) })).toEqual({ changed: true });
+    expect(await row()).toMatchObject({ signInLostAt: at(5), signInLostStatus: 401 });
+
+    // 2. A key failing on every call: the first refusal marks it, the next ones change nothing and the mark stays on the first
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: at(6) })).toEqual({ changed: false });
+    expect((await row()).signInLostAt).toEqual(at(5));
+
+    // 3. A good call after that clears it at once, however close
+    await reportKeyWorked(connection.id, 1, at(8));
+    expect(await row()).toMatchObject({ signInLostAt: null, lastWorkedAt: at(8) });
+
+    // 4. A refusal between two good calls that is reported after the second is old news, though it was inside the minute of both
+    await reset();
+    await reportKeyWorked(connection.id, 1, at(10));
+    await reportKeyWorked(connection.id, 1, at(20));
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: at(15) })).toEqual({ changed: false });
+    expect((await row()).signInLostAt).toBeNull();
+
+    // 5. The same refusal reported BEFORE the second good call is a loss, and the second good call clears it
+    await reset();
+    await reportKeyWorked(connection.id, 1, at(10));
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: at(15) })).toEqual({ changed: true });
+    await reportKeyWorked(connection.id, 1, at(20));
+    expect((await row()).signInLostAt).toBeNull();
+
+    // 6. A late refusal of a call made before a good one that is already written down (many calls ago) is old news
+    await reportKeyWorked(connection.id, 1, at(40));
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 403, at: at(12) })).toEqual({ changed: false });
+    expect((await row()).signInLostAt).toBeNull();
+
+    // 7. A key that refuses now and then between good calls: each refusal is a loss until the next good call, and none stays after a good call that follows it
+    await reset();
+    await reportKeyWorked(connection.id, 1, at(0));
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: at(2) })).toEqual({ changed: true });
+    await reportKeyWorked(connection.id, 1, at(3));
+    expect((await row()).signInLostAt).toBeNull();
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: at(4) })).toEqual({ changed: true });
+    await reportKeyWorked(connection.id, 1, at(5));
+    expect((await row()).signInLostAt).toBeNull();
+
+    // 8. Two no-answers behave the same: the first is kept, a good call after it clears it, one before a later good call is old news
+    await reset();
+    await reportKeyWorked(connection.id, 1, at(0));
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'no-answer', at: at(5) })).toEqual({ changed: true });
+    expect((await row()).noAnswerAt).toEqual(at(5));
+    await reportKeyWorked(connection.id, 1, at(6));
+    expect((await row()).noAnswerAt).toBeNull();
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'no-answer', at: at(5.5) })).toEqual({ changed: false });
+    expect((await row()).noAnswerAt).toBeNull();
+  });
+
   it('a refusal saved between the read of a good call and its write is cleared by it, not left standing beside the newer success', async () => {
     const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
     await grantToBrick(sara, connection.id, saraBrick);
