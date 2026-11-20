@@ -2093,6 +2093,22 @@ run('payments for pages, in a real database', () => {
           expect(via.body).toMatchObject({ status: 'checking', longWait: true, orderId, via: 'receipt' });
         });
 
+        it('an order that could not be confirmed is still being checked for the order poll and Check payment too, never "cannot confirm", whether or not the service is asked this time; one the service settled as a payment for something else stays final', async () => {
+          const { artifactId, code, intentId, orderId } = await longWaitOrder();
+          // Looked at a moment ago, so this ask makes no look of its own and answers from the order as it stands
+          await prisma.appPageOrder.update({ where: { id: orderId }, data: { status: 'cant_confirm', closedAt: null, checkedAt: new Date() } });
+          const sent = gateway({ record: (id) => paidRecord(id, { status: 'INITIATED' }) });
+          expect(await orderForArtifact(orderId, artifactId)).toMatchObject({ status: 'checking', longWait: true, orderId, checkoutUrl: null });
+          const check = await ask(artifactId, { check: true, intentId, recoveryCode: code }, '198.51.100.131');
+          expect(check.body).toMatchObject({ status: 'checking', longWait: true, orderId, checkoutUrl: null });
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(0);
+          // Reconciled (the service named a payment for something else): final, and said as it is
+          await prisma.appPageOrder.update({ where: { id: orderId }, data: { status: 'cant_confirm', reconciled: true, checkedAt: new Date() } });
+          const final = await orderForArtifact(orderId, artifactId);
+          expect(final).toMatchObject({ status: 'cant_confirm' });
+          expect(final?.longWait).toBeUndefined();
+        });
+
         it('shows the ops numbers: orders never checked, scheduled looks that are overdue, and the time since the service was last read', async () => {
           const { orderId } = await longWaitOrder();
           // Never asked about by a sweep (no schedule) and never once read

@@ -688,14 +688,16 @@ const nothingMoreToAsk = (view: OrderView): OrderView => {
 export const checksHaveEnded = (view: OrderView): boolean => over.has(view);
 
 /**
- * What a returning buyer (Check payment, the order poll) is told about an order the service has not had the last word about: a closed one still says
+ * What a returning buyer (Check payment, the order poll) is told about an order the service has not had the last word about: a closed one, or one that could not be confirmed, still says
  * "checking" (it is, by its own schedule, for as long as it takes), never "not paid", because a payment made at the service after the order closed is real money. Only the
  * service's own final failed state (or a payment for something else) ends it, and that is read after the look just made.
  */
 async function stillUnresolved(view: OrderView | null): Promise<OrderView | null> {
-  if (!view || view.status !== 'not_paid') return view;
+  if (!view || (view.status !== 'not_paid' && view.status !== 'cant_confirm')) return view;
   const order = await prisma.appPageOrder.findUnique({ where: { id: view.orderId }, select: { status: true, reconciled: true, providerRef: true } });
-  if (!order || order.status !== 'not_paid' || order.reconciled || !order.providerRef) return view;
+  // Both words an order the service has not had the last word about can wear: closed (not paid), or one that could not be confirmed (the app was gone, a key could not be read).
+  // A cannot-confirm the service settled (reconciled: a payment for something else) is final and stays as it is
+  if (!order || (order.status !== 'not_paid' && order.status !== 'cant_confirm') || order.reconciled || !order.providerRef) return view;
   const said: OrderView = { ...view, status: 'checking', checkoutUrl: null, longWait: true, pollAfterMs: Math.max(view.pollAfterMs, 15_000) };
   return waiting.has(view) ? later(said) : said;
 }
