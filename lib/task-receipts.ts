@@ -817,7 +817,10 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
     // A receipt already stored as refunded does not hold either while something is still on the person: until it is given back it reads as done
     const key = `${header.botId}:${header.taskKey}`;
     const failed = failedJobs.has(key);
-    const state: ReceiptState = failed ? (!mayHaveTaken ? 'refunded' : header.state === 'refunded' ? 'done' : header.state) : header.state;
+    // An App that WORKED (verified by its own run, and not one let go unconfirmed) is work the person has whatever it took: a Gmail that went out for nothing (a zero charge, or a hold the books gave back)
+    // keeps the task partly done beside a computer that was given back. Verified work is looked at on its own, apart from what is still payable, before a task is called refunded
+    const verifiedWork = header.actions.some((action) => action.outcome === 'worked' && !letGo.has(action.run));
+    const state: ReceiptState = failed ? (!mayHaveTaken && !verifiedWork ? 'refunded' : header.state === 'refunded' ? 'done' : header.state) : header.state;
     const jobRow = jobRows.get(key) ?? null;
     // A job still going has not come out yet; one that never started did nothing
     const over = jobRow !== null && isOver(jobRow.status) && jobRow.startedAt !== null;

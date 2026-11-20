@@ -1146,6 +1146,34 @@ run('credit for computers, on the real books', () => {
       expect(item.outcomeNote).not.toContain('price is not known');
     });
 
+    it('a Gmail that worked and took nothing (a zero charge, or its hold released) beside a computer given back keeps the task "partly done"; with no verified work the task is refunded as before', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      // A run that worked and was charged nothing
+      const run = await gmailWorked(sara, jobId, 0);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Free mail with report', category: 'computer' }, NOW);
+      await failedOnOurSide(jobId, at(10));
+      await closeReceipt({ botId: sara.brickId, taskKey: jobId, personId: sara.id, state: 'done' }, at(11));
+      await settleCheckingReceipts(50, at(600));
+      const [item] = await itemFor(sara.id, 'Free mail with report');
+      expect(await prisma.instantRun.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({ state: 'succeeded', customerMicros: BigInt(0) });
+      expect(item).toMatchObject({ state: 'done', outcome: 'partial', returnedMicros: 30_000 });
+      expect(item.outcomeText).not.toBe(OUTCOME_WORDS.refunded);
+      expect(item.actions).toMatchObject([{ label: 'gmail', outcome: 'worked' }]);
+      // No verified work: a computer given back with nothing else is refunded
+      const other = await running('tom');
+      const second = await job(other);
+      await gift([other.id], 'computers', 1_000_000);
+      await call(second.token, 'a', 50_000, 30_000);
+      await openReceipt({ botId: other.brickId, personId: other.id, taskKey: second.jobId, title: 'Computer only', category: 'computer' }, NOW);
+      await failedOnOurSide(second.jobId, at(10));
+      await closeReceipt({ botId: other.brickId, taskKey: second.jobId, personId: other.id, state: 'done' }, at(11));
+      await settleCheckingReceipts(50, at(600));
+      expect((await itemFor(other.id, 'Computer only'))[0]).toMatchObject({ state: 'refunded', outcome: 'refunded' });
+    });
+
     it('observation 3: the wallet cannot post the refund: "$0.05 refund pending" until it does; then the SAME receipt says refunded and the credit came back once', async () => {
       const sara = await running();
       const { jobId, token } = await job(sara);
