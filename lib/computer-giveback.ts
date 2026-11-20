@@ -124,7 +124,9 @@ export async function decideRunnerFinish(
     const last = await lastFaultTurn(tx, job.id, options.run);
     judged = last === null ? [] : [last];
   }
-  const rows = lenient && judged && judged.length === 0 ? [] : await readFaultRows(tx, job.id, judged, options.run);
+  // A runner that named no turn, with no numbered row to choose one from, still has the rows that apply to the whole job (a fault of ours before any turn: the relay down, a key that could not be read):
+  // those are read, and never an empty list of turns, which would read the numbered rows of every run
+  const rows = await readFaultRows(tx, job.id, judged, options.run, { turnlessOnly: lenient && !!judged && judged.length === 0 });
   const judgedTurns = lenient && !(turns && turns.length > 0) ? [...(judged ?? [])] : undefined;
   const ours = rows.find((row) => row.cls === 'ours');
   // Nothing was charged for a job that never started: there is nothing to hold back
@@ -380,12 +382,13 @@ export async function afterLateEvidence(jobId: string, now: Date = new Date()): 
     // a row yet, the last one now
     const lenient = decision.causeHint !== 'ours';
     let turns: readonly number[] = decision.judgedTurns;
+    let turnlessOnly = false;
     if (lenient && turns.length === 0) {
       const last = await lastFaultTurn(tx, jobId, decision.judgedRun);
-      if (last === null) return false;
-      turns = [last];
+      if (last === null) turnlessOnly = true;
+      else turns = [last];
     }
-    const rows = await readFaultRows(tx, jobId, turns, decision.judgedRun);
+    const rows = await readFaultRows(tx, jobId, turns, decision.judgedRun, { turnlessOnly });
     const ours = rows.find((row) => row.cls === 'ours');
     if (!ours) return false;
     await tx.computerGiveBackDecision.update({ where: { jobId }, data: { state: 'given', basis: 'universe_fault', reason: ours.reason, route: ours.route, nextAttemptAt: null } });

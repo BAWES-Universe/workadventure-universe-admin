@@ -1694,6 +1694,38 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await decisionOf(turnless.id)).toMatchObject({ state: 'given', basis: 'incident' });
     });
 
+    it('a runner that named no turn, with no numbered row to choose one from, is judged on the confirmed rows that apply to the whole job (its run’s and no run’s), never on the numbered rows of another run', async () => {
+      await limitsAre(LAUNCH);
+      const sara = await person('sara');
+      // Our relay was down before any turn: a turnless confirmed fault of this run
+      const ownRun = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' }, withFaults(sara, [fault(null, 'relay_down', { run: 'runb' })]));
+      expect(await decisionOf(ownRun.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_down' });
+      expect(await givenBack(ownRun.id)).toBe(true);
+      // The same naming no run at all (it applies to the whole job)
+      const wholeJob = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' }, withFaults(sara, [fault(null, 'relay_down', { run: null })]));
+      expect(await decisionOf(wholeJob.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+      // A numbered fault of ours of ANOTHER run, and a turnless one of another run, are not what this run's ending rests on: the agent ended on its own
+      const otherRun = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' }, withFaults(sara, [fault(3, 'relay_down', { run: 'runa' }), fault(null, 'relay_down', { run: 'runa' })]));
+      expect(await decisionOf(otherRun.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      expect(await givenBack(otherRun.id)).toBe(false);
+    });
+
+    it('a confirmed turnless fault of ours that arrives late gives back a job the agent was said to have ended itself, by the same reading; a numbered one of another run does not', async () => {
+      await limitsAre(LAUNCH);
+      const sara = await person('sara');
+      const late = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' });
+      const stranger = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' });
+      expect(await decisionOf(late.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      await recordFaults(sara.brickId, stranger.id, [fault(5, 'relay_down', { run: 'runa' })]);
+      await afterLateEvidence(stranger.id);
+      expect(await decisionOf(stranger.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      await recordFaults(sara.brickId, late.id, [fault(null, 'relay_down', { run: 'runb' })]);
+      await afterLateEvidence(late.id);
+      expect(await decisionOf(late.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_down' });
+      expect(await givenBack(late.id)).toBe(true);
+      expect(await givenBack(stranger.id)).toBe(false);
+    });
+
     it('the legacy verdict the runner called ours with no turns named keeps reading every row of the job: a provider row of any run on the route qualifies', async () => {
       await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
       const sara = await person('sara');

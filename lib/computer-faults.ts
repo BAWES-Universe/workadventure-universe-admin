@@ -137,12 +137,15 @@ type Db = Pick<Prisma.TransactionClient, 'computerJobFault'>;
  * names no run or names that very run: another named run's row never does. Answered calls are not read at all (they say nothing about a failure, and they must
  * never fill a page ahead of a fault), and every matching row is read, a page at a time, so what the verdict rests on never depends on a limit.
  */
-export async function readFaultRows(db: Db, jobId: string, turns: readonly number[] | null | undefined, run: string | null | undefined = null): Promise<FaultRow[]> {
+export async function readFaultRows(db: Db, jobId: string, turns: readonly number[] | null | undefined, run: string | null | undefined = null, options: { turnlessOnly?: boolean } = {}): Promise<FaultRow[]> {
   const named = run ?? null;
+  const turnless: Prisma.ComputerJobFaultWhereInput = named ? { turn: null, OR: [{ run: null }, { run: named }] } : { turn: null, run: null };
+  // `turnlessOnly`: a ruling that judged no turn (there is no numbered row to judge) rests on the rows that apply to the whole job, never on the numbered rows of other runs, which an
+  // empty list of turns would also read
   const where: Prisma.ComputerJobFaultWhereInput = {
     jobId,
     kind: { not: 'answered' },
-    ...(turns && turns.length > 0 ? { OR: [{ turn: { in: [...turns] }, run: named }, (named ? { turn: null, OR: [{ run: null }, { run: named }] } : { turn: null, run: null })] } : {}),
+    ...(options.turnlessOnly ? turnless : turns && turns.length > 0 ? { OR: [{ turn: { in: [...turns] }, run: named }, turnless] } : {}),
   };
   const out: FaultRow[] = [];
   let cursor: string | undefined;
