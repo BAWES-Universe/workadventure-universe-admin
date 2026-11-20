@@ -28,6 +28,7 @@ import { GET as getPaidBy } from '@/app/api/bots/[id]/paid-by/route';
 import { POST as postJob } from '@/app/api/bots/[id]/computer-jobs/route';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, renewJob, startJob, sweepComputers } from '@/lib/computer';
+import { recordFaults } from '@/lib/computer-faults';
 import { mintJobToken } from '@/lib/computer-token';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { createInstantFunds } from '@/lib/funding/instant-funds';
@@ -1288,7 +1289,9 @@ run('rules said in chat and task receipts, in a real database', () => {
       const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
       if (!started.ok) throw new Error(`not started: ${started.reason}`);
       record.mockRejectedValue(new Error('books down'));
-      await finishJob(started.job.id, 'failed', minutes(5), 'The machine broke', 'ours');
+      // "Ours" is judged from what the relay recorded (a confirmed fault of ours), not from the runner's word alone
+      await recordFaults(sara.brickId, started.job.id, [{ turn: 1, callId: 'c-ours-1', kind: 'fault', reason: 'relay_down', source: 'universe-ai', route: 'universe-ai/model-a', at: minutes(4) }]);
+      await finishJob(started.job.id, 'failed', minutes(5), 'The machine broke', 'ours', [1]);
       expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
       expect(await ask(sara, 1_000_000, minutes(6))).toEqual({ ok: true });
     });

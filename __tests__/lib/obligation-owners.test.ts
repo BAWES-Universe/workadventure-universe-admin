@@ -46,7 +46,7 @@ const OWNERS: Array<[string, string, string[], string]> = [
   ['meterGrant', 'meter_grants', ['lib/meter-grants.ts'], 'extra usage granted to someone (a unique key per grant)'],
   ['appUse', 'app_uses', ['lib/app-uses.ts'], 'an App use counted against a connection (a lock per connection and universe)'],
   // A job has several column families, each owned by one file (state and ending, model calls and claims, the report to the person, visits)
-  ['computerJob', 'computer_jobs', ['lib/computer-broker.ts', 'lib/computer-report.ts', 'lib/computer-visits.ts', 'lib/computer.ts'], 'a computer job (split by what is written: ending and time in computer.ts, calls and claims in computer-broker.ts, the report in computer-report.ts, visits in computer-visits.ts)'],
+  ['computerJob', 'computer_jobs', ['lib/computer-broker.ts', 'lib/computer-giveback.ts', 'lib/computer-report.ts', 'lib/computer-visits.ts', 'lib/computer.ts'], 'a computer job (split by what is written: ending and time in computer.ts, calls and claims in computer-broker.ts, the give-back decision’s mark on the job in computer-giveback.ts, the report in computer-report.ts, visits in computer-visits.ts)'],
 ];
 
 describe('who may write each obligation’s record', () => {
@@ -74,7 +74,8 @@ describe('one writer for what many paths lead to', () => {
   it('a computer job’s credit is given back by ONE function, whoever notices the end (the end, a late call, the sweep)', () => {
     expect(callers('giveBackComputerCredit')).toEqual(['lib/computer-calls.ts']);
     expect(countIn('lib/computer-calls.ts', /giveBackComputerCredit\(/g)).toBe(1);
-    expect(callers('giveBackModelCalls')).toEqual(['lib/computer-calls.ts', 'lib/computer.ts']);
+    // The calls of a job are given back by the one function in computer-calls.ts (safe to ask twice); the end, the sweep and the give-back decision all ask it
+    expect(callers('giveBackModelCalls')).toEqual(['lib/computer-calls.ts', 'lib/computer-giveback.ts', 'lib/computer.ts']);
   });
 
   it('a stale or repeated receipt close is settled by ONE function', () => {
