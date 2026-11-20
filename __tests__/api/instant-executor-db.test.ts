@@ -1389,6 +1389,9 @@ run('the bounded Instant executor, in a real database', () => {
       };
       const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
       let slow: Promise<unknown> | null = null;
+      // The slow pass's read is held until `open` is called; declared here so the cleanup can always release it
+      let open: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (open = resolve));
       try {
         await prisma.$executeRawUnsafe(`ALTER TABLE meter_events ADD CONSTRAINT instant_event_refused CHECK (event_id NOT LIKE 'instant:%') NOT VALID`);
         for (let n = 0; n < 6; n += 1) {
@@ -1399,15 +1402,23 @@ run('the bounded Instant executor, in a real database', () => {
         // All six are missing their event and none can be written (so every pass stops where it read to, and none of them is ever done). The
         // repair goes through runs in the order of their ids
         ids.sort();
-        // The slow pass reads the place (there is none) and is held there, two runs to look at
-        let open!: () => void;
-        const gate = new Promise<void>((resolve) => (open = resolve));
+        // The slow pass reads the place (there is none) and is held there, two runs to look at. The signal comes once the read has finished (not
+        // when it starts), so the faster pass below can only start after the slow one has what it read
+        let readDone!: () => void;
+        const slowHasRead = new Promise<void>((resolve) => (readDone = resolve));
         const real = prisma.appSetting.findUnique.bind(prisma.appSetting);
-        const reading = jest.spyOn(prisma.appSetting, 'findUnique').mockImplementationOnce(((args: never) => real(args).then(async (row: unknown) => { await gate; return row; })) as never);
+        jest.spyOn(prisma.appSetting, 'findUnique').mockImplementationOnce(((args: never) =>
+          real(args).then(async (row: unknown) => {
+            readDone();
+            await gate;
+            return row;
+          })) as never);
         slow = repairInstantReporting({ limit: 2, now: new Date() });
-        for (let waited = 0; reading.mock.calls.length === 0; waited += 50) {
-          if (waited >= 5_000) throw new Error('the slow pass never read the place');
-          await pause(50);
+        let timer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([slowHasRead, new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error('the slow pass never read the place')), 5_000)))]);
+        } finally {
+          if (timer) clearTimeout(timer);
         }
         // A faster pass starts from the same place, looks at four runs and saves where it got to: the fourth
         await repairInstantReporting({ limit: 4, now: new Date() });
@@ -1420,6 +1431,8 @@ run('the bounded Instant executor, in a real database', () => {
         await repairInstantReporting({ limit: 2, now: new Date() });
         expect(await placeId()).toBe(ids[5]);
       } finally {
+        // Release the slow pass first (it may still be held if something above failed), wait for it, then put everything back
+        open();
         if (slow) await Promise.allSettled([slow]);
         jest.restoreAllMocks();
         quiet.mockRestore();
