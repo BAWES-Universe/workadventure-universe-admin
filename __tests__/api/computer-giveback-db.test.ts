@@ -27,6 +27,7 @@ import { recordFaults, type FaultInput } from '@/lib/computer-faults';
 import { afterLateEvidence, decidePendingForPurge, decideRunnerFinish, lockPerson, resolveDecision, sweepGiveBackDecisions, sweepLateEvidence } from '@/lib/computer-giveback';
 import { correctRouteTogether, giveBackOverview, giveBackReadiness, routeIsPaused } from '@/lib/computer-fault-ops';
 import { mintJobToken, revokeJobTokens } from '@/lib/computer-token';
+import { WorkerDied, afterWorkerDied } from '../helpers/worker-died';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -862,13 +863,29 @@ run('a computer job that failed on our side, and the bound on giving it back', (
 
       it('a settlement waits for the person’s lock before it touches the effect, so it can never land between a retry’s read of the effect and its grant', async () => {
         const held = await heldForEffect();
-        const waiting = async () => (await prisma.$queryRaw<Array<{ n: number }>>`SELECT COUNT(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)[0].n;
+        let finished = false;
         let settled: Promise<boolean> = Promise.resolve(false);
         await prisma.$transaction(async (tx) => {
           await lockPerson(tx, held.personId);
-          settled = settleEffect(held.id, 'mail-1', 'done', 'ali@example.test');
-          // It is waiting for the lock (a barrier on the database's own lock table, no timer), and the effect has not moved
-          while ((await waiting()) === 0) await new Promise((resolve) => setImmediate(resolve));
+          // The lock this fixture holds, read from its own granted row in the lock table, and the fixture's own backend
+          const mine = (await tx.$queryRaw<Array<{ pid: number; classid: number; objid: number; objsubid: number }>>`
+            SELECT pg_backend_pid() AS pid, classid::int AS classid, objid::int AS objid, objsubid::int AS objsubid FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid()`)[0];
+          settled = settleEffect(held.id, 'mail-1', 'done', 'ali@example.test').finally(() => {
+            finished = true;
+          });
+          settled.catch(() => undefined);
+          // A backend OTHER than the fixture's is waiting for that very lock (a barrier on the database's own lock table, no timer): polled for a bounded time, never past the
+          // settlement finishing (it would then have gone round the lock, which is the failure)
+          const waiting = async () =>
+            (await prisma.$queryRaw<Array<{ n: number }>>`
+              SELECT COUNT(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid::int = ${mine.classid} AND objid::int = ${mine.objid} AND objsubid::int = ${mine.objsubid} AND pid <> ${mine.pid}`)[0].n;
+          const deadline = Date.now() + 5_000;
+          while (!finished && (await waiting()) === 0) {
+            if (Date.now() > deadline) throw new Error('the settlement never waited for the person’s lock');
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+          expect(finished).toBe(false);
+          // ...and the effect has not moved
           expect((await tx.computerEffect.findFirstOrThrow({ where: { jobId: held.id } })).state).toBe('planned');
         });
         expect(await settled).toBe(true);
@@ -930,12 +947,15 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       await prisma.computerGiveBackDecision.update({ where: { jobId: ended.id }, data: { decidedAt: new Date(NOW.getTime() - 3 * 24 * 60 * 60_000), nextAttemptAt: new Date(NOW.getTime() + 24 * 60 * 60_000) } });
       const captured = Sentry.captureMessage as jest.Mock;
       captured.mockClear();
-      await prisma.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT "job_id" FROM "computer_give_back_decisions" WHERE "job_id" = ${ended.id} FOR UPDATE`;
-        expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 0 });
-        expect(captured).not.toHaveBeenCalled();
-        throw new Error('the worker died');
-      }).catch(() => undefined);
+      // Another sweep holds the row; the assertions made while it is held reach the test, and only the worker's own death is swallowed
+      await afterWorkerDied(
+        prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT "job_id" FROM "computer_give_back_decisions" WHERE "job_id" = ${ended.id} FOR UPDATE`;
+          expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 0 });
+          expect(captured).not.toHaveBeenCalled();
+          throw new WorkerDied();
+        }),
+      );
       expect((await decisionOf(ended.id))?.alertedAt).toBeNull();
       expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 1 });
       expect(captured).toHaveBeenCalledTimes(1);

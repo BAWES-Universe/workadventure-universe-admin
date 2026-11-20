@@ -38,6 +38,7 @@ import * as creditSpend from '@/lib/credit-spend';
 import { holdCredit, settleHold } from '@/lib/credit-spend';
 import { ensureIssued } from '@/lib/credit-issue';
 import { personUsage } from '@/lib/meter-person';
+import { WorkerDied, afterWorkerDied } from '../helpers/worker-died';
 import { activityFor, closeReceipt, openReceipt, settleCheckingReceipts } from '@/lib/task-receipts';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -714,19 +715,24 @@ run('credit for computers, on the real books', () => {
         const captured = Sentry.captureMessage as jest.Mock;
         captured.mockClear();
         const spy = quiet();
-        // Another sweep holds the row (it is telling Sentry): this one skips it, says nothing, and does not wait. That worker then dies, which rolls back
-        await prisma.$transaction(async (tx) => {
-          await tx.$queryRaw`SELECT "id" FROM "computer_refund_obligations" WHERE "hold_key" = ${holdKey} FOR UPDATE`;
-          expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 0 });
-          expect(captured).not.toHaveBeenCalled();
-          throw new Error('the worker died');
-        }).catch(() => undefined);
-        expect((await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).alertedAt).toBeNull();
-        // The next sweep tells it, once
-        expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 1 });
-        expect(captured).toHaveBeenCalledTimes(1);
-        expect((await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).alertedAt).not.toBeNull();
-        spy.mockRestore();
+        try {
+          // Another sweep holds the row (it is telling Sentry): this one skips it, says nothing, and does not wait. That worker then dies, which rolls back
+          await afterWorkerDied(
+            prisma.$transaction(async (tx) => {
+              await tx.$queryRaw`SELECT "id" FROM "computer_refund_obligations" WHERE "hold_key" = ${holdKey} FOR UPDATE`;
+              expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 0 });
+              expect(captured).not.toHaveBeenCalled();
+              throw new WorkerDied();
+            }),
+          );
+          expect((await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).alertedAt).toBeNull();
+          // The next sweep tells it, once
+          expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 1 });
+          expect(captured).toHaveBeenCalledTimes(1);
+          expect((await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).alertedAt).not.toBeNull();
+        } finally {
+          spy.mockRestore();
+        }
       });
 
       it('the overdue-refund alert says what the row holds when it is locked: a try that failed between the candidate read and the lock is in it', async () => {
