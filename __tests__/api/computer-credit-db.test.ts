@@ -1194,6 +1194,47 @@ run('credit for computers, on the real books', () => {
       expect(after).not.toHaveProperty('refundPendingMicros');
     });
 
+    it('the task reply carries no refund pending for a failed job that is NOT given back (the person’s own cause): its credit stays with it, so nothing is owed back', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      // A recorded fault that is the person's (their allowance): the job failed on THEIR account, so nothing is given back
+      await recordFaults(sara.brickId, jobId, [{ turn: 1, callId: 'x1', kind: 'not_ours', reason: 'allowance', source: 'universe-ai', route: 'universe-ai:p', at: NOW }]);
+      await (finishJob as (...args: unknown[]) => Promise<unknown>)(jobId, 'failed', at(10), null, 'ours', [1]);
+      expect(await prisma.computerGiveBackDecision.findUnique({ where: { jobId } })).toMatchObject({ state: 'refused', basis: 'person_caused' });
+      const report = (await reportsToTell(50, at(60 * 24))).find((one) => one.jobId === jobId);
+      expect(report).toMatchObject({ kind: 'failed', givenBack: false });
+      expect(report).not.toHaveProperty('refundPendingMicros');
+    });
+
+    it('a job our own pool cut off is reported as failed with the refund still owed on it, until the books acknowledge it; an acknowledged one carries none', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      await call(token, 'b', 50_000, 20_000);
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(async () => {
+        throw new Error('books unreachable');
+      });
+      await saveMeterSettings({ memberAllowanceMicros: BASE, poolCeilingMicros: 1, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+      const mute = quiet();
+      try {
+        expect(await renewJob(jobId, at(5))).toEqual({ ok: false, reason: 'pool' });
+      } finally {
+        mute.mockRestore();
+      }
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'stopped', endedBy: 'pool' });
+      const later = at(60 * 24);
+      const told = async () => (await reportsToTell(50, later)).find((report) => report.jobId === jobId);
+      expect(await told()).toMatchObject({ kind: 'failed', givenBack: true, refundPendingMicros: 50_000 });
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(actualRefund());
+      await sweepComputers(at(600));
+      const after = await told();
+      expect(after).toMatchObject({ kind: 'failed', givenBack: true });
+      expect(after).not.toHaveProperty('refundPendingMicros');
+    });
+
     it('a pending refund beside a Gmail that was charged: the Gmail charge and the pending refund are each said, and the net amount waits until it is settled', async () => {
       const sara = await running();
       const { jobId, token } = await job(sara);

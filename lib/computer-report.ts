@@ -263,7 +263,8 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
   const handedPaths = await handedPathsOf(ended.filter((job) => job.status === 'done').map((job) => job.id));
 
   // What a failed try drew from credit and is still owed back (one read for the page): said with the report, never promised as made while the books have not acknowledged it
-  const owedBack = await refundStatesFor(ended.filter((job) => job.status === 'failed').map((job) => job.id));
+  // Every job told as `failed` (a failed try, and one our own pool cut off, which stays `stopped` but is reported as failed too and can owe a refund as well)
+  const owedBack = await refundStatesFor(ended.filter((job) => kindOfEnding(job.status, job.endedBy) === 'failed').map((job) => job.id));
   const reports: Report[] = [];
   for (const job of ended) {
     const kind = kindOfEnding(job.status, job.endedBy);
@@ -272,6 +273,9 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
       await prisma.computerJob.updateMany({ where: { id: job.id, endToldAt: null }, data: { endToldAt: new Date() } });
       continue;
     }
+    const givenBack = kind === 'failed' ? await givenBackIn(job.id, job.secondsRun) : false;
+    // A credit still owed back is said only for a job that IS being given back: one that was refused (the person's, or over the bound) keeps its credit, so nothing is owed to it
+    const pendingRefund = kind === 'failed' && givenBack ? (owedBack.get(job.id)?.pendingMicros ?? 0) : 0;
     reports.push({
       key: `computer-told:${job.id}:${kind}`,
       jobId: job.id,
@@ -290,8 +294,8 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
       effects: effectsOf(job),
       files: kind === 'done' && job.writes ? filesMadeBy(job.endFiles, job.startFiles, new Set(handedPaths.get(job.id) ?? [])) : [],
       handed: kind === 'done' ? (cardsOf.get(job.id) ?? []).map((card) => ({ id: card.id, name: card.name, bytes: card.bytes, mime: card.mime })) : [],
-      givenBack: kind === 'failed' ? await givenBackIn(job.id, job.secondsRun) : false,
-      ...(kind === 'failed' && (owedBack.get(job.id)?.pendingMicros ?? 0) > 0 ? { refundPendingMicros: owedBack.get(job.id)?.pendingMicros } : {}),
+      givenBack,
+      ...(pendingRefund > 0 ? { refundPendingMicros: pendingRefund } : {}),
     });
   }
   for (const job of waiting) {
