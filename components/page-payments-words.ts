@@ -16,6 +16,7 @@ export const PAY_WORDS = {
   receiptCopied: { title: 'Private receipt link copied.', sub: 'Keep it somewhere safe, like your notes or email. Anyone who has it can bring this purchase back.' },
   copyFailed: 'Couldn’t copy it. Select the link below and copy it yourself.',
   notHeard: { title: 'We haven’t heard back about your payment yet.', sub: 'If you paid, it still counts. Check it here before paying again.' },
+  stillChecking: { title: 'We’re still checking your earlier payment.', sub: 'If you paid, it will show up here when your payment service confirms it.' },
   notPaid: { title: 'Not paid yet.', sub: 'If you already paid, it can take a while to show. Check it here before paying again.' },
   needsUpdate: { title: 'This page’s pay button needs an update.', sub: 'If you already paid, check it here before paying again.' },
   unavailable: { title: 'Payments unavailable', sub: null },
@@ -82,6 +83,7 @@ export function describeLine(line: PayLine, state: { copied: boolean }): PayView
   // Whatever else is pressed, a browser that cannot keep the buyer's code keeps offering the receipt link while the payment is not settled
   const save = line.keepReceipt && line.receipt ? [savePrompt(state.copied)] : [];
   if (line.problem === 'not_paid') return { ...PAY_WORDS.notPaid, actions: [check, ...save], closable: false };
+  if (line.problem === 'still_checking') return { ...PAY_WORDS.stillChecking, actions: [check, ...save], closable: false };
   if (line.problem === 'cant_confirm') return { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false };
   // A start whose answer was lost: an order may or may not exist, so it is said like any other payment not heard back about
   if (line.problem === 'unavailable') return line.canCheck ? { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false } : { ...PAY_WORDS.unavailable, actions: [], closable: false };

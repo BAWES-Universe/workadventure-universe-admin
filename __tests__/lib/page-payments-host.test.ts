@@ -3,6 +3,7 @@
  * page is told the same things in both. These run without a browser: the frame, the fetch and the clock are stand-ins.
  */
 import { createPagePaymentsHost, safeCheckout, type PayLine } from '@/lib/page-payments-host';
+import { describeLine } from '@/components/page-payments-words';
 
 const PAGE = 'https://orbit.example.org/a/k7Qm2xR9';
 const ART = 'art-1';
@@ -392,6 +393,34 @@ describe('a paying page on the public share link', () => {
     expect(calls[0].body.intentId).toBeUndefined();
     expect(told()).toEqual([{ universe: 'app-result', session: 's1', status: 'paid', request: 'r1', test: true }]);
     host.destroy();
+  });
+
+  it('says a closed order the service has not had the last word about is "still being checked": never "no purchase found", never waited on, never "not paid"', async () => {
+    const unresolved = { status: 'checking', longWait: true, orderId: 'o-9', checkoutUrl: null, testPayment: false, via: 'own', buyer: 'guest', pollAfterMs: 15_000 };
+    // Restore (the page asks for its purchase back): one ask, no watching for twenty minutes, the page is told it could not be confirmed yet
+    const restored = setup((call) => (call.body.restore ? { body: unresolved } : { body: { status: 'paid', testPayment: false } }));
+    restored.tap({ request: 'r1', restore: true });
+    await flush();
+    expect(restored.lines.at(-1)).toMatchObject({ problem: 'still_checking', canCheck: true, checking: false, paid: null, offerRestore: false });
+    expect(restored.told()).toEqual([{ universe: 'app-result', session: 's1', status: 'cant_confirm', request: 'r1' }]);
+    // What the guest reads, and what can be pressed: Check payment, and not the sentence for a purchase that was never found
+    const view = describeLine(restored.lines.at(-1)!, { copied: false });
+    expect(view).toMatchObject({ title: 'We’re still checking your earlier payment.', closable: false, actions: [{ kind: 'check' }] });
+    expect(JSON.stringify(view)).not.toMatch(/No purchase found|Not paid yet/);
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(restored.calls).toHaveLength(1);
+    restored.host.destroy();
+    // Check payment by the wish of the last checkout says the same (the start's answer was lost, so the wish is on record)
+    const checked = setup((call) => (call.body.check ? { body: unresolved } : 'lost'));
+    checked.tap({ request: 'r2' });
+    await jest.advanceTimersByTimeAsync(10_000);
+    checked.host.checkPayment();
+    await flush();
+    expect(checked.calls.at(-1)?.body).toMatchObject({ check: true });
+    expect(checked.lines.at(-1)).toMatchObject({ problem: 'still_checking', canCheck: true, checking: false });
+    expect(describeLine(checked.lines.at(-1)!, { copied: false })?.title).toBe('We’re still checking your earlier payment.');
+    expect(checked.told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'cant_confirm', request: 'r2' });
+    checked.host.destroy();
   });
 
   it('tells a page "none" when a restore finds nothing, and watches an order of theirs that is still open', async () => {

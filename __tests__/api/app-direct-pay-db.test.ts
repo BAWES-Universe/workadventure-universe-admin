@@ -46,7 +46,7 @@ jest.mock('@/lib/app-direct/page-contract-inventory', () => {
   const actual = jest.requireActual('@/lib/app-direct/page-contract-inventory');
   return { ...actual, inventoryPaymentPages: jest.fn(actual.inventoryPaymentPages) };
 });
-import { checkPurchase, checksHaveEnded, guestBuyerKey, isWaiting, lookStats, orderForArtifact, pagePaymentLoad, pollAfterMs, restorePurchase, startCheckout, sweepPageOrders, verifyOrder } from '@/lib/app-direct/pay';
+import { checkPurchase, checksHaveEnded, guestBuyerKey, isWaiting, lookStats, orderForArtifact, pagePaymentLoad, pollAfterMs, reconcileEveryMs, restorePurchase, startCheckout, sweepPageOrders, verifyOrder } from '@/lib/app-direct/pay';
 import { keyAppsOf, runKeyApp } from '@/lib/app-direct/use';
 import { GET as readJob, POST as makeJob } from '@/app/api/bots/[id]/key-apps/[serverId]/page-jobs/route';
 import { GET as sweepLoad, POST as sweepRoute } from '@/app/api/app-pay/sweep/route';
@@ -2001,6 +2001,147 @@ run('payments for pages, in a real database', () => {
         expect((await notices()).slice(before)).toHaveLength(1);
         expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: row.id } })).paidAt).toEqual(paidAt);
         expect(await prisma.appPageOrderEvent.count({ where: { orderId: row.id, toStatus: 'paid' } })).toBe(1);
+      });
+
+      describe('an order the service has not had the last word about (round 2)', () => {
+        /** A guest's order that is long closed: it has its reference at the service, which still says "started", and nothing final was ever said. */
+        const longWaitOrder = async (hoursClosed = 100) => {
+          const { artifactId } = await pending();
+          const code = word();
+          const intentId = wish();
+          const limits = await getBrickLimits();
+          gateway();
+          const made = await begin(artifactId, intentId, code);
+          if (made.status !== 'ok') throw new Error('expected ok');
+          await prisma.appPageOrder.update({ where: { id: made.orderId }, data: { status: 'not_paid', createdAt: new Date(Date.now() - (limits.checkoutOpenHours + hoursClosed) * 3_600_000), closedAt: new Date(Date.now() - hoursClosed * 3_600_000), checkedAt: new Date(Date.now() - 24 * 3_600_000), nextLookAt: null } });
+          return { artifactId, code, intentId, orderId: made.orderId };
+        };
+        const ask = async (artifactId: string, body: Record<string, unknown>, address: string) => {
+          mockUser.current = null;
+          const response = await publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body, headers: { 'x-forwarded-for': address } }), params({ artifactId }));
+          return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+        };
+
+        it('Check payment and Restore both hand back the existing order as still being checked, never "not paid" and never "nothing found", and nothing is started again', async () => {
+          const { artifactId, code, intentId, orderId } = await longWaitOrder();
+          const sent = gateway({ record: (id) => paidRecord(id, { status: 'INITIATED' }) });
+          // The same asks the host makes: Check payment by the wish, then Restore, as a guest with the browser's own recovery code
+          const check = await ask(artifactId, { check: true, intentId, recoveryCode: code }, '198.51.100.80');
+          expect(check.status).toBe(200);
+          expect(check.body).toMatchObject({ status: 'checking', longWait: true, orderId, checkoutUrl: null, buyer: 'guest' });
+          const restored = await ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.81');
+          expect(restored.status).toBe(200);
+          expect(restored.body).toMatchObject({ status: 'checking', longWait: true, orderId, checkoutUrl: null, via: 'own' });
+          expect(restored.body.status).not.toBe('none');
+          // The rows: the same one order, still closed and still not reconciled, no second payment asked of the service, no entitlement
+          expect(await orders(artifactId)).toHaveLength(1);
+          expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ status: 'not_paid', reconciled: false });
+          expect(await prisma.appPageOrder.count({ where: { artifactId, status: 'paid' } })).toBe(0);
+          expect(POSTS(sent)).toHaveLength(0);
+          // The order poll says the same (the host that adopted it must not say "not paid" a moment later)
+          const polled = await orderForArtifact(orderId, artifactId);
+          expect(polled).toMatchObject({ status: 'checking', longWait: true });
+        });
+
+        it('is the ordinary rate-limited check on the original order: pressing again at once asks the service once', async () => {
+          const { artifactId, code, intentId } = await longWaitOrder();
+          const sent = gateway({ record: (id) => paidRecord(id, { status: 'INITIATED' }) });
+          for (let n = 0; n < 4; n += 1) expect((await ask(artifactId, { check: true, intentId, recoveryCode: code }, `198.51.100.${90 + n}`)).body).toMatchObject({ status: 'checking', longWait: true });
+          for (let n = 0; n < 3; n += 1) expect((await ask(artifactId, { restore: true, recoveryCode: code }, `198.51.100.${100 + n}`)).body).toMatchObject({ status: 'checking', longWait: true });
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(1);
+        });
+
+        it('a later confirmed payment lands on the SAME order, with one entitlement and one notice, however it is asked for', async () => {
+          const { artifactId, code, intentId, orderId } = await longWaitOrder();
+          gateway({ record: (id) => paidRecord(id, { status: 'INITIATED' }) });
+          expect((await ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.110')).body).toMatchObject({ status: 'checking', longWait: true });
+          const before = (await notices()).length;
+          // The service now says it was paid
+          const sent = gateway({ record: (id) => paidRecord(id) });
+          await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 24 * 3_600_000) } });
+          const checked = await ask(artifactId, { check: true, intentId, recoveryCode: code }, '198.51.100.111');
+          expect(checked.body).toMatchObject({ status: 'paid', orderId });
+          const [one, two] = await Promise.all([ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.112'), ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.113')]);
+          expect([one.body, two.body]).toMatchObject([{ status: 'paid', orderId }, { status: 'paid', orderId }]);
+          expect(await orders(artifactId)).toHaveLength(1);
+          expect(await prisma.appPageOrder.count({ where: { artifactId, status: 'paid' } })).toBe(1);
+          expect((await prisma.appPageOrderEvent.findMany({ where: { orderId, toStatus: 'paid' } })).map((line) => line.reason)).toEqual(['paid_late']);
+          expect((await notices()).slice(before)).toHaveLength(1);
+          expect(POSTS(sent)).toHaveLength(0);
+        });
+
+        it('is still "nothing found" for another buyer, and ends for good only on the service’s own last word', async () => {
+          const { artifactId, code, intentId, orderId } = await longWaitOrder();
+          gateway({ record: (id) => paidRecord(id, { status: 'INITIATED' }) });
+          // Someone else's browser never sees it
+          expect((await ask(artifactId, { restore: true, recoveryCode: word() }, '198.51.100.120')).body).toMatchObject({ status: 'none' });
+          expect((await ask(artifactId, { check: true, intentId, recoveryCode: word() }, '198.51.100.121')).status).toBe(404);
+          // The service says it failed: that is its last word, and now it is not paid and nothing is found
+          gateway({ record: (id) => paidRecord(id, { status: 'FAILED' }) });
+          await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 24 * 3_600_000) } });
+          expect((await ask(artifactId, { check: true, intentId, recoveryCode: code }, '198.51.100.122')).body).toMatchObject({ status: 'not_paid', orderId });
+          expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ status: 'not_paid', reconciled: true });
+          expect((await ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.123')).body).toMatchObject({ status: 'none' });
+        });
+
+        it('an order that could not be confirmed (the app was gone) is handed back as still being checked too, by a receipt link as well', async () => {
+          const { artifactId, code, orderId } = await longWaitOrder();
+          await prisma.appPageOrder.update({ where: { id: orderId }, data: { status: 'cant_confirm', closedAt: null } });
+          gateway({ record: (id) => paidRecord(id, { status: 'INITIATED' }) });
+          // Another browser holding only the receipt link's code: the order is found, and said to be a receipt's, never given a new receipt
+          const via = await ask(artifactId, { restore: true, recoveryCode: word(), receiptCode: code }, '198.51.100.130');
+          expect(via.body).toMatchObject({ status: 'checking', longWait: true, orderId, via: 'receipt' });
+        });
+
+        it('shows the ops numbers: orders never checked, scheduled looks that are overdue, and the time since the service was last read', async () => {
+          const { orderId } = await longWaitOrder();
+          // Never asked about by a sweep (no schedule) and never once read
+          await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: null, lastReadAt: null } });
+          expect((await pagePaymentLoad()).unconfirmed).toMatchObject({ count: 1, neverChecked: 1, neverRead: 1, overdue: 1 });
+          expect((await pagePaymentLoad()).sinceLastReadSeconds).toBeNull();
+          // Looked at on time: not overdue, and the last read is now
+          gateway({ record: (id) => paidRecord(id, { status: 'INITIATED' }) });
+          expect((await sweepPageOrders()).looked).toBe(1);
+          const after = await pagePaymentLoad();
+          expect(after.unconfirmed).toMatchObject({ count: 1, neverChecked: 0, neverRead: 0, overdue: 0 });
+          expect(after.sinceLastReadSeconds).toBeLessThan(60);
+          // Its scheduled look is two hours late (a stopped sweep): overdue, and the read ages
+          await prisma.appPageOrder.update({ where: { id: orderId }, data: { nextLookAt: new Date(Date.now() - 2 * 3_600_000), lastReadAt: new Date(Date.now() - 5 * 3_600_000) } });
+          const late = await pagePaymentLoad();
+          expect(late.unconfirmed.overdue).toBe(1);
+          expect(late.sinceLastReadSeconds).toBeGreaterThan(4.9 * 3_600);
+        });
+
+        it('Restore prefers a paid purchase, then an open order with its link, then the long-wait order, then nothing', async () => {
+          const { artifactId, code, orderId: longId } = await longWaitOrder();
+          const key = buyerOf(code);
+          const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+          gateway({ record: (id) => paidRecord(id, { status: 'INITIATED' }) });
+          // Only the long-wait order: still checking
+          expect((await ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.140')).body).toMatchObject({ status: 'checking', longWait: true, orderId: longId });
+          // An open order of the same buyer for the current offer wins over it, with its own link (and is not a long-wait one)
+          const open = await prisma.appPageOrder.create({
+            data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'pending', providerRef: 'chg_open', checkoutUrl: 'https://checkout.examplepay.com/?token=open', visitorHash: 'v', intentId: wish(), buyerKey: key, createdAt: new Date(Date.now() - 60_000), checkedAt: new Date() },
+          });
+          const second = (await ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.141')).body;
+          expect(second).toMatchObject({ status: 'checking', orderId: open.id, checkoutUrl: 'https://checkout.examplepay.com/?token=open' });
+          expect(second.longWait).toBeUndefined();
+          // A paid purchase wins over both
+          const paid = await prisma.appPageOrder.create({
+            data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'paid', paidAt: new Date(Date.now() - 3_600_000), visitorHash: 'v', intentId: wish(), buyerKey: key },
+          });
+          expect((await ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.142')).body).toMatchObject({ status: 'paid', orderId: paid.id });
+        });
+
+        it('looks at least weekly for as long as it takes: 6 hours, then daily, then weekly, with no end', () => {
+          const day = 24 * 3_600_000;
+          expect(reconcileEveryMs(0)).toBe(6 * 3_600_000);
+          expect(reconcileEveryMs(2 * day)).toBe(6 * 3_600_000);
+          expect(reconcileEveryMs(3 * day)).toBe(day);
+          expect(reconcileEveryMs(32 * day)).toBe(day);
+          expect(reconcileEveryMs(33 * day)).toBe(7 * day);
+          expect(reconcileEveryMs(2_000 * day)).toBe(7 * day);
+        });
       });
 
       it('never turns a cut-off or non-object body into a checkout: only no body at all is a plain start', async () => {
