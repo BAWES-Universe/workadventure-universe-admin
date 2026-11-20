@@ -245,6 +245,51 @@ run('a computer job that failed on our side, and the bound on giving it back', (
     expect(await givenBack((await job(sara, ours)).id)).toBe(true);
   });
 
+  describe('when the Limits cannot be read', () => {
+    /** Reading the Instant Limits fails this many times (every other read goes through). */
+    const failLimitsReads = (times: number) => {
+      const real = prisma.appSetting.findUnique.bind(prisma.appSetting);
+      let left = times;
+      return jest.spyOn(prisma.appSetting, 'findUnique').mockImplementation(((args: { where?: { key?: string } }) => {
+        if (args?.where?.key === 'instant-limits' && left > 0) {
+          left--;
+          return Promise.reject(new Error('database blip'));
+        }
+        return real(args as never);
+      }) as never);
+    };
+    afterEach(() => jest.restoreAllMocks());
+
+    it('is read once more: a single failed read gives the same answer as a good one', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+      failLimitsReads(1);
+      // The bound (1) is used up: the second read is good and the answer is "not given back", not "unbounded"
+      const second = await job(sara, ours);
+      expect(second).toMatchObject({ status: 'failed', endedBy: null });
+    });
+
+    it('does not read as "no bound" when it fails twice: the runner’s ours is not given back this time, never unbounded', async () => {
+      await limitsAre(LAUNCH);
+      const sara = await person('sara');
+      failLimitsReads(2);
+      const ended = await job(sara, ours);
+      expect(ended).toMatchObject({ status: 'failed', endedBy: null, runnerFault: false });
+      expect(await givenBack(ended.id)).toBe(false);
+    });
+
+    it('never touches a failure Orbit saw itself: it is given back even when the Limits cannot be read', async () => {
+      await limitsAre(LAUNCH);
+      const sara = await person('sara');
+      const lapsing = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Lapsing' }, minutes(100));
+      if (!lapsing.ok) throw new Error('no');
+      failLimitsReads(10);
+      expect(await sweepComputers(minutes(200))).toMatchObject({ stopped: 1 });
+      expect(await givenBack(lapsing.job.id)).toBe(true);
+    });
+  });
+
   it('leaves a model call on the person’s own key as it was: it is never limited, whatever the give-backs are', async () => {
     await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
     const sara = await person('sara');
