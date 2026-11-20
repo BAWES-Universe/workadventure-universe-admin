@@ -487,9 +487,21 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'person_caused', reason });
         expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: ended.id } })).toMatchObject({ status: 'failed', endedBy: null });
       }
-      // A call on the person's own key is theirs whatever went wrong with it, even with a reason that is ours on our key
-      const own = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'relay_down', { source: 'own-key' })]));
+      // Their own provider failing on their own key is theirs
+      const own = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'own_provider', { source: 'own-key' })]));
       expect(await decisionOf(own.id)).toMatchObject({ state: 'refused', basis: 'person_caused' });
+    });
+
+    it('does not charge by source alone: an own-key call with a relay_down row (our relay, kind fault) is given back and not counted, even with the bound spent', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+      const ended = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'relay_down', { source: 'own-key', route: 'own-key' })]));
+      expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_down' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: ended.id } })).toMatchObject({ endedBy: 'error', runnerFault: false });
+      // An own-key timeout the relay was unsure about is unresolved: goodwill, bounded (the bound is spent here)
+      const unsure = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'timeout_after_output', { source: 'own-key', route: 'own-key' })]));
+      expect(await decisionOf(unsure.id)).toMatchObject({ state: 'refused', basis: 'cap' });
     });
 
     it('counts a provider 5xx, a 429, a timeout, a fieldless 400, a field only the relay sets and a reason Orbit does not know as unresolved: goodwill, bounded, counted', async () => {
