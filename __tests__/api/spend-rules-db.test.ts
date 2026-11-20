@@ -1213,6 +1213,26 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await ask(sara, 970_001, minutes(12))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
     });
 
+    it('a job that crossed the end of a month and whose time is unwritten counts in the new month only by the part that ran in it, before and after repair', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      // 23:55 to 00:05: 5 minutes in each month, $0.006 a minute
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, new Date('2026-10-31T23:55:00Z'));
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      record.mockRejectedValue(new Error('books down'));
+      await finishJob(started.job.id, 'done', new Date('2026-11-01T00:05:00Z'));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      const later = new Date('2026-11-01T00:20:00Z');
+      expect(await ask(sara, 970_000, later)).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, later)).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      record.mockImplementation(actualRecord);
+      await sweepComputers(new Date('2026-11-01T00:30:00Z'));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(1);
+      expect(await ask(sara, 970_000, later)).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, later)).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+    });
+
     it('a job that failed on our side is not counted while its time is unwritten: it takes nothing from the person', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
