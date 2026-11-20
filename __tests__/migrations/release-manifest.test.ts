@@ -94,7 +94,8 @@ describe('the migrations 0.5.0 ships', () => {
   it('a migration added AFTER the manifest’s last one is caught for the active release; only an explicit historical cutoff leaves it out', () => {
     const copy = isolated();
     try {
-      const later = '20261120130001_release_fix';
+      // One second after the manifest's last migration, whatever that is now
+      const later = `${String(Number(manifest.shipping.lastMigration.slice(0, 14)) + 1)}_release_fix`;
       expect(later > manifest.shipping.lastMigration).toBe(true);
       fs.mkdirSync(path.join(copy.migrations, later));
       fs.writeFileSync(path.join(copy.migrations, later, 'migration.sql'), 'SELECT 1;\n');
