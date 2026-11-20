@@ -56,6 +56,8 @@ function fakeFunds(balance: number) {
       return { ok: !!hold };
     }),
     refund: jest.fn(async (input: { amountMicros: number }) => ({ ok: true, refundedMicros: input.amountMicros })),
+    // Read only: these tests never give anything back, so the books never hold a give-back under a key
+    refundLookup: jest.fn(async (): ReturnType<InstantFunds['refundLookup']> => ({ status: 'none' as const })),
   } satisfies InstantFunds;
   void balance;
   return { funds, holds };
