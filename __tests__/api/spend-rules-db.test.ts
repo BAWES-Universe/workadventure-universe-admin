@@ -19,7 +19,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { saveMeterSettings } from '@/lib/meter';
 import { releaseRoom, renewRoom, reserveRoom } from '@/lib/meter-allowance';
 import { memberUsage } from '@/lib/meter-usage';
-import { changeRule, checkSpend, endRule, listRules, ownerSpendAllowed, proposeRule } from '@/lib/spend-rules';
+import { changeRule, checkSpend, chatRuleKey, endRule, listRules, ownerSpendAllowed, proposeRule } from '@/lib/spend-rules';
 import { activityFor, closeReceipt, openReceipt } from '@/lib/task-receipts';
 import { POST as postRule, GET as getRules } from '@/app/api/bots/[id]/spend-rules/route';
 import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
@@ -393,6 +393,24 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(second).toMatchObject({ ok: true, created: true });
       // The same long message again still finds its rule
       expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-a`, scope: 'bot', period: 'month', capMicros: 1_000_000 })).toMatchObject({ ok: true, created: false });
+    });
+
+    it('a rule made from a long message id is saved under a hashed key and with the fingerprint of what the message said, never under a cut key', async () => {
+      const sara = await person('sara');
+      for (const sayingKey of [`m-${'a'.repeat(300)}`, `m-${'a'.repeat(300)}-b`]) {
+        const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+        if (!made.ok) throw new Error('not made');
+        const row = await prisma.spendRule.findUniqueOrThrow({ where: { id: made.rule.id } });
+        // The key is shorter than the column and carries the hash of the whole id: two ids that start alike never share a key, so a row under a
+        // cut key (and without a fingerprint) can only come from before the change, in a development database: spend rules were never in production
+        expect(row.ruleKey.length).toBeLessThan(255);
+        expect(row.ruleKey).toBe(chatRuleKey(sara.brickId, sara.id, sayingKey));
+        // The hashed key has a top-level name of its own ("chat-sha256:", slice 4's 0259e569): under "chat:" a literal id reading "sha256:<digest>" would make the
+        // same key as the long id that digest was made from
+        expect(row.ruleKey).toMatch(/^chat-sha256:/);
+        expect(row.ruleKey).not.toBe(`chat:${sara.brickId}:${sara.id}:${sayingKey}`.slice(0, 255));
+        expect(row.proposalFingerprint).not.toBeNull();
+      }
     });
 
     it('a rule saved before long ids were hashed (under the key cut to 255 characters) is never taken as this message\'s rule, whatever its state, and is never changed by it', async () => {
