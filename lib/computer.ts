@@ -9,6 +9,7 @@ import { drawComputerCredit } from '@/lib/computer-credit';
 import { DISK_ROOM_PREFIX, diskRoomKey, memberAllowance, releaseRoom, renewRoom, reserveDiskRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
+import { priceChanges, pinnedMicrosPerMinute } from '@/lib/spend-rules-values';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import {
@@ -1248,7 +1249,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     if (job.reservationKey) {
       if (held) {
         // What ran is written to the books first, and a write that fails is written again by the next sweep (same event id, so never twice)
-        const cost = await recordComputerTime({ id: job.id, botId: job.botId, personId: job.personId, runId: job.runId, startedAt: job.startedAt }, seconds, now, { endedBy, status });
+        const cost = await recordComputerTime({ id: job.id, botId: job.botId, personId: job.personId, runId: job.runId, startedAt: job.startedAt, reservationKey: job.reservationKey }, seconds, now, { endedBy, status });
         await settleRoom({ key: job.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
       } else {
         await releaseRoom({ key: job.reservationKey }, now);
@@ -1369,10 +1370,15 @@ async function handOver(job: { id: string; botId: string; personId: string; titl
  * Writes what a job ran into the meter's books as one event under the job's id; asked twice it is the same event. Returns the cost
  * it worked out (null when the provider has no price). The write never throws: a failure is logged and the sweep writes it again.
  */
-async function recordComputerTime(job: { id: string; botId: string; personId: string; runId?: string | null; startedAt?: Date | null }, seconds: number, at: Date, why: { endedBy: EndedBy | null; status: string }): Promise<number | null> {
+async function recordComputerTime(job: { id: string; botId: string; personId: string; runId?: string | null; startedAt?: Date | null; reservationKey?: string | null }, seconds: number, at: Date, why: { endedBy: EndedBy | null; status: string }): Promise<number | null> {
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
-  const cost = costOfSeconds(seconds, provider ? provider.microsPerMinute() : null);
+  // The job is priced at what its lease was priced at as each stretch was taken (the rates the room was held by), never at the provider's rate at the moment it
+  // closed: a price that changed while it ran must not make the books say something else than the room that was held for the same time. A lease with no
+  // recorded terms (an older row) keeps the provider's rate.
+  const lease = job.reservationKey ? await prisma.meterReservation.findUnique({ where: { reservationKey: job.reservationKey }, select: { terms: true } }) : null;
+  const pinned = lease ? pinnedMicrosPerMinute(lease.terms, seconds, at.getTime()) : null;
+  const cost = costOfSeconds(seconds, pinned ?? (provider ? provider.microsPerMinute() : null));
   // A job that failed on our side (the machine would not start or could not be reached, the agent's turn broke, the worker was lost) is not
   // the person's: what it ran stays in the books as our own cost (the provider still bills it), but is not written against them, so it
   // never draws from their month. A job that ran and ended any other way (done, stopped by them, out of room, nobody answered) is theirs.
@@ -1401,7 +1407,8 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
     // The run of a goal or task that started the job, when one did, so its computer time is on the books with its model calls
     // `startedMs`: when the job began, so a rule's cap counts a job that crossed midnight or the end of a month by the part that fell in its own
     // period, the same split the held room was counted by (lib/spend-rules.ts). Events without it (older ones) count whole in the period they end in.
-    detail: { endedBy: why.endedBy, status: why.status, ...(job.startedAt ? { startedMs: job.startedAt.getTime() } : {}), ...(job.runId ? { runId: job.runId } : {}), ...(givenBack ? { givenBack: true, forPersonId: job.personId } : {}) },
+    // `terms`: only for a job whose price changed while it ran, so that split follows the prices it ran at and not only its duration.
+    detail: { endedBy: why.endedBy, status: why.status, ...(job.startedAt ? { startedMs: job.startedAt.getTime() } : {}), ...(priceChanges(lease?.terms) ? { terms: priceChanges(lease?.terms) as unknown as Prisma.InputJsonValue } : {}), ...(job.runId ? { runId: job.runId } : {}), ...(givenBack ? { givenBack: true, forPersonId: job.personId } : {}) },
   }).catch((error) => console.error('[Computer] Could not record computer time:', error instanceof Error ? error.message : 'unknown'));
   return cost;
 }
@@ -1432,8 +1439,8 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
   const claimCutoff = new Date(now.getTime() - FILES_CLAIM_MS);
   // ...nor one that is waiting in line for its hand-over (it beats while it waits): the gap between two hand-overs on the machine is no reason to write its time
   const aliveCutoff = new Date(now.getTime() - HAND_OVER_ALIVE_MS);
-  const ended = await prisma.$queryRaw<Array<{ id: string; botId: string; personId: string; runId: string | null; startedAt: Date | null; secondsRun: number; status: string; endedBy: string | null; endedAt: Date | null }>>(Prisma.sql`
-    SELECT j."id", j."bot_id" AS "botId", j."person_id" AS "personId", j."run_id" AS "runId", j."started_at" AS "startedAt", j."seconds_run" AS "secondsRun", j."status", j."ended_by" AS "endedBy", j."ended_at" AS "endedAt"
+  const ended = await prisma.$queryRaw<Array<{ id: string; botId: string; personId: string; runId: string | null; startedAt: Date | null; secondsRun: number; status: string; endedBy: string | null; endedAt: Date | null; reservationKey: string }>>(Prisma.sql`
+    SELECT j."id", j."bot_id" AS "botId", j."person_id" AS "personId", j."run_id" AS "runId", j."started_at" AS "startedAt", j."seconds_run" AS "secondsRun", j."status", j."ended_by" AS "endedBy", j."ended_at" AS "endedAt", j."reservation_key" AS "reservationKey"
     FROM "computer_jobs" j
     WHERE j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0 AND j."ended_at" <= ${cutoff} ${only}
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')
@@ -1442,7 +1449,10 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
     ORDER BY j."ended_at" ASC
     LIMIT ${batch}`);
   for (const job of ended) {
-    await recordComputerTime(job, job.secondsRun, job.endedAt ?? now, { endedBy: job.endedBy as EndedBy | null, status: job.status });
+    const cost = await recordComputerTime(job, job.secondsRun, job.endedAt ?? now, { endedBy: job.endedBy as EndedBy | null, status: job.status });
+    // Its room is closed at what it ran too, when the end that wrote the time did not get to (a room already closed stays as it closed): so the time is in the
+    // books and the room is settled, never one of them only
+    await settleRoom({ key: job.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now).catch((error) => console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown'));
   }
   await giveBackMissingModelCalls(batch, botId);
 }
@@ -1516,6 +1526,16 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
     if (job && !isOver(job.status) && HOLDS_MACHINE.includes(job.status as never)) {
       await endJob(job.id, 'stopped', 'error', now);
       stopped++;
+    } else if (job && isOver(job.status) && job.startedAt && job.secondsRun > 0 && job.reservationKey === reservation.reservationKey) {
+      // A job that ran and ended, whose room was left held (its settlement did not get through): the room is settled at what it ran, never given back, so the
+      // time it took is never lost between the room and the books (the sweep writes its time below)
+      const lease = await prisma.meterReservation.findUnique({ where: { reservationKey: reservation.reservationKey }, select: { terms: true } });
+      const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
+      const provider = providerFor(row);
+      const pinned = pinnedMicrosPerMinute(lease?.terms, job.secondsRun, (job.endedAt ?? now).getTime());
+      const cost = costOfSeconds(job.secondsRun, pinned ?? (provider ? provider.microsPerMinute() : null));
+      await settleRoom({ key: reservation.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
+      released++;
     } else {
       await releaseRoom({ key: reservation.reservationKey }, now);
       released++;
