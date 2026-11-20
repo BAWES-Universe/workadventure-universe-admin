@@ -16,12 +16,13 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
 import { POST as writeEvents } from '@/app/api/meter/events/route';
-import { recordMeterEvent, saveMeterSettings, settleEventsThrough } from '@/lib/meter';
+import { recordMeterEvent, saveMeterSettings, scheduleMemberAllowance, settleEventsThrough } from '@/lib/meter';
 import { currentEnvelope, memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
+import { termsOf } from '@/lib/spend-rules-values';
 import { GrantRefused, markGrantBilled, recordGrant } from '@/lib/meter-grants';
 import { compareModelCalls, compareReplyWindow } from '@/lib/meter-shadow';
 import { getMeterSettings } from '@/lib/meter';
-import { readMeterEvent, type MeterEventInput } from '@/lib/meter-values';
+import { readMeterEvent, readMeterSettings, type MeterEventInput } from '@/lib/meter-values';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -95,6 +96,14 @@ run('the meter, in a real database', () => {
       expect(Number((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: first.eventId } })).quantity)).toBe(3);
     });
 
+    it('says so when the same id comes back with another payer or another pool', async () => {
+      const first = event({ eventId: `payer-${tag}`, payerKind: 'universe', payerPersonId: null });
+      await recordMeterEvent(first);
+      expect(await recordMeterEvent({ ...first, payerKind: 'person', payerPersonId: 'someone' })).toEqual({ recorded: false, conflict: true });
+      expect(await recordMeterEvent({ ...first, pool: first.pool === 'chat' ? 'computer' : 'chat' })).toEqual({ recorded: false, conflict: true });
+      expect(await recordMeterEvent(first)).toEqual({ recorded: false, conflict: false });
+    });
+
     it('keeps an unknown price empty and a real zero as zero, with their marks', async () => {
       await recordMeterEvent(event({ eventId: `unknown-${tag}`, basis: 'unknown', costMicros: null }));
       await recordMeterEvent(event({ eventId: `zero-${tag}`, basis: 'measured', costMicros: 0 }));
@@ -154,6 +163,12 @@ run('the meter, in a real database', () => {
       expect(compared.today).toBe(2);
       expect(compared.books).toBe(2);
       expect(compared.replies.state).toBe('same');
+    });
+
+    it('counts nothing for a reply window that has run its hours, even while its row is still there', async () => {
+      const kai = await person('kai');
+      await prisma.replyWindow.create({ data: { key: `ua:person:${kai.id}`, startedAt: new Date(Date.now() - 6 * 3_600_000) } });
+      expect(await compareReplyWindow(kai.id)).toMatchObject({ since: null, today: 0, books: 0 });
     });
 
     it('leaves work a Brick did on its own out of the comparison with today’s window count', async () => {
@@ -249,7 +264,8 @@ run('the meter, in a real database', () => {
       expect((await currentEnvelope(NOW)).unsettledMicros).toBe(900);
       const december = new Date('2026-12-02T09:00:00Z');
       expect((await reserveRoom({ key: `next-month-${tag}`, personId: sara.id, amountMicros: 1_000 }, december)).ok).toBe(true);
-      expect((await currentEnvelope(new Date('2026-12-02T10:00:00Z'))).unsettledMicros).toBe(0);
+      // Only the room taken in December counts there (it starts when it was authorized): the 900 from November never does
+      expect((await currentEnvelope(new Date('2026-12-02T10:00:00Z'))).unsettledMicros).toBe(1_000);
     });
 
     it('answers the same reservation for the same key and takes nothing more', async () => {
@@ -308,6 +324,7 @@ run('the meter, in a real database', () => {
       const key = `person:${sara.id}`;
       // Spent and settled by the provider, spent and not settled yet, and a reservation that lapsed
       await recordMeterEvent(event({ personKey: key, personId: sara.id, costMicros: 1_000 }));
+      await prisma.meterEvent.updateMany({ data: { recordedAt: NOW } });
       await settleEventsThrough(NOW);
       await recordMeterEvent(event({ personKey: key, personId: sara.id, costMicros: 250, occurredAt: minutes(5) }));
       await reserveRoom({ key: `lapsed-${tag}`, personId: sara.id, amountMicros: 40 }, NOW);
@@ -359,6 +376,29 @@ run('the meter, in a real database', () => {
       expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: `job-${tag}` } })).renewals).toBe(1);
     });
 
+    it('starts a lease at the moment it was authorized, not at the moment the row happened to be inserted', async () => {
+      const sara = await person('sara');
+      await setUp({ renewMinutes: 10 });
+      await reserveRoom({ key: `created-${tag}`, personId: sara.id, amountMicros: 100 }, minutes(-60));
+      const row = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: `created-${tag}` } });
+      expect(row.createdAt).toEqual(minutes(-60));
+      expect(termsOf(row.terms)?.[0].at).toBe(minutes(-60).getTime());
+    });
+
+    it('a renewal stamped before the last stretch on record changes nothing: the lease keeps its history in order and its end', async () => {
+      const sara = await person('sara');
+      await setUp({ memberAllowanceMicros: 10_000, renewMinutes: 5 });
+      await reserveRoom({ key: `order-${tag}`, personId: sara.id, amountMicros: 400 }, NOW);
+      expect(await renewRoom({ key: `order-${tag}`, moreMicros: 300 }, minutes(4))).toMatchObject({ ok: true, reservation: { amountMicros: 700, renewals: 1 } });
+      // The one that was asked first reaches the lock second
+      const late = await renewRoom({ key: `order-${tag}`, moreMicros: 300 }, minutes(3));
+      expect(late).toMatchObject({ ok: true, created: false, reservation: { amountMicros: 700, renewals: 1, expiresAt: minutes(9) } });
+      const row = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: `order-${tag}` } });
+      expect(row.amountMicros).toBe(BigInt(700));
+      expect(row.expiresAt).toEqual(minutes(9));
+      expect(termsOf(row.terms)).toHaveLength(2);
+    });
+
     it('does not renew room that lapsed, or that was settled or released: the job saves its work and stops', async () => {
       const sara = await person('sara');
       await setUp({ renewMinutes: 10 });
@@ -382,6 +422,18 @@ run('the meter, in a real database', () => {
       expect(await releaseRoom({ key: `t-${tag}` }, minutes(4))).toMatchObject({ state: 'released' });
       expect(await releaseRoom({ key: `unknown-${tag}` }, minutes(4))).toBeNull();
       expect(await prisma.meterReservation.count()).toBe(2);
+    });
+  });
+
+  describe('scheduling a new allowance', () => {
+    it('does not put an older allowance back when the one that was waiting has already taken effect', async () => {
+      await saveMeterSettings({ memberAllowanceMicros: 100 }, 'admin');
+      await scheduleMemberAllowance(200, new Date('2026-07-01T00:00:00Z'), 'admin', new Date('2026-06-20T00:00:00Z'));
+      // July 15: the 200 is in force; scheduling 300 for August must leave the 200 where it is until then
+      await scheduleMemberAllowance(300, new Date('2026-08-01T00:00:00Z'), 'admin', new Date('2026-07-15T00:00:00Z'));
+      const row = await prisma.appSetting.findUniqueOrThrow({ where: { key: 'meter' } });
+      expect(readMeterSettings(row.value, new Date('2026-07-15T00:00:00Z')).memberAllowanceMicros).toBe(200);
+      expect(readMeterSettings(row.value, new Date('2026-08-02T00:00:00Z')).memberAllowanceMicros).toBe(300);
     });
   });
 
@@ -458,9 +510,22 @@ run('the meter, in a real database', () => {
       await setUp();
       await recordMeterEvent(event({ personKey: `person:${sara.id}`, personId: sara.id, costMicros: 10, occurredAt: NOW }));
       await recordMeterEvent(event({ personKey: `person:${sara.id}`, personId: sara.id, costMicros: 20, occurredAt: minutes(30) }));
+      await prisma.meterEvent.updateMany({ where: { costMicros: 10 }, data: { recordedAt: NOW } });
+      await prisma.meterEvent.updateMany({ where: { costMicros: 20 }, data: { recordedAt: minutes(30) } });
       expect(await settleEventsThrough(minutes(10))).toBe(1);
       expect(await settleEventsThrough(minutes(10))).toBe(0);
       expect(await currentEnvelope(minutes(40))).toMatchObject({ committedMicros: 10, unsettledMicros: 20 });
+    });
+
+    it('settles by when an event was recorded, never by when it happened: one written after the provider’s pass is not covered by it', async () => {
+      const sara = await person('sara');
+      await setUp();
+      // It happened before the moment the provider settled through, but it was written after it
+      await recordMeterEvent(event({ personKey: `person:${sara.id}`, personId: sara.id, costMicros: 10, occurredAt: NOW }));
+      await prisma.meterEvent.updateMany({ data: { recordedAt: minutes(30) } });
+      expect(await settleEventsThrough(minutes(10))).toBe(0);
+      expect(await currentEnvelope(minutes(40))).toMatchObject({ committedMicros: 0, unsettledMicros: 10 });
+      expect(await settleEventsThrough(minutes(31))).toBe(1);
     });
   });
 });

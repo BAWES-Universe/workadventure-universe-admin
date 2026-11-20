@@ -378,6 +378,49 @@ run('the grants routes, on the real books', () => {
     expect(await prisma.grantProgram.count({ where: { kind: 'exception', status: 'active' } })).toBe(0);
   });
 
+  it('changes another category of an exception that already has a computers rule from before, sent back as it was, and leaves that rule alone', async () => {
+    const [omar, noor] = [await person('Omar'), await person('Noor')];
+    const audience = { kind: 'people', userIds: [omar, noor] };
+    await call(postException, '/x', { method: 'POST', body: { audience, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'same' } } });
+    const { saveException } = await import('@/lib/credit-rules');
+    await saveException({ categoryId: 'computers', amount: 5 * MILLION, schedule: 'monthly', recipients: { kind: 'people', userIds: [omar, noor] }, claimStartsAt: new Date() }, { userId: admin.id, superAdmin: true });
+    const opened = (await overview()).exceptions[0];
+    expect(opened.computers).toMatchObject({ mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' });
+    const computersBefore = await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'computers', kind: 'exception', status: 'active' }, select: { id: true } });
+    // The edit sheet sends every category back: the Apps amount changes, the computers rule is as it was
+    const body = { audience, replaceId: opened.id, instant_apps: { mode: 'own', amountMicros: 12 * MILLION, interval: 'monthly' }, computers: opened.computers };
+    const preview = await (await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', ...body } })).json();
+    expect(preview.problem).toBeUndefined();
+    expect((await call(postException, '/x', { method: 'POST', body })).status).toBe(201);
+    const after = (await overview()).exceptions;
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ instant_apps: { mode: 'own', amountMicros: 12 * MILLION }, computers: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } });
+    // The computers rule is the same rule, not ended and saved again
+    expect(await prisma.grantProgram.findFirstOrThrow({ where: { categoryId: 'computers', kind: 'exception', status: 'active' }, select: { id: true } })).toEqual(computersBefore);
+    // A different computers rule is still refused, and "As everyone" still ends it
+    const changed = await call<any>(postException, '/x', { method: 'POST', body: { ...body, replaceId: after[0].id, computers: { mode: 'own', amountMicros: 6 * MILLION, interval: 'monthly' } } });
+    expect(changed.status).toBe(400);
+    expect((await changed.json()).code).toBe('computers_not_yet');
+    expect((await call(postException, '/x', { method: 'POST', body: { ...body, replaceId: after[0].id, computers: { mode: 'same' } } })).status).toBe(201);
+    expect((await overview()).exceptions[0].computers).toEqual({ mode: 'same' });
+  });
+
+  it('does not call a computers rule "as it was" when the people it is saved for changed: the save is refused and nothing changes', async () => {
+    const [omar, noor] = [await person('Omar'), await person('Noor')];
+    const audience = { kind: 'people', userIds: [omar, noor] };
+    await call(postException, '/x', { method: 'POST', body: { audience, instant_apps: { mode: 'own', amountMicros: 10 * MILLION, interval: 'monthly' }, computers: { mode: 'same' } } });
+    const { saveException } = await import('@/lib/credit-rules');
+    await saveException({ categoryId: 'computers', amount: 5 * MILLION, schedule: 'monthly', recipients: { kind: 'people', userIds: [omar, noor] }, claimStartsAt: new Date() }, { userId: admin.id, superAdmin: true });
+    const opened = (await overview()).exceptions[0];
+    // The same rule sent back for fewer people, with the Apps amount changed
+    const narrowed = { audience: { kind: 'people', userIds: [omar] }, replaceId: opened.id, instant_apps: { mode: 'own', amountMicros: 12 * MILLION, interval: 'monthly' }, computers: opened.computers };
+    const answer = await call<any>(postException, '/x', { method: 'POST', body: narrowed });
+    expect(answer.status).toBe(400);
+    expect((await answer.json()).code).toBe('computers_not_yet');
+    // Nothing changed: the Apps rule is still 10 for both people
+    expect((await overview()).exceptions[0]).toMatchObject({ instant_apps: { mode: 'own', amountMicros: 10 * MILLION }, computers: { mode: 'own', amountMicros: 5 * MILLION } });
+  });
+
   it('never half-saves an exception: if the second category is refused, the first is put back', async () => {
     await saveMeterSettings({ rolloutBudgetMicros: 5 * MILLION }, admin.id);
     const [omar, noor] = [await person('Omar'), await person('Noor')];
@@ -481,7 +524,8 @@ run('the grants routes, on the real books', () => {
       const silenced = jest.spyOn(console, 'error').mockImplementation(() => undefined);
       try {
         const refused = await call<any>(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor, faisal] }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 25 * MILLION, interval: 'monthly' }, clashChoice: 'this' } });
-        expect(refused.status).toBeGreaterThanOrEqual(400);
+        // An unexpected error is a 500, not one of the refusals (400, 409) the screen can say something about
+        expect(refused.status).toBe(500);
       } finally {
         silenced.mockRestore();
         await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS grants_test_refuse_rule ON grant_rules');
@@ -533,6 +577,28 @@ run('the grants routes, on the real books', () => {
       const refused = await call<any>(postException, '/x', { method: 'POST', body: { ...second([omar, noor]), clashChoice: 'other' } });
       expect(refused.status).toBe(400);
       expect((await refused.json()).error).toMatch(/Nobody would be left/);
+    });
+
+    it('does not keep a computers rule "as it was" when the clash choice takes people out of the rule: the save is refused and nothing changes', async () => {
+      const [omar, noor, faisal] = [await person('Omar'), await person('Noor'), await person('Faisal')];
+      const { saveException } = await import('@/lib/credit-rules');
+      const who = { userId: admin.id, superAdmin: true };
+      // Two groups of the same size that share Noor and say the same thing (so there is no clash yet); the first also has a computers rule
+      await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [noor, faisal] }, computers: { mode: 'same' }, instant_apps: { mode: 'own', amountMicros: 25 * MILLION, interval: 'monthly' } } });
+      await saveException({ categoryId: 'computers', amount: 5 * MILLION, schedule: 'monthly', recipients: { kind: 'people', userIds: [noor, faisal] }, claimStartsAt: new Date() }, who);
+      await saveException({ categoryId: 'instant_apps', amount: 25 * MILLION, schedule: 'monthly', recipients: { kind: 'people', userIds: [omar, noor] }, claimStartsAt: new Date() }, who);
+      const opened = (await overview()).exceptions.find((e: any) => e.instant_apps.amountMicros === 25 * MILLION);
+      // Saved again with another figure, which now disagrees for Noor, with "the other rule keeps Noor": Noor leaves this rule, so its computers rule
+      // (sent back as it was) would be for other people than it was made for
+      const answer = await call<any>(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [noor, faisal] }, replaceId: opened.id, instant_apps: { mode: 'own', amountMicros: 30 * MILLION, interval: 'monthly' }, computers: opened.computers, clashChoice: 'other' } });
+      expect(answer.status).toBe(400);
+      expect((await answer.json()).code).toBe('computers_not_yet');
+      const after = await overview();
+      const mine = after.exceptions.find((e: any) => e.instant_apps.amountMicros === 25 * MILLION);
+      expect(mine.audience.people.map((p: any) => p.name).sort()).toEqual(['Faisal', 'Noor']);
+      expect(mine.computers).toMatchObject({ mode: 'own', amountMicros: 5 * MILLION });
+      expect(after.exceptions.find((e: any) => e.instant_apps.amountMicros === 30 * MILLION)).toBeUndefined();
+      expect(after.exceptions).toHaveLength(2);
     });
 
     it('names the clash for a universe’s members too, not only for people you picked', async () => {

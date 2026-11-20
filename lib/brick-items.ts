@@ -1282,9 +1282,11 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
     // Told once per row of failures: the first reported failure at or past the number tells if nobody was told yet (a run that was given up
     // without a report counts in the row and tells nothing itself), and a run that works starts the row over
     const tellAt = kind === 'reminder' || kind === 'schedule' ? 1 : limits.failuresBeforeTelling;
-    // It is kept as told only when the bot server says it did tell (markTold), so a tell that failed is asked for again with the next failure
+    // It is kept as told only when the bot server says it did tell (markTold), so a tell that failed is asked for again with the next failure.
+    // A timeout notice still waiting to be confirmed (failureNoticeAt) is kept when a later run's failure takes the tell over: the notice is
+    // then retried until confirmed, instead of being forgotten
     const tellPerson = report.state === 'failed' && failuresInRow >= tellAt && !item.failureTold;
-    const data: Prisma.BrickItemUpdateInput = { lastRunAt: now, failuresInRow, ...(report.state === 'failed' ? (tellPerson ? { tellRunId: runId, failureNoticeAt: null } : {}) : { failureTold: false, tellRunId: null, failureNoticeAt: null }) };
+    const data: Prisma.BrickItemUpdateInput = { lastRunAt: now, failuresInRow, ...(report.state === 'failed' ? (tellPerson ? { tellRunId: runId, ...(item.failureNoticeAt && !item.failureTold ? {} : { failureNoticeAt: null }) } : {}) : { failureTold: false, tellRunId: null, failureNoticeAt: null }) };
     if (report.progress && kind === 'goal') {
       if (report.progress.statusLine !== undefined) data.statusLine = report.progress.statusLine;
       if (report.progress.steps !== undefined) data.steps = report.progress.steps;

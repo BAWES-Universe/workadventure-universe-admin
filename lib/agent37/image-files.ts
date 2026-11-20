@@ -862,7 +862,11 @@ def desktop_part(pid):
     name = os.path.basename(path)
     args = argv(pid)
     if name == "Xvfb":
-        return [part for part in args[1:] if re.match(r"^:\d+$", part)] == [":99"]
+        # Xvfb ignores everything after -I, so a display number placed there is not one it uses: Xvfb -I :99 runs on :0 and is not the supervisor's
+        rest = args[1:]
+        if "-I" in rest:
+            rest = rest[:rest.index("-I")]
+        return [part for part in rest if re.match(r"^:\d+$", part)] == [":99"]
     if name == "openbox":
         return not any(part.split("=")[0] in OPENBOX_RUNS for part in args[1:])
     if name == "x11vnc":

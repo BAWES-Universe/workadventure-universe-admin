@@ -315,6 +315,31 @@ run('goals and tasks, in a real database', () => {
     expect(mine((await claimWork(at(HOUR + 60 * MIN + 4 * DAY))).failed)).toEqual([]);
   });
 
+  it('keeps a timeout notice that is still waiting to be confirmed when a later run\'s failure takes the tell over', async () => {
+    const nora = await person('nora');
+    const item = await set(nora, { kind: 'schedule', cadence: { type: 'every', minutes: 60 } });
+    const mine = <T extends { itemId: string }>(list: T[]) => list.filter((one) => one.itemId === item.id);
+    const [first] = mine((await claimWork(at(HOUR + MIN))).runs);
+    await claimWork(at(HOUR + 20 * MIN));
+    await claimWork(at(HOUR + 40 * MIN));
+    // The first run is given up with no report: its notice is handed out and waits to be confirmed
+    const lapsed = await claimWork(at(HOUR + 50 * MIN));
+    expect(mine(lapsed.failed)).toMatchObject([{ runId: first.runId }]);
+    const waiting = await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(waiting).toMatchObject({ tellRunId: first.runId, failureTold: false });
+    expect(waiting.failureNoticeAt).not.toBeNull();
+    // The next run is reported as failed: it takes the tell, and the waiting notice is not forgotten
+    const [next] = mine((await claimWork(at(2 * HOUR + MIN))).runs);
+    expect(next.runId).not.toBe(first.runId);
+    // (The sweep may have handed the waiting notice out again on that call: what counts is what stands just before the failure is reported)
+    const before = await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(before.failureNoticeAt).not.toBeNull();
+    expect(await finishRun(next.runId, { attempt: next.attempt, state: 'failed', error: 'The chat did not answer' }, at(2 * HOUR + 2 * MIN))).toMatchObject({ ok: true, applied: true, tellPerson: true });
+    const after = await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(after).toMatchObject({ tellRunId: next.runId, failureTold: false });
+    expect(after.failureNoticeAt?.getTime()).toBe(before.failureNoticeAt!.getTime());
+  });
+
   it('a one-off whose run fails, or is never reported, ends instead of staying on with nothing due', async () => {
     const odin = await person('odin');
     const reported = await set(odin);

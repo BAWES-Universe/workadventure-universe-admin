@@ -60,9 +60,10 @@ export async function grantKeyAppToBricks(ownerId: string, connection: { id: str
 /** A Brick was just made: it gets every key app its owner has. Inside the caller's transaction, so a Brick never exists half-granted. */
 export async function grantKeyAppsToNewBrick(tx: Db, ownerId: string, botId: string): Promise<void> {
   const apps = await tx.appConnection.findMany({ where: { ownerId, kind: 'direct' }, select: { id: true, name: true }, orderBy: { createdAt: 'asc' } });
+  const most = await maxAppsPerBot(tx);
   for (const app of apps) {
     // A brand-new Brick has nothing else yet, so the slot count needs no lock; the limit is still held
-    if ((await tx.botMcpServer.count({ where: { botId } })) >= (await maxAppsPerBot(tx))) break;
+    if ((await tx.botMcpServer.count({ where: { botId } })) >= most) break;
     await tx.botMcpServer.create({ data: { botId, connectionId: app.id, name: app.name, serverUrl: '', authType: 'none', connectedById: ownerId } });
   }
 }

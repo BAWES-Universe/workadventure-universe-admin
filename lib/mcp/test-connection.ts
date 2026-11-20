@@ -178,8 +178,17 @@ type Secrets = readonly string[];
 
 function withoutSecrets(text: string, secrets: Secrets): string {
   let out = text;
+  // A secret with a quote, a backslash or a slash is written differently inside a JSON answer (\" \\ \/), so those spellings go too
+  const spellings = new Set<string>();
+  for (const secret of secrets) {
+    if (!secret) continue;
+    const json = JSON.stringify(secret).slice(1, -1);
+    spellings.add(secret);
+    spellings.add(json);
+    spellings.add(json.replace(/\//g, '\\/'));
+  }
   // Longest first, so a secret that holds another is removed whole
-  for (const secret of [...secrets].sort((a, b) => b.length - a.length)) out = out.split(secret).join('[removed]');
+  for (const spelling of [...spellings].sort((a, b) => b.length - a.length)) out = out.split(spelling).join('[removed]');
   return out;
 }
 
@@ -233,7 +242,9 @@ async function describeFailure(
   // in full before truncateDetail ever sees it. Covers both failure call sites, the
   // direct response and the followed redirect, which both land here without a body.
   const rawBody = withoutSecrets(responseBody ?? (await readBodyWithLimit(response)), secrets);
-  const errorCode = extractErrorCode(rawBody);
+  // What is read out of the body is cleaned again: a secret written in JSON's own spelling is plain text once it is read out
+  const readCode = extractErrorCode(rawBody);
+  const errorCode = readCode === null ? null : withoutSecrets(readCode, secrets);
   // The reason phrase is chosen by the server, so it is stored text like any other and
   // goes through the same redact-then-truncate as the body and the challenge header: an
   // endpoint can echo credential material there, and it can be arbitrarily long. This
@@ -255,7 +266,9 @@ async function describeFailure(
 /** What a server's error answer says, redacted and cut like every other text a server sends back: it may echo the credentials it was sent. */
 function rpcErrorText(error: unknown, secrets: Secrets): string {
   const message = error && typeof error === 'object' ? (error as { message?: unknown }).message : undefined;
-  return truncateDetail(withoutSecrets(typeof message === 'string' && message ? message : JSON.stringify(error), secrets)) ?? 'unknown error';
+  // The message is cleaned as it reads; the JSON of the whole error is cleaned in its own spelling (the secret's JSON form), then again as text
+  const text = typeof message === 'string' && message ? message : withoutSecrets(JSON.stringify(error), secrets);
+  return truncateDetail(withoutSecrets(text, secrets)) ?? 'unknown error';
 }
 
 /** Calls initialize and tools/list on an app's link with its stored sign-in (decrypted here only), through the same address guards at every hop. */

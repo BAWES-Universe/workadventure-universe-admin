@@ -145,7 +145,7 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
   const history = Array.isArray(data.conversationHistory) ? (data.conversationHistory as unknown[]) : null;
   const events = isObject(data.relationship) && Array.isArray(data.relationship.importantEvents) ? (data.relationship.importantEvents as unknown[]) : null;
   const doomedLines = new Set<unknown>();
-  const phrases: { text: string; anySender: boolean }[] = [];
+  const phrases: { text: string; anySender: boolean; forgotAt: number | null }[] = [];
   let removed = 0;
 
   const goes = (id: string, drawn: number | null) => {
@@ -153,14 +153,15 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
     const forgotAt = onlyOlderThan?.get(id);
     return !(forgotAt && drawn !== null && drawn > forgotAt.getTime());
   };
-  const takeLines = (drawn: number | null, phrase: string) => {
+  const takeLines = (drawn: number | null, phrase: string, id: string) => {
     if (!history) return;
     if (drawn !== null) {
       for (const line of history) if (isObject(line) && line.timestamp === drawn && line.sender === 'person') doomedLines.add(line);
     }
     // The bot's own lines that say it back go too. When no line was noted for it (what the bot kept before this), the
     // person's lines that hold its words go as well.
-    if (phrase.trim().length >= MIN_PHRASE) phrases.push({ text: phrase.trim().toLowerCase(), anySender: drawn === null });
+    // A line said after the Forget is the person's again, so the phrase only takes out the lines from before it
+    if (phrase.trim().length >= MIN_PHRASE) phrases.push({ text: phrase.trim().toLowerCase(), anySender: drawn === null, forgotAt: onlyOlderThan?.get(id)?.getTime() ?? null });
   };
   const dropEventsOf = (prefix: string) => {
     if (!events) return;
@@ -170,7 +171,7 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
   if (typeof info.name === 'string') {
     const drawn = numberOr(placeOf(info.drawnFrom, 'name'));
     if (goes(memoryItemKey('name', null, info.name), drawn)) {
-      takeLines(drawn, info.name);
+      takeLines(drawn, info.name, memoryItemKey('name', null, info.name));
       delete info.name;
       drop(info.heard, 'name');
       drop(info.drawnFrom, 'name');
@@ -180,7 +181,7 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
   if (typeof info.birthday === 'string') {
     const drawn = numberOr(placeOf(info.drawnFrom, 'birthday'));
     if (goes(memoryItemKey('birthday', null, info.birthday), drawn)) {
-      takeLines(drawn, info.birthday);
+      takeLines(drawn, info.birthday, memoryItemKey('birthday', null, info.birthday));
       delete info.birthday;
       drop(info.heard, 'birthday');
       drop(info.drawnFrom, 'birthday');
@@ -196,7 +197,7 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
       const key = `pref:${preference}`;
       const drawn = numberOr(placeOf(info.drawnFrom, key));
       if (!goes(memoryItemKey('pref', null, preference), drawn)) return true;
-      takeLines(drawn, preference);
+      takeLines(drawn, preference, memoryItemKey('pref', null, preference));
       drop(info.heard, key);
       drop(info.drawnFrom, key);
       removed++;
@@ -215,7 +216,7 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
         continue;
       }
       // The words of a fact go from the chat too (when no line was noted for it): "I work at Acme" is not left there to bring it back
-      takeLines(drawn, value);
+      takeLines(drawn, value, memoryItemKey('fact', name, value));
       drop(info.heard, key);
       drop(info.drawnFrom, key);
       if (name === 'current_state') alsoGoes.add(`${value}_mentioned_at`);
@@ -229,7 +230,8 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
       if (doomedLines.has(line)) return false;
       const text = isObject(line) && typeof line.message === 'string' ? line.message.toLowerCase() : '';
       const fromBot = isObject(line) && line.sender === 'bot';
-      return !phrases.some((phrase) => (phrase.anySender || fromBot) && text.includes(phrase.text));
+      const said = isObject(line) && typeof line.timestamp === 'number' ? line.timestamp : null;
+      return !phrases.some((phrase) => (phrase.anySender || fromBot) && text.includes(phrase.text) && !(phrase.forgotAt !== null && said !== null && said > phrase.forgotAt));
     });
   }
   return { data, removed };

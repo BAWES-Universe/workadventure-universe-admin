@@ -94,8 +94,14 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}, again = 
     const already = await tx.appKeyCall.findUnique({ where: { botId_callId: { botId: input.botId, callId: input.callId } }, select: { id: true } });
     if (already) return 'again' as const;
     const since = new Date(Date.now() - 3_600_000);
-    const [mine, everyone] = await Promise.all([tx.appKeyCall.count({ where: { ownerId, createdAt: { gte: since } } }), tx.appKeyCall.count({ where: { createdAt: { gte: since }, NOT: { ownerId: 'page-payments' } } })]);
-    if (mine >= limits.keyCallsPerPerson || everyone >= limits.keyCallsPlatform) return 'limit' as const;
+    // The platform's cap covers key calls and page checkouts together (checkout counts both, lib/app-direct/pay.ts): the orders of the last hour
+    // use part of it too, so key calls can never fill what checkouts already hold. (A checkout writes its order under this same lock.)
+    const [mine, everyone, orders] = await Promise.all([
+      tx.appKeyCall.count({ where: { ownerId, createdAt: { gte: since } } }),
+      tx.appKeyCall.count({ where: { createdAt: { gte: since }, NOT: { ownerId: 'page-payments' } } }),
+      tx.appPageOrder.count({ where: { createdAt: { gte: since } } }),
+    ]);
+    if (mine >= limits.keyCallsPerPerson || everyone + orders >= limits.keyCallsPlatform) return 'limit' as const;
     await tx.appKeyCall.create({ data: { connectionId: connection.id, ownerId, botId: input.botId, callId: input.callId, operation: operation.id } });
     // Old rows are kept long enough for a retry to be recognised, and no longer
     const old = await tx.appKeyCall.findMany({ where: { createdAt: { lt: new Date(Date.now() - 2 * DAY_MS) } }, select: { id: true }, take: 100 });
@@ -157,7 +163,7 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}, again = 
   }
   const ok = answer.status >= 200 && answer.status < 300;
   await finish(input, ok ? 'ok' : 'failed', answer.status);
-  if (ok) await reportKeyWorked(connection.id, connection.keyVersion).catch(() => undefined);
+  if (ok) await reportKeyWorked(connection.id, connection.keyVersion, startedAt).catch(() => undefined);
   if (!ok) return { status: 'done', ok: false, httpStatus: answer.status, data: null, truncated: false };
 
   let data: unknown = null;

@@ -223,6 +223,21 @@ export async function checkOutboundUrl(url: string): Promise<{ allowed: boolean;
   return isAllowedServerIp(url);
 }
 
+/** Waits for `work`, or ends with the signal's reason when the signal ends first (also when it already has). The listener is taken off when either ends. */
+function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work;
+  const reason = () => (signal.reason instanceof Error ? signal.reason : new DOMException('This operation was aborted', 'AbortError'));
+  if (signal.aborted) {
+    work.catch(() => undefined);
+    return Promise.reject(reason());
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(reason());
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
 /**
  * A request made to the address that was checked, never to a second look-up of the name. `fetch` resolves the host again after the
  * check, so a name that answers with a public address for the check and an internal one a moment later (DNS rebinding) would reach
@@ -233,9 +248,11 @@ export async function checkOutboundUrl(url: string): Promise<{ allowed: boolean;
 export async function pinnedFetch(url: string, init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal } = {}): Promise<Response> {
   const target = new URL(url);
   if (target.protocol !== 'https:' && target.protocol !== 'http:') throw new Error('Only http and https addresses are allowed');
-  const checked = await isAllowedServerIp(url);
+  // A stalled resolver never holds a caller that has given up: the wait ends with the signal, and a look-up that answers late starts nothing
+  const checked = await untilAborted(isAllowedServerIp(url), init.signal);
   if (!checked.allowed || !checked.addresses || checked.addresses.length === 0) throw new Error(checked.error || 'Server URL resolves to a blocked address');
-  const pinned = checked.addresses[0];
+  // Every address that was checked stays available to the connector (it may try the next when one does not answer), and no other does
+  const pinned = checked.addresses;
   const useHttps = target.protocol === 'https:';
   const hostname = target.hostname.startsWith('[') ? target.hostname.slice(1, -1) : target.hostname;
   return new Promise<Response>((resolve, reject) => {
@@ -252,8 +269,8 @@ export async function pinnedFetch(url: string, init: { method?: string; headers?
         agent: false,
         // The name is never resolved again: the socket goes to the address that was checked
         lookup: ((_name: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {
-          if (options && options.all) callback(null, [{ address: pinned.address, family: pinned.family }]);
-          else callback(null, pinned.address, pinned.family);
+          if (options && options.all) callback(null, pinned.map((one) => ({ address: one.address, family: one.family })));
+          else callback(null, pinned[0].address, pinned[0].family);
         }) as never,
       },
       (incoming) => {
@@ -264,8 +281,15 @@ export async function pinnedFetch(url: string, init: { method?: string; headers?
           else if (typeof value === 'string') responseHeaders.set(name, value);
         }
         const noBody = [101, 204, 205, 304].includes(status);
-        if (noBody) incoming.resume();
-        resolve(new Response(noBody ? null : (Readable.toWeb(incoming) as ReadableStream), { status, statusText: incoming.statusMessage ?? '', headers: responseHeaders }));
+        // A server can answer with a status `Response` refuses (0, 1xx, 600 and up): that ends this request with an error, never an uncaught one
+        try {
+          const response = new Response(noBody ? null : (Readable.toWeb(incoming) as ReadableStream), { status, statusText: incoming.statusMessage ?? '', headers: responseHeaders });
+          if (noBody) incoming.resume();
+          resolve(response);
+        } catch (error) {
+          incoming.destroy();
+          reject(error instanceof Error ? error : new Error('The server answered with a status that cannot be read'));
+        }
       },
     );
     request.on('error', reject);

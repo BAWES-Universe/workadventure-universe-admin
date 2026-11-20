@@ -150,6 +150,11 @@ describe('the Agent37 client', () => {
       await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
     });
 
+    it('says the machine was not reached, never idle, for an empty answer, `null`, a list or a bare value about the session', async () => {
+      const { api } = client([new Response('', { status: 200 }), new Response('null', { status: 200 }), new Response('"idle"', { status: 200 }), new Response('7', { status: 200 }), new Response('[]', { status: 200 })]);
+      for (let ask = 0; ask < 5; ask++) await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+    });
+
     it('gives the saved-files archive a signal, so a machine that stops answering cannot hold a save for ever, and takes the caller’s own', async () => {
       const { api, calls } = client([new Response('bytes', { status: 200 }), new Response('bytes', { status: 200 })]);
       await api.archive('https://abc.agent37.app');

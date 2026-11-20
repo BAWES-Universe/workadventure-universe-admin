@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { getMeterSettings } from '@/lib/meter';
+import { getMeterSettingsStrict } from '@/lib/meter';
 import { pickRunning } from '@/lib/meter-grants';
 import { extraDrawn, monthOf, type GrantWindow } from '@/lib/meter-values';
 import { wokaLayersForMany } from '@/lib/woka-avatar';
@@ -45,6 +45,8 @@ export interface GoesRow {
   bytes: number | null;
   /** Events with no price yet. */
   unpriced: number;
+  /** Instant runs let go unconfirmed: Composio's log could not be reached for the whole wait, so the hold went back and they were written off as failed. */
+  releasedUnconfirmed?: number;
   sure: Sure;
 }
 
@@ -180,12 +182,15 @@ function grantSpan(grants: GrantRow[], now: Date): { first: Date; last: Date } {
  * it, month by month (the usual allowance starts again each month), worked out by the same walk the allowance uses. `events` are
  * that person's computer costs over the whole span of their grants, read once for everyone (see `costsReport`).
  */
-function aboveUsual(base: number | null, grants: GrantRow[], events: { occurredAt: Date; costMicros: bigint | number | null }[], now: Date): number[] {
-  if (base === null || grants.length === 0) return grants.map(() => 0);
+function aboveUsual(allowanceOf: (month: { start: Date; end: Date }) => number | null, grants: GrantRow[], events: { occurredAt: Date; costMicros: bigint | number | null }[], now: Date): number[] {
+  if (grants.length === 0) return grants.map(() => 0);
   const windows = grants.map(grantWindow);
   const { first, last } = grantSpan(grants, now);
   const totals = grants.map(() => 0);
   for (let month = monthOf(first); month.start <= last; month = monthOf(month.end)) {
+    // The allowance that applied in that month, never today's
+    const base = allowanceOf(month);
+    if (base === null) continue;
     const inMonth = events.filter((event) => event.occurredAt >= month.start && event.occurredAt < month.end);
     const drawn = extraDrawn(base, inMonth.map((event) => ({ at: event.occurredAt, micros: toNumber(event.costMicros) })), windows);
     drawn.forEach((micros, index) => (totals[index] += micros));
@@ -232,7 +237,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
         (COUNT(*) FILTER (WHERE kind = 'model_call' AND COALESCE(detail->>'error', 'false') <> 'true' AND COALESCE(detail->>'greeting', 'false') <> 'true'))::int AS replies,
         COALESCE(SUM(quantity) FILTER (WHERE kind = 'app_use'), 0)::bigint AS uses,
         COALESCE(SUM(CASE unit WHEN 'second' THEN quantity WHEN 'minute' THEN quantity * 60 ELSE 0 END) FILTER (WHERE kind = 'computer_time'), 0)::bigint AS seconds,
-        (COUNT(*) FILTER (WHERE kind = 'model_call' AND payer_kind <> 'universe'))::int AS own,
+        (COUNT(*) FILTER (WHERE kind = 'model_call' AND payer_kind <> 'universe' AND COALESCE(detail->>'error', 'false') <> 'true' AND COALESCE(detail->>'greeting', 'false') <> 'true'))::int AS own,
         (COUNT(*) FILTER (WHERE payer_kind = 'universe' AND basis = 'measured'))::int AS measured,
         (COUNT(*) FILTER (WHERE payer_kind = 'universe' AND basis = 'estimated'))::int AS estimated,
         (COUNT(*) FILTER (WHERE payer_kind = 'universe' AND cost_micros IS NULL))::int AS unpriced,
@@ -266,7 +271,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
         WHERE kind = 'stored_bytes' AND payer_kind = 'universe' AND bot_id IS NOT NULL AND occurred_at < ${until}
         ORDER BY bot_id, occurred_at DESC, recorded_at DESC
       ) latest`),
-    getMeterSettings(),
+    getMeterSettingsStrict(),
   ]);
 
   // Instant runs are their own line: "app_use" is ordinary connected-app use, "app_use:instant" is an Instant run
@@ -305,7 +310,9 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     unpriced: 0,
     sure: perGb === null ? 'Unknown' : 'Estimated',
   };
-  const goes: GoesRow[] = [row('models', 'AI models', ['model_call']), row('voice', 'Voice', ['speech']), row('computers', 'Computers', ['computer_time', 'size_change']), row('instant', 'Instant Apps', ['app_use:instant']), row('apps', 'Apps overhead', ['app_use']), files];
+  // Runs let go unconfirmed in this range, said on the Instant row so a free run is never hidden
+  const releasedUnconfirmed = await prisma.instantRun.count({ where: { finishedAt: { gte: from, lt: until }, detail: { path: ['releasedUnconfirmed'], equals: true } } });
+  const goes: GoesRow[] = [row('models', 'AI models', ['model_call']), row('voice', 'Voice', ['speech']), row('computers', 'Computers', ['computer_time', 'size_change']), { ...row('instant', 'Instant Apps', ['app_use:instant']), releasedUnconfirmed }, row('apps', 'Apps overhead', ['app_use']), files];
 
   // Guests of a Brick are paid for from their own table, so their cost is added to the headline as well
   const costMicros = [...byKind.values()].reduce((sum, group) => sum + toNumber(group.ours), 0) + guestRows.reduce((sum, guest) => sum + toNumber(guest.cost), 0);
@@ -314,11 +321,11 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
   const listedPeople = peopleRows.slice(0, COSTS_LISTED);
   const listedBricks = brickRows.slice(0, COSTS_LISTED);
   // The given list is every grant still running or waiting to start, every one still to bill, and the latest few that ended. A cap
-  // on all of them would drop a running or unbilled grant once enough newer ones exist.
-  const recentIds = (await prisma.meterGrant.findMany({ where: { endsAt: { lte: now } }, orderBy: { createdAt: 'desc' }, take: GIVEN_RECENT, select: { id: true } })).map((grant) => grant.id);
+  // on all of them would drop a running or unbilled grant once enough newer ones exist. A cancelled grant is an ended one, whatever its end date was.
+  const recentIds = (await prisma.meterGrant.findMany({ where: { OR: [{ endsAt: { lte: now } }, { cancelledAt: { not: null } }] }, orderBy: { createdAt: 'desc' }, take: GIVEN_RECENT, select: { id: true } })).map((grant) => grant.id);
   const [shownGrants, requests, openCount, bots] = await Promise.all([
     prisma.meterGrant.findMany({
-      where: { OR: [{ endsAt: { gt: now } }, { settlement: 'to_bill', billedAt: null }, { id: { in: recentIds } }] },
+      where: { OR: [{ endsAt: { gt: now }, cancelledAt: null }, { settlement: 'to_bill', billedAt: null }, { id: { in: recentIds } }] },
       orderBy: { createdAt: 'desc' },
     }),
     prisma.meterRequest.findMany({ where: { answeredAt: null }, orderBy: { createdAt: 'asc' }, take: ASKED_LISTED }),
@@ -334,7 +341,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
   ]);
   const nameOf = new Map(users.map((user) => [user.id, user.name?.trim() || user.email || 'Someone']));
   const botOf = new Map(bots.map((bot) => [bot.id, bot]));
-  const running = grants.filter((grant) => grant.startsAt <= now && grant.endsAt > now);
+  const running = grants.filter((grant) => !grant.cancelledAt && grant.startsAt <= now && grant.endsAt > now);
   // The same one the person's page reports: the largest running, and the later end of two the same
   const extraOf = new Map<string, Date>();
   for (const personId of new Set(running.map((grant) => grant.personId))) {
@@ -399,11 +406,27 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     else byPerson.set(grant.personId, [grant]);
   }
   const above = new Map<string, number>();
+  // The allowance for each member as it was over time: a month is worked out with the one that applied in it. With no history at all
+  // (nothing saved since it began), what is saved now is all there is
+  const changes = await prisma.meterAllowanceChange.findMany({ orderBy: { effectiveFrom: 'asc' }, select: { effectiveFrom: true, allowanceMicros: true } });
+  const figureOf = (change: { allowanceMicros: bigint | null }): number | null => (change.allowanceMicros === null ? null : Number(change.allowanceMicros));
+  const allowanceOf = (month: { start: Date; end: Date }): number | null => {
+    if (changes.length === 0) return settings.memberAllowanceMicros;
+    // A month before the first saved figure is worked out with that first figure: it is all that is known of it, and what every month used until now
+    let applied = figureOf(changes[0]);
+    for (const change of changes) {
+      // A figure scheduled for a day that has not come yet is not the allowance of any month: a report of a month before it is not worked out with it
+      if (change.effectiveFrom >= month.end || change.effectiveFrom > now) break;
+      applied = figureOf(change);
+    }
+    return applied;
+  };
+  const anyAllowance = settings.memberAllowanceMicros !== null || changes.some((change) => change.allowanceMicros !== null);
   // One read for everyone, not one per person and month: the spending of all of them over the whole span of their grants, sorted out
   // by person and month here
-  const spans = [...byPerson.values()].map((list) => grantSpan(list, now));
+  const spans = [...byPerson.values()].filter((list) => list.some((grant) => !grant.cancelledAt)).map((list) => grantSpan(list.filter((grant) => !grant.cancelledAt), now));
   const spending =
-    settings.memberAllowanceMicros === null || byPerson.size === 0
+    !anyAllowance || spans.length === 0
       ? []
       : await prisma.meterEvent.findMany({
           where: {
@@ -422,8 +445,10 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     else spendingOf.set(event.personKey, [event]);
   }
   for (const [personId, list] of byPerson) {
-    const figures = aboveUsual(settings.memberAllowanceMicros, list, spendingOf.get(`person:${personId}`) ?? [], now);
-    list.forEach((grant, index) => above.set(grant.grantKey, figures[index]));
+    // A grant taken back before it started never ran: it has no window, and the others are worked out as if it was never given
+    const ran = list.filter((grant) => !grant.cancelledAt);
+    const figures = aboveUsual(allowanceOf, ran, spendingOf.get(`person:${personId}`) ?? [], now);
+    ran.forEach((grant, index) => above.set(grant.grantKey, figures[index]));
   }
   const given: GivenRow[] = shownGrants.map((grant) => ({
     grantKey: grant.grantKey,
@@ -434,7 +459,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     noLimit: grant.noLimit,
     startsAt: grant.startsAt.toISOString(),
     endsAt: grant.endsAt.toISOString(),
-    ended: grant.endsAt <= now,
+    ended: !!grant.cancelledAt || grant.endsAt <= now,
     givenByName: nameOf.get(grant.givenById) ?? 'a super admin',
     settlement: grant.settlement === 'to_bill' ? 'to_bill' : 'gift',
     billedAt: grant.billedAt?.toISOString() ?? null,
