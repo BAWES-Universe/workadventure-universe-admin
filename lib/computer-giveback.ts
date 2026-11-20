@@ -15,13 +15,14 @@ import { retryWaitMs } from '@/lib/computer-retry';
  *
  * A job's words are the person's, so a brief can make the agent do the work and then crash its own machine, and that looks like a failure of ours. Money
  * therefore depends on what the failure was, judged by Orbit from the relay's durable rows (lib/computer-faults) when the computer's runner reports a
- * failure with cause "ours" (its cause is only a hint). Three classes:
+ * failure with cause "ours" (its cause is only a hint: a failure it calls the agent's own, or says nothing about, but names turns for is read against the same rows, and a
+ * confirmed fault of ours in them is given back too, whichever arrives first, the rows or the finish: `decideHintedFinish`, `afterLateEvidence`). Three classes:
  *
  *  1. A fault only OURS can cause (relay side, or the provider refusing our key): ALWAYS given back, never counted. If any bad turn of the failed streak
  *     was one, the ending is ours, whatever else happened in it.
  *  2. A fault the PERSON caused, with evidence (their allowance, a rule, their own key, a field their job set): charged like any run.
  *  3. UNRESOLVED (a crash with nothing noted, a provider 5xx or 429, a timeout, a 400 with no field): bounded goodwill, decided as follows.
- *     - A job that settled something outside its computer as done delivered: nothing is given back.
+ *     - A job that settled something outside its computer as done delivered: no GOODWILL is given back (an incident that operations establishes caused it, or a confirmed fault of ours, still gives its computer cost back; the App's own charge stays on its own line).
  *     - A job with an outside effect still to be confirmed is held (`pending`) until it is, or until the bounded close (Instant's wait for an unreachable
  *       log): done means none, failed means give back. The same rule as Instant: a late confirmation never takes a give-back back.
  *     - A person has a bounded number of give-backs a month (UTC): Instant's "Give-backs one person may have in a month" when a super admin set it,
@@ -37,9 +38,15 @@ import { retryWaitMs } from '@/lib/computer-retry';
 export type GiveBackLimits = Pick<InstantLimits, 'goodwillPerPersonPerMonth' | 'pauseMinRuns' | 'pauseFailureRateBps' | 'unreachableWaitMinutes' | 'unclearWaitMinutes'>;
 
 export type Verdict =
-  | { state: 'given'; basis: 'universe_fault' | 'goodwill' | 'orbit_fault' | 'incident'; counted: boolean; reason: string | null; route: string | null }
-  | { state: 'refused'; basis: 'person_caused' | 'delivered' | 'cap' | 'paused'; reason: string | null; route: string | null }
-  | { state: 'pending'; basis: 'effect_unresolved' | 'limits_unreadable' | 'limits_missing'; reason: string | null; route: string | null };
+  | { state: 'given'; basis: 'universe_fault' | 'goodwill' | 'orbit_fault' | 'incident'; counted: boolean; reason: string | null; route: string | null; /** The turns the verdict was read from, when the runner named none and Orbit chose the last one with a row. */ judgedTurns?: number[] }
+  | { state: 'refused'; basis: 'person_caused' | 'delivered' | 'cap' | 'paused' | 'agent_ended'; reason: string | null; route: string | null; judgedTurns?: number[] }
+  | { state: 'pending'; basis: 'effect_unresolved' | 'limits_unreadable' | 'limits_missing'; reason: string | null; route: string | null; judgedTurns?: number[] };
+
+/** What the runner said the cause of a failed finish was. Only a hint: the rows decide. */
+export type FinishHint = 'ours' | 'agent' | 'none';
+
+/** The hint a decision was made under (a decision kept before hints were all kept has only `ours`). */
+export const hintOf = (kept: string | null | undefined): FinishHint => (kept === 'agent' || kept === 'none' ? kept : 'ours');
 
 const MINUTE = 60 * 1000;
 
@@ -90,6 +97,12 @@ interface JobRef {
   endedAt?: Date | null;
 }
 
+/** The last turn of a run (no run: the turns of no run) that has a row saying something went wrong, or null: where a failure the runner named no turns for is looked for. */
+export async function lastFaultTurn(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, run: string | null | undefined): Promise<number | null> {
+  const last = await db.computerJobFault.findFirst({ where: { jobId, run: run ?? null, turn: { not: null }, kind: { not: 'answered' } }, orderBy: { turn: 'desc' }, select: { turn: true } });
+  return last?.turn ?? null;
+}
+
 /**
  * Decides one failed job the runner reported as ours. Runs inside a transaction, under the person's give-back lock, so two jobs of one person deciding
  * together cannot both take the last give-back. `limits` are read before the transaction opens (null: they could not be read).
@@ -100,20 +113,32 @@ export async function decideRunnerFinish(
   job: JobRef,
   turns: readonly number[] | null | undefined,
   now: Date,
-  options: { effectsClosed?: boolean; run?: string | null } = {},
+  options: { effectsClosed?: boolean; run?: string | null; hint?: FinishHint } = {},
 ): Promise<Verdict> {
-  const rows = await readFaultRows(tx, job.id, turns, options.run);
+  // A failed finish is judged whatever the runner's hint (the hint is evidence, never the verdict). Hint `ours` reads the turns the runner named (every row when it named none) and a turn it
+  // named that has no row is unresolved. Any other hint reads the turns it named too, or, when it named none, the LAST turn of its run that has a row; a turn with no row says nothing wrong
+  // was recorded, so the agent ending on its own is the person's (`agent_ended`, never counted): no brief can make a job free without a recorded fault
+  const lenient = options.hint !== undefined && options.hint !== 'ours';
+  let judged: readonly number[] | null | undefined = turns;
+  if (lenient && !(turns && turns.length > 0)) {
+    const last = await lastFaultTurn(tx, job.id, options.run);
+    judged = last === null ? [] : [last];
+  }
+  const rows = lenient && judged && judged.length === 0 ? [] : await readFaultRows(tx, job.id, judged, options.run);
+  const judgedTurns = lenient && !(turns && turns.length > 0) ? [...(judged ?? [])] : undefined;
   const ours = rows.find((row) => row.cls === 'ours');
   // Nothing was charged for a job that never started: there is nothing to hold back
-  if (!job.startedAt) return { state: 'given', basis: 'universe_fault', counted: false, reason: ours?.reason ?? 'not_started', route: ours?.route ?? null };
+  if (!job.startedAt) return { state: 'given', basis: 'universe_fault', counted: false, reason: ours?.reason ?? 'not_started', route: ours?.route ?? null, judgedTurns };
   // Class 1: any bad turn of ours makes the ending ours
-  if (ours) return { state: 'given', basis: 'universe_fault', counted: false, reason: ours.reason, route: ours.route };
+  if (ours) return { state: 'given', basis: 'universe_fault', counted: false, reason: ours.reason, route: ours.route, judgedTurns };
   const person = rows.find((row) => row.cls === 'person');
-  // A turn the runner judged failed that has no row at all (a crash, a stream that broke) is unresolved, never the person's
-  const silent = turns && turns.length > 0 ? turns.find((turn) => !rows.some((row) => row.turn === turn)) : undefined;
+  // A turn the runner judged failed that has no row at all (a crash, a stream that broke) is unresolved, never the person's (hint `ours` only)
+  const silent = !lenient && turns && turns.length > 0 ? turns.find((turn) => !rows.some((row) => row.turn === turn)) : undefined;
   const unresolved = rows.find((row) => row.cls === 'unresolved') ?? (silent !== undefined ? { reason: 'no_row', route: null } : undefined);
   // Class 2: evidence it was the person's, and nothing that points at us
-  if (person && !unresolved) return { state: 'refused', basis: 'person_caused', reason: person.reason, route: person.route };
+  if (person && !unresolved) return { state: 'refused', basis: 'person_caused', reason: person.reason, route: person.route, judgedTurns };
+  // The agent ended on its own with nothing wrong recorded on what was judged
+  if (lenient && !unresolved) return { state: 'refused', basis: 'agent_ended', reason: null, route: null, judgedTurns };
 
   // Class 3: bounded goodwill
   const reason = unresolved?.reason ?? null;
@@ -121,11 +146,11 @@ export async function decideRunnerFinish(
   // Both states are read in ONE statement, so a send that turns from planned to done between two reads can never be seen as neither: one done blocks goodwill, one still
   // planned (and none done) defers the decision
   const effects = await tx.computerEffect.groupBy({ by: ['state'], where: { jobId: job.id, state: { in: ['done', 'planned'] } }, _count: { _all: true } });
-  if (effects.some((one) => one.state === 'done')) return { state: 'refused', basis: 'delivered', reason, route };
-  if (!options.effectsClosed && effects.some((one) => one.state === 'planned')) return { state: 'pending', basis: 'effect_unresolved', reason, route };
-  if (!limits) return { state: 'pending', basis: 'limits_unreadable', reason, route };
+  if (effects.some((one) => one.state === 'done')) return { state: 'refused', basis: 'delivered', reason, route, judgedTurns };
+  if (!options.effectsClosed && effects.some((one) => one.state === 'planned')) return { state: 'pending', basis: 'effect_unresolved', reason, route, judgedTurns };
+  if (!limits) return { state: 'pending', basis: 'limits_unreadable', reason, route, judgedTurns };
   const bound = personGiveBackBound(limits);
-  if (bound === null) return { state: 'pending', basis: 'limits_missing', reason, route };
+  if (bound === null) return { state: 'pending', basis: 'limits_missing', reason, route, judgedTurns };
 
   // The month the job ended in, not the month the decision is made in: a job that ended on the 31st and is decided on the 1st uses the 31st's month, for both counts
   const month = monthOf(job.endedAt ?? now);
@@ -136,9 +161,9 @@ export async function decideRunnerFinish(
     // Jobs that ended after running, but not the ones the person ended themselves or turned off: those say nothing about how the work goes
     tx.computerJob.count({ where: { ...ran, status: { in: ['done', 'failed', 'stopped'] }, OR: [{ endedBy: null }, { endedBy: { notIn: ['person', 'off', 'deleted'] } }] } }),
   ]);
-  if (given >= bound) return { state: 'refused', basis: 'cap', reason, route };
-  if (personGiveBackPaused(limits, ended, given)) return { state: 'refused', basis: 'paused', reason, route };
-  return { state: 'given', basis: 'goodwill', counted: true, reason, route };
+  if (given >= bound) return { state: 'refused', basis: 'cap', reason, route, judgedTurns };
+  if (personGiveBackPaused(limits, ended, given)) return { state: 'refused', basis: 'paused', reason, route, judgedTurns };
+  return { state: 'given', basis: 'goodwill', counted: true, reason, route, judgedTurns };
 }
 
 /** Takes the person's advisory lock for give-backs (held to the end of the transaction). */
@@ -161,7 +186,8 @@ export async function writeDecision(
     reason: verdict.reason,
     route: verdict.route,
     judgedTurns: [...(turns ?? [])],
-    judgedRun: turns && turns.length > 0 ? (run ?? null) : null,
+    // The run is kept whenever the runner named turns, and for a hint other than ours even with none: the last turn with a row is looked for again, in that run, when a row arrives late
+    judgedRun: (turns && turns.length > 0) || (hint !== null && hint !== 'ours') ? (run ?? null) : null,
     nextAttemptAt: verdict.state === 'pending' ? new Date(now.getTime() + retryWaitMs(0)) : null,
   };
   await tx.computerGiveBackDecision.upsert({ where: { jobId: job.id }, create: { jobId: job.id, personId: job.personId, ...data }, update: data });
@@ -174,6 +200,11 @@ export async function writeOrbitDecision(tx: Prisma.TransactionClient, job: { id
     create: { jobId: job.id, personId: job.personId, state: 'given', basis: 'orbit_fault', causeHint: null, reason: null, route: null, judgedTurns: [] },
     update: {},
   });
+}
+
+/** Says on a job's orbit_fault decision that our own pool cut it off (nothing is changed if the job has no such decision). Never throws. */
+export async function notePoolCutOff(jobId: string): Promise<void> {
+  await prisma.computerGiveBackDecision.updateMany({ where: { jobId, basis: 'orbit_fault', reason: null }, data: { reason: 'pool_cut_off' } }).catch(() => undefined);
 }
 
 /**
@@ -210,12 +241,11 @@ export async function correctDecisionForIncident(tx: Prisma.TransactionClient, j
     await uncountGiveBack(tx, job.id);
     return 'uncounted';
   }
-  // Delivered work is left alone: a job with an outside effect that is done is never turned into a give-back by a correction (a held decision stays held, and is decided by its
-  // evidence). This blocks only that flip: a goodwill give-back already made (counted against the person's bound) is freed from the bound above, delivered or not, because the
-  // correction lifts the bound and does not change the verdict
-  if ((await tx.computerEffect.count({ where: { jobId: job.id, state: 'done' } })) > 0) return null;
+  // Once operations has established that the incident caused this job's failure, the confirmed-fault rule applies even if another step of the job delivered: the computer's own cost
+  // (its time, its model calls, the credit they drew) is given back, and what an App delivered and charged stays on its own line, untouched. Only a held, cap/pause-refused, delivered-refused
+  // or runner-hint-refused decision turns; a decision the person's own evidence refused (person_caused) is left alone, and a give-back already made is never taken back
   const flipped = await tx.computerGiveBackDecision.updateMany({
-    where: { jobId: job.id, OR: [{ state: 'pending' }, { state: 'refused', basis: { in: ['cap', 'paused'] } }] },
+    where: { jobId: job.id, OR: [{ state: 'pending' }, { state: 'refused', basis: { in: ['cap', 'paused', 'delivered', 'agent_ended'] } }] },
     data: { state: 'given', basis: 'incident', route, nextAttemptAt: null, lastError: null },
   });
   if (flipped.count === 0) return null;
@@ -262,7 +292,7 @@ export async function resolveDecision(jobId: string, now: Date = new Date(), opt
     // Read again under the person's lock: an incident correction (or another retry) may have decided it since the read above, and that decision stands
     const current = await tx.computerGiveBackDecision.findUnique({ where: { jobId }, select: { state: true } });
     if (!current || current.state !== 'pending') return null;
-    let next = await decideRunnerFinish(tx, limits, job, decision.judgedTurns, now, { effectsClosed, run: decision.judgedRun });
+    let next = await decideRunnerFinish(tx, limits, job, decision.judgedTurns, now, { effectsClosed, run: decision.judgedRun, hint: hintOf(decision.causeHint) });
     // Limits that cannot be read or are not set cannot be waited out when the evidence is about to be deleted: the person is not charged for it
     if (options.closing && next.state === 'pending') next = { state: 'given', basis: 'orbit_fault', counted: false, reason: 'brick_purged', route: next.route };
     if (next.state === 'pending') {
@@ -334,7 +364,8 @@ export async function sweepGiveBackDecisions(now: Date = new Date(), batch = 50)
  */
 export async function afterLateEvidence(jobId: string, now: Date = new Date()): Promise<void> {
   const first = await prisma.computerGiveBackDecision.findUnique({ where: { jobId } });
-  if (!first || first.causeHint !== 'ours') return;
+  // Every failed finish has a decision whatever the runner said (a hint never hides evidence); an Orbit-seen ending has no hint and is already given
+  if (!first || !first.causeHint) return;
   if (first.state === 'pending') {
     await resolveDecision(jobId, now);
     return;
@@ -350,7 +381,16 @@ export async function afterLateEvidence(jobId: string, now: Date = new Date()): 
     // The same verdict as evidence on time: a confirmed fault of ours in what was judged beats a delivered effect (decideRunnerFinish reads class 1 before the effects), so a row that
     // arrives late and says so gives the job back whatever the decision refused it for
     if (!decision || decision.state === 'pending' || (decision.state === 'given' && decision.basis !== 'goodwill')) return false;
-    const rows = await readFaultRows(tx, jobId, decision.judgedTurns, decision.judgedRun);
+    // A decision for a runner that said the agent's own (or nothing) and named no turns looks at the LAST turn with a row, in its run: the one it chose at the finish, or, when nothing had
+    // a row yet, the last one now
+    const lenient = decision.causeHint !== 'ours';
+    let turns: readonly number[] = decision.judgedTurns;
+    if (lenient && turns.length === 0) {
+      const last = await lastFaultTurn(tx, jobId, decision.judgedRun);
+      if (last === null) return false;
+      turns = [last];
+    }
+    const rows = await readFaultRows(tx, jobId, turns, decision.judgedRun);
     const ours = rows.find((row) => row.cls === 'ours');
     if (!ours) return false;
     await tx.computerGiveBackDecision.update({ where: { jobId }, data: { state: 'given', basis: 'universe_fault', reason: ours.reason, route: ours.route, nextAttemptAt: null } });
@@ -391,7 +431,7 @@ export async function sweepLateEvidence(now: Date = new Date(), batch = 50): Pro
   try {
     const due = await prisma.$queryRaw<Array<{ job_id: string; mark: Date; attempts: number; last_error: string | null }>>(Prisma.sql`
       SELECT d."job_id", clock_timestamp() AS mark, d."attempts", d."last_error" FROM "computer_give_back_decisions" d
-      WHERE d."cause_hint" = 'ours' AND (d."state" = 'refused' OR (d."state" = 'given' AND d."basis" = 'goodwill'))
+      WHERE d."cause_hint" IS NOT NULL AND (d."state" = 'refused' OR (d."state" = 'given' AND d."basis" = 'goodwill'))
         AND (
           -- A look that threw is retried at its own time, however old the decision is: it is never dropped
           (d."last_error" LIKE 'late_look%' AND d."next_attempt_at" <= ${now})

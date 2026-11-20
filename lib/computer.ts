@@ -37,7 +37,7 @@ import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
 import { recordRefundObligationsForBrick, sweepRefundObligations } from '@/lib/computer-refunds';
-import { decidePendingForPurge, decideRunnerFinish, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, markDeliveredLate, noteEffectSettled, sweepGiveBackDecisions, sweepLateEvidence, type Verdict } from '@/lib/computer-giveback';
+import { decidePendingForPurge, decideRunnerFinish, notePoolCutOff, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, markDeliveredLate, noteEffectSettled, sweepGiveBackDecisions, sweepLateEvidence, type Verdict } from '@/lib/computer-giveback';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -999,7 +999,10 @@ export async function renewJob(
     return { ok: false, reason: 'rule', words: room.words };
   }
   const reason = room.reason === 'allowance' ? 'allowance' : room.reason === 'closed' ? 'closed' : 'pool';
-  await endJob(jobId, 'stopped', reason === 'allowance' ? 'allowance' : reason === 'closed' ? 'error' : 'pool', now);
+  // Our own pool or envelope having no room is OUR ending, like a closed room: given back in full (time, model calls, the credit they drew), never counted, kept as an orbit_fault decision
+  // whose reason says why. A model call refused for the same cause is `pool_busy`, a fault of ours, so the two endings must not disagree
+  await endJob(jobId, 'stopped', reason === 'allowance' ? 'allowance' : 'error', now);
+  if (reason === 'pool') await notePoolCutOff(jobId);
   return { ok: false, reason };
 }
 
@@ -1025,10 +1028,13 @@ export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: 
     // The computer's own sentence about why it could not go on is kept before the job ends, for the message that tells the person
     const note = outcome === 'failed' ? cleanEndNote(why) : null;
     if (note) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: note } });
-    // Only a failure the runner says is ours is given back; one with no cause (or the agent's own) is the person's, so a run cannot be made free by ending it "failed"
-    // Only this ending is steered by the job's own words (a brief can crash its own machine), so only this one is bounded; the endings Orbit saw itself are always given back
+    // The runner's cause is only a HINT. Every failed finish is judged by Orbit from the relay's durable rows (lib/computer-giveback): a confirmed fault only OURS can cause is given back
+    // under any hint, whichever arrives first, the rows or the finish (a row that comes after is looked at again: afterLateEvidence). Hint `ours` is judged as before; the agent's own, or
+    // nothing, reads the turns the runner named (or the last turn with a row) and gives goodwill only for an unresolved row. A run is never made free by ending it "failed" with nothing recorded
     const ours = outcome === 'failed' && cause === 'ours';
-    await endJob(jobId, outcome, ours ? 'error' : null, now, true, undefined, true, ours ? { turns: turns ?? null, run: turns && turns.length > 0 ? (run ?? null) : null } : null);
+    const named = !!turns && turns.length > 0;
+    const runner = outcome !== 'failed' ? null : { turns: turns ?? null, run: named || !ours ? (run ?? null) : null, hint: ours ? ('ours' as const) : cause === 'agent' ? ('agent' as const) : ('none' as const) };
+    await endJob(jobId, outcome, ours ? 'error' : null, now, true, undefined, true, runner);
   }
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return job ? jobView(job) : null;
@@ -1147,7 +1153,7 @@ const END_TRIES = 4;
  * `outside` false writes only our own tables (the Brick's purge ends its jobs this way, so a slow provider or backup never holds the purge):
  * the machine, its browser and the agent's turn are left to the purge's own removal of the machine.
  */
-async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, runner: { turns: number[] | null; run?: string | null } | null = null): Promise<void> {
+async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, runner: { turns: number[] | null; run?: string | null; /** What the runner said the cause was: `ours` is judged from the rows and bounded; any other is a hint read against the rows of the named turns. */ hint?: 'ours' | 'agent' | 'none' } | null = null): Promise<void> {
   // The job can change under this (a person's answer moves it between running and waiting): the end is tried again on what it is now, and
   // only a job that is over, or no longer the one the caller meant, is let go
   let job: NonNullable<Awaited<ReturnType<typeof prisma.computerJob.findUnique>>> | null = null;
@@ -1190,37 +1196,42 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // writes the ending and under the person's give-back lock, so two of their jobs ending together cannot both take the last give-back. A job that is not given back
     // ends as a failure that is the person's, charged provisionally when the decision cannot be made yet (it is then decided again by the sweep, never a final charge)
     const runnerJudged = runner !== null && endedBy === 'error' && job.startedAt !== null;
+    // A failure the runner did not call ours is read against the rows too (the turns it named, or the last turn with a row): a confirmed fault of ours is given back, an unresolved one is bounded goodwill, nothing recorded stays the person's
+    const hintJudged = runner !== null && runner.hint !== 'ours' && endedBy === null && status === 'failed' && job.startedAt !== null;
     // An ending Orbit saw itself is always given back; it is kept in the same record
     const orbitSeen = runner === null && endedBy === 'error' && job.startedAt !== null;
     const turnHold = held && !!job.firstTurnSentAt && !job.agentResponseId;
     const where = { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted };
-    if (runnerJudged || orbitSeen || turnHold) {
+    if (runnerJudged || hintJudged || orbitSeen || turnHold) {
       // The job's first turn was sent and never named: it may still run on the machine with nothing to cancel it by. The machine carries a hold from the
       // moment the job is over (one commit with the end), so no other job or turn starts beside that turn until the machine is proved asleep
       const botId = job.botId;
       const ref = { id: jobId, personId: job.personId, startedAt: job.startedAt };
       // Read before the transaction opens: a read of Limits that fails inside it would leave the transaction aborted
-      const limits = runnerJudged ? await readGiveBackLimits() : null;
+      const limits = runnerJudged || hintJudged ? await readGiveBackLimits() : null;
       const result = await prisma.$transaction(async (tx) => {
         let verdict: Verdict | null = null;
-        if (runnerJudged) {
+        if (runnerJudged || hintJudged) {
           await lockPerson(tx, ref.personId);
-          verdict = await decideRunnerFinish(tx, limits, ref, runner.turns, now, { run: runner.run ?? null });
+          verdict = await decideRunnerFinish(tx, limits, ref, runner.turns, now, { run: runner.run ?? null, hint: runner.hint });
         }
         const given = !verdict || verdict.state === 'given';
         const counted = verdict?.state === 'given' && verdict.counted;
-        const data = !given ? { ...endData, status: 'failed', endedBy: null } : counted ? { ...endData, runnerFault: true } : endData;
+        // A given-back ending ends as ours (`error`), counted or not: for a hinted one it was not ended so by the runner, so it is said here
+        const data = !given ? { ...endData, status: 'failed', endedBy: null } : { ...endData, ...(hintJudged ? { endedBy: 'error' as const } : {}), ...(counted ? { runnerFault: true } : {}) };
         const done = await tx.computerJob.updateMany({ where, data });
         if (done.count === 1) {
           if (turnHold) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
-          if (verdict) await writeDecision(tx, ref, verdict, 'ours', runner?.turns ?? null, now, runner?.run ?? null);
+          if (verdict) await writeDecision(tx, ref, verdict, runner?.hint ?? 'ours', verdict.judgedTurns ?? runner?.turns ?? null, now, runner?.run ?? null);
           else if (orbitSeen) await writeOrbitDecision(tx, ref);
         }
         return { done, verdict };
       });
       ended = result.done;
+      // A hinted ending that was given back is ours from here on: its time and calls are given back below like any
+      if (ended.count === 1 && hintJudged && result.verdict?.state === 'given') endedBy = 'error';
       if (ended.count === 1 && result.verdict && result.verdict.state !== 'given') {
-        console.warn('[Computer] A job that failed on our side is not given back (yet):', result.verdict.state, result.verdict.basis);
+        if (!hintJudged) console.warn('[Computer] A job that failed on our side is not given back (yet):', result.verdict.state, result.verdict.basis);
         // Limits that could not be read hold a give-back on no fault of the person's: it is told to Sentry so it can be made good by hand, and the sweep decides it again
         if (result.verdict.basis === 'limits_unreadable') Sentry.captureMessage('A computer give-back was held because the Limits could not be read', { level: 'error', tags: { area: 'computer', step: 'giveback_limits_unreadable' }, extra: { jobId } });
         status = 'failed';

@@ -3728,9 +3728,9 @@ model ComputerGiveBackDecision {
   personId      String    @map("person_id")
   // given, refused, pending
   state         String    @db.VarChar(8)
-  // given: universe_fault, orbit_fault, goodwill, incident; refused: person_caused, delivered, cap, paused; pending: effect_unresolved, limits_unreadable, limits_missing
+  // given: universe_fault, orbit_fault, goodwill, incident; refused: person_caused, delivered, cap, paused, agent_ended (the runner said the agent's own and nothing wrong was recorded on what was judged); pending: effect_unresolved, limits_unreadable, limits_missing
   basis         String    @db.VarChar(20)
-  // What the runner said ('ours') and the reason of the row (or the Orbit ending) the decision rests on
+  // What the runner said ('ours', 'agent', or 'none' when it said nothing) and the reason of the row (or the Orbit ending) the decision rests on
   causeHint     String?   @map("cause_hint") @db.VarChar(10)
   reason        String?   @db.VarChar(32)
   route         String?   @db.VarChar(120)

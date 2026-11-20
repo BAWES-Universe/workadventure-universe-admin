@@ -31,12 +31,16 @@ export const PERSON_REASONS: readonly string[] = ['field_job_set', 'allowance', 
 export const UNRESOLVED_REASONS: readonly string[] = ['provider_5xx', 'provider_429', 'stream_cut', 'timeout_no_output', 'timeout_after_output', 'fieldless_400', 'field_relay_set'];
 
 /** The class of one row; null for a call that was answered (it says nothing about a failure). A reason Orbit does not know is unresolved, never ours. */
-export function faultClassOf(row: { kind: string; reason: string; source: string }): FaultClass | null {
+export function faultClassOf(row: { kind: string; reason: string; source: string; providerStatus?: number | null }): FaultClass | null {
   if (row.kind === 'answered') return null;
   // The source alone never charges anyone: the game writes source own-key on EVERY row of a call on the person's own key, including our relay being down.
   // Their provider refusing their key is theirs, when the relay says it is not ours (kind `not_ours`): an unconfirmed row stays unresolved like any other, and a row that says
   // `fault` on a call made with their own key contradicts itself, so it is unresolved too. Everything else is read by kind and reason below, own key or not
   if (row.source === 'own-key' && row.reason === 'provider_key_ours') return row.kind === 'not_ours' ? 'person' : 'unresolved';
+  // A provider failing for the person's own key is the person's only when it REFUSED the key or the request (a 4xx: their credential, their model, their quota). A generic upstream
+  // 5xx, a request timeout, or a row with no status at all (a disconnect, a stream that was cut with nothing said) does not establish why the provider failed: unresolved, with stronger
+  // evidence (a confirmed incident) able to settle it. A service outage alone never makes a person's own key the cause
+  if (row.reason === 'own_provider' && row.kind === 'not_ours' && (row.providerStatus === null || row.providerStatus === undefined || row.providerStatus >= 500 || row.providerStatus === 408)) return 'unresolved';
   // Ours or the person's only when the reason and the relay's own word agree; anything else could be either
   if (OURS_REASONS.includes(row.reason) && row.kind === 'fault') return 'ours';
   if (PERSON_REASONS.includes(row.reason) && row.kind === 'not_ours') return 'person';
