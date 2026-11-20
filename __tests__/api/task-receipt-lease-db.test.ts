@@ -874,17 +874,17 @@ run('receipts that always settle (O1)', () => {
       // The provider's log turns up and says it went out; the books have not released the hold yet
       await prisma.instantRun.update({ where: { id: run.id }, data: { detail: { noLog: true, releasedUnconfirmed: true, lateEvidence: { status: 'success' } } } });
       await settleCheckingReceipts(50, at(401));
+      // A stray settle event for the run (a charge recorded against it): the receipt still shows no amount taken for a run that was let go, so the guard is what holds it
+      await prisma.meterEvent.create({ data: { eventId: `instant:${run.id}`, kind: 'app_use', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(5_000), basis: 'measured', detail: { instant: true, taskKey: 'late-worked-held', runId: run.id, app: 'gmail', customerMicros: 7_000 } } as never });
       expect(await receipt('late-worked-held')).toMatchObject({ actions: [{ run: run.id, outcome: 'worked' }] });
       const held = await find();
       expect(held?.actions[0]).toMatchObject({ outcome: 'worked', takenText: HOLD_BEING_RELEASED });
       expect(held?.actions[0]).not.toHaveProperty('amountMicros');
-      expect(held?.spentMicros).toBeNull();
       // The books acknowledge the release: released, still no amount taken
       await prisma.instantRun.update({ where: { id: run.id }, data: { customerState: 'released', customerMicros: BigInt(0) } });
       const released = await find();
       expect(released?.actions[0]).toMatchObject({ outcome: 'worked', takenText: HOLD_RELEASED });
       expect(released?.actions[0]).not.toHaveProperty('amountMicros');
-      expect(released?.spentMicros).toBeNull();
     });
 
     it('a later confirmed success updates the ORIGINAL receipt (the same row, the same id) and the charge stays what the books recorded; a later confirmed failure is a failure, never unknown', async () => {

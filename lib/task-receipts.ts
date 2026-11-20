@@ -28,6 +28,7 @@ import {
 } from '@/lib/task-receipts-values';
 import { actionWords, HOLD_BEING_RELEASED, HOLD_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote } from '@/lib/task-receipt-words';
 import { isOver } from '@/lib/computer-values';
+import { isUnconfirmedRun } from '@/lib/instant/values';
 
 /**
  * One receipt per task (paying spec 3, part O4): the Activity list on the Usage page. A line for each task, and on tap what it used
@@ -700,9 +701,9 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
   // a hold being released, or released, not as a charge or as "nothing taken", until the books acknowledge the release. A run let go unconfirmed (its own reason is `unclear`) keeps that
   // wording when late evidence says it WORKED too: it was never charged and never will be. An ordinary run that worked is not one of these, and waits for its settlement as ever
   const actionOutcomeOf = new Map(all.flatMap((header) => header.actions.map((action) => [action.run, action.outcome] as const)));
-  const money = actionOutcomeOf.size === 0 ? [] : await prisma.instantRun.findMany({ where: { id: { in: [...actionOutcomeOf.keys()] }, customerState: { in: ['held', 'released'] } }, select: { id: true, customerState: true, holdMicros: true, reason: true } });
-  const moneyRows = money.filter((run) => actionOutcomeOf.get(run.id) !== 'worked' || run.reason === 'unclear');
-  const letGo = new Set(money.filter((run) => run.reason === 'unclear').map((run) => run.id));
+  const money = actionOutcomeOf.size === 0 ? [] : await prisma.instantRun.findMany({ where: { id: { in: [...actionOutcomeOf.keys()] }, customerState: { in: ['held', 'released'] } }, select: { id: true, customerState: true, holdMicros: true, reason: true, state: true } });
+  const moneyRows = money.filter((run) => actionOutcomeOf.get(run.id) !== 'worked' || isUnconfirmedRun(run));
+  const letGo = new Set(money.filter((run) => isUnconfirmedRun(run)).map((run) => run.id));
   const held = new Set(moneyRows.filter((run) => run.customerState === 'held').map((run) => run.id));
   const released = new Map(moneyRows.filter((run) => run.customerState === 'released').map((run) => [run.id, Number(run.holdMicros)] as const));
   const items = all.map((header) => {
