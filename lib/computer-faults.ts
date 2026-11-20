@@ -88,7 +88,8 @@ export async function recordFaults(botId: string, jobId: string, rows: FaultInpu
       // Already kept: only an uncertain one may be settled, and only once
       if (row.kind !== 'uncertain') {
         const settled = await prisma.computerJobFault.updateMany({
-          where: { jobId, callId: data.callId, kind: 'uncertain' },
+          // Only the SAME run's and turn's uncertain row is settled by this one: another run's confirmed fault under the same call id never upgrades it (that falls to the conflict check)
+          where: { jobId, callId: data.callId, kind: 'uncertain', run: data.run, turn: data.turn },
           data: { kind: data.kind, reason: data.reason, source: data.source, route: data.route, providerStatus: data.providerStatus, at: data.at },
         });
         stored += settled.count;

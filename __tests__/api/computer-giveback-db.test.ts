@@ -888,6 +888,23 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await recordFaults(sara.brickId, randomUUID(), [row])).toBeNull();
       expect(await prisma.computerJobFault.count({ where: { jobId: id } })).toBe(1);
     });
+
+    it('settles an uncertain row only for the run and turn that kept it: another run’s confirmed fault under the same call id is a conflict and changes nothing', async () => {
+      const sara = await person('sara');
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, minutes(0));
+      if (!started.ok) throw new Error('no');
+      const id = started.job.id;
+      const at = new Date();
+      const uncertainOfA = { turn: 2, run: 'run-a', callId: 'c1', kind: 'uncertain' as const, reason: 'timeout_after_output', source: 'universe-ai' as const, route: 'r1', providerStatus: null, at };
+      expect(await recordFaults(sara.brickId, id, [uncertainOfA])).toEqual({ stored: 1, conflicts: 0 });
+      // Run B names the same real call id (it is the model call's own) with a confirmed fault
+      expect(await recordFaults(sara.brickId, id, [{ ...uncertainOfA, run: 'run-b', turn: 5, kind: 'fault', reason: 'provider_key_ours' }])).toEqual({ stored: 0, conflicts: 1 });
+      expect(await prisma.computerJobFault.findFirstOrThrow({ where: { jobId: id } })).toMatchObject({ kind: 'uncertain', reason: 'timeout_after_output', run: 'run-a', turn: 2 });
+      // The same turn of another run is also a conflict; the run's own confirmation still settles it
+      expect(await recordFaults(sara.brickId, id, [{ ...uncertainOfA, run: 'run-b', kind: 'fault', reason: 'provider_key_ours' }])).toEqual({ stored: 0, conflicts: 1 });
+      expect(await recordFaults(sara.brickId, id, [{ ...uncertainOfA, kind: 'fault', reason: 'provider_key_ours' }])).toEqual({ stored: 1, conflicts: 0 });
+      expect(await prisma.computerJobFault.findFirstOrThrow({ where: { jobId: id } })).toMatchObject({ kind: 'fault', reason: 'provider_key_ours', run: 'run-a', turn: 2 });
+    });
   });
 
   describe('one provider failing for many people', () => {
