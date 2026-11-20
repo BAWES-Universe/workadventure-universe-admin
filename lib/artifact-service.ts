@@ -753,7 +753,10 @@ export async function openArtifact(id: string, viewer: Viewer, version?: number 
 /** Throws the same not-found as everything else unless this viewer may open the artifact. Opens nothing: no version is read and no address is made. */
 export async function requireMayOpen(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<void> {
   const artifact = await loadArtifact(id, ctx.now);
-  requireOpen(artifact, await whoIsLooking(artifact, viewer), ctx.now);
+  const who = await whoIsLooking(artifact, viewer);
+  requireOpen(artifact, who, ctx.now);
+  // Public with nothing published is not there for a visitor (game #2115), so nothing that asks "may they open it" says yes
+  shownTo(artifact, who);
 }
 
 export async function listVersions(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ versions: VersionView[] }> {

@@ -8,6 +8,7 @@ import { POST as code } from '@/app/api/artifacts/[id]/versions/[number]/route';
 import { PUT as share } from '@/app/api/artifacts/[id]/share/route';
 import { POST as publish } from '@/app/api/artifacts/[id]/publish/route';
 import { POST as copy } from '@/app/api/artifacts/[id]/copy/route';
+import { POST as pay } from '@/app/api/artifacts/[id]/pay/route';
 import { POST as chatList } from '@/app/api/artifacts/chat/route';
 import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy } from '@/lib/bot-privacy';
@@ -18,6 +19,8 @@ jest.mock('@/lib/db', () => ({ prisma: jest.requireActual('../../helpers/artifac
 jest.mock('@/lib/artifact-storage', () => ({ artifactFiles: jest.requireActual('../../helpers/artifacts-db').fakeFiles }));
 jest.mock('@/lib/bot-access', () => ({ checkBotAccess: jest.fn() }));
 jest.mock('@/lib/bot-privacy', () => ({ loadBotPrivacy: jest.fn() }));
+// The payment side has its own tests; here only who may ask about it
+jest.mock('@/lib/app-direct/pay', () => ({ pageTakesPayments: async () => false, orderForArtifact: async () => null, startCheckout: async () => ({ status: 'unavailable' }) }));
 
 /** Publish (game #2115): people who open an artifact only by its link see what its owner published, and nothing newer. */
 
@@ -156,6 +159,16 @@ describe('artifact Publish', () => {
       // Its owner and the people in its chat open it as they always did
       expect((await openAs(person('owner'), id, true)).status).toBe(200);
       expect((await openAs(person('friend'), id, true)).status).toBe(200);
+    });
+
+    it('does not let a visitor ask about paying on a page that is not published, and lets them once it is', async () => {
+      const id = await makePage();
+      await shareAs(id, 'public');
+      expect((await call(pay, { viewer: viewer(person('stranger'), false) }, { id })).status).toBe(404);
+      // Its owner and the people in its chat are asked as before: the answer is whether payments are on
+      expect((await call(pay, { viewer: viewer(person('friend'), true) }, { id })).status).toBe(200);
+      await publishAs(person('owner'), id, true);
+      expect((await call(pay, { viewer: viewer(person('stranger'), false) }, { id })).status).toBe(200);
     });
 
     it('shows the published version to people outside, under the title it had then, and the latest to its owner and its chat', async () => {

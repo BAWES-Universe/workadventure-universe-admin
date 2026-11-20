@@ -581,8 +581,10 @@ export async function orderForArtifact(orderId: string, artifactId: string, deps
 
 /** A page anyone with the link may open (shared by link, or Public): the public page's checkout is only for it, and only while it is there. */
 export async function isOpenByLink(artifactId: string): Promise<boolean> {
-  const artifact = await prisma.artifact.findUnique({ where: { id: artifactId }, select: { openScope: true, expiresAt: true } });
-  return !!artifact && (artifact.openScope === 'link' || artifact.openScope === 'public') && !(artifact.expiresAt && artifact.expiresAt.getTime() <= Date.now());
+  const artifact = await prisma.artifact.findUnique({ where: { id: artifactId }, select: { openScope: true, publishedVersion: true, expiresAt: true } });
+  if (!artifact || (artifact.expiresAt && artifact.expiresAt.getTime() <= Date.now())) return false;
+  // Public with nothing published is not there for a visitor (game #2115): nobody pays on a page they cannot see
+  return artifact.openScope === 'link' || (artifact.openScope === 'public' && artifact.publishedVersion !== null);
 }
 
 /** Whether a page is taking payments right now, for the page's own "Pay" button to know (nothing else about the job). */
