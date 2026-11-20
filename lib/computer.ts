@@ -1025,7 +1025,9 @@ export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: 
     const note = outcome === 'failed' ? cleanEndNote(why) : null;
     if (note) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: note } });
     // Only a failure the runner says is ours is given back; one with no cause (or the agent's own) is the person's, so a run cannot be made free by ending it "failed"
-    await endJob(jobId, outcome, outcome === 'failed' && cause === 'ours' ? 'error' : null, now);
+    // Only this ending is steered by the job's own words (a brief can crash its own machine), so only this one is bounded; the endings Orbit saw itself are always given back
+    const ours = outcome === 'failed' && cause === 'ours';
+    await endJob(jobId, outcome, ours ? 'error' : null, now, true, undefined, true, ours);
   }
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return job ? jobView(job) : null;
@@ -1139,10 +1141,11 @@ const END_TRIES = 4;
  * Ends a job once. Whatever it ran is worked out from the seconds the machine was held for it, recorded in the meter's books as
  * one event under the job's id, and its reserved room is settled to that. Then the machine rests if no other job holds it, and
  * the next job in line is tried. A job that is already over is left exactly as it ended.
+ * `bounded` is true only for the runner's own finish as ours: its give-back goes through the bound on give-backs (lib/computer-giveback).
  * `outside` false writes only our own tables (the Brick's purge ends its jobs this way, so a slow provider or backup never holds the purge):
  * the machine, its browser and the agent's turn are left to the purge's own removal of the machine.
  */
-async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true): Promise<void> {
+async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, bounded = false): Promise<void> {
   // The job can change under this (a person's answer moves it between running and waiting): the end is tried again on what it is now, and
   // only a job that is over, or no longer the one the caller meant, is let go
   let job: NonNullable<Awaited<ReturnType<typeof prisma.computerJob.findUnique>>> | null = null;
@@ -1177,9 +1180,9 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       // The person's own Stop, a computer turned off and a Brick deleted are never told: they just did it
       endToldAt: silentEnding(endedBy) ? now : null,
     } as const;
-    // An ending as ours is given back only inside the bound (lib/computer-giveback): decided in the same transaction that writes the ending, under the person's
+    // An ending the runner reported as ours (`bounded`) is given back only inside the bound (lib/computer-giveback): decided in the same transaction that writes the ending, under the person's
     // give-back lock, so two of their jobs ending together cannot both take the last one. A job that is not given back ends as a failure that is the person's
-    const judged = endedBy === 'error' && job.startedAt !== null;
+    const judged = bounded && endedBy === 'error' && job.startedAt !== null;
     const turnHold = held && !!job.firstTurnSentAt && !job.agentResponseId;
     const where = { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted };
     if (judged || turnHold) {
