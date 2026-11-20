@@ -35,6 +35,7 @@ import { computersArePaused } from '@/lib/capability-pause';
 import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
+import { recordRefundObligationsForBrick, sweepRefundObligations } from '@/lib/computer-refunds';
 import { decideRunnerFinish, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, noteEffectSettled, sweepGiveBackDecisions, type Verdict } from '@/lib/computer-giveback';
 import {
   AFTER_TAKE_OVER,
@@ -1253,7 +1254,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   }
   // A job that failed on our side takes nothing from the person's month, and neither do the model calls it made, nor the credit they drew (the sweep tries again if this fails)
   if (givenBackJob(status, endedBy)) {
-    await giveBackModelCalls(job.id, job.personId).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
+    await giveBackModelCalls(job.id, job.personId, now).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
   }
 
   // The list taken as THIS job ended is kept on the job, so a later job's list can never be read as this one's; none taken (another job still held the machine) says no files
@@ -1437,14 +1438,14 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
   for (const job of ended) {
     await recordComputerTime(job, job.secondsRun, job.endedAt ?? now, { endedBy: job.endedBy as EndedBy | null, status: job.status });
   }
-  await giveBackMissingModelCalls(batch, botId);
+  await giveBackMissingModelCalls(batch, botId, now);
 }
 
 /**
  * A job that failed on our side has its model calls, and the credit it drew, given back when it ends. If that write did not go through, or a call was recorded
  * in the same moment, the next sweep finds the call still written against the person (or credit the job still holds drawn) and gives it back too. Never throws.
  */
-async function giveBackMissingModelCalls(batch: number, botId?: string): Promise<void> {
+async function giveBackMissingModelCalls(batch: number, botId: string | undefined, now: Date): Promise<void> {
   const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
   // A job whose give-back keeps failing for a reason of its own still matches on every sweep, so a plain "oldest first" would let it (and others like it)
   // take the whole batch for ever, and a plain LIMIT would take whichever the database returns. Half the batch is the oldest and half the newest of the jobs
@@ -1460,12 +1461,14 @@ async function giveBackMissingModelCalls(batch: number, botId?: string): Promise
         WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error') ${only}
           AND (
             EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
-            -- ...or credit the job drew that has not gone back (a give-back that failed once is found again: giving back is safe to repeat)
-            OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros")
+            -- ...or credit the job drew that has not gone back and has no refund obligation yet (an obligation, once written, is asked again by its own sweep with a
+            -- growing wait: lib/computer-refunds)
+            OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros"
+              AND NOT EXISTS (SELECT 1 FROM "computer_refund_obligations" o WHERE o."hold_key" = h."hold_key"))
           )
       ) matching
       WHERE "oldest" <= ${half} OR "newest" <= ${half}`);
-    for (const job of jobs) await giveBackModelCalls(job.id, job.personId);
+    for (const job of jobs) await giveBackModelCalls(job.id, job.personId, now);
   } catch (error) {
     console.error('[Computer] Could not look for a failed job’s model calls:', error instanceof Error ? error.message : 'unknown');
   }
@@ -1484,6 +1487,8 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   await getComputerProvider()?.maintain().catch((error) => console.error('[Computer] The provider could not be kept up:', error instanceof Error ? error.message : 'unknown'));
   // Give-backs that could not be decided yet (Limits, or an outside effect still to be confirmed) are decided again, and an old one is told to Sentry
   await sweepGiveBackDecisions(now).catch((error) => console.error('[Computer] The give-back decisions could not be decided again:', error instanceof Error ? error.message : 'unknown'));
+  // Refunds of credit a failed job drew are owed until the books acknowledge them: asked again with a growing wait, and an old one is told to Sentry
+  await sweepRefundObligations(now).catch((error) => console.error('[Computer] The refund obligations could not be asked again:', error instanceof Error ? error.message : 'unknown'));
   // A wind-down that is on goes on until every job is over and every machine is stopped and proven so
   await continueWindDown(now, batch).catch((error) => console.error('[Computer] The wind-down could not go on:', error instanceof Error ? error.message : 'unknown'));
   // A job that asked its person to take over and got no answer within the wait a super admin set ends, so it does not hold the
@@ -2411,6 +2416,8 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
     WHERE j."bot_id" = ${botId} AND j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
   if (Number(unwritten[0]?.n ?? 0) !== 0) return false;
+  // The refunds owed for this Brick's failed jobs are written first (only what is written outlives the jobs)
+  await recordRefundObligationsForBrick(botId).catch((error) => console.error('[Computer] Could not keep the refunds a Brick’s jobs owe:', error instanceof Error ? error.message : 'unknown'));
   // A failed job's model calls that are still written against the person (or credit it drew that has not gone back) are not in the books as given back yet (the give-back above never throws, so
   // a write that failed shows here). Once the jobs are gone nothing can find those calls to give them back, so the Brick waits for the next sweep
   const owed = await prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
@@ -2418,8 +2425,10 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
     WHERE j."bot_id" = ${botId} AND (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error')
       AND (
         EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
-        -- ...or credit the job drew that has not gone back (the sweep's own check): found only by way of the job, so a purge must not delete the job first
-        OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros")
+        -- ...or credit the job drew that has not gone back and that no refund obligation covers yet: an obligation keeps the minimum references to finish the
+        -- reimbursement (job, person, hold key, refund key, amount) without the job, so a refund the books cannot take yet never holds the deletion for ever
+        OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros"
+          AND NOT EXISTS (SELECT 1 FROM "computer_refund_obligations" o WHERE o."hold_key" = h."hold_key"))
       )`);
   return Number(owed[0]?.n ?? 0) === 0;
 }

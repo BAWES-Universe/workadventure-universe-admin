@@ -111,14 +111,14 @@ export interface CallFacts {
  * written against nobody, like the job's minutes. Calls on the owner's own key cost the platform nothing and are not touched.
  * Safe to say twice (a call already given back no longer matches), and for a job that ran fine or that the person stopped it is never called.
  */
-export async function giveBackModelCalls(jobId: string, personId: string): Promise<void> {
+export async function giveBackModelCalls(jobId: string, personId: string, now: Date = new Date()): Promise<void> {
   await prisma.$executeRaw(Prisma.sql`
     UPDATE meter_events
     SET "person_key" = 'unknown', "person_id" = NULL,
         "detail" = COALESCE("detail", '{}'::jsonb) || jsonb_build_object('givenBack', true, 'forPersonId', ${personId}::text)
     WHERE "job_id" = ${jobId} AND "kind" = 'model_call' AND "pool" = 'computer' AND "payer_kind" = 'universe' AND "person_key" = ${`person:${personId}`}`);
   // What the job drew from credit given for computers goes back into the lots it came from (each draw once: asked again it gives nothing more)
-  await giveBackComputerCredit(jobId);
+  await giveBackComputerCredit(jobId, now);
 }
 
 /** The figures of a finished call go to the books once, and its room is settled. Safe to say twice. Not for a call nobody authorized. */
@@ -180,7 +180,7 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
   // looked. Look again (the answer is only ever "failed on our side" once, so this is cheap and settles the race either way)
   if (!givenBack && !paidByOther) {
     const now2 = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { status: true, endedBy: true } });
-    if (now2 && givenBackJob(now2.status, now2.endedBy)) await giveBackModelCalls(job.id, job.personId);
+    if (now2 && givenBackJob(now2.status, now2.endedBy)) await giveBackModelCalls(job.id, job.personId, now);
   }
   // The room settles at what the books hold for this call, never at what this report says: a report sent again after a first one that wrote
   // the event but did not settle (or with another figure) must settle at the event's own cost. A price that is not known settles at the

@@ -6,6 +6,7 @@ import { INSTANT_LIMITS_RECOMMENDED, type InstantLimits } from '@/lib/instant/va
 import { monthOf } from '@/lib/meter-values';
 import { giveBackModelCalls } from '@/lib/computer-calls';
 import { readFaultRows } from '@/lib/computer-faults';
+import { retryWaitMs } from '@/lib/computer-retry';
 
 /**
  * Whether a computer job that failed is given back, and the kept record of why (table computer_give_back_decisions).
@@ -74,8 +75,7 @@ export async function readGiveBackLimits(): Promise<GiveBackLimits | null> {
   return null;
 }
 
-/** The wait before a pending decision is tried again: one minute, growing to an hour. */
-export const retryWaitMs = (attempts: number): number => Math.min(2 ** Math.max(0, attempts), 60) * MINUTE;
+export { retryWaitMs };
 
 interface JobRef {
   id: string;
@@ -179,8 +179,8 @@ export async function applyGiveBack(tx: Prisma.TransactionClient, job: { id: str
 }
 
 /** The calls and credit of a job that was given back. Never throws. */
-export async function giveBackAfter(job: { id: string; personId: string }): Promise<void> {
-  await giveBackModelCalls(job.id, job.personId).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
+export async function giveBackAfter(job: { id: string; personId: string }, now: Date = new Date()): Promise<void> {
+  await giveBackModelCalls(job.id, job.personId, now).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
 }
 
 /**
@@ -212,7 +212,7 @@ export async function resolveDecision(jobId: string, now: Date = new Date()): Pr
     if (next.state === 'given') await applyGiveBack(tx, job, next.counted);
     return next;
   });
-  if (verdict.state === 'given') await giveBackAfter(job);
+  if (verdict.state === 'given') await giveBackAfter(job, now);
   return verdict.state === 'pending' ? 'pending' : 'resolved';
 }
 
@@ -268,7 +268,7 @@ export async function afterLateEvidence(jobId: string, now: Date = new Date()): 
     await applyGiveBack(tx, job, false);
     return true;
   });
-  if (applied) await giveBackAfter(job);
+  if (applied) await giveBackAfter(job, now);
 }
 
 /**

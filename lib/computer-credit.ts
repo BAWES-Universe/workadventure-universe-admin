@@ -1,7 +1,8 @@
 import { prisma } from '@/lib/db';
 import { ensureIssued } from '@/lib/credit-issue';
 import { currentRules, personFacts, usableLots, type Db, type LotRow } from '@/lib/credit-store';
-import { holdCredit, refundHold, settleHold } from '@/lib/credit-spend';
+import { holdCredit, settleHold } from '@/lib/credit-spend';
+import { settleRefundObligations } from '@/lib/computer-refunds';
 import { pickBase, reaches } from '@/lib/credit-values';
 
 /**
@@ -151,21 +152,11 @@ export async function drawComputerCredit(
 
 /**
  * A job that failed on our side takes nothing from the person's month, and that includes the credit it drew: each draw is given back into the
- * lot it came from while that lot lasts (a small replacement credit when it ended), by the funding books' own give-back. Safe to say twice
- * (what was given back is not given again). Never throws.
+ * lot it came from while that lot lasts (a small replacement credit when it ended), by the funding books' own give-back. What is owed is an obligation
+ * until the books acknowledge it (lib/computer-refunds): asked again it is the same refund (the same amount under the same key), never a second one. Never throws.
  */
 export async function giveBackComputerCredit(jobId: string, now: Date = new Date()): Promise<void> {
-  try {
-    const holds = await prisma.creditHold.findMany({
-      where: { jobKey: jobId, category: 'computers', state: 'settled' },
-      select: { holdKey: true, customerMicros: true, refundedMicros: true },
-    });
-    for (const hold of holds) {
-      const left = Number(hold.customerMicros ?? 0) - Number(hold.refundedMicros);
-      if (left <= 0) continue;
-      await refundHold({ holdKey: hold.holdKey, refundKey: `giveback:${hold.holdKey}`, amountMicros: left, reason: 'platform_failure' }, now);
-    }
-  } catch (error) {
-    console.error('[Computer] Could not give back the credit a job drew:', error instanceof Error ? error.message : 'unknown');
-  }
+  // What is owed is written first (once per hold, with its amount fixed), then asked of the books; one that cannot be acknowledged is kept, tried again with a
+  // growing wait, and told to Sentry when it is old (lib/computer-refunds)
+  await settleRefundObligations(jobId, now);
 }

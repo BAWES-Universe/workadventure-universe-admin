@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getInstantLimits } from '@/lib/instant/state';
 import { INSTANT_LIMITS_RECOMMENDED, type InstantLimits } from '@/lib/instant/values';
 import { OURS_REASONS, UNRESOLVED_REASONS } from '@/lib/computer-faults';
+import { refundOverview, type RefundOverview } from '@/lib/computer-refunds';
 import { applyGiveBack, giveBackAfter, giveBackSettingsProblems, lockPerson, readGiveBackLimits } from '@/lib/computer-giveback';
 
 /**
@@ -44,6 +45,8 @@ export interface GiveBackOverview {
   pending: { jobs: number; costMicros: number; oldestAt: string | null; oldestMinutes: number | null };
   /** Routes with provider failures in the window, and whether new work on them is paused. */
   routes: Array<{ route: string; failedJobs: number; paused: boolean }>;
+  /** Refunds of credit a failed job drew that the books have not acknowledged: how many, how much, how old, and how many are overdue (the list is at /api/admin/computer/refund-obligations). */
+  refunds: RefundOverview['owed'];
 }
 
 /** What operations see: the settings, the decisions with what each group cost, what is held, and the routes that are failing. Reads only. */
@@ -76,6 +79,7 @@ export async function giveBackOverview(now: Date = new Date()): Promise<GiveBack
       oldestMinutes: oldest ? Math.floor((now.getTime() - oldest.decidedAt.getTime()) / 60_000) : null,
     },
     routes: failing.map((row) => ({ route: row.route, failedJobs: row.jobs, paused: limits.pauseMinRuns !== null && row.jobs >= limits.pauseMinRuns })),
+    refunds: (await refundOverview(now)).owed,
   };
 }
 
@@ -120,6 +124,8 @@ export async function giveBackReadiness(): Promise<{ ok: boolean; detail: string
   if (!limits) return { ok: false, detail: 'The limits the bound on computer give-backs reads could not be read' };
   const problems = giveBackSettingsProblems(limits);
   if (problems.length > 0) return { ok: false, detail: problems.join(' ') };
+  const refunds = (await refundOverview()).owed;
+  if (refunds.overdue > 0) return { ok: false, detail: `${refunds.overdue} refund${refunds.overdue === 1 ? '' : 's'} of credit a failed computer job drew ${refunds.overdue === 1 ? 'has' : 'have'} not been acknowledged by the books for over an hour (the oldest ${refunds.oldestMinutes} minutes): see /api/admin/computer/refund-obligations` };
   return { ok: true, detail: `Computer give-backs: bound of ${limits.goodwillPerPersonPerMonth && limits.goodwillPerPersonPerMonth >= 1 ? limits.goodwillPerPersonPerMonth : 'what Instant’s pause numbers allow'} a person a month for unresolved failures; confirmed faults of ours are always given back` };
 }
 

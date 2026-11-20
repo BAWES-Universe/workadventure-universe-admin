@@ -3735,6 +3735,33 @@ model ComputerGiveBackDecision {
   @@map("computer_give_back_decisions")
 }
 
+// A refund of credit a computer job drew and that was given back (the job failed on our side), owed until the funding books acknowledge it. Written once per
+// hold BEFORE the refund is asked, with the amount fixed, so a retry asks for exactly the same refund under the same key, and it outlives the job and the Brick
+// (it keeps the minimum references to finish the reimbursement: job id, person, hold key, refund key, amount; no foreign keys on purpose).
+model ComputerRefundObligation {
+  id                 String    @id @default(uuid())
+  jobId              String    @map("job_id") @db.VarChar(255)
+  personId           String    @map("person_id")
+  holdKey            String    @unique @map("hold_key") @db.VarChar(255)
+  refundKey          String    @map("refund_key") @db.VarChar(255)
+  amountMicros       BigInt    @map("amount_micros")
+  // owed or acknowledged (the books answered, with what they gave back)
+  state              String    @default("owed") @db.VarChar(12)
+  attempts           Int       @default(0)
+  lastAttemptAt      DateTime? @map("last_attempt_at")
+  lastError          String?   @map("last_error") @db.VarChar(200)
+  nextAttemptAt      DateTime? @map("next_attempt_at")
+  alertedAt          DateTime? @map("alerted_at")
+  acknowledgedAt     DateTime? @map("acknowledged_at")
+  acknowledgedMicros BigInt?   @map("acknowledged_micros")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  @@index([state, nextAttemptAt])
+  @@index([jobId])
+  @@map("computer_refund_obligations")
+}
+
 // An effect outside the computer that a job meant to have, written BEFORE it is tried and once per key, so a retry looks up
 // what happened and never does it twice: a lost "created" answer is never a second pull request, send or purchase.
 model ComputerEffect {

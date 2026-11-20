@@ -53,3 +53,35 @@ describe('computer give-backs for operations', () => {
     expect(correct).toHaveBeenCalledTimes(1);
   });
 });
+
+import { GET as refundsGet } from '@/app/api/admin/computer/refund-obligations/route';
+import { POST as refundsRetry } from '@/app/api/admin/computer/refund-obligations/retry/route';
+import { refundOverview, retryRefundObligation } from '@/lib/computer-refunds';
+
+jest.mock('@/lib/computer-refunds', () => ({ refundOverview: jest.fn(), retryRefundObligation: jest.fn() }));
+
+describe('owed refunds for support', () => {
+  const retry = (body: unknown) => refundsRetry(new NextRequest('http://localhost/api/admin/computer/refund-obligations/retry', { method: 'POST', body: JSON.stringify(body) }));
+
+  it('shows nothing to anyone who is not a super admin', async () => {
+    admin.mockReturnValue(false);
+    expect((await refundsGet(new NextRequest('http://localhost/api/admin/computer/refund-obligations'))).status).toBe(403);
+    expect((await retry({ holdKey: 'h' })).status).toBe(403);
+    expect(refundOverview).not.toHaveBeenCalled();
+    expect(retryRefundObligation).not.toHaveBeenCalled();
+  });
+
+  it('lists what is owed for a super admin, and retries one by its hold key (404 for one that is not owed)', async () => {
+    (refundOverview as jest.Mock).mockResolvedValue({ owed: { count: 1, amountMicros: 30000, oldestAt: null, oldestMinutes: 5, overdue: 0 }, rows: [] });
+    const list = await refundsGet(new NextRequest('http://localhost/api/admin/computer/refund-obligations'));
+    expect(list.status).toBe(200);
+    expect(list.headers.get('Cache-Control')).toBe('no-store');
+    (retryRefundObligation as jest.Mock).mockResolvedValueOnce({ found: true, result: 'acknowledged' }).mockResolvedValueOnce({ found: false, result: 'none' });
+    const done = await retry({ holdKey: 'computer:credit:x' });
+    expect(done.status).toBe(200);
+    expect(await done.json()).toEqual({ found: true, result: 'acknowledged' });
+    expect((await retry({ holdKey: 'nope' })).status).toBe(404);
+    expect((await retry({})).status).toBe(400);
+    expect((await retry({ holdKey: 'h', extra: 1 })).status).toBe(400);
+  });
+});
