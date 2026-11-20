@@ -1531,6 +1531,11 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
       // time it took is never lost between the room and the books (the sweep writes its time below)
       const lease = await prisma.meterReservation.findUnique({ where: { reservationKey: reservation.reservationKey }, select: { terms: true } });
       const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
+      // ...but not while its files are still being handed over: that hand-over adds its seconds to the job's time and settles the room itself afterwards
+      // (a room settled here first at the shorter time would stay, close() keeps the first settlement). The same two conditions recordMissingComputerTime waits
+      // by: the machine's files are claimed, or this job is waiting in line for its hand-over and beating. Once the claim or the beat is stale the hand-over is
+      // abandoned and the room is settled at what the job ran, on this or a later sweep.
+      if ((row?.filesClaimedAt && row.filesClaimedAt.getTime() > now.getTime() - FILES_CLAIM_MS) || (job.handOverAliveAt && job.handOverAliveAt.getTime() > now.getTime() - HAND_OVER_ALIVE_MS)) continue;
       const provider = providerFor(row);
       const pinned = pinnedMicrosPerMinute(lease?.terms, job.secondsRun, (job.endedAt ?? now).getTime());
       const cost = costOfSeconds(job.secondsRun, pinned ?? (provider ? provider.microsPerMinute() : null));

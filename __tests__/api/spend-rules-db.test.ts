@@ -29,6 +29,7 @@ import { POST as postJob } from '@/app/api/bots/[id]/computer-jobs/route';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, renewJob, startJob, sweepComputers } from '@/lib/computer';
 import { recordFaults } from '@/lib/computer-faults';
+import { HAND_OVER_ALIVE_MS, HAND_OVER_LATEST_MS } from '@/lib/computer-file-cards';
 import { mintJobToken } from '@/lib/computer-token';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { createInstantFunds } from '@/lib/funding/instant-funds';
@@ -1196,6 +1197,48 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await prisma.meterEvent.findMany({ where: { eventId: `computer:${started.job.id}:time` }, select: { costMicros: true } })).toEqual([{ costMicros: BigInt(30_000) }]);
       expect(await ask(sara, 970_000, minutes(14))).toEqual({ ok: true });
       expect(await ask(sara, 970_001, minutes(14))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+    });
+
+    describe('a lapsed room of an ended job is not settled while its files are still being handed over', () => {
+      // The job ran 5 minutes ($0.03) and ended, its room left held with the books down; the hand-over adds its seconds to the job's time and settles the room itself
+      const endedWithRoomHeld = async () => {
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        record.mockRejectedValue(new Error('books down'));
+        (settleRoom as jest.Mock).mockRejectedValueOnce(new Error('books down'));
+        await finishJob(started.job.id, 'done', minutes(5));
+        expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'held' });
+        return { sara, jobId: started.job.id };
+      };
+      const room = (jobId: string) => prisma.meterReservation.findFirstOrThrow({ where: { jobId } });
+
+      it('a hand-over beating for this job keeps the room held; once the beat is stale the room is settled at what the job ran', async () => {
+        const { jobId } = await endedWithRoomHeld();
+        await prisma.computerJob.update({ where: { id: jobId }, data: { handOverAliveAt: new Date(minutes(11).getTime() - 5_000) } });
+        await sweepComputers(minutes(11));
+        expect(await room(jobId)).toMatchObject({ state: 'held' });
+        // The beat is older than HAND_OVER_ALIVE_MS: the hand-over was abandoned, so the room is settled at what it ran
+        await sweepComputers(new Date(minutes(11).getTime() + HAND_OVER_ALIVE_MS + 1_000));
+        expect(await room(jobId)).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      });
+
+      it('the machine’s files being claimed keeps the room held; once the claim is stale the room is settled at what the job ran', async () => {
+        const { sara, jobId } = await endedWithRoomHeld();
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { filesClaimedAt: minutes(10) } });
+        await sweepComputers(minutes(11));
+        expect(await room(jobId)).toMatchObject({ state: 'held' });
+        await sweepComputers(new Date(minutes(10).getTime() + HAND_OVER_LATEST_MS + 1_000));
+        expect(await room(jobId)).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      });
+
+      it('a job with no hand-over under way is settled at once, as before', async () => {
+        const { jobId } = await endedWithRoomHeld();
+        await sweepComputers(minutes(11));
+        expect(await room(jobId)).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      });
     });
 
     it('the sweep that writes a job’s missing time closes its room at the same time, so the room is never left held beside an event', async () => {
