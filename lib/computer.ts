@@ -1222,6 +1222,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       ended = result.done;
       if (ended.count === 1 && !result.verdict.give) {
         console.warn('[Computer] A job that failed on our side is not given back:', result.verdict.why);
+        // Limits that could not be read refuse a give-back on no fault of the person's: it is told to Sentry so it can be made good by hand
+        if (result.verdict.why === 'limits_unreadable') Sentry.captureMessage('A computer give-back was refused because the Limits could not be read', { level: 'error', tags: { area: 'computer', step: 'giveback_limits_unreadable' }, extra: { jobId } });
         status = 'failed';
         endedBy = null;
       }
