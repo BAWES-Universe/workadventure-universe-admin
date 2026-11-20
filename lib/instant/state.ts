@@ -25,6 +25,15 @@ export async function getInstantLimits(db: SettingsDb = prisma): Promise<Instant
   }
 }
 
+/**
+ * The limits as saved, or a throw when they could not be read. getInstantLimits reads a failure as empty (right for Instant: nothing runs), which a
+ * caller that must tell "no numbers are set" from "the read failed" cannot use: an empty answer there would read as "no bound".
+ */
+export async function getInstantLimitsStrict(db: SettingsDb = prisma): Promise<InstantLimits> {
+  const row = await db.appSetting.findUnique({ where: { key: LIMITS_KEY } });
+  return readInstantLimits(row?.value);
+}
+
 /** Saves a change on top of what is saved (only the names it carries change; null empties one) and returns all of them. */
 export async function saveInstantLimits(change: Partial<Record<keyof InstantLimits, number | null>>, userId: string): Promise<InstantLimits> {
   return prisma.$transaction(async (tx) => {
