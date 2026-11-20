@@ -988,7 +988,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         // An hour later the look fails again and would tell Sentry; another sweep holds the row at that moment (taken right after this look wrote its marker)
         const realExec = prisma.$executeRaw.bind(prisma) as (strings: TemplateStringsArray, ...values: unknown[]) => Promise<number>;
         let release: () => void = () => undefined;
-        let holder: Promise<unknown> = Promise.resolve();
+        let holderDone: Promise<void> = Promise.resolve();
         const exec = jest.spyOn(prisma, '$executeRaw').mockImplementation((async (strings: TemplateStringsArray, ...values: unknown[]) => {
           const done = await realExec(strings, ...values);
           if (strings.join('?').includes('"attempts" + 1')) {
@@ -997,17 +997,18 @@ run('a computer job that failed on our side, and the bound on giving it back', (
             const holding = new Promise<void>((resolve) => {
               locked = resolve;
             });
-            holder = prisma
-              .$transaction(async (tx) => {
+            // Only the worker's own death after it took the lock is swallowed: a fixture that fails BEFORE the lock rejects the wait below and reaches the test
+            holderDone = afterWorkerDied(
+              prisma.$transaction(async (tx) => {
                 await tx.$queryRaw`SELECT "job_id" FROM "computer_give_back_decisions" WHERE "job_id" = ${refused.id} FOR UPDATE`;
                 locked();
                 await new Promise<void>((resolve) => {
                   release = resolve;
                 });
-                throw new Error('the worker died');
-              })
-              .catch(() => undefined);
-            await holding;
+                throw new WorkerDied();
+              }),
+            );
+            await Promise.race([holding, holderDone]);
           }
           return done;
         }) as never);
@@ -1016,7 +1017,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         } finally {
           exec.mockRestore();
           release();
-          await holder;
+          await holderDone;
         }
         expect(captured).not.toHaveBeenCalled();
         expect(await peek()).toMatchObject({ lastError: expect.stringMatching(/^late_look:/) });
