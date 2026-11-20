@@ -1365,6 +1365,56 @@ run('the bounded Instant executor, in a real database', () => {
       expect(event).toMatchObject({ basis: 'measured', costMicros: BigInt(4_000) });
     });
 
+    it('a slower pass of the repair that started from an older place never moves the saved place back over a newer one', async () => {
+      await setLimits();
+      await prisma.appSetting.deleteMany({ where: { key: 'instant-reporting-cursor' } });
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      const ids: string[] = [];
+      const placeId = async () => {
+        const row = await prisma.appSetting.findUnique({ where: { key: 'instant-reporting-cursor' } });
+        return row ? (row.value as { after: string | null }).after : null;
+      };
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let slow: Promise<unknown> | null = null;
+      try {
+        await prisma.$executeRawUnsafe(`ALTER TABLE meter_events ADD CONSTRAINT instant_event_refused CHECK (event_id NOT LIKE 'instant:%') NOT VALID`);
+        for (let n = 0; n < 6; n += 1) {
+          const key = callId();
+          await runInstant(ask({ callId: key, arguments: { query: `ovl${n}` } }), { adapter: p.adapter, funds: f.funds });
+          ids.push(await runIdOf(key));
+        }
+        // All six are missing their event and none can be written (so every pass stops where it read to, and none of them is ever done). The
+        // repair goes through runs in the order of their ids
+        ids.sort();
+        // The slow pass reads the place (there is none) and is held there, two runs to look at
+        let open!: () => void;
+        const gate = new Promise<void>((resolve) => (open = resolve));
+        const real = prisma.appSetting.findUnique.bind(prisma.appSetting);
+        const reading = jest.spyOn(prisma.appSetting, 'findUnique').mockImplementationOnce(((args: never) => real(args).then(async (row: unknown) => { await gate; return row; })) as never);
+        slow = repairInstantReporting({ limit: 2, now: new Date() });
+        for (let waited = 0; reading.mock.calls.length === 0; waited += 50) {
+          if (waited >= 5_000) throw new Error('the slow pass never read the place');
+          await pause(50);
+        }
+        // A faster pass starts from the same place, looks at four runs and saves where it got to: the fourth
+        await repairInstantReporting({ limit: 4, now: new Date() });
+        expect(await placeId()).toBe(ids[3]);
+        open();
+        await slow;
+        // The slow one ends on the second run: that is behind, and must not replace the newer place
+        expect(await placeId()).toBe(ids[3]);
+        // And the next pass goes on from the newer place
+        await repairInstantReporting({ limit: 2, now: new Date() });
+        expect(await placeId()).toBe(ids[5]);
+      } finally {
+        if (slow) await Promise.allSettled([slow]);
+        jest.restoreAllMocks();
+        quiet.mockRestore();
+        await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT IF EXISTS instant_event_refused');
+      }
+    }, 60_000);
+
     it('runs whose event cannot be written do not keep the runs behind them from being tried, and a run missed long ago is still written (the repair)', async () => {
       await setLimits();
       // The repair's place is kept in the database: this test starts from the top, whatever an earlier test left
