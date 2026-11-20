@@ -5,9 +5,11 @@ import { paidBy, payerFromRow, payerOf, payerToRow, type PaidBy, type Payer } fr
 import {
   activityIdOf,
   categoryOf,
+  computerTakenOf,
   givenBackCall,
   givenBackTime,
   jobActivityIdOf,
+  outcomeOfActions,
   outcomeOfRuns,
   readActions,
   receiptLines,
@@ -24,7 +26,7 @@ import {
   type ReceiptOutcome,
   type ReceiptState,
 } from '@/lib/task-receipts-values';
-import { actionWords, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote } from '@/lib/task-receipt-words';
+import { actionWords, HOLD_BEING_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote } from '@/lib/task-receipt-words';
 import { isOver } from '@/lib/computer-values';
 
 /**
@@ -43,7 +45,7 @@ export interface ActivityItem {
   /** ISO time: when it finished, or began while it has not. */
   at: string;
   state: ReceiptState;
-  /** How the task came to end: done (every action worked), partial, or refunded. `state` stays done for a partly done task, since something worked. */
+  /** How the task came to end: done (every step worked), partial, failed (it did not finish and something was taken for it), unconfirmed (nobody could confirm an action), or refunded. `state` stays done for everything but refunded, since something worked or was taken. */
   outcome: ReceiptOutcome;
   /** The words for `outcome` ("Partly done"; see `lib/task-receipt-words.ts`). */
   outcomeText: string;
@@ -65,7 +67,7 @@ export interface ActivityAction {
   outcome: ActionOutcome;
   /** "Gmail · didn't work" */
   text: string;
-  /** "Nothing taken" for an action that did not work; null for one that did (what it took is on the receipt's own lines). */
+  /** "Nothing taken" for an action that did not work or could not be confirmed ("Hold being released" while its credit is still on hold); null for one that did (what it took is on the receipt's own lines). */
   takenText: string | null;
   /**
    * What was taken from credit for this action, in whole micros: only for an action that worked and whose price the books know (zero is a
@@ -177,7 +179,7 @@ const receiptLock = (tx: Tx, botId: string, taskKey: string) => tx.$executeRaw`S
 
 /** The task's Instant runs, as their own records say. */
 const runRecordsOf = (tx: Tx, task: Task) =>
-  tx.instantRun.findMany({ where: { botId: task.botId, personId: task.personId, taskKey: task.taskKey }, select: { id: true, state: true, toolkit: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+  tx.instantRun.findMany({ where: { botId: task.botId, personId: task.personId, taskKey: task.taskKey }, select: { id: true, state: true, toolkit: true, reason: true, detail: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
 
 const leaseLapsed = (row: Pick<Row, 'leaseUntil'>, now: Date): boolean => row.leaseUntil !== null && row.leaseUntil.getTime() <= now.getTime();
 const isTerminal = (state: string): boolean => state === 'done' || state === 'refunded';
@@ -242,7 +244,7 @@ export async function closeReceipt(
     }
     if (view.actions.length > 0) {
       // Every run has ended and some went out: the run records say how it went, whatever the word was
-      const state = await endReceipt(tx, row, outcomeWith(view, job), view.actions, now, input.chargedMicros ?? null);
+      const state = await endReceipt(tx, row, outcomeWithJob(view, job), view.actions, now, input.chargedMicros ?? null);
       return { ok: true, id, state, generation: row.generation };
     }
     if (input.state === 'checking') {
@@ -250,7 +252,8 @@ export async function closeReceipt(
       await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'checking', outcome: null, endedAt: null, leaseUntil: null } });
       return { ok: true, id, state: 'checking', generation: row.generation };
     }
-    const outcome: ReceiptOutcome = input.state === 'refunded' ? 'refunded' : 'done';
+    // A job that ran and failed is failed whatever the word says; otherwise the bot server's word stands for a task with no action that went out
+    const outcome: ReceiptOutcome = jobFailed(job) ? 'failed' : input.state === 'refunded' ? 'refunded' : 'done';
     const state = await endReceipt(tx, row, outcome, [], now, input.chargedMicros ?? null);
     return { ok: true, id, state, generation: row.generation };
   });
@@ -259,12 +262,26 @@ export async function closeReceipt(
 type JobRow = { status: string; endedBy: string | null; startedAt: Date | null } | null;
 const jobOf = (tx: Tx, task: Task): Promise<JobRow> => tx.computerJob.findFirst({ where: { id: task.taskKey, botId: task.botId, personId: task.personId }, select: { status: true, endedBy: true, startedAt: true } });
 
+/** The task ran a computer job for the person: it started and did not fail on our side (a job given back did nothing for them). */
+const jobRan = (job: JobRow): job is NonNullable<JobRow> => job !== null && job.startedAt !== null && !givenBackJob(job.status, job.endedBy);
+/** That job did not finish: it failed after running (the agent gave up, or it hit its turn cap), and its time is the person's like any other run. */
+const jobFailed = (job: JobRow): boolean => jobRan(job) && job?.status === 'failed';
+
 /**
- * What a task came to, from its Instant runs and its computer job if it has one. A job that ran is the task's work: runs that all failed do
- * not make it refunded (the time the books took for the job stays on the receipt). A job that never ran, or that failed on our side
- * (`givenBackJob`), did nothing for the person, so its Apps all failing is refunded, nothing taken, as for a task with no job.
+ * What a task came to, from its Instant runs and its computer job if it has one. A job that ran is a step of the task: finished (or stopped
+ * by the person) it worked; failed it did not. So a failed job with every App failed is `failed` ("It didn't finish": the computer time
+ * is the person's), never done; a job that finished with an App that did not work is partly done. A job that never ran, or failed on our
+ * side (`givenBackJob`), did nothing for the person: the Apps alone decide.
  */
-const outcomeWith = (view: ReturnType<typeof outcomeOfRuns>, job: JobRow): ReceiptOutcome => (view.outcome === 'refunded' && job !== null && job.startedAt !== null && !givenBackJob(job.status, job.endedBy) ? 'done' : view.outcome);
+const outcomeWithJob = (view: ReturnType<typeof outcomeOfRuns>, job: JobRow): ReceiptOutcome => {
+  if (!jobRan(job)) return view.outcome;
+  const outcome = outcomeOfActions([...view.actions.map((action) => action.outcome), job.status === 'failed' ? 'failed' : 'worked']);
+  // Nothing was verified and a job that ran took the person's time: not "nothing taken"
+  return outcome === 'refunded' ? 'failed' : outcome;
+};
+
+/** A task with no Instant action that went out and a computer job that is over: the job's own record says how it went. */
+const outcomeOfJobAlone = (job: NonNullable<JobRow>): ReceiptOutcome => (jobFailed(job) ? 'failed' : 'done');
 
 /**
  * A receipt that has ended whose runs now say it came to something else is put right from the run records (a run that landed after the word
@@ -273,7 +290,7 @@ const outcomeWith = (view: ReturnType<typeof outcomeOfRuns>, job: JobRow): Recei
  */
 async function reconcileEnded(tx: Tx, row: Row, view: ReturnType<typeof outcomeOfRuns>, job: JobRow, now: Date): Promise<ReceiptState> {
   if (row.actions === null) return row.state as ReceiptState;
-  const outcome = outcomeWith(view, job);
+  const outcome = outcomeWithJob(view, job);
   const same = row.outcome === outcome && JSON.stringify(readActions(row.actions)) === JSON.stringify(view.actions);
   if (same) return row.state as ReceiptState;
   return endReceipt(tx, row, outcome, view.actions, now);
@@ -366,7 +383,7 @@ export async function settleReceipt(task: Task, now: Date = new Date(), unwatche
       if (job && !isOver(job.status)) return row.state as ReceiptNow;
       // A running receipt on no lease (a computer's) is the job's: with the job over (or no job of that key after a lease's age) it is as good as lapsed
       if (row.state === 'running' && !lapsed && !(row.leaseUntil === null && jobEnded(row, job, now))) return 'running';
-      return endReceipt(tx, row, outcomeWith(view, job), view.actions, now);
+      return endReceipt(tx, row, outcomeWithJob(view, job), view.actions, now);
     }
     // No Instant run that went out (none at all, or every one refused before it ran)
     if (isTerminal(row.state)) return row.state as ReceiptState;
@@ -377,7 +394,7 @@ export async function settleReceipt(task: Task, now: Date = new Date(), unwatche
     if (job || row.category === 'computer') {
       const waited = row.state === 'running' ? job !== null || row.startedAt.getTime() + RECEIPT_LEASE_MS <= now.getTime() : unwatchedBefore !== null && row.updatedAt < unwatchedBefore;
       if (!waited) return row.state as ReceiptNow;
-      return endReceipt(tx, row, job ? 'done' : 'refunded', [], now);
+      return endReceipt(tx, row, job ? outcomeOfJobAlone(job) : 'refunded', [], now);
     }
     const quiet = row.state === 'running' ? lapsed : unwatchedBefore !== null && row.updatedAt < unwatchedBefore;
     if (!quiet) return row.state as ReceiptNow;
@@ -396,7 +413,8 @@ export const UNWATCHED_CHECKING_WAIT_MS = 15 * 60 * 1000;
  *  - running, with a lease that has run out; a computer's running receipt (no lease) once its job is over, or once it is a lease old with no job at all;
  *  - in checking: those with Instant runs once every run has ended, those with none after `UNWATCHED_CHECKING_WAIT_MS`
  *    (a computer's receipt only once its job is over);
- *  - ended, with a run of its task that has not ended (it turned up after the word), or one that ended and the receipt has not recorded (the hook that records it did not finish).
+ *  - ended, with a run of its task that has not ended (it turned up after the word), or one that ended and the receipt has not recorded (the hook that records it did not finish),
+ *    or an action recorded as unknown whose run the provider's log has since confirmed (the receipt is updated in place).
  * Returns how many left `running` or `checking` in this pass.
  */
 export async function settleCheckingReceipts(limit: number, now: Date = new Date(), unwatchedWaitMs: number = UNWATCHED_CHECKING_WAIT_MS): Promise<number> {
@@ -425,6 +443,10 @@ export async function settleCheckingReceipts(limit: number, now: Date = new Date
         -- (A receipt that ended before this existed has no actions written down at all: it is left as it ended, never judged afresh.)
         OR (r."actions" IS NOT NULL AND EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" <> 'refused' AND i."state" NOT IN (${open})
           AND NOT (r."actions" @> jsonb_build_array(jsonb_build_object('run', i."id")))))
+        -- An action recorded as unknown whose run has since been confirmed either way by the provider's own log: the same receipt is put right (a later confirmed success updates it, and what the person was charged stays the run's own)
+        OR (r."actions" @> jsonb_build_array(jsonb_build_object('outcome', 'unknown')) AND EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key"
+          AND i."state" = 'failed' AND i."reason" = 'unclear' AND i."detail"->'lateEvidence'->>'status' IN ('success', 'failed')
+          AND r."actions" @> jsonb_build_array(jsonb_build_object('run', i."id", 'outcome', 'unknown'))))
       ))
     )
     ORDER BY COALESCE(r."lease_until", r."updated_at") ASC
@@ -453,6 +475,10 @@ interface Header {
   runId: string | null;
   outcome: ReceiptOutcome | null;
   actions: ReceiptAction[];
+  /** How the task's computer job came out, when one ran for the person (the agent finished it, or gave up); none when no job ran or it failed on our side. */
+  job: 'worked' | 'failed' | null;
+  /** Runs of the task nobody could confirm whose credit is still on hold. */
+  heldRuns: ReadonlySet<string>;
 }
 
 const headerOfRow = (row: ReceiptRow): Header => ({
@@ -468,6 +494,8 @@ const headerOfRow = (row: ReceiptRow): Header => ({
   runId: row.runId,
   outcome: row.outcome as ReceiptOutcome | null,
   actions: readActions(row.actions),
+  job: null,
+  heldRuns: new Set<string>(),
 });
 
 /**
@@ -519,21 +547,41 @@ async function eventsFor(headers: readonly Header[]): Promise<Map<string, LineEv
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
+/**
+ * How a task reads at the time of reading. A computer job that ran is a step of the task, read from the job's own record (so a receipt that
+ * was settled before this existed, or before the job's last word, is still put right): a job that failed with nothing else that worked is
+ * `failed`, never done. Without a job, the stored outcome stands (a state put right at read time, refunded, wins over it).
+ */
+function outcomeOfHeader(header: Header): ReceiptOutcome {
+  // Nothing was taken: refunded, or (when nobody could confirm an action) said as that, never as a failure
+  if (header.state === 'refunded') return header.outcome === 'unconfirmed' ? 'unconfirmed' : 'refunded';
+  if (header.job !== null) {
+    const outcome = outcomeOfActions([...header.actions.map((action) => action.outcome), header.job]);
+    return outcome === 'refunded' ? 'failed' : outcome;
+  }
+  return header.outcome === 'partial' || header.outcome === 'failed' || header.outcome === 'unconfirmed' ? header.outcome : 'done';
+}
+
 function itemOf(header: Header, events: readonly LineEvent[], botName: string, readerId: string): ActivityItem {
   const lines = receiptLines(events, botName);
   const who = paidBy(header.payer, readerId);
+  const outcome = outcomeOfHeader(header);
+  const holdPending = header.actions.some((action) => action.outcome === 'unknown' && header.heldRuns.has(action.run));
+  const computerMicros = header.job === null ? undefined : (computerTakenOf(events) ?? null);
   return {
     id: header.id,
     title: header.title,
     at: header.at.toISOString(),
-    state: header.state,
-    // `state` stays done for a task that partly worked (something worked and may have been taken); a state put right at read time wins over the stored outcome
-    outcome: header.state === 'refunded' ? 'refunded' : header.outcome === 'partial' ? 'partial' : 'done',
-    outcomeText: OUTCOME_WORDS[header.state === 'refunded' ? 'refunded' : header.outcome === 'partial' ? 'partial' : 'done'],
-    outcomeNote: header.state === 'refunded' ? null : outcomeNote(header.outcome ?? 'done', header.actions),
+    // An unconfirmed action's credit still on hold is not given back yet: the task is not shown as refunded until it is
+    state: holdPending && header.state === 'refunded' ? 'done' : header.state,
+    // `state` stays done for a task that partly worked or that took something and did not finish; a state put right at read time wins over the stored outcome
+    outcome,
+    outcomeText: OUTCOME_WORDS[outcome],
+    outcomeNote: outcomeNote(outcome, header.actions, { ...(header.job === null ? {} : { job: header.job, computerMicros }), holdPending }),
     actions: header.actions.map((action): ActivityAction => {
       const taken = action.outcome === 'worked' ? takenForRun(events, action.run) : null;
-      return { label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome), takenText: action.outcome === 'failed' ? NOTHING_TAKEN : null, ...(taken === null ? {} : { amountMicros: taken }) };
+      const takenText = action.outcome === 'worked' ? null : action.outcome === 'unknown' && header.heldRuns.has(action.run) ? HOLD_BEING_RELEASED : NOTHING_TAKEN;
+      return { label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome), takenText, ...(taken === null ? {} : { amountMicros: taken }) };
     }),
     spentMicros: spentOf(header.state, header.chargedMicros, lines),
     category: categoryOf(header.category, events),
@@ -609,6 +657,8 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
       runId: job.runId,
       outcome: null,
       actions: [],
+      job: null,
+      heldRuns: new Set<string>(),
     }));
   const all = [...headers, ...computerHeaders];
   const [events, bots] = await Promise.all([eventsFor(all), prisma.bot.findMany({ where: { id: { in: [...new Set(all.map((header) => header.botId))] } }, select: { id: true, name: true } })]);
@@ -619,8 +669,13 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
   // while its job is not among the newest jobs
   const listedJobIds = new Set(jobs.map((job) => job.id));
   const receiptJobKeys = rows.map((row) => row.taskKey).filter((key) => !listedJobIds.has(key));
-  const behindReceipts = receiptJobKeys.length === 0 ? [] : await prisma.computerJob.findMany({ where: { personId, id: { in: receiptJobKeys } }, select: { id: true, botId: true, status: true, endedBy: true } });
-  const failedJobs = new Set([...jobs, ...behindReceipts].filter((job) => givenBackJob(job.status, job.endedBy)).map((job) => `${job.botId}:${job.id}`));
+  const behindReceipts = receiptJobKeys.length === 0 ? [] : await prisma.computerJob.findMany({ where: { personId, id: { in: receiptJobKeys } }, select: { id: true, botId: true, status: true, endedBy: true, startedAt: true } });
+  const jobRows = new Map([...jobs, ...behindReceipts].map((job) => [`${job.botId}:${job.id}`, job]));
+  const failedJobs = new Set([...jobRows.values()].filter((job) => givenBackJob(job.status, job.endedBy)).map((job) => `${job.botId}:${job.id}`));
+  // Runs of these tasks nobody could confirm whose credit is still on hold: said as a hold being released, not as a charge
+  const unknownRuns = all.flatMap((header) => header.actions.filter((action) => action.outcome === 'unknown').map((action) => action.run));
+  const heldRows = unknownRuns.length === 0 ? [] : await prisma.instantRun.findMany({ where: { id: { in: unknownRuns }, customerState: 'held' }, select: { id: true } });
+  const held = new Set(heldRows.map((run) => run.id));
   const items = all.map((header) => {
     const forHeader = events.get(header.id) ?? [];
     // A computer job that failed is "refunded, nothing taken" only when the books show nothing was taken: a price not known yet is not "nothing"
@@ -631,9 +686,14 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
         (event.costMicros === null || event.costMicros > 0),
     );
     // A receipt already stored as refunded does not hold either while something is still on the person: until it is given back it reads as done
-    const failed = failedJobs.has(`${header.botId}:${header.taskKey}`);
+    const key = `${header.botId}:${header.taskKey}`;
+    const failed = failedJobs.has(key);
     const state: ReceiptState = failed ? (!mayHaveTaken ? 'refunded' : header.state === 'refunded' ? 'done' : header.state) : header.state;
-    return itemOf({ ...header, state }, forHeader, names.get(header.botId) ?? 'Brick', personId);
+    const jobRow = jobRows.get(key) ?? null;
+    const job = jobRan(jobRow) ? (jobRow.status === 'failed' ? 'failed' : 'worked') : null;
+    // A job still going has not come out yet
+    const over = jobRow !== null && isOver(jobRow.status);
+    return itemOf({ ...header, state, job: over ? job : null, heldRuns: new Set(header.actions.filter((action) => held.has(action.run)).map((action) => action.run)) }, forHeader, names.get(header.botId) ?? 'Brick', personId);
   });
   return items.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : -1)).slice(0, limit);
 }

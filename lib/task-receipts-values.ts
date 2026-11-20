@@ -5,10 +5,22 @@
  */
 
 export type ReceiptState = 'done' | 'refunded' | 'checking';
-/** How a task came to end, from what its actions came to: all worked, some did (partial), none did. A task that is not over has none. */
-export type ReceiptOutcome = 'done' | 'partial' | 'refunded';
-/** How one Instant action of a task ended. A failed one took nothing from the person: its hold went back. */
-export type ActionOutcome = 'worked' | 'failed';
+/**
+ * How a task came to end, from what its actions and its computer job came to.
+ *  - done: everything worked. partial: a verified step worked and another did not, or could not be confirmed.
+ *  - failed: nothing was verified and something was taken for it (a computer job that ran and failed): "It didn't finish", with what was taken.
+ *  - unconfirmed: nothing was verified and at least one action could not be confirmed (its delivery is unknown).
+ *  - refunded: nothing worked and nothing was taken. A task that is not over has none.
+ */
+export type ReceiptOutcome = 'done' | 'partial' | 'refunded' | 'failed' | 'unconfirmed';
+/**
+ * How one Instant action of a task ended: it worked (the run's own record says so, or the provider's log confirmed it later), it did not
+ * (the provider said so), or `unknown`: nobody could confirm whether it went out. An unknown action is never called a failure, and what
+ * was taken for it is its own record's to say.
+ */
+export type ActionOutcome = 'worked' | 'failed' | 'unknown';
+export const ACTION_OUTCOMES: readonly ActionOutcome[] = ['worked', 'failed', 'unknown'];
+export const RECEIPT_OUTCOMES: readonly ReceiptOutcome[] = ['done', 'partial', 'refunded', 'failed', 'unconfirmed'];
 
 /** What a receipt keeps of each Instant action: the run, the App it was for, and how it ended. Never what was asked or answered. */
 export interface ReceiptAction {
@@ -20,11 +32,40 @@ export interface ReceiptAction {
 /** The states of an Instant run that has not ended: still going out, or its answer did not come back and nobody can say whether it ran. */
 export const RUN_OPEN_STATES = ['reserving', 'held', 'sent', 'ambiguous'] as const;
 
-/** The part of an Instant run's record a receipt reads. */
+/** The part of an Instant run's record a receipt reads. `reason` and `detail` only say whether an ended run was one nobody could confirm, and whether the provider's log confirmed it later. */
 export interface RunRecord {
   id: string;
   state: string;
   toolkit: string;
+  reason?: string | null;
+  detail?: unknown;
+}
+
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** What the provider's own log said of a run that was let go unconfirmed, when it turned up later (the executor writes it on the run as `detail.lateEvidence`). */
+export function lateEvidenceOf(detail: unknown): 'success' | 'failed' | null {
+  if (!isObject(detail) || !isObject(detail.lateEvidence)) return null;
+  return detail.lateEvidence.status === 'success' ? 'success' : detail.lateEvidence.status === 'failed' ? 'failed' : null;
+}
+
+/** How an ended run's action came out, from the run's own record. */
+export function actionOutcomeOfRun(run: Pick<RunRecord, 'state' | 'reason' | 'detail'>): ActionOutcome {
+  if (run.state === 'succeeded') return 'worked';
+  // A run let go unconfirmed: the provider's log, found later, is what settles it (a success updates the action; a failure is a failure)
+  if (run.reason === 'unclear') {
+    const late = lateEvidenceOf(run.detail);
+    return late === 'success' ? 'worked' : late === 'failed' ? 'failed' : 'unknown';
+  }
+  return 'failed';
+}
+
+/** What a set of steps came to: all worked is done; some worked and some not is partial; none worked is unconfirmed when any could not be confirmed, else refunded (nothing taken: a caller that knows something was taken says failed). */
+export function outcomeOfActions(steps: readonly ActionOutcome[]): ReceiptOutcome {
+  const worked = steps.filter((step) => step === 'worked').length;
+  if (worked === steps.length && steps.length > 0) return 'done';
+  if (worked > 0) return 'partial';
+  return steps.some((step) => step === 'unknown') ? 'unconfirmed' : 'refunded';
 }
 
 /**
@@ -32,21 +73,22 @@ export interface RunRecord {
  * call's row is not proof that an App worked).
  *  - `open`: a run has not ended, so the task cannot be settled yet.
  *  - A refused run never went out (a rule, no credit, not offered, or it crashed before sending), so it is not an action of the task.
- *  - A succeeded run worked. Every other ended run did not (a failed one, or one nobody could vouch for when its wait ended: the person's favour).
- *  - Every action worked: done. Some did and some did not: partial. None did, or there was none: refunded, nothing taken.
+ *  - A succeeded run worked; a failed one did not; one nobody could confirm (and the provider's log has not said since) is unknown.
+ *  - See `outcomeOfActions` for what they add up to. A computer job the task ran is added by the caller (`outcomeWithJob` in task-receipts.ts).
  */
 export function outcomeOfRuns(runs: readonly RunRecord[]): { open: boolean; outcome: ReceiptOutcome; actions: ReceiptAction[] } {
   const open = runs.some((run) => (RUN_OPEN_STATES as readonly string[]).includes(run.state));
   const actions = runs
     .filter((run) => run.state !== 'refused' && !(RUN_OPEN_STATES as readonly string[]).includes(run.state))
-    .map((run): ReceiptAction => ({ run: run.id, label: run.toolkit, outcome: run.state === 'succeeded' ? 'worked' : 'failed' }));
-  const worked = actions.filter((action) => action.outcome === 'worked').length;
-  const outcome: ReceiptOutcome = worked === 0 ? 'refunded' : worked === actions.length ? 'done' : 'partial';
-  return { open, outcome, actions };
+    .map((run): ReceiptAction => ({ run: run.id, label: run.toolkit, outcome: actionOutcomeOfRun(run) }));
+  return { open, outcome: outcomeOfActions(actions.map((action) => action.outcome)), actions };
 }
 
-/** The receipt's state for an outcome: partly done is still done (something worked and may have been taken); only none-worked is refunded. */
-export const stateOfOutcome = (outcome: ReceiptOutcome): 'done' | 'refunded' => (outcome === 'refunded' ? 'refunded' : 'done');
+/**
+ * The receipt's state for an outcome: refunded when nothing was taken (none worked and nothing was charged: refunded, or nobody could confirm
+ * it and its hold is given back); done for everything else, since something worked or something was taken.
+ */
+export const stateOfOutcome = (outcome: ReceiptOutcome): 'done' | 'refunded' => (outcome === 'refunded' || outcome === 'unconfirmed' ? 'refunded' : 'done');
 
 /** Reads the actions a receipt stored back, dropping anything that is not the shape written. */
 export function readActions(value: unknown): ReceiptAction[] {
@@ -54,7 +96,7 @@ export function readActions(value: unknown): ReceiptAction[] {
   return value.flatMap((entry): ReceiptAction[] => {
     if (typeof entry !== 'object' || entry === null) return [];
     const { run, label, outcome } = entry as Record<string, unknown>;
-    return typeof run === 'string' && typeof label === 'string' && (outcome === 'worked' || outcome === 'failed') ? [{ run, label, outcome }] : [];
+    return typeof run === 'string' && typeof label === 'string' && (ACTION_OUTCOMES as readonly unknown[]).includes(outcome) ? [{ run, label, outcome: outcome as ActionOutcome }] : [];
   });
 }
 export type ReceiptCategory = 'apps' | 'computer';
@@ -123,6 +165,17 @@ interface Group {
   priced: boolean;
   charged: boolean;
   note?: string;
+}
+
+/**
+ * What the computer's time took from the person for a task, in whole micros: undefined when no time was written against them (none booked,
+ * or all of it given back), null while any of it has no price yet (never a made-up total).
+ */
+export function computerTakenOf(events: readonly LineEvent[]): number | null | undefined {
+  const mine = events.filter((event) => event.kind === 'computer_time' && !givenBackTime(event));
+  if (mine.length === 0) return undefined;
+  if (mine.some((event) => event.costMicros === null)) return null;
+  return mine.reduce((sum, event) => sum + (event.costMicros ?? 0), 0);
 }
 
 /**
