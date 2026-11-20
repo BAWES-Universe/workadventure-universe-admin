@@ -1000,7 +1000,7 @@ run('The files a finished computer job made reach the chat as cards, in a real d
       expect((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${id}:time` } })).quantity).toBe(BigInt(job.secondsRun));
     });
 
-    it('gap (b): a hand-over that finishes between the sweep’s two reads is never settled at the seconds from before it', async () => {
+    it('gap (b): a hand-over that finishes between the sweep’s two reads is never settled at the seconds from before it, whichever of the two reads comes first', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
       const started_ = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', writes: false }, minutes(-60));
@@ -1012,27 +1012,54 @@ run('The files a finished computer job made reach the chat as cards, in a real d
       await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date() } });
       const before = (await prisma.computerJob.findUniqueOrThrow({ where: { id } })).secondsRun;
       const room = await roomOf(id);
-      // The hand-over finishes (its seconds added, the claim and the beat let go) right after the sweep's first read of what it needs to decide
-      const realFind = prisma.meterReservation.findUnique.bind(prisma.meterReservation);
-      let injected = false;
-      const spy = jest.spyOn(prisma.meterReservation, 'findUnique').mockImplementation(((args: { where?: { reservationKey?: string } }) => {
-        const read = realFind(args as never);
-        if (injected || args?.where?.reservationKey !== room.reservationKey) return read;
-        injected = true;
+      // The sweep reads two things to decide: the machine's claim and the job's seconds and beat. Whichever it reads FIRST gets what was there before the hand-over
+      // finished; the hand-over finishes (its seconds added, the claim and the beat let go) right after that read, so the SECOND read sees it finished
+      const realLease = prisma.meterReservation.findUnique.bind(prisma.meterReservation);
+      const realClaim = prisma.brickComputer.findUnique.bind(prisma.brickComputer);
+      const realJob = prisma.computerJob.findUnique.bind(prisma.computerJob);
+      let armed = false;
+      let first: 'claim' | 'job' | null = null;
+      const finishHandOver = async () => {
+        await prisma.computerJob.update({ where: { id }, data: { secondsRun: { increment: 7 }, handOverAliveAt: null } });
+        await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: null } });
+      };
+      const leaseSpy = jest.spyOn(prisma.meterReservation, 'findUnique').mockImplementation(((args: { where?: { reservationKey?: string } }) => {
+        if (args?.where?.reservationKey === room.reservationKey) armed = true;
+        return realLease(args as never);
+      }) as never);
+      const claimSpy = jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementation(((args: { where?: { botId?: string } }) => {
+        const read = realClaim(args as never);
+        if (!armed || first || args?.where?.botId !== sara.brickId) return read;
+        first = 'claim';
         return read.then(async (value) => {
-          await prisma.computerJob.update({ where: { id }, data: { secondsRun: { increment: 7 }, handOverAliveAt: null } });
-          await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: null } });
+          await finishHandOver();
           return value;
         });
       }) as never);
+      const jobSpy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: { where?: { id?: string }; select?: { handOverAliveAt?: boolean } }) => {
+        const read = realJob(args as never);
+        if (!armed || first || args?.where?.id !== id || !args?.select?.handOverAliveAt) return read;
+        first = 'job';
+        return read.then(async (value) => {
+          await finishHandOver();
+          return value;
+        });
+      }) as never);
+      let afterFirstSweep: Awaited<ReturnType<typeof roomOf>> | null = null;
       try {
         await sweepComputers(new Date());
+        afterFirstSweep = await roomOf(id);
       } finally {
-        spy.mockRestore();
+        leaseSpy.mockRestore();
+        claimSpy.mockRestore();
+        jobSpy.mockRestore();
       }
-      expect(injected).toBe(true);
+      expect(first).not.toBeNull();
       const after = await prisma.computerJob.findUniqueOrThrow({ where: { id } });
       expect(after.secondsRun).toBe(before + 7);
+      // Never at the seconds from before the hand-over: held for the next sweep, or settled at the whole
+      if (afterFirstSweep?.state === 'settled') expect(afterFirstSweep.settledMicros).toBe(priced(after.secondsRun));
+      await sweepComputers(new Date());
       expect((await roomOf(id)).state).toBe('settled');
       expect((await roomOf(id)).settledMicros).toBe(priced(after.secondsRun));
     });
