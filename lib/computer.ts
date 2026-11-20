@@ -1181,6 +1181,10 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       handoverUntold: false,
       // The person's own Stop, a computer turned off and a Brick deleted are never told: they just did it
       endToldAt: silentEnding(endedBy) ? now : null,
+      // A job that finished well and writes files hands them over next: it says so in the SAME write that ends it, so there is no moment when it is over and nothing says its time is
+      // still to be added (a sweep that settled its room in that gap would settle too little, and a room's first settlement is the one kept). The hand-over clears it when it is
+      // done; one that never runs (the server stopped) leaves a mark that ages out after HAND_OVER_ALIVE_MS, and the sweep settles the job then, once
+      ...(outside && held && status === 'done' && job.writes ? { handOverAliveAt: now } : {}),
     } as const;
     // An ending the runner reported as ours is decided from the relay's durable rows and the bound on goodwill (lib/computer-giveback), in the same transaction that
     // writes the ending and under the person's give-back lock, so two of their jobs ending together cannot both take the last give-back. A job that is not given back
@@ -1540,15 +1544,20 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
       // A job that ran and ended, whose room was left held (its settlement did not get through): the room is settled at what it ran, never given back, so the
       // time it took is never lost between the room and the books (the sweep writes its time below)
       const lease = await prisma.meterReservation.findUnique({ where: { reservationKey: reservation.reservationKey }, select: { terms: true } });
-      const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
       // ...but not while its files are still being handed over: that hand-over adds its seconds to the job's time and settles the room itself afterwards
       // (a room settled here first at the shorter time would stay, close() keeps the first settlement). The same two conditions recordMissingComputerTime waits
       // by: the machine's files are claimed, or this job is waiting in line for its hand-over and beating. Once the claim or the beat is stale the hand-over is
       // abandoned and the room is settled at what the job ran, on this or a later sweep.
-      if ((row?.filesClaimedAt && row.filesClaimedAt.getTime() > now.getTime() - FILES_CLAIM_MS) || (job.handOverAliveAt && job.handOverAliveAt.getTime() > now.getTime() - HAND_OVER_ALIVE_MS)) continue;
+      // THE ORDER MATTERS: the claim is read first and the job (its seconds and its beat) after. A hand-over adds its seconds while it holds the claim and lets go of the claim and
+      // the beat after, so "both gone" read in this order always comes with the final seconds; read the other way round, a hand-over that finished between the two reads
+      // would be settled at the seconds from before it
+      const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
+      const fresh = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { secondsRun: true, endedAt: true, handOverAliveAt: true } });
+      if (!fresh) continue;
+      if ((row?.filesClaimedAt && row.filesClaimedAt.getTime() > now.getTime() - FILES_CLAIM_MS) || (fresh.handOverAliveAt && fresh.handOverAliveAt.getTime() > now.getTime() - HAND_OVER_ALIVE_MS)) continue;
       const provider = providerFor(row);
-      const pinned = pinnedMicrosPerMinute(lease?.terms, job.secondsRun, (job.endedAt ?? now).getTime());
-      const cost = costOfSeconds(job.secondsRun, pinned ?? (provider ? provider.microsPerMinute() : null));
+      const pinned = pinnedMicrosPerMinute(lease?.terms, fresh.secondsRun, (fresh.endedAt ?? now).getTime());
+      const cost = costOfSeconds(fresh.secondsRun, pinned ?? (provider ? provider.microsPerMinute() : null));
       await settleRoom({ key: reservation.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
       released++;
     } else {

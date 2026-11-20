@@ -593,7 +593,7 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
     actions: header.actions.map((action): ActivityAction => {
       const taken = action.outcome === 'worked' ? takenForRun(events, action.run) : null;
       const released = action.outcome === 'unknown' && !header.heldRuns.has(action.run) ? releasedOf(action.run) : 0;
-      const takenText = action.outcome === 'worked' ? null : action.outcome !== 'worked' && header.heldRuns.has(action.run) ? HOLD_BEING_RELEASED : released > 0 ? HOLD_RELEASED : NOTHING_TAKEN;
+      const takenText = action.outcome === 'worked' ? null : header.heldRuns.has(action.run) ? HOLD_BEING_RELEASED : released > 0 ? HOLD_RELEASED : NOTHING_TAKEN;
       return { label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome), takenText, ...(taken === null ? {} : { amountMicros: taken }), ...(released > 0 ? { releasedMicros: released } : {}) };
     }),
     spentMicros: spentOf(header.state, header.chargedMicros, lines),
