@@ -133,7 +133,7 @@ const client: Row = {
     create: async ({ data, include }: Row) => {
       const { versions, ...fields } = data;
       const now = new Date();
-      const row = { ownerId: null, chatKind: null, chatRef: null, openScope: 'chat', changeScope: 'owner', latestVersion: 1, copiedFromId: null, expiresAt: null, createdAt: now, updatedAt: now, ...fields };
+      const row = { ownerId: null, chatKind: null, chatRef: null, openScope: 'chat', changeScope: 'owner', latestVersion: 1, publishedVersion: null, publishedTitle: null, publishedAt: null, copiedFromId: null, expiresAt: null, createdAt: now, updatedAt: now, ...fields };
       db.artifacts.push(row);
       if (versions?.create) createVersion({ artifactId: row.id, ...versions.create });
       return withOwner(row, include);
