@@ -12,7 +12,7 @@ jest.mock('@/lib/credit-spend', () => {
   const actual = jest.requireActual('@/lib/credit-spend');
   return { ...actual, refundHold: jest.fn(actual.refundHold) };
 });
-jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn() }));
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn(), getClient: jest.fn(() => undefined), flush: jest.fn(async () => true) }));
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
@@ -731,6 +731,42 @@ run('credit for computers, on the real books', () => {
           expect(captured).toHaveBeenCalledTimes(1);
           expect((await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).alertedAt).not.toBeNull();
         } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('the overdue-refund alert is flushed inside the claim: a flush that does not confirm leaves it unmarked for the next sweep, and with no Sentry client it commits at once', async () => {
+        const { holdKey } = await stuck();
+        const created = (await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).createdAt;
+        const overdueAt = new Date(created.getTime() + 61 * 60_000);
+        await prisma.computerRefundObligation.update({ where: { holdKey }, data: { nextAttemptAt: new Date(overdueAt.getTime() + 10 * 24 * 3_600_000) } });
+        const captured = Sentry.captureMessage as jest.Mock;
+        const getClient = Sentry.getClient as jest.Mock;
+        const flush = Sentry.flush as jest.Mock;
+        captured.mockClear();
+        flush.mockClear();
+        const spy = quiet();
+        const marked = async () => (await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).alertedAt;
+        try {
+          getClient.mockReturnValue({});
+          // The transport did not confirm the event: rolled back, so nothing is marked told
+          flush.mockResolvedValueOnce(false);
+          expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 0 });
+          expect(flush).toHaveBeenCalledWith(2_000);
+          expect(await marked()).toBeNull();
+          // The next sweep tells it again (a duplicate at worst), and this time it is confirmed
+          expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 1 });
+          expect(captured).toHaveBeenCalledTimes(2);
+          expect(await marked()).not.toBeNull();
+          // With no client nothing could ever be delivered: it commits at once, without a flush
+          await prisma.computerRefundObligation.update({ where: { holdKey }, data: { alertedAt: null } });
+          getClient.mockReturnValue(undefined);
+          flush.mockClear();
+          expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 1 });
+          expect(flush).not.toHaveBeenCalled();
+          expect(await marked()).not.toBeNull();
+        } finally {
+          getClient.mockReturnValue(undefined);
           spy.mockRestore();
         }
       });

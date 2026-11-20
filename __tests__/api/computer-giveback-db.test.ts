@@ -13,7 +13,7 @@ jest.mock('@/lib/computer-token', () => {
   const actual = jest.requireActual('@/lib/computer-token');
   return { ...actual, revokeJobTokens: jest.fn(actual.revokeJobTokens) };
 });
-jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn() }));
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn(), getClient: jest.fn(() => undefined), flush: jest.fn(async () => true) }));
 
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
@@ -734,6 +734,33 @@ run('a computer job that failed on our side, and the bound on giving it back', (
           quiet.mockRestore();
         }
       });
+
+      it('flushes the alert inside the claim: a flush that does not confirm leaves the look unmarked as told, and the next failing look tells it', async () => {
+        const refused = await failing();
+        const captured = Sentry.captureMessage as jest.Mock;
+        const getClient = Sentry.getClient as jest.Mock;
+        const flush = Sentry.flush as jest.Mock;
+        captured.mockClear();
+        flush.mockClear();
+        const t0 = new Date();
+        const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        const spy = throwFor(refused.id);
+        try {
+          getClient.mockReturnValue({});
+          await sweepLateEvidence(t0);
+          flush.mockResolvedValueOnce(false);
+          await sweepLateEvidence(new Date(t0.getTime() + 1.02 * 3_600_000));
+          expect(flush).toHaveBeenCalledWith(2_000);
+          expect(await peek(refused.id)).toMatchObject({ lastError: expect.stringMatching(/^late_look:/) });
+          await sweepLateEvidence(new Date(t0.getTime() + 2.04 * 3_600_000));
+          expect(captured).toHaveBeenCalledTimes(2);
+          expect(await peek(refused.id)).toMatchObject({ lastError: expect.stringMatching(/^late_look_told:/) });
+        } finally {
+          getClient.mockReturnValue(undefined);
+          spy.mockRestore();
+          quiet.mockRestore();
+        }
+      });
     });
 
     it('a late look that failed never writes an older marker over another sweep’s: the reschedule is made only over the marker it read, so the alert is not told twice', async () => {
@@ -960,6 +987,39 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 1 });
       expect(captured).toHaveBeenCalledTimes(1);
       expect((await decisionOf(ended.id))?.alertedAt).not.toBeNull();
+    });
+
+    it('the pending-age alert is flushed inside the claim: a flush that does not confirm leaves it unmarked for the next sweep, and with no Sentry client it commits at once', async () => {
+      await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
+      const sara = await person('sara');
+      const ended = await job(sara, { ...ours, turns: [1] }, async (id) => {
+        await planEffect(id, { key: 'flush-1', kind: 'send' });
+      });
+      await prisma.computerGiveBackDecision.update({ where: { jobId: ended.id }, data: { decidedAt: new Date(NOW.getTime() - 3 * 24 * 60 * 60_000), nextAttemptAt: new Date(NOW.getTime() + 24 * 60 * 60_000) } });
+      const captured = Sentry.captureMessage as jest.Mock;
+      const getClient = Sentry.getClient as jest.Mock;
+      const flush = Sentry.flush as jest.Mock;
+      captured.mockClear();
+      flush.mockClear();
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        getClient.mockReturnValue({});
+        flush.mockResolvedValueOnce(false);
+        expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 0 });
+        expect(flush).toHaveBeenCalledWith(2_000);
+        expect((await decisionOf(ended.id))?.alertedAt).toBeNull();
+        expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 1 });
+        expect(captured).toHaveBeenCalledTimes(2);
+        expect((await decisionOf(ended.id))?.alertedAt).not.toBeNull();
+        await prisma.computerGiveBackDecision.update({ where: { jobId: ended.id }, data: { alertedAt: null } });
+        getClient.mockReturnValue(undefined);
+        flush.mockClear();
+        expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 1 });
+        expect(flush).not.toHaveBeenCalled();
+      } finally {
+        getClient.mockReturnValue(undefined);
+        quiet.mockRestore();
+      }
     });
 
     it('the late-look alert is claimed by a row lock: a failing look that finds the row locked by another skips the alert, and the next failing look tells it', async () => {

@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { refundHold } from '@/lib/credit-spend';
 import { retryWaitMs } from '@/lib/computer-retry';
+import { ALERT_TRANSACTION_OPTIONS, tellSentry } from '@/lib/computer-alerts';
 
 /**
  * The refund of what a failed computer job drew from credit is an OBLIGATION until the funding books acknowledge it (table computer_refund_obligations).
@@ -140,14 +141,17 @@ export async function sweepRefundObligations(now: Date = new Date(), batch = 50)
           );
           if (locked.length !== 1) return false;
           const row = locked[0];
-          Sentry.captureMessage('A refund of credit a failed computer job drew has not been acknowledged by the books for over an hour', {
-            level: 'error',
-            tags: { area: 'computer', step: 'refund_obligation_age' },
-            extra: { jobId: row.job_id, holdKey: row.hold_key, amountMicros: Number(row.amount_micros), attempts: row.attempts, lastError: row.last_error, since: row.created_at.toISOString() },
-          });
+          // Told, then flushed, inside the transaction (lib/computer-alerts): a flush that does not confirm rolls the claim back and the next sweep tells it again
+          await tellSentry(() =>
+            Sentry.captureMessage('A refund of credit a failed computer job drew has not been acknowledged by the books for over an hour', {
+              level: 'error',
+              tags: { area: 'computer', step: 'refund_obligation_age' },
+              extra: { jobId: row.job_id, holdKey: row.hold_key, amountMicros: Number(row.amount_micros), attempts: row.attempts, lastError: row.last_error, since: row.created_at.toISOString() },
+            }),
+          );
           await tx.computerRefundObligation.update({ where: { id: one.id }, data: { alertedAt: now } });
           return true;
-        });
+        }, ALERT_TRANSACTION_OPTIONS);
         if (told) result.alerted++;
       } catch (error) {
         console.error('[Computer] Could not tell Sentry about an overdue refund (the next sweep tells it):', error instanceof Error ? error.message : 'unknown');

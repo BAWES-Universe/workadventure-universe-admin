@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import * as Sentry from '@sentry/nextjs';
+import { ALERT_TRANSACTION_OPTIONS, tellSentry } from '@/lib/computer-alerts';
 import { prisma } from '@/lib/db';
 import { getInstantLimitsStrict } from '@/lib/instant/state';
 import { INSTANT_LIMITS_RECOMMENDED, type InstantLimits } from '@/lib/instant/values';
@@ -312,10 +313,10 @@ export async function sweepGiveBackDecisions(now: Date = new Date(), batch = 50)
         const told = await prisma.$transaction(async (tx) => {
           const locked = await tx.$queryRaw<Array<{ job_id: string }>>(Prisma.sql`SELECT "job_id" FROM "computer_give_back_decisions" WHERE "job_id" = ${one.jobId} AND "state" = 'pending' AND "alerted_at" IS NULL FOR UPDATE SKIP LOCKED`);
           if (locked.length !== 1) return false;
-          Sentry.captureMessage('A computer give-back has been pending for a long time: the person is charged provisionally', { level: 'error', tags: { area: 'computer', step: 'giveback_pending_age', basis: one.basis }, extra: { jobId: one.jobId, since: one.decidedAt.toISOString() } });
+          await tellSentry(() => Sentry.captureMessage('A computer give-back has been pending for a long time: the person is charged provisionally', { level: 'error', tags: { area: 'computer', step: 'giveback_pending_age', basis: one.basis }, extra: { jobId: one.jobId, since: one.decidedAt.toISOString() } }));
           await tx.computerGiveBackDecision.update({ where: { jobId: one.jobId }, data: { alertedAt: now } });
           return true;
-        });
+        }, ALERT_TRANSACTION_OPTIONS);
         if (told) result.alerted++;
       } catch (error) {
         console.error('[Computer] Could not tell Sentry about a long-pending give-back (the next sweep tells it):', error instanceof Error ? error.message : 'unknown');
@@ -441,17 +442,17 @@ async function lateLookFailed(jobId: string, mark: Date, now: Date): Promise<voi
       SET "updated_at" = GREATEST("updated_at", ${mark}), "attempts" = "attempts" + 1, "next_attempt_at" = ${next}, "last_error" = ${marker}
       WHERE "job_id" = ${jobId} AND "state" IN ('refused', 'given') AND "last_error" IS NOT DISTINCT FROM ${row.last_error} AND "attempts" = ${row.attempts}`;
     if (rescheduled !== 1 || told || now.getTime() - first < LATE_LOOK_ALERT_MS) return;
-    // Told once, by the same shape as the other alerts: the row is locked (FOR UPDATE SKIP LOCKED) while its marker is still the one just written, Sentry is told inside the
-    // transaction, and `late_look_told` is set before the commit. A sweep that finds it locked skips it; a capture that throws or a worker that dies rolls back, and the next
+    // Told once, by the same shape as the other alerts: the row is locked (FOR UPDATE SKIP LOCKED) while its marker is still the one just written, Sentry is told (and flushed) inside the
+    // transaction (lib/computer-alerts), and `late_look_told` is set before the commit. A sweep that finds it locked skips it; a capture that throws or a worker that dies rolls back, and the next
     // failing look tells it (a duplicate at worst, never a lost alert)
     const toldMarker = `${LATE_LOOK_TOLD}:${first}`;
     try {
       await prisma.$transaction(async (tx) => {
         const locked = await tx.$queryRaw<Array<{ job_id: string }>>(Prisma.sql`SELECT "job_id" FROM "computer_give_back_decisions" WHERE "job_id" = ${jobId} AND "last_error" = ${marker} FOR UPDATE SKIP LOCKED`);
         if (locked.length !== 1) return;
-        Sentry.captureMessage('A late look at evidence for a computer give-back has been failing for over an hour: a confirmed fault of ours may still be charged to a person', { level: 'error', tags: { area: 'computer', step: 'giveback_late_look' }, extra: { jobId, since: new Date(first).toISOString() } });
+        await tellSentry(() => Sentry.captureMessage('A late look at evidence for a computer give-back has been failing for over an hour: a confirmed fault of ours may still be charged to a person', { level: 'error', tags: { area: 'computer', step: 'giveback_late_look' }, extra: { jobId, since: new Date(first).toISOString() } }));
         await tx.$executeRaw`UPDATE "computer_give_back_decisions" SET "last_error" = ${toldMarker} WHERE "job_id" = ${jobId}`;
-      });
+      }, ALERT_TRANSACTION_OPTIONS);
     } catch (error) {
       console.error('[Computer] Could not tell Sentry about a failing late look (the next failing look tells it):', error instanceof Error ? error.message : 'unknown');
     }
