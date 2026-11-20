@@ -2377,7 +2377,11 @@ export async function planEffect(jobId: string, input: { key: string; kind: Effe
 export async function settleEffect(jobId: string, key: string, state: 'done' | 'failed', evidence?: string | null): Promise<boolean> {
   // The effect's own change and the fact that a give-back already made was for work that turned out delivered commit TOGETHER: a flag that cannot be written leaves the
   // effect planned, and the settle is asked again (the charge is never touched either way)
+  // Under the person's give-back lock, taken BEFORE the effect is touched (the same order a decision made again takes it: lock first, then the effects). A retry that read
+  // this effect as planned and grants goodwill then either finishes first, and this settlement flags that give-back as delivered late, or comes after, and sees the effect done
+  const owner = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { personId: true } });
   const count = await prisma.$transaction(async (tx) => {
+    if (owner) await lockPerson(tx, owner.personId);
     const changed = await tx.computerEffect.updateMany({
       where: { jobId, effectKey: key, state: 'planned' },
       data: { state, settledAt: new Date(), ...(evidence !== undefined ? { evidence: evidence === null ? null : evidence.slice(0, 500) } : {}) },

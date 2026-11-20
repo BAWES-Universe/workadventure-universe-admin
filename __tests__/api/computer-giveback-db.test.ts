@@ -828,6 +828,54 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       });
     });
 
+    describe('an effect settled while a decision is made again (the person’s lock orders them)', () => {
+      const heldForEffect = async () => {
+        await limitsAre(LAUNCH);
+        const sara = await person('sara');
+        const held = await job(sara, { ...ours, turns: [1] }, async (id) => {
+          await recordFaults(sara.brickId, id, [fault(1, 'provider_5xx')]);
+          await planEffect(id, { key: 'mail-1', kind: 'send' });
+        });
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', basis: 'effect_unresolved' });
+        return held;
+      };
+
+      it('settlement first: the retry sees the effect done, and done means none (unresolved rows only: refused, delivered)', async () => {
+        const held = await heldForEffect();
+        expect(await settleEffect(held.id, 'mail-1', 'done', 'ali@example.test')).toBe(true);
+        // The settlement decides the held decision itself; a retry that comes after finds nothing pending and changes nothing
+        expect(await resolveDecision(held.id, minutes(30))).toBe('none');
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'refused', basis: 'delivered', deliveredLate: false });
+        expect(await givenBack(held.id)).toBe(false);
+      });
+
+      it('grant first: the settlement that comes after flags the give-back as delivered late, and the give-back stays', async () => {
+        const held = await heldForEffect();
+        // The wait for the effect is over: the retry grants goodwill with the effect still planned
+        await prisma.computerGiveBackDecision.update({ where: { jobId: held.id }, data: { decidedAt: new Date(Date.now() - 3 * 24 * 3_600_000) } });
+        expect(await resolveDecision(held.id, new Date())).toBe('resolved');
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'goodwill', deliveredLate: false });
+        expect(await settleEffect(held.id, 'mail-1', 'done', 'ali@example.test')).toBe(true);
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'goodwill', deliveredLate: true });
+        expect(await givenBack(held.id)).toBe(true);
+      });
+
+      it('a settlement waits for the person’s lock before it touches the effect, so it can never land between a retry’s read of the effect and its grant', async () => {
+        const held = await heldForEffect();
+        const waiting = async () => (await prisma.$queryRaw<Array<{ n: number }>>`SELECT COUNT(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)[0].n;
+        let settled: Promise<boolean> = Promise.resolve(false);
+        await prisma.$transaction(async (tx) => {
+          await lockPerson(tx, held.personId);
+          settled = settleEffect(held.id, 'mail-1', 'done', 'ali@example.test');
+          // It is waiting for the lock (a barrier on the database's own lock table, no timer), and the effect has not moved
+          while ((await waiting()) === 0) await new Promise((resolve) => setImmediate(resolve));
+          expect((await tx.computerEffect.findFirstOrThrow({ where: { jobId: held.id } })).state).toBe('planned');
+        });
+        expect(await settled).toBe(true);
+        expect((await prisma.computerEffect.findFirstOrThrow({ where: { jobId: held.id } })).state).toBe('done');
+      });
+    });
+
     it('late evidence gives the same verdict as evidence on time: a confirmed fault of ours is given back even where the work was delivered, on the sweep as on the first look (both paths agree)', async () => {
       await limitsAre(LAUNCH);
       const sara = await person('sara');
