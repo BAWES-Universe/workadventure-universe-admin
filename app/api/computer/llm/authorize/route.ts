@@ -12,6 +12,8 @@ const bodySchema = z
     callId: z.string().min(1).max(80),
     estimateMicros: z.number().int().min(0).max(2_000_000_000),
     payer: z.enum(['universe', 'own-key']),
+    /** The provider and route the call will go to ("universe-ai:<providerId>"), when the relay knows it: a route failing for many people is paused for new work. */
+    route: z.string().min(1).max(120).nullable().optional(),
   })
   .strict();
 

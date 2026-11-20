@@ -6,6 +6,7 @@ import { reconcileCheck } from '@/lib/computer-reconcile';
 import { coldProvider, coldStatus } from '@/lib/computer-cold';
 import { STORAGE_DELETION_ALERT_MS, storageDeletionsWaiting } from '@/lib/computer-archives';
 import { computersArePaused } from '@/lib/capability-pause';
+import { giveBackReadiness } from '@/lib/computer-fault-ops';
 
 export interface Readiness {
   /** Every check passed: a person's job can run now. */
@@ -48,6 +49,9 @@ export async function computerReadiness(): Promise<Readiness> {
       checks.push({ name: 'cold storage', ok: cold.lastDrill ? cold.lastDrill.ok : true, detail: `${cold.cold} computer${cold.cold === 1 ? '' : 's'} packed away, ${cold.packing} being packed, ${cold.failing} could not be packed yet; ${drill}; ${slow}; ${sized}` });
     }
   }
+  // The settings the bound on give-backs reads must exist: missing numbers hold unresolved give-backs, they never mean "no bound"
+  const giveBack = await giveBackReadiness().catch(() => ({ ok: false, detail: 'The give-back settings could not be checked' }));
+  checks.push({ name: 'give-backs', ...giveBack });
   // Deleted copies of a Brick's files that are still in the bucket: how many wait and for how long the oldest has. A day is far longer than a slow bucket takes,
   // so a deletion older than that means the bucket has stopped accepting deletes (and a deleted Brick's files are still stored): not ready until it is looked at.
   if (coldProvider(provider)) {

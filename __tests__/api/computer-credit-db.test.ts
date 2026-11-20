@@ -12,10 +12,15 @@ jest.mock('@/lib/credit-spend', () => {
   const actual = jest.requireActual('@/lib/credit-spend');
   return { ...actual, refundHold: jest.fn(actual.refundHold) };
 });
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn() }));
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
+import { attemptRefundObligation, refundOverview, retryRefundObligation, sweepRefundObligations } from '@/lib/computer-refunds';
+import { giveBackReadiness } from '@/lib/computer-fault-ops';
+import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { memberAllowance } from '@/lib/meter-allowance';
@@ -79,6 +84,7 @@ const setUp = (over: Record<string, number | null> = {}) =>
 
 const wipe = async () => {
   await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
+  await prisma.computerRefundObligation.deleteMany({});
   await prisma.meterEvent.deleteMany({});
   await prisma.meterReservation.deleteMany({});
   await prisma.$executeRawUnsafe('DELETE FROM credit_refunds');
@@ -133,12 +139,14 @@ run('credit for computers, on the real books', () => {
     // The give-back is the real one again, whatever a test did to it
     (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(jest.requireActual('@/lib/credit-spend').refundHold);
     await wipe();
+    await seedGiveBackLimits();
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
     setComputerProviderForTests(new FakeComputerProvider());
     await setUp();
   });
   afterAll(async () => {
     await wipe();
+    await clearGiveBackLimits();
     setComputerProviderForTests(null);
     process.env.COMPUTER_PROVIDER = env;
     await prisma.user.deleteMany({ where: { id: { in: people } } });
@@ -376,13 +384,13 @@ run('credit for computers, on the real books', () => {
       expect(holds.map((hold) => Number(hold.refundedMicros)).sort()).toEqual([20_000, 30_000]);
     });
 
-    it('a Brick is not purged while a failed job still holds credit that has not gone back: the job is what finds it again, so purging first would lose that credit', async () => {
+    it('a Brick is purged even while the books cannot take a refund: the refund obligation keeps the job, the person and the amount, and the refund is still made afterwards', async () => {
       const { purgeBrick } = jest.requireActual('@/lib/brick-purge');
       const sara = await running();
       const { jobId, token } = await job(sara);
       await gift([sara.id], 'computers', 1_000_000);
       await call(token, 'a', 50_000, 30_000);
-      // The books cannot be reached when the job fails, nor when the purge tries the give-back itself
+      // The books cannot be reached when the job fails, nor when the purge tries
       (creditSpend.refundHold as jest.Mock).mockImplementation(async () => {
         throw new Error('books unreachable');
       });
@@ -393,16 +401,193 @@ run('credit for computers, on the real books', () => {
         await failedOnOurSide(jobId, at);
         expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(970_000);
         await prisma.bot.update({ where: { id: sara.brickId }, data: { deletedAt: at, goneAt: at, enabled: false, enabledBeforeDelete: true } });
-        expect(await purgeBrick(sara.brickId, later)).toBe('books');
-        expect(await prisma.computerJob.count({ where: { id: jobId } })).toBe(1);
+        // Deletion is not held for ever by a refund that cannot be made: what is owed is kept apart from the job
+        expect(await purgeBrick(sara.brickId, later)).toBe('purged');
+        expect(await prisma.computerJob.count({ where: { id: jobId } })).toBe(0);
       } finally {
         quiet.mockRestore();
       }
-      // The books answer again: the sweep gives the credit back, and only then is the Brick purged
+      const owed = await prisma.computerRefundObligation.findFirstOrThrow({ where: { jobId } });
+      expect(owed).toMatchObject({ jobId, personId: sara.id, state: 'owed', lastError: 'books unreachable' });
+      expect(Number(owed.amountMicros)).toBe(30_000);
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(970_000);
+      // The books answer again: the sweep gives the credit back without the job or the Brick, and the obligation is acknowledged
       (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(jest.requireActual('@/lib/credit-spend').refundHold);
-      await sweepComputers(new Date(later.getTime() + 30 * 60_000));
+      await sweepComputers(new Date(later.getTime() + 3 * 60 * 60_000));
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
-      expect(await purgeBrick(sara.brickId, new Date(later.getTime() + 31 * 60_000))).toBe('purged');
+      expect(await prisma.computerRefundObligation.findUniqueOrThrow({ where: { id: owed.id } })).toMatchObject({ state: 'acknowledged', acknowledgedMicros: BigInt(30_000) });
+    });
+
+    describe('the refund of credit a failed job drew is an obligation until the books acknowledge it', () => {
+      const actualRefund = () => jest.requireActual('@/lib/credit-spend').refundHold;
+      const quiet = () => jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      afterEach(() => {
+        (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(actualRefund());
+        jest.restoreAllMocks();
+        (Sentry.captureMessage as jest.Mock).mockClear();
+      });
+      /** A failed job that drew 30,000 from a gift, whose first refund try fails because the books are unreachable. */
+      async function stuck() {
+        const sara = await running();
+        const { jobId, token } = await job(sara);
+        await gift([sara.id], 'computers', 1_000_000);
+        await call(token, 'a', 50_000, 30_000);
+        (creditSpend.refundHold as jest.Mock).mockImplementation(async () => {
+          throw new Error('books unreachable');
+        });
+        const spy = quiet();
+        await failedOnOurSide(jobId, new Date(NOW.getTime() + 10 * 60_000));
+        spy.mockRestore();
+        const holdKey = `computer:credit:computer:${jobId}:call:a`;
+        return { sara, jobId, holdKey };
+      }
+
+      it('is written before the books are asked, with the amount fixed, and is acknowledged with what they gave; asked again it changes nothing', async () => {
+        const sara = await running();
+        const { jobId, token } = await job(sara);
+        await gift([sara.id], 'computers', 1_000_000);
+        await call(token, 'a', 50_000, 30_000);
+        const seen: unknown[] = [];
+        (creditSpend.refundHold as jest.Mock).mockImplementation(async (input: { holdKey: string; refundKey: string; amountMicros: number }, at?: Date) => {
+          // At the moment the books are asked the obligation already exists with the amount and key it will ask with
+          seen.push(await prisma.computerRefundObligation.findUnique({ where: { holdKey: input.holdKey } }));
+          return actualRefund()(input, at);
+        });
+        await failedOnOurSide(jobId, new Date(NOW.getTime() + 10 * 60_000));
+        expect(seen).toHaveLength(1);
+        expect(seen[0]).toMatchObject({ jobId, personId: sara.id, state: 'owed', refundKey: `giveback:computer:credit:computer:${jobId}:call:a`, amountMicros: BigInt(30_000) });
+        const kept = await prisma.computerRefundObligation.findFirstOrThrow({ where: { jobId } });
+        expect(kept).toMatchObject({ state: 'acknowledged', acknowledgedMicros: BigInt(30_000), attempts: 1, lastError: null, nextAttemptAt: null });
+        // Said again (the sweep, a second end, support) the books are not asked and nothing more is given
+        const asked = (creditSpend.refundHold as jest.Mock).mock.calls.length;
+        await sweepComputers(new Date(NOW.getTime() + 30 * 60_000));
+        expect(await attemptRefundObligation(kept.holdKey, new Date(NOW.getTime() + 31 * 60_000), { force: true })).toBe('none');
+        expect((creditSpend.refundHold as jest.Mock).mock.calls.length).toBe(asked);
+        expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      });
+
+      it('keeps a failed try (tries, last try, why) and asks again with a growing wait: not before it is due, and never more often than that', async () => {
+        const { holdKey } = await stuck();
+        const first = await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } });
+        expect(first).toMatchObject({ state: 'owed', attempts: 1, lastError: 'books unreachable' });
+        const t0 = first.lastAttemptAt as Date;
+        expect(first.nextAttemptAt?.getTime()).toBe(t0.getTime() + 2 * 60_000);
+        const spy = quiet();
+        const asked = () => (creditSpend.refundHold as jest.Mock).mock.calls.length;
+        let before = asked();
+        // A sweep that comes too early does not ask the books at all
+        await sweepComputers(new Date(t0.getTime() + 60_000));
+        expect(asked()).toBe(before);
+        // Due: asked once, fails again, and the wait doubles
+        before = asked();
+        const due = new Date(t0.getTime() + 3 * 60_000);
+        await sweepComputers(due);
+        expect(asked()).toBe(before + 1);
+        const second = await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } });
+        expect(second).toMatchObject({ attempts: 2 });
+        expect(second.nextAttemptAt?.getTime()).toBe(due.getTime() + 4 * 60_000);
+        // The wait stops growing at an hour
+        for (let attempts = 3; attempts < 12; attempts++) await prisma.computerRefundObligation.update({ where: { holdKey }, data: { attempts, nextAttemptAt: null } }).then(() => attemptRefundObligation(holdKey, due));
+        const capped = await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } });
+        expect((capped.nextAttemptAt as Date).getTime() - due.getTime()).toBe(60 * 60_000);
+        spy.mockRestore();
+      });
+
+      it('asks for the same refund when the books made it but the answer was lost: found again by its key, given once', async () => {
+        const { sara, holdKey } = await stuck();
+        // This time the books MAKE the refund and then the answer is lost
+        (creditSpend.refundHold as jest.Mock).mockReset();
+        (creditSpend.refundHold as jest.Mock).mockImplementationOnce(async (input: unknown, at?: Date) => {
+          await actualRefund()(input, at);
+          throw new Error('answer lost');
+        });
+        (creditSpend.refundHold as jest.Mock).mockImplementation(actualRefund());
+        const spy = quiet();
+        const later = new Date(NOW.getTime() + 60 * 60_000);
+        expect(await attemptRefundObligation(holdKey, later, { force: true })).toBe('owed');
+        spy.mockRestore();
+        expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+        // Support's retry: the books answer with the SAME refund (replayed under its key), the obligation is acknowledged, nothing is given twice
+        expect(await retryRefundObligation(holdKey, new Date(later.getTime() + 60_000))).toEqual({ found: true, result: 'acknowledged' });
+        expect(await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).toMatchObject({ state: 'acknowledged', acknowledgedMicros: BigInt(30_000), attempts: 3 });
+        expect((await prisma.creditHold.findUniqueOrThrow({ where: { holdKey } })).refundedMicros).toBe(BigInt(30_000));
+        const hold = await prisma.creditHold.findUniqueOrThrow({ where: { holdKey } });
+        expect(await prisma.creditRefund.count({ where: { holdId: hold.id } })).toBe(1);
+        expect(await retryRefundObligation('no-such-hold')).toEqual({ found: false, result: 'none' });
+      });
+
+      it('does not ask the books again when a job’s give-back is said again before the wait is over (a late call, a second end)', async () => {
+        const { jobId, holdKey } = await stuck();
+        const asked = () => (creditSpend.refundHold as jest.Mock).mock.calls.length;
+        const before = asked();
+        const spy = quiet();
+        // The job ended at +10 minutes and the first try failed: the next is due at +12, so these two come too early
+        await giveBackComputerCredit(jobId, new Date(NOW.getTime() + 10 * 60_000 + 30_000));
+        await giveBackComputerCredit(jobId, new Date(NOW.getTime() + 11 * 60_000));
+        spy.mockRestore();
+        expect(asked()).toBe(before);
+        expect((await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).attempts).toBe(1);
+      });
+
+      it('keeps an answer that is not an acknowledgement as owed with why (a refund the books cannot make: more than the hold has left), for support', async () => {
+        const { sara, holdKey } = await stuck();
+        (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(actualRefund());
+        await prisma.computerRefundObligation.update({ where: { holdKey }, data: { amountMicros: BigInt(40_000) } });
+        expect(await attemptRefundObligation(holdKey, new Date(), { force: true })).toBe('owed');
+        expect(await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).toMatchObject({ state: 'owed', lastError: 'too_much' });
+        expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(970_000);
+      });
+
+      it('writes the obligation of a job that failed before obligations existed when its Brick is purged, so the purge goes on and the refund is still made', async () => {
+        const { purgeBrick } = jest.requireActual('@/lib/brick-purge');
+        const { sara, jobId, holdKey } = await stuck();
+        // A job that failed in an earlier release has no obligation row: only the job and the hold say what is owed
+        await prisma.computerRefundObligation.deleteMany({ where: { holdKey } });
+        const at = new Date(NOW.getTime() + 10 * 60_000);
+        await prisma.bot.update({ where: { id: sara.brickId }, data: { deletedAt: at, goneAt: at, enabled: false, enabledBeforeDelete: true } });
+        const spy = quiet();
+        expect(await purgeBrick(sara.brickId, new Date(NOW.getTime() + 60 * 60_000))).toBe('purged');
+        spy.mockRestore();
+        expect(await prisma.computerJob.count({ where: { id: jobId } })).toBe(0);
+        expect(await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).toMatchObject({ jobId, personId: sara.id, state: 'owed', amountMicros: BigInt(30_000) });
+        (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(actualRefund());
+        await sweepComputers(new Date(NOW.getTime() + 5 * 60 * 60_000));
+        expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      });
+
+      it('tells Sentry once about a refund unacknowledged for over an hour, and shows it overdue with what support needs', async () => {
+        const { sara, jobId, holdKey } = await stuck();
+        const created = (await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).createdAt;
+        const spy = quiet();
+        // Not yet an hour: nothing is said
+        expect(await sweepRefundObligations(new Date(created.getTime() + 30 * 60_000))).toMatchObject({ alerted: 0 });
+        expect((Sentry.captureMessage as jest.Mock)).not.toHaveBeenCalled();
+        const overdueAt = new Date(created.getTime() + 61 * 60_000);
+        expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 1 });
+        expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+        expect(Sentry.captureMessage).toHaveBeenCalledWith(expect.stringContaining('not been acknowledged'), expect.objectContaining({ tags: expect.objectContaining({ step: 'refund_obligation_age' }), extra: expect.objectContaining({ jobId, holdKey, amountMicros: 30_000, lastError: 'books unreachable' }) }));
+        // ...and only once
+        await sweepRefundObligations(new Date(overdueAt.getTime() + 120 * 60_000));
+        expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+        spy.mockRestore();
+        const view = await refundOverview(overdueAt);
+        expect(view.owed).toMatchObject({ count: 1, amountMicros: 30_000, overdue: 1 });
+        expect(view.rows[0]).toMatchObject({ jobId, personId: sara.id, holdKey, amountMicros: 30_000, lastError: 'books unreachable', overdue: true });
+        expect(view.rows[0].attempts).toBeGreaterThanOrEqual(1);
+        expect(view.rows[0].lastAttemptAt).not.toBeNull();
+      });
+
+      it('makes the readiness check fail while a refund is overdue, and pass once it is acknowledged', async () => {
+        await seedGiveBackLimits({});
+        const { holdKey } = await stuck();
+        const created = (await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).createdAt;
+        await prisma.computerRefundObligation.update({ where: { holdKey }, data: { createdAt: new Date(Date.now() - 2 * 60 * 60_000) } });
+        expect(created).toBeTruthy();
+        expect(await giveBackReadiness()).toMatchObject({ ok: false, detail: expect.stringContaining('not been acknowledged') });
+        (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(actualRefund());
+        await retryRefundObligation(holdKey);
+        expect((await giveBackReadiness()).ok).toBe(true);
+      });
     });
 
     it('the sweep takes the oldest and the newest of the jobs it must give back, so jobs whose give-back never works cannot keep a newer one out', async () => {

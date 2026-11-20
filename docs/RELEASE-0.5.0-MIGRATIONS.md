@@ -266,5 +266,7 @@ the statements it sends keep working against the new columns, which are all null
 179. `20261120080000_computer_job_runner_fault`
 180. `20261120090000_archive_deletion_since`
 181. `20261120110000_task_receipt_failed_outcomes`
-182. `20261120120000_page_order_reconcile`
+182. `20261120120000_computer_job_faults`
+183. `20261120120000_page_order_reconcile`
+184. `20261120130000_computer_refund_obligations`
 <!-- migrations:end -->
