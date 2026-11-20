@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test selftest/gateway.check.js"
+    "test": "node --test selftest/gateway.check.js selftest/notice.check.js selftest/server.check.js"
   },
   "engines": { "node": ">=20" }
 }
