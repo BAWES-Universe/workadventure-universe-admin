@@ -68,13 +68,14 @@ const wipe = async () => {
 
 let clock = 0;
 /** A job that starts and then is ended as the runner says; every job in these tests runs 5 minutes. */
-async function job(p: { id: string; brickId: string }, ending: { outcome: 'done' | 'failed'; cause?: 'ours' | 'agent'; turns?: number[]; run?: string }, before?: (jobId: string) => Promise<void>) {
+async function job(p: { id: string; brickId: string }, ending: { outcome: 'done' | 'failed'; cause?: 'ours' | 'agent'; turns?: number[]; run?: string }, before?: (jobId: string) => Promise<void>, origin: Date = NOW) {
   const at = clock;
   clock += 10;
-  const started = await startJob({ botId: p.brickId, personId: p.id, title: 'Job' }, minutes(at));
+  const when = (n: number) => new Date(origin.getTime() + n * 60_000);
+  const started = await startJob({ botId: p.brickId, personId: p.id, title: 'Job' }, when(at));
   if (!started.ok) throw new Error('the job did not start');
   if (before) await before(started.job.id);
-  await finishJob(started.job.id, ending.outcome, minutes(at + 5), null, ending.cause ?? null, ending.turns, ending.run);
+  await finishJob(started.job.id, ending.outcome, when(at + 5), null, ending.cause ?? null, ending.turns, ending.run);
   return prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } });
 }
 const ours = { outcome: 'failed' as const, cause: 'ours' as const };
@@ -1473,17 +1474,21 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
         const route = 'universe-ai/model-incident';
         const sara = await person('sara');
-        expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+        // Every job ends on the 15th of this month, so the four are in ONE bound month whenever the test runs (never across a month's end)
+        const mid = new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth(), 15, 12));
+        const at = (n: number) => new Date(mid.getTime() + n * 60_000);
+        expect(await givenBack((await job(sara, ours, undefined, mid)).id)).toBe(true);
         const refused: string[] = [];
         for (let index = 0; index < 3; index++) {
-          const ended = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx', { route })]));
+          const ended = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx', { route, at: at(clock + 1) })]), mid);
           expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+          expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: ended.id } })).endedAt?.getUTCMonth()).toBe(mid.getUTCMonth());
           refused.push(ended.id);
         }
-        expect(await correctRouteTogether({ route, from: minutes(-60), to: minutes(600) }, 1)).toMatchObject({ corrected: 3 });
+        expect(await correctRouteTogether({ route, from: at(-60), to: at(600) }, 1)).toMatchObject({ corrected: 3 });
         for (const id of refused) expect(await decisionOf(id)).toMatchObject({ state: 'given', basis: 'incident' });
         // Said twice it changes nothing
-        expect(await correctRouteTogether({ route, from: minutes(-60), to: minutes(600) }, 1)).toMatchObject({ corrected: 0, uncounted: 0 });
+        expect(await correctRouteTogether({ route, from: at(-60), to: at(600) }, 1)).toMatchObject({ corrected: 0, uncounted: 0 });
       });
 
       it('an incident correction leaves a job alone whose outside effect was delivered while its decision waited: it stays pending and is decided by its evidence', async () => {
