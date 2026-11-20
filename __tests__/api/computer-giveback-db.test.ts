@@ -1405,6 +1405,25 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(await givenBack(delivered.id)).toBe(true);
       });
 
+      it('an incident operations establishes gives back a job the runner called the agent’s own and nothing recorded (a provider row arrived late on its judged turn); one with person evidence is left alone', async () => {
+        await limitsAre(LAUNCH);
+        const sara = await person('sara');
+        const route = 'universe-ai/model-hint-incident';
+        const ended = await job(sara, { outcome: 'failed', cause: 'agent', turns: [1, 2] });
+        const theirs = await job(sara, { outcome: 'failed', cause: 'agent', turns: [1] }, withFaults(sara, [fault(1, 'allowance', { route })]));
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+        // A late unresolved row alone decides nothing...
+        await recordFaults(sara.brickId, ended.id, [fault(2, 'provider_5xx', { route })]);
+        await afterLateEvidence(ended.id);
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+        // ...until operations establish that the incident on that route caused the failure
+        expect(await correctRouteTogether({ route, from: minutes(-60), to: minutes(600) })).toMatchObject({ corrected: 1, uncounted: 0 });
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'incident' });
+        expect(await givenBack(ended.id)).toBe(true);
+        expect(await decisionOf(theirs.id)).toMatchObject({ state: 'refused', basis: 'person_caused' });
+        expect(await givenBack(theirs.id)).toBe(false);
+      });
+
       it('a late fault of ours decides a PENDING decision too (held for an outside effect), under a hint', async () => {
         await limitsAre(LAUNCH);
         const sara = await person('sara');
