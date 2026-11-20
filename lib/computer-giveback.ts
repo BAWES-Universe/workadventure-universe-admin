@@ -178,6 +178,27 @@ export async function applyGiveBack(tx: Prisma.TransactionClient, job: { id: str
   return changed.count > 0;
 }
 
+/** A counted goodwill give-back is freed from the person's bound (the job is no longer a counted one). Safe to say twice. */
+export async function uncountGiveBack(tx: Prisma.TransactionClient, jobId: string): Promise<void> {
+  await tx.computerJob.updateMany({ where: { id: jobId, runnerFault: true }, data: { runnerFault: false } });
+}
+
+/** An incident's correction of one decision: a goodwill give-back is re-labelled and freed from the bound (true), a held or cap/pause-refused one becomes a give-back (the caller gives it back). */
+export async function correctDecisionForIncident(tx: Prisma.TransactionClient, job: { id: string; personId: string }, route: string): Promise<'uncounted' | 'given' | null> {
+  const freed = await tx.computerGiveBackDecision.updateMany({ where: { jobId: job.id, state: 'given', basis: 'goodwill' }, data: { basis: 'incident', route } });
+  if (freed.count > 0) {
+    await uncountGiveBack(tx, job.id);
+    return 'uncounted';
+  }
+  const flipped = await tx.computerGiveBackDecision.updateMany({
+    where: { jobId: job.id, OR: [{ state: 'pending' }, { state: 'refused', basis: { in: ['cap', 'paused'] } }] },
+    data: { state: 'given', basis: 'incident', route, nextAttemptAt: null, lastError: null },
+  });
+  if (flipped.count === 0) return null;
+  await applyGiveBack(tx, job, false);
+  return 'given';
+}
+
 /** The calls and credit of a job that was given back. Never throws. */
 export async function giveBackAfter(job: { id: string; personId: string }, now: Date = new Date()): Promise<void> {
   await giveBackModelCalls(job.id, job.personId, now).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
@@ -283,7 +304,7 @@ export async function afterLateEvidence(jobId: string, now: Date = new Date()): 
     await tx.computerGiveBackDecision.update({ where: { jobId }, data: { state: 'given', basis: 'universe_fault', reason: ours.reason, route: ours.route, nextAttemptAt: null } });
     if (decision.state === 'given') {
       // It was counted against the person's bound as goodwill, and a fault of ours (it names no one's words) uses none of it: un-counted, nothing else to give back
-      await tx.computerJob.updateMany({ where: { id: jobId, runnerFault: true }, data: { runnerFault: false } });
+      await uncountGiveBack(tx, jobId);
       return false;
     }
     await applyGiveBack(tx, job, false);

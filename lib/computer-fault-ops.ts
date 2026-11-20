@@ -4,7 +4,7 @@ import { getInstantLimits } from '@/lib/instant/state';
 import { INSTANT_LIMITS_RECOMMENDED, type InstantLimits } from '@/lib/instant/values';
 import { OURS_REASONS, UNRESOLVED_REASONS } from '@/lib/computer-faults';
 import { refundOverview, type RefundOverview } from '@/lib/computer-refunds';
-import { applyGiveBack, giveBackAfter, giveBackSettingsProblems, lockPerson, readGiveBackLimits } from '@/lib/computer-giveback';
+import { correctDecisionForIncident, giveBackAfter, giveBackSettingsProblems, lockPerson, readGiveBackLimits } from '@/lib/computer-giveback';
 
 /**
  * One provider failing for many people is an incident, not many people's bad luck (the per-person bound cannot see it). Failures are counted by the route
@@ -103,21 +103,9 @@ export async function correctRouteTogether(input: { route: string; from: Date; t
   let costMicros = 0;
   for (const one of candidates) {
     const job = { id: one.job_id, personId: one.person_id };
-    const changed = await prisma.$transaction(async (tx): Promise<'given' | 'uncounted' | null> => {
+    const changed = await prisma.$transaction(async (tx) => {
       await lockPerson(tx, job.personId);
-      // Already given back as goodwill and counted against the person's bound: it is the incident's, so it is freed from the bound (nothing more to give back)
-      const freed = await tx.computerGiveBackDecision.updateMany({ where: { jobId: job.id, state: 'given', basis: 'goodwill' }, data: { basis: 'incident', route: input.route } });
-      if (freed.count > 0) {
-        await tx.computerJob.updateMany({ where: { id: job.id, runnerFault: true }, data: { runnerFault: false } });
-        return 'uncounted';
-      }
-      const flipped = await tx.computerGiveBackDecision.updateMany({
-        where: { jobId: job.id, OR: [{ state: 'pending' }, { state: 'refused', basis: { in: ['cap', 'paused'] } }] },
-        data: { state: 'given', basis: 'incident', route: input.route, nextAttemptAt: null, lastError: null },
-      });
-      if (flipped.count === 0) return null;
-      await applyGiveBack(tx, job, false);
-      return 'given';
+      return correctDecisionForIncident(tx, job, input.route);
     });
     if (!changed) continue;
     if (changed === 'uncounted') {

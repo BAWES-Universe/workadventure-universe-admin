@@ -31,6 +31,7 @@ import { finishJob, giveComputer, renewJob, startJob, sweepComputers } from '@/l
 import { mintJobToken } from '@/lib/computer-token';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { createInstantFunds } from '@/lib/funding/instant-funds';
+import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { PATCH as patchRule, DELETE as deleteRule } from '@/app/api/me/spend-rules/[ruleId]/route';
 
 // The books' own writer, wrapped so a test can make its writes fail (the reporting outage) and every other one run as it always does
@@ -135,9 +136,12 @@ run('rules said in chat and task receipts, in a real database', () => {
   beforeEach(async () => {
     await wipe();
     await saveMeterSettings({ memberAllowanceMicros: 100_000_000, poolCeilingMicros: 1_000_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+    // A failed job the runner calls ours is decided by the give-back Limits (as production has them), never left to a missing setting
+    await seedGiveBackLimits();
   });
   afterAll(async () => {
     await wipe();
+    await clearGiveBackLimits();
     await prisma.universe.deleteMany({ where: { id: { in: universes } } });
     await prisma.user.deleteMany({ where: { id: { in: people.map((one) => one.id) } } });
     await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
