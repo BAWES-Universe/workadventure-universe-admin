@@ -209,15 +209,26 @@ run('a computer job that failed on our side, and the bound on giving it back', (
     expect(await givenBack((await job(sara, ours)).id)).toBe(true);
   });
 
-  it('bounds a failure Orbit saw itself too (a job whose room lapsed), not only one the runner reported', async () => {
+  it('always gives back a failure only our own servers cause (a room that lapsed, a start that broke), whatever the bound: an outage is never refused', async () => {
     await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
     const sara = await person('sara');
+    // The bound is used up by the runner's own report
     expect(await givenBack((await job(sara, ours)).id)).toBe(true);
-    const lapsing = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, minutes(100));
-    if (!lapsing.ok) throw new Error('no');
-    expect(await sweepComputers(minutes(200))).toMatchObject({ stopped: 1 });
-    expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: lapsing.job.id } })).toMatchObject({ status: 'failed', endedBy: null });
-    expect(await givenBack(lapsing.job.id)).toBe(false);
+    expect(await givenBack((await job(sara, ours)).id)).toBe(false);
+    // The bot server goes down: three running jobs on three Bricks lose their renewals and the sweep stops them. All three are given back.
+    const lapsing = [] as string[];
+    for (let n = 0; n < 3; n++) {
+      const brick = n === 0 ? sara : { id: sara.id, brickId: (await createBrick({ ownerId: sara.id, name: `Lapsing ${n}` })).id };
+      if (n > 0) await giveComputer(brick.brickId, sara.id);
+      const started = await startJob({ botId: brick.brickId, personId: sara.id, title: `Lapsing ${n}` }, minutes(100));
+      if (!started.ok) throw new Error('no');
+      lapsing.push(started.job.id);
+    }
+    expect(await sweepComputers(minutes(200))).toMatchObject({ stopped: 3 });
+    for (const id of lapsing) {
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'stopped', endedBy: 'error' });
+      expect(await givenBack(id)).toBe(true);
+    }
   });
 
   it('leaves a model call on the person’s own key as it was: it is never limited, whatever the give-backs are', async () => {
