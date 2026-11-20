@@ -941,6 +941,14 @@ async function tellOwnerPaid(
   }
 }
 
+/**
+ * One order as the page the buyer returns to after paying shows it: the same look as any other asker's, then told as the Check payment and the order poll tell it: an order the service has
+ * not had the last word about (closed, or one that could not be confirmed, with its reference at the service) is "checking", never "not paid" or "cannot confirm". Only the service's own last word ends it.
+ */
+export async function verifyOrderForReturnPage(orderId: string, deps: GuardDeps = {}): Promise<OrderView | null> {
+  return stillUnresolved(await verifyOrder(orderId, deps));
+}
+
 /** One order as the visitor's page may ask about it: only on the page it was made for. */
 export async function orderForArtifact(orderId: string, artifactId: string, deps: GuardDeps = {}, viewer?: { accountId: string | null }): Promise<OrderView | null> {
   const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, select: { artifactId: true, buyerKey: true } });

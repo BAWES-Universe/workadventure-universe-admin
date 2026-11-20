@@ -46,7 +46,7 @@ jest.mock('@/lib/app-direct/page-contract-inventory', () => {
   const actual = jest.requireActual('@/lib/app-direct/page-contract-inventory');
   return { ...actual, inventoryPaymentPages: jest.fn(actual.inventoryPaymentPages) };
 });
-import { checkPurchase, checksHaveEnded, guestBuyerKey, isWaiting, lookStats, orderForArtifact, pagePaymentLoad, pollAfterMs, reconcileEveryMs, restorePurchase, startCheckout, sweepPageOrders, verifyOrder } from '@/lib/app-direct/pay';
+import { checkPurchase, checksHaveEnded, guestBuyerKey, isWaiting, lookStats, orderForArtifact, pagePaymentLoad, pollAfterMs, reconcileEveryMs, restorePurchase, startCheckout, sweepPageOrders, verifyOrder, verifyOrderForReturnPage } from '@/lib/app-direct/pay';
 import { keyAppsOf, runKeyApp } from '@/lib/app-direct/use';
 import { GET as readJob, POST as makeJob } from '@/app/api/bots/[id]/key-apps/[serverId]/page-jobs/route';
 import { GET as sweepLoad, POST as sweepRoute } from '@/app/api/app-pay/sweep/route';
@@ -2105,6 +2105,23 @@ run('payments for pages, in a real database', () => {
           // Reconciled (the service named a payment for something else): final, and said as it is
           await prisma.appPageOrder.update({ where: { id: orderId }, data: { status: 'cant_confirm', reconciled: true, checkedAt: new Date() } });
           const final = await orderForArtifact(orderId, artifactId);
+          expect(final).toMatchObject({ status: 'cant_confirm' });
+          expect(final?.longWait).toBeUndefined();
+        });
+
+        it('the page a buyer returns to after paying tells an order that could not be confirmed the same way: still being checked while the service has not had the last word, its own words once settled', async () => {
+          const { orderId } = await longWaitOrder();
+          // Looked at a moment ago, so the return page makes no look of its own
+          await prisma.appPageOrder.update({ where: { id: orderId }, data: { status: 'cant_confirm', closedAt: null, checkedAt: new Date() } });
+          const sent = gateway({ record: (id) => paidRecord(id, { status: 'INITIATED' }) });
+          const waiting = await verifyOrderForReturnPage(orderId);
+          expect(waiting).toMatchObject({ status: 'checking', longWait: true, orderId });
+          // The plain look (what the page called before) would have said "cannot confirm" and scheduled nothing
+          expect(await verifyOrder(orderId)).toMatchObject({ status: 'cant_confirm' });
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(0);
+          // Settled (the service named a payment for something else): final, said as it is
+          await prisma.appPageOrder.update({ where: { id: orderId }, data: { reconciled: true } });
+          const final = await verifyOrderForReturnPage(orderId);
           expect(final).toMatchObject({ status: 'cant_confirm' });
           expect(final?.longWait).toBeUndefined();
         });
