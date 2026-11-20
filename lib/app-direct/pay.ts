@@ -730,6 +730,8 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // one again: what counts a payment is still the exact amount, currency, reference and mode, so another key can never make one up
   const nowJob = reconciling && !order.connection ? await prisma.appPageJob.findUnique({ where: { artifactId: order.artifactId }, include: { connection: true } }) : null;
   const connection = order.connection ?? (nowJob && nowJob.ownerId === order.ownerId ? nowJob.connection : null);
+  // The page's app as it is NOW, not the one that made this order: its word counts only where it names a payment that matches (below), and never ends the order
+  const substitute = !order.connection && !!connection;
   const definition = connection && connection.kind === 'direct' ? definitionOf(connection) : null;
   // The app was disconnected: what it said could not be checked any more, and a payment is never assumed. A definition that changed since
   // the checkout began (a new key, a new catalog) is not a reason to give up on a payment that may be real: the look below uses the
@@ -849,6 +851,9 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
       currency.toUpperCase() === order.currency &&
       reference === order.id &&
       sameMode;
+    // A payment service other than the one that made the order is believed only when the reference, the amount, the currency (and the mode) all match: anything else it says
+    // about this order (a payment for something else, too) ends nothing and marks nothing reconciled, so the order stays in the long wait and Check payment still asks
+    if (substitute && !same) return later(view(order.status));
     // Completed at the service, but not for what we asked: never counted as paid
     if (!same) {
       // A payment for something else is for a person to look at: nothing more is asked automatically
@@ -861,6 +866,9 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
     if (left) await tellOwnerPaid(order, connection.name, definition.service !== 'custom', order.job?.artifact.title ?? 'your page', left !== 'pending');
     return view('paid');
   }
+  // Only the service that made the order can say it did not complete: a substitute that says failed, or anything else but paid, leaves the order as it is (no end date, not
+  // reconciled): it stays in the long wait and its age shows in the load view (`unconfirmed.oldestSeconds`) until the original service, or a person, settles it
+  if (substitute) return later(view(order.status));
   const failed = typeof status === 'string' && lookup.failedStates.includes(status);
   // An order that could not be confirmed, and the service can be read again: it goes on as it would have (open while its time lasts, closed after)
   if (order.status === 'cant_confirm') {

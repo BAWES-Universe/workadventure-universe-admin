@@ -764,6 +764,50 @@ run('payments for pages, in a real database', () => {
         expect(await prisma.appPageOrderEvent.count({ where: { orderId, toStatus: 'paid' } })).toBe(1);
       });
 
+      it('a payment service other than the one that made the order never ends it: its failed, unknown or mismatching answer leaves the order in the long wait (no end, not reconciled, Check payment still asks); only a payment that matches in reference, amount and currency counts', async () => {
+        // (1) An order closed past its late window whose app was then disconnected, and (2) one that could not be confirmed: both asked about through the page's NEW app
+        const first = await pending();
+        const closed = await closeByExpiry(first.artifactId, '198.51.100.60');
+        await prisma.appPageOrder.update({ where: { id: closed }, data: { createdAt: new Date(Date.now() - 80 * 3_600_000), closedAt: new Date(Date.now() - 60 * 3_600_000), reconciled: false, nextLookAt: null } });
+        gateway();
+        const unconfirmed = (await checkout(first.artifactId, '198.51.100.61')).orderId;
+        await disconnect(sara, first.connectionId);
+        expect(await settle(unconfirmed)).toMatchObject({ status: 'cant_confirm' });
+        expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: closed } })).toMatchObject({ connectionId: null });
+        const again = await connectGateway();
+        await job(again.serverId, first.artifactId);
+        const stands = async () => {
+          for (const id of [closed, unconfirmed]) {
+            expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: id === closed ? 'not_paid' : 'cant_confirm', reconciled: false, paidAt: null });
+          }
+          expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: closed } })).closedAt?.getTime()).toBeLessThan(Date.now() - 59 * 3_600_000);
+          expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: unconfirmed } })).closedAt).toBeNull();
+        };
+        const lookAgain = () => prisma.appPageOrder.updateMany({ where: { id: { in: [closed, unconfirmed] } }, data: { nextLookAt: null, checkedAt: null } });
+        for (const record of [{ status: 'FAILED' }, { status: 'INITIATED' }, { status: 'CAPTURED', amount: 1 }, { status: 'CAPTURED', currency: 'USD' }, { status: 'CAPTURED', reference: { order: 'someone-elses' } }]) {
+          await lookAgain();
+          gateway({ record: (order) => paidRecord(order, record) });
+          await sweepPageOrders();
+          await stands();
+        }
+        // Check payment still asks it, and still ends nothing
+        await lookAgain();
+        gateway({ record: (order) => paidRecord(order, { status: 'FAILED' }) });
+        expect(await verifyOrder(unconfirmed, {}, undefined, { explicit: true })).toMatchObject({ status: 'cant_confirm' });
+        await stands();
+        // A payment that matches in reference, amount and currency is found, counted once, as a late one
+        // (the fake gateway names the order it was last asked to make: each order is the one looked at in turn)
+        for (const id of [closed, unconfirmed]) {
+          await lookAgain();
+          await prisma.appPageOrder.updateMany({ where: { id: id === closed ? unconfirmed : closed }, data: { nextLookAt: new Date(Date.now() + 3_600_000) } });
+          gateway({ record: (order) => paidRecord(order) });
+          lastOrder = id;
+          await sweepPageOrders();
+          expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'paid' });
+        }
+        expect(await prisma.appPageOrderEvent.count({ where: { orderId: { in: [closed, unconfirmed] }, toStatus: 'paid' } })).toBe(2);
+      });
+
       it('an order that could not be confirmed, and can be read again while its time lasts, goes on as open', async () => {
         const { artifactId } = await pending();
         gateway();
