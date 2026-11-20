@@ -3421,10 +3421,14 @@ model ComputerArchive {
   proofMs       Int?      @map("proof_ms")
   // Why it failed, in a few plain words
   failure       String?   @db.VarChar(200)
+  // When this copy was first taken for deletion and its object was not deleted yet (the row is deleted with the object, so any row with this set is a
+  // deletion still waiting). The oldest of these is what the team reads to tell a bucket that is slow from one that has stopped accepting deletes.
+  deletionSince DateTime? @map("deletion_since")
 
   @@unique([botId, generation])
   @@index([botId, state])
   @@index([state, createdAt])
+  @@index([deletionSince])
   @@map("computer_archives")
 }
 

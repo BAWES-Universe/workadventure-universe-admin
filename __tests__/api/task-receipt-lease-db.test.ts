@@ -20,7 +20,7 @@ import { resumeInstant, saveInstantLimits } from '@/lib/instant/state';
 import { forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
 import { instantRulesAndReceipts } from '@/lib/instant/rules-and-receipts';
 import { activityFor, closeReceipt, openReceipt, RECEIPT_LEASE_MS, renewReceipt, settleCheckingReceipts, settleReceipt, touchLeaseForRun, UNWATCHED_CHECKING_WAIT_MS } from '@/lib/task-receipts';
-import { HOLD_BEING_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, actionWords, outcomeNote } from '@/lib/task-receipt-words';
+import { HOLD_BEING_RELEASED, HOLD_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, actionWords, outcomeNote } from '@/lib/task-receipt-words';
 import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
@@ -694,7 +694,7 @@ run('receipts that always settle (O1)', () => {
       expect(item.actions[0]).toMatchObject({ label: 'gmail', outcome: 'worked', text: actionWords('gmail', 'worked'), takenText: null });
     });
 
-    it('a worked action whose price is not known yet has no amount, and the receipt says "Price not known yet" with no total made up', async () => {
+    it('a worked action whose charge the books have not acknowledged has no amount, and the receipt says "Settlement pending" (it may already have been debited) with no total made up', async () => {
       await open('amount-2');
       const known = await makeRun('amount-2', 'succeeded', { customerMicros: BigInt(20_000), toolkit: 'gmail' });
       const unknown = await makeRun('amount-2', 'succeeded', { customerMicros: null, customerState: 'held', toolkit: 'exa' });
@@ -705,7 +705,7 @@ run('receipts that always settle (O1)', () => {
       expect(item.actions[0]).toMatchObject({ outcome: 'worked', amountMicros: 20_000 });
       expect(item.actions[1]).toMatchObject({ outcome: 'worked' });
       expect(item.actions[1]).not.toHaveProperty('amountMicros');
-      expect(item.lines.some((line) => line.note === 'Price not known yet')).toBe(true);
+      expect(item.lines.some((line) => line.note === 'Settlement pending')).toBe(true);
       expect(item.spentMicros).toBeNull();
     });
 
@@ -791,9 +791,9 @@ run('receipts that always settle (O1)', () => {
       await closeReceipt({ botId: brick, taskKey: 'unk-1', personId: sara, state: 'done' }, at(3));
       expect(await receipt('unk-1')).toMatchObject({ state: 'done', outcome: 'partial', actions: [{ run: worked.id, outcome: 'worked' }, { run: unclear.id, outcome: 'unknown' }] });
       const [partly] = (await activityFor(sara)).filter((candidate) => candidate.title === 'Find the weather');
-      expect(partly.actions[1]).toEqual({ label: 'gmail', outcome: 'unknown', text: actionWords('gmail', 'unknown'), takenText: NOTHING_TAKEN });
+      expect(partly.actions[1]).toEqual({ label: 'gmail', outcome: 'unknown', text: actionWords('gmail', 'unknown'), takenText: HOLD_RELEASED, releasedMicros: 10_000 });
       expect(partly.actions[1].text).not.toContain("didn't");
-      expect(partly.outcomeNote).toBe('One step worked and one couldn’t be confirmed. Nothing was taken for it.');
+      expect(partly.outcomeNote).toBe('One step worked and one couldn’t be confirmed. Your hold of $0.01 was released.');
 
       await open('unk-2');
       const only = await makeRun('unk-2', 'failed', { reason: 'unclear', toolkit: 'gmail', customerState: 'released', detail: { releasedUnconfirmed: true } });
@@ -803,7 +803,7 @@ run('receipts that always settle (O1)', () => {
       expect((await activityFor(sara)).find((candidate) => candidate.outcome === 'unconfirmed' && candidate.actions[0]?.label === 'gmail')).toMatchObject({ state: 'refunded', outcomeText: OUTCOME_WORDS.unconfirmed, spentMicros: null });
     });
 
-    it('while the credit of an unconfirmed action is still on hold it says the hold is being released; after, nothing is taken', async () => {
+    it('while the credit of an unconfirmed action is still on hold it says the hold is being released; after, the released amount is shown', async () => {
       await open('unk-hold');
       const held = await makeRun('unk-hold', 'failed', { reason: 'unclear', toolkit: 'exa', customerState: 'held', detail: { releasedUnconfirmed: true } });
       await closeReceipt({ botId: brick, taskKey: 'unk-hold', personId: sara, state: 'refunded' }, at(3));
@@ -816,7 +816,7 @@ run('receipts that always settle (O1)', () => {
       await prisma.instantRun.update({ where: { id: held.id }, data: { customerState: 'released', customerMicros: BigInt(0) } });
       const after = await find();
       expect(after).toMatchObject({ state: 'refunded', outcome: 'unconfirmed' });
-      expect(after?.actions[0]).toMatchObject({ outcome: 'unknown', takenText: NOTHING_TAKEN });
+      expect(after?.actions[0]).toMatchObject({ outcome: 'unknown', takenText: HOLD_RELEASED, releasedMicros: 10_000 });
       expect(after?.outcomeNote).not.toContain('releasing');
     });
 

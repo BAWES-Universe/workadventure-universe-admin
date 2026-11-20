@@ -4,6 +4,8 @@
  * Universe AI. This file is only the words and the sums; lib/task-receipts.ts reads the books.
  */
 
+import { HOLD_BEING_RELEASED, SETTLEMENT_PENDING } from '@/lib/task-receipt-words';
+
 export type ReceiptState = 'done' | 'refunded' | 'checking';
 /**
  * How a task came to end, from what its actions and its computer job came to.
@@ -162,6 +164,10 @@ interface Group {
   label: string;
   micros: number;
   unpriced: boolean;
+  /** An Instant run whose charge the credit books have not acknowledged yet: it may already have been debited, so it is "settlement pending", not a price nobody knows. */
+  settling?: boolean;
+  /** An Instant run that could not be confirmed and whose hold is still reserved: it is being released. */
+  releasing?: boolean;
   priced: boolean;
   charged: boolean;
   note?: string;
@@ -199,8 +205,12 @@ export function receiptLines(events: readonly LineEvent[], botName: string): Rec
       const found = group(`instant:${name ?? ''}`, 0, name ? `Instant ${name}` : 'Instant Apps', true);
       found.count += event.quantity;
       const taken = instantTaken(event);
-      if (taken === null) found.unpriced = true;
-      else {
+      if (taken === null) {
+        const detail = isRecord(event.detail) ? event.detail : {};
+        if (detail.instant !== true || event.costMicros === null) found.unpriced = true;
+        else if (detail.unconfirmed === true) found.releasing = true;
+        else found.settling = true;
+      } else {
         found.micros += taken;
         found.priced = true;
       }
@@ -234,6 +244,8 @@ export function receiptLines(events: readonly LineEvent[], botName: string): Rec
       if (!found.charged) return found.note ? { label, note: found.note } : { label, note: 'Nothing' };
       // What it took from credit: the known part, and when some use has no price yet, that is said and no total is made up
       if (found.unpriced) return { label, note: 'Price not known yet' };
+      if (found.releasing) return { label, note: HOLD_BEING_RELEASED };
+      if (found.settling) return { label, note: SETTLEMENT_PENDING };
       return found.priced ? { label, amountMicros: found.micros } : { label, note: 'Nothing' };
     });
 }
@@ -246,7 +258,7 @@ export function spentOf(state: ReceiptState, chargedMicros: number | null, lines
   if (state === 'refunded') return null;
   // What the books recorded decides, so the total always agrees with the lines under it. A charge the caller sent only stands in when the
   // books give no total (nothing recorded yet, or a price not known yet)
-  const charged = lines.filter((line) => line.amountMicros !== undefined || line.note === 'Price not known yet');
+  const charged = lines.filter((line) => line.amountMicros !== undefined || line.note === 'Price not known yet' || line.note === SETTLEMENT_PENDING || line.note === HOLD_BEING_RELEASED);
   if (charged.length > 0 && charged.every((line) => line.amountMicros !== undefined)) {
     const total = charged.reduce((sum, line) => sum + (line.amountMicros ?? 0), 0);
     return total > 0 ? total : null;

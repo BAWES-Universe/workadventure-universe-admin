@@ -13,6 +13,8 @@ import {
   archiveBytes,
   deleteAllArchives,
   removeStrayCopies,
+  STORAGE_DELETION_ALERT_MS,
+  storageDeletionsWaiting,
   downloadUrl,
   markFailed,
   markVerified,
@@ -707,6 +709,9 @@ export async function restoreDrill(provider: ComputerProvider | null, now: Date 
 
 let lastScratchSweep = 0;
 let lastStraySweep = 0;
+let lastDeletionAlert = 0;
+/** Said again at most this often: one message per few hours while a deletion stays blocked, not one per sweep. */
+const DELETION_ALERT_EVERY_MS = 6 * 60 * MIN;
 let stepRunning = false;
 
 /**
@@ -741,6 +746,16 @@ export async function coldStep(provider: ComputerProvider | null, now: Date = ne
     if (now.getTime() - lastStraySweep > 30 * MIN) {
       lastStraySweep = now.getTime();
       await removeStrayCopies(now).catch((error) => console.error('[Computer] Could not look for copies no row points at:', words(error)));
+    }
+    // A deletion that has waited more than a day is not a slow bucket: it is said, with how many and since when, and again every few hours while it lasts
+    const waiting = await storageDeletionsWaiting(now).catch(() => null);
+    if (waiting && waiting.ageMs !== null && waiting.ageMs > STORAGE_DELETION_ALERT_MS && now.getTime() - lastDeletionAlert > DELETION_ALERT_EVERY_MS) {
+      lastDeletionAlert = now.getTime();
+      Sentry.captureMessage('A deletion of stored computer copies has waited more than a day: the bucket may have stopped accepting deletes', {
+        level: 'warning',
+        tags: { area: 'computer', step: 'storage_deletion_waiting' },
+        extra: { waiting: waiting.count, since: waiting.oldestSince?.toISOString(), strayCopiesSince: waiting.strayCopiesSince?.toISOString() ?? null },
+      });
     }
     if (windingDown) return out;
     const { coldStorageDays } = await getBrickLimits();

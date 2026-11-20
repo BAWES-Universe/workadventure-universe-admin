@@ -26,7 +26,7 @@ import {
   type ReceiptOutcome,
   type ReceiptState,
 } from '@/lib/task-receipts-values';
-import { actionWords, HOLD_BEING_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote } from '@/lib/task-receipt-words';
+import { actionWords, HOLD_BEING_RELEASED, HOLD_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote } from '@/lib/task-receipt-words';
 import { isOver } from '@/lib/computer-values';
 
 /**
@@ -74,6 +74,8 @@ export interface ActivityAction {
    * price). Absent for an action that did not work (nothing was taken) and while the price is not known yet (the receipt's line says "Price not known yet").
    */
   amountMicros?: number;
+  /** For an action nobody could confirm whose hold the credit books have since acknowledged giving back: what came back, in whole micros. Absent while the hold is still on, and for any other action. */
+  releasedMicros?: number;
 }
 
 type ReceiptRow = NonNullable<Awaited<ReturnType<typeof prisma.taskReceipt.findUnique>>>;
@@ -479,6 +481,8 @@ interface Header {
   job: 'worked' | 'failed' | null;
   /** Runs of the task nobody could confirm whose credit is still on hold. */
   heldRuns: ReadonlySet<string>;
+  /** Runs of the task nobody could confirm whose hold the credit books acknowledged giving back, and how much came back (whole micros). */
+  releasedRuns: ReadonlyMap<string, number>;
 }
 
 const headerOfRow = (row: ReceiptRow): Header => ({
@@ -496,6 +500,7 @@ const headerOfRow = (row: ReceiptRow): Header => ({
   actions: readActions(row.actions),
   job: null,
   heldRuns: new Set<string>(),
+  releasedRuns: new Map<string, number>(),
 });
 
 /**
@@ -567,6 +572,9 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
   const who = paidBy(header.payer, readerId);
   const outcome = outcomeOfHeader(header);
   const holdPending = header.actions.some((action) => action.outcome === 'unknown' && header.heldRuns.has(action.run));
+  // Once the books acknowledged giving a hold back, the amount that came back is said (never before: a hold still on is "being released")
+  const releasedOf = (run: string): number => header.releasedRuns.get(run) ?? 0;
+  const releasedMicros = holdPending ? 0 : header.actions.reduce((sum, action) => (action.outcome === 'unknown' ? sum + releasedOf(action.run) : sum), 0);
   const computerMicros = header.job === null ? undefined : (computerTakenOf(events) ?? null);
   return {
     id: header.id,
@@ -577,11 +585,12 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
     // `state` stays done for a task that partly worked or that took something and did not finish; a state put right at read time wins over the stored outcome
     outcome,
     outcomeText: OUTCOME_WORDS[outcome],
-    outcomeNote: outcomeNote(outcome, header.actions, { ...(header.job === null ? {} : { job: header.job, computerMicros }), holdPending }),
+    outcomeNote: outcomeNote(outcome, header.actions, { ...(header.job === null ? {} : { job: header.job, computerMicros }), holdPending, ...(releasedMicros > 0 ? { releasedMicros } : {}) }),
     actions: header.actions.map((action): ActivityAction => {
       const taken = action.outcome === 'worked' ? takenForRun(events, action.run) : null;
-      const takenText = action.outcome === 'worked' ? null : action.outcome === 'unknown' && header.heldRuns.has(action.run) ? HOLD_BEING_RELEASED : NOTHING_TAKEN;
-      return { label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome), takenText, ...(taken === null ? {} : { amountMicros: taken }) };
+      const released = action.outcome === 'unknown' && !header.heldRuns.has(action.run) ? releasedOf(action.run) : 0;
+      const takenText = action.outcome === 'worked' ? null : action.outcome === 'unknown' && header.heldRuns.has(action.run) ? HOLD_BEING_RELEASED : released > 0 ? HOLD_RELEASED : NOTHING_TAKEN;
+      return { label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome), takenText, ...(taken === null ? {} : { amountMicros: taken }), ...(released > 0 ? { releasedMicros: released } : {}) };
     }),
     spentMicros: spentOf(header.state, header.chargedMicros, lines),
     category: categoryOf(header.category, events),
@@ -659,6 +668,7 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
       actions: [],
       job: null,
       heldRuns: new Set<string>(),
+      releasedRuns: new Map<string, number>(),
     }));
   const all = [...headers, ...computerHeaders];
   const [events, bots] = await Promise.all([eventsFor(all), prisma.bot.findMany({ where: { id: { in: [...new Set(all.map((header) => header.botId))] } }, select: { id: true, name: true } })]);
@@ -674,8 +684,9 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
   const failedJobs = new Set([...jobRows.values()].filter((job) => givenBackJob(job.status, job.endedBy)).map((job) => `${job.botId}:${job.id}`));
   // Runs of these tasks nobody could confirm whose credit is still on hold: said as a hold being released, not as a charge
   const unknownRuns = all.flatMap((header) => header.actions.filter((action) => action.outcome === 'unknown').map((action) => action.run));
-  const heldRows = unknownRuns.length === 0 ? [] : await prisma.instantRun.findMany({ where: { id: { in: unknownRuns }, customerState: 'held' }, select: { id: true } });
-  const held = new Set(heldRows.map((run) => run.id));
+  const moneyRows = unknownRuns.length === 0 ? [] : await prisma.instantRun.findMany({ where: { id: { in: unknownRuns }, customerState: { in: ['held', 'released'] } }, select: { id: true, customerState: true, holdMicros: true } });
+  const held = new Set(moneyRows.filter((run) => run.customerState === 'held').map((run) => run.id));
+  const released = new Map(moneyRows.filter((run) => run.customerState === 'released').map((run) => [run.id, Number(run.holdMicros)] as const));
   const items = all.map((header) => {
     const forHeader = events.get(header.id) ?? [];
     // A computer job that failed is "refunded, nothing taken" only when the books show nothing was taken: a price not known yet is not "nothing"
@@ -693,7 +704,7 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
     const job = jobRan(jobRow) ? (jobRow.status === 'failed' ? 'failed' : 'worked') : null;
     // A job still going has not come out yet
     const over = jobRow !== null && isOver(jobRow.status);
-    return itemOf({ ...header, state, job: over ? job : null, heldRuns: new Set(header.actions.filter((action) => held.has(action.run)).map((action) => action.run)) }, forHeader, names.get(header.botId) ?? 'Brick', personId);
+    return itemOf({ ...header, state, job: over ? job : null, heldRuns: new Set(header.actions.filter((action) => held.has(action.run)).map((action) => action.run)), releasedRuns: new Map(header.actions.filter((action) => released.has(action.run)).map((action) => [action.run, released.get(action.run) as number] as const)) }, forHeader, names.get(header.botId) ?? 'Brick', personId);
   });
   return items.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : -1)).slice(0, limit);
 }

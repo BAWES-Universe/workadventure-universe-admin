@@ -4,6 +4,7 @@ import { missingSettings } from '@/lib/meter-values';
 import { isWindingDown } from '@/lib/computer';
 import { reconcileCheck } from '@/lib/computer-reconcile';
 import { coldProvider, coldStatus } from '@/lib/computer-cold';
+import { STORAGE_DELETION_ALERT_MS, storageDeletionsWaiting } from '@/lib/computer-archives';
 import { computersArePaused } from '@/lib/capability-pause';
 
 export interface Readiness {
@@ -45,6 +46,23 @@ export async function computerReadiness(): Promise<Readiness> {
       const awake = cold.last30Days;
       const sized = `${Math.round(cold.storedBytes / 1_000_000)} MB of copies kept (${money}); last 30 days awake for cold storage: ${awake.packSeconds + awake.returnSeconds} s on Bricks’ computers, ${awake.scratchSeconds} s on throwaway ones, over ${awake.runs} run${awake.runs === 1 ? '' : 's'}`;
       checks.push({ name: 'cold storage', ok: cold.lastDrill ? cold.lastDrill.ok : true, detail: `${cold.cold} computer${cold.cold === 1 ? '' : 's'} packed away, ${cold.packing} being packed, ${cold.failing} could not be packed yet; ${drill}; ${slow}; ${sized}` });
+    }
+  }
+  // Deleted copies of a Brick's files that are still in the bucket: how many wait and for how long the oldest has. A day is far longer than a slow bucket takes,
+  // so a deletion older than that means the bucket has stopped accepting deletes (and a deleted Brick's files are still stored): not ready until it is looked at.
+  if (coldProvider(provider)) {
+    const waiting = await storageDeletionsWaiting().catch(() => null);
+    if (!waiting) checks.push({ name: 'storage deletions', ok: false, detail: 'The deletions waiting in storage could not be read' });
+    else if (waiting.ageMs === null) checks.push({ name: 'storage deletions', ok: true, detail: 'No deletion is waiting in storage' });
+    else {
+      const hours = Math.floor(waiting.ageMs / 3_600_000);
+      const age = hours >= 48 ? `${Math.floor(hours / 24)} days` : hours >= 1 ? `${hours} hour${hours === 1 ? '' : 's'}` : `${Math.max(1, Math.round(waiting.ageMs / 60_000))} min`;
+      const stalled = waiting.ageMs > STORAGE_DELETION_ALERT_MS;
+      checks.push({
+        name: 'storage deletions',
+        ok: !stalled,
+        detail: `${waiting.count} copy deletion${waiting.count === 1 ? '' : 's'} waiting${waiting.strayCopiesSince ? ' and the sweep for stray copies could not delete' : ''}; the oldest for ${age}${stalled ? ': the bucket may have stopped accepting deletes' : ''}`,
+      });
     }
   }
   const winding = await isWindingDown();

@@ -1,4 +1,4 @@
-import { actionWords, appLabel, dollars, HOLD_BEING_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote } from '@/lib/task-receipt-words';
+import { actionWords, appLabel, dollars, HOLD_BEING_RELEASED, HOLD_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote, SETTLEMENT_PENDING } from '@/lib/task-receipt-words';
 
 describe('the words for how a task came to end (mock M2)', () => {
   it('names the outcomes as the mock does, and the two it did not have: a task that did not finish but took something, and one nobody could confirm', () => {
@@ -36,10 +36,18 @@ describe('the words for how a task came to end (mock M2)', () => {
   });
 
   it('says an action nobody could confirm as exactly that, never as a failure', () => {
-    expect(outcomeNote('unconfirmed', [{ outcome: 'unknown', label: 'gmail' }])).toBe('We couldn’t confirm that Gmail finished. Nothing was taken for it.');
+    expect(outcomeNote('unconfirmed', [{ outcome: 'unknown', label: 'gmail' }])).toBe('We couldn’t confirm whether Gmail finished. Nothing was taken for it.');
     expect(outcomeNote('partial', [{ outcome: 'worked' }, { outcome: 'unknown', label: 'gmail' }])).toBe('One step worked and one couldn’t be confirmed. Nothing was taken for it.');
     expect(outcomeNote('partial', [{ outcome: 'worked' }, { outcome: 'failed' }, { outcome: 'unknown', label: 'gmail' }])).toBe('One step worked and one didn’t and one couldn’t be confirmed. Nothing was taken for them.');
-    expect(outcomeNote('unconfirmed', [{ outcome: 'unknown', label: 'exa' }], { holdPending: true })).toBe('We couldn’t confirm that Exa finished. We’re releasing your hold.');
+    expect(outcomeNote('unconfirmed', [{ outcome: 'unknown', label: 'exa' }], { holdPending: true })).toBe('We couldn’t confirm whether Exa finished. We’re releasing your hold.');
+  });
+
+  it('once the books acknowledge giving a hold back it says the amount that came back, and never before', () => {
+    expect(outcomeNote('unconfirmed', [{ outcome: 'unknown', label: 'exa' }], { releasedMicros: 7_600 })).toBe('We couldn’t confirm whether Exa finished. Your hold of $0.01 was released.');
+    expect(outcomeNote('unconfirmed', [{ outcome: 'unknown', label: 'exa' }], { holdPending: true, releasedMicros: 7_600 })).toBe('We couldn’t confirm whether Exa finished. We’re releasing your hold.');
+    expect(outcomeNote('unconfirmed', [{ outcome: 'unknown', label: 'exa' }], { releasedMicros: 0 })).toBe('We couldn’t confirm whether Exa finished. Nothing was taken for it.');
+    expect(HOLD_RELEASED).toBe('Hold released');
+    expect(SETTLEMENT_PENDING).toBe('Settlement pending');
   });
 
   it('writes dollars the way a reader says them', () => {

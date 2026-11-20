@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { recordMeterEvent, type RecordedEvent } from '@/lib/meter';
 import type { MeterEventInput } from '@/lib/meter-values';
-import { INSTANT_PROVIDER } from '@/lib/instant/values';
+import { INSTANT_PROVIDER, isUnconfirmedRun } from '@/lib/instant/values';
 
 /**
  * The meter event of an Instant run (`instant:<run id>`), made from what the run itself says, and kept right.
@@ -18,12 +18,15 @@ import { INSTANT_PROVIDER } from '@/lib/instant/values';
 export type Row = Prisma.InstantRunGetPayload<object>;
 
 /**
- * What the person was charged, as the event says it: the amount the credit books confirmed, 0 when the hold was given back or the run failed (the person
- * paid nothing: a zero, not "not known"), and null while the books have not said yet (the receipt shows that as pending, never as a charge nobody confirmed).
+ * What the person was charged, as the event says it: the amount the credit books confirmed, 0 when the hold was given back (or the run failed and nothing was ever
+ * held), and null while the books have not said yet. A run that failed or was let go unconfirmed whose hold is still reserved is null too: it is "being released",
+ * not "nothing taken" (the credit is still set aside until the books acknowledge giving it back), and the receipt says so. The receipt shows null as pending,
+ * never as a charge nobody confirmed and never as a refund that has not happened.
  */
 export function customerAmountOf(run: Pick<Row, 'customerState' | 'customerMicros' | 'state'>): number | null {
   if (run.customerState === 'charged' && run.customerMicros !== null) return Number(run.customerMicros);
-  if (run.customerState === 'released' || run.state === 'failed') return 0;
+  if (run.customerState === 'released') return 0;
+  if (run.state === 'failed' && run.customerState !== 'held') return 0;
   return null;
 }
 
@@ -60,6 +63,17 @@ export function instantEventOf(run: Row): MeterEventInput | null {
       toolkit: run.toolkit,
       runId: run.id,
       customerMicros: customerAmountOf(run),
+      // Where the credit stands (held until the books acknowledge a charge or a release) and what is set aside: the receipt says "settlement pending" while a
+      // held run may already have been debited, and "releasing your hold" for one that is being given back, from these, never from a guess
+      customerState: run.customerState,
+      holdMicros: Number(run.holdMicros),
+      releasedMicros: run.customerState === 'released' ? Number(run.holdMicros) : null,
+      // The run could not be confirmed: delivery is unknown, whatever happened to the credit
+      unconfirmed: isUnconfirmedRun(run),
+      // Three different times: when it went out, when it is recognised as finished (the event's own day: a run let go unconfirmed first gets this moment when it is
+      // written off), and, for a later change, when that was made (`corrections[].at`, never the event's day)
+      dispatchedAt: run.sentAt ? run.sentAt.toISOString() : null,
+      finishedAt: run.finishedAt.toISOString(),
       basis: basisOf(run),
       state: run.state,
     },
@@ -146,7 +160,7 @@ const gapsSql = Prisma.sql`
       e.id IS NULL
       OR e.cost_micros IS DISTINCT FROM r.provider_micros
       OR e.basis IS DISTINCT FROM ${BASIS_SQL}
-      OR (e.detail->>'customerMicros') IS DISTINCT FROM (CASE WHEN r.customer_state = 'charged' AND r.customer_micros IS NOT NULL THEN r.customer_micros::text WHEN r.customer_state = 'released' OR r.state = 'failed' THEN '0' ELSE NULL END)
+      OR (e.detail->>'customerMicros') IS DISTINCT FROM (CASE WHEN r.customer_state = 'charged' AND r.customer_micros IS NOT NULL THEN r.customer_micros::text WHEN r.customer_state = 'released' OR (r.state = 'failed' AND r.customer_state <> 'held') THEN '0' ELSE NULL END)
     )`;
 
 export interface ReportingGaps {

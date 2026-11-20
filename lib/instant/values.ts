@@ -14,6 +14,9 @@ import { DIRECT_EXECUTION_MICROS, RATE_MICROS } from '@/lib/composio-rates';
 
 export const INSTANT_PROVIDER = 'composio';
 
+/** A run that nobody could vouch for when its wait ended: it was let go as failed, and whether it finished is not known (a receipt says that, never "didn't work"). */
+export const isUnconfirmedRun = (run: { state: string; reason: string | null }): boolean => run.state === 'failed' && run.reason === 'unclear';
+
 /** The account name Composio's own docs give for choosing an Instant account on purpose when running a tool. */
 export const INSTANT_ACCOUNT = 'instant_account';
 

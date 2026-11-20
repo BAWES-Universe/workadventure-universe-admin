@@ -95,6 +95,15 @@ const view = (row: Row): ArchiveRow => ({
   proofMs: row.proofMs,
 });
 
+/**
+ * Writes down that these copies are waiting to be deleted, from now, unless they already say since when (the first time is the one that counts: a deletion
+ * that fails again and again is one wait, however many tries). The oldest of these is what the team reads (`storageDeletionsWaiting`).
+ */
+async function markWaiting(ids: string[], now: Date): Promise<void> {
+  if (ids.length === 0) return;
+  await prisma.computerArchive.updateMany({ where: { id: { in: ids }, deletionSince: null }, data: { deletionSince: now } });
+}
+
 const objectKeyOf = (botId: string, generation: number, id: string) => `computer-cold/${botId}/${generation}.${id}.ubc`;
 const stagingKeyOf = (botId: string, generation: number, id: string) => `computer-cold/${botId}/${generation}.${id}.ubc.new`;
 
@@ -162,7 +171,8 @@ async function writeArchive(botId: string, archive: ReadableStream<Uint8Array>, 
         // If this record cannot be written either (the database and the bucket failed together), the object has no row. It is not lost: a purge is not done
         // while the Brick's part of the bucket holds anything (`removeBrickObjects`), and the sweep finds the rest by listing (`removeStrayCopies`)
         await prisma.computerArchive
-          .upsert({ where: { id }, create: { id, botId, generation, state: 'superseded', objectKey: row.objectKey }, update: { state: 'superseded' } })
+          .upsert({ where: { id }, create: { id, botId, generation, state: 'superseded', objectKey: row.objectKey, deletionSince: new Date() }, update: { state: 'superseded' } })
+          .then(() => markWaiting([id], new Date()))
           .catch((recordError) => console.error('[Computer] A copy’s object could not be deleted and its record could not be written; the purge and the sweep look for it by listing:', recordError instanceof Error ? recordError.message : 'unknown'));
       }
       throw error;
@@ -236,13 +246,15 @@ export async function pruneArchives(botId: string, keepId: string | null = null,
     // that is still uploading) changed the row, so this does not touch it; and once the row is `superseded` nothing proves, publishes or restores from it.
     // A run that stops half way leaves it `superseded`, which every later clean-up deletes
     if (row.state !== 'superseded') {
-      const taken = await prisma.computerArchive.updateMany({ where: { id: row.id, state: row.state }, data: { state: 'superseded' } });
+      const taken = await prisma.computerArchive.updateMany({ where: { id: row.id, state: row.state }, data: { state: 'superseded', deletionSince: row.deletionSince ?? now } });
       if (taken.count !== 1) continue;
     }
     try {
       await store.remove([row.objectKey, `${row.objectKey}.new`]);
     } catch (error) {
       console.error('[Computer] Could not delete an old copy:', error instanceof Error ? error.message : 'unknown');
+      // A row left `superseded` by an older version has no time written: its wait begins here, so it can be read like any other
+      await markWaiting([row.id], now).catch(() => undefined);
       continue;
     }
     const gone = await prisma.computerArchive.deleteMany({ where: { id: row.id, state: 'superseded' } });
@@ -266,7 +278,13 @@ export async function deleteAllArchives(botId: string, now: Date = new Date()): 
     return true;
   });
   if (rows.length === 0) return;
-  await store.remove(rows.flatMap((row) => [row.objectKey, `${row.objectKey}.new`]));
+  try {
+    await store.remove(rows.flatMap((row) => [row.objectKey, `${row.objectKey}.new`]));
+  } catch (error) {
+    // The rows stay (the purge is not done), and each says since when its deletion has been waiting
+    for (let at = 0; at < rows.length; at += 500) await markWaiting(rows.slice(at, at + 500).map((row) => row.id), now).catch(() => undefined);
+    throw error;
+  }
   // Only the rows whose objects were just deleted, and only as they were when they were read: a copy that began being written meanwhile keeps its
   // row, and so does a row its writer changed meanwhile (a writer that published after the objects were deleted and could not take its object back
   // out says so in the row, `superseded`), so the next try finds it and deletes the object
@@ -283,10 +301,20 @@ export const STRAY_CURSOR_KEY = 'computer-stray-sweep-cursor';
 export function setStrayPassForTests(max: number): void {
   strayPassMax = max;
 }
-async function readStrayCursor(): Promise<string | undefined> {
+async function readStrayState(): Promise<{ after?: string; failingSince: Date | null }> {
   const row = await prisma.appSetting.findUnique({ where: { key: STRAY_CURSOR_KEY } }).catch(() => null);
-  const after = (row?.value as { after?: unknown } | null | undefined)?.after;
-  return typeof after === 'string' ? after : undefined;
+  const value = row?.value as { after?: unknown; failingSince?: unknown } | null | undefined;
+  const since = typeof value?.failingSince === 'string' ? new Date(value.failingSince) : null;
+  return { after: typeof value?.after === 'string' ? value.after : undefined, failingSince: since && !Number.isNaN(since.getTime()) ? since : null };
+}
+async function readStrayCursor(): Promise<string | undefined> {
+  return (await readStrayState()).after;
+}
+/** A pass that could not delete what it found says since when (the first time counts), keeping where it was; a pass that deleted everything writes the place alone, which clears it. */
+async function noteStrayFailure(now: Date): Promise<void> {
+  const state = await readStrayState();
+  const value = { after: state.after ?? null, failingSince: (state.failingSince ?? now).toISOString() };
+  await prisma.appSetting.upsert({ where: { key: STRAY_CURSOR_KEY }, create: { key: STRAY_CURSOR_KEY, value }, update: { value } }).catch(() => undefined);
 }
 async function writeStrayCursor(after: string | null): Promise<void> {
   const value = { after };
@@ -320,7 +348,14 @@ export async function removeStrayCopies(now: Date = new Date()): Promise<number>
     const known = new Set((await prisma.computerArchive.findMany({ where: { id: { in: page.map((object) => object.id) } }, select: { id: true } })).map((row) => row.id));
     for (const object of page) if (!known.has(object.id)) stray.push(object.key);
   }
-  if (stray.length > 0) await store.remove(stray);
+  if (stray.length > 0) {
+    try {
+      await store.remove(stray);
+    } catch (error) {
+      await noteStrayFailure(now);
+      throw error;
+    }
+  }
   // Only now that everything on the page was looked at and what had to go is gone: a pass that failed is looked at again by the next
   await writeStrayCursor(next);
   return stray.length;
@@ -389,4 +424,28 @@ export function verifyDownloadToken(token: string | null | undefined, archiveId:
 export function downloadUrl(archiveId: string, env: NodeJS.ProcessEnv = process.env): string | null {
   const base = (env.NEXT_PUBLIC_API_URL || env.ADMIN_API_URL || '').trim().replace(/\/+$/, '');
   return base ? `${base}/api/computer/archives/${encodeURIComponent(archiveId)}/download` : null;
+}
+
+/** How long a deletion may wait before the team is told (a bucket that is only slow clears it long before; one that has stopped accepting deletes does not). */
+export const STORAGE_DELETION_ALERT_MS = 24 * 60 * 60 * 1000;
+
+export interface DeletionsWaiting {
+  /** Copies taken for deletion whose object is not deleted yet. */
+  count: number;
+  /** Since when the oldest deletion has waited (a copy's, or a pass for stray objects that could not delete what it found), and for how long. Null when nothing waits. */
+  oldestSince: Date | null;
+  ageMs: number | null;
+  /** Since when the pass for copies no row points at has failed to delete, when it has. */
+  strayCopiesSince: Date | null;
+}
+
+/** What the team reads to tell eventual clean-up from a bucket that has stopped accepting deletes: how many deletions wait, and since when the oldest has. */
+export async function storageDeletionsWaiting(now: Date = new Date()): Promise<DeletionsWaiting> {
+  const [rows, stray] = await Promise.all([
+    prisma.computerArchive.aggregate({ where: { deletionSince: { not: null } }, _count: { _all: true }, _min: { deletionSince: true } }),
+    readStrayState(),
+  ]);
+  const times = [rows._min.deletionSince, stray.failingSince].filter((at): at is Date => at !== null);
+  const oldestSince = times.length > 0 ? new Date(Math.min(...times.map((at) => at.getTime()))) : null;
+  return { count: rows._count._all, oldestSince, ageMs: oldestSince ? Math.max(0, now.getTime() - oldestSince.getTime()) : null, strayCopiesSince: stray.failingSince };
 }

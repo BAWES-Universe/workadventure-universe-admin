@@ -19,6 +19,12 @@ export const NOTHING_TAKEN = 'Nothing taken';
 /** What an action nobody could confirm says while its hold on credit is still on: the hold is on its way back, nothing is charged for it. */
 export const HOLD_BEING_RELEASED = 'Hold being released';
 
+/** What it says once the credit books have acknowledged giving the hold back (the amount is said beside it). */
+export const HOLD_RELEASED = 'Hold released';
+
+/** What a charge the books have not acknowledged yet is called on a receipt: a run held for this may already have been debited. */
+export const SETTLEMENT_PENDING = 'Settlement pending';
+
 const ACTION_OUTCOME_WORDS: Record<ActionOutcome, string> = {
   worked: 'worked',
   failed: "didn't work",
@@ -54,13 +60,15 @@ export interface NoteFacts {
   computerMicros?: number | null;
   /** An action nobody could confirm still has its credit on hold (it is on its way back). */
   holdPending?: boolean;
+  /** What the books say they gave back for actions nobody could confirm, in whole micros (only once they acknowledged it); the hold is then not "being released" any more. */
+  releasedMicros?: number;
 }
 
 /**
  * The sentence under a receipt that did not simply work. Null for done and for refunded (nothing more needs saying).
  *  - partial: "Two steps worked and one didn’t. Nothing was taken for the one that didn’t." (a step that could not be confirmed says so, never "didn’t work")
  *  - failed: "It didn’t finish. Computer time used $0.03. Gmail charged $0."
- *  - unconfirmed: "We couldn’t confirm that Gmail finished. Nothing was taken for it."
+ *  - unconfirmed: "We couldn’t confirm whether Gmail finished. We’re releasing your hold." (then "Your hold of $0.01 was released." once the books say so)
  * What was taken is only ever said from the books' amounts the caller passes in; a hold still on is said as a hold being released.
  */
 export function outcomeNote(outcome: ReceiptOutcome, actions: readonly { outcome: ActionOutcome; label?: string }[], facts: NoteFacts = {}): string | null {
@@ -79,6 +87,7 @@ export function outcomeNote(outcome: ReceiptOutcome, actions: readonly { outcome
   if (hasComputer) taken.push(facts.computerMicros === null ? 'Computer time price not known yet.' : `Computer time used ${dollars(facts.computerMicros ?? 0)}.`);
   if (notWorked.length > 0) {
     if (facts.holdPending) taken.push('We’re releasing your hold.');
+    else if (facts.releasedMicros !== undefined && facts.releasedMicros > 0) taken.push(`Your hold of ${dollars(facts.releasedMicros)} was released.`);
     else if (hasComputer) for (const label of labels) taken.push(`${label} charged $0.`);
     else if (notWorked.every((action) => action.outcome === 'failed') && outcome === 'partial') taken.push(`Nothing was taken for ${notWorked.length === 1 ? 'the one that didn’t' : 'the ones that didn’t'}.`);
     else taken.push(`Nothing was taken for ${notWorked.length === 1 ? 'it' : 'them'}.`);
@@ -93,5 +102,5 @@ export function outcomeNote(outcome: ReceiptOutcome, actions: readonly { outcome
   if (outcome === 'failed') return ['It didn’t finish.', ...taken].join(' ');
   // unconfirmed
   const names = labels.length > 0 ? listOf(labels) : 'it';
-  return [`We couldn’t confirm that ${names} finished.`, ...taken].join(' ');
+  return [`We couldn’t confirm whether ${names} finished.`, ...taken].join(' ');
 }

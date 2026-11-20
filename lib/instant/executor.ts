@@ -3,8 +3,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getAdapter } from '@/lib/app-adapter';
 import type { InstantAdapter, InstantCall, InstantLog, ReadyMadeAdapter } from '@/lib/app-adapter/types';
-import { recordMeterEvent } from '@/lib/meter';
-import { instantEventOf, reportInstantRunIn } from '@/lib/instant/report';
+import { reportInstantRunIn } from '@/lib/instant/report';
 import { monthOf } from '@/lib/meter-values';
 import { brickHasApp } from '@/lib/instant/asker';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
@@ -398,8 +397,9 @@ async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<I
       case 'rejected': {
         // Refused before anything ran: nothing is charged to anyone
         const reason = reasonOfRejection(call.code, call.status);
-        await settleProvider({ ...run, state: 'failed' }, tx, 0, 'measured', ctx.now);
+        // The run says it failed first: the event is written from the run as it now stands
         await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason, finishedAt: ctx.now, detail: { status: call.status, code: call.code } } });
+        await settleProvider({ ...run, state: 'failed' }, tx, 0, 'measured', ctx.now);
         // Composio's balance is empty: every run would fail the same way, so Instant stops until a super admin has looked
         if (reason === 'provider_empty') await pauseInstant('provider_empty', null, tx);
         return { status: 'failed', runId: run.id, reason, message: REASON_WORDS[reason] };
@@ -532,13 +532,13 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
   const finishedAt = run.finishedAt ?? now;
   await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt } });
   // The meter event is a copy for the books: if it cannot be written, the settlement still stands (the sweep mends it from the run's own rows, see
-  // `repairInstantReporting`). It is written inside a savepoint, because a failed statement otherwise leaves the whole transaction aborted, and the
-  // settlement above would fail with it. What the person was charged is whatever the credit books have confirmed by now (pending until they have): the
-  // amount the hold would be settled at is a calculation, never written as a charge
+  // `repairInstantReporting`). It is written by the same writer as every later correction (`reportInstantRunIn`: one place decides what the event says, from the run
+  // as it now stands in this transaction, never from a copy made here), inside a savepoint, because a failed statement otherwise leaves the whole transaction
+  // aborted, and the settlement above would fail with it. What the person was charged is whatever the credit books have confirmed by now (pending until they
+  // have, and pending for a run whose hold is still being given back): the amount the hold would be settled at is a calculation, never written as a charge
   await tx.$executeRaw`SAVEPOINT instant_meter_event`;
   try {
-    const event = instantEventOf({ ...run, providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt });
-    if (event) await recordMeterEvent(event, tx);
+    await reportInstantRunIn(tx, run.id, now, { insertIsBestEffort: true });
     await tx.$executeRaw`RELEASE SAVEPOINT instant_meter_event`;
   } catch (error) {
     await tx.$executeRaw`ROLLBACK TO SAVEPOINT instant_meter_event`;
