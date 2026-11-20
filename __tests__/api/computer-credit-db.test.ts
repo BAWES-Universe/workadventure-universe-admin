@@ -370,6 +370,7 @@ run('credit for computers, on the real books', () => {
       await settleCheckingReceipts(50, new Date(NOW.getTime() + 600 * 60_000));
       const [line] = (await activityFor(sara.id)).filter((item) => item.title === 'Pool report');
       expect(line).toMatchObject({ state: 'refunded' });
+      expect(line).toMatchObject({ outcome: 'stopped', outcomeText: 'Stopped: our computers were busy, and its time was given back', returnedMicros: 50_000 });
       await sweepComputers(new Date(NOW.getTime() + 30 * 60_000));
       await giveBackComputerCredit(jobId);
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
