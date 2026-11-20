@@ -574,18 +574,52 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
 
 /** The most pages a sweep reads when it looks for settled runs with no meter event; a page is `batch` runs. */
 const BACKFILL_MAX_PAGES = 20;
+/** Where the last sweep stopped, so the next one goes on from there (in the app's own settings, so it survives between sweeps and servers). */
+const BACKFILL_CURSOR_KEY = 'instant-meter-backfill-cursor';
+
+type BackfillCursor = { finishedAt: Date; id: string };
+
+async function readBackfillCursor(): Promise<BackfillCursor | null> {
+  try {
+    const row = await prisma.appSetting.findUnique({ where: { key: BACKFILL_CURSOR_KEY } });
+    const value = row?.value;
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+    const { finishedAt, id } = value as { finishedAt?: unknown; id?: unknown };
+    const at = typeof finishedAt === 'string' ? new Date(finishedAt) : null;
+    return at && !Number.isNaN(at.getTime()) && typeof id === 'string' ? { finishedAt: at, id } : null;
+  } catch {
+    // A cursor that cannot be read is a sweep that starts from the oldest run: it never stops a run from being tried
+    return null;
+  }
+}
+
+async function saveBackfillCursor(cursor: BackfillCursor | null): Promise<void> {
+  try {
+    if (cursor) {
+      const value = { finishedAt: cursor.finishedAt.toISOString(), id: cursor.id };
+      await prisma.appSetting.upsert({ where: { key: BACKFILL_CURSOR_KEY }, create: { key: BACKFILL_CURSOR_KEY, value }, update: { value } });
+    } else {
+      await prisma.appSetting.deleteMany({ where: { key: BACKFILL_CURSOR_KEY } });
+    }
+  } catch (error) {
+    console.error('[Instant] Could not save where the meter event check stopped:', error instanceof Error ? error.message : 'unknown');
+  }
+}
 
 /**
  * Settled runs whose meter event was never written (the write failed inside its savepoint, and the run's settlement stood without it): written
  * here, from what the run says (its provider cost and basis, and what the person was charged if that is known). The event id is the run's own, so
  * a run that has one, or one written twice, is still one event. There is no age limit: a run that was missed long ago is still written, with the
  * time it finished. The runs are read a page at a time, each page starting after the last run of the one before, so a run whose event cannot be
- * written does not keep the runs behind it from being tried. Returns how many were written.
+ * written does not keep the runs behind it from being tried. A sweep reads a bounded number of pages and remembers where it stopped, so the next
+ * one goes on from there: however many runs keep failing, the ones behind them are reached. When a sweep gets to the end it starts over from the
+ * oldest next time, so the runs that failed are tried again. Returns how many were written.
  */
-export async function backfillMeterEvents(now: Date = new Date(), batch = 25): Promise<number> {
+export async function backfillMeterEvents(now: Date = new Date(), batch = 25, maxPages = BACKFILL_MAX_PAGES): Promise<number> {
   let written = 0;
-  let after: { finishedAt: Date; id: string } | null = null;
-  for (let page = 0; page < BACKFILL_MAX_PAGES; page += 1) {
+  let after: BackfillCursor | null = await readBackfillCursor();
+  let reachedEnd = false;
+  for (let page = 0; page < maxPages; page += 1) {
     const past: Prisma.Sql = after ? Prisma.sql`AND (r."finished_at", r."id") > (${after.finishedAt}, ${after.id})` : Prisma.empty;
     const missing: { id: string; finished_at: Date }[] = await prisma.$queryRaw<{ id: string; finished_at: Date }[]>`
       SELECT r."id", r."finished_at" FROM "instant_runs" r
@@ -608,10 +642,14 @@ export async function backfillMeterEvents(now: Date = new Date(), batch = 25): P
         console.error('[Instant] Could not write the meter event again:', error instanceof Error ? error.message : 'unknown');
       }
     }
-    if (missing.length < batch) break;
+    if (missing.length < batch) {
+      reachedEnd = true;
+      break;
+    }
     const last = missing[missing.length - 1];
     after = { finishedAt: last.finished_at, id: last.id };
   }
+  await saveBackfillCursor(reachedEnd ? null : after);
   return written;
 }
 
