@@ -434,12 +434,12 @@ async function lateLookFailed(jobId: string, mark: Date, now: Date): Promise<voi
     const first = (previous ? Number(previous.split(':')[1]) : NaN) || now.getTime();
     const marker = `${told ? LATE_LOOK_TOLD : LATE_LOOK}:${first}`;
     const next = new Date(now.getTime() + retryWaitMs(row.attempts + 1));
-    // Written only over the marker this attempt read: another sweep that told Sentry (or failed first) in the meantime has the newer word, and an older marker never
-    // overwrites it (that would make the alert fire again)
+    // Written only over the state this attempt read (the marker AND the count of attempts): another sweep that told Sentry, or failed over the same marker, in the meantime has the
+    // newer word, and an older one never overwrites it (that would fire the alert again, or move the deadline back)
     const rescheduled = await prisma.$executeRaw`
       UPDATE "computer_give_back_decisions"
       SET "updated_at" = GREATEST("updated_at", ${mark}), "attempts" = "attempts" + 1, "next_attempt_at" = ${next}, "last_error" = ${marker}
-      WHERE "job_id" = ${jobId} AND "state" IN ('refused', 'given') AND "last_error" IS NOT DISTINCT FROM ${row.last_error}`;
+      WHERE "job_id" = ${jobId} AND "state" IN ('refused', 'given') AND "last_error" IS NOT DISTINCT FROM ${row.last_error} AND "attempts" = ${row.attempts}`;
     if (rescheduled !== 1 || told || now.getTime() - first < LATE_LOOK_ALERT_MS) return;
     // Told once, by the same shape as the other alerts: the row is locked (FOR UPDATE SKIP LOCKED) while its marker is still the one just written, Sentry is told inside the
     // transaction, and `late_look_told` is set before the commit. A sweep that finds it locked skips it; a capture that throws or a worker that dies rolls back, and the next

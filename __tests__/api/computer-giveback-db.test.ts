@@ -876,6 +876,51 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       });
     });
 
+    it('two failing looks over the same marker: the one that read the older state never moves the deadline back (the reschedule is also made only over the attempts it read)', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      await job(sara, ours);
+      const refused = await job(sara, { ...ours, turns: [1] });
+      await prisma.computerJobFault.create({ data: { jobId: refused.id, callId: `keep-${refused.id}`, turn: 1, kind: 'fault', reason: 'provider_key_ours', source: 'universe-ai', route: 'universe-ai/model-a', providerStatus: 401, at: new Date() } });
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let looking = true;
+      const peek = async () => {
+        looking = false;
+        try {
+          return await decisionOf(refused.id);
+        } finally {
+          looking = true;
+        }
+      };
+      const realFind = prisma.computerGiveBackDecision.findUnique.bind(prisma.computerGiveBackDecision);
+      const find = jest.spyOn(prisma.computerGiveBackDecision, 'findUnique').mockImplementation(((args: { where?: { jobId?: string } }) => (looking && args?.where?.jobId === refused.id ? Promise.reject(new Error('blip')) : realFind(args as never))) as never);
+      try {
+        const t0 = new Date();
+        await sweepLateEvidence(t0);
+        const first = await peek();
+        expect(first).toMatchObject({ attempts: 1, lastError: expect.stringMatching(/^late_look:/) });
+        // Another sweep, over the same marker, fails after this one read the row and writes a LATER deadline
+        const later = new Date(Date.now() + 24 * 3_600_000);
+        const realExec = prisma.$executeRaw.bind(prisma) as (strings: TemplateStringsArray, ...values: unknown[]) => Promise<number>;
+        const exec = jest.spyOn(prisma, '$executeRaw').mockImplementation((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+          if (strings.join('?').includes('"attempts" + 1')) {
+            exec.mockRestore();
+            await prisma.computerGiveBackDecision.updateMany({ where: { jobId: refused.id }, data: { attempts: 2, nextAttemptAt: later } });
+          }
+          return realExec(strings, ...values);
+        }) as never);
+        try {
+          await sweepLateEvidence(new Date((first?.nextAttemptAt as Date).getTime() + 1000));
+        } finally {
+          exec.mockRestore();
+        }
+        expect(await peek()).toMatchObject({ attempts: 2, nextAttemptAt: later });
+      } finally {
+        find.mockRestore();
+        quiet.mockRestore();
+      }
+    });
+
     it('the pending-age alert is claimed by a row lock: a sweep that finds the row locked by another skips it, a worker that dies leaves it for the next sweep, and the mark is set in the same transaction that tells Sentry', async () => {
       await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
       const sara = await person('sara');
