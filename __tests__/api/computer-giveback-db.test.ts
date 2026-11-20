@@ -857,14 +857,15 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
       });
 
-      it('keeps the run a held decision was judged in: decided again later (the Limits now set), an earlier run’s rows are still not the new run’s turns', async () => {
+      it('keeps the run a held decision was judged in: decided again later (the Limits now set) it reads the same run’s rows, not another run’s', async () => {
         await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
         const sara = await person('sara');
-        const held = await job(sara, { ...ours, turns: [1], run: 'runb' }, withFaults(sara, [fault(1, 'field_job_set', { run: 'runa' })]));
-        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', judgedRun: 'runb' });
+        const held = await job(sara, { ...ours, turns: [1], run: 'runb' }, withFaults(sara, [fault(1, 'provider_5xx', { run: 'runb' }), fault(1, 'allowance', { run: 'runa', callId: 'other-run' })]));
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', judgedRun: 'runb', reason: 'provider_5xx' });
         await limitsAre(LAUNCH);
         await sweepComputers(new Date(NOW.getTime() + 3 * 60 * 60_000));
-        expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason: 'no_row' });
+        // Decided from run B's own row (the provider's 5xx), not as "no row" (run lost) and not from run A's allowance
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason: 'provider_5xx' });
       });
 
       it('matches no run with no run, so rows and finishes from a game that names none read as before; a run on only one side is not a match', async () => {
