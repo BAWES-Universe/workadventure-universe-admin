@@ -670,14 +670,37 @@ run('payments for pages, in a real database', () => {
       });
 
       it('the long-wait pass of the sweep is planned on an index: the query the sweep runs can be answered from app_page_orders_reconciled_status_next_look_at_idx', async () => {
-        const plan = await prisma.$transaction(async (tx) => {
-          // A table this small is scanned whatever indexes it has: the question is whether an index CAN answer the query, so scans are turned off for this one statement
-          await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
-          return tx.$queryRawUnsafe<Array<Record<string, string>>>(
-            `EXPLAIN SELECT id FROM app_page_orders WHERE reconciled = false AND provider_ref IS NOT NULL AND (status = 'cant_confirm' OR (status = 'not_paid' AND closed_at < now() - interval '48 hours')) AND (next_look_at IS NULL OR next_look_at <= now()) ORDER BY next_look_at ASC NULLS FIRST, created_at ASC LIMIT 50`,
-          );
-        });
-        expect(plan.map((line) => Object.values(line)[0]).join('\n')).toContain('app_page_orders_reconciled_status_next_look_at_idx');
+        class RollBack extends Error {
+          constructor(readonly plan: string) {
+            super('rolled back');
+          }
+        }
+        const explain = async (dropOurs: boolean): Promise<string> => {
+          try {
+            await prisma.$transaction(async (tx) => {
+              // A table this small is scanned whatever indexes it has, and which index the planner prefers on an empty table is not the question: whether an index CAN
+              // answer this query is. So scans are turned off, the other two indexes that carry status are dropped (inside this transaction, which is rolled back), and what is left is asked
+              await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
+              await tx.$executeRawUnsafe('DROP INDEX app_page_orders_status_created_at_idx');
+              await tx.$executeRawUnsafe('DROP INDEX app_page_orders_artifact_id_buyer_key_status_idx');
+              if (dropOurs) await tx.$executeRawUnsafe('DROP INDEX app_page_orders_reconciled_status_next_look_at_idx');
+              const plan = await tx.$queryRawUnsafe<Array<Record<string, string>>>(
+                `EXPLAIN SELECT id FROM app_page_orders WHERE reconciled = false AND provider_ref IS NOT NULL AND (status = 'cant_confirm' OR (status = 'not_paid' AND closed_at < now() - interval '48 hours')) AND (next_look_at IS NULL OR next_look_at <= now()) ORDER BY next_look_at ASC NULLS FIRST, created_at ASC LIMIT 50`,
+              );
+              throw new RollBack(plan.map((line) => Object.values(line)[0]).join('\n'));
+            });
+          } catch (error) {
+            if (error instanceof RollBack) return error.plan;
+            throw error;
+          }
+          throw new Error('the plan was not read');
+        };
+        expect(await explain(false)).toContain('app_page_orders_reconciled_status_next_look_at_idx');
+        // Without it, nothing can answer the query from an index
+        expect(await explain(true)).not.toContain('Index');
+        // The rolled-back drops left both in place
+        const names = (await prisma.$queryRawUnsafe<Array<{ indexname: string }>>(`SELECT indexname FROM pg_indexes WHERE tablename = 'app_page_orders'`)).map((row) => row.indexname);
+        expect(names).toEqual(expect.arrayContaining(['app_page_orders_status_created_at_idx', 'app_page_orders_artifact_id_buyer_key_status_idx', 'app_page_orders_reconciled_status_next_look_at_idx']));
       });
 
       it('stops asking only when the service says the last word: a final failed state (and nothing is asked after it), or a payment for something else', async () => {
