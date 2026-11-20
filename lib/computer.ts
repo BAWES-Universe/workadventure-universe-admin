@@ -35,6 +35,7 @@ import { computersArePaused } from '@/lib/capability-pause';
 import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
+import { judgeJobGiveBack, type GiveBackVerdict } from '@/lib/computer-giveback';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -1175,19 +1176,35 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       // The person's own Stop, a computer turned off and a Brick deleted are never told: they just did it
       endToldAt: silentEnding(endedBy) ? now : null,
     } as const;
-    if (held && job.firstTurnSentAt && !job.agentResponseId) {
+    // An ending as ours is given back only inside the bound (lib/computer-giveback): decided in the same transaction that writes the ending, under the person's
+    // give-back lock, so two of their jobs ending together cannot both take the last one. A job that is not given back ends as a failure that is the person's
+    const judged = endedBy === 'error' && job.startedAt !== null;
+    const turnHold = held && !!job.firstTurnSentAt && !job.agentResponseId;
+    const where = { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted };
+    if (judged || turnHold) {
       // The job's first turn was sent and never named: it may still run on the machine with nothing to cancel it by. The machine carries a hold from the
       // moment the job is over (one commit with the end), so no other job or turn starts beside that turn until the machine is proved asleep
       const botId = job.botId;
-      const status0 = job.status;
-      const { secondsRun: secondsSeen, stretchStarted: stretchSeen } = job;
-      ended = await prisma.$transaction(async (tx) => {
-        const done = await tx.computerJob.updateMany({ where: { id: jobId, status: status0, secondsRun: secondsSeen, stretchStarted: stretchSeen }, data: endData });
-        if (done.count === 1) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
-        return done;
+      const personId = job.personId;
+      const startedAt = job.startedAt;
+      const result = await prisma.$transaction(async (tx) => {
+        let verdict: GiveBackVerdict = { give: true };
+        if (judged) {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`computer:giveback:${personId}`}))`;
+          verdict = await judgeJobGiveBack(tx, { id: jobId, personId, startedAt }, now);
+        }
+        const done = await tx.computerJob.updateMany({ where, data: verdict.give ? endData : { ...endData, status: 'failed', endedBy: null } });
+        if (done.count === 1 && turnHold) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
+        return { done, verdict };
       });
+      ended = result.done;
+      if (ended.count === 1 && !result.verdict.give) {
+        console.warn('[Computer] A job that failed on our side is not given back:', result.verdict.why);
+        status = 'failed';
+        endedBy = null;
+      }
     } else {
-      ended = await prisma.computerJob.updateMany({ where: { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted }, data: endData });
+      ended = await prisma.computerJob.updateMany({ where, data: endData });
     }
   }
   // Someone else ended it between the read and the write: that one counts and settles
