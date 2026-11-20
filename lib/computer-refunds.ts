@@ -134,12 +134,16 @@ export async function sweepRefundObligations(now: Date = new Date(), batch = 50)
       // and the next sweep tells it. The worst case (a capture followed by a commit that fails) is a second alert, never a lost one
       try {
         const told = await prisma.$transaction(async (tx) => {
-          const locked = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT "id" FROM "computer_refund_obligations" WHERE "id" = ${one.id} AND "state" = 'owed' AND "alerted_at" IS NULL FOR UPDATE SKIP LOCKED`);
+          // What the alert says is read from the row AS LOCKED: a try that failed between the candidate read and the lock (a support retry) is in it, never the older figures
+          const locked = await tx.$queryRaw<Array<{ id: string; job_id: string; hold_key: string; amount_micros: bigint; attempts: number; last_error: string | null; created_at: Date }>>(
+            Prisma.sql`SELECT "id", "job_id", "hold_key", "amount_micros", "attempts", "last_error", "created_at" FROM "computer_refund_obligations" WHERE "id" = ${one.id} AND "state" = 'owed' AND "alerted_at" IS NULL FOR UPDATE SKIP LOCKED`,
+          );
           if (locked.length !== 1) return false;
+          const row = locked[0];
           Sentry.captureMessage('A refund of credit a failed computer job drew has not been acknowledged by the books for over an hour', {
             level: 'error',
             tags: { area: 'computer', step: 'refund_obligation_age' },
-            extra: { jobId: one.jobId, holdKey: one.holdKey, amountMicros: Number(one.amountMicros), attempts: one.attempts, lastError: one.lastError, since: one.createdAt.toISOString() },
+            extra: { jobId: row.job_id, holdKey: row.hold_key, amountMicros: Number(row.amount_micros), attempts: row.attempts, lastError: row.last_error, since: row.created_at.toISOString() },
           });
           await tx.computerRefundObligation.update({ where: { id: one.id }, data: { alertedAt: now } });
           return true;

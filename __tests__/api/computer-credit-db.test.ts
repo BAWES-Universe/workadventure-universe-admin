@@ -729,6 +729,33 @@ run('credit for computers, on the real books', () => {
         spy.mockRestore();
       });
 
+      it('the overdue-refund alert says what the row holds when it is locked: a try that failed between the candidate read and the lock is in it', async () => {
+        const { holdKey } = await stuck();
+        const created = (await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).createdAt;
+        const overdueAt = new Date(created.getTime() + 61 * 60_000);
+        await prisma.computerRefundObligation.update({ where: { holdKey }, data: { nextAttemptAt: new Date(overdueAt.getTime() + 10 * 24 * 3_600_000) } });
+        const captured = Sentry.captureMessage as jest.Mock;
+        captured.mockClear();
+        const spy = quiet();
+        // A support retry fails after the sweep read its candidate rows and before it locked the row
+        const realFindMany = prisma.computerRefundObligation.findMany.bind(prisma.computerRefundObligation);
+        const findMany = jest.spyOn(prisma.computerRefundObligation, 'findMany').mockImplementation(((args: { where?: { alertedAt?: null } }) => {
+          const read = realFindMany(args as never);
+          if (args?.where?.alertedAt !== null) return read;
+          return read.then(async (rows) => {
+            await prisma.computerRefundObligation.update({ where: { holdKey }, data: { attempts: 9, lastError: 'books said no, again' } });
+            return rows;
+          });
+        }) as never);
+        try {
+          expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 1 });
+        } finally {
+          findMany.mockRestore();
+          spy.mockRestore();
+        }
+        expect(captured).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ extra: expect.objectContaining({ holdKey, attempts: 9, lastError: 'books said no, again' }) }));
+      });
+
       it('makes the readiness check fail while a refund is overdue, and pass once it is acknowledged', async () => {
         await seedGiveBackLimits({});
         const { holdKey } = await stuck();
