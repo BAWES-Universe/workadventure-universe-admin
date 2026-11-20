@@ -2028,10 +2028,10 @@ run('payments for pages, in a real database', () => {
           // The same asks the host makes: Check payment by the wish, then Restore, as a guest with the browser's own recovery code
           const check = await ask(artifactId, { check: true, intentId, recoveryCode: code }, '198.51.100.80');
           expect(check.status).toBe(200);
-          expect(check.body).toMatchObject({ status: 'checking', unresolved: true, orderId, checkoutUrl: null, buyer: 'guest' });
+          expect(check.body).toMatchObject({ status: 'checking', longWait: true, orderId, checkoutUrl: null, buyer: 'guest' });
           const restored = await ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.81');
           expect(restored.status).toBe(200);
-          expect(restored.body).toMatchObject({ status: 'checking', unresolved: true, orderId, checkoutUrl: null, via: 'own' });
+          expect(restored.body).toMatchObject({ status: 'checking', longWait: true, orderId, checkoutUrl: null, via: 'own' });
           expect(restored.body.status).not.toBe('none');
           // The rows: the same one order, still closed and still not reconciled, no second payment asked of the service, no entitlement
           expect(await orders(artifactId)).toHaveLength(1);
@@ -2040,21 +2040,21 @@ run('payments for pages, in a real database', () => {
           expect(POSTS(sent)).toHaveLength(0);
           // The order poll says the same (the host that adopted it must not say "not paid" a moment later)
           const polled = await orderForArtifact(orderId, artifactId);
-          expect(polled).toMatchObject({ status: 'checking', unresolved: true });
+          expect(polled).toMatchObject({ status: 'checking', longWait: true });
         });
 
         it('is the ordinary rate-limited check on the original order: pressing again at once asks the service once', async () => {
           const { artifactId, code, intentId } = await longWaitOrder();
           const sent = gateway({ record: (id) => paidRecord(id, { status: 'INITIATED' }) });
-          for (let n = 0; n < 4; n += 1) expect((await ask(artifactId, { check: true, intentId, recoveryCode: code }, `198.51.100.${90 + n}`)).body).toMatchObject({ status: 'checking', unresolved: true });
-          for (let n = 0; n < 3; n += 1) expect((await ask(artifactId, { restore: true, recoveryCode: code }, `198.51.100.${100 + n}`)).body).toMatchObject({ status: 'checking', unresolved: true });
+          for (let n = 0; n < 4; n += 1) expect((await ask(artifactId, { check: true, intentId, recoveryCode: code }, `198.51.100.${90 + n}`)).body).toMatchObject({ status: 'checking', longWait: true });
+          for (let n = 0; n < 3; n += 1) expect((await ask(artifactId, { restore: true, recoveryCode: code }, `198.51.100.${100 + n}`)).body).toMatchObject({ status: 'checking', longWait: true });
           expect(sent.filter((target) => target.method === 'GET')).toHaveLength(1);
         });
 
         it('a later confirmed payment lands on the SAME order, with one entitlement and one notice, however it is asked for', async () => {
           const { artifactId, code, intentId, orderId } = await longWaitOrder();
           gateway({ record: (id) => paidRecord(id, { status: 'INITIATED' }) });
-          expect((await ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.110')).body).toMatchObject({ status: 'checking', unresolved: true });
+          expect((await ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.110')).body).toMatchObject({ status: 'checking', longWait: true });
           const before = (await notices()).length;
           // The service now says it was paid
           const sent = gateway({ record: (id) => paidRecord(id) });
@@ -2090,7 +2090,7 @@ run('payments for pages, in a real database', () => {
           gateway({ record: (id) => paidRecord(id, { status: 'INITIATED' }) });
           // Another browser holding only the receipt link's code: the order is found, and said to be a receipt's, never given a new receipt
           const via = await ask(artifactId, { restore: true, recoveryCode: word(), receiptCode: code }, '198.51.100.130');
-          expect(via.body).toMatchObject({ status: 'checking', unresolved: true, orderId, via: 'receipt' });
+          expect(via.body).toMatchObject({ status: 'checking', longWait: true, orderId, via: 'receipt' });
         });
 
         it('shows the ops numbers: orders never checked, scheduled looks that are overdue, and the time since the service was last read', async () => {
@@ -2110,6 +2110,27 @@ run('payments for pages, in a real database', () => {
           const late = await pagePaymentLoad();
           expect(late.unconfirmed.overdue).toBe(1);
           expect(late.sinceLastReadSeconds).toBeGreaterThan(4.9 * 3_600);
+        });
+
+        it('Restore prefers a paid purchase, then an open order with its link, then the long-wait order, then nothing', async () => {
+          const { artifactId, code, orderId: longId } = await longWaitOrder();
+          const key = buyerOf(code);
+          const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+          gateway({ record: (id) => paidRecord(id, { status: 'INITIATED' }) });
+          // Only the long-wait order: still checking
+          expect((await ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.140')).body).toMatchObject({ status: 'checking', longWait: true, orderId: longId });
+          // An open order of the same buyer for the current offer wins over it, with its own link (and is not a long-wait one)
+          const open = await prisma.appPageOrder.create({
+            data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'pending', providerRef: 'chg_open', checkoutUrl: 'https://checkout.examplepay.com/?token=open', visitorHash: 'v', intentId: wish(), buyerKey: key, createdAt: new Date(Date.now() - 60_000), checkedAt: new Date() },
+          });
+          const second = (await ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.141')).body;
+          expect(second).toMatchObject({ status: 'checking', orderId: open.id, checkoutUrl: 'https://checkout.examplepay.com/?token=open' });
+          expect(second.longWait).toBeUndefined();
+          // A paid purchase wins over both
+          const paid = await prisma.appPageOrder.create({
+            data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'paid', paidAt: new Date(Date.now() - 3_600_000), visitorHash: 'v', intentId: wish(), buyerKey: key },
+          });
+          expect((await ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.142')).body).toMatchObject({ status: 'paid', orderId: paid.id });
         });
 
         it('looks at least weekly for as long as it takes: 6 hours, then daily, then weekly, with no end', () => {

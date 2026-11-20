@@ -641,7 +641,7 @@ export interface OrderView {
    * Only with `checking`, for an order that is closed (or could not be confirmed) and that the service has not had the last word about: it may still have been
    * paid, so it is said to be still checked, never "not paid" or "no purchase". It has no link to go on with; the buyer is never asked to pay a second time for it.
    */
-  unresolved?: boolean;
+  longWait?: boolean;
   /** How long a host may wait before asking again, in milliseconds: short for a new order, longer the longer it has waited. */
   pollAfterMs: number;
 }
@@ -696,7 +696,7 @@ async function stillUnresolved(view: OrderView | null): Promise<OrderView | null
   if (!view || view.status !== 'not_paid') return view;
   const order = await prisma.appPageOrder.findUnique({ where: { id: view.orderId }, select: { status: true, reconciled: true, providerRef: true } });
   if (!order || order.status !== 'not_paid' || order.reconciled || !order.providerRef) return view;
-  const said: OrderView = { ...view, status: 'checking', checkoutUrl: null, unresolved: true, pollAfterMs: Math.max(view.pollAfterMs, 15_000) };
+  const said: OrderView = { ...view, status: 'checking', checkoutUrl: null, longWait: true, pollAfterMs: Math.max(view.pollAfterMs, 15_000) };
   return waiting.has(view) ? later(said) : said;
 }
 
@@ -1033,7 +1033,7 @@ export interface Restored {
   /** Which proof found it: the buyer's own (account or recovery code), or only a receipt link's code. A purchase found by a receipt link is not given a new receipt. */
   via?: 'own' | 'receipt';
   /** Only when checking: the order is closed (or could not be confirmed) and the service has not had the last word about it. It has no link; it is still checked, never "no purchase". */
-  unresolved?: boolean;
+  longWait?: boolean;
 }
 
 /** The most orders of one buyer asked about at the service in one restore: the rest are asked about by the next. */
@@ -1068,14 +1068,14 @@ export async function restorePurchase(input: { artifactId: string; buyerKeys: st
   const chosen = live ?? (await prisma.appPageOrder.findFirst({ where: { ...mine, status: 'paid' }, orderBy: { paidAt: 'desc' }, select: { id: true, mode: true, paidAt: true, buyerKey: true } }));
   if (chosen) return { status: 'paid', testPayment: chosen.mode === 'test', orderId: chosen.id, pollAfterMs: 3_000, paidAt: chosen.paidAt?.toISOString() ?? null, via: viaOf(chosen.buyerKey) };
   // Still open for what this page sells now: an older checkout at an old price is never handed back as this offer's (it stays asked about, by its own wish)
-  // ... or closed (or not confirmable) with the service never having had the last word: it may still have been paid, so it is handed back as still being checked and never as "nothing found"
-  const waiting = await prisma.appPageOrder.findFirst({
-    where: { ...mine, OR: [{ status: { in: ['creating', 'pending'] } }, { status: { in: ['not_paid', 'cant_confirm'] }, reconciled: false, providerRef: { not: null } }] },
-    orderBy: { createdAt: 'desc' },
-    select: { id: true, createdAt: true, status: true, checkoutUrl: true, buyerKey: true },
-  });
-  if (!waiting) return none();
-  if (waiting.status === 'not_paid' || waiting.status === 'cant_confirm') return { status: 'checking', testPayment: false, orderId: waiting.id, pollAfterMs: Math.max(pollAfterMs(waiting.createdAt), 15_000), checkoutUrl: null, via: viaOf(waiting.buyerKey), unresolved: true };
+  const waiting = await prisma.appPageOrder.findFirst({ where: { ...mine, status: { in: ['creating', 'pending'] } }, orderBy: { createdAt: 'desc' }, select: { id: true, createdAt: true, status: true, checkoutUrl: true, buyerKey: true } });
+  if (!waiting) {
+    // ... then one that is closed (or not confirmable) for what this page sells now, with the service never having had the last word: it may still have been paid, so it is
+    // handed back as still being checked and never as "nothing found". A newer long-wait order never outranks an open one
+    const long = await prisma.appPageOrder.findFirst({ where: { ...mine, status: { in: ['not_paid', 'cant_confirm'] }, reconciled: false, providerRef: { not: null } }, orderBy: { createdAt: 'desc' }, select: { id: true, createdAt: true, buyerKey: true } });
+    if (!long) return none();
+    return { status: 'checking', testPayment: false, orderId: long.id, pollAfterMs: Math.max(pollAfterMs(long.createdAt), 15_000), checkoutUrl: null, via: viaOf(long.buyerKey), longWait: true };
+  }
   let checkoutUrl = waiting.status === 'pending' ? waiting.checkoutUrl : null;
   // An order whose start never finished (the server stopped, the answer was lost) goes on from here for its own buyer, with the same id: a reload
   // does not leave it with no way forward

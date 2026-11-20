@@ -16,7 +16,7 @@ export const PAY_WORDS = {
   receiptCopied: { title: 'Private receipt link copied.', sub: 'Keep it somewhere safe, like your notes or email. Anyone who has it can bring this purchase back.' },
   copyFailed: 'Couldn’t copy it. Select the link below and copy it yourself.',
   notHeard: { title: 'We haven’t heard back about your payment yet.', sub: 'If you paid, it still counts. Check it here before paying again.' },
-  stillChecking: { title: 'We’re still checking this payment.', sub: 'If you paid, it will show here once the payment service confirms it. Check it here before paying again.' },
+  stillChecking: { title: 'We’re still checking your earlier payment.', sub: 'If you paid, it will show up here when your payment service confirms it.' },
   notPaid: { title: 'Not paid yet.', sub: 'If you already paid, it can take a while to show. Check it here before paying again.' },
   needsUpdate: { title: 'This page’s pay button needs an update.', sub: 'If you already paid, check it here before paying again.' },
   unavailable: { title: 'Payments unavailable', sub: null },
