@@ -36,7 +36,7 @@ export type Authorized =
   | { ok: false; reason: 'refused' }
   /** The person's own computer allowance is used up: "Ask for more". */
   | { ok: false; reason: 'allowance' }
-  /** Our pool, or the controls, have no room: nothing the person can ask for. `full` is true only when the pool has no room even for the smallest call (the envelope is at its ceiling), so the relay can tell a full pool (ours) from a call refused for its own size. */
+  /** Our pool, or the controls, have no room: nothing the person can ask for. `full` is true when the pool has no room even for the smallest call (the envelope is at its ceiling) or when new work on the call's route is paused (our decision), so the relay can tell ours from a call refused for its own size. */
   | { ok: false; reason: 'pool'; full: boolean }
   /** A rule the person said in chat does not let this call take that much: the rule's own words, and nothing to ask more credit for. */
   | { ok: false; reason: 'rule'; ruleId: string; why: 'own_accounts' | 'cap'; leftMicros: number | null; words: string };
@@ -55,8 +55,9 @@ export async function authorizeModelCall(
     return still.ok && still.generation === verified.generation ? { ok: true, ...base, reservedMicros: null } : { ok: false, reason: 'refused' };
   }
   if (!Number.isSafeInteger(input.estimateMicros) || input.estimateMicros <= 0 || input.estimateMicros > MAX_MICROS) return { ok: false, reason: 'refused' };
-  // One provider failing for many people: nothing new is sent to it for now (the relay answers busy, and nothing is held or charged). Never for a person's own key.
-  if (input.route && (await routeIsPaused(input.route, now).catch(() => false))) return { ok: false, reason: 'pool', full: false };
+  // One provider failing for many people: nothing new is sent to it for now (nothing is held or charged). Never for a person's own key. A pause is OUR decision,
+  // so it answers `full: true`: the relay records it as a confirmed fault of ours (pool_busy), never as the job's own doing
+  if (input.route && (await routeIsPaused(input.route, now).catch(() => false))) return { ok: false, reason: 'pool', full: true };
   const room = await reserveRoom({ key: callRoomKey(base.jobId, input.callId), personId: base.personId, amountMicros: input.estimateMicros, botId: base.botId, jobId: base.jobId, newJob: false }, now);
   if (room.ok) {
     // The room may have waited for the pool's lock while the person took the machine: the key must still be good after it, or the room goes back

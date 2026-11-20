@@ -8,9 +8,10 @@ import { applyGiveBack, giveBackAfter, giveBackSettingsProblems, lockPerson, rea
 
 /**
  * One provider failing for many people is an incident, not many people's bad luck (the per-person bound cannot see it). Failures are counted by the route
- * they went to (the provider and route the relay names): the jobs that had a provider failure of an unresolved kind, or our key refused, on the route in
- * Instant's failure window. When that reaches Instant's own smallest batch (pauseMinRuns, the same numbers Instant pauses itself by) new platform-funded
- * work on that route is paused. Nothing is stored: it lifts by itself once the window passes with fewer, and the person's own key is never paused.
+ * they went to (the provider and route the relay names): the DIFFERENT PEOPLE who had a job with a provider failure of an unresolved kind, or our key
+ * refused, on the route in Instant's failure window (one person's jobs are one: a person's own words can cause a 400 or a timeout, and one person alone
+ * must never be able to pause a route for everyone). When that reaches Instant's own smallest batch (pauseMinRuns, the same numbers Instant pauses itself by)
+ * new platform-funded work on that route is paused. Nothing is stored: it lifts by itself once the window passes with fewer, and the person's own key is never paused.
  * Operations see what is at risk and correct every affected job together.
  */
 
@@ -19,12 +20,12 @@ const PROVIDER_REASONS: readonly string[] = [...UNRESOLVED_REASONS, 'provider_ke
 
 type PauseLimits = Pick<InstantLimits, 'pauseMinRuns' | 'pauseWindowMinutes'>;
 
-/** How many different jobs had a provider failure on this route inside the window ending now. */
-export async function routeFailureJobs(route: string, now: Date, limits: Pick<InstantLimits, 'pauseWindowMinutes'>): Promise<number> {
+/** How many different PEOPLE had a job with a provider failure on this route inside the window ending now. */
+export async function routeFailurePeople(route: string, now: Date, limits: Pick<InstantLimits, 'pauseWindowMinutes'>): Promise<number> {
   const since = new Date(now.getTime() - limits.pauseWindowMinutes * 60 * 1000);
   const rows = await prisma.$queryRaw<Array<{ jobs: number }>>(Prisma.sql`
-    SELECT COUNT(DISTINCT "job_id")::int AS jobs FROM "computer_job_faults"
-    WHERE "route" = ${route} AND "source" = 'universe-ai' AND "kind" <> 'answered' AND "at" >= ${since} AND "reason" IN (${Prisma.join([...PROVIDER_REASONS])})`);
+    SELECT COUNT(DISTINCT j."person_id")::int AS jobs FROM "computer_job_faults" f JOIN "computer_jobs" j ON j."id" = f."job_id"
+    WHERE f."route" = ${route} AND f."source" = 'universe-ai' AND f."kind" <> 'answered' AND f."at" >= ${since} AND f."reason" IN (${Prisma.join([...PROVIDER_REASONS])})`);
   return rows[0]?.jobs ?? 0;
 }
 
@@ -32,7 +33,7 @@ export async function routeFailureJobs(route: string, now: Date, limits: Pick<In
 export async function routeIsPaused(route: string, now: Date = new Date()): Promise<boolean> {
   const limits: PauseLimits & Partial<InstantLimits> = await getInstantLimits();
   if (limits.pauseMinRuns === null || limits.pauseMinRuns === undefined) return false;
-  return (await routeFailureJobs(route, now, limits)) >= limits.pauseMinRuns;
+  return (await routeFailurePeople(route, now, limits)) >= limits.pauseMinRuns;
 }
 
 export interface GiveBackOverview {
@@ -44,7 +45,7 @@ export interface GiveBackOverview {
   /** The money still charged to people provisionally while a decision waits, and the age of the oldest. */
   pending: { jobs: number; costMicros: number; oldestAt: string | null; oldestMinutes: number | null };
   /** Routes with provider failures in the window, and whether new work on them is paused. */
-  routes: Array<{ route: string; failedJobs: number; paused: boolean }>;
+  routes: Array<{ route: string; failedPeople: number; paused: boolean }>;
   /** Refunds of credit a failed job drew that the books have not acknowledged: how many, how much, how old, and how many are overdue (the list is at /api/admin/computer/refund-obligations). */
   refunds: RefundOverview['owed'];
 }
@@ -65,9 +66,9 @@ export async function giveBackOverview(now: Date = new Date()): Promise<GiveBack
   const oldest = await prisma.computerGiveBackDecision.findFirst({ where: { state: 'pending' }, orderBy: { decidedAt: 'asc' }, select: { decidedAt: true } });
   const since = new Date(now.getTime() - limits.pauseWindowMinutes * 60 * 1000);
   const failing = await prisma.$queryRaw<Array<{ route: string; jobs: number }>>(Prisma.sql`
-    SELECT "route", COUNT(DISTINCT "job_id")::int AS jobs FROM "computer_job_faults"
-    WHERE "route" IS NOT NULL AND "source" = 'universe-ai' AND "kind" <> 'answered' AND "at" >= ${since} AND "reason" IN (${Prisma.join([...PROVIDER_REASONS])})
-    GROUP BY "route" ORDER BY jobs DESC LIMIT 50`);
+    SELECT f."route", COUNT(DISTINCT j."person_id")::int AS jobs FROM "computer_job_faults" f JOIN "computer_jobs" j ON j."id" = f."job_id"
+    WHERE f."route" IS NOT NULL AND f."source" = 'universe-ai' AND f."kind" <> 'answered' AND f."at" >= ${since} AND f."reason" IN (${Prisma.join([...PROVIDER_REASONS])})
+    GROUP BY f."route" ORDER BY jobs DESC LIMIT 50`);
   return {
     at: now.toISOString(),
     settingsProblems: giveBackSettingsProblems(limits),
@@ -78,44 +79,57 @@ export async function giveBackOverview(now: Date = new Date()): Promise<GiveBack
       oldestAt: oldest?.decidedAt.toISOString() ?? null,
       oldestMinutes: oldest ? Math.floor((now.getTime() - oldest.decidedAt.getTime()) / 60_000) : null,
     },
-    routes: failing.map((row) => ({ route: row.route, failedJobs: row.jobs, paused: limits.pauseMinRuns !== null && row.jobs >= limits.pauseMinRuns })),
+    routes: failing.map((row) => ({ route: row.route, failedPeople: row.jobs, paused: limits.pauseMinRuns !== null && row.jobs >= limits.pauseMinRuns })),
     refunds: (await refundOverview(now)).owed,
   };
 }
 
 /**
  * Gives back every job that had a provider failure on a route between two times and is not a give-back yet (charged for the person's cap, for an effect still
- * to be confirmed, or held): one incident, corrected together. A job the person's own doing stopped (evidence of theirs) or that delivered something outside its
- * computer is left alone. None of these count towards anyone's bound. Safe to say twice.
+ * to be confirmed, or held): one incident, corrected together. A job already given back as counted goodwill is UN-COUNTED (it was the provider's incident, not
+ * the person's bad luck, so it no longer uses their bound). A job the person's own doing stopped (evidence of theirs) or that delivered something outside its
+ * computer is left alone. None of these count towards anyone's bound. Safe to say twice. `corrected` is the jobs given back now; `uncounted` the goodwill ones
+ * freed from the bound.
  */
-export async function correctRouteTogether(input: { route: string; from: Date; to: Date }): Promise<{ corrected: number; costMicros: number }> {
+export async function correctRouteTogether(input: { route: string; from: Date; to: Date }): Promise<{ corrected: number; uncounted: number; costMicros: number }> {
   const candidates = await prisma.$queryRaw<Array<{ job_id: string; person_id: string }>>(Prisma.sql`
     SELECT DISTINCT d."job_id", d."person_id" FROM "computer_give_back_decisions" d
     JOIN "computer_job_faults" f ON f."job_id" = d."job_id"
     WHERE f."route" = ${input.route} AND f."at" >= ${input.from} AND f."at" <= ${input.to} AND f."source" = 'universe-ai' AND f."reason" IN (${Prisma.join([...PROVIDER_REASONS, ...OURS_REASONS])})
-      AND (d."state" = 'pending' OR (d."state" = 'refused' AND d."basis" IN ('cap', 'paused')))
+      AND (d."state" = 'pending' OR (d."state" = 'refused' AND d."basis" IN ('cap', 'paused')) OR (d."state" = 'given' AND d."basis" = 'goodwill'))
     LIMIT 500`);
   let corrected = 0;
+  let uncounted = 0;
   let costMicros = 0;
   for (const one of candidates) {
     const job = { id: one.job_id, personId: one.person_id };
-    const changed = await prisma.$transaction(async (tx) => {
+    const changed = await prisma.$transaction(async (tx): Promise<'given' | 'uncounted' | null> => {
       await lockPerson(tx, job.personId);
+      // Already given back as goodwill and counted against the person's bound: it is the incident's, so it is freed from the bound (nothing more to give back)
+      const freed = await tx.computerGiveBackDecision.updateMany({ where: { jobId: job.id, state: 'given', basis: 'goodwill' }, data: { basis: 'incident', route: input.route } });
+      if (freed.count > 0) {
+        await tx.computerJob.updateMany({ where: { id: job.id, runnerFault: true }, data: { runnerFault: false } });
+        return 'uncounted';
+      }
       const flipped = await tx.computerGiveBackDecision.updateMany({
         where: { jobId: job.id, OR: [{ state: 'pending' }, { state: 'refused', basis: { in: ['cap', 'paused'] } }] },
         data: { state: 'given', basis: 'incident', route: input.route, nextAttemptAt: null, lastError: null },
       });
-      if (flipped.count === 0) return false;
+      if (flipped.count === 0) return null;
       await applyGiveBack(tx, job, false);
-      return true;
+      return 'given';
     });
     if (!changed) continue;
+    if (changed === 'uncounted') {
+      uncounted++;
+      continue;
+    }
     await giveBackAfter(job);
     corrected++;
     const cost = await prisma.meterEvent.aggregate({ where: { jobId: job.id, pool: 'computer', kind: { in: ['computer_time', 'model_call'] }, payerKind: 'universe' }, _sum: { costMicros: true } });
     costMicros += Number(cost._sum.costMicros ?? 0);
   }
-  return { corrected, costMicros };
+  return { corrected, uncounted, costMicros };
 }
 
 /** Limits as they are now, for the readiness check (never throws). */
