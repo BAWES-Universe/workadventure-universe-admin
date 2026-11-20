@@ -744,15 +744,16 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ runnerFault: true });
       // Our key was out of credit on that very turn; the row reaches Orbit late
       await recordFaults(sara.brickId, first.id, [fault(1, 'provider_key_ours', { providerStatus: 402 })]);
-      await afterLateEvidence(first.id);
+      // Said twice at the same moment: both attempt the goodwill-to-fault transition together, and it happens once
+      await Promise.all([afterLateEvidence(first.id), afterLateEvidence(first.id)]);
       expect(await decisionOf(first.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'provider_key_ours' });
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ endedBy: 'error', runnerFault: false });
       expect(await givenBack(first.id)).toBe(true);
       // The bound (1) is free again
       const next = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
       expect(await decisionOf(next.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
-      // Said twice, or at the same moment, it changes nothing more
-      await Promise.all([afterLateEvidence(first.id), afterLateEvidence(first.id)]);
+      // Said again later it changes nothing more
+      await afterLateEvidence(first.id);
       expect(await decisionOf(first.id)).toMatchObject({ basis: 'universe_fault' });
       expect(await prisma.computerJob.count({ where: { personId: sara.id, runnerFault: true } })).toBe(1);
     });
