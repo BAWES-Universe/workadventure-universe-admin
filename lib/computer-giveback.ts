@@ -430,11 +430,13 @@ async function lateLookFailed(jobId: string, mark: Date, now: Date): Promise<voi
     const first = (previous ? Number(previous.split(':')[1]) : NaN) || now.getTime();
     const marker = `${told ? LATE_LOOK_TOLD : LATE_LOOK}:${first}`;
     const next = new Date(now.getTime() + retryWaitMs(row.attempts + 1));
-    await prisma.$executeRaw`
+    // Written only over the marker this attempt read: another sweep that told Sentry (or failed first) in the meantime has the newer word, and an older marker never
+    // overwrites it (that would make the alert fire again)
+    const rescheduled = await prisma.$executeRaw`
       UPDATE "computer_give_back_decisions"
       SET "updated_at" = GREATEST("updated_at", ${mark}), "attempts" = "attempts" + 1, "next_attempt_at" = ${next}, "last_error" = ${marker}
-      WHERE "job_id" = ${jobId} AND "state" IN ('refused', 'given')`;
-    if (told || now.getTime() - first < LATE_LOOK_ALERT_MS) return;
+      WHERE "job_id" = ${jobId} AND "state" IN ('refused', 'given') AND "last_error" IS NOT DISTINCT FROM ${row.last_error}`;
+    if (rescheduled !== 1 || told || now.getTime() - first < LATE_LOOK_ALERT_MS) return;
     // Claimed by a write only one of two sweeps can win, and only that one tells Sentry; a capture that throws gives the claim back
     const toldMarker = `${LATE_LOOK_TOLD}:${first}`;
     const claimed = await prisma.$executeRaw`UPDATE "computer_give_back_decisions" SET "last_error" = ${toldMarker} WHERE "job_id" = ${jobId} AND "last_error" = ${marker}`;
