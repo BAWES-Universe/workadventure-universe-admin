@@ -876,6 +876,95 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       });
     });
 
+    it('the pending-age alert is claimed by a row lock: a sweep that finds the row locked by another skips it, a worker that dies leaves it for the next sweep, and the mark is set in the same transaction that tells Sentry', async () => {
+      await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
+      const sara = await person('sara');
+      const ended = await job(sara, { ...ours, turns: [1] }, async (id) => {
+        await planEffect(id, { key: 'lock-1', kind: 'send' });
+      });
+      await prisma.computerGiveBackDecision.update({ where: { jobId: ended.id }, data: { decidedAt: new Date(NOW.getTime() - 3 * 24 * 60 * 60_000), nextAttemptAt: new Date(NOW.getTime() + 24 * 60 * 60_000) } });
+      const captured = Sentry.captureMessage as jest.Mock;
+      captured.mockClear();
+      await prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "job_id" FROM "computer_give_back_decisions" WHERE "job_id" = ${ended.id} FOR UPDATE`;
+        expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 0 });
+        expect(captured).not.toHaveBeenCalled();
+        throw new Error('the worker died');
+      }).catch(() => undefined);
+      expect((await decisionOf(ended.id))?.alertedAt).toBeNull();
+      expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 1 });
+      expect(captured).toHaveBeenCalledTimes(1);
+      expect((await decisionOf(ended.id))?.alertedAt).not.toBeNull();
+    });
+
+    it('the late-look alert is claimed by a row lock: a failing look that finds the row locked by another skips the alert, and the next failing look tells it', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      await job(sara, ours);
+      const refused = await job(sara, { ...ours, turns: [1] });
+      await prisma.computerJobFault.create({ data: { jobId: refused.id, callId: `keep-${refused.id}`, turn: 1, kind: 'fault', reason: 'provider_key_ours', source: 'universe-ai', route: 'universe-ai/model-a', providerStatus: 401, at: new Date() } });
+      const captured = Sentry.captureMessage as jest.Mock;
+      captured.mockClear();
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let looking = true;
+      const peek = async () => {
+        looking = false;
+        try {
+          return await decisionOf(refused.id);
+        } finally {
+          looking = true;
+        }
+      };
+      const realFind = prisma.computerGiveBackDecision.findUnique.bind(prisma.computerGiveBackDecision);
+      const find = jest.spyOn(prisma.computerGiveBackDecision, 'findUnique').mockImplementation(((args: { where?: { jobId?: string } }) => (looking && args?.where?.jobId === refused.id ? Promise.reject(new Error('blip')) : realFind(args as never))) as never);
+      try {
+        const t0 = new Date();
+        await sweepLateEvidence(t0);
+        // An hour later the look fails again and would tell Sentry; another sweep holds the row at that moment (taken right after this look wrote its marker)
+        const realExec = prisma.$executeRaw.bind(prisma) as (strings: TemplateStringsArray, ...values: unknown[]) => Promise<number>;
+        let release: () => void = () => undefined;
+        let holder: Promise<unknown> = Promise.resolve();
+        const exec = jest.spyOn(prisma, '$executeRaw').mockImplementation((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+          const done = await realExec(strings, ...values);
+          if (strings.join('?').includes('"attempts" + 1')) {
+            exec.mockRestore();
+            let locked: () => void = () => undefined;
+            const holding = new Promise<void>((resolve) => {
+              locked = resolve;
+            });
+            holder = prisma
+              .$transaction(async (tx) => {
+                await tx.$queryRaw`SELECT "job_id" FROM "computer_give_back_decisions" WHERE "job_id" = ${refused.id} FOR UPDATE`;
+                locked();
+                await new Promise<void>((resolve) => {
+                  release = resolve;
+                });
+                throw new Error('the worker died');
+              })
+              .catch(() => undefined);
+            await holding;
+          }
+          return done;
+        }) as never);
+        try {
+          await sweepLateEvidence(new Date(t0.getTime() + 61 * 60_000 + 5_000));
+        } finally {
+          exec.mockRestore();
+          release();
+          await holder;
+        }
+        expect(captured).not.toHaveBeenCalled();
+        expect(await peek()).toMatchObject({ lastError: expect.stringMatching(/^late_look:/) });
+        // The worker died: the next failing look tells it
+        await sweepLateEvidence(new Date(t0.getTime() + 3 * 3_600_000));
+        expect(captured).toHaveBeenCalledTimes(1);
+        expect(await peek()).toMatchObject({ lastError: expect.stringMatching(/^late_look_told:/) });
+      } finally {
+        find.mockRestore();
+        quiet.mockRestore();
+      }
+    });
+
     it('late evidence gives the same verdict as evidence on time: a confirmed fault of ours is given back even where the work was delivered, on the sweep as on the first look (both paths agree)', async () => {
       await limitsAre(LAUNCH);
       const sara = await person('sara');

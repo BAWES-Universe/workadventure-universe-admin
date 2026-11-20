@@ -705,6 +705,30 @@ run('credit for computers, on the real books', () => {
         spy.mockRestore();
       });
 
+      it('the overdue-refund alert is claimed by a row lock: a sweep that finds the row locked by another skips it, a worker that dies leaves it for the next sweep', async () => {
+        const { holdKey } = await stuck();
+        const created = (await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).createdAt;
+        const overdueAt = new Date(created.getTime() + 61 * 60_000);
+        // Not due for another try (so only the alert looks at it)
+        await prisma.computerRefundObligation.update({ where: { holdKey }, data: { nextAttemptAt: new Date(overdueAt.getTime() + 10 * 24 * 3_600_000) } });
+        const captured = Sentry.captureMessage as jest.Mock;
+        captured.mockClear();
+        const spy = quiet();
+        // Another sweep holds the row (it is telling Sentry): this one skips it, says nothing, and does not wait. That worker then dies, which rolls back
+        await prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT "id" FROM "computer_refund_obligations" WHERE "hold_key" = ${holdKey} FOR UPDATE`;
+          expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 0 });
+          expect(captured).not.toHaveBeenCalled();
+          throw new Error('the worker died');
+        }).catch(() => undefined);
+        expect((await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).alertedAt).toBeNull();
+        // The next sweep tells it, once
+        expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 1 });
+        expect(captured).toHaveBeenCalledTimes(1);
+        expect((await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).alertedAt).not.toBeNull();
+        spy.mockRestore();
+      });
+
       it('makes the readiness check fail while a refund is overdue, and pass once it is acknowledged', async () => {
         await seedGiveBackLimits({});
         const { holdKey } = await stuck();

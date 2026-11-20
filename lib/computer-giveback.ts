@@ -306,20 +306,19 @@ export async function sweepGiveBackDecisions(now: Date = new Date(), batch = 50)
     const alertAfter = (limits?.unclearWaitMinutes ?? INSTANT_LIMITS_RECOMMENDED.unclearWaitMinutes) * MINUTE;
     const old = await prisma.computerGiveBackDecision.findMany({ where: { state: 'pending', alertedAt: null, decidedAt: { lte: new Date(now.getTime() - alertAfter) } }, take: 20 });
     for (const one of old) {
-      // One row's trouble never ends the loop for the rest. The alert is CLAIMED first by a write only one of two sweeps running together can win, and only that one tells Sentry;
-      // a capture that throws gives the claim back (same guard), so the next sweep tells it
+      // One row's trouble never ends the loop for the rest. The row is locked (FOR UPDATE SKIP LOCKED) in a transaction, Sentry is told INSIDE it, and `alertedAt` is set before the
+      // commit: two sweeps never both get the row, and a worker that dies or a capture that throws rolls back, so the next sweep tells it (a duplicate at worst, never a lost alert)
       try {
-        const claimed = await prisma.computerGiveBackDecision.updateMany({ where: { jobId: one.jobId, state: 'pending', alertedAt: null }, data: { alertedAt: now } });
-        if (claimed.count !== 1) continue;
-        try {
+        const told = await prisma.$transaction(async (tx) => {
+          const locked = await tx.$queryRaw<Array<{ job_id: string }>>(Prisma.sql`SELECT "job_id" FROM "computer_give_back_decisions" WHERE "job_id" = ${one.jobId} AND "state" = 'pending' AND "alerted_at" IS NULL FOR UPDATE SKIP LOCKED`);
+          if (locked.length !== 1) return false;
           Sentry.captureMessage('A computer give-back has been pending for a long time: the person is charged provisionally', { level: 'error', tags: { area: 'computer', step: 'giveback_pending_age', basis: one.basis }, extra: { jobId: one.jobId, since: one.decidedAt.toISOString() } });
-          result.alerted++;
-        } catch (error) {
-          console.error('[Computer] Could not tell Sentry about a long-pending give-back:', error instanceof Error ? error.message : 'unknown');
-          await prisma.computerGiveBackDecision.updateMany({ where: { jobId: one.jobId, state: 'pending', alertedAt: now }, data: { alertedAt: null } }).catch(() => undefined);
-        }
+          await tx.computerGiveBackDecision.update({ where: { jobId: one.jobId }, data: { alertedAt: now } });
+          return true;
+        });
+        if (told) result.alerted++;
       } catch (error) {
-        console.error('[Computer] Could not claim the alert of a long-pending give-back:', error instanceof Error ? error.message : 'unknown');
+        console.error('[Computer] Could not tell Sentry about a long-pending give-back (the next sweep tells it):', error instanceof Error ? error.message : 'unknown');
       }
     }
   } catch (error) {
@@ -442,15 +441,19 @@ async function lateLookFailed(jobId: string, mark: Date, now: Date): Promise<voi
       SET "updated_at" = GREATEST("updated_at", ${mark}), "attempts" = "attempts" + 1, "next_attempt_at" = ${next}, "last_error" = ${marker}
       WHERE "job_id" = ${jobId} AND "state" IN ('refused', 'given') AND "last_error" IS NOT DISTINCT FROM ${row.last_error}`;
     if (rescheduled !== 1 || told || now.getTime() - first < LATE_LOOK_ALERT_MS) return;
-    // Claimed by a write only one of two sweeps can win, and only that one tells Sentry; a capture that throws gives the claim back
+    // Told once, by the same shape as the other alerts: the row is locked (FOR UPDATE SKIP LOCKED) while its marker is still the one just written, Sentry is told inside the
+    // transaction, and `late_look_told` is set before the commit. A sweep that finds it locked skips it; a capture that throws or a worker that dies rolls back, and the next
+    // failing look tells it (a duplicate at worst, never a lost alert)
     const toldMarker = `${LATE_LOOK_TOLD}:${first}`;
-    const claimed = await prisma.$executeRaw`UPDATE "computer_give_back_decisions" SET "last_error" = ${toldMarker} WHERE "job_id" = ${jobId} AND "last_error" = ${marker}`;
-    if (claimed !== 1) return;
     try {
-      Sentry.captureMessage('A late look at evidence for a computer give-back has been failing for over an hour: a confirmed fault of ours may still be charged to a person', { level: 'error', tags: { area: 'computer', step: 'giveback_late_look' }, extra: { jobId, since: new Date(first).toISOString() } });
+      await prisma.$transaction(async (tx) => {
+        const locked = await tx.$queryRaw<Array<{ job_id: string }>>(Prisma.sql`SELECT "job_id" FROM "computer_give_back_decisions" WHERE "job_id" = ${jobId} AND "last_error" = ${marker} FOR UPDATE SKIP LOCKED`);
+        if (locked.length !== 1) return;
+        Sentry.captureMessage('A late look at evidence for a computer give-back has been failing for over an hour: a confirmed fault of ours may still be charged to a person', { level: 'error', tags: { area: 'computer', step: 'giveback_late_look' }, extra: { jobId, since: new Date(first).toISOString() } });
+        await tx.$executeRaw`UPDATE "computer_give_back_decisions" SET "last_error" = ${toldMarker} WHERE "job_id" = ${jobId}`;
+      });
     } catch (error) {
-      console.error('[Computer] Could not tell Sentry about a failing late look:', error instanceof Error ? error.message : 'unknown');
-      await prisma.$executeRaw`UPDATE "computer_give_back_decisions" SET "last_error" = ${marker} WHERE "job_id" = ${jobId} AND "last_error" = ${toldMarker}`.catch(() => undefined);
+      console.error('[Computer] Could not tell Sentry about a failing late look (the next failing look tells it):', error instanceof Error ? error.message : 'unknown');
     }
   } catch (error) {
     console.error('[Computer] Could not reschedule a failing late look:', error instanceof Error ? error.message : 'unknown');
