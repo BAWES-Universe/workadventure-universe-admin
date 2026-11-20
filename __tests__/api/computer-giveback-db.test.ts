@@ -233,6 +233,22 @@ run('a computer job that failed on our side, and the bound on giving it back', (
     expect(await givenBack(refused.id)).toBe(false);
   });
 
+  it('does not mark an Orbit-seen failure as the runner’s when the job also has an unproven first turn: the lapse is given back past the bound', async () => {
+    await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+    const sara = await person('sara');
+    expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+    const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Unproven turn' }, minutes(100));
+    if (!started.ok) throw new Error('no');
+    // Its first turn was sent and never named, so the ending also writes the machine's turn hold in the same transaction
+    await prisma.computerJob.update({ where: { id: started.job.id }, data: { firstTurnSentAt: minutes(101), agentResponseId: null } });
+    expect(await sweepComputers(minutes(200))).toMatchObject({ stopped: 1 });
+    expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'error', runnerFault: false });
+    expect(await givenBack(started.job.id)).toBe(true);
+    // And it used none of the bound (1): the next runner give-back is refused only because of the first one
+    const next = await job(sara, ours);
+    expect(next).toMatchObject({ status: 'failed', endedBy: null });
+  });
+
   it('always gives back a machine that would not start, and it uses none of the bound either', async () => {
     await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
     const sara = await person('sara');
