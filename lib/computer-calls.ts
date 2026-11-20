@@ -28,7 +28,11 @@ import { routeIsPaused } from '@/lib/computer-fault-ops';
 const CALL_ID = /^[A-Za-z0-9_.:-]{1,80}$/;
 const MAX_MICROS = 2_000_000_000;
 
-export const callRoomKey = (jobId: string, callId: string) => `computer:call:${jobId}:${callId}`;
+// A function declaration, not a const: this module is part of an import cycle (computer-calls, computer-fault-ops, computer-giveback), and a declaration is
+// usable at once when another module in the cycle reads the exports while this one is still loading (a const is not, and a test mock that copies the exports failed on it)
+export function callRoomKey(jobId: string, callId: string): string {
+  return `computer:call:${jobId}:${callId}`;
+}
 
 export type Authorized =
   | { ok: true; jobId: string; botId: string; personId: string; /** Null when the call is on the owner's own key: no room was taken. */ reservedMicros: number | null }
