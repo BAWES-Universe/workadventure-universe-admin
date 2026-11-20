@@ -304,9 +304,21 @@ export async function sweepGiveBackDecisions(now: Date = new Date(), batch = 50)
     const alertAfter = (limits?.unclearWaitMinutes ?? INSTANT_LIMITS_RECOMMENDED.unclearWaitMinutes) * MINUTE;
     const old = await prisma.computerGiveBackDecision.findMany({ where: { state: 'pending', alertedAt: null, decidedAt: { lte: new Date(now.getTime() - alertAfter) } }, take: 20 });
     for (const one of old) {
-      Sentry.captureMessage('A computer give-back has been pending for a long time: the person is charged provisionally', { level: 'error', tags: { area: 'computer', step: 'giveback_pending_age', basis: one.basis }, extra: { jobId: one.jobId, since: one.decidedAt.toISOString() } });
-      await prisma.computerGiveBackDecision.update({ where: { jobId: one.jobId }, data: { alertedAt: now } });
-      result.alerted++;
+      // One row's trouble never ends the loop for the rest. The alert is CLAIMED first by a write only one of two sweeps running together can win, and only that one tells Sentry;
+      // a capture that throws gives the claim back (same guard), so the next sweep tells it
+      try {
+        const claimed = await prisma.computerGiveBackDecision.updateMany({ where: { jobId: one.jobId, state: 'pending', alertedAt: null }, data: { alertedAt: now } });
+        if (claimed.count !== 1) continue;
+        try {
+          Sentry.captureMessage('A computer give-back has been pending for a long time: the person is charged provisionally', { level: 'error', tags: { area: 'computer', step: 'giveback_pending_age', basis: one.basis }, extra: { jobId: one.jobId, since: one.decidedAt.toISOString() } });
+          result.alerted++;
+        } catch (error) {
+          console.error('[Computer] Could not tell Sentry about a long-pending give-back:', error instanceof Error ? error.message : 'unknown');
+          await prisma.computerGiveBackDecision.updateMany({ where: { jobId: one.jobId, state: 'pending', alertedAt: now }, data: { alertedAt: null } }).catch(() => undefined);
+        }
+      } catch (error) {
+        console.error('[Computer] Could not claim the alert of a long-pending give-back:', error instanceof Error ? error.message : 'unknown');
+      }
     }
   } catch (error) {
     console.error('[Computer] The give-back sweep failed:', error instanceof Error ? error.message : 'unknown');

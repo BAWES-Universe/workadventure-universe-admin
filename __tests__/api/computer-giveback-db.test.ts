@@ -682,6 +682,63 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect((await timeOf(stuck.id)).detail).toMatchObject({ givenBack: true, forPersonId: sara.id });
     });
 
+    it('a give-back pending for a long time is told to Sentry once: the alert is claimed by a write only one sweep wins, a capture that throws is told again by the next sweep, and one failing row does not end the loop', async () => {
+      await limitsAre(LAUNCH);
+      const sara = await person('sara');
+      const waiting = async (key: string) => {
+        const ended = await job(sara, { ...ours, turns: [1] }, async (id) => {
+          await planEffect(id, { key, kind: 'send' });
+        });
+        // Pending for days, and not due for a new decision (so only the age alert looks at it)
+        await prisma.computerGiveBackDecision.update({ where: { jobId: ended.id }, data: { decidedAt: new Date(NOW.getTime() - 3 * 24 * 60 * 60_000), nextAttemptAt: new Date(NOW.getTime() + 24 * 60 * 60_000) } });
+        return ended.id;
+      };
+      const one = await waiting('age-1');
+      const alertedAt = async (id: string) => (await prisma.computerGiveBackDecision.findUniqueOrThrow({ where: { jobId: id } })).alertedAt;
+      const captured = Sentry.captureMessage as jest.Mock;
+      captured.mockClear();
+      // Another sweep claims the alert between this one's read and its own claim: this one says nothing
+      const realFindMany = prisma.computerGiveBackDecision.findMany.bind(prisma.computerGiveBackDecision);
+      const spy = jest.spyOn(prisma.computerGiveBackDecision, 'findMany').mockImplementation(((args: { where?: { alertedAt?: null } }) => {
+        const read = realFindMany(args as never);
+        if (args?.where?.alertedAt !== null) return read;
+        return read.then(async (rows) => {
+          await prisma.computerGiveBackDecision.updateMany({ where: { jobId: one }, data: { alertedAt: minutes(1) } });
+          return rows;
+        });
+      }) as never);
+      try {
+        expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 0 });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(captured).not.toHaveBeenCalled();
+      // Two sweeps together tell it once
+      await prisma.computerGiveBackDecision.update({ where: { jobId: one }, data: { alertedAt: null } });
+      const [a, b] = await Promise.all([sweepGiveBackDecisions(minutes(1)), sweepGiveBackDecisions(minutes(1))]);
+      expect(a.alerted + b.alerted).toBe(1);
+      expect(captured).toHaveBeenCalledTimes(1);
+      // A capture that throws gives the claim back and does not stop the rows behind it; the next sweep tells both
+      const two = await waiting('age-2');
+      await prisma.computerGiveBackDecision.update({ where: { jobId: one }, data: { alertedAt: null } });
+      captured.mockClear();
+      captured.mockImplementationOnce(() => {
+        throw new Error('sentry down');
+      });
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 1 });
+      } finally {
+        quiet.mockRestore();
+      }
+      expect(captured).toHaveBeenCalledTimes(2);
+      const failed = [one, two];
+      const states = await Promise.all(failed.map(alertedAt));
+      expect(states.filter((value) => value === null)).toHaveLength(1);
+      expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 1 });
+      expect(await Promise.all(failed.map(alertedAt))).toEqual([expect.any(Date), expect.any(Date)]);
+    });
+
     it('never lets a late row take a give-back back, or turn a job the runner did not report as ours into a give-back', async () => {
       await limitsAre(LAUNCH);
       const sara = await person('sara');
