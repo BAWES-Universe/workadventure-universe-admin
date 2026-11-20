@@ -513,20 +513,21 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: ended.id } })).toMatchObject({ status: 'failed', endedBy: null });
       }
       // Their own provider REFUSING their key is theirs
-      const own = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'own_provider', { source: 'own-key', providerStatus: 401 })]));
+      const own = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'own_provider', { source: 'own-key' })]));
       expect(await decisionOf(own.id)).toMatchObject({ state: 'refused', basis: 'person_caused' });
     });
 
-    it('does not charge the owner for their own provider failing: a generic 5xx, a disconnect with no status or a cut stream on their own key is unresolved (bounded goodwill), whatever the relay called it', async () => {
+    it('does not charge the owner for their own provider failing: a 5xx, a cut stream or a plain 403 on their own key (sent uncertain) is bounded goodwill, while a credential rejection and a resting key stay theirs', async () => {
       await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
       const sara = await person('sara');
-      for (const providerStatus of [500, 503, null]) {
-        const ended = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'own_provider', { source: 'own-key', providerStatus })]));
-        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason: 'own_provider' });
+      for (const [reason, providerStatus] of [['provider_5xx', 500], ['stream_cut', null], ['provider_403', 403]] as const) {
+        const ended = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, reason, { source: 'own-key', route: 'own-key', kind: 'uncertain', providerStatus })]));
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason });
       }
-      // The same on a row the relay says is uncertain (what the game sends once it reads a 5xx as unresolved)
-      const uncertain = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx', { source: 'own-key', kind: 'uncertain', providerStatus: 500 })]));
-      expect(await decisionOf(uncertain.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+      for (const providerStatus of [401, 503, null]) {
+        const theirs = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'own_provider', { source: 'own-key', route: 'own-key', providerStatus })]));
+        expect(await decisionOf(theirs.id)).toMatchObject({ state: 'refused', basis: 'person_caused' });
+      }
     });
 
     it('does not charge by source alone: an own-key call with a relay_down row (our relay, kind fault) is given back and not counted, even with the bound spent', async () => {

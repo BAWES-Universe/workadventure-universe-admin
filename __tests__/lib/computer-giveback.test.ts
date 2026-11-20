@@ -48,7 +48,7 @@ import { faultClassOf } from '@/lib/computer-faults';
 import { giveBackSettingsProblems, retryWaitMs } from '@/lib/computer-giveback';
 
 describe('the class of one thing the relay saw go wrong (Orbit judges it, not the relay)', () => {
-  const row = (reason: string, extra: Partial<{ kind: string; source: string; providerStatus: number | null }> = {}) => ({ kind: 'fault', source: 'universe-ai', reason, ...extra });
+  const row = (reason: string, extra: Partial<{ kind: string; source: string }> = {}) => ({ kind: 'fault', source: 'universe-ai', reason, ...extra });
 
   it('is ours for the faults only our side can cause, and the provider refusing our key, when the relay confirmed it (kind fault)', () => {
     for (const reason of ['relay_down', 'route_unknown', 'authorize_failed', 'key_decrypt_failed', 'pool_busy', 'provider_key_ours']) expect(faultClassOf(row(reason))).toBe('ours');
@@ -58,10 +58,10 @@ describe('the class of one thing the relay saw go wrong (Orbit judges it, not th
     for (const reason of ['allowance', 'rule', 'field_job_set']) expect(faultClassOf(row(reason, { kind: 'not_ours' }))).toBe('person');
   });
 
-  it('is the owner’s for their own provider only when it REFUSED the key or the request (a 4xx); a generic 5xx, a timeout, a disconnect with no status or a cut stream is unresolved, never theirs', () => {
-    const own = (providerStatus: number | null) => faultClassOf(row('own_provider', { kind: 'not_ours', source: 'own-key', providerStatus }));
-    for (const status of [400, 401, 402, 403, 404, 413, 422, 429]) expect(own(status)).toBe('person');
-    for (const status of [408, 500, 502, 503, 504, 529, null]) expect(own(status)).toBe('unresolved');
+  it('reads what the relay sends for failures on the owner’s own key by kind and reason: a credential or credit rejection and a resting key are theirs (not_ours own_provider, with or without a status); a generic 5xx, 429, cut stream, timeout, unreachable endpoint or plain 403 is uncertain, so unresolved', () => {
+    const own = (reason: string, kind: string) => faultClassOf(row(reason, { kind, source: 'own-key' }));
+    expect(own('own_provider', 'not_ours')).toBe('person');
+    for (const reason of ['provider_5xx', 'provider_429', 'stream_cut', 'timeout_no_output', 'timeout_after_output', 'provider_403']) expect(own(reason, 'uncertain')).toBe('unresolved');
   });
 
   it('is unresolved for provider failures, a field only the relay sets, and any reason Orbit does not know (never ours)', () => {
@@ -79,9 +79,7 @@ describe('the class of one thing the relay saw go wrong (Orbit judges it, not th
     expect(faultClassOf(row('relay_down', { source: 'own-key' }))).toBe('ours');
     expect(faultClassOf(row('provider_5xx', { source: 'own-key', kind: 'uncertain' }))).toBe('unresolved');
     expect(faultClassOf(row('timeout_after_output', { source: 'own-key', kind: 'uncertain' }))).toBe('unresolved');
-    expect(faultClassOf(row('own_provider', { source: 'own-key', kind: 'not_ours', providerStatus: 401 }))).toBe('person');
-    expect(faultClassOf(row('own_provider', { source: 'own-key', kind: 'not_ours', providerStatus: 500 }))).toBe('unresolved');
-    expect(faultClassOf(row('own_provider', { source: 'own-key', kind: 'not_ours' }))).toBe('unresolved');
+    expect(faultClassOf(row('own_provider', { source: 'own-key', kind: 'not_ours' }))).toBe('person');
     // Their provider refusing their key is theirs only when the relay says it is not ours; unconfirmed, or a row that says fault on their own key, stays unresolved
     expect(faultClassOf(row('provider_key_ours', { source: 'own-key', kind: 'not_ours' }))).toBe('person');
     expect(faultClassOf(row('provider_key_ours', { source: 'own-key', kind: 'uncertain' }))).toBe('unresolved');
