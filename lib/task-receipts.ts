@@ -571,8 +571,11 @@ function outcomeOfHeader(header: Header): ReceiptOutcome {
 function itemOf(header: Header, events: readonly LineEvent[], botName: string, readerId: string): ActivityItem {
   const lines = receiptLines(events, botName);
   const who = paidBy(header.payer, readerId);
-  const outcome = outcomeOfHeader(header);
-  const holdPending = header.actions.some((action) => action.outcome === 'unknown' && header.heldRuns.has(action.run));
+  // A hold is pending for any action that did not work, whatever its outcome says now: late evidence that confirms a failure does not give the credit back, only the books do
+  const holdPending = header.actions.some((action) => action.outcome !== 'worked' && header.heldRuns.has(action.run));
+  const stated = outcomeOfHeader(header);
+  // "Refunded, nothing taken" is not said while a hold is still on: it reads as not finished (with the release wording) until the books acknowledge the release
+  const outcome: ReceiptOutcome = holdPending && stated === 'refunded' ? 'failed' : stated;
   // Once the books acknowledged giving a hold back, the amount that came back is said (never before: a hold still on is "being released")
   const releasedOf = (run: string): number => header.releasedRuns.get(run) ?? 0;
   const releasedMicros = holdPending ? 0 : header.actions.reduce((sum, action) => (action.outcome === 'unknown' ? sum + releasedOf(action.run) : sum), 0);
@@ -590,7 +593,7 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
     actions: header.actions.map((action): ActivityAction => {
       const taken = action.outcome === 'worked' ? takenForRun(events, action.run) : null;
       const released = action.outcome === 'unknown' && !header.heldRuns.has(action.run) ? releasedOf(action.run) : 0;
-      const takenText = action.outcome === 'worked' ? null : action.outcome === 'unknown' && header.heldRuns.has(action.run) ? HOLD_BEING_RELEASED : released > 0 ? HOLD_RELEASED : NOTHING_TAKEN;
+      const takenText = action.outcome === 'worked' ? null : action.outcome !== 'worked' && header.heldRuns.has(action.run) ? HOLD_BEING_RELEASED : released > 0 ? HOLD_RELEASED : NOTHING_TAKEN;
       return { label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome), takenText, ...(taken === null ? {} : { amountMicros: taken }), ...(released > 0 ? { releasedMicros: released } : {}) };
     }),
     spentMicros: spentOf(header.state, header.chargedMicros, lines),
@@ -683,9 +686,10 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
   const behindReceipts = receiptJobKeys.length === 0 ? [] : await prisma.computerJob.findMany({ where: { personId, id: { in: receiptJobKeys } }, select: { id: true, botId: true, status: true, endedBy: true, startedAt: true } });
   const jobRows = new Map([...jobs, ...behindReceipts].map((job) => [`${job.botId}:${job.id}`, job]));
   const failedJobs = new Set([...jobRows.values()].filter((job) => givenBackJob(job.status, job.endedBy)).map((job) => `${job.botId}:${job.id}`));
-  // Runs of these tasks nobody could confirm whose credit is still on hold: said as a hold being released, not as a charge
-  const unknownRuns = all.flatMap((header) => header.actions.filter((action) => action.outcome === 'unknown').map((action) => action.run));
-  const moneyRows = unknownRuns.length === 0 ? [] : await prisma.instantRun.findMany({ where: { id: { in: unknownRuns }, customerState: { in: ['held', 'released'] } }, select: { id: true, customerState: true, holdMicros: true } });
+  // Runs of these tasks that did not work (nobody could confirm them, or later evidence said they failed) whose credit is still on hold: said as a hold being released,
+  // not as a charge or as "nothing taken", until the books acknowledge the release
+  const unworkedRuns = all.flatMap((header) => header.actions.filter((action) => action.outcome !== 'worked').map((action) => action.run));
+  const moneyRows = unworkedRuns.length === 0 ? [] : await prisma.instantRun.findMany({ where: { id: { in: unworkedRuns }, customerState: { in: ['held', 'released'] } }, select: { id: true, customerState: true, holdMicros: true } });
   const held = new Set(moneyRows.filter((run) => run.customerState === 'held').map((run) => run.id));
   const released = new Map(moneyRows.filter((run) => run.customerState === 'released').map((run) => [run.id, Number(run.holdMicros)] as const));
   const items = all.map((header) => {

@@ -842,6 +842,29 @@ run('receipts that always settle (O1)', () => {
       expect(after?.outcomeNote).not.toContain('releasing');
     });
 
+    it('late evidence that confirms a failure keeps the release wording until the books release the hold: not "refunded", not "nothing taken", while the release is still refused', async () => {
+      await open('late-held', { title: 'Late held task' });
+      const run = await makeRun('late-held', 'failed', { reason: 'unclear', toolkit: 'gmail', customerState: 'held', detail: { noLog: true, releasedUnconfirmed: true } });
+      await closeReceipt({ botId: brick, taskKey: 'late-held', personId: sara, state: 'refunded' }, at(3));
+      const find = async () => (await activityFor(sara)).find((candidate) => candidate.title === 'Late held task');
+      // The provider's log turns up and says it failed; the books still refuse to release the hold (twice)
+      await prisma.instantRun.update({ where: { id: run.id }, data: { detail: { noLog: true, releasedUnconfirmed: true, lateEvidence: { status: 'failed' } } } });
+      await settleCheckingReceipts(50, at(401));
+      await settleCheckingReceipts(50, at(402));
+      expect(await receipt('late-held')).toMatchObject({ actions: [{ run: run.id, outcome: 'failed' }] });
+      const before = await find();
+      expect(before?.state).not.toBe('refunded');
+      expect(before?.actions[0]).toMatchObject({ outcome: 'failed', takenText: HOLD_BEING_RELEASED });
+      expect(before?.outcomeNote).toContain('We’re releasing your hold.');
+      expect(before?.outcomeNote).not.toContain('Nothing was taken');
+      // The books acknowledge the release: now nothing was taken and it is refunded
+      await prisma.instantRun.update({ where: { id: run.id }, data: { customerState: 'released', customerMicros: BigInt(0) } });
+      const after = await find();
+      expect(after).toMatchObject({ state: 'refunded' });
+      expect(after?.actions[0]).toMatchObject({ outcome: 'failed', takenText: NOTHING_TAKEN });
+      expect(after?.outcomeNote ?? '').not.toContain('releasing');
+    });
+
     it('a later confirmed success updates the ORIGINAL receipt (the same row, the same id) and the charge stays what the books recorded; a later confirmed failure is a failure, never unknown', async () => {
       await open('late-1');
       const run = await makeRun('late-1', 'failed', { reason: 'unclear', toolkit: 'gmail', customerState: 'released', customerMicros: BigInt(0), detail: { noLog: true } });
