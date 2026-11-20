@@ -137,3 +137,27 @@ describe('the key-form holds migration is superseded', () => {
     expect(found).toBe('');
   });
 });
+
+describe('an index built without blocking writes', () => {
+  const statementsOf = (sql: string) =>
+    sql
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n')
+      .split(';')
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+
+  it('a migration that builds an index CONCURRENTLY has that statement alone (the concurrent form cannot run inside a transaction block)', () => {
+    const concurrent = manifest.shipping.migrations.filter((name) => /CREATE\s+(UNIQUE\s+)?INDEX\s+CONCURRENTLY/i.test(fs.readFileSync(path.join(root, 'prisma/migrations', name, 'migration.sql'), 'utf8')));
+    expect(concurrent).toContain('20261120140000_page_order_long_wait_index');
+    for (const name of concurrent) expect(statementsOf(fs.readFileSync(path.join(root, 'prisma/migrations', name, 'migration.sql'), 'utf8'))).toHaveLength(1);
+  });
+
+  it('the long-wait index on checkout orders is built that way, and its comment does not claim an order the index does not give', () => {
+    const sql = fs.readFileSync(path.join(root, 'prisma/migrations/20261120140000_page_order_long_wait_index/migration.sql'), 'utf8');
+    expect(statementsOf(sql)[0]).toMatch(/^CREATE INDEX CONCURRENTLY "app_page_orders_reconciled_status_next_look_at_idx"/);
+    expect(sql).not.toMatch(/builds in moments/i);
+    expect(sql.replace(/\n--\s*/g, ' ')).toMatch(/does\s+not supply the sweep's order/i);
+  });
+});
