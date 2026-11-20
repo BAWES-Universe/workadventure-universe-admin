@@ -6,6 +6,7 @@ import { reconcileCheck } from '@/lib/computer-reconcile';
 import { coldProvider, coldStatus } from '@/lib/computer-cold';
 import { STORAGE_DELETION_ALERT_MS, storageDeletionsWaiting } from '@/lib/computer-archives';
 import { computersArePaused } from '@/lib/capability-pause';
+import { giveBackReadiness } from '@/lib/computer-fault-ops';
 
 export interface Readiness {
   /** Every check passed: a person's job can run now. */
@@ -65,6 +66,9 @@ export async function computerReadiness(): Promise<Readiness> {
       });
     }
   }
+  // The settings the bound on give-backs reads must exist: missing numbers hold unresolved give-backs, they never mean "no bound"
+  const giveBack = await giveBackReadiness().catch(() => ({ ok: false, detail: 'The give-back settings could not be checked' }));
+  checks.push({ name: 'give-backs', ...giveBack });
   const winding = await isWindingDown();
   checks.push({ name: 'wind-down', ok: !winding, detail: winding ? 'A wind-down is on: no computer takes new work' : 'No wind-down is on' });
   const paused = await computersArePaused();
