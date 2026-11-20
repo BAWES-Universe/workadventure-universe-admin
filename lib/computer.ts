@@ -35,6 +35,7 @@ import { computersArePaused } from '@/lib/capability-pause';
 import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
+import { getInstantLimits } from '@/lib/instant/state';
 import { judgeJobGiveBack, type GiveBackVerdict } from '@/lib/computer-giveback';
 import {
   AFTER_TAKE_OVER,
@@ -1187,11 +1188,13 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       const botId = job.botId;
       const personId = job.personId;
       const startedAt = job.startedAt;
+      // Read before the transaction opens: a read of Limits that fails inside it would leave the transaction aborted
+      const limits = judged ? await getInstantLimits() : null;
       const result = await prisma.$transaction(async (tx) => {
         let verdict: GiveBackVerdict = { give: true };
-        if (judged) {
+        if (judged && limits) {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`computer:giveback:${personId}`}))`;
-          verdict = await judgeJobGiveBack(tx, { id: jobId, personId, startedAt }, now);
+          verdict = await judgeJobGiveBack(tx, limits, { id: jobId, personId, startedAt }, now);
         }
         const done = await tx.computerJob.updateMany({ where, data: verdict.give ? endData : { ...endData, status: 'failed', endedBy: null } });
         if (done.count === 1 && turnHold) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });

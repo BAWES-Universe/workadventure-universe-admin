@@ -157,13 +157,28 @@ run('a computer job that failed on our side, and the bound on giving it back', (
     expect(await givenBack((await job(sara, ours)).id)).toBe(true);
   });
 
-  it('is still given back when an effect was only tried, or confirmed not done: nothing was delivered', async () => {
+  it('is still given back when an effect was confirmed not done: nothing was delivered', async () => {
     const sara = await person('sara');
     const ended = await job(sara, ours, async (jobId) => {
       await planEffect(jobId, { key: 'mail-1', kind: 'send' });
       await settleEffect(jobId, 'mail-1', 'failed');
     });
     expect(await givenBack(ended.id)).toBe(true);
+  });
+
+  it('is not given back when an effect was tried and its outcome is not known: it may settle as done after the job is over, and a give-back cannot be taken back', async () => {
+    const sara = await person('sara');
+    let jobId = '';
+    const ended = await job(sara, ours, async (id) => {
+      jobId = id;
+      await planEffect(id, { key: 'mail-1', kind: 'send' });
+    });
+    expect(ended).toMatchObject({ status: 'failed', endedBy: null });
+    expect(await givenBack(ended.id)).toBe(false);
+    // The effect settles as done later: nothing changes, the person was never given anything back
+    expect(await settleEffect(jobId, 'mail-1', 'done', 'ali@example.test')).toBe(true);
+    await sweepComputers(minutes(60));
+    expect(await timeOf(ended.id)).toMatchObject({ personKey: `person:${sara.id}` });
   });
 
   it('is not given back to a person who is paused: their give-backs are repeated as a share of the jobs that ended', async () => {
