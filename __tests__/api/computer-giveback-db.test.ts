@@ -64,13 +64,13 @@ const wipe = async () => {
 
 let clock = 0;
 /** A job that starts and then is ended as the runner says; every job in these tests runs 5 minutes. */
-async function job(p: { id: string; brickId: string }, ending: { outcome: 'done' | 'failed'; cause?: 'ours' | 'agent'; turns?: number[] }, before?: (jobId: string) => Promise<void>) {
+async function job(p: { id: string; brickId: string }, ending: { outcome: 'done' | 'failed'; cause?: 'ours' | 'agent'; turns?: number[]; run?: string }, before?: (jobId: string) => Promise<void>) {
   const at = clock;
   clock += 10;
   const started = await startJob({ botId: p.brickId, personId: p.id, title: 'Job' }, minutes(at));
   if (!started.ok) throw new Error('the job did not start');
   if (before) await before(started.job.id);
-  await finishJob(started.job.id, ending.outcome, minutes(at + 5), null, ending.cause ?? null, ending.turns);
+  await finishJob(started.job.id, ending.outcome, minutes(at + 5), null, ending.cause ?? null, ending.turns, ending.run);
   return prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } });
 }
 const ours = { outcome: 'failed' as const, cause: 'ours' as const };
@@ -827,6 +827,66 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await givenBack(first.id)).toBe(true);
       const next = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
       expect(await decisionOf(next.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+    });
+
+    describe('runs: a bot-server restart makes a new run that numbers its turns from 1 again', () => {
+      it('does not mix two runs that use the same turn numbers: the rows of an earlier run are not the turns of the new one', async () => {
+        await limitsAre(LAUNCH);
+        const sara = await person('sara');
+        // Run A's turn 1 was the person's (their job set a field the provider refused); run B's turn 1 crashed and left no row
+        const rowsA = [fault(1, 'field_job_set', { run: 'runa' })];
+        const mixed = await job(sara, { ...ours, turns: [1], run: 'runb' }, withFaults(sara, rowsA));
+        expect(await decisionOf(mixed.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason: 'no_row', judgedRun: 'runb' });
+        // The same rows judged in the run they belong to are the person's
+        const own = await job(sara, { ...ours, turns: [1], run: 'runa' }, withFaults(sara, [fault(1, 'field_job_set', { run: 'runa' })]));
+        expect(await decisionOf(own.id)).toMatchObject({ state: 'refused', basis: 'person_caused', judgedRun: 'runa' });
+      });
+
+      it('reads a confirmed fault of ours only in the run it was written in, and a late row of another run changes nothing', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const sara = await person('sara');
+        expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+        // Our fault on turn 1 of run A; the job's new run B crashed on its turn 1 with no row: B's ending is unresolved, and the bound is spent
+        const ended = await job(sara, { ...ours, turns: [1], run: 'runb' }, withFaults(sara, [fault(1, 'provider_key_ours', { run: 'runa' })]));
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+        await afterLateEvidence(ended.id);
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+        // A late row of OUR fault in run B itself does give it back
+        await recordFaults(sara.brickId, ended.id, [fault(1, 'provider_key_ours', { run: 'runb' })]);
+        await afterLateEvidence(ended.id);
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+      });
+
+      it('keeps the run a held decision was judged in: decided again later (the Limits now set), an earlier run’s rows are still not the new run’s turns', async () => {
+        await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
+        const sara = await person('sara');
+        const held = await job(sara, { ...ours, turns: [1], run: 'runb' }, withFaults(sara, [fault(1, 'field_job_set', { run: 'runa' })]));
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', judgedRun: 'runb' });
+        await limitsAre(LAUNCH);
+        await sweepComputers(new Date(NOW.getTime() + 3 * 60 * 60_000));
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason: 'no_row' });
+      });
+
+      it('matches no run with no run, so rows and finishes from a game that names none read as before; a run on only one side is not a match', async () => {
+        await limitsAre(LAUNCH);
+        const sara = await person('sara');
+        const none = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'field_job_set')]));
+        expect(await decisionOf(none.id)).toMatchObject({ state: 'refused', basis: 'person_caused', judgedRun: null });
+        const finishOnly = await job(sara, { ...ours, turns: [1], run: 'runx' }, withFaults(sara, [fault(1, 'field_job_set')]));
+        expect(await decisionOf(finishOnly.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason: 'no_row' });
+        const rowOnly = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'field_job_set', { run: 'runx' })]));
+        expect(await decisionOf(rowOnly.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason: 'no_row' });
+      });
+
+      it('keeps the run of a row once, like the rest of it (a row said twice changes nothing)', async () => {
+        const sara = await person('sara');
+        const s = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, minutes(0));
+        if (!s.ok) throw new Error('no');
+        const row = fault(2, 'provider_5xx', { run: 'runa', callId: 'same' });
+        expect(await recordFaults(sara.brickId, s.job.id, [row])).toEqual({ stored: 1 });
+        expect(await recordFaults(sara.brickId, s.job.id, [{ ...row, run: 'runb' }])).toEqual({ stored: 0 });
+        expect(await prisma.computerJobFault.findFirstOrThrow({ where: { jobId: s.job.id } })).toMatchObject({ run: 'runa' });
+      });
     });
 
     describe('a Brick purged while a give-back still waits', () => {

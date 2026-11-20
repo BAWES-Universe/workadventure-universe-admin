@@ -1018,7 +1018,7 @@ export async function stopJobForRefusal(jobId: string, why: { reason: 'allowance
 }
 
 /** The job finished: its machine is saved and rests, what it cost is counted, and the next job in line starts. Safe to say twice. */
-export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date(), why?: string | null, cause?: FinishCause | null, turns?: number[] | null): Promise<JobView | null> {
+export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date(), why?: string | null, cause?: FinishCause | null, turns?: number[] | null, run?: string | null): Promise<JobView | null> {
   // A job that never started (still in line) did not finish: it is stopped by the person or starts, never "done"
   const current = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
   if (current && current.status !== 'queued') {
@@ -1028,7 +1028,7 @@ export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: 
     // Only a failure the runner says is ours is given back; one with no cause (or the agent's own) is the person's, so a run cannot be made free by ending it "failed"
     // Only this ending is steered by the job's own words (a brief can crash its own machine), so only this one is bounded; the endings Orbit saw itself are always given back
     const ours = outcome === 'failed' && cause === 'ours';
-    await endJob(jobId, outcome, ours ? 'error' : null, now, true, undefined, true, ours ? { turns: turns ?? null } : null);
+    await endJob(jobId, outcome, ours ? 'error' : null, now, true, undefined, true, ours ? { turns: turns ?? null, run: turns && turns.length > 0 ? (run ?? null) : null } : null);
   }
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return job ? jobView(job) : null;
@@ -1147,7 +1147,7 @@ const END_TRIES = 4;
  * `outside` false writes only our own tables (the Brick's purge ends its jobs this way, so a slow provider or backup never holds the purge):
  * the machine, its browser and the agent's turn are left to the purge's own removal of the machine.
  */
-async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, runner: { turns: number[] | null } | null = null): Promise<void> {
+async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, runner: { turns: number[] | null; run?: string | null } | null = null): Promise<void> {
   // The job can change under this (a person's answer moves it between running and waiting): the end is tried again on what it is now, and
   // only a job that is over, or no longer the one the caller meant, is let go
   let job: NonNullable<Awaited<ReturnType<typeof prisma.computerJob.findUnique>>> | null = null;
@@ -1201,7 +1201,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         let verdict: Verdict | null = null;
         if (runnerJudged) {
           await lockPerson(tx, ref.personId);
-          verdict = await decideRunnerFinish(tx, limits, ref, runner.turns, now);
+          verdict = await decideRunnerFinish(tx, limits, ref, runner.turns, now, { run: runner.run ?? null });
         }
         const given = !verdict || verdict.state === 'given';
         const counted = verdict?.state === 'given' && verdict.counted;
@@ -1209,7 +1209,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         const done = await tx.computerJob.updateMany({ where, data });
         if (done.count === 1) {
           if (turnHold) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
-          if (verdict) await writeDecision(tx, ref, verdict, 'ours', runner?.turns ?? null, now);
+          if (verdict) await writeDecision(tx, ref, verdict, 'ours', runner?.turns ?? null, now, runner?.run ?? null);
           else if (orbitSeen) await writeOrbitDecision(tx, ref);
         }
         return { done, verdict };

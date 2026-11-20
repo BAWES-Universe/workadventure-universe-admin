@@ -9,6 +9,8 @@ export const runtime = 'nodejs';
 
 const faultSchema = z.object({
   turn: z.number().int().min(0).max(100_000).nullable().optional(),
+  // The runner's run the turn was numbered in (a restart makes a new run, numbering turns from 1 again); left out by a runner that names none
+  run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional(),
   // One row per model call; a fault with no call is `turn:<n>`
   callId: z.string().min(1).max(120),
   kind: z.enum(FAULT_KINDS),
@@ -40,7 +42,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     return NextResponse.json({ error: 'Invalid request' }, { status: 400 });
   }
   try {
-    const kept = await recordFaults(id, jobId, body.faults.map((row) => ({ ...row, turn: row.turn ?? null, route: row.route ?? null, providerStatus: row.providerStatus ?? null })));
+    const kept = await recordFaults(id, jobId, body.faults.map((row) => ({ ...row, turn: row.turn ?? null, run: row.run ?? null, route: row.route ?? null, providerStatus: row.providerStatus ?? null })));
     if (!kept) return NextResponse.json({ error: 'Job not found' }, { status: 404 });
     // A row for a job that is already over can change what was decided about it
     await afterLateEvidence(jobId).catch((error) => console.error('[Computer] Late evidence could not be judged:', error instanceof Error ? error.message : 'unknown'));

@@ -93,9 +93,9 @@ export async function decideRunnerFinish(
   job: JobRef,
   turns: readonly number[] | null | undefined,
   now: Date,
-  options: { effectsClosed?: boolean } = {},
+  options: { effectsClosed?: boolean; run?: string | null } = {},
 ): Promise<Verdict> {
-  const rows = await readFaultRows(tx, job.id, turns);
+  const rows = await readFaultRows(tx, job.id, turns, options.run);
   const ours = rows.find((row) => row.cls === 'ours');
   // Nothing was charged for a job that never started: there is nothing to hold back
   if (!job.startedAt) return { state: 'given', basis: 'universe_fault', counted: false, reason: ours?.reason ?? 'not_started', route: ours?.route ?? null };
@@ -141,6 +141,7 @@ export async function writeDecision(
   hint: string | null,
   turns: readonly number[] | null | undefined,
   now: Date,
+  run: string | null | undefined = null,
 ): Promise<void> {
   const data = {
     state: verdict.state,
@@ -149,6 +150,7 @@ export async function writeDecision(
     reason: verdict.reason,
     route: verdict.route,
     judgedTurns: [...(turns ?? [])],
+    judgedRun: turns && turns.length > 0 ? (run ?? null) : null,
     nextAttemptAt: verdict.state === 'pending' ? new Date(now.getTime() + retryWaitMs(0)) : null,
   };
   await tx.computerGiveBackDecision.upsert({ where: { jobId: job.id }, create: { jobId: job.id, personId: job.personId, ...data }, update: data });
@@ -230,7 +232,7 @@ export async function resolveDecision(jobId: string, now: Date = new Date(), opt
   const effectsClosed = options.closing === true || now.getTime() - decision.decidedAt.getTime() >= closeAfter;
   const verdict = await prisma.$transaction(async (tx) => {
     await lockPerson(tx, job.personId);
-    let next = await decideRunnerFinish(tx, limits, job, decision.judgedTurns, now, { effectsClosed });
+    let next = await decideRunnerFinish(tx, limits, job, decision.judgedTurns, now, { effectsClosed, run: decision.judgedRun });
     // Limits that cannot be read or are not set cannot be waited out when the evidence is about to be deleted: the person is not charged for it
     if (options.closing && next.state === 'pending') next = { state: 'given', basis: 'orbit_fault', counted: false, reason: 'brick_purged', route: next.route };
     if (next.state === 'pending') {
@@ -298,7 +300,7 @@ export async function afterLateEvidence(jobId: string, now: Date = new Date()): 
     // Read again under the person's lock: a decision made in the meantime (a parallel retry) is the one that stands
     const decision = await tx.computerGiveBackDecision.findUnique({ where: { jobId } });
     if (!decision || decision.state === 'pending' || (decision.state === 'given' && decision.basis !== 'goodwill')) return false;
-    const rows = await readFaultRows(tx, jobId, decision.judgedTurns);
+    const rows = await readFaultRows(tx, jobId, decision.judgedTurns, decision.judgedRun);
     const ours = rows.find((row) => row.cls === 'ours');
     if (!ours) return false;
     await tx.computerGiveBackDecision.update({ where: { jobId }, data: { state: 'given', basis: 'universe_fault', reason: ours.reason, route: ours.route, nextAttemptAt: null } });

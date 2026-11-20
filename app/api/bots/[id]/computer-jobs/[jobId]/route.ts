@@ -18,7 +18,7 @@ const actionSchema = z.discriminatedUnion('action', [
     /** For "details": what Brick is ready to put in and where, named before the person is asked. */
     ready: z.object({ what: z.string().trim().min(1).max(150), where: z.string().trim().min(1).max(150) }).nullable().optional(),
   }),
-  z.object({ action: z.literal('finish'), outcome: z.enum(['done', 'failed']), /** Who a failure is down to (`ours` is given back, `agent` is the person's); left out, it is the person's. */ cause: z.enum(FINISH_CAUSES).nullable().optional(), /** The turns the runner judged failed: Orbit decides a give-back from the relay's rows for them (the cause is only a hint). */ turns: z.array(z.number().int().min(0).max(100_000)).max(200).nullable().optional(), /** The computer's one sentence about why it could not go on; cleaned before it is kept. */ why: z.string().max(2000).nullable().optional() }),
+  z.object({ action: z.literal('finish'), outcome: z.enum(['done', 'failed']), /** Who a failure is down to (`ours` is given back, `agent` is the person's); left out, it is the person's. */ cause: z.enum(FINISH_CAUSES).nullable().optional(), /** The turns the runner judged failed: Orbit decides a give-back from the relay's rows for them (the cause is only a hint). */ turns: z.array(z.number().int().min(0).max(100_000)).max(200).nullable().optional(), /** The runner's run those turns were numbered in (a restart makes a new run that numbers turns again); only meaningful with `turns`. */ run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional(), /** The computer's one sentence about why it could not go on; cleaned before it is kept. */ why: z.string().max(2000).nullable().optional() }),
   z.object({ action: z.literal('plan-effect'), key: z.string().min(1).max(255), kind: z.enum(EFFECT_KINDS), evidence: z.string().max(500).nullable().optional() }),
   z.object({ action: z.literal('settle-effect'), key: z.string().min(1).max(255), state: z.enum(['done', 'failed']), evidence: z.string().max(500).nullable().optional() }),
 ]);
@@ -76,7 +76,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       case 'handover':
         return NextResponse.json({ job: await requestHandover(jobId, body.waitingFor, new Date(), body.ready) });
       case 'finish':
-        return NextResponse.json({ job: await finishJob(jobId, body.outcome, new Date(), body.why, body.cause, body.turns) });
+        return NextResponse.json({ job: await finishJob(jobId, body.outcome, new Date(), body.why, body.cause, body.turns, body.run) });
       case 'plan-effect':
         return NextResponse.json(await planEffect(jobId, { key: body.key, kind: body.kind, evidence: body.evidence }));
       case 'settle-effect':
