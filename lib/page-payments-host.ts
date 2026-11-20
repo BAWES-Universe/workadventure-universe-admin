@@ -619,7 +619,11 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         if (answer.ok && status === 'paid') return end({ paid: { test: answer.body?.testPayment === true }, restored: restoredOf(answer.body) }, 'paid', request, ticket, answer.body?.testPayment === true);
         // An order of theirs that closed while the service has still not had the last word: it may have been paid, so it is never "no purchase found" and
         // never waited on for twenty minutes (there is no link), and a new purchase is not held up by it
-        if (answer.ok && status === 'checking' && answer.body?.longWait === true) return end({ problem: 'still_checking', canCheck: true }, 'cant_confirm', request, ticket);
+        // This Restore is now the ask Check payment follows (what it asks, and the request the page hears the answer under), not the wish of an earlier checkout
+        if (answer.ok && status === 'checking' && answer.body?.longWait === true) {
+          target = { intentId: null, request, ticket };
+          return end({ problem: 'still_checking', canCheck: true }, 'cant_confirm', request, ticket);
+        }
         // Their own start that never finished, not yet ready to be carried on: Orbit only does that when Restore is asked again after its wait,
         // so it is asked again, at the pace it gives, until the link comes, the purchase is found, or twenty minutes have passed
         if (answer.ok && stillStarting(answer.body)) {
@@ -706,7 +710,11 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         };
         if (answer.ok && status === 'paid') return done({ paid: { test }, restored: asked.intentId ? null : restoredOf(answer.body) }, 'paid', test);
         // Closed, and the service has not had the last word: still being checked, never waited on (there is no link) and never "not paid"
-        if (answer.ok && status === 'checking' && answer.body?.longWait === true) return done({ problem: 'still_checking', canCheck: true }, 'cant_confirm');
+        if (answer.ok && status === 'checking' && answer.body?.longWait === true) {
+          // An explicit Restore becomes the ask Check payment follows; Check payment itself stays on the wish it asked by
+          if (restoring) target = { intentId: null, request: asked.request, ticket: asked.ticket };
+          return done({ problem: 'still_checking', canCheck: true }, 'cant_confirm');
+        }
         // This browser's own start that never finished and cannot be carried on yet (it may still be in flight, or its wait is not over): Orbit
         // resumes it only when it is asked about again by its wish (Check payment) or by Restore, never when an order is polled. So the same ask is
         // made again, at the pace the server gives, until the link comes (then it is adopted as any other), the purchase is found, or twenty

@@ -423,6 +423,34 @@ describe('a paying page on the public share link', () => {
     checked.host.destroy();
   });
 
+  it('after a Restore that finds an order still being checked, Check payment follows that Restore (its ask and its request), while Check payment by an earlier wish stays on that wish', async () => {
+    const unresolved = { status: 'checking', longWait: true, orderId: 'o-9', checkoutUrl: null, testPayment: false, via: 'own', buyer: 'guest', pollAfterMs: 15_000 };
+    const earlier = setup((call) => (call.body.restore || call.body.check ? { body: unresolved } : 'lost'));
+    earlier.tap({ request: 'r1' });
+    await jest.advanceTimersByTimeAsync(10_000);
+    // The page then asks for its purchase back (request r2): still being checked, told under r2
+    earlier.tap({ request: 'r2', restore: true });
+    await flush();
+    expect(earlier.told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'cant_confirm', request: 'r2' });
+    // Check payment now asks as that Restore did, and the page hears it under r2 (not under r1, whose checkout is long over)
+    earlier.host.checkPayment();
+    await flush();
+    expect(earlier.calls.at(-1)?.body).toMatchObject({ restore: true });
+    expect(earlier.calls.at(-1)?.body.intentId).toBeUndefined();
+    expect(earlier.told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'cant_confirm', request: 'r2' });
+    earlier.host.destroy();
+    // The explicit Restore purchase button does the same
+    const button = setup((call) => (call.body.restore || call.body.check ? { body: unresolved } : 'lost'));
+    button.tap({ request: 'r3' });
+    await jest.advanceTimersByTimeAsync(10_000);
+    button.host.restorePurchase();
+    await flush();
+    button.host.checkPayment();
+    await flush();
+    expect(button.calls.at(-1)?.body).toMatchObject({ restore: true });
+    button.host.destroy();
+  });
+
   it('tells a page "none" when a restore finds nothing, and watches an order of theirs that is still open', async () => {
     const none = setup(() => ({ body: { status: 'none', testPayment: false, orderId: null } }));
     none.tap({ request: 'r1', restore: true });
