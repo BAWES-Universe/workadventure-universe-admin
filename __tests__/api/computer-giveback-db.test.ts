@@ -1372,6 +1372,21 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(seen.groups).toBe(4);
       });
 
+      /** Resolves once the retry has READ the decision (as pending): the first read of that job's decision is the retry's, made before it waits for the person's lock. A barrier, never a timer. */
+      const retryHasRead = (jobId: string) => {
+        const real = prisma.computerGiveBackDecision.findUnique.bind(prisma.computerGiveBackDecision);
+        let release: () => void = () => undefined;
+        const read = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const spy = jest.spyOn(prisma.computerGiveBackDecision, 'findUnique').mockImplementation(((args: { where?: { jobId?: string } }) => {
+          const answer = real(args as never);
+          if (args?.where?.jobId === jobId) answer.then(() => release(), () => release());
+          return answer;
+        }) as never);
+        return { read, restore: () => spy.mockRestore() };
+      };
+
       it('a retry that read a decision as pending decides nothing over one an incident correction made while it waited for the person’s lock', async () => {
         await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
         const sara = await person('sara');
@@ -1381,13 +1396,16 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
         expect(await givenBack((await job(sara, ours)).id)).toBe(true);
         let retry: Promise<string> = Promise.resolve('none');
+        const barrier = retryHasRead(held.id);
         await prisma.$transaction(async (tx) => {
           await lockPerson(tx, sara.id);
           retry = resolveDecision(held.id, minutes(30));
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          // The retry has read the decision as pending; only then does the correction commit
+          await barrier.read;
           await tx.computerGiveBackDecision.update({ where: { jobId: held.id }, data: { state: 'given', basis: 'incident', route: 'r', nextAttemptAt: null } });
         });
         expect(await retry).toBe('none');
+        barrier.restore();
         expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'incident' });
       });
 
@@ -1397,13 +1415,16 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         const held = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
         await prisma.computerJob.delete({ where: { id: held.id } });
         let retry: Promise<string> = Promise.resolve('none');
+        const barrier = retryHasRead(held.id);
         await prisma.$transaction(async (tx) => {
           await lockPerson(tx, sara.id);
           retry = resolveDecision(held.id, minutes(30));
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          // The retry has read the decision as pending; only then does the correction commit
+          await barrier.read;
           await tx.computerGiveBackDecision.update({ where: { jobId: held.id }, data: { state: 'given', basis: 'incident', route: 'r', nextAttemptAt: null } });
         });
         expect(await retry).toBe('none');
+        barrier.restore();
         expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'incident' });
       });
 
