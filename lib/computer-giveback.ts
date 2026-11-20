@@ -389,8 +389,8 @@ const LATE_LOOK_ALERT_MS = 60 * MINUTE;
 export async function sweepLateEvidence(now: Date = new Date(), batch = 50): Promise<{ looked: number }> {
   const result = { looked: 0 };
   try {
-    const due = await prisma.$queryRaw<Array<{ job_id: string; mark: Date }>>(Prisma.sql`
-      SELECT d."job_id", clock_timestamp() AS mark FROM "computer_give_back_decisions" d
+    const due = await prisma.$queryRaw<Array<{ job_id: string; mark: Date; attempts: number; last_error: string | null }>>(Prisma.sql`
+      SELECT d."job_id", clock_timestamp() AS mark, d."attempts", d."last_error" FROM "computer_give_back_decisions" d
       WHERE d."cause_hint" = 'ours' AND (d."state" = 'refused' OR (d."state" = 'given' AND d."basis" = 'goodwill'))
         AND (
           -- A look that threw is retried at its own time, however old the decision is: it is never dropped
@@ -407,13 +407,16 @@ export async function sweepLateEvidence(now: Date = new Date(), batch = 50): Pro
       result.looked++;
       try {
         await afterLateEvidence(one.job_id, now);
-        // Marked as looked at as of when this look began: a row that arrives from here on is newer than the mark. A look that succeeds ends any retry of an earlier one that threw
-        await prisma.$executeRaw`
+        // Marked as looked at as of when this look began: a row that arrives from here on is newer than the mark. A look that succeeds ends the retry of an earlier one that threw,
+        // but ONLY the retry this look read (its attempts and its marker): a look that failed while this one was running has recorded a NEWER retry, which this older success
+        // must not clear (the evidence it is for may be older than the mark, and nothing else would pick it up again). The mark still advances
+        const sameRetry = Prisma.sql`"last_error" LIKE 'late_look%' AND "attempts" = ${one.attempts} AND "last_error" IS NOT DISTINCT FROM ${one.last_error}`;
+        await prisma.$executeRaw(Prisma.sql`
           UPDATE "computer_give_back_decisions"
           SET "updated_at" = GREATEST("updated_at", ${one.mark}),
-              "next_attempt_at" = CASE WHEN "last_error" LIKE 'late_look%' THEN NULL ELSE "next_attempt_at" END,
-              "last_error" = CASE WHEN "last_error" LIKE 'late_look%' THEN NULL ELSE "last_error" END
-          WHERE "job_id" = ${one.job_id}`;
+              "next_attempt_at" = CASE WHEN ${sameRetry} THEN NULL ELSE "next_attempt_at" END,
+              "last_error" = CASE WHEN ${sameRetry} THEN NULL ELSE "last_error" END
+          WHERE "job_id" = ${one.job_id}`);
       } catch (error) {
         console.error('[Computer] Could not look at late evidence again:', error instanceof Error ? error.message : 'unknown');
         await lateLookFailed(one.job_id, one.mark, now);

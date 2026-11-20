@@ -920,6 +920,39 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       });
     });
 
+    it('an older successful look never clears a NEWER failed look’s retry: only the retry the look read is cleared', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      await job(sara, ours);
+      const refused = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+      expect(await decisionOf(refused.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+      const t0 = new Date();
+      // A look that threw earlier left a retry that is due now
+      await prisma.computerGiveBackDecision.update({ where: { jobId: refused.id }, data: { lastError: `late_look:${t0.getTime() - 1000}`, attempts: 1, nextAttemptAt: new Date(t0.getTime() - 1000) } });
+      const newer = new Date(t0.getTime() + 3_600_000);
+      // Sweep A has read the row as due; before its look ends, sweep B's look fails and records a newer retry
+      const realFind = prisma.computerGiveBackDecision.findUnique.bind(prisma.computerGiveBackDecision);
+      let injected = false;
+      const spy = jest.spyOn(prisma.computerGiveBackDecision, 'findUnique').mockImplementation(((args: { where?: { jobId?: string } }) => {
+        if (!injected && args?.where?.jobId === refused.id) {
+          injected = true;
+          return prisma.computerGiveBackDecision.updateMany({ where: { jobId: refused.id }, data: { lastError: `late_look:${t0.getTime() - 1000}`, attempts: 2, nextAttemptAt: newer } }).then(() => realFind(args as never));
+        }
+        return realFind(args as never);
+      }) as never);
+      try {
+        expect((await sweepLateEvidence(t0)).looked).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(injected).toBe(true);
+      // B's retry stands, so the next sweep at its time looks again
+      expect(await decisionOf(refused.id)).toMatchObject({ attempts: 2, nextAttemptAt: newer, lastError: expect.stringMatching(/^late_look:/) });
+      expect((await sweepLateEvidence(new Date(newer.getTime() + 1000))).looked).toBe(1);
+      // ...and that look, uncontested, ends its own retry
+      expect(await decisionOf(refused.id)).toMatchObject({ nextAttemptAt: null, lastError: null });
+    });
+
     it('two failing looks over the same marker: the one that read the older state never moves the deadline back (the reschedule is also made only over the attempts it read)', async () => {
       await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
       const sara = await person('sara');
