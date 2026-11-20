@@ -33,10 +33,13 @@ describe('POST /api/bots/:id/computer-jobs/:jobId/faults', () => {
   });
 
   it('keeps the rows for the Brick and job it is told and answers how many were new, then looks again at what was decided about the job', async () => {
-    record.mockResolvedValue({ stored: 1 });
+    record.mockResolvedValue({ stored: 1, conflicts: 0 });
     const res = await call({ faults: [good] });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, stored: 1 });
+    expect(await res.json()).toEqual({ ok: true, stored: 1, conflicts: 0 });
+    // A row another run or turn of the job already holds under its call id is said, never dropped silently
+    record.mockResolvedValue({ stored: 0, conflicts: 1 });
+    expect(await (await call({ faults: [good] })).json()).toEqual({ ok: true, stored: 0, conflicts: 1 });
     expect(record).toHaveBeenCalledWith('brick-1', 'job-1', [expect.objectContaining({ callId: 'c1', reason: 'provider_key_ours', providerStatus: 402, at: new Date('2026-11-20T10:00:00.000Z') })]);
     expect(late).toHaveBeenCalledWith('job-1');
   });

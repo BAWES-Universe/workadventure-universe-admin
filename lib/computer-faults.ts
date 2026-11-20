@@ -34,8 +34,9 @@ export const UNRESOLVED_REASONS: readonly string[] = ['provider_5xx', 'provider_
 export function faultClassOf(row: { kind: string; reason: string; source: string }): FaultClass | null {
   if (row.kind === 'answered') return null;
   // The source alone never charges anyone: the game writes source own-key on EVERY row of a call on the person's own key, including our relay being down.
-  // Their provider refusing their key is theirs; everything else is read by kind and reason below, own key or not
-  if (row.source === 'own-key' && row.reason === 'provider_key_ours') return 'person';
+  // Their provider refusing their key is theirs, when the relay says it is not ours (kind `not_ours`): an unconfirmed row stays unresolved like any other, and a row that says
+  // `fault` on a call made with their own key contradicts itself, so it is unresolved too. Everything else is read by kind and reason below, own key or not
+  if (row.source === 'own-key' && row.reason === 'provider_key_ours') return row.kind === 'not_ours' ? 'person' : 'unresolved';
   // Ours or the person's only when the reason and the relay's own word agree; anything else could be either
   if (OURS_REASONS.includes(row.reason) && row.kind === 'fault') return 'ours';
   if (PERSON_REASONS.includes(row.reason) && row.kind === 'not_ours') return 'person';
@@ -59,17 +60,19 @@ export interface FaultInput {
  * Keeps what the relay saw, once per (job, call): a row written again changes nothing, except that an `uncertain` one may be settled once (to what it turned
  * out to be). The Brick must own the job. Returns how many rows are kept for this job after the write that were new or settled, or null for an unknown job.
  */
-export async function recordFaults(botId: string, jobId: string, rows: FaultInput[]): Promise<{ stored: number } | null> {
+export async function recordFaults(botId: string, jobId: string, rows: FaultInput[]): Promise<{ stored: number; conflicts: number } | null> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, botId: true } });
   if (!job || job.botId !== botId) return null;
-  if (rows.length === 0) return { stored: 0 };
+  if (rows.length === 0) return { stored: 0, conflicts: 0 };
   let stored = 0;
+  let conflicts = 0;
   for (const row of rows) {
+    const run = row.run ? row.run.slice(0, 40) : null;
     const data = {
       jobId,
       turn: row.turn ?? null,
-      run: row.run ? row.run.slice(0, 40) : null,
-      callId: row.callId.slice(0, 120),
+      run,
+      callId: keyOfCall(row.callId, run),
       kind: row.kind,
       reason: row.reason.slice(0, 32),
       source: row.source,
@@ -89,10 +92,26 @@ export async function recordFaults(botId: string, jobId: string, rows: FaultInpu
           data: { kind: data.kind, reason: data.reason, source: data.source, route: data.route, providerStatus: data.providerStatus, at: data.at },
         });
         stored += settled.count;
+        if (settled.count > 0) continue;
+      }
+      // A row that is not the one already kept (another run's, or another turn's, under the same call id) is never dropped silently: it is counted and said
+      const kept = await prisma.computerJobFault.findUnique({ where: { jobId_callId: { jobId, callId: data.callId } }, select: { run: true, turn: true } });
+      if (kept && (kept.run !== data.run || kept.turn !== data.turn)) {
+        conflicts++;
+        console.error('[Computer] A fault row could not be kept: its call id is already used by another run or turn of the job. Job', jobId);
       }
     }
   }
-  return { stored };
+  return { stored, conflicts };
+}
+
+/**
+ * The key a call is kept under. A fault with no call is `turn:<n>`, and turns are numbered again by every run of a job (a restart), so a turn-only id is
+ * qualified by the run that numbered it: two runs never share a key. A real call id is the model call's own and is kept as it is. A runner that names no run
+ * has one numbering as far as Orbit can tell.
+ */
+function keyOfCall(callId: string, run: string | null): string {
+  return (run && callId.startsWith('turn:') ? `${run}:${callId}` : callId).slice(0, 120);
 }
 
 export interface FaultRow {
@@ -107,17 +126,30 @@ export interface FaultRow {
 
 type Db = Pick<Prisma.TransactionClient, 'computerJobFault'>;
 
-/** The rows that count for a ruling: the ones for the turns the runner judged failed IN THE RUN it names (a restart makes a new run that numbers turns again; no run matches no run), or every row of the job when it named no turns. Answered calls are left out. */
+/**
+ * The rows that count for a ruling: the ones for the turns the runner judged failed IN THE RUN it names (a restart makes a new run that numbers turns again; no
+ * run matches no run), or every row of the job when it named no turns. A row with no turn applies to the whole job, so it counts for a ruling on a run only when it
+ * names no run or names that very run: another named run's row never does. Answered calls are not read at all (they say nothing about a failure, and they must
+ * never fill a page ahead of a fault), and every matching row is read, a page at a time, so what the verdict rests on never depends on a limit.
+ */
 export async function readFaultRows(db: Db, jobId: string, turns: readonly number[] | null | undefined, run: string | null | undefined = null): Promise<FaultRow[]> {
-  const rows = await db.computerJobFault.findMany({
-    where: { jobId, ...(turns && turns.length > 0 ? { OR: [{ turn: { in: [...turns] }, run: run ?? null }, { turn: null }] } : {}) },
-    orderBy: [{ at: 'asc' }, { callId: 'asc' }],
-    take: 500,
-  });
+  const named = run ?? null;
+  const where: Prisma.ComputerJobFaultWhereInput = {
+    jobId,
+    kind: { not: 'answered' },
+    ...(turns && turns.length > 0 ? { OR: [{ turn: { in: [...turns] }, run: named }, (named ? { turn: null, OR: [{ run: null }, { run: named }] } : { turn: null, run: null })] } : {}),
+  };
   const out: FaultRow[] = [];
-  for (const row of rows) {
-    const cls = faultClassOf(row);
-    if (cls) out.push({ turn: row.turn, callId: row.callId, kind: row.kind, reason: row.reason, source: row.source, route: row.route, cls });
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await db.computerJobFault.findMany({ where, orderBy: [{ at: 'asc' }, { callId: 'asc' }, { id: 'asc' }], take: FAULT_PAGE, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}) });
+    for (const row of page) {
+      const cls = faultClassOf(row);
+      if (cls) out.push({ turn: row.turn, callId: row.callId, kind: row.kind, reason: row.reason, source: row.source, route: row.route, cls });
+    }
+    if (page.length < FAULT_PAGE) return out;
+    cursor = page[page.length - 1].id;
   }
-  return out;
 }
+
+const FAULT_PAGE = 500;

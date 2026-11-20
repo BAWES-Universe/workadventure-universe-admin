@@ -609,11 +609,11 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       if (!started.ok) throw new Error('no');
       const id = started.job.id;
       const row = { turn: 2, callId: 'c-x', kind: 'uncertain' as const, reason: 'timeout_after_output', source: 'universe-ai' as const, route: 'r1', providerStatus: null, at: new Date() };
-      expect(await recordFaults(sara.brickId, id, [row])).toEqual({ stored: 1 });
-      expect(await recordFaults(sara.brickId, id, [row])).toEqual({ stored: 0 });
+      expect(await recordFaults(sara.brickId, id, [row])).toEqual({ stored: 1, conflicts: 0 });
+      expect(await recordFaults(sara.brickId, id, [row])).toEqual({ stored: 0, conflicts: 0 });
       // The uncertain one turns out to be our fault: settled once; then it cannot move again
-      expect(await recordFaults(sara.brickId, id, [{ ...row, kind: 'fault', reason: 'provider_key_ours' }])).toEqual({ stored: 1 });
-      expect(await recordFaults(sara.brickId, id, [{ ...row, kind: 'not_ours', reason: 'allowance' }])).toEqual({ stored: 0 });
+      expect(await recordFaults(sara.brickId, id, [{ ...row, kind: 'fault', reason: 'provider_key_ours' }])).toEqual({ stored: 1, conflicts: 0 });
+      expect(await recordFaults(sara.brickId, id, [{ ...row, kind: 'not_ours', reason: 'allowance' }])).toEqual({ stored: 0, conflicts: 0 });
       expect(await prisma.computerJobFault.findFirstOrThrow({ where: { jobId: id } })).toMatchObject({ kind: 'fault', reason: 'provider_key_ours' });
       // A different Brick does not own the job; an unknown job is unknown
       expect(await recordFaults(other.brickId, id, [row])).toBeNull();
@@ -884,9 +884,67 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         const s = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, minutes(0));
         if (!s.ok) throw new Error('no');
         const row = fault(2, 'provider_5xx', { run: 'runa', callId: 'same' });
-        expect(await recordFaults(sara.brickId, s.job.id, [row])).toEqual({ stored: 1 });
-        expect(await recordFaults(sara.brickId, s.job.id, [{ ...row, run: 'runb' }])).toEqual({ stored: 0 });
+        expect(await recordFaults(sara.brickId, s.job.id, [row])).toEqual({ stored: 1, conflicts: 0 });
+        // A real call id another run uses is not kept over the first, and it is not dropped silently: it is counted as a conflict
+        expect(await recordFaults(sara.brickId, s.job.id, [{ ...row, run: 'runb' }])).toEqual({ stored: 0, conflicts: 1 });
         expect(await prisma.computerJobFault.findFirstOrThrow({ where: { jobId: s.job.id } })).toMatchObject({ run: 'runa' });
+      });
+    });
+
+    describe('round 3: what a ruling reads', () => {
+      it('an own-key call refused for its own provider key is the person’s only when the relay says it is not ours; an unconfirmed row, or one that says fault, stays unresolved', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const sara = await person('sara');
+        expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+        const own = (kind: FaultInput['kind']) => withFaults(sara, [fault(1, 'provider_key_ours', { source: 'own-key', kind })]);
+        // Only row of the judged turn, unconfirmed: unresolved, so past the bound it is refused for the cap, never as the person's doing
+        const uncertain = await job(sara, { ...ours, turns: [1] }, own('uncertain'));
+        expect(await decisionOf(uncertain.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+        const contradicting = await job(sara, { ...ours, turns: [1] }, own('fault'));
+        expect(await decisionOf(contradicting.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+        const confirmed = await job(sara, { ...ours, turns: [1] }, own('not_ours'));
+        expect(await decisionOf(confirmed.id)).toMatchObject({ state: 'refused', basis: 'person_caused' });
+      });
+
+      it('a row with no turn counts for a run only when it names no run or that run: another named run’s never does', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 0 });
+        const sara = await person('sara');
+        // Run A recorded a turnless relay fault; run B finishes on turn 1: A's fault is not B's
+        const other = await job(sara, { ...ours, turns: [1], run: 'runb' }, withFaults(sara, [fault(null, 'relay_down', { run: 'runa', callId: 'turn:none-a' }), fault(1, 'field_job_set', { run: 'runb' })]));
+        expect(await decisionOf(other.id)).toMatchObject({ state: 'refused', basis: 'person_caused' });
+        // The same run's own turnless fault, and a runless one, do count
+        const same = await job(sara, { ...ours, turns: [1], run: 'runb' }, withFaults(sara, [fault(null, 'relay_down', { run: 'runb', callId: 'turn:none-b' })]));
+        expect(await decisionOf(same.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+        const runless = await job(sara, { ...ours, turns: [1], run: 'runc' }, withFaults(sara, [fault(null, 'relay_down', { callId: 'turn:none-c' })]));
+        expect(await decisionOf(runless.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+      });
+
+      it('answered calls never hide a confirmed fault: more than a page of them ahead of it, and the verdict is still ours', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 0 });
+        const sara = await person('sara');
+        const early = new Date(Date.now() - 3_600_000);
+        const answered = Array.from({ length: 620 }, (_, index) => fault(1, 'relay_down', { kind: 'answered', callId: `ok-${index}`, at: new Date(early.getTime() + index) }));
+        const ended = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [...answered, fault(1, 'relay_down', { callId: 'the-fault', at: new Date() })]));
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+        // And more than a page of failures that are not decisive ahead of a decisive one does not hide it either
+        const many = Array.from({ length: 520 }, (_, index) => fault(2, 'provider_5xx', { callId: `slow-${index}`, at: new Date(early.getTime() + index) }));
+        const late = await job(sara, { ...ours, turns: [2] }, withFaults(sara, [...many, fault(2, 'relay_down', { callId: 'decisive', at: new Date() })]));
+        expect(await decisionOf(late.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+      });
+
+      it('two runs of one job that each wrote a turn-only row for the same turn are both kept, and each run is judged by its own', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 0 });
+        const sara = await person('sara');
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, minutes(0));
+        if (!started.ok) throw new Error('no');
+        const jobId = started.job.id;
+        expect(await recordFaults(sara.brickId, jobId, [fault(1, 'field_job_set', { run: 'runa', callId: 'turn:1' })])).toEqual({ stored: 1, conflicts: 0 });
+        expect(await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', { run: 'runb', callId: 'turn:1' })])).toEqual({ stored: 1, conflicts: 0 });
+        expect(await prisma.computerJobFault.count({ where: { jobId } })).toBe(2);
+        // Said again, it changes nothing
+        expect(await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', { run: 'runb', callId: 'turn:1' })])).toEqual({ stored: 0, conflicts: 0 });
+        await finishJob(jobId, 'failed', minutes(5), null, 'ours', [1], 'runb');
+        expect(await decisionOf(jobId)).toMatchObject({ state: 'given', basis: 'universe_fault' });
       });
     });
 

@@ -26,7 +26,7 @@ const bodySchema = z.object({ faults: z.array(faultSchema).min(1).max(50) });
  * POST /api/bots/:id/computer-jobs/:jobId/faults { faults: [{ turn, callId, kind, reason, source, route, providerStatus, at }, ...] }: what the game relay saw go
  * wrong (or be uncertain) on a job's model calls, kept once per (job, call) so Orbit, and not a process's memory, judges whether a failed job is given back.
  * Written BEFORE the job finishes; a row that arrives after it is still kept and can still make the job a give-back (a fault of ours it names). Safe to say twice.
- * Answers { ok, stored }. Auth: service token only (the bot server's, like every route the computer's runner calls).
+ * Answers { ok, stored, conflicts } (`conflicts`: rows whose call id another run or turn of the job already holds: said, never dropped silently). Auth: service token only (the bot server's, like every route the computer's runner calls).
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string; jobId: string }> }) {
   try {
@@ -46,7 +46,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (!kept) return NextResponse.json({ error: 'Job not found' }, { status: 404 });
     // A row for a job that is already over can change what was decided about it
     await afterLateEvidence(jobId).catch((error) => console.error('[Computer] Late evidence could not be judged:', error instanceof Error ? error.message : 'unknown'));
-    return NextResponse.json({ ok: true, stored: kept.stored });
+    return NextResponse.json({ ok: true, stored: kept.stored, conflicts: kept.conflicts });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer', step: 'faults' } });
     return NextResponse.json({ error: 'Could not keep the faults' }, { status: 500 });
