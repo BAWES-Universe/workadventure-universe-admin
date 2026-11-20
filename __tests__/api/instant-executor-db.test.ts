@@ -3666,6 +3666,31 @@ run('the bounded Instant executor, in a real database', () => {
       });
     });
 
+    it.each([['noLog'], ['unreadableLog']])('O7b end to end (%s): the receipt says it could not be confirmed, then, when the log later says it went out, the same receipt says it worked, and the person is still charged nothing', async (route) => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      await setLimits({ unclearWaitMinutes: 30 });
+      await openReceipt({ botId: brick, personId: sara, taskKey: `o7b-${route}`, title: `Late ${route}`, category: 'apps' });
+      p.script.runs.push({ kind: 'unclear', why: 'server', status: 500 });
+      await runInstant(ask({ callId: callId(), taskKey: `o7b-${route}`, arguments: { query: route } }), { adapter: p.adapter, funds: f.funds });
+      const run = await prisma.instantRun.findFirstOrThrow({ where: { taskKey: `o7b-${route}` } });
+      if (route === 'unreadableLog') p.script.byUser.set(run.providerUserId, [p.line(run.providerUserId, 'unknown', null, 'log-odd')]);
+      const at = new Date(Date.now() + 31 * MIN);
+      await closeReceipt({ botId: brick, taskKey: `o7b-${route}`, personId: sara, state: 'refunded' });
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: at });
+      const before = await prisma.taskReceipt.findFirstOrThrow({ where: { personId: sara, taskKey: `o7b-${route}` } });
+      expect(before).toMatchObject({ state: 'refunded', outcome: 'unconfirmed' });
+      expect((await activityFor(sara)).find((item) => item.title === `Late ${route}`)).toMatchObject({ outcome: 'unconfirmed', state: 'refunded' });
+      p.script.byUser.set(run.providerUserId, [p.line(run.providerUserId, 'success', TOP - 1_000, 'log-late')]);
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
+      const after = await prisma.taskReceipt.findFirstOrThrow({ where: { personId: sara, taskKey: `o7b-${route}` } });
+      // The same row, now done; what the person was charged stays nothing
+      expect(after).toMatchObject({ id: before.id, state: 'done', outcome: 'done', chargedMicros: BigInt(0) });
+      expect((await activityFor(sara)).find((item) => item.title === `Late ${route}`)).toMatchObject({ outcome: 'done' });
+      expect(f.left()).toBe(1_000_000);
+      expect(f.funds.settle).not.toHaveBeenCalled();
+    });
+
     it('a task with one run that worked and one let go unconfirmed ends done, charged only for the one that worked', async () => {
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
