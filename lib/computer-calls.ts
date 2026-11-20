@@ -60,7 +60,9 @@ export async function authorizeModelCall(
   if (!Number.isSafeInteger(input.estimateMicros) || input.estimateMicros <= 0 || input.estimateMicros > MAX_MICROS) return { ok: false, reason: 'refused' };
   // One provider failing for many people: nothing new is sent to it for now (nothing is held or charged). Never for a person's own key. A pause is OUR decision,
   // so it answers `full: true`: the relay records it as a confirmed fault of ours (pool_busy), never as the job's own doing
-  if (input.route && (await routeIsPaused(input.route, now).catch(() => false))) return { ok: false, reason: 'pool', full: true };
+  // The pause gates only NEW call ids: a call that already holds its room (the same job, the same person, still held) is asked again by a retry, and is answered
+  // with its own authorization whatever the route's state is now: it was authorized before the pause, and refusing its retry would make the relay record a fault of ours for a call that is going on
+  if (input.route && !(await holdsItsRoom(base.jobId, input.callId, base.personId, now)) && (await routeIsPaused(input.route, now).catch(() => false))) return { ok: false, reason: 'pool', full: true };
   const room = await reserveRoom({ key: callRoomKey(base.jobId, input.callId), personId: base.personId, amountMicros: input.estimateMicros, botId: base.botId, jobId: base.jobId, newJob: false }, now);
   if (room.ok) {
     // The room may have waited for the pool's lock while the person took the machine: the key must still be good after it, or the room goes back
@@ -84,6 +86,12 @@ export async function authorizeModelCall(
   // Asked again for a call whose room was settled or lapsed: the first try is the call, and a second one is not another
   if (room.reason === 'closed' || room.reason === 'key_reused') return { ok: false, reason: 'refused' };
   return { ok: false, reason: 'pool', full: room.reason === 'pool' && room.full === true };
+}
+
+/** True when this call id already holds room for this job and person: room held and not lapsed (what reserving it again would answer with its own reservation). */
+async function holdsItsRoom(jobId: string, callId: string, personId: string, now: Date): Promise<boolean> {
+  const held = await prisma.meterReservation.findUnique({ where: { reservationKey: callRoomKey(jobId, callId) }, select: { state: true, personKey: true, jobId: true, expiresAt: true } });
+  return !!held && held.state === 'held' && held.expiresAt > now && held.jobId === jobId && held.personKey === `person:${personId}`;
 }
 
 /** Ends the job a call was refused for (computer.ts owns how a job ends; it is loaded when asked, as it reads this file). A refusal is answered whatever this does. */

@@ -986,6 +986,31 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await routeIsPaused(route, new Date(Date.now() + 61 * 60_000))).toBe(false);
     });
 
+    it('a call that already holds its room is answered with its own authorization when it is asked again after the route paused; only a new call id waits', async () => {
+      await limitsAre({ ...LAUNCH, pauseMinRuns: 3 });
+      const people3 = [await person('a'), await person('b'), await person('c')];
+      const route = 'universe-ai/model-replay';
+      const started = [] as Array<{ id: string; brickId: string }>;
+      for (const p of people3) {
+        const s = await startJob({ botId: p.brickId, personId: p.id, title: 'Job' }, minutes(0));
+        if (!s.ok) throw new Error('no');
+        started.push({ id: s.job.id, brickId: p.brickId });
+      }
+      const { token } = (await mintJobToken(started[0].id, 'model', new Date())) as { token: string };
+      const first = await authorizeModelCall({ token, callId: 'held-1', estimateMicros: 1_000, payer: 'universe', route }, new Date());
+      expect(first).toMatchObject({ ok: true, reservedMicros: 1_000 });
+      // The route pauses in between
+      for (const s of started) await recordFaults(s.brickId, s.id, [fault(1, 'provider_5xx', { route })]);
+      expect(await routeIsPaused(route)).toBe(true);
+      // The same call id, asked again (the relay's retry), gets what it was given; a new call id waits and takes nothing
+      expect(await authorizeModelCall({ token, callId: 'held-1', estimateMicros: 1_000, payer: 'universe', route }, new Date())).toEqual(first);
+      expect(await authorizeModelCall({ token, callId: 'new-1', estimateMicros: 1_000, payer: 'universe', route }, new Date())).toEqual({ ok: false, reason: 'pool', full: true });
+      expect(await prisma.meterReservation.count({ where: { jobId: started[0].id, reservationKey: { startsWith: 'computer:call:' } } })).toBe(1);
+      // A call whose room was settled is not replayed past the pause: the first try is the call
+      await settleModelCall(started[0].id, 'held-1', { costMicros: 800, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, new Date());
+      expect(await authorizeModelCall({ token, callId: 'held-1', estimateMicros: 1_000, payer: 'universe', route }, new Date())).toEqual({ ok: false, reason: 'pool', full: true });
+    });
+
     it('does not pause on rows of the person’s own key, the relay’s own faults, or answered calls', async () => {
       await limitsAre({ ...LAUNCH, pauseMinRuns: 1 });
       const sara = await person('sara');
