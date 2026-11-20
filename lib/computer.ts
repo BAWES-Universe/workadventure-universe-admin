@@ -1490,7 +1490,14 @@ async function giveBackMissingModelCalls(batch: number, botId: string | undefine
           )
       ) matching
       WHERE "oldest" <= ${half} OR "newest" <= ${half}`);
-    for (const job of jobs) await giveBackModelCalls(job.id, job.personId, now);
+    // One job's trouble never skips the rest of the batch: it is said, and it stays eligible for the next sweep
+    for (const job of jobs) {
+      try {
+        await giveBackModelCalls(job.id, job.personId, now);
+      } catch (error) {
+        console.error('[Computer] Could not give back a failed job’s model calls:', error instanceof Error ? error.message : 'unknown');
+      }
+    }
   } catch (error) {
     console.error('[Computer] Could not look for a failed job’s model calls:', error instanceof Error ? error.message : 'unknown');
   }

@@ -8,6 +8,10 @@ import { randomUUID } from 'node:crypto';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
+jest.mock('@/lib/computer-calls', () => {
+  const actual = jest.requireActual('@/lib/computer-calls');
+  return { ...actual, giveBackModelCalls: jest.fn(actual.giveBackModelCalls) };
+});
 
 import { prisma } from '@/lib/db';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
@@ -19,7 +23,7 @@ import { computerView, finishJob, giveComputer, handBack, renewJob, startJob, st
 import { activityFor } from '@/lib/task-receipts';
 import { TOKEN_LIFE_MS, forgetOldTokens, mintJobToken, verifyJobToken } from '@/lib/computer-token';
 import { recordMeterEvent } from '@/lib/meter';
-import { authorizeModelCall, callRoomKey, releaseModelCall, settleModelCall } from '@/lib/computer-calls';
+import { authorizeModelCall, callRoomKey, giveBackModelCalls, releaseModelCall, settleModelCall } from '@/lib/computer-calls';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -455,6 +459,31 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect(await callEvent(jobId, 'done1')).toMatchObject({ personKey: 'unknown', personId: null });
       expect(await callEvent(jobId, 'lost')).toMatchObject({ personKey: 'unknown', personId: null, costMicros: null, basis: 'unknown' });
       expect((await computerView(sara.brickId, sara.id, minutes(60)))?.month?.leftFraction).toBe(1);
+    });
+
+    it('one job whose give-back throws does not skip the others of the sweep’s batch: it is said, and the rest are still given back', async () => {
+      const first = await running('sara');
+      const second = await running('tom');
+      for (const { jobId } of [first, second]) {
+        await settledCall(jobId, 'c1', 1_200);
+        await finishJob(jobId, 'failed', minutes(5), null, 'ours');
+        // The give-back of the end did not go through (or a call was recorded in the same moment): the call is still written against the person
+        await prisma.meterEvent.updateMany({ where: { jobId, kind: 'model_call' }, data: { personKey: `person:${jobId === first.jobId ? first.sara.id : second.sara.id}`, personId: jobId === first.jobId ? first.sara.id : second.sara.id } });
+      }
+      const logged = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      (giveBackModelCalls as jest.Mock).mockClear();
+      (giveBackModelCalls as jest.Mock).mockRejectedValueOnce(new Error('The books are down'));
+      await sweepComputers(minutes(30));
+      logged.mockRestore();
+      const calls = (giveBackModelCalls as jest.Mock).mock.calls.map((c) => c[0] as string);
+      // Both were tried: the one that threw did not end the batch
+      expect([...calls].sort()).toEqual([first.jobId, second.jobId].sort());
+      const [thrown, rest] = calls;
+      expect(await callEvent(rest, 'c1')).toMatchObject({ personKey: 'unknown', personId: null });
+      // The one that failed is still the person's, so the next sweep finds it again and gives it back
+      expect((await callEvent(thrown, 'c1')).personKey).not.toBe('unknown');
+      await sweepComputers(minutes(31));
+      expect(await callEvent(thrown, 'c1')).toMatchObject({ personKey: 'unknown', personId: null });
     });
 
     it('a report that replaces an unknown figure keeps the call given back', async () => {
