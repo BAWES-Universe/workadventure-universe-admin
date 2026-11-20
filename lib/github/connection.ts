@@ -404,7 +404,7 @@ export async function saveOwnKey(connectionId: string, key: string, fetchImpl: F
   const auth: GitHubAuth = { provider: 'github', ownKey: true, accessToken: key, login: me.data.login, githubId: me.data.id, reconnectRequired: null };
   const letGo = await holdRefreshLease(connectionId);
   try {
-    await prisma.appConnection.update({ where: { id: connectionId }, data: { authConfig: sealAuth(auth), signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date() } });
+    await prisma.appConnection.update({ where: { id: connectionId }, data: { authConfig: sealAuth(auth), signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date(), signInNonce: null } });
   } finally {
     await letGo();
   }

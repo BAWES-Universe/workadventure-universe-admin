@@ -502,7 +502,7 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   checkContent(content, maxBytes);
   const merged = mergeMedia(mediaOf(latest), input.media ?? [], input.dropMedia ?? [], kind, maxMediaBytes, maxMediaFiles);
   const title = cleanLine(input.title, MAX_TITLE_LENGTH);
-  if (copying) return changeInACopy({ input, artifact, latestNumber: latest.number, who, botName, hidden, content, merged, title }, ctx);
+  if (copying) return changeInACopy({ input, artifact, latestNumber: latest.number, who, botName, hidden, content, merged, title, ownerAsks: isOwner(artifact, reader) }, ctx);
 
   const next = artifact.latestVersion + 1;
   const fileKey = newFileKey(artifact.id, next, kind);
@@ -558,6 +558,8 @@ async function changeInACopy(
     content: string;
     merged: { keep: MediaFile[]; add: MediaUpload[] };
     title: string | null;
+    /** The one who asked is the original's owner: how it is shared is no part of what lets them in. */
+    ownerAsks: boolean;
   },
   ctx: Context,
 ): Promise<Made> {
@@ -568,34 +570,44 @@ async function changeInACopy(
   const fileKey = newFileKey(id, 1, kind);
   const media = placeMedia(fileKey, call.merged);
   const created = await storing(files, fileKey, kind, call.content, media, () =>
-    prisma.artifact.create({
-      data: {
-        id,
-        ownerId: who.userId,
-        makerBotId: input.botId,
-        makerName: clipText(call.botName, MAX_NAME_LENGTH),
-        title: call.title ?? artifact.title,
-        kind,
-        chatKind: input.chat.kind,
-        chatRef: input.chat.ref,
-        copiedFromId: artifact.id,
-        ...(isJustYou(artifact) ? { openScope: 'me' } : {}),
-        // Nothing is kept for a guest beyond a day, and anyone in their chat may ask for a change meanwhile
-        changeScope: who.userId ? 'owner' : 'openers',
-        expiresAt: who.userId ? null : new Date(now.getTime() + GUEST_KEEP_MS),
-        versions: {
-          create: {
-            number: 1,
-            summary: cleanLine(input.summary, MAX_SUMMARY_LENGTH) ?? `Copy of version ${call.latestNumber}, changed`,
-            askedById: who.userId,
-            askedByName: who.name,
-            fileKey,
-            sizeBytes: byteLength(call.content),
-            media: media.files as unknown as Prisma.InputJsonValue,
+    prisma.$transaction(async (tx) => {
+      // Someone other than the owner was let in by how the original was shared when it was read: if the owner changed that meanwhile
+      // (made it "Just you", or took back who may ask for changes), no copy is made, as for a change to the original itself
+      if (!call.ownerAsks) {
+        // The row is held while it is read, so a change of how it is shared that is still landing has landed (or waits for this copy) before the check
+        await tx.$queryRaw`SELECT 1 FROM "artifacts" WHERE "id" = ${artifact.id} FOR UPDATE`;
+        const same = await tx.artifact.count({ where: { id: artifact.id, openScope: artifact.openScope, changeScope: artifact.changeScope } });
+        if (same !== 1) throw new ArtifactError('stale_version', 409, 'The owner changed how it is shared at the same moment; read it again.');
+      }
+      return tx.artifact.create({
+        data: {
+          id,
+          ownerId: who.userId,
+          makerBotId: input.botId,
+          makerName: clipText(call.botName, MAX_NAME_LENGTH),
+          title: call.title ?? artifact.title,
+          kind,
+          chatKind: input.chat.kind,
+          chatRef: input.chat.ref,
+          copiedFromId: artifact.id,
+          ...(isJustYou(artifact) ? { openScope: 'me' } : {}),
+          // Nothing is kept for a guest beyond a day, and anyone in their chat may ask for a change meanwhile
+          changeScope: who.userId ? 'owner' : 'openers',
+          expiresAt: who.userId ? null : new Date(now.getTime() + GUEST_KEEP_MS),
+          versions: {
+            create: {
+              number: 1,
+              summary: cleanLine(input.summary, MAX_SUMMARY_LENGTH) ?? `Copy of version ${call.latestNumber}, changed`,
+              askedById: who.userId,
+              askedByName: who.name,
+              fileKey,
+              sizeBytes: byteLength(call.content),
+              media: media.files as unknown as Prisma.InputJsonValue,
+            },
           },
         },
-      },
-      include: { ...ARTIFACT_INCLUDE, versions: true },
+        include: { ...ARTIFACT_INCLUDE, versions: true },
+      });
     }),
   );
   await pruneExpired(ctx).catch((error) => console.error('Could not clear expired artifacts:', error));

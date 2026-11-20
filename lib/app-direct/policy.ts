@@ -25,8 +25,11 @@ export function toolNameOf(definition: Pick<Definition, 'service' | 'short'>, op
 
 export const fingerprintOf = (definitionHash: string, operationId: string): string => createHash('sha256').update(`${definitionHash}:${operationId}`).digest('hex');
 
+/** A tool row changed between the read and the write of the same call: the whole call is read again. */
+class StaleTools extends Error {}
+
 /** Makes the grant's tools match the definition it uses. Cheap when nothing changed. Returns true when something did. */
-export async function ensureKeyAppTools(serverId: string, retried = false): Promise<boolean> {
+export async function ensureKeyAppTools(serverId: string, attempt = 0): Promise<boolean> {
   const server = await prisma.botMcpServer.findUnique({ where: { id: serverId }, include: { connection: true, tools: { select: { id: true, name: true, fingerprint: true, confirmedAt: true } } } });
   const connection = server?.connection;
   if (!server || !connection || connection.kind !== 'direct' || !connection.definition) return false;
@@ -49,8 +52,15 @@ export async function ensureKeyAppTools(serverId: string, retried = false): Prom
       const decided = entry.operation.verified ? { heading, confirmedAt: now, confirmedById: null, movedById: null } : { heading: null, confirmedAt: null, confirmedById: null, movedById: null };
       const before = byName.get(entry.name);
       if (!before) await tx.botMcpTool.create({ data: { serverId, name: entry.name, fingerprint: entry.fingerprint, ...shown, ...decided } });
-      else if (before.fingerprint !== entry.fingerprint) await tx.botMcpTool.update({ where: { id: before.id }, data: { fingerprint: entry.fingerprint, ...shown, ...decided } });
-      else if (entry.operation.verified && !before.confirmedAt) await tx.botMcpTool.update({ where: { id: before.id }, data: { ...shown, ...decided } });
+      // A row is written only while it still holds what was read: another call that already brought it up to date, or an owner who
+      // decided on it since, is never overwritten by this older read (the call looks again instead)
+      else if (before.fingerprint !== entry.fingerprint) {
+        const written = await tx.botMcpTool.updateMany({ where: { id: before.id, fingerprint: before.fingerprint, confirmedAt: before.confirmedAt }, data: { fingerprint: entry.fingerprint, ...shown, ...decided } });
+        if (written.count !== 1) throw new StaleTools();
+      } else if (entry.operation.verified && !before.confirmedAt) {
+        const written = await tx.botMcpTool.updateMany({ where: { id: before.id, fingerprint: before.fingerprint, confirmedAt: null }, data: { ...shown, ...decided } });
+        if (written.count !== 1) throw new StaleTools();
+      }
     }
     const names = new Set(wanted.map((entry) => entry.name));
     const gone = server.tools.filter((tool) => !names.has(tool.name));
@@ -59,7 +69,7 @@ export async function ensureKeyAppTools(serverId: string, retried = false): Prom
   });
   } catch (error) {
     // Two calls made the same tools at once and the other one won: look again at what is there now and make only what is still missing
-    if (!retried && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return ensureKeyAppTools(serverId, true);
+    if (attempt < 3 && (error instanceof StaleTools || (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'))) return ensureKeyAppTools(serverId, attempt + 1);
     throw error;
   }
   return true;

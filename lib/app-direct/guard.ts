@@ -195,12 +195,25 @@ export function targetOf(url: string): { host: string; path: string } {
 
 export async function guardedRequest(request: GuardedRequest, deps: GuardDeps = {}): Promise<GuardedAnswer> {
   const { host, path } = targetOf(request.url);
+  // One deadline for the whole call: the name is asked for inside it, and the request gets only what is left
+  const startedAt = Date.now();
   let addresses: { address: string; family: number }[];
+  let stopWaiting: ReturnType<typeof setTimeout> | undefined;
   try {
-    addresses = await (deps.resolve ?? defaultResolve)(host);
-  } catch {
+    addresses = await Promise.race([
+      (deps.resolve ?? defaultResolve)(host),
+      new Promise<never>((_resolve, reject) => {
+        stopWaiting = setTimeout(() => reject(new GuardError('timeout', 'No answer in time')), request.timeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    if (error instanceof GuardError) throw error;
     throw new GuardError('unreachable', 'The name did not resolve');
+  } finally {
+    clearTimeout(stopWaiting);
   }
+  const timeLeft = request.timeoutMs - (Date.now() - startedAt);
+  if (timeLeft <= 0) throw new GuardError('timeout', 'No answer in time');
   if (addresses.length === 0) throw new GuardError('unreachable', 'The name did not resolve');
   // Every address, not only the one used: a name that also points inside is refused whole
   if (!addresses.every((entry) => isPublicAddress(entry.address))) throw new GuardError('blocked', 'A private place');
@@ -213,7 +226,7 @@ export async function guardedRequest(request: GuardedRequest, deps: GuardDeps = 
     method: request.method,
     headers: request.headers,
     body: request.body,
-    timeoutMs: request.timeoutMs,
+    timeoutMs: timeLeft,
     maxBytes: request.maxBytes,
   });
 }

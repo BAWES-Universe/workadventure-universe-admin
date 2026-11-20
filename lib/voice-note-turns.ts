@@ -6,7 +6,7 @@ import { checkSpeechCap } from '@/lib/speech-cap';
 import { lockSpeech, speechReserved, SPEECH_LOCK, NOTE_START_MS } from '@/lib/speech-reserved';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { VOICE_RANGES, savedVoiceKeyLimits } from '@/lib/voice-limit-values';
-import { checkReplyAllowance, type ReplyAllowance } from '@/lib/reply-limits';
+import { checkReplyAllowance, type ReplyAllowance, type ReplySlot } from '@/lib/reply-limits';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import { placeFor } from '@/lib/guest-brick';
 import { botHearing, universeAiHearing, type NoteHearing } from '@/lib/voice-note-hearing';
@@ -54,6 +54,12 @@ export const BUFFER_MS = 15 * 60_000;
 export const BUFFER_MAX_BYTES = 64 * 1024;
 /** A note reserved this long ago and never started is no longer "being heard" for the notes-at-once count. */
 const STARTING_MS = NOTE_START_MS;
+/** A note that has not become an answer after this long is no longer counted as a reply on its way. */
+const ON_THE_WAY_MS = 15 * 60 * 1000;
+/** How long after a note is answered its reply may still be missing from the usage rows (the bot server reports the two separately). */
+const ANSWER_GAP_MS = 2 * 60 * 1000;
+/** What a reservation answers with when the ask has to be made again from the top. */
+const AGAIN = Symbol('again');
 
 const HOUR = 60 * 60_000;
 const DAY = 24 * HOUR;
@@ -118,7 +124,8 @@ const wholeOf = (value: unknown, name: string, min: number, max: number): number
 
 const readAdapterList = (value: unknown): Set<string> => {
   if (!Array.isArray(value) || value.length > 20) throw new VoiceNoteError('adapters must be a list of the providers the bot server can send a file to', 400);
-  return new Set(value.filter((name): name is string => typeof name === 'string' && /^[a-z0-9][a-z0-9-]{0,48}$/.test(name)));
+  // Read the way the discovery list is (lib/voice-note-hearing.ts): trimmed and lower-case, then checked
+  return new Set(value.filter((name): name is string => typeof name === 'string').map((name) => name.trim().toLowerCase()).filter((name) => /^[a-z0-9][a-z0-9-]{0,48}$/.test(name)));
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -158,7 +165,8 @@ const view = (turn: VoiceNoteTurn): TurnView => ({ id: turn.id, state: turn.stat
 function replay(turn: VoiceNoteTurn, now: Date): Reservation {
   if (turn.state === 'answered') {
     const kept = turn.buffer && turn.bufferUntil && turn.bufferUntil > now ? openBuffer(turn.id, turn.buffer) : null;
-    if (!kept?.answer) return { ok: false, reason: 'expired' };
+    // An answer that is the empty text is still an answer that is kept: only one that is gone or unreadable is expired
+    if (!kept || typeof kept.answer !== 'string') return { ok: false, reason: 'expired' };
     return { ok: true, turn: view(turn), replay: true, answer: kept };
   }
   return { ok: true, turn: view(turn), replay: true };
@@ -198,7 +206,9 @@ export async function reserveVoiceNote(
     adapters?: unknown;
     source?: unknown;
   },
-  now: Date = new Date()
+  now: Date = new Date(),
+  // Set only by the call that repeats itself once, when the person turned out to have an account (see below)
+  repeated = false
 ): Promise<Reservation> {
   const scope = input.scope;
   if (scope !== 'bot' && scope !== 'guest-brick') throw new VoiceNoteError('scope must be bot or guest-brick', 400);
@@ -249,10 +259,14 @@ export async function reserveVoiceNote(
 
   // The note and its answer are one reply, checked before anything is heard: the bot's own daily cap whatever it answers on, and
   // Universe AI's windows when it answers there (lib/reply-limits.ts skips those for a person's own key)
+  // The limits the reply was allowed under, counted again under the reservation lock below (with the notes already on their way)
+  const slots: ReplySlot[] = [];
+  let replySource: 'universe-ai' | 'provider' | 'own-key' | null = null;
   if (scope === 'bot') {
     const source = input.source;
     if (source !== 'universe-ai' && source !== 'provider' && source !== 'own-key') throw new VoiceNoteError('source must be universe-ai, provider or own-key', 400);
-    const allowance = await checkReplyAllowance(botId!, { userId, isGuest: input.isGuest, source }, now);
+    replySource = source;
+    const allowance = await checkReplyAllowance(botId!, { userId, isGuest: input.isGuest, source }, now, slots);
     if (!allowance.allowed) return { ok: false, reason: 'reply-limit', allowance };
   }
 
@@ -261,7 +275,7 @@ export async function reserveVoiceNote(
   const tomorrow = new Date(day.getTime() + DAY).toISOString();
   const universeAi = hearing.payer === 'universe-ai';
 
-  return prisma.$transaction(async (tx): Promise<Reservation> => {
+  const reserved = await prisma.$transaction(async (tx): Promise<Reservation | typeof AGAIN> => {
     // One lock for every reservation: they are short and few, and nothing can take the last minute twice
     await lockSpeech(tx);
     if (scope === 'bot' && personKey.startsWith('guest:') && signedIn) {
@@ -270,12 +284,45 @@ export async function reserveVoiceNote(
       const again = await resolveUsagePerson(userId, false, tx);
       if (!again.personId && again.guest !== true) throw new VoiceNoteError('Who sent this note can\'t be looked up now', 503);
       if (again.personId) {
+        // The reply slots above were worked out for the guest this person was filed as: the whole ask is made again once, now that the
+        // account is there, so they are the account's (limits, windows and the notes on their way all follow the new key)
+        if (!repeated) return AGAIN;
         personKey = `person:${again.personId}`;
         asked = askedFor(personKey);
       }
     }
     const raced = await tx.voiceNoteTurn.findFirst({ where: asked, orderBy: { createdAt: 'asc' } });
     if (raced) return same(raced);
+
+    // The reply slot is taken under the lock: two notes at the same instant never both see the last reply free. What is counted is the
+    // replies already used plus the notes reserved and not yet answered (they have no usage row yet), from the same limits the check above read
+    for (const slot of slots) {
+      // The notes on their way are read first, then the replies used: a note answered in between is then counted twice at worst (as on its
+      // way and as used), never missed
+      const onTheWay = await tx.voiceNoteTurn.count({
+        where: {
+          scope: 'bot',
+          released: false,
+          // A note is on its way until it is answered: a heard one stays answerable as long as its text is kept, not only 15 minutes
+          OR: [
+            { state: { in: ['reserved', 'hearing'] }, createdAt: { gt: new Date(now.getTime() - ON_THE_WAY_MS) } },
+            { state: { in: ['heard', 'answering'] }, bufferUntil: { gt: now } },
+            { state: { in: ['heard', 'answering'] }, bufferUntil: null, createdAt: { gt: new Date(now.getTime() - ON_THE_WAY_MS) } },
+            // A note answered a moment ago: its reply's usage row is reported separately and may land after the answer, so for a short while
+            // it is counted here as well (twice at worst, with the row, never missed). Only that short while: its answer is kept for much longer
+            { state: { in: ['answered', 'delivered'] }, bufferUntil: { gt: new Date(now.getTime() + BUFFER_MS - ANSWER_GAP_MS) } },
+          ],
+          personKey: slot.pending.guestsOnly ? { startsWith: 'guest:' } : slot.pending.personKey,
+          ...(slot.pending.botId ? { botId: slot.pending.botId } : {}),
+          ...(slot.pending.notOwnKey ? { replySource: { in: ['universe-ai', 'provider'] } } : {}),
+        },
+      });
+      const used = await tx.botsAiUsage.count({ where: slot.usage });
+      if (used + onTheWay >= slot.limit) {
+        await tx.botReplyLimitHit.createMany({ data: [slot.hit], skipDuplicates: true });
+        return { ok: false, reason: 'reply-limit', allowance: { allowed: false, limit: slot.kind, resetsAt: slot.resetsAt, who: slot.who } };
+      }
+    }
 
     const counted = { released: false };
     const sum = async (where: Prisma.VoiceNoteTurnWhereInput) => (await tx.voiceNoteTurn.aggregate({ _sum: { seconds: true }, where: { ...counted, ...where } }))._sum.seconds ?? 0;
@@ -322,10 +369,11 @@ export async function reserveVoiceNote(
     }
 
     const turn = await tx.voiceNoteTurn.create({
-      data: { scope, personKey, target, botId, universeKey, clientTurnId, fingerprint, payer: hearing.payer!, providerId: hearing.provider?.id ?? null, seconds, state: 'reserved', createdAt: now },
+      data: { scope, personKey, target, botId, universeKey, clientTurnId, fingerprint, payer: hearing.payer!, providerId: hearing.provider?.id ?? null, seconds, state: 'reserved', replySource, createdAt: now },
     });
     return { ok: true, turn: view(turn), replay: false };
   }, SPEECH_LOCK);
+  return reserved === AGAIN ? reserveVoiceNote(input, now, true) : reserved;
 }
 
 /** Gives back a reservation that was never used: its seconds stop counting, on the bot's day too. */
@@ -358,8 +406,10 @@ async function findTurn(id: string): Promise<VoiceNoteTurn> {
 }
 
 /** Moves a turn on only if nobody else did first: the state and generation it was read with. */
-const moveOn = (turn: VoiceNoteTurn, data: Prisma.VoiceNoteTurnUpdateManyMutationInput) =>
-  prisma.voiceNoteTurn.updateMany({ where: { id: turn.id, state: turn.state, generation: turn.generation }, data });
+const moveOn = (turn: VoiceNoteTurn, data: Prisma.VoiceNoteTurnUpdateManyMutationInput, onLease = false) =>
+  // `onLease`: a recovery that took the turn over because its lease had run out only does so while the lease is still the one it read:
+  // a bot server that reported its progress in the meantime renewed it (without a new generation), and is still the one holding it
+  prisma.voiceNoteTurn.updateMany({ where: { id: turn.id, state: turn.state, generation: turn.generation, ...(onLease ? { leaseUntil: turn.leaseUntil } : {}) }, data });
 
 /** Marks a turn failed and gives back its reservation, once. */
 async function failUnused(turn: VoiceNoteTurn) {
@@ -401,7 +451,7 @@ export async function leaseVoiceNoteStage(id: string, input: { stage?: unknown; 
     if (turn.state === 'hearing' && live) return { granted: false, reason: 'held' };
     if (turn.state === 'hearing' && !turn.providerRefs) {
       // The bot server that held it is gone, and nobody knows whether the provider got the note: never sent again
-      const done = await moveOn(turn, { state: 'uncertain', leaseUntil: null });
+      const done = await moveOn(turn, { state: 'uncertain', leaseUntil: null }, true);
       return { granted: false, reason: done.count > 0 ? 'uncertain' : 'held' };
     }
     if (turn.state !== 'reserved' && turn.state !== 'hearing') return { granted: false, reason: turn.state as TurnState };
@@ -415,29 +465,38 @@ export async function leaseVoiceNoteStage(id: string, input: { stage?: unknown; 
     if (!hearing) {
       // The key it was reserved with can't be used now. A hearing that was started stays counted
       if (turn.state === 'reserved') await failUnused(turn);
-      else await moveOn(turn, { state: 'uncertain', leaseUntil: null });
+      else await moveOn(turn, { state: 'uncertain', leaseUntil: null }, true);
       return { granted: false, reason: 'no-hearing' };
     }
     if (turn.state === 'reserved') {
       // Started under the reservations' lock, still young enough at that moment (the clock moved on while the hearing was looked
-      // up): a reservation counts as being heard until it is too old, then never starts, so nothing passes the notes at once
+      // up): a reservation counts as being heard until it is too old, then never starts, so nothing passes the notes at once.
+      // The hearing is looked up again under the lock too: a lend the owner took back while this waited for it is not heard with.
+      const adapters = readAdapterList(input.adapters);
       const started = await prisma.$transaction(async (tx) => {
         await lockSpeech(tx);
+        const current = await hearingFor(turn, adapters);
+        if (!current) return { lost: true as const };
         const at = now.getTime() + (Date.now() - entered);
-        return tx.voiceNoteTurn.updateMany({
+        const moved = await tx.voiceNoteTurn.updateMany({
           where: { id: turn.id, state: 'reserved', generation: turn.generation, createdAt: { gt: new Date(at - STARTING_MS) } },
           data: { state: 'hearing', generation, leaseUntil },
         });
+        return { lost: false as const, count: moved.count, hearing: current };
       }, SPEECH_LOCK);
+      if (started.lost) {
+        await failUnused(turn);
+        return { granted: false, reason: 'no-hearing' };
+      }
       if (started.count === 0) {
         const after = await findTurn(turn.id);
         if (after.state !== 'reserved') return { granted: false, reason: 'held' };
         await failUnused(after);
         return { granted: false, reason: 'expired' };
       }
-      return { ...granted, hearing };
+      return { ...granted, hearing: started.hearing };
     }
-    const done = await moveOn(turn, { state: 'hearing', generation, leaseUntil });
+    const done = await moveOn(turn, { state: 'hearing', generation, leaseUntil }, true);
     if (done.count === 0) return { granted: false, reason: 'held' };
     return { ...granted, hearing, reconcile: turn.providerRefs };
   }
@@ -480,7 +539,10 @@ export async function recordVoiceNote(id: string, input: Record<string, unknown>
   if (event === 'delivered') {
     if (turn.state === 'delivered') return ok('delivered');
     if (turn.state !== 'answered') throw new VoiceNoteError(`A ${turn.state} turn has no answer to deliver`, 409);
-    await prisma.voiceNoteTurn.updateMany({ where: { id: turn.id, state: 'answered' }, data: { state: 'delivered', buffer: null, bufferUntil: null } });
+    await prisma.voiceNoteTurn.updateMany({ where: { id: turn.id, state: 'answered' },
+      // The answer is gone, but its time is kept: a note delivered a moment after it was answered is still counted as on its way for the short
+      // while its reply row may take to land (the clause in reserveVoiceNote); the sweep clears the time once it has passed
+      data: { state: 'delivered', buffer: null } });
     return ok('delivered');
   }
 
@@ -505,7 +567,11 @@ export async function recordVoiceNote(id: string, input: Record<string, unknown>
       if (typeof input.transcript !== 'string') throw new VoiceNoteError('transcript is required', 400);
       const heardSeconds = input.seconds === undefined ? turn.seconds : Math.min(turn.seconds, wholeOf(input.seconds, 'seconds', 0, LENGTH_CEILING));
       const costMicros = input.costMicros === undefined ? null : wholeOf(input.costMicros, 'costMicros', 0, 2_000_000_000);
-      const buffer = sealBuffer(turn.id, { transcript: input.transcript.slice(0, 20_000) });
+      // Half of what a kept turn can hold is left for the answer, in bytes (a long note in a language with three bytes to a letter would
+      // otherwise fill the buffer and the answer could never be stored, after both providers were already paid)
+      let transcript = input.transcript.slice(0, 20_000);
+      while (Buffer.byteLength(transcript) > BUFFER_MAX_BYTES / 2) transcript = transcript.slice(0, Math.floor(transcript.length * 0.9));
+      const buffer = sealBuffer(turn.id, { transcript });
       // The note moves to heard and its event goes into the books in one transaction, under the lock every speech reservation reads under
       // (lib/speech-reserved.ts): a reservation sees the note as waiting (no event) or as spent (the event), never both and never neither.
       // If the books can't be written nothing moved, the note is still being heard, and the same report can be sent again. What was heard
@@ -543,7 +609,13 @@ export async function recordVoiceNote(id: string, input: Record<string, unknown>
       const value = { transcript: kept?.transcript ?? '', answer: input.answer };
       if (Buffer.byteLength(JSON.stringify(value)) > BUFFER_MAX_BYTES) throw new VoiceNoteError(`The answer and its words are over ${BUFFER_MAX_BYTES / 1024} KB`, 400);
       const buffer = sealBuffer(turn.id, value);
-      fenced((await moveOn(turn, { state: 'answered', buffer, bufferUntil: new Date(now.getTime() + BUFFER_MS), leaseUntil: null })).count);
+      // Under the lock every reservation counts under (as is the reply's usage row, app/api/bots/ai-usage/route.ts): a reservation reads the notes
+      // on their way and then the replies used inside one hold of it, so a note is never answered between those two reads
+      const answered = await prisma.$transaction(async (tx) => {
+        await lockSpeech(tx);
+        return tx.voiceNoteTurn.updateMany({ where: { id: turn.id, state: turn.state, generation: turn.generation }, data: { state: 'answered', buffer, bufferUntil: new Date(now.getTime() + BUFFER_MS), leaseUntil: null } });
+      }, SPEECH_LOCK);
+      fenced(answered.count);
       return ok('answered');
     }
     case 'answer-failed': {

@@ -146,6 +146,19 @@ describe('taking a thing out', () => {
     expect(afterName.conversationHistory).toHaveLength(memory.conversationHistory.length);
   });
 
+  it('takes the lines that hold an ordinary fact too, when no line was noted for it', () => {
+    const memory = saved();
+    memory.personalInfo.facts.push(['employer', 'Acme Corp'], ['age', '31']);
+    memory.conversationHistory.push({ sender: 'person', message: 'I work at Acme Corp', timestamp: T0 + 3 * DAY }, { sender: 'person', message: 'I am 31', timestamp: T0 + 3 * DAY + 1 });
+    const after = withoutItems(memory, new Set([memoryItemKey('fact', 'employer', 'Acme Corp')])).data as typeof memory;
+    expect(after.personalInfo.facts.map(([name]) => name)).not.toContain('employer');
+    expect(after.conversationHistory.map((line) => line.message)).not.toContain('I work at Acme Corp');
+    expect(after.conversationHistory.map((line) => line.message)).toContain('I am 31');
+    // A short value is never searched for in the chat
+    const shortOne = withoutItems(memory, new Set([memoryItemKey('fact', 'age', '31')])).data as typeof memory;
+    expect(shortOne.conversationHistory.map((line) => line.message)).toContain('I am 31');
+  });
+
   it('does nothing for a key it does not hold, or an empty set', () => {
     const memory = saved();
     expect(withoutItems(memory, new Set(['0'.repeat(32)])).removed).toBe(0);
@@ -177,6 +190,22 @@ describe('what was forgotten stays gone', () => {
     const before = saved();
     before.personalInfo.drawnFrom = { 'pref:coffee, no sugar': forgotAt.getTime() - 1000 };
     expect(memoryItemsOf(withoutForgotten(before, [{ itemKey: coffee, createdAt: forgotAt }])).map((item) => item.value)).not.toContain('coffee, no sugar');
+  });
+
+  it('takes out the lines that say it from before the Forget, and keeps the ones said after it', () => {
+    const forgotAt = new Date(T0 + 5 * DAY);
+    const memory = saved();
+    // What was kept before this carries no moment for it, so the person's own lines holding its words go too, but only the ones from before
+    memory.personalInfo.drawnFrom = {};
+    memory.conversationHistory.push(
+      { sender: 'person', message: 'I still like coffee, no sugar', timestamp: forgotAt.getTime() + 1000 },
+      { sender: 'bot', message: 'Coffee, no sugar, got it', timestamp: forgotAt.getTime() + 2000 },
+    );
+    const after = withoutForgotten(memory, [{ itemKey: coffee, createdAt: forgotAt }]) as typeof memory;
+    expect(after.conversationHistory.map((line) => line.message)).toEqual(['What is the weather', 'I still like coffee, no sugar', 'Coffee, no sugar, got it']);
+    // Without a Forget time (taking it out by hand) every line goes
+    const all = withoutItems(memory, new Set([coffee])).data as typeof memory;
+    expect(all.conversationHistory.map((line) => line.message)).toEqual(['What is the weather']);
   });
 
   it('a thing forgotten twice keeps the later Forget', () => {

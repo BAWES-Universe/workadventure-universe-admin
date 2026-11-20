@@ -6,11 +6,13 @@
  */
 import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
+import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 
 const mockUser: { current: { id: string; isGuest?: boolean } | null } = { current: null };
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockUser.current) }));
 type Sent = { host: string; path: string; method: string; headers: Record<string, string>; body?: string };
-const mockSend: { current: ((target: Sent) => { status: number; body?: unknown; redirected?: boolean }) | null } = { current: null };
+type Answer = { status: number; body?: unknown; redirected?: boolean };
+const mockSend: { current: ((target: Sent) => Answer | Promise<Answer>) | null } = { current: null };
 jest.mock('@/lib/app-direct/guard', () => {
   const actual = jest.requireActual('@/lib/app-direct/guard');
   return {
@@ -20,7 +22,7 @@ jest.mock('@/lib/app-direct/guard', () => {
         ? actual.guardedRequest(request, {
             resolve: async () => [{ address: '93.184.216.34', family: 4 }],
             send: async (target: Sent) => {
-              const answer = mockSend.current!(target);
+              const answer = await mockSend.current!(target);
               return { status: answer.status, redirected: answer.redirected ?? false, body: JSON.stringify(answer.body ?? {}), truncated: false, contentType: 'application/json' };
             },
           })
@@ -311,6 +313,23 @@ run('payments for pages, in a real database', () => {
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
     });
 
+    it('gives out no checkout address when the order was closed while the service was being asked', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await makeArtifact();
+      await job(serverId, artifactId);
+      gateway();
+      const answer = mockSend.current!;
+      mockSend.current = async (target) => {
+        // The order is closed (by a sweep, or by the owner stopping the page) after the charge was made and before it is kept
+        await prisma.appPageOrder.updateMany({ where: { ownerId: sara }, data: { status: 'not_paid', closedAt: new Date() } });
+        return answer(target);
+      };
+      const response = await start(artifactId);
+      expect(response.status).toBe(409);
+      expect(await response.json()).not.toHaveProperty('checkoutUrl');
+      expect(await prisma.appPageOrder.findFirst({ where: { ownerId: sara } })).toMatchObject({ status: 'not_paid', checkoutUrl: null });
+    });
+
     it('closes the order, never leaves it open, when the key cannot be read', async () => {
       const { id, serverId } = await connectGateway();
       const artifactId = await makeArtifact();
@@ -359,6 +378,8 @@ run('payments for pages, in a real database', () => {
       const { orderId } = await checkout(first);
       // The service refuses this one lookup (for example a charge it no longer shows this key)
       mockSend.current = () => ({ status: 403 });
+      // The checkout's good call was a minute ago or more (a refusal right behind a recorded good call is not read as a loss)
+      await prisma.appConnection.update({ where: { id }, data: { lastWorkedAt: new Date(Date.now() - 2 * 60_000) } });
       await settle(orderId);
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).not.toBeNull();
       // Another page still gets its checkout, which clears the mark
@@ -700,6 +721,7 @@ run('payments for pages, in a real database', () => {
       gateway();
       const { orderId } = await checkout(artifactId);
       mockSend.current = () => ({ status: 401, body: { errors: [{ code: '1103' }] } });
+      await prisma.appConnection.update({ where: { id: connectionId }, data: { lastWorkedAt: new Date(Date.now() - 2 * 60_000) } });
       expect(await settle(orderId)).toMatchObject({ status: 'checking' });
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connectionId } })).signInLostAt).not.toBeNull();
       expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('pending');
@@ -734,6 +756,60 @@ run('payments for pages, in a real database', () => {
       gateway();
       expect((await startCheckout({ artifactId, visitor: 'one' })).status).toBe('ok');
       expect((await startCheckout({ artifactId, visitor: 'two' })).status).toBe('limit');
+    });
+  });
+
+  describe('the platform’s limit', () => {
+    it('is counted by one checkout at a time across every owner, so two at the same moment cannot both take the last place', async () => {
+      const { artifactId } = await pending();
+      gateway();
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let locked: () => void = () => undefined;
+      const taken = new Promise<void>((resolve) => (locked = resolve));
+      // Another owner's checkout is in the middle of counting and writing its order
+      const other = prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('page-orders:platform', 0))`;
+          locked();
+          await held;
+        },
+        { timeout: 20_000 },
+      );
+      await taken;
+      let finished = false;
+      const mine = startCheckout({ artifactId, visitor: 'one' }).then((outcome) => ((finished = true), outcome));
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(finished).toBe(false);
+      release();
+      await other;
+      expect((await mine).status).toBe('ok');
+    });
+
+    it('takes its turn on the key calls\' count with every other use of a key, so a call and a checkout cannot both take the last place', async () => {
+      const { artifactId } = await pending();
+      gateway();
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let locked: () => void = () => undefined;
+      const taken = new Promise<void>((resolve) => (locked = resolve));
+      // A key call (lib/app-direct/use.ts) is in the middle of counting and writing its row
+      const call = prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('key-calls:everyone', 0))`;
+          locked();
+          await held;
+        },
+        { timeout: 20_000 },
+      );
+      await taken;
+      let finished = false;
+      const mine = startCheckout({ artifactId, visitor: 'one' }).then((outcome) => ((finished = true), outcome));
+      await waitUntilBlockedOnLock();
+      expect(finished).toBe(false);
+      release();
+      await call;
+      expect((await mine).status).toBe('ok');
     });
   });
 

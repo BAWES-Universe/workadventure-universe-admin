@@ -655,6 +655,22 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(await (await test(serverId)).json()).toMatchObject({ success: true, toolCount: 1, toolNames: ['GMAIL_FETCH_EMAILS'] });
     });
 
+    it('does not take an answer that carries another id for the answer to the list it asked for, in a plain reply or in a stream', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      const mismatched = (listAnswer: ReturnType<typeof answerOf>) =>
+        adapter.callLink
+          .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}', 's1'))
+          .mockResolvedValueOnce(answerOf(202, ''))
+          .mockResolvedValueOnce(listAnswer);
+      mismatched(answerOf(200, '{"jsonrpc":"2.0","id":99,"result":{"tools":[{"name":"SOMEONE_ELSES"}]}}'));
+      expect(await (await test(serverId)).json()).toMatchObject({ success: false });
+      adapter.callLink.mockClear();
+      mismatched(answerOf(200, 'event: message\ndata: {"jsonrpc":"2.0","id":99,"result":{"tools":[{"name":"SOMEONE_ELSES"}]}}\n'));
+      const streamed = await (await test(serverId)).json();
+      expect(streamed).toMatchObject({ success: false });
+      expect(JSON.stringify(streamed)).not.toContain('SOMEONE_ELSES');
+    });
+
     it('reads every page of a long list of tools', async () => {
       const { adapter, serverId } = await connectedAndGranted();
       adapter.callLink

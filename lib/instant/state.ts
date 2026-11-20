@@ -65,12 +65,14 @@ export async function getInstantPause(db: SettingsDb = prisma): Promise<InstantP
 }
 
 /** Pauses Instant (new runs only: runs already going finish and are settled). The first reason stands until it is resumed. */
-export async function pauseInstant(reason: string, userId: string | null = null, within?: Prisma.TransactionClient): Promise<InstantPause> {
+export async function pauseInstant(reason: string, userId: string | null = null, within?: Prisma.TransactionClient, ifResumedAt?: string | null): Promise<InstantPause> {
   // Called from inside a transaction, it uses that one: a second connection from the pool is never taken while one is held
   const pause = async (tx: Prisma.TransactionClient): Promise<InstantPause> => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('instant:state'))`;
     const current = await getInstantPause(tx);
     if (current.paused) return current;
+    // Decided from what was read before a resume: the resume came later and wins (see evaluatePause)
+    if (ifResumedAt !== undefined && (current.resumedAt ?? null) !== ifResumedAt) return current;
     const state = { paused: true, reason, at: new Date().toISOString() };
     const value = state as Prisma.InputJsonValue;
     await tx.appSetting.upsert({ where: { key: STATE_KEY }, create: { key: STATE_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });

@@ -54,7 +54,10 @@ export function goesLines(row: CostsReport['goes'][number]): string[] {
   }
   if (row.key === 'apps' || row.key === 'instant') {
     const uses = plural(row.uses ?? 0, 'use', 'uses');
-    return [uses, row.ourMicros === null ? 'no price known yet' : `Our count ${dollars(row.ourMicros)}`];
+    const lines = [uses, row.ourMicros === null ? 'no price known yet' : `Our count ${dollars(row.ourMicros)}`];
+    // Said plainly: a run let go because Composio's log could not be reached may have gone through, so the person may have had it free
+    if ((row.releasedUnconfirmed ?? 0) > 0) lines.push(`${plural(row.releasedUnconfirmed ?? 0, 'run', 'runs')} released unconfirmed`);
+    return lines;
   }
   if (row.ourMicros === null) return ['Our count not known yet', row.unpriced > 0 ? `${plural(row.unpriced, 'use has', 'uses have')} no price yet` : ''].filter(Boolean);
   const lines = [`Our count ${dollars(row.ourMicros)}`];

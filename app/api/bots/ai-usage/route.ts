@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
@@ -6,6 +7,7 @@ import { readUsagePriceFacts } from '@/lib/ai-usage-cost';
 import { readUsageChannel, resolveUsagePerson } from '@/lib/usage-person';
 import { recordModelCall } from '@/lib/meter';
 import { runOfBrick } from '@/lib/brick-items';
+import { lockSpeech, SPEECH_LOCK } from '@/lib/speech-reserved';
 
 /**
  * POST /api/bots/ai-usage
@@ -73,6 +75,20 @@ export async function POST(request: NextRequest) {
     const named = await resolveUsagePerson(talked, isGuest);
     const task = readUsageChannel(channel) === 'task';
 
+    // This report's own id, made here and never taken from the request: every write of this report carries it, so a write that meets the row an
+    // earlier write of the same report left (its commit went through and only the answer was lost) is told so by the database, exactly
+    const reportKey = randomUUID();
+    const writeOnce = async (row: Parameters<typeof prisma.botsAiUsage.create>[0]['data']) => {
+      try {
+        return await prisma.botsAiUsage.create({ data: row });
+      } catch (err) {
+        if ((err as { code?: string } | null)?.code !== 'P2002') throw err;
+        const written = await prisma.botsAiUsage.findUnique({ where: { reportKey } });
+        if (!written) throw err;
+        return written;
+      }
+    };
+
     // Fire-and-forget: Don't await, just start the operation
     // This ensures bot operation isn't blocked if tracking fails
     (async () => {
@@ -88,32 +104,49 @@ export async function POST(request: NextRequest) {
           console.error('Error looking up whose Brick made a task call:', err);
         }
       }
-      return prisma.botsAiUsage.create({
-        data: {
-          botId,
-          providerId,
-          tokensUsed,
-          apiCalls,
-          durationSeconds,
-          // A row with price facts leaves the old column empty, so an old estimate and a real price are never both on one row
-          cost: facts ? null : cost !== null ? cost : null,
-          ...(facts ?? {}),
-          latency,
-          error,
-          timestamp: timestamp ? new Date(timestamp) : new Date(),
-          // Who talked (as the bot server knows them) and whose key paid; the key's owner comes from the provider row, never from the request
-          talkedUserId: talked,
-          keyOwnerId: provider.ownerId ?? null,
-          // Direct messages or nearby chat, and the person as Orbit knows them (#491, #1159 step 6)
-          channel: readUsageChannel(channel),
-          talkedPersonId: person.personId,
-          talkedGuest: person.guest,
-          // A greeting the bot made on its own: still the payer's usage, never counted against the person it greeted
-          greeting: greeting === true,
-          // The run of a goal or task the call was made for (game #2002), kept only as the bot server's word for it
-          brickRunId: typeof sentRunId === 'string' && sentRunId ? sentRunId.slice(0, 36) : null,
-        },
-      });
+      const data = {
+        botId,
+        providerId,
+        tokensUsed,
+        apiCalls,
+        durationSeconds,
+        // A row with price facts leaves the old column empty, so an old estimate and a real price are never both on one row
+        cost: facts ? null : cost !== null ? cost : null,
+        ...(facts ?? {}),
+        latency,
+        error,
+        timestamp: timestamp ? new Date(timestamp) : new Date(),
+        // Who talked (as the bot server knows them) and whose key paid; the key's owner comes from the provider row, never from the request
+        talkedUserId: talked,
+        keyOwnerId: provider.ownerId ?? null,
+        // Direct messages or nearby chat, and the person as Orbit knows them (#491, #1159 step 6)
+        channel: readUsageChannel(channel),
+        talkedPersonId: person.personId,
+        talkedGuest: person.guest,
+        // A greeting the bot made on its own: still the payer's usage, never counted against the person it greeted
+        greeting: greeting === true,
+        // The run of a goal or task the call was made for (game #2002), kept only as the bot server's word for it
+        brickRunId: typeof sentRunId === 'string' && sentRunId ? sentRunId.slice(0, 36) : null,
+        reportKey,
+      };
+      // A row that counts as a reply (not an error, not a greeting) is written under the lock every voice note reservation counts under
+      // (lib/voice-note-turns.ts): a reservation reads the notes on their way and then the replies used inside one hold of it, so a row is never
+      // written between those two reads and a note that was answered is never missed by one of them. Other rows are written as before
+      if (error !== true && greeting !== true) {
+        try {
+          return await prisma.$transaction(async (tx) => {
+            await lockSpeech(tx);
+            return tx.botsAiUsage.create({ data });
+          }, SPEECH_LOCK);
+        } catch (err) {
+          // The lock was busy for too long or no connection came in time: the row is still written, without it, so a reply never drops out of the
+          // counts and the books. Written without the lock, a reservation running at that moment may miss it for that one hold. If the failure
+          // came after the first write was committed (the answer to the commit was lost), this write meets the row's report key and answers with
+          // the row that is there: the reply is in the counts once, exactly, whether or not anything could be looked up.
+          console.error('Could not write a reply row under the speech lock, writing it without:', err);
+        }
+      }
+      return writeOnce(data);
     })()
       // The meter's books (game #1998) copy the call from the row that was just counted. They never hold up or fail the report
       .then(async (row) =>

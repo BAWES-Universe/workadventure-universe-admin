@@ -190,6 +190,21 @@ const ASK_NAMES_PER_DAY = 20;
 
 const NAME_SHAPE = /^[\p{L}\p{N}][\p{L}\p{M}\p{N} .&'+\-/]*$/u;
 
+/**
+ * Words that make three or more words a sentence rather than a name: "My project is confidential". Kept short and plain on purpose: a real
+ * App name ("You Need A Budget", "We Heart It", "My Fitness Pal") has none of them, and a junk name that gets past is still only one line on a
+ * report, held back by the per-person daily caps.
+ */
+const SENTENCE_WORDS = new Set(['is', 'are', 'was', 'were', 'am', 'has', 'have', 'had', 'will', 'would', 'can', 'could', 'should', 'must', "isn't", "aren't", "don't", "doesn't", "didn't", "can't", 'cannot', "won't", "i'm", "i'd", "i've", "it's", "we're"]);
+const SENTENCE_OPENERS = new Set(['please', 'i', 'hello', 'hi', 'hey', 'thanks', 'thank']);
+
+function readsAsSentence(name: string): boolean {
+  const words = name.toLowerCase().split(' ');
+  if (words.length < 3) return false;
+  if (name.endsWith('.')) return true;
+  return SENTENCE_OPENERS.has(words[0]) || words.some((word) => SENTENCE_WORDS.has(word));
+}
+
 /** The App name to count, or null when it is not an App name (empty, too long, a link, an email, or reads like a sentence). */
 export function cleanAskName(raw: unknown): { name: string; key: string } | null {
   if (typeof raw !== 'string') return null;
@@ -198,6 +213,7 @@ export function cleanAskName(raw: unknown): { name: string; key: string } | null
   if (name.split(' ').length > ASK_WORDS_MAX) return null;
   if (!NAME_SHAPE.test(name)) return null;
   if (/https?:|www\.|@/i.test(name)) return null;
+  if (readsAsSentence(name)) return null;
   // The key is what asks are grouped by: lower case, and without accents or other marks, so "Café", "CAFÉ" and "cafe" are one App.
   // Lowercasing can make a name longer (İ becomes two characters before its mark is dropped), so the key is also cut to the width
   // of its column, counted in characters (code points), never in the middle of one.
@@ -241,7 +257,8 @@ export async function recordAppAsk(input: { name: unknown; personKey: string }, 
 /** Whether an App of that name or key is already on a list a person can use (a ready-made App that is on, or an entry of the super admin's list that is on). */
 async function appExists(key: string): Promise<boolean> {
   const slug = key.replace(/[^a-z0-9]+/g, '');
-  const ready = (await readReadyMadeApps()).some((app) => app.enabled && (askKey(app.name) === key || app.key.replace(/[^a-z0-9]+/g, '') === slug));
+  // Ready-made Apps are on a list only while the provider is: with it off they cannot be used, so asking for one still counts
+  const ready = (adapterIsOn() ? await readReadyMadeApps() : []).some((app) => app.enabled && (askKey(app.name) === key || app.key.replace(/[^a-z0-9]+/g, '') === slug));
   if (ready) return true;
   const entries = await prisma.appCatalogEntry.findMany({ where: { enabled: true }, select: { key: true, name: true } });
   return entries.some((entry) => askKey(entry.name) === key || entry.key.replace(/[^a-z0-9]+/g, '') === slug);

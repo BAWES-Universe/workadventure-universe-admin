@@ -1170,7 +1170,9 @@ export function readInstantLimits(answer: unknown): InstantLimitViews | null {
   const limits = (answer as { limits?: unknown } | null)?.limits;
   if (!limits || typeof limits !== 'object') return null;
   const entries = Object.entries(limits as Record<string, Partial<InstantLimitView>>);
-  const valid = entries.length > 0 && entries.every(([, view]) => view && typeof view.label === 'string' && typeof view.hint === 'string' && view.range && typeof view.range.min === 'number' && typeof view.range.max === 'number' && ['micros', 'bps', 'count', 'minutes'].includes(view.unit as string));
+  // Every field a row is drawn from is checked: a row without its value, its recommendation or whether it is required would come out as NaN
+  const numberOrNull = (field: unknown) => field === null || (typeof field === 'number' && Number.isFinite(field));
+  const valid = entries.length > 0 && entries.every(([, view]) => view && typeof view.label === 'string' && typeof view.hint === 'string' && view.range && typeof view.range.min === 'number' && typeof view.range.max === 'number' && ['micros', 'bps', 'count', 'minutes'].includes(view.unit as string) && numberOrNull(view.value) && numberOrNull(view.recommended) && typeof view.required === 'boolean');
   return valid ? (limits as InstantLimitViews) : null;
 }
 

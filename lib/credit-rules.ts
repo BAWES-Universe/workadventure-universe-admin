@@ -305,6 +305,8 @@ function sameFigures(made: ProgramRow, checked: Checked): boolean {
     rule.share === checked.share &&
     rule.settlement === checked.settlement &&
     rule.fundingAccountId === checked.fundingAccountId &&
+    rule.joinerCap === checked.joinerCap &&
+    rule.totalCapMicros === checked.totalCapMicros &&
     [...rule.covers].sort().join() === [...checked.covers].sort().join() &&
     sameRecipients
   );
@@ -386,7 +388,7 @@ async function clashesOf(db: Tx, candidate: RuleFacts, now: Date, programIds?: {
 }
 
 /** Saves a new program, or a new version of one (`programId`). A clash between rules is refused. */
-async function save(kind: ProgramKind, input: GrantInput & { programId?: string }, issuer: Issuer, now: Date): Promise<ProgramView> {
+async function save(kind: ProgramKind, input: GrantInput & { programId?: string }, issuer: Issuer, now: Date, after?: (tx: Tx) => Promise<void>): Promise<ProgramView> {
   const checked = checkGrant(kind, input, now);
   const programId = input.programId ?? randomUUID();
   if (input.requestKey !== undefined && (!input.requestKey || input.requestKey.length > 255)) throw new CreditRefused('requestKey must be 1 to 255 characters', 'request_key');
@@ -501,17 +503,19 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     });
     if (existing && input.label?.trim()) await tx.grantProgram.update({ where: { id: programId }, data: { label: checked.label } });
     const saved = await loadProgramRow(tx, programId);
+    // What must change together with this rule (the same save, the same commit): it fails, and so does the rule
+    if (after) await after(tx);
     return viewOf(saved as ProgramRow, (saved as ProgramRow).rules[0], (saved as ProgramRow).rules.length);
   });
   return view;
 }
 
 /** The category's default: how much, how often, and who gets it. Saving again makes a new version of the same program. */
-export async function saveDefault(input: GrantInput, issuer: Issuer, now: Date = new Date()): Promise<ProgramView> {
+export async function saveDefault(input: GrantInput, issuer: Issuer, now: Date = new Date(), after?: (tx: Tx) => Promise<void>): Promise<ProgramView> {
   for (let attempt = 0; ; attempt += 1) {
     const current = await prisma.grantProgram.findFirst({ where: { categoryId: input.categoryId, kind: 'default', status: 'active' }, select: { id: true } });
     try {
-      return await save('default', { ...input, programId: current?.id }, issuer, now);
+      return await save('default', { ...input, programId: current?.id }, issuer, now, after);
     } catch (error) {
       // A unique-key refusal on the default's index means someone else just made it too (a writer that did not take the lock): look again
       const raced = error instanceof DefaultAppeared || (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002');
@@ -532,22 +536,33 @@ export async function createGift(input: GrantInput, issuer: Issuer, now: Date = 
 
 /** Ends a program: nothing new is issued under it, the credit already given stays until it ends, and its history stays. */
 export async function endProgram(programId: string, issuer: Issuer, now: Date = new Date()): Promise<'ended' | 'already_ended' | 'not_found'> {
+  return prisma.$transaction((tx) => endProgramIn(tx, programId, issuer, now));
+}
+
+/** Ends several programs in one commit: all of them end, or none does (a refusal on the second leaves the first as it was). */
+export async function endPrograms(programIds: string[], issuer: Issuer, now: Date = new Date()): Promise<('ended' | 'already_ended' | 'not_found')[]> {
   return prisma.$transaction(async (tx) => {
-    // Under the funding account's lock and the category's rules lock (issuing holds the rules lock shared, and may still be issuing from a
-    // version waiting to be replaced that another account funds): an issuing that read the rule before this ends it sees it ended and gives nothing
-    const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true, program: { select: { categoryId: true } } } });
-    if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId), lockOfRules(peek.program.categoryId)]);
-    const program = await tx.grantProgram.findUnique({ where: { id: programId }, include: { rules: { where: { state: 'current' }, take: 1 } } });
-    if (!program) return 'not_found';
-    if (program.status === 'ended') return 'already_ended';
-    const rule = program.rules[0];
-    if (rule) {
-      await checkMayFundFrom(tx, rule.fundingAccountId, issuer, 'You cannot end this one');
-    }
-    await tx.grantProgram.update({ where: { id: programId }, data: { status: 'ended', endedAt: now } });
-    await tx.grantRule.updateMany({ where: { programId, state: 'current' }, data: { state: 'ended', supersededAt: now } });
-    return 'ended';
+    const results: ('ended' | 'already_ended' | 'not_found')[] = [];
+    for (const programId of programIds) results.push(await endProgramIn(tx, programId, issuer, now));
+    return results;
   });
+}
+
+async function endProgramIn(tx: Tx, programId: string, issuer: Issuer, now: Date): Promise<'ended' | 'already_ended' | 'not_found'> {
+  // Under the funding account's lock and the category's rules lock (issuing holds the rules lock shared, and may still be issuing from a
+  // version waiting to be replaced that another account funds): an issuing that read the rule before this ends it sees it ended and gives nothing
+  const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true, program: { select: { categoryId: true } } } });
+  if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId), lockOfRules(peek.program.categoryId)]);
+  const program = await tx.grantProgram.findUnique({ where: { id: programId }, include: { rules: { where: { state: 'current' }, take: 1 } } });
+  if (!program) return 'not_found';
+  if (program.status === 'ended') return 'already_ended';
+  const rule = program.rules[0];
+  if (rule) {
+    await checkMayFundFrom(tx, rule.fundingAccountId, issuer, 'You cannot end this one');
+  }
+  await tx.grantProgram.update({ where: { id: programId }, data: { status: 'ended', endedAt: now } });
+  await tx.grantRule.updateMany({ where: { programId, state: 'current' }, data: { state: 'ended', supersededAt: now } });
+  return 'ended';
 }
 
 // ---------- The preview, before any save (spec 7a) ----------
@@ -624,13 +639,15 @@ async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: 
   const renewals = checked.schedule === 'monthly' ? (months === null ? null : Math.max(0, months - 1)) : 0;
   // A cap on how many can join and a total cap bound a group that grows; with neither, a growing group has no lifetime maximum
   const capped = checked.totalCapMicros !== null || (checked.joinerCap !== null && checked.share === 'each');
-  const unbounded = checked.schedule !== 'none' && ((growing && !capped) || (checked.schedule === 'monthly' && months === null));
+  // A monthly rule with no end date goes on for ever, unless a total cap stops it: then the cap is the most it ever issues
+  const unbounded = checked.schedule !== 'none' && ((growing && !capped) || (checked.schedule === 'monthly' && months === null && checked.totalCapMicros === null));
   let lifetime: number | null = null;
   if (!unbounded && checked.schedule !== 'none') {
     const periods = checked.schedule === 'monthly' ? (months ?? 1) : 1;
     const joiners = growing && checked.joinerCap !== null && checked.share === 'each' ? Math.max(people, checked.joinerCap) : people;
     const whole = (checked.share === 'shared' ? eachMicros : eachMicros * joiners) * periods;
-    lifetime = checked.totalCapMicros !== null ? Math.min(whole, checked.totalCapMicros) : whole;
+    // With no end date the months have no number: only the total cap is left to say how much
+    lifetime = checked.totalCapMicros !== null ? (months === null && checked.schedule === 'monthly' ? checked.totalCapMicros : Math.min(whole, checked.totalCapMicros)) : whole;
   }
   const dollars = (micros: number) => `$${(micros / 1_000_000).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
   const unit = universeAi ? 'replies' : '';
@@ -638,7 +655,7 @@ async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: 
   let sentence: string;
   if (checked.schedule === 'none') sentence = 'Gives nothing: those people get no grant.';
   else if (unbounded) sentence = growing && !capped ? `Issues ${amountWords} to each person who qualifies, including people who join or sign up later. It has no lifetime maximum.` : `Renews every month with no end date, so it has no lifetime maximum.`;
-  else sentence = `Issues at most ${universeAi ? `${lifetime} ${unit}` : dollars(lifetime ?? 0)} in all${checked.schedule === 'monthly' ? ` over ${months} month${months === 1 ? '' : 's'}` : ''}.`;
+  else sentence = `Issues at most ${universeAi ? `${lifetime} ${unit}` : dollars(lifetime ?? 0)} in all${checked.schedule === 'monthly' ? (months === null ? ', then stops at the total cap' : ` over ${months} month${months === 1 ? '' : 's'}`) : ''}.`;
   // The envelope is only a figure beside the preview: if it cannot be read, the preview goes on without it. It is read inside a savepoint,
   // because a failed query otherwise leaves the whole transaction aborted and every read after it fails too
   let envelope: Awaited<ReturnType<typeof envelopeIn>> | null = null;

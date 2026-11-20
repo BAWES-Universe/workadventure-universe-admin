@@ -217,6 +217,8 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     check('the same request key finds the same gift instead of giving another', replay.replayed === true && replay.programId === gift.programId && (await prisma.grantProgram.count({ where: { requestKey: 'gift-A' } })) === 1, replay);
     const other = await refuses(() => rules.createGift({ categoryId: 'instant_apps', amount: 6 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['g1', 'g2'] }, covers: ['instant_apps', 'computers'], requestKey: 'gift-A' }, root, G));
     check('the same key with other figures is refused: the first stands', other?.code === 'key_used', other);
+    const capped = await refuses(() => rules.createGift({ categoryId: 'instant_apps', amount: 5 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['g1', 'g2'] }, covers: ['instant_apps', 'computers'], totalCapMicros: 8 * M, requestKey: 'gift-A' }, root, G));
+    check('the same key with another cap is refused too: the first stands', capped?.code === 'key_used', capped);
     await Promise.all([issue.ensureIssued('g1', G), issue.ensureIssued('g1', G), issue.ensureIssued('g2', G)]);
     const g1lots = await lotsOf('g1');
     check('a gift for both Instant Apps and computers is ONE dollar amount: one lot covering both', g1lots.length === 1 && g1lots[0].covers.length === 2 && Number(g1lots[0].amountMicros) === 5 * M && g1lots[0].source === 'gift', g1lots);
@@ -328,6 +330,10 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     check('a refund goes back into the lot it came from, and never becomes cash', run.ok && r1.ok && r1.restoredMicros === 1 * M && bal?.usedMicros === 2 * M && bal.availableMicros === 3 * M, { r1, bal });
     const r1b = await spend.refundHold({ holdKey: 'rf-1', refundKey: 'ref-1', amountMicros: 1 * M, reason: 'platform_failure' }, G);
     check('the same refund key refunds once', r1b.ok && !r1b.created && r1b.refundedMicros === 1 * M && (await prisma.creditRefund.count({ where: { holdId: (await prisma.creditHold.findUniqueOrThrow({ where: { holdKey: 'rf-1' } })).id } })) === 1, r1b);
+    // Read only: a key the books gave under answers with its first amount, a key they never saw with nothing, and asking creates nothing
+    const seen = await spend.findRefund({ refundKey: 'ref-1' });
+    const unseen = await spend.findRefund({ refundKey: 'ref-never' });
+    check('looking up a refund key finds what was given under it, and nothing for a key never used, without making one', seen.found && seen.refundedMicros === 1 * M && !unseen.found && (await prisma.creditRefundRequest.count({ where: { requestKey: 'ref-never' } })) === 0, { seen, unseen });
     const tooMuch = await spend.refundHold({ holdKey: 'rf-1', refundKey: 'ref-2', amountMicros: 3 * M, reason: 'platform_failure' }, G);
     check('a refund cannot be more than was charged and not yet given back', !tooMuch.ok && tooMuch.reason === 'too_much', tooMuch);
     const early = await spend.refundHold({ holdKey: 'rf-nope', refundKey: 'ref-9', amountMicros: 1, reason: 'platform_failure' }, G);
@@ -459,6 +465,8 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     check('everyone, with later sign-ups, says plainly it has no lifetime maximum', wide.mostIssued.unbounded && wide.mostIssued.lifetimeMicros === null && /no lifetime maximum/.test(wide.mostIssued.sentence) && wide.recipients.growing, wide);
     const monthly = await rules.previewGrant('exception', { categoryId: 'computers', amount: 5 * M, schedule: 'monthly', recipients: { kind: 'people', userIds: ['g1', 'g2'] } }, G);
     check('monthly with no end date says it has no lifetime maximum', monthly.mostIssued.unbounded && monthly.mostIssued.lifetimeMicros === null, monthly);
+    const monthlyCapped = await rules.previewGrant('exception', { categoryId: 'computers', amount: 5 * M, schedule: 'monthly', recipients: { kind: 'people', userIds: ['g1', 'g2'] }, totalCapMicros: 12 * M }, G);
+    check('monthly with no end date but a total cap: the cap is the most it ever issues', !monthlyCapped.mostIssued.unbounded && monthlyCapped.mostIssued.lifetimeMicros === 12 * M && !/no lifetime maximum/.test(monthlyCapped.mostIssued.sentence), monthlyCapped);
     const ending = await rules.previewGrant('exception', { categoryId: 'computers', amount: 5 * M, schedule: 'monthly', recipients: { kind: 'people', userIds: ['g1', 'g2'] }, claimEndsAt: at('2027-05-01T00:00:00Z') }, G);
     check('monthly with an end counts the renewals: Feb to Apr is 3 months, 2 renewals, $30', ending.mostIssued.renewals === 2 && ending.mostIssued.lifetimeMicros === 30 * M && !ending.mostIssued.unbounded, ending);
     check('part 3 is apart from part 2: at most the credit at provider prices, with what we already carry', bounded.cost.atMostAtProviderPricesMicros === 15 * M && typeof bounded.cost.reservedMicros === 'number' && typeof bounded.cost.keptStorageMicros === 'number' && !bounded.cost.variableProviderCost, bounded.cost);

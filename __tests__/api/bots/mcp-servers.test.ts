@@ -46,6 +46,8 @@ jest.mock('@/lib/db', () => {
         botMcpServer: mockBotMcpServer,
         bot: mockBot,
         user: mockUser,
+        // The server's limits are read inside it: nothing saved, so the recommended ones
+        appSetting: { findUnique: jest.fn(async () => null) },
         // Holding the bot's row while its apps are counted
         $queryRaw: jest.fn(async () => []),
       })),

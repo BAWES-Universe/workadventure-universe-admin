@@ -240,6 +240,72 @@ describe('gifts', () => {
     expect(body(calls('POST', '/gifts')[4]).grantKey).not.toBe(body(calls('POST', '/gifts')[3]).grantKey);
   });
 
+  it('keeps the key after a sign-in that failed on the way back, since the first try may have been saved', async () => {
+    render(<GrantsPage />);
+    await pickOmar();
+    fireEvent.change(await screen.findByLabelText('Gift amount'), { target: { value: '5' } });
+    const give = await screen.findByRole('button', { name: 'Give $5 each' });
+    await waitFor(() => expect(give).not.toBeDisabled());
+    const original = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) =>
+      url === '/api/admin/grants/gifts' ? Promise.resolve({ ok: false, status: 401, json: async () => ({ error: 'Unauthorized' }) } as Response) : original(url, init),
+    );
+    fireEvent.click(give);
+    await waitFor(() => expect(calls('POST', '/gifts')).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Give $5 each' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Give $5 each' }));
+    await waitFor(() => expect(calls('POST', '/gifts')).toHaveLength(2));
+    expect(body(calls('POST', '/gifts')[1]).grantKey).toBe(body(calls('POST', '/gifts')[0]).grantKey);
+  });
+
+  it('lets an exception that exists go back to “As everyone” in both, and keeps Save shut for a new one with nothing chosen', async () => {
+    overview = set;
+    render(<GrantsPage />);
+    fireEvent.click(within(await screen.findByTestId('grants-exception')).getByRole('button', { name: 'Change' }));
+    // The Instant Apps setting of this exception is its own: back to the same as everyone
+    fireEvent.click(screen.getAllByRole('radio', { name: 'As everyone' })[0]);
+    await waitFor(() => expect(screen.getByTestId('grants-save')).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(await screen.findByTestId('grants-add-exception'));
+    expect(screen.getByTestId('grants-save')).toBeDisabled();
+  });
+
+  it('asks the clash again when a category of the draft changes, even though it names the same people and rule', async () => {
+    overview = set;
+    preview = { numbers: nums({ people: 2, interval: 'monthly', mostNowMicros: 20_000_000, laterToo: false }), clash: { people: ['Omar', 'Noor'], other: { name: 'Kuwait Makers', text: 'Computers $5 a month' }, thisText: '$25' } };
+    render(<GrantsPage />);
+    fireEvent.click(await screen.findByTestId('grants-add-exception'));
+    fireEvent.change(await screen.findByLabelText('Search people by name'), { target: { value: 'o' } });
+    fireEvent.click(await screen.findByText('Omar', { selector: 'button *' }));
+    fireEvent.click(screen.getAllByRole('radio', { name: 'Its own' })[1]);
+    fireEvent.change(screen.getByLabelText('Computers amount'), { target: { value: '25' } });
+    const clash = await screen.findByTestId('grants-clash');
+    fireEvent.click(within(clash).getByRole('radio', { name: /This one, \$25/ }));
+    expect(screen.getByTestId('grants-save')).not.toBeDisabled();
+    // The admin changes what this exception gives: the answer was for another draft, and is asked again
+    fireEvent.change(screen.getByLabelText('Computers amount'), { target: { value: '30' } });
+    await waitFor(() => expect(screen.getByTestId('grants-save')).toBeDisabled());
+  });
+
+  it('does not offer the people of an earlier search once typing goes on', async () => {
+    render(<GrantsPage />);
+    fireEvent.click(await screen.findByTestId('grants-give'));
+    const search = await screen.findByLabelText('Search people by name');
+    fireEvent.change(search, { target: { value: 'o' } });
+    await screen.findByText('Omar', { selector: 'button *' });
+    // Typing on: until the next answer comes, nobody from the search before is offered
+    let release: (value: unknown) => void = () => undefined;
+    const original = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) =>
+      String(url).startsWith('/api/admin/grants/find') ? new Promise((resolve) => { release = resolve; }) : original(url, init),
+    );
+    fireEvent.change(search, { target: { value: 'oz' } });
+    expect(screen.queryByText('Omar', { selector: 'button *' })).not.toBeInTheDocument();
+    await waitFor(() => expect(calls('GET', 'q=oz')).toHaveLength(1));
+    release({ ok: true, status: 200, json: () => Promise.resolve({ results: [{ id: 'omar', name: 'Omar', woka: [] }] }) });
+    expect(await screen.findByText('Omar', { selector: 'button *' })).toBeInTheDocument();
+  });
+
   it('records what was agreed only for extra usage that will be billed', async () => {
     render(<GrantsPage />);
     await pickOmar();

@@ -11,12 +11,19 @@ import { randomUUID } from 'node:crypto';
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 jest.mock('@/lib/tool-signin', () => ({ syncToolSignInNotices: jest.fn(async () => undefined) }));
 
+/** Lets one test stand between a Brick being found and the list being read. */
+const mockListHook: { current: ((read: () => Promise<unknown>) => Promise<unknown>) | null } = { current: null };
+jest.mock('@/lib/brick-default', () => {
+  const actual = jest.requireActual('@/lib/brick-default');
+  return { ...actual, listBricks: (...args: unknown[]) => (mockListHook.current ? mockListHook.current(() => actual.listBricks(...args)) : actual.listBricks(...args)) };
+});
+
 import { prisma } from '@/lib/db';
 import { ensureDefaultBrick, listBricks, listDeletedBricks } from '@/lib/brick-default';
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
 import { BRICK_LOOKS, makeBrick, makeBrickFromChat, bricksForChat } from '@/lib/brick-make';
 import { answerOffer, claimOffer, offersSoFar } from '@/lib/brick-offers';
-import { ENDED_BY_DELETE } from '@/lib/bot-actions';
+import { endAllApprovals, ENDED_BY_DELETE } from '@/lib/bot-actions';
 import { checkBotAccess } from '@/lib/bot-access';
 import { credentialsForBot } from '@/lib/bot-ai-credentials';
 
@@ -106,6 +113,34 @@ run('more Bricks, deleting one and Undo, in a real database', () => {
     expect((await bricksForChat(brick!.id, hadi.uuid))!.map((card) => card.name.toLowerCase())).toEqual(['brick', 'music brick']);
   });
 
+  it('makes one Brick when two asks both found the one of that name, and it was deleted before they listed', async () => {
+    const uma = await person('uma');
+    const { brick } = await ensureDefaultBrick(uma.id);
+    const there = await makeBrickFromChat(brick!.id, { userId: uma.uuid, name: 'Bolt' });
+    if (!there.ok) throw new Error('expected an answer');
+    let asked = 0;
+    let open: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    mockListHook.current = async (read) => {
+      asked += 1;
+      // Both asks have found it and are about to list: it is deleted now
+      if (asked === 2) {
+        await deleteBrick(there.brick.id, uma.id, NOW);
+        open();
+      }
+      await gate;
+      return read();
+    };
+    let answers: Awaited<ReturnType<typeof makeBrickFromChat>>[];
+    try {
+      answers = await Promise.all([makeBrickFromChat(brick!.id, { userId: uma.uuid, name: 'Bolt' }), makeBrickFromChat(brick!.id, { userId: uma.uuid, name: 'Bolt' })]);
+    } finally {
+      mockListHook.current = null;
+    }
+    expect(answers.every((answer) => answer.ok)).toBe(true);
+    expect((await bricksForChat(brick!.id, uma.uuid))!.map((card) => card.name)).toEqual(['Brick', 'Bolt']);
+  });
+
   it('makes one from the person’s own chat with their Brick, opens the one of that name instead of making it twice, and makes none for anyone else', async () => {
     const omar = await person('omar');
     const lina = await person('lina');
@@ -153,6 +188,25 @@ run('more Bricks, deleting one and Undo, in a real database', () => {
 
     // A second tap changes nothing: the same Brick, the same day
     expect(await deleteBrick(brick.id, maya.id, later(1))).toMatchObject({ deletedAt: NOW.toISOString(), goneAt: later(7).toISOString() });
+  });
+
+  it('closes a card that was tapped yes while the cards were being closed, so nothing approved can still start', async () => {
+    const tess = await person('tess');
+    const brick = await makeBrick(tess.id, { name: 'Tapped Brick' });
+    const waiting = await request(brick.id, 'waiting');
+    const read = prisma.botActionRequest.findMany.bind(prisma.botActionRequest);
+    const spy = jest.spyOn(prisma.botActionRequest, 'findMany').mockImplementationOnce(((...args: Parameters<typeof read>) =>
+      read(...args).then(async (rows) => {
+        // The person says yes right after the card was read as waiting: it is approved now, at a newer revision
+        await prisma.botActionRequest.update({ where: { id: waiting.id }, data: { status: 'approved', approvedAt: NOW, startBy: later(1), revision: { increment: 1 } } });
+        return rows;
+      })) as never);
+    try {
+      expect(await endAllApprovals(prisma, brick.id, NOW)).toMatchObject({ requests: 1 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await prisma.botActionRequest.findUnique({ where: { id: waiting.id } })).toMatchObject({ status: 'closed', closedReason: 'revoked' });
   });
 
   it('keeps a deleted Brick off whatever is saved: the database refuses to switch it on', async () => {

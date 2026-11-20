@@ -19,10 +19,10 @@ export async function appsRoute(
   if (!meOriginAllowed(request)) return respond({ error: 'Origin not allowed' }, 403);
   const user = await getSessionUser(request);
   if (!user) return respond({ error: 'Unauthorized' }, 401);
-  // A guest has no account of their own to connect an app to
-  const account = await prisma.user.findUnique({ where: { id: user.id }, select: { isGuest: true } });
-  if (!account || account.isGuest) return respond({ error: 'Sign in to connect apps' }, 403);
   try {
+    // A guest has no account of their own to connect an app to (the lookup is inside the try: a database that fails here answers in the same way as one that fails later)
+    const account = await prisma.user.findUnique({ where: { id: user.id }, select: { isGuest: true } });
+    if (!account || account.isGuest) return respond({ error: 'Sign in to connect apps' }, 403);
     return await run(user, respond);
   } catch (error) {
     if (error instanceof AppConnectionError) return respond({ error: error.message }, error.status);
