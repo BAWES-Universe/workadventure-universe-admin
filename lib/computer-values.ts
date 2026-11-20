@@ -33,11 +33,11 @@ export type FinishCause = (typeof FINISH_CAUSES)[number];
 
 /**
  * A job that ended on our side, so none of what it ran is the person's: Orbit itself saw it break (the machine would not start or could
- * not be reached, the worker was lost and its room lapsed) or the runner said the cause was ours. Those are written `ended_by = 'error'`.
+ * not be reached, the worker was lost and its room lapsed) or the runner said the cause was ours. Those are written `ended_by = 'error'`. A job our own pool or envelope cut off mid-run (`ended_by = 'pool'`) is ours too, and kept as `pool` so the person is told it was our computers that were busy.
  * A failure the runner reports without that cause (the agent gave up, the turn cap) is `failed` with no ending, and is the person's.
  * The books and Activity both ask this, so the two cannot disagree.
  */
-export const givenBackJob = (status: string, endedBy: string | null | undefined): boolean => (status === 'failed' || status === 'stopped') && endedBy === 'error';
+export const givenBackJob = (status: string, endedBy: string | null | undefined): boolean => (status === 'failed' || status === 'stopped') && (endedBy === 'error' || endedBy === 'pool');
 
 /** What a job waits for: the person's step. */
 export const WAITING_FOR = ['details', 'signin', 'upload', 'pay', 'submit', 'answer'] as const;

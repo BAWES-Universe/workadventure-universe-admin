@@ -25,8 +25,10 @@ import { createBrick } from '@/lib/brick-create';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { memberAllowance } from '@/lib/meter-allowance';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { finishJob, giveComputer, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
+import { finishJob, giveComputer, renewJob, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
 import { mintJobToken } from '@/lib/computer-token';
+import { recordFaults } from '@/lib/computer-faults';
+import { afterLateEvidence } from '@/lib/computer-giveback';
 import * as calls from '@/lib/computer-calls';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { reserveRoom } from '@/lib/meter-allowance';
@@ -320,6 +322,60 @@ run('credit for computers, on the real books', () => {
       if (givesBack) expect((await month(sara.id, new Date(NOW.getTime() + 10 * 60_000))).leftMicros).toBe(BASE + 1_000_000);
     });
 
+    it('credit a job drew is given back ONCE when a confirmed fault of ours arrives after the finish, although the runner called the failure the agent’s own', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      await call(token, 'b', 50_000, 20_000);
+      // The runner says the agent's own and names three turns; nothing wrong is recorded yet: the person's, charged (what the calls drew stays drawn)
+      await (finishJob as (...args: unknown[]) => Promise<unknown>)(jobId, 'failed', new Date(NOW.getTime() + 10 * 60_000), null, 'agent', [1, 2, 3], 'run1');
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'failed', endedBy: null });
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(890_000);
+      // The relay's confirmed 401 on Universe's key for the same job, run and second turn arrives later
+      const bot = (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId }, select: { botId: true } })).botId;
+      await recordFaults(bot, jobId, [{ turn: 2, run: 'run1', callId: 'late-401', kind: 'fault', reason: 'provider_key_ours', source: 'universe-ai', route: 'universe-ai/model-a', providerStatus: 401, at: new Date() }]);
+      await afterLateEvidence(jobId, new Date(NOW.getTime() + 11 * 60_000));
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      const holds = await prisma.creditHold.findMany({ where: { jobKey: jobId } });
+      expect(holds.map((hold) => Number(hold.refundedMicros)).sort()).toEqual([20_000, 30_000, 60_000]);
+      // The ten minutes of the machine the person was charged are given back with the calls
+      // Said again by the late look and by the credit's own give-back: nothing is given twice
+      await afterLateEvidence(jobId, new Date(NOW.getTime() + 12 * 60_000));
+      await giveBackComputerCredit(jobId);
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(3);
+    });
+
+    it('a job our own pool cut off mid-run stays `pool`, and its time, its calls and the credit they drew all go back once, which Activity reads as refunded (end to end)', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      await call(token, 'b', 50_000, 20_000);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Pool report', category: 'computer' }, NOW);
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(950_000);
+      // Our pool has no room for the job to go on
+      await saveMeterSettings({ memberAllowanceMicros: BASE, poolCeilingMicros: 1, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+      expect(await renewJob(jobId, new Date(NOW.getTime() + 5 * 60_000))).toEqual({ ok: false, reason: 'pool' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'stopped', endedBy: 'pool' });
+      expect(await prisma.computerGiveBackDecision.findUnique({ where: { jobId } })).toMatchObject({ state: 'given', basis: 'orbit_fault', reason: 'pool_cut_off' });
+      // The credit the calls drew (and the minutes it ran) is whole again; the calls are written against nobody
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      const holds = await prisma.creditHold.findMany({ where: { jobKey: jobId } });
+      expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(holds.length);
+      for (const event of await prisma.meterEvent.findMany({ where: { jobId, kind: 'model_call' } })) expect(event).toMatchObject({ personKey: 'unknown', personId: null });
+      // What the person reads in Activity: refunded, once, however many things look at it
+      await closeReceipt({ botId: sara.brickId, taskKey: jobId, personId: sara.id, state: 'done' }, new Date(NOW.getTime() + 6 * 60_000));
+      await settleCheckingReceipts(50, new Date(NOW.getTime() + 600 * 60_000));
+      const [line] = (await activityFor(sara.id)).filter((item) => item.title === 'Pool report');
+      expect(line).toMatchObject({ state: 'refunded' });
+      await sweepComputers(new Date(NOW.getTime() + 30 * 60_000));
+      await giveBackComputerCredit(jobId);
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(holds.length);
+    });
+
     it('a failed job is given back exactly once however many things see it: its end, a late call, the sweep and the task receipt (which writes no money at all)', async () => {
       const sara = await running();
       const { jobId, token } = await job(sara);
@@ -385,6 +441,34 @@ run('credit for computers, on the real books', () => {
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
       const holds = await prisma.creditHold.findMany({ where: { jobKey: jobId } });
       expect(holds.map((hold) => Number(hold.refundedMicros)).sort()).toEqual([20_000, 30_000]);
+    });
+
+    it('a Brick whose job our pool cut off is purged while the books cannot take the refund: the obligation is kept for a `pool` ending too, and paid afterwards', async () => {
+      const { purgeBrick } = jest.requireActual('@/lib/brick-purge');
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      (creditSpend.refundHold as jest.Mock).mockImplementation(async () => {
+        throw new Error('books unreachable');
+      });
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const at = new Date(NOW.getTime() + 5 * 60_000);
+      const later = new Date(NOW.getTime() + 60 * 60_000);
+      try {
+        await saveMeterSettings({ memberAllowanceMicros: BASE, poolCeilingMicros: 1, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+        expect(await renewJob(jobId, at)).toEqual({ ok: false, reason: 'pool' });
+        await prisma.bot.update({ where: { id: sara.brickId }, data: { deletedAt: at, goneAt: at, enabled: false, enabledBeforeDelete: true } });
+        expect(await purgeBrick(sara.brickId, later)).toBe('purged');
+      } finally {
+        quiet.mockRestore();
+        (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(jest.requireActual('@/lib/credit-spend').refundHold);
+      }
+      const owed = await prisma.computerRefundObligation.findFirstOrThrow({ where: { jobId } });
+      expect(owed).toMatchObject({ personId: sara.id, state: 'owed' });
+      await sweepComputers(new Date(later.getTime() + 3 * 60 * 60_000));
+      expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
+      expect(await prisma.computerRefundObligation.findUniqueOrThrow({ where: { id: owed.id } })).toMatchObject({ state: 'acknowledged' });
     });
 
     it('a Brick is purged even while the books cannot take a refund: the refund obligation keeps the job, the person and the amount, and the refund is still made afterwards', async () => {

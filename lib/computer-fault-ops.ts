@@ -71,8 +71,7 @@ export async function giveBackOverview(now: Date = new Date()): Promise<GiveBack
 /**
  * Gives back every job that had a provider failure on a route between two times and is not a give-back yet (charged for the person's cap, for an effect still
  * to be confirmed, or held): one incident, corrected together. A job already given back as counted goodwill is UN-COUNTED (it was the provider's incident, not
- * the person's bad luck, so it no longer uses their bound). A job the person's own doing stopped (evidence of theirs) or that delivered something outside its
- * computer is left alone. None of these count towards anyone's bound. Safe to say twice. `corrected` is the jobs given back now; `uncounted` the goodwill ones
+ * the person's bad luck, so it no longer uses their bound). A job the person's own doing stopped (evidence of theirs) is left alone; one that delivered something outside its computer is given back too (what the App delivered and charged stays on its own line). None of these count towards anyone's bound. Safe to say twice. `corrected` is the jobs given back now; `uncounted` the goodwill ones
  * freed from the bound.
  */
 export async function correctRouteTogether(input: { route: string; from: Date; to: Date }, batch = 500): Promise<{ corrected: number; uncounted: number; costMicros: number }> {
@@ -87,7 +86,7 @@ export async function correctRouteTogether(input: { route: string; from: Date; t
       SELECT DISTINCT d."job_id", d."person_id" FROM "computer_give_back_decisions" d
       JOIN "computer_job_faults" f ON f."job_id" = d."job_id"
       WHERE ${incidentFaultMatch(input.route, input.from, input.to, OURS_REASONS)}
-        AND (d."state" = 'pending' OR (d."state" = 'refused' AND d."basis" IN ('cap', 'paused')) OR (d."state" = 'given' AND d."basis" = 'goodwill'))
+        AND (d."state" = 'pending' OR (d."state" = 'refused' AND d."basis" IN ('cap', 'paused', 'delivered', 'agent_ended')) OR (d."state" = 'given' AND d."basis" = 'goodwill'))
         AND d."job_id" > ${after}
       ORDER BY d."job_id" ASC
       LIMIT ${batch}`);
