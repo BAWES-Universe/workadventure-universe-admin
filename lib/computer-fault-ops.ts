@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { getInstantLimits } from '@/lib/instant/state';
 import { INSTANT_LIMITS_RECOMMENDED, type InstantLimits } from '@/lib/instant/values';
 import { OURS_REASONS } from '@/lib/computer-faults';
-import { PROVIDER_REASONS, routeIsPaused } from '@/lib/computer-route-pause';
+import { PROVIDER_REASONS, incidentFaultMatch, routeIsPaused } from '@/lib/computer-route-pause';
 
 import { refundOverview, type RefundOverview } from '@/lib/computer-refunds';
 import { correctDecisionForIncident, giveBackAfter, giveBackSettingsProblems, lockPerson, readGiveBackLimits } from '@/lib/computer-giveback';
@@ -86,7 +86,7 @@ export async function correctRouteTogether(input: { route: string; from: Date; t
     const candidates = await prisma.$queryRaw<Array<{ job_id: string; person_id: string }>>(Prisma.sql`
       SELECT DISTINCT d."job_id", d."person_id" FROM "computer_give_back_decisions" d
       JOIN "computer_job_faults" f ON f."job_id" = d."job_id"
-      WHERE f."route" = ${input.route} AND f."at" >= ${input.from} AND f."at" <= ${input.to} AND f."source" = 'universe-ai' AND f."reason" IN (${Prisma.join([...PROVIDER_REASONS, ...OURS_REASONS])})
+      WHERE ${incidentFaultMatch(input.route, input.from, input.to, OURS_REASONS)}
         AND (d."state" = 'pending' OR (d."state" = 'refused' AND d."basis" IN ('cap', 'paused')) OR (d."state" = 'given' AND d."basis" = 'goodwill'))
         AND d."job_id" > ${after}
       ORDER BY d."job_id" ASC
@@ -95,7 +95,7 @@ export async function correctRouteTogether(input: { route: string; from: Date; t
       const job = { id: one.job_id, personId: one.person_id };
       const changed = await prisma.$transaction(async (tx) => {
         await lockPerson(tx, job.personId);
-        return correctDecisionForIncident(tx, job, input.route);
+        return correctDecisionForIncident(tx, job, input);
       });
       if (!changed) continue;
       if (changed === 'uncounted') {

@@ -5,7 +5,8 @@ import { getInstantLimitsStrict } from '@/lib/instant/state';
 import { INSTANT_LIMITS_RECOMMENDED, type InstantLimits } from '@/lib/instant/values';
 import { monthOf } from '@/lib/meter-values';
 import { giveBackModelCalls } from '@/lib/computer-calls';
-import { readFaultRows } from '@/lib/computer-faults';
+import { OURS_REASONS, readFaultRows } from '@/lib/computer-faults';
+import { incidentFaultMatch } from '@/lib/computer-route-pause';
 import { retryWaitMs } from '@/lib/computer-retry';
 
 /**
@@ -192,9 +193,16 @@ export async function uncountGiveBack(tx: Prisma.TransactionClient, jobId: strin
 }
 
 /** An incident's correction of one decision: a goodwill give-back is re-labelled and freed from the bound (true), a held or cap/pause-refused one becomes a give-back (the caller gives it back). */
-export async function correctDecisionForIncident(tx: Prisma.TransactionClient, job: { id: string; personId: string }, route: string): Promise<'uncounted' | 'given' | null> {
+export async function correctDecisionForIncident(tx: Prisma.TransactionClient, job: { id: string; personId: string }, incident: { route: string; from: Date; to: Date }): Promise<'uncounted' | 'given' | null> {
+  const route = incident.route;
   // Delivered work is left alone: a job with an outside effect that is done is never given back by a correction (a held decision stays held, and is decided by its evidence)
   if ((await tx.computerEffect.count({ where: { jobId: job.id, state: 'done' } })) > 0) return null;
+  // Only the decision's OWN evidence corrects it, read again here under the person's lock: a fault of an earlier run of the same job, on the same route inside the window,
+  // never reverses a decision judged on a later one (the candidate query asks the same, so this is the check on what the decision is at this moment)
+  const proof = await tx.$queryRaw<Array<{ one: number }>>(Prisma.sql`
+    SELECT 1 AS one FROM "computer_give_back_decisions" d JOIN "computer_job_faults" f ON f."job_id" = d."job_id"
+    WHERE d."job_id" = ${job.id} AND ${incidentFaultMatch(route, incident.from, incident.to, OURS_REASONS)} LIMIT 1`);
+  if (proof.length === 0) return null;
   const freed = await tx.computerGiveBackDecision.updateMany({ where: { jobId: job.id, state: 'given', basis: 'goodwill' }, data: { basis: 'incident', route } });
   if (freed.count > 0) {
     await uncountGiveBack(tx, job.id);

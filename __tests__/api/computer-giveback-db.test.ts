@@ -680,6 +680,37 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       }
     });
 
+    it('an incident corrects a decision only by its OWN evidence: a fault of an earlier run of the same job, or of a turn that was not judged, never reverses it', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      const route = 'universe-ai/model-scope';
+      const base = new Date();
+      const window = { route, from: new Date(base.getTime() - 60_000), to: new Date(base.getTime() + 60_000) };
+      // Held for an effect still to be confirmed: judged on run b, turn 1, which has no row of a provider failing. The provider's failure on the route is from run a
+      const earlierRun = await job(sara, { ...ours, turns: [1], run: 'runb' }, async (id) => {
+        await recordFaults(sara.brickId, id, [fault(1, 'provider_5xx', { route, run: 'runa', at: base })]);
+        await planEffect(id, { key: 'scope-1', kind: 'send' });
+      });
+      // The same on a turn that was not judged (turn 2 of the same run)
+      const otherTurn = await job(sara, { ...ours, turns: [1], run: 'runb' }, async (id) => {
+        await recordFaults(sara.brickId, id, [fault(2, 'provider_5xx', { route, run: 'runb', at: base })]);
+        await planEffect(id, { key: 'scope-2', kind: 'send' });
+      });
+      // The provider's failure IS part of what was judged (run b, turn 1)
+      const ownEvidence = await job(sara, { ...ours, turns: [1], run: 'runb' }, async (id) => {
+        await recordFaults(sara.brickId, id, [fault(1, 'provider_5xx', { route, run: 'runb', at: base })]);
+        await planEffect(id, { key: 'scope-3', kind: 'send' });
+      });
+      for (const one of [earlierRun, otherTurn, ownEvidence]) expect(await decisionOf(one.id)).toMatchObject({ state: 'pending', judgedRun: 'runb', judgedTurns: [1] });
+      expect(await correctRouteTogether(window)).toMatchObject({ corrected: 1, uncounted: 0 });
+      expect(await decisionOf(earlierRun.id)).toMatchObject({ state: 'pending' });
+      expect(await decisionOf(otherTurn.id)).toMatchObject({ state: 'pending' });
+      expect(await decisionOf(ownEvidence.id)).toMatchObject({ state: 'given', basis: 'incident' });
+      expect(await givenBack(earlierRun.id)).toBe(false);
+      expect(await givenBack(otherTurn.id)).toBe(false);
+      expect(await givenBack(ownEvidence.id)).toBe(true);
+    });
+
     it('corrects every affected job together: held and cap-refused ones are given back uncounted, delivered and person-caused ones are left alone, and it is safe to say twice', async () => {
       await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
       const sara = await person('sara');
