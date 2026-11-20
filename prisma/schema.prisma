@@ -1670,6 +1670,7 @@ model AppPageOrder {
   @@index([ownerId, createdAt])
   @@index([visitorHash, createdAt])
   @@index([status, createdAt])
+  @@index([reconciled, status, nextLookAt])
   @@map("app_page_orders")
 }
 

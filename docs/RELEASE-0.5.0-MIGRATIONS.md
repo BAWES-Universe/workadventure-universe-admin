@@ -269,4 +269,5 @@ the statements it sends keep working against the new columns, which are all null
 182. `20261120120000_computer_job_faults`
 183. `20261120120000_page_order_reconcile`
 184. `20261120130000_computer_refund_obligations`
+185. `20261120140000_page_order_long_wait_index`
 <!-- migrations:end -->

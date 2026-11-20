@@ -655,6 +655,31 @@ run('payments for pages, in a real database', () => {
         expect((await pagePaymentLoad()).unconfirmed.count).toBe(0);
       });
 
+      it('an unclosed not-paid order older than the late window plus the open time is in the long wait: the sweep looks at it and the numbers count it (no order drops out for lacking a close time)', async () => {
+        const { artifactId } = await pending();
+        await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
+        const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+        const order = await prisma.appPageOrder.create({
+          data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, mode: 'test', status: 'not_paid', providerRef: 'chg_TS01', reconciled: false, closedAt: null, nextLookAt: null, visitorHash: 'v', intentId: `i-${randomUUID().slice(0, 8)}`, description: jobRow.description, createdAt: new Date(Date.now() - 100 * 3_600_000) },
+        });
+        gateway({ record: () => paidRecord(order.id) });
+        expect((await pagePaymentLoad()).unconfirmed).toMatchObject({ count: 1 });
+        const swept = await sweepPageOrders();
+        expect(swept.looked).toBe(1);
+        expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: order.id } })).toMatchObject({ status: 'paid' });
+      });
+
+      it('the long-wait pass of the sweep is planned on an index: the query the sweep runs can be answered from app_page_orders_reconciled_status_next_look_at_idx', async () => {
+        const plan = await prisma.$transaction(async (tx) => {
+          // A table this small is scanned whatever indexes it has: the question is whether an index CAN answer the query, so scans are turned off for this one statement
+          await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
+          return tx.$queryRawUnsafe<Array<Record<string, string>>>(
+            `EXPLAIN SELECT id FROM app_page_orders WHERE reconciled = false AND provider_ref IS NOT NULL AND (status = 'cant_confirm' OR (status = 'not_paid' AND closed_at < now() - interval '48 hours')) AND (next_look_at IS NULL OR next_look_at <= now()) ORDER BY next_look_at ASC NULLS FIRST, created_at ASC LIMIT 50`,
+          );
+        });
+        expect(plan.map((line) => Object.values(line)[0]).join('\n')).toContain('app_page_orders_reconciled_status_next_look_at_idx');
+      });
+
       it('stops asking only when the service says the last word: a final failed state (and nothing is asked after it), or a payment for something else', async () => {
         const { artifactId } = await pending();
         const orderId = await closeByExpiry(artifactId, '198.51.100.36');
@@ -1716,6 +1741,29 @@ run('payments for pages, in a real database', () => {
         expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: lost.id } })).toMatchObject({ status: 'pending' });
       });
 
+      it('the short look interval is only for Check payment and Restore: a page that refreshes itself, a poll or a notice keeps the age-grown spacing on an order in the long wait', async () => {
+        const { artifactId } = await pending();
+        await saveServerLimits({ bricks: { paymentCheckSeconds: 5, checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
+        const code = word();
+        const intentId = wish();
+        const order = await lostOrder(artifactId, code, intentId, { status: 'not_paid', providerRef: 'chg_TS01', reconciled: false, createdAt: new Date(Date.now() - 80 * 3_600_000), closedAt: new Date(Date.now() - 60 * 3_600_000), nextLookAt: null });
+        const recent = () => prisma.appPageOrder.update({ where: { id: order.id }, data: { checkedAt: new Date(Date.now() - 30_000) } });
+        const sent = gateway({ record: () => paidRecord(order.id, { status: 'INITIATED' }) });
+        const GETS = () => sent.filter((target) => target.method === 'GET').length;
+        // Thirty seconds after its last look: the passive askers (the done page's refresh, the poll, the notice) are spaced like any order of that age (5 seconds a minute of age, up to 60)
+        await recent();
+        await verifyOrder(order.id);
+        await verifyOrder(order.id);
+        expect(GETS()).toBe(0);
+        // The buyer pressing Check payment is looked at as soon as the ordinary spacing allows
+        await checkPurchase({ artifactId, buyerKeys: [buyerOf(code)], intentId });
+        expect(GETS()).toBe(1);
+        // And so is Restore
+        await recent();
+        await restorePurchase({ artifactId, buyerKeys: [buyerOf(code)] });
+        expect(GETS()).toBe(2);
+      });
+
       it('gives a reloaded buyer a way forward: Restore carries their unfinished start on and hands back its own link', async () => {
         const { artifactId } = await pending();
         const code = word();
@@ -2364,6 +2412,9 @@ run('payments for pages, in a real database', () => {
       expect(Object.keys(rows[0]).sort()).toEqual(['artifactId', 'contract', 'jobActive', 'jobId', 'openScope', 'orders']);
       expect((await pagesInventory(request('/api/app-pay/pages'))).status).toBe(401);
       expect((await pagesInventory(request('/api/app-pay/pages?take=1', { token: SERVICE_TOKEN }))).status).toBe(200);
+      // A page size that is not a whole number of 1 or more is the caller's mistake (400), never an error inside the inventory (500)
+      for (const bad of ['1.5', '0', '-1', 'abc', '2e3', '1,5']) expect((await pagesInventory(request(`/api/app-pay/pages?take=${bad}`, { token: SERVICE_TOKEN }))).status).toBe(400);
+      for (const good of ['', '1', '25']) expect((await pagesInventory(request(`/api/app-pay/pages?take=${good}`, { token: SERVICE_TOKEN }))).status).toBe(200);
     });
   });
 });

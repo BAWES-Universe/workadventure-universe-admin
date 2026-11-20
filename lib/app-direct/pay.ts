@@ -685,7 +685,7 @@ const stateOf = (status: string): OrderState => (status === 'paid' ? 'paid' : st
  * Asks the service about one order and moves it on. Safe to call as often as anyone likes (the visitor's page, the return page, the
  * service's notice): the service itself is asked at most once in `paymentCheckSeconds` (more for an order that has waited long) for an order, and "paid" is written once.
  */
-export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?: { contacted: boolean }, how: { background?: boolean } = {}): Promise<OrderView | null> {
+export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?: { contacted: boolean }, how: { background?: boolean; explicit?: boolean } = {}): Promise<OrderView | null> {
   const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, include: { connection: true, job: { select: { artifact: { select: { title: true } } } } } });
   if (!order) return null;
   const view = (status: string, mode: string | null = order.mode): OrderView => ({ status: stateOf(status), checkoutUrl: status === 'pending' ? order.checkoutUrl : null, testPayment: mode === 'test', orderId: order.id, pollAfterMs: pollAfterMs(order.createdAt) });
@@ -751,8 +751,10 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // more adds one more `paymentCheckSeconds`, up to sixty of them): a buyer who pays is seen at once, while tabs left open on an order nobody
   // is paying cost an owner a small and shrinking share of their looks instead of the same share for the whole open time.
   const spacing = limits.paymentCheckSeconds * Math.min(60, 1 + Math.floor((now.getTime() - order.createdAt.getTime()) / 60_000));
-  // An order in the long wait is looked at by its own schedule when a sweep asks; a buyer pressing Check payment is looked at as soon as the ordinary spacing allows
-  const due = reconciling && how.background ? { OR: [{ nextLookAt: null }, { nextLookAt: { lte: now } }] } : { OR: [{ checkedAt: null }, { checkedAt: { lt: new Date(now.getTime() - (reconciling ? limits.paymentCheckSeconds : spacing) * 1000) } }] };
+  // An order in the long wait is looked at by its own schedule when a sweep asks. A buyer pressing Check payment or Restore (`explicit`) is looked at as soon as the
+  // ordinary spacing allows; every other asker (the done page that refreshes, the poll, the service's notice) keeps the age-grown spacing, so a tab left open on an order
+  // that stays unpaid never spends the owner's looks at the short interval for ever
+  const due = reconciling && how.background ? { OR: [{ nextLookAt: null }, { nextLookAt: { lte: now } }] } : { OR: [{ checkedAt: null }, { checkedAt: { lt: new Date(now.getTime() - (reconciling && how.explicit ? limits.paymentCheckSeconds : spacing) * 1000) } }] };
   const taken = await prisma.appPageOrder.updateMany({
     where: { id: order.id, status: open, ...(reconciling ? { reconciled: false } : {}), ...due },
     data: { checkedAt: now, checks: { increment: 1 }, ...(reconciling ? { nextLookAt: new Date(now.getTime() + reconcileEveryMs(sinceWindow)) } : {}) },
@@ -941,7 +943,7 @@ export async function checkPurchase(input: { artifactId: string; buyerKeys: stri
   const order = await prisma.appPageOrder.findFirst({ where: wishWhere(input.artifactId, input.intentId, input.buyerKeys), select: { id: true, status: true, buyerKey: true } });
   if (!order) return null;
   if (order.status === 'creating') await carryOn(order.id, await getBrickLimits(), { resume: ownsOrder(input.ownKeys ?? input.buyerKeys, order.buyerKey), wait: true }, deps);
-  return verifyOrder(order.id, deps);
+  return verifyOrder(order.id, deps, undefined, { explicit: true });
 }
 
 /** Whether an order is under one of the buyer's OWN keys (their account or their browser's recovery code), as against one only a receipt link found. */
@@ -965,6 +967,22 @@ function askable(now: Date, limits: Awaited<ReturnType<typeof getBrickLimits>>, 
       { status: 'not_paid', closedAt: null, createdAt: { gte: unclosedFrom } },
       // The long wait (Restore asks about these too): an order the service has not had the last word about may still have been paid, however long ago it closed
       ...(longWait ? [{ reconciled: false, providerRef: { not: null }, status: { in: ['not_paid', 'cant_confirm'] } }] : []),
+    ],
+  };
+}
+
+/**
+ * The orders in the long wait: the service has not had the last word about them, and they are past the late-payment window (or the service could not be
+ * read for them). One definition, in positive conditions only (a NOT over a NULL close time would drop an unclosed order), for the sweep that looks at them and
+ * the numbers that count them.
+ */
+function longWaitWhere(now: Date, limits: Awaited<ReturnType<typeof getBrickLimits>>): Prisma.AppPageOrderWhereInput {
+  return {
+    reconciled: false,
+    providerRef: { not: null },
+    OR: [
+      { status: 'cant_confirm' },
+      { status: 'not_paid', OR: [{ closedAt: { lt: new Date(now.getTime() - limits.latePaymentHours * HOUR) } }, { closedAt: null, createdAt: { lt: new Date(now.getTime() - (limits.latePaymentHours + limits.checkoutOpenHours) * HOUR) } }] },
     ],
   };
 }
@@ -1007,7 +1025,7 @@ export async function restorePurchase(input: { artifactId: string; buyerKeys: st
     take: RESTORE_LOOKS,
     select: { id: true },
   });
-  for (const order of open) await verifyOrder(order.id, deps).catch(() => null);
+  for (const order of open) await verifyOrder(order.id, deps, undefined, { explicit: true }).catch(() => null);
   const offer = await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, select: { amountMinor: true, currency: true } });
   const forOffer = offer ? { amountMinor: offer.amountMinor, currency: offer.currency } : {};
   const mine = { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, ...forOffer };
@@ -1059,7 +1077,7 @@ export async function sweepPageOrders(now: Date = new Date(), deps: GuardDeps = 
   const quiet = new Date(now.getTime() - SWEEP_QUIET_MS);
   // The long wait is a pass of its own, by each order's own schedule, so orders that are due never wait behind ones that are not
   const waiting = await prisma.appPageOrder.findMany({
-    where: { reconciled: false, providerRef: { not: null }, status: { in: ['not_paid', 'cant_confirm'] }, AND: [{ OR: [{ nextLookAt: null }, { nextLookAt: { lte: now } }] }, { NOT: { AND: [{ status: 'not_paid' }, { OR: [{ closedAt: { gte: new Date(now.getTime() - limits.latePaymentHours * HOUR) } }, { closedAt: null, createdAt: { gte: new Date(now.getTime() - limits.latePaymentHours * HOUR - limits.checkoutOpenHours * HOUR) } }] }] } }] },
+    where: { AND: [longWaitWhere(now, limits), { OR: [{ nextLookAt: null }, { nextLookAt: { lte: now } }] }] },
     orderBy: [{ nextLookAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
     take: SWEEP_BATCH,
     select: { id: true, status: true },
@@ -1120,7 +1138,7 @@ export async function pagePaymentLoad(now: Date = new Date()): Promise<PaymentLo
   const limits = await getBrickLimits();
   const day = new Date(now.getTime() - 24 * HOUR);
   const hour = new Date(now.getTime() - HOUR);
-  const longWait = { reconciled: false, providerRef: { not: null }, OR: [{ status: 'cant_confirm' }, { status: 'not_paid', OR: [{ closedAt: { lt: new Date(now.getTime() - limits.latePaymentHours * HOUR) } }, { closedAt: null, createdAt: { lt: new Date(now.getTime() - (limits.latePaymentHours + limits.checkoutOpenHours) * HOUR) } }] }] } satisfies Prisma.AppPageOrderWhereInput;
+  const longWait = longWaitWhere(now, limits);
   const [pending, oldestPending, starting, oldestStarting, looksLastHour, paid, unconfirmed, oldestUnconfirmed, neverRead] = await Promise.all([
     prisma.appPageOrder.count({ where: { status: 'pending' } }),
     prisma.appPageOrder.findFirst({ where: { status: 'pending' }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
