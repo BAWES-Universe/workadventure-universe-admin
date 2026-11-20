@@ -20,7 +20,7 @@ export async function routeFailurePeople(route: string, now: Date, limits: Pick<
   const since = new Date(now.getTime() - limits.pauseWindowMinutes * 60 * 1000);
   const rows = await prisma.$queryRaw<Array<{ jobs: number }>>(Prisma.sql`
     SELECT COUNT(DISTINCT j."person_id")::int AS jobs FROM "computer_job_faults" f JOIN "computer_jobs" j ON j."id" = f."job_id"
-    WHERE f."route" = ${route} AND f."source" = 'universe-ai' AND f."kind" <> 'answered' AND f."at" >= ${since} AND f."reason" IN (${Prisma.join([...PROVIDER_REASONS])})`);
+    WHERE f."route" = ${route} AND f."source" = 'universe-ai' AND f."kind" <> 'answered' AND f."at" >= ${since} AND f."at" <= ${now} AND f."reason" IN (${Prisma.join([...PROVIDER_REASONS])})`);
   return rows[0]?.jobs ?? 0;
 }
 

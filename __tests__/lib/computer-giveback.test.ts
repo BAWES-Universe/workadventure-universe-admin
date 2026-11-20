@@ -74,7 +74,10 @@ describe('the class of one thing the relay saw go wrong (Orbit judges it, not th
     expect(faultClassOf(row('provider_5xx', { source: 'own-key', kind: 'uncertain' }))).toBe('unresolved');
     expect(faultClassOf(row('timeout_after_output', { source: 'own-key', kind: 'uncertain' }))).toBe('unresolved');
     expect(faultClassOf(row('own_provider', { source: 'own-key', kind: 'not_ours' }))).toBe('person');
-    expect(faultClassOf(row('provider_key_ours', { source: 'own-key' }))).toBe('person');
+    // Their provider refusing their key is theirs only when the relay says it is not ours; unconfirmed, or a row that says fault on their own key, stays unresolved
+    expect(faultClassOf(row('provider_key_ours', { source: 'own-key', kind: 'not_ours' }))).toBe('person');
+    expect(faultClassOf(row('provider_key_ours', { source: 'own-key', kind: 'uncertain' }))).toBe('unresolved');
+    expect(faultClassOf(row('provider_key_ours', { source: 'own-key', kind: 'fault' }))).toBe('unresolved');
   });
 
   it('is nothing for an answered call', () => {
@@ -87,6 +90,15 @@ describe('the settings the give-back reads, and the wait before a held decision 
   it('has no problem when the numbers are there, and says so when they are not', () => {
     expect(giveBackSettingsProblems({ goodwillPerPersonPerMonth: null, pauseMinRuns: 10, pauseFailureRateBps: 2000 })).toEqual([]);
     expect(giveBackSettingsProblems({ goodwillPerPersonPerMonth: null, pauseMinRuns: null, pauseFailureRateBps: null }).length).toBeGreaterThan(0);
+  });
+
+  it('names the provider pause number and the person’s failure rate apart: the number of runs is what pauses a provider, the rate only a person’s own give-backs', () => {
+    const onlyRate = giveBackSettingsProblems({ goodwillPerPersonPerMonth: 2, pauseMinRuns: 3, pauseFailureRateBps: null });
+    expect(onlyRate).toHaveLength(1);
+    expect(onlyRate[0]).toMatch(/failure rate/);
+    expect(onlyRate[0]).not.toMatch(/provider failing/);
+    const onlyRuns = giveBackSettingsProblems({ goodwillPerPersonPerMonth: 2, pauseMinRuns: null, pauseFailureRateBps: 2000 });
+    expect(onlyRuns.some((line) => /number of runs/.test(line) && /provider failing/.test(line))).toBe(true);
   });
 
   it('grows from one minute to an hour and stops growing', () => {

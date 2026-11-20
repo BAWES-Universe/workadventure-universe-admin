@@ -20,7 +20,7 @@ import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/compute
 import { computerView, finishJob, giveComputer, planEffect, settleEffect, startJob, sweepComputers } from '@/lib/computer';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { recordFaults, type FaultInput } from '@/lib/computer-faults';
-import { afterLateEvidence } from '@/lib/computer-giveback';
+import { afterLateEvidence, decidePendingForPurge, decideRunnerFinish, lockPerson, resolveDecision, sweepGiveBackDecisions } from '@/lib/computer-giveback';
 import { correctRouteTogether, giveBackOverview, giveBackReadiness, routeIsPaused } from '@/lib/computer-fault-ops';
 import { mintJobToken } from '@/lib/computer-token';
 
@@ -945,6 +945,152 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', { run: 'runb', callId: 'turn:1' })])).toEqual({ stored: 0, conflicts: 0 });
         await finishJob(jobId, 'failed', minutes(5), null, 'ours', [1], 'runb');
         expect(await decisionOf(jobId)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+      });
+    });
+
+    describe('round 3: the decision itself', () => {
+      it('a late fault row never turns delivered work into a give-back: a refusal because the work was delivered stays', async () => {
+        await limitsAre(LAUNCH);
+        const sara = await person('sara');
+        const ended = await job(sara, { ...ours, turns: [1] }, async (id) => {
+          await recordFaults(sara.brickId, id, [fault(1, 'provider_5xx')]);
+          await planEffect(id, { key: 'mail-1', kind: 'send' });
+        });
+        expect(await settleEffect(ended.id, 'mail-1', 'done', 'ali@example.test')).toBe(true);
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'delivered' });
+        await recordFaults(sara.brickId, ended.id, [fault(1, 'relay_down')]);
+        await afterLateEvidence(ended.id);
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'delivered' });
+        expect(await givenBack(ended.id)).toBe(false);
+      });
+
+      it('reads the effects once, in one statement: one done blocks goodwill, one still planned defers it, none leaves it to the bound', async () => {
+        await limitsAre(LAUNCH);
+        const sara = await person('sara');
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, minutes(0));
+        if (!started.ok) throw new Error('no');
+        const jobId = started.job.id;
+        await recordFaults(sara.brickId, jobId, [fault(1, 'provider_5xx')]);
+        const seen = { groups: 0, counts: 0 };
+        const verdict = (effectsClosed = false) =>
+          prisma.$transaction(async (tx) => {
+            const wrapped = new Proxy(tx, {
+              get: (target, key) =>
+                key === 'computerEffect'
+                  ? {
+                      groupBy: (args: never) => {
+                        seen.groups++;
+                        return (target.computerEffect.groupBy as (a: never) => Promise<unknown>)(args);
+                      },
+                      count: (args: never) => {
+                        seen.counts++;
+                        return (target.computerEffect.count as (a: never) => Promise<unknown>)(args);
+                      },
+                    }
+                  : (target as never)[key as never],
+            }) as typeof tx;
+            return decideRunnerFinish(wrapped, await readLimits(), { id: jobId, personId: sara.id, startedAt: new Date() }, [1], new Date(), { effectsClosed });
+          });
+        const readLimits = async () => (await import('@/lib/computer-giveback')).readGiveBackLimits();
+        expect(await verdict()).toMatchObject({ state: 'given', basis: 'goodwill' });
+        await planEffect(jobId, { key: 'a', kind: 'send' });
+        expect(await verdict()).toMatchObject({ state: 'pending', basis: 'effect_unresolved' });
+        expect(await verdict(true)).toMatchObject({ state: 'given', basis: 'goodwill' });
+        await planEffect(jobId, { key: 'b', kind: 'send' });
+        await settleEffect(jobId, 'b', 'done', 'x@example.test');
+        // One done and one still planned: the done one decides (delivered), whatever the other is
+        expect(await verdict()).toMatchObject({ state: 'refused', basis: 'delivered' });
+        expect(seen.counts).toBe(0);
+        expect(seen.groups).toBe(4);
+      });
+
+      it('a retry that read a decision as pending decides nothing over one an incident correction made while it waited for the person’s lock', async () => {
+        await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
+        const sara = await person('sara');
+        const held = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', basis: 'limits_missing' });
+        // The Limits are set now and would refuse it (a bound of 0 is no bound set, so use a spent one)
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+        let retry: Promise<string> = Promise.resolve('none');
+        await prisma.$transaction(async (tx) => {
+          await lockPerson(tx, sara.id);
+          retry = resolveDecision(held.id, minutes(30));
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          await tx.computerGiveBackDecision.update({ where: { jobId: held.id }, data: { state: 'given', basis: 'incident', route: 'r', nextAttemptAt: null } });
+        });
+        expect(await retry).toBe('none');
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'incident' });
+      });
+
+      it('the same for a decision whose job is gone: a decision made while it waited for the lock stands', async () => {
+        await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
+        const sara = await person('sara');
+        const held = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+        await prisma.computerJob.delete({ where: { id: held.id } });
+        let retry: Promise<string> = Promise.resolve('none');
+        await prisma.$transaction(async (tx) => {
+          await lockPerson(tx, sara.id);
+          retry = resolveDecision(held.id, minutes(30));
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          await tx.computerGiveBackDecision.update({ where: { jobId: held.id }, data: { state: 'given', basis: 'incident', route: 'r', nextAttemptAt: null } });
+        });
+        expect(await retry).toBe('none');
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'incident' });
+      });
+
+      it('a decision that throws when it is tried again is rescheduled, so the oldest rows cannot keep every slot from the ones behind them', async () => {
+        await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
+        const sara = await person('sara');
+        const ids: string[] = [];
+        for (let index = 0; index < 3; index++) ids.push((await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]))).id);
+        for (const [index, id] of ids.entries()) await prisma.computerGiveBackDecision.update({ where: { jobId: id }, data: { nextAttemptAt: new Date(NOW.getTime() - (10 - index) * 1000) } });
+        const real = prisma.computerJob.findUnique.bind(prisma.computerJob);
+        const spyOn = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: { where: { id?: string } }) => {
+          if (args?.where?.id && ids.slice(0, 2).includes(args.where.id)) throw new Error('boom');
+          return real(args as never);
+        }) as never);
+        const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        try {
+          const now = minutes(1);
+          expect(await sweepGiveBackDecisions(now, 2)).toMatchObject({ looked: 2 });
+          for (const id of ids.slice(0, 2)) {
+            const row = await decisionOf(id);
+            expect(row?.attempts).toBe(1);
+            expect(row?.nextAttemptAt && row.nextAttemptAt.getTime()).toBeGreaterThan(now.getTime());
+          }
+          // The next sweep reaches the one behind them
+          expect(await sweepGiveBackDecisions(now, 2)).toMatchObject({ looked: 1 });
+          expect((await decisionOf(ids[2]))?.attempts).toBe(1);
+        } finally {
+          spyOn.mockRestore();
+          quiet.mockRestore();
+        }
+      });
+
+      it('a Brick with more waiting decisions than one batch is not purged until the last is decided', async () => {
+        await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
+        const sara = await person('sara');
+        const first = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+        const second = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+        expect(await decidePendingForPurge(sara.brickId, minutes(60), 1)).toBe(false);
+        const states = [(await decisionOf(first.id))?.state, (await decisionOf(second.id))?.state].sort();
+        expect(states).toEqual(['given', 'pending']);
+        expect(await decidePendingForPurge(sara.brickId, minutes(61), 1)).toBe(true);
+        expect([(await decisionOf(first.id))?.state, (await decisionOf(second.id))?.state]).toEqual(['given', 'given']);
+      });
+
+      it('a provider fault the relay stamped in the future is not counted towards a pause yet', async () => {
+        await limitsAre({ ...LAUNCH, pauseMinRuns: 2 });
+        const route = 'universe-ai/model-clock';
+        for (const name of ['c1', 'c2']) {
+          const p = await person(name);
+          const s = await startJob({ botId: p.brickId, personId: p.id, title: 'Failing' }, minutes(0));
+          if (!s.ok) throw new Error('no');
+          await recordFaults(p.brickId, s.job.id, [fault(1, 'provider_5xx', { route, at: new Date(Date.now() + 10 * 60_000) })]);
+        }
+        expect(await routeIsPaused(route, new Date())).toBe(false);
+        expect(await routeIsPaused(route, new Date(Date.now() + 11 * 60_000))).toBe(true);
       });
     });
 
