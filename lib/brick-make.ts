@@ -1,9 +1,11 @@
 import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
+import { getBrickLimits } from '@/lib/bot-limits';
 import { createBrick } from '@/lib/brick-create';
 import { ownsBrick } from '@/lib/brick';
-import { DEFAULT_BRICK_LOOK, listBricks, toCard, type BrickCard } from '@/lib/brick-default';
+import { CARD_SELECT, DEFAULT_BRICK_LOOK, listBricks, toCard, type BrickCard } from '@/lib/brick-default';
+import { BrickRequestKeyUsed, NewBricksLimit, NEW_BRICKS_LIMIT_CODE, claimNewBrick, lockNewBricks, newBricksRefusal } from '@/lib/brick-new-limit';
 import { findUserByIdentifier } from '@/lib/user-identifier';
 
 /**
@@ -58,8 +60,38 @@ function nextLook(worn: (string | null)[]): string {
   return best;
 }
 
-/** Makes a Brick for this person and answers with its card. */
-export async function makeBrick(ownerId: string, input: NewBrickInput, db: Prisma.TransactionClient = prisma): Promise<BrickCard> {
+/** New Brick from the game's own form: the same, with a key that makes a repeat of the request the same Brick. */
+export const newBrickRequestSchema = newBrickSchema.extend({ requestKey: z.string().trim().min(1, 'requestKey must not be empty').max(200, 'requestKey must be at most 200 characters').nullish() }).strict();
+
+/**
+ * Makes a Brick for this person, or says why not. It is where every way of making one meets "New Bricks per hour"
+ * (lib/brick-new-limit.ts): a person over the limit makes nothing and gets NewBricksLimit, whichever way they asked.
+ *
+ * With a `requestKey`, a repeat of the same request answers the Brick it first made (`created` false) instead of making
+ * another, and is never counted twice: also two at once, because the person's make lock lets one go first and the other
+ * then finds its Brick. A key that comes back with another name, or for a Brick since deleted, is refused (BrickRequestKeyUsed).
+ */
+export async function makeBrickOnce(
+  ownerId: string,
+  input: NewBrickInput,
+  db: Prisma.TransactionClient = prisma,
+  requestKey?: string | null,
+  /** The limit as the caller read it before its transaction opened; read here when the caller has not. */
+  newPerHour?: number,
+): Promise<{ brick: BrickCard; created: boolean }> {
+  // Read before any transaction holds a connection: a caller whose transaction is open has the limit already
+  const limit = newPerHour ?? (await getBrickLimits()).newPerHour;
+  // Counted and written under one lock, or two makes at once could both slip in under the limit
+  if ((db as unknown) === prisma) return prisma.$transaction((tx) => makeBrickOnce(ownerId, input, tx, requestKey, limit));
+  await lockNewBricks(db, ownerId);
+  if (requestKey) {
+    const first = await db.bot.findFirst({ where: { ownerId, createRequestKey: requestKey }, select: { ...CARD_SELECT, deletedAt: true } });
+    if (first) {
+      if (first.deletedAt !== null || first.name !== input.name) throw new BrickRequestKeyUsed();
+      return { brick: toCard(first, false), created: false };
+    }
+  }
+  await claimNewBrick(db, ownerId, limit);
   const look =
     input.characterTextureId ??
     nextLook((await db.bot.findMany({ where: { ownerId, roomId: null, deletedAt: null }, select: { characterTextureId: true } })).map((bot) => bot.characterTextureId));
@@ -70,8 +102,14 @@ export async function makeBrick(ownerId: string, input: NewBrickInput, db: Prism
     characterTextureId: look,
     chatInstructions: input.chatInstructions?.trim() || null,
     hello: input.hello || null,
+    createRequestKey: requestKey ?? null,
   }, db);
-  return toCard(bot, false);
+  return { brick: toCard(bot, false), created: true };
+}
+
+/** Makes a Brick for this person and answers with its card. Throws NewBricksLimit when they have made too many this hour. */
+export async function makeBrick(ownerId: string, input: NewBrickInput, db: Prisma.TransactionClient = prisma, newPerHour?: number): Promise<BrickCard> {
+  return (await makeBrickOnce(ownerId, input, db, undefined, newPerHour)).brick;
 }
 
 /** What the bot server sends when a person asks their Brick for another one. */
@@ -86,7 +124,9 @@ export const chatBrickSchema = newBrickSchema
 
 export type ChatBrickAnswer =
   | { ok: true; made: boolean; brick: BrickCard; bricks: BrickCard[] }
-  | { ok: false; status: 403 | 404; error: string };
+  | { ok: false; status: 403 | 404; error: string }
+  /** Over "New Bricks per hour": nothing was made. `error` is the kind line, in the person's own clock. */
+  | { ok: false; status: 429; error: string; code: typeof NEW_BRICKS_LIMIT_CODE; retryAt: string };
 
 /**
  * The owner of the Brick that asks, when `userId` is that owner: a signed-in person, found by the name the bot server
@@ -110,27 +150,38 @@ export async function makeBrickFromChat(viaBrickId: string, input: z.infer<typeo
   const { userId, evenIfThere, ...brick } = input;
   const ownerId = await ownerAskingThrough(viaBrickId, userId);
   if (!ownerId) return { ok: false, status: 404, error: 'Brick not found' };
-  // One at a time per person and name (a lock held for the transaction): two asks for the same name that arrive
-  // together would otherwise each find no such Brick and each make one.
-  const outcome = await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-make:${ownerId}:${brick.name.toLowerCase()}`}))`;
-    if (!evenIfThere) {
-      const there = await tx.bot.findFirst({
-        where: { ownerId, roomId: null, deletedAt: null, name: { equals: brick.name, mode: 'insensitive' } },
-        select: { id: true },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      });
-      if (there) return { made: false as const, id: there.id };
+  // Read before the transaction holds a connection (see claimNewBrick)
+  const { newPerHour } = await getBrickLimits();
+  try {
+    // One at a time per person and name (a lock held for the transaction): two asks for the same name that arrive
+    // together would otherwise each find no such Brick and each make one.
+    const outcome = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-make:${ownerId}:${brick.name.toLowerCase()}`}))`;
+      if (!evenIfThere) {
+        const there = await tx.bot.findFirst({
+          where: { ownerId, roomId: null, deletedAt: null, name: { equals: brick.name, mode: 'insensitive' } },
+          select: { id: true },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        });
+        if (there) return { made: false as const, id: there.id };
+      }
+      return { made: true as const, brick: await makeBrick(ownerId, brick, tx, newPerHour) };
+    });
+    const bricks = await listBricks(ownerId);
+    if (outcome.made) return { ok: true, made: true, brick: outcome.brick, bricks };
+    const card = bricks.find((one) => one.id === outcome.id);
+    if (card) return { ok: true, made: false, brick: card, bricks };
+    // Deleted between the look and the list: it is no longer theirs to open, so they get the one they asked for
+    const made = await makeBrick(ownerId, brick, undefined, newPerHour);
+    return { ok: true, made: true, brick: made, bricks: await listBricks(ownerId) };
+  } catch (error) {
+    // Over "New Bricks per hour": nothing was made, and the Brick that asks says the kind line as it is
+    if (error instanceof NewBricksLimit) {
+      const refusal = await newBricksRefusal(ownerId, error);
+      return { ok: false, status: 429, error: refusal.body.error, code: NEW_BRICKS_LIMIT_CODE, retryAt: refusal.body.retryAt };
     }
-    return { made: true as const, brick: await makeBrick(ownerId, brick, tx) };
-  });
-  const bricks = await listBricks(ownerId);
-  if (outcome.made) return { ok: true, made: true, brick: outcome.brick, bricks };
-  const card = bricks.find((one) => one.id === outcome.id);
-  if (card) return { ok: true, made: false, brick: card, bricks };
-  // Deleted between the look and the list: it is no longer theirs to open, so they get the one they asked for
-  const made = await makeBrick(ownerId, brick);
-  return { ok: true, made: true, brick: made, bricks: await listBricks(ownerId) };
+    throw error;
+  }
 }
 
 /** This person's Bricks, for the Brick that asks on their behalf (so it can open one instead of making it twice). */

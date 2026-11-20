@@ -14,6 +14,8 @@ export interface NewBrick {
   chatInstructions?: string | null;
   /** The first line of its chat while nothing is written there (game #1996); none means the game's own hello. */
   hello?: string | null;
+  /** The key a New Brick came with (see makeBrickOnce): the same key from the same person is the same Brick. */
+  createRequestKey?: string | null;
 }
 
 /**
@@ -37,6 +39,7 @@ export async function createBrick(input: NewBrick, db: Prisma.TransactionClient 
       characterTextureId: input.characterTextureId ?? null,
       chatInstructions: input.chatInstructions ?? null,
       hello: input.hello ?? null,
+      createRequestKey: input.createRequestKey ?? null,
       behaviorType: 'idle',
       behaviorConfig: startWithToolCallsOn({}),
       aiProviderRef: UNIVERSE_AI_REF,
