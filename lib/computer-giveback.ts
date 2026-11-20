@@ -85,6 +85,8 @@ interface JobRef {
   id: string;
   personId: string;
   startedAt: Date | null;
+  /** When the job ended, as stored (absent at its own finish: it ends now). The goodwill count is of THAT month, whenever the decision is made. */
+  endedAt?: Date | null;
 }
 
 /**
@@ -124,7 +126,8 @@ export async function decideRunnerFinish(
   const bound = personGiveBackBound(limits);
   if (bound === null) return { state: 'pending', basis: 'limits_missing', reason, route };
 
-  const month = monthOf(now);
+  // The month the job ended in, not the month the decision is made in: a job that ended on the 31st and is decided on the 1st uses the 31st's month, for both counts
+  const month = monthOf(job.endedAt ?? now);
   const ran = { personId: job.personId, id: { not: job.id }, startedAt: { not: null }, endedAt: { gte: month.start, lt: month.end } };
   const [given, ended] = await Promise.all([
     // Only goodwill gives count: a fault of ours, an outage and an incident correction use none of a person's bound
@@ -229,7 +232,7 @@ export async function giveBackAfter(job: { id: string; personId: string }, now: 
 export async function resolveDecision(jobId: string, now: Date = new Date(), options: { closing?: boolean } = {}): Promise<'resolved' | 'pending' | 'none'> {
   const decision = await prisma.computerGiveBackDecision.findUnique({ where: { jobId } });
   if (!decision || decision.state !== 'pending') return 'none';
-  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, personId: true, startedAt: true } });
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, personId: true, startedAt: true, endedAt: true } });
   if (!job) {
     // The job is gone (its Brick was purged) while the decision still waited: never a final charge. It is given back in the person's favour, uncounted; what the
     // job wrote is found by its id (the time event and the calls), and the credit by the refund obligations

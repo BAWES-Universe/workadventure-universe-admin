@@ -160,6 +160,25 @@ run('a computer job that failed on our side, and the bound on giving it back', (
     expect(await givenBack((await job(sara, ours)).id)).toBe(true);
   });
 
+  it('a decision that waited into the next month is counted in the month the JOB ended in, not the month it is decided in', async () => {
+    await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+    const sara = await person('sara');
+    const lastMonthEnd = new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth(), 0, 23, 30));
+    const first = await job(sara, ours);
+    expect(await decisionOf(first.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+    await prisma.computerJob.update({ where: { id: first.id }, data: { endedAt: new Date(lastMonthEnd.getTime() - 3_600_000) } });
+    // Finished on the last evening of last month, held for an effect, and decided in this month: last month's bound (one) is already used
+    const held = await job(sara, ours, async (id) => {
+      await planEffect(id, { key: 'month-1', kind: 'send' });
+    });
+    expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', basis: 'effect_unresolved' });
+    await prisma.computerJob.update({ where: { id: held.id }, data: { endedAt: lastMonthEnd } });
+    await prisma.computerGiveBackDecision.update({ where: { jobId: held.id }, data: { decidedAt: new Date(NOW.getTime() - 3 * 24 * 60 * 60_000) } });
+    expect(await resolveDecision(held.id, minutes(30))).toBe('resolved');
+    expect(await decisionOf(held.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+    expect(await givenBack(held.id)).toBe(false);
+  });
+
   it('is not given back when the job already settled something outside its computer as done: it delivered', async () => {
     const sara = await person('sara');
     const ended = await job(sara, ours, async (jobId) => {
