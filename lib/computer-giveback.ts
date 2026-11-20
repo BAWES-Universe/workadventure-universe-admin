@@ -383,15 +383,24 @@ export async function afterLateEvidence(jobId: string, now: Date = new Date()): 
     const lenient = decision.causeHint !== 'ours';
     let turns: readonly number[] = decision.judgedTurns;
     let turnlessOnly = false;
+    // The turn chosen now is KEPT on the decision, as a finish that found the row on time keeps it: the decision then stands on that turn's evidence (an incident correction reads the same rows
+    // whichever arrived first, the row or the finish). A turn nobody has judged is never added to a decision that already judged one
+    let chosen: number | null = null;
     if (lenient && turns.length === 0) {
       const last = await lastFaultTurn(tx, jobId, decision.judgedRun);
       if (last === null) turnlessOnly = true;
-      else turns = [last];
+      else {
+        turns = [last];
+        chosen = last;
+      }
     }
     const rows = await readFaultRows(tx, jobId, turns, decision.judgedRun, { turnlessOnly });
     const ours = rows.find((row) => row.cls === 'ours');
-    if (!ours) return false;
-    await tx.computerGiveBackDecision.update({ where: { jobId }, data: { state: 'given', basis: 'universe_fault', reason: ours.reason, route: ours.route, nextAttemptAt: null } });
+    if (!ours) {
+      if (chosen !== null) await tx.computerGiveBackDecision.update({ where: { jobId }, data: { judgedTurns: [chosen] } });
+      return false;
+    }
+    await tx.computerGiveBackDecision.update({ where: { jobId }, data: { state: 'given', basis: 'universe_fault', reason: ours.reason, route: ours.route, nextAttemptAt: null, ...(chosen !== null ? { judgedTurns: [chosen] } : {}) } });
     if (decision.state === 'given') {
       // It was counted against the person's bound as goodwill, and a fault of ours (it names no one's words) uses none of it: un-counted, nothing else to give back
       await uncountGiveBack(tx, jobId);

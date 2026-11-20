@@ -1689,6 +1689,38 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await givenBack(ownEvidence.id)).toBe(true);
     });
 
+    it('the same evidence gives the same incident correction whichever arrives first, the provider fault row or the finish; a numbered fault on a turn nobody judged still reverses nothing', async () => {
+      await limitsAre(LAUNCH);
+      const sara = await person('sara');
+      const route = 'universe-ai/model-both-orders';
+      const window = { route, from: minutes(-60), to: minutes(600) };
+      // The runner names no turn and says the agent ended: the last turn with a row is judged (run b). Row BEFORE the finish
+      const before = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' }, withFaults(sara, [fault(2, 'provider_5xx', { route, run: 'runb' })]));
+      // The same row AFTER the finish (the relay writes best effort)
+      const after = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' });
+      expect(await decisionOf(after.id)).toMatchObject({ state: 'refused', basis: 'agent_ended', judgedTurns: [] });
+      await recordFaults(sara.brickId, after.id, [fault(2, 'provider_5xx', { route, run: 'runb' })]);
+      await afterLateEvidence(after.id);
+      // A provider failure is unresolved, never ours alone: the one found on time is bounded goodwill, the late one leaves the refusal as it was. Both decisions stand on turn 2 of run b
+      expect(await decisionOf(before.id)).toMatchObject({ state: 'given', basis: 'goodwill', judgedRun: 'runb', judgedTurns: [2] });
+      expect(await decisionOf(after.id)).toMatchObject({ state: 'refused', basis: 'agent_ended', judgedRun: 'runb', judgedTurns: [2] });
+      // A turn nobody judged: turn 2 (a failure on another route) was the last one found, and a provider failure of THIS route arrives later still, on turn 3
+      const unjudged = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' });
+      await recordFaults(sara.brickId, unjudged.id, [fault(2, 'provider_5xx', { route: 'universe-ai/elsewhere', run: 'runb' })]);
+      await afterLateEvidence(unjudged.id);
+      await recordFaults(sara.brickId, unjudged.id, [fault(3, 'provider_5xx', { route, run: 'runb' })]);
+      await afterLateEvidence(unjudged.id);
+      expect(await decisionOf(unjudged.id)).toMatchObject({ state: 'refused', basis: 'agent_ended', judgedTurns: [2] });
+      // The incident corrects both by the same evidence: the counted goodwill is freed from the bound, the refusal is given back
+      expect(await correctRouteTogether(window)).toMatchObject({ corrected: 1, uncounted: 1 });
+      expect(await decisionOf(before.id)).toMatchObject({ state: 'given', basis: 'incident' });
+      expect(await decisionOf(after.id)).toMatchObject({ state: 'given', basis: 'incident' });
+      expect(await decisionOf(unjudged.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      expect(await givenBack(before.id)).toBe(true);
+      expect(await givenBack(after.id)).toBe(true);
+      expect(await givenBack(unjudged.id)).toBe(false);
+    });
+
     it('a decision judged on no turn is read on every row of the job only when the runner called it ours; for any other hint a numbered fault of another run never reverses it, and a turnless one of its own run does', async () => {
       await limitsAre(LAUNCH);
       const sara = await person('sara');
