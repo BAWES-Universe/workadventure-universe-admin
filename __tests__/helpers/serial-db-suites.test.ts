@@ -7,6 +7,7 @@ describe('database suites run one at a time', () => {
     try {
       let loaded: () => Promise<{ maxWorkers?: number }> = async () => ({});
       jest.isolateModules(() => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports -- the config is a CommonJS file read fresh under each setting of the flag
         loaded = require('../../jest.config.js');
       });
       return await loaded();
