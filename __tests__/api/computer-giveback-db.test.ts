@@ -9,6 +9,9 @@ import { randomUUID } from 'node:crypto';
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn() }));
+
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
@@ -293,6 +296,17 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       const ended = await job(sara, ours);
       expect(ended).toMatchObject({ status: 'failed', endedBy: null, runnerFault: false });
       expect(await givenBack(ended.id)).toBe(false);
+      // It is told to Sentry, so the refused give-back can be made good by hand
+      expect(Sentry.captureMessage).toHaveBeenCalledWith(expect.stringContaining('Limits could not be read'), expect.objectContaining({ tags: expect.objectContaining({ step: 'giveback_limits_unreadable' }), extra: { jobId: ended.id } }));
+    });
+
+    it('does not tell Sentry anything when a read fails once and the retry works', async () => {
+      await limitsAre(LAUNCH);
+      const sara = await person('sara');
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      failLimitsReads(1);
+      expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+      expect(Sentry.captureMessage).not.toHaveBeenCalled();
     });
 
     it('never touches a failure Orbit saw itself: it is given back even when the Limits cannot be read', async () => {
