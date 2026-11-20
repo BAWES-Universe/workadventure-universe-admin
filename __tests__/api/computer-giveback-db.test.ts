@@ -20,7 +20,7 @@ import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/compute
 import { computerView, finishJob, giveComputer, planEffect, settleEffect, startJob, sweepComputers } from '@/lib/computer';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { recordFaults, type FaultInput } from '@/lib/computer-faults';
-import { afterLateEvidence, decidePendingForPurge, decideRunnerFinish, lockPerson, resolveDecision, sweepGiveBackDecisions } from '@/lib/computer-giveback';
+import { afterLateEvidence, decidePendingForPurge, decideRunnerFinish, lockPerson, resolveDecision, sweepGiveBackDecisions, sweepLateEvidence } from '@/lib/computer-giveback';
 import { correctRouteTogether, giveBackOverview, giveBackReadiness, routeIsPaused } from '@/lib/computer-fault-ops';
 import { mintJobToken } from '@/lib/computer-token';
 
@@ -597,6 +597,56 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await prisma.computerJob.count({ where: { personId: sara.id, endedBy: 'error' } })).toBe(2);
     });
 
+    it('a confirmed fault stored while the finish was being committed is not lost: the sweep looks again at every decision it is newer than, and marks what it looked at', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      await job(sara, ours);
+      // The finish read no evidence and refused (the bound is used); the fault was stored by a write that overlapped it, so the route's own look found no decision and did nothing
+      const late = await job(sara, { ...ours, turns: [1] });
+      expect(await decisionOf(late.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+      await prisma.computerJobFault.create({ data: { jobId: late.id, callId: 'overlap-1', turn: 1, kind: 'fault', reason: 'provider_key_ours', source: 'universe-ai', route: 'universe-ai/model-a', providerStatus: 401, at: new Date() } });
+      expect(await decisionOf(late.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+      // (the computer sweep does it)
+      await sweepComputers(new Date());
+      expect(await decisionOf(late.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+      expect(await givenBack(late.id)).toBe(true);
+      // Goodwill that was counted is freed the same way when a confirmed fault of ours turns up (a refusal by delivery stays: the same verdict as on time, see below)
+      const counted = await job(sara, { ...ours, turns: [1], run: 'runz' }, withFaults(sara, [fault(1, 'provider_5xx', { run: 'runz' })]));
+      await prisma.computerJob.update({ where: { id: counted.id }, data: { runnerFault: true } });
+      await prisma.computerGiveBackDecision.update({ where: { jobId: counted.id }, data: { state: 'given', basis: 'goodwill' } });
+      await prisma.computerJobFault.create({ data: { jobId: counted.id, callId: 'overlap-2', turn: 1, run: 'runz', kind: 'fault', reason: 'relay_down', source: 'universe-ai', route: null, at: new Date() } });
+      await sweepLateEvidence(new Date());
+      expect(await decisionOf(counted.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: counted.id } })).runnerFault).toBe(false);
+      // Looked at: with its rows older than the margin it is not looked at again, and nothing about it moves
+      await prisma.computerJobFault.updateMany({ where: { jobId: { in: [late.id, counted.id] } }, data: { createdAt: new Date(Date.now() - 3_600_000) } });
+      expect((await sweepLateEvidence(new Date(), 500)).looked).toBe(0);
+    });
+
+    it('late evidence gives the same verdict as evidence on time: a confirmed fault of ours is given back even where the work was delivered, on the sweep as on the first look (both paths agree)', async () => {
+      await limitsAre(LAUNCH);
+      const sara = await person('sara');
+      // On time: delivered work and a confirmed fault of ours in what was judged
+      const onTime = await job(sara, { ...ours, turns: [1] }, async (id) => {
+        await recordFaults(sara.brickId, id, [fault(1, 'relay_down')]);
+        await planEffect(id, { key: 'same-1', kind: 'send' });
+        await settleEffect(id, 'same-1', 'done', 'ali@example.test');
+      });
+      // Late: the same, the fault row arriving after the finish judged the delivery
+      const late = await job(sara, { ...ours, turns: [1] }, async (id) => {
+        await planEffect(id, { key: 'same-2', kind: 'send' });
+        await settleEffect(id, 'same-2', 'done', 'ali@example.test');
+      });
+      expect(await decisionOf(late.id)).toMatchObject({ state: 'refused', basis: 'delivered' });
+      await prisma.computerJobFault.create({ data: { jobId: late.id, callId: 'same-late', turn: 1, kind: 'fault', reason: 'relay_down', source: 'universe-ai', route: null, at: new Date() } });
+      await sweepLateEvidence(new Date());
+      // What the late path decides is pinned to what the on-time path decided
+      const onTimeDecision = await decisionOf(onTime.id);
+      expect(onTimeDecision).toMatchObject({ state: 'given', basis: 'universe_fault' });
+      const lateDecision = await decisionOf(late.id);
+      expect({ state: lateDecision?.state, basis: lateDecision?.basis }).toEqual({ state: onTimeDecision?.state, basis: onTimeDecision?.basis });
+    });
+
     it('never lets a late row take a give-back back, or turn a job the runner did not report as ours into a give-back', async () => {
       await limitsAre(LAUNCH);
       const sara = await person('sara');
@@ -1000,7 +1050,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
     });
 
     describe('round 3: the decision itself', () => {
-      it('a late fault row never turns delivered work into a give-back: a refusal because the work was delivered stays', async () => {
+      it('late evidence gives the verdict evidence on time gives: a confirmed fault of ours beats a delivered effect, and a row that is not one changes nothing', async () => {
         await limitsAre(LAUNCH);
         const sara = await person('sara');
         const ended = await job(sara, { ...ours, turns: [1] }, async (id) => {
@@ -1009,10 +1059,16 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         });
         expect(await settleEffect(ended.id, 'mail-1', 'done', 'ali@example.test')).toBe(true);
         expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'delivered' });
-        await recordFaults(sara.brickId, ended.id, [fault(1, 'relay_down')]);
+        // A row of the person's, or an unresolved one, never turns delivered work into a give-back
+        await recordFaults(sara.brickId, ended.id, [fault(1, 'allowance'), fault(1, 'provider_5xx')]);
         await afterLateEvidence(ended.id);
         expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'delivered' });
         expect(await givenBack(ended.id)).toBe(false);
+        // A confirmed fault of ours does, exactly as it would have on time
+        await recordFaults(sara.brickId, ended.id, [fault(1, 'relay_down')]);
+        await afterLateEvidence(ended.id);
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+        expect(await givenBack(ended.id)).toBe(true);
       });
 
       it('reads the effects once, in one statement: one done blocks goodwill, one still planned defers it, none leaves it to the bound', async () => {

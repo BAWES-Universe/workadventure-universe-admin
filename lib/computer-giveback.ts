@@ -333,8 +333,9 @@ export async function afterLateEvidence(jobId: string, now: Date = new Date()): 
     await lockPerson(tx, job.personId);
     // Read again under the person's lock: a decision made in the meantime (a parallel retry) is the one that stands
     const decision = await tx.computerGiveBackDecision.findUnique({ where: { jobId } });
-    // A refusal because the work was delivered stays: a late fault row never turns delivered work into a give-back
-    if (!decision || decision.state === 'pending' || decision.basis === 'delivered' || (decision.state === 'given' && decision.basis !== 'goodwill')) return false;
+    // The same verdict as evidence on time: a confirmed fault of ours in what was judged beats a delivered effect (decideRunnerFinish reads class 1 before the effects), so a row that
+    // arrives late and says so gives the job back whatever the decision refused it for
+    if (!decision || decision.state === 'pending' || (decision.state === 'given' && decision.basis !== 'goodwill')) return false;
     const rows = await readFaultRows(tx, jobId, decision.judgedTurns, decision.judgedRun);
     const ours = rows.find((row) => row.cls === 'ours');
     if (!ours) return false;
@@ -348,6 +349,42 @@ export async function afterLateEvidence(jobId: string, now: Date = new Date()): 
     return true;
   });
   if (applied) await giveBackAfter(job, now);
+}
+
+/** How far before a decision's last change a fault row may have been written and still be looked at again: a row is written by a write that began before the decision was committed (the two overlap). */
+const LATE_ROW_MARGIN_MINUTES = 5;
+/** How old a decision may be and still be looked at again for a late row. */
+const LATE_ROW_HORIZON_DAYS = 30;
+
+/**
+ * Evidence that reached Orbit while a decision was being made is not lost: the sweep looks again, with `afterLateEvidence`, at every decision a fault row of ours is newer than (a
+ * refusal, or goodwill that was counted), so a row that was stored a moment before the finish committed, and found no decision to judge, is judged all the same. The route that stores
+ * a row answers once it is stored, whatever this does. A decision looked at is marked as looked at (the time this look began, taken before it read anything), so it is not looked at again
+ * until another row arrives; rows written within a few minutes before that mark are looked at once more, because a write that began before it may have committed after it. Never throws.
+ */
+export async function sweepLateEvidence(now: Date = new Date(), batch = 50): Promise<{ looked: number }> {
+  const result = { looked: 0 };
+  try {
+    const due = await prisma.$queryRaw<Array<{ job_id: string; mark: Date }>>(Prisma.sql`
+      SELECT d."job_id", clock_timestamp() AS mark FROM "computer_give_back_decisions" d
+      WHERE d."cause_hint" = 'ours' AND (d."state" = 'refused' OR (d."state" = 'given' AND d."basis" = 'goodwill'))
+        AND d."updated_at" > ${new Date(now.getTime() - LATE_ROW_HORIZON_DAYS * 24 * 60 * MINUTE)}
+        AND EXISTS (SELECT 1 FROM "computer_job_faults" f WHERE f."job_id" = d."job_id" AND f."created_at" > d."updated_at" - ${Prisma.raw(`interval '${LATE_ROW_MARGIN_MINUTES} minutes'`)})
+      ORDER BY d."updated_at" ASC LIMIT ${batch}`);
+    for (const one of due) {
+      result.looked++;
+      try {
+        await afterLateEvidence(one.job_id, now);
+        // Marked as looked at as of when this look began: a row that arrives from here on is newer than the mark
+        await prisma.$executeRaw`UPDATE "computer_give_back_decisions" SET "updated_at" = ${one.mark} WHERE "job_id" = ${one.job_id} AND "updated_at" < ${one.mark}`;
+      } catch (error) {
+        console.error('[Computer] Could not look at late evidence again:', error instanceof Error ? error.message : 'unknown');
+      }
+    }
+  } catch (error) {
+    console.error('[Computer] The late evidence sweep failed:', error instanceof Error ? error.message : 'unknown');
+  }
+  return result;
 }
 
 /**
