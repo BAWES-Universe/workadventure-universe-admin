@@ -653,6 +653,87 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await decisionOf(first.id)).toMatchObject({ state: 'refused' });
     });
 
+    describe('a late look that keeps throwing is never dropped', () => {
+      const failing = async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const sara = await person('sara');
+        await job(sara, ours);
+        const refused = await job(sara, { ...ours, turns: [1] });
+        expect(await peek(refused.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+        await prisma.computerJobFault.create({ data: { jobId: refused.id, callId: `keep-${refused.id}`, turn: 1, kind: 'fault', reason: 'provider_key_ours', source: 'universe-ai', route: 'universe-ai/model-a', providerStatus: 401, at: new Date() } });
+        return refused;
+      };
+      // The look's own read of the decision fails for this job; the test's reads (peek) are never the look's
+      let looking = true;
+      const throwFor = (jobId: string) => {
+        const realFind = prisma.computerGiveBackDecision.findUnique.bind(prisma.computerGiveBackDecision);
+        return jest.spyOn(prisma.computerGiveBackDecision, 'findUnique').mockImplementation(((args: { where?: { jobId?: string } }) => (looking && args?.where?.jobId === jobId ? Promise.reject(new Error('blip')) : realFind(args as never))) as never);
+      };
+      const peek = async (id: string) => {
+        looking = false;
+        try {
+          return await decisionOf(id);
+        } finally {
+          looking = true;
+        }
+      };
+
+      it('is looked at again on its own retry time, however old its rows are, and gives the job back once it stops throwing (a refused row with a retry time is never treated as pending)', async () => {
+        const refused = await failing();
+        const t0 = new Date();
+        const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        const spy = throwFor(refused.id);
+        try {
+          await sweepLateEvidence(t0);
+          expect(await peek(refused.id)).toMatchObject({ state: 'refused', attempts: 1, lastError: expect.stringMatching(/^late_look:/) });
+          const retry = (await peek(refused.id))?.nextAttemptAt as Date;
+          expect(retry.getTime()).toBeGreaterThan(t0.getTime());
+          // Not before its time (its row is still inside the margin, which is no reason to look sooner)
+          expect((await sweepLateEvidence(new Date(t0.getTime() + 30_000))).looked).toBe(0);
+          // On its time it is looked at, throws again, and waits longer
+          expect((await sweepLateEvidence(new Date(retry.getTime() + 1000))).looked).toBe(1);
+          expect(await peek(refused.id)).toMatchObject({ state: 'refused', attempts: 2 });
+          expect(((await peek(refused.id))?.nextAttemptAt as Date).getTime()).toBeGreaterThan(retry.getTime() + 60_000);
+          // The pending sweep and the purge never take it for a pending decision
+          expect(await sweepGiveBackDecisions(new Date(t0.getTime() + 24 * 3_600_000))).toMatchObject({ looked: 0 });
+          expect(await peek(refused.id)).toMatchObject({ state: 'refused', attempts: 2 });
+        } finally {
+          spy.mockRestore();
+          quiet.mockRestore();
+        }
+        // Long after the margin (its row is an hour old), and it has stopped throwing: it is looked at by its retry time and the job is given back
+        await prisma.computerJobFault.updateMany({ where: { jobId: refused.id }, data: { createdAt: new Date(Date.now() - 3_600_000) } });
+        const later = new Date(t0.getTime() + 2 * 3_600_000);
+        expect((await sweepLateEvidence(later)).looked).toBe(1);
+        expect(await peek(refused.id)).toMatchObject({ state: 'given', basis: 'universe_fault', nextAttemptAt: null, lastError: null });
+        expect(await givenBack(refused.id)).toBe(true);
+        expect((await sweepLateEvidence(new Date(later.getTime() + 3_600_000))).looked).toBe(0);
+      });
+
+      it('tells Sentry once when a look has been failing for an hour (the alert is claimed; a capture that throws is told again by the next sweep)', async () => {
+        const refused = await failing();
+        const captured = Sentry.captureMessage as jest.Mock;
+        captured.mockClear();
+        const t0 = new Date();
+        const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        const spy = throwFor(refused.id);
+        try {
+          await sweepLateEvidence(t0);
+          expect(captured).not.toHaveBeenCalled();
+          captured.mockImplementationOnce(() => {
+            throw new Error('sentry down');
+          });
+          // An hour after the first failure: told (the capture throws, so the claim is given back), and told again by the next failing sweep, then never again
+          for (const hours of [1.02, 2.04, 3.06, 4.08]) await sweepLateEvidence(new Date(t0.getTime() + hours * 3_600_000));
+          expect(captured).toHaveBeenCalledTimes(2);
+          expect(await peek(refused.id)).toMatchObject({ lastError: expect.stringMatching(/^late_look_told:/) });
+        } finally {
+          spy.mockRestore();
+          quiet.mockRestore();
+        }
+      });
+    });
+
     it('late evidence gives the same verdict as evidence on time: a confirmed fault of ours is given back even where the work was delivered, on the sweep as on the first look (both paths agree)', async () => {
       await limitsAre(LAUNCH);
       const sara = await person('sara');

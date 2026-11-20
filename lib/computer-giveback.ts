@@ -370,11 +370,21 @@ const LATE_ROW_MARGIN_MINUTES = 5;
 /** How old a decision may be and still be looked at again for a late row. */
 const LATE_ROW_HORIZON_DAYS = 30;
 
+/** What a late look that threw leaves in `lastError` (then `:` and the time of its first failure, in ms); `late_look_told` once Sentry has been told it keeps failing. */
+const LATE_LOOK = 'late_look';
+const LATE_LOOK_TOLD = 'late_look_told';
+/** How long a late look may keep failing before Sentry is told. */
+const LATE_LOOK_ALERT_MS = 60 * MINUTE;
+
 /**
  * Evidence that reached Orbit while a decision was being made is not lost: the sweep looks again, with `afterLateEvidence`, at every decision a fault row of ours is newer than (a
  * refusal, or goodwill that was counted), so a row that was stored a moment before the finish committed, and found no decision to judge, is judged all the same. The route that stores
  * a row answers once it is stored, whatever this does. A decision looked at is marked as looked at (the time this look began, taken before it read anything), so it is not looked at again
- * until another row arrives; rows written within a few minutes before that mark are looked at once more, because a write that began before it may have committed after it. Never throws.
+ * until another row arrives; rows written within a few minutes before that mark are looked at once more, because a write that began before it may have committed after it.
+ *
+ * A look that THROWS is never dropped: the decision is marked and given a retry time with the growing wait (`attempts`, `nextAttemptAt`, `lastError` = late_look:<first failure>), and the sweep
+ * picks it by that time however old its rows are, until a look succeeds (which clears all three). The decision sweep reads `nextAttemptAt` of PENDING decisions only, so on these it is only this.
+ * Sentry is told once (the alert is claimed first) when a look has been failing for an hour. Never throws.
  */
 export async function sweepLateEvidence(now: Date = new Date(), batch = 50): Promise<{ looked: number }> {
   const result = { looked: 0 };
@@ -383,25 +393,61 @@ export async function sweepLateEvidence(now: Date = new Date(), batch = 50): Pro
       SELECT d."job_id", clock_timestamp() AS mark FROM "computer_give_back_decisions" d
       WHERE d."cause_hint" = 'ours' AND (d."state" = 'refused' OR (d."state" = 'given' AND d."basis" = 'goodwill'))
         AND d."updated_at" > ${new Date(now.getTime() - LATE_ROW_HORIZON_DAYS * 24 * 60 * MINUTE)}
-        AND EXISTS (SELECT 1 FROM "computer_job_faults" f WHERE f."job_id" = d."job_id" AND f."created_at" > d."updated_at" - ${Prisma.raw(`interval '${LATE_ROW_MARGIN_MINUTES} minutes'`)})
+        AND (
+          (d."last_error" LIKE 'late_look%' AND d."next_attempt_at" <= ${now})
+          OR (COALESCE(d."last_error", '') NOT LIKE 'late_look%' AND EXISTS (SELECT 1 FROM "computer_job_faults" f WHERE f."job_id" = d."job_id" AND f."created_at" > d."updated_at" - ${Prisma.raw(`interval '${LATE_ROW_MARGIN_MINUTES} minutes'`)}))
+        )
       ORDER BY d."updated_at" ASC LIMIT ${batch}`);
     for (const one of due) {
       result.looked++;
       try {
         await afterLateEvidence(one.job_id, now);
-        // Marked as looked at as of when this look began: a row that arrives from here on is newer than the mark
-        await prisma.$executeRaw`UPDATE "computer_give_back_decisions" SET "updated_at" = ${one.mark} WHERE "job_id" = ${one.job_id} AND "updated_at" < ${one.mark}`;
+        // Marked as looked at as of when this look began: a row that arrives from here on is newer than the mark. A look that succeeds ends any retry of an earlier one that threw
+        await prisma.$executeRaw`
+          UPDATE "computer_give_back_decisions"
+          SET "updated_at" = GREATEST("updated_at", ${one.mark}),
+              "next_attempt_at" = CASE WHEN "last_error" LIKE 'late_look%' THEN NULL ELSE "next_attempt_at" END,
+              "last_error" = CASE WHEN "last_error" LIKE 'late_look%' THEN NULL ELSE "last_error" END
+          WHERE "job_id" = ${one.job_id}`;
       } catch (error) {
         console.error('[Computer] Could not look at late evidence again:', error instanceof Error ? error.message : 'unknown');
-        // A look that throws is marked as looked at all the same (guarded, as the decision sweep reschedules one that throws): left unmarked it would stay first by its time
-        // and keep every slot from the decisions behind it. The row that made it due is still newer than the mark minus the margin, so it comes round again within the margin
-        await prisma.$executeRaw`UPDATE "computer_give_back_decisions" SET "updated_at" = ${one.mark} WHERE "job_id" = ${one.job_id} AND "updated_at" < ${one.mark}`.catch(() => undefined);
+        await lateLookFailed(one.job_id, one.mark, now);
       }
     }
   } catch (error) {
     console.error('[Computer] The late evidence sweep failed:', error instanceof Error ? error.message : 'unknown');
   }
   return result;
+}
+
+/** A late look threw: marked, rescheduled with the growing wait, and Sentry told once when it has been failing for an hour. Never throws. */
+async function lateLookFailed(jobId: string, mark: Date, now: Date): Promise<void> {
+  try {
+    const row = (await prisma.$queryRaw<Array<{ attempts: number; last_error: string | null }>>(Prisma.sql`SELECT "attempts", "last_error" FROM "computer_give_back_decisions" WHERE "job_id" = ${jobId}`))[0];
+    if (!row) return;
+    const previous = row.last_error?.startsWith(LATE_LOOK) ? row.last_error : null;
+    const told = previous?.startsWith(LATE_LOOK_TOLD) ?? false;
+    const first = (previous ? Number(previous.split(':')[1]) : NaN) || now.getTime();
+    const marker = `${told ? LATE_LOOK_TOLD : LATE_LOOK}:${first}`;
+    const next = new Date(now.getTime() + retryWaitMs(row.attempts + 1));
+    await prisma.$executeRaw`
+      UPDATE "computer_give_back_decisions"
+      SET "updated_at" = GREATEST("updated_at", ${mark}), "attempts" = "attempts" + 1, "next_attempt_at" = ${next}, "last_error" = ${marker}
+      WHERE "job_id" = ${jobId} AND "state" IN ('refused', 'given')`;
+    if (told || now.getTime() - first < LATE_LOOK_ALERT_MS) return;
+    // Claimed by a write only one of two sweeps can win, and only that one tells Sentry; a capture that throws gives the claim back
+    const toldMarker = `${LATE_LOOK_TOLD}:${first}`;
+    const claimed = await prisma.$executeRaw`UPDATE "computer_give_back_decisions" SET "last_error" = ${toldMarker} WHERE "job_id" = ${jobId} AND "last_error" = ${marker}`;
+    if (claimed !== 1) return;
+    try {
+      Sentry.captureMessage('A late look at evidence for a computer give-back has been failing for over an hour: a confirmed fault of ours may still be charged to a person', { level: 'error', tags: { area: 'computer', step: 'giveback_late_look' }, extra: { jobId, since: new Date(first).toISOString() } });
+    } catch (error) {
+      console.error('[Computer] Could not tell Sentry about a failing late look:', error instanceof Error ? error.message : 'unknown');
+      await prisma.$executeRaw`UPDATE "computer_give_back_decisions" SET "last_error" = ${marker} WHERE "job_id" = ${jobId} AND "last_error" = ${toldMarker}`.catch(() => undefined);
+    }
+  } catch (error) {
+    console.error('[Computer] Could not reschedule a failing late look:', error instanceof Error ? error.message : 'unknown');
+  }
 }
 
 /**
