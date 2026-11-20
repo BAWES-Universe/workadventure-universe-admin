@@ -661,7 +661,7 @@ run('apps a person connects once, in a real database', () => {
     // Reported after both: old news
     expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: refusedAt })).toEqual({ changed: false });
     expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } })).signInLostAt).toBeNull();
-    // A refusal after the newest good call is a loss
+    // A refusal seen after the newest good call is a loss
     expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: new Date() })).toEqual({ changed: true });
     // A good call that is older than what is written never moves it back
     await reportKeyWorked(connection.id, 1, new Date(second.getTime() - 500));
@@ -727,6 +727,45 @@ run('apps a person connects once, in a real database', () => {
     expect((await row()).noAnswerAt).toBeNull();
     expect(await reportToolSignIn(saraBrick, a.id, { state: 'no-answer', at: at(5.5) })).toEqual({ changed: false });
     expect((await row()).noAnswerAt).toBeNull();
+  });
+
+  it('a key that fails soon after a good call is marked at once: a refusal 30 seconds after the last good call is a loss, and a no-answer is the same', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    const row = () => prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } });
+    const worked = new Date(Date.now() - 40_000);
+    await reportKeyWorked(connection.id, 1, worked);
+    // Inside the minute of the good call, newer than it: marked (an old refusal that reports late is another matter, tested above)
+    const refused = new Date(worked.getTime() + 30_000);
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: refused })).toEqual({ changed: true });
+    expect(await row()).toMatchObject({ signInLostAt: refused, signInLostStatus: 401 });
+    // A good call after it heals; a no-answer 30 seconds later is marked too
+    const healed = new Date(refused.getTime() + 5_000);
+    await reportKeyWorked(connection.id, 1, healed);
+    expect(await row()).toMatchObject({ signInLostAt: null, lastWorkedAt: healed });
+    const silent = new Date(healed.getTime() + 3_000);
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'no-answer', at: silent })).toEqual({ changed: true });
+    expect((await row()).noAnswerAt).toEqual(silent);
+  });
+
+  it('a key that refuses, works, refuses is marked each time a refusal is newer than the last good call, and a late report of an earlier refusal changes nothing', async () => {
+    const connection = await newOAuthApp(sara, { accessToken: 'token', expiresAt: nowSeconds() + 3600 });
+    const a = (await grantToBrick(sara, connection.id, saraBrick))!;
+    const row = () => prisma.appConnection.findUniqueOrThrow({ where: { id: connection.id } });
+    const t0 = Date.now() - 50_000;
+    const at = (seconds: number) => new Date(t0 + seconds * 1000);
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: at(0) })).toEqual({ changed: true });
+    await reportKeyWorked(connection.id, 1, at(10));
+    expect((await row()).signInLostAt).toBeNull();
+    // Refused again after the good call: marked again
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: at(20) })).toEqual({ changed: true });
+    await reportKeyWorked(connection.id, 1, at(30));
+    expect((await row()).signInLostAt).toBeNull();
+    // A refusal of a call made at 25 s, reported only now (after the good call of 30 s): old news
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: at(25) })).toEqual({ changed: false });
+    expect((await row()).signInLostAt).toBeNull();
+    // And a refusal after the good call of 30 s is marked again
+    expect(await reportToolSignIn(saraBrick, a.id, { state: 'expired', status: 401, at: at(40) })).toEqual({ changed: true });
   });
 
   it('a refusal saved between the read of a good call and its write is cleared by it, not left standing beside the newer success', async () => {

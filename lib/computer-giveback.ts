@@ -3,7 +3,10 @@ import type { InstantLimits } from '@/lib/instant/values';
 import { monthOf } from '@/lib/meter-values';
 
 /**
- * Whether a computer job that ended on our side (`ended_by = 'error'`) is given back.
+ * Whether a computer job that the runner reported as failing on our side (`finishJob` with cause "ours") is given back.
+ * Only that ending goes through here: it is the only one the job's own words can steer. Endings Orbit saw itself (a room that lapsed because the bot server
+ * stopped renewing, a room closed, a machine that would not start or wake) are always given back, whatever the bound, so a real outage is never refused.
+ * Those endings are stored the same way and so do count among the person's give-backs this month (there is no marker to tell them apart).
  *
  * A job's words are the person's, so a brief can make the agent do the work and then crash its own machine. That ends as "ours", and without a bound the
  * person would get all of it back though the work was seen. So a give-back is bounded the way Instant's "Didn't work" give-back is, from the same Limits,
@@ -12,11 +15,13 @@ import { monthOf } from '@/lib/meter-values';
  *  - Nothing is given back for a job that settled something outside its computer as done (a send, a publish, a payment…) or tried one whose outcome is not
  *    known yet: that job delivered, or may have, and a late "done" cannot take a give-back back. An effect confirmed not done does not count.
  *  - A person has a bounded number of give-backs a month (UTC). It is Instant's "Give-backs one person may have in a month" when a super admin set it.
- *    Left empty (as it is at launch: Instant's own button is gone), it is what Instant's pause rule itself tolerates among its smallest batch of runs:
+ *    Left empty (as it is at launch: Instant's own button is gone), or 0 (read as empty, as Instant reads it), it is what Instant's pause rule itself tolerates among its smallest batch of runs:
  *    "pauseMinRuns" runs at "pauseFailureRateBps" of them, the number of failures that rule lets pass before it pauses.
  *  - A person whose give-backs are repeated is paused on their own, by Instant's pause rule applied to their own month: once they have had at least
  *    "pauseMinRuns" jobs end, and the share given back reached "pauseFailureRateBps", nothing more is given back to them. It lifts by itself as the
- *    share falls (more jobs that ran well) or on the 1st.
+ *    share falls (more jobs that ran well) or on the 1st. With the bound read from the pause numbers (the launch case) it NEVER fires: the give-backs
+ *    needed to reach the share (at least floor(pauseMinRuns x share)) are already past the bound. It only matters when a super admin sets a higher
+ *    Instant per-person number, and then the bound is not the gate.
  *
  * Real outages stay given back inside that bound. People's own keys are never touched here: a call on a person's own key is never drawn from them, so
  * there is nothing of it to give back or to limit. Universe AI chat, direct messages and voice never come through here.
