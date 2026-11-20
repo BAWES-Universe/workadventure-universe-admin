@@ -163,17 +163,10 @@ export async function proposeRule(input: DraftInput & { speakerId: string; sayin
   // person's replay never finds, or shows, another person's rule
   const ruleKey = input.sayingKey ? chatRuleKey(input.botId, input.speakerId, input.sayingKey) : null;
   // Rules made before long ids were hashed were saved under the whole key cut to the column's 255 characters. Several long ids that start the same
-  // share that one cut key, so it is not an identity: such a rule is taken as this message's only while it is as it was made (active, never changed)
-  // and says what this message says. Any other hit is left alone, and the message makes its own rule under the hashed key.
-  const whole = input.sayingKey ? `chat:${input.botId}:${input.speakerId}:${input.sayingKey}` : '';
-  const legacyKey = ruleKey && whole.length > 255 ? whole.slice(0, 255) : null;
-  const findSeen = async (): Promise<Prisma.SpendRuleGetPayload<object> | null> => {
-    if (!ruleKey) return null;
-    const canonical = await prisma.spendRule.findUnique({ where: { ruleKey } });
-    if (canonical || !legacyKey) return canonical;
-    const old = await prisma.spendRule.findUnique({ where: { ruleKey: legacyKey } });
-    return old && old.state === 'active' && old.version === 1 && isReplayOf(old, draft, owner.ownerPersonId) ? old : null;
-  };
+  // share that one cut key, so it says nothing about which message made the rule: a hit on it is never taken as a replay of this message, and
+  // such a rule is never changed by it. This message finds or makes its own rule under its hashed key. (Those rows exist only in databases from
+  // before the change; the spend rules table has not reached production.)
+  const findSeen = async (): Promise<Prisma.SpendRuleGetPayload<object> | null> => (ruleKey ? prisma.spendRule.findUnique({ where: { ruleKey } }) : null);
   if (ruleKey) {
     const seen = await findSeen();
     if (seen) return isReplayOf(seen, draft, owner.ownerPersonId) ? { ok: true, rule: await cardOf(seen), created: false } : { ok: false, reason: 'key_reused' };

@@ -1365,6 +1365,47 @@ run('the bounded Instant executor, in a real database', () => {
       expect(event).toMatchObject({ basis: 'measured', costMicros: BigInt(4_000) });
     });
 
+    it('runs whose event cannot be written do not keep the runs behind them from being tried, and a run missed long ago is still written (the repair)', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      const ids: string[] = [];
+      await prisma.$executeRawUnsafe(`ALTER TABLE meter_events ADD CONSTRAINT instant_event_refused CHECK (event_id NOT LIKE 'instant:%') NOT VALID`);
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let first: Awaited<ReturnType<typeof repairInstantReporting>>;
+      let second: Awaited<ReturnType<typeof repairInstantReporting>>;
+      try {
+        for (let n = 0; n < 26; n += 1) {
+          const key = callId();
+          await runInstant(ask({ callId: key, arguments: { query: `bf${n}` } }), { adapter: p.adapter, funds: f.funds });
+          ids.push(await runIdOf(key));
+        }
+        // The repair goes through runs in the order of their ids: the first 25 are the ones whose event cannot be written, and the 26th (the last)
+        // can be. All of them settled long ago, far past any age limit
+        ids.sort();
+        for (const [n, id] of ids.entries()) {
+          await prisma.instantRun.update({ where: { id }, data: { finishedAt: new Date(Date.UTC(2020, 0, 1, 0, 0, n)) } });
+        }
+        await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT instant_event_refused');
+        const refused = ids.slice(0, 25).map((id) => `'instant:${id}'`).join(', ');
+        await prisma.$executeRawUnsafe(`ALTER TABLE meter_events ADD CONSTRAINT instant_event_refused CHECK (event_id NOT IN (${refused})) NOT VALID`);
+        first = await repairInstantReporting({ limit: 25, now: new Date() });
+        second = await repairInstantReporting({ limit: 25, now: new Date() });
+      } finally {
+        quiet.mockRestore();
+        await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT IF EXISTS instant_event_refused');
+      }
+      // The first pass looked at the 25 that cannot be written and mended none; the next goes on after them and writes the one behind them
+      expect(first).toMatchObject({ looked: 25, written: 0, failed: 25 });
+      expect(second).toMatchObject({ written: 1 });
+      expect(await prisma.meterEvent.count({ where: { eventId: `instant:${ids[25]}` } })).toBe(1);
+      expect(await prisma.meterEvent.count({ where: { eventId: { in: ids.slice(0, 25).map((id) => `instant:${id}`) } } })).toBe(0);
+      // And once they can be written they are, however old
+      await repairInstantReporting({ limit: 25, now: new Date() });
+      expect(await prisma.meterEvent.count({ where: { eventId: { in: ids.map((id) => `instant:${id}`) } } })).toBe(26);
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${ids[0]}` } })).toMatchObject({ occurredAt: new Date(Date.UTC(2020, 0, 1, 0, 0, 0)) });
+    }, 60_000);
+
     it('the charge is recorded under the run lock, so a repair reading the run first cannot leave the event saying "not known" for good', async () => {
       await setLimits();
       const p = fakeProvider();
@@ -1822,17 +1863,21 @@ run('the bounded Instant executor, in a real database', () => {
         return { ok: false, refundedMicros: 0, reason: 'unavailable' };
       }) as never);
       const sweeping = sweepGoodwill({ funds: f.funds, now: new Date(Date.now() + 601 * MIN) });
+      let swept: PromiseSettledResult<Awaited<typeof sweeping>>[] = [];
       try {
         let timer: NodeJS.Timeout | undefined;
-        const timeout = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error('the sweep never reached the books')), 20_000)));
+        // Shorter than the test's own timeout, so a sweep that never arrives fails here with its own message and the cleanup still runs
+        const timeout = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error('the sweep never reached the books')), 5_000)));
         await Promise.race([arrived, timeout]).finally(() => clearTimeout(timer));
         await prisma.instantRefund.updateMany({ where: { runId: a }, data: { releasedAt: null, createdAt: new Date() } });
       } finally {
+        // On every path the gate is let go and the sweep is joined, so no database work outlives the test
         open();
+        swept = await Promise.allSettled([sweeping]);
       }
-      expect(await sweeping).toEqual({ looked: 1, settled: 0, released: 0 });
+      expect(swept[0]).toEqual({ status: 'fulfilled', value: { looked: 1, settled: 0, released: 0 } });
       expect((await prisma.instantRefund.findFirstOrThrow({ where: { runId: a } })).releasedAt).toBeNull();
-    });
+    }, 20_000);
 
     it('a give-back let go of that the books never made, with room under the limits, is made once as a new one and counts again from then', async () => {
       await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 1, unreachableWaitMinutes: 600 });
