@@ -24,11 +24,11 @@ const urlOf = (database: string): string => {
 
 export type Throwaway = { name: string; url: string; client: Client };
 
-const admin = async <T>(use: (client: Client) => Promise<T>): Promise<T> => {
+const admin = async <T>(callback: (client: Client) => Promise<T>): Promise<T> => {
   const client = new Client({ connectionString: urlOf('postgres') });
   await client.connect();
   try {
-    return await use(client);
+    return await callback(client);
   } finally {
     await client.end();
   }
@@ -114,10 +114,10 @@ export async function history(client: Client): Promise<{ applied: string[]; unfi
 }
 
 /**
- * Runs `use` with the application's own database module (lib/db) pointed at this database, so the real code reads what the upgrade left. Modules are loaded
+ * Runs `callback` with the application's own database module (lib/db) pointed at this database, so the real code reads what the upgrade left. Modules are loaded
  * fresh for it and the connection is closed after.
  */
-export async function withApplication<T>(db: Throwaway, use: () => Promise<T>): Promise<T> {
+export async function withApplication<T>(db: Throwaway, callback: () => Promise<T>): Promise<T> {
   const holder = globalThis as unknown as { prisma?: { $disconnect(): Promise<void> } };
   const closeShared = async () => {
     await holder.prisma?.$disconnect().catch(() => undefined);
@@ -141,7 +141,7 @@ export async function withApplication<T>(db: Throwaway, use: () => Promise<T>): 
     return { ...actual, Pool: Tracked };
   });
   try {
-    return await use();
+    return await callback();
   } finally {
     await closeShared();
     await Promise.all(pools.map((pool) => pool.end().catch(() => undefined)));
