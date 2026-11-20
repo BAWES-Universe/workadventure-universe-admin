@@ -494,6 +494,22 @@ run('credit for computers, on the real books', () => {
         spy.mockRestore();
       });
 
+      it('a failed try that read an earlier clock than the one kept never moves the last try or the deadline backwards', async () => {
+        const { holdKey } = await stuck();
+        const first = await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } });
+        const kept = first.lastAttemptAt as Date;
+        const spy = quiet();
+        // A try forced with a clock from before the one already kept (the sweep and a support retry racing, one of them with an older reading of the time)
+        expect(await attemptRefundObligation(holdKey, new Date(kept.getTime() - 5 * 60_000), { force: true })).toBe('owed');
+        spy.mockRestore();
+        const second = await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } });
+        expect(second.attempts).toBe(2);
+        expect(second.lastAttemptAt?.getTime()).toBe(kept.getTime());
+        // The wait after the second failure (4 minutes) counts from the later time, so the deadline only ever moves forward
+        expect(second.nextAttemptAt?.getTime()).toBe(kept.getTime() + 4 * 60_000);
+        expect((second.nextAttemptAt as Date).getTime()).toBeGreaterThan((first.nextAttemptAt as Date).getTime());
+      });
+
       it('asks for the same refund when the books made it but the answer was lost: found again by its key, given once', async () => {
         const { sara, holdKey } = await stuck();
         // This time the books MAKE the refund and then the answer is lost

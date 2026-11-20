@@ -87,11 +87,14 @@ export async function attemptRefundObligation(holdKey: string, now: Date = new D
     // support retry) record two attempts one after the other and the second waits the longer time, never the same one from the same old count
     await prisma.$transaction(async (tx) => {
       await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "computer_refund_obligations" WHERE "id" = ${one.id} FOR UPDATE`);
-      const current = await tx.computerRefundObligation.findUnique({ where: { id: one.id }, select: { attempts: true, state: true } });
+      const current = await tx.computerRefundObligation.findUnique({ where: { id: one.id }, select: { attempts: true, state: true, lastAttemptAt: true } });
       if (!current || current.state !== 'owed') return;
+      // A try that read an earlier clock than the one already kept (two tries failing together, a support retry racing the sweep) never moves the last try or the
+      // deadline backwards: both start from the later of the two
+      const base = current.lastAttemptAt && current.lastAttemptAt.getTime() > now.getTime() ? current.lastAttemptAt : now;
       await tx.computerRefundObligation.update({
         where: { id: one.id },
-        data: { attempts: current.attempts + 1, lastAttemptAt: now, lastError: error, nextAttemptAt: new Date(now.getTime() + retryWaitMs(current.attempts + 1)) },
+        data: { attempts: current.attempts + 1, lastAttemptAt: base, lastError: error, nextAttemptAt: new Date(base.getTime() + retryWaitMs(current.attempts + 1)) },
       });
     });
     return 'owed';
