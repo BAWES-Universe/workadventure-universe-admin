@@ -1770,6 +1770,26 @@ run('payments for pages, in a real database', () => {
         expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: lost.id } })).toMatchObject({ status: 'pending' });
       });
 
+      it('an order in the long wait whose look had no room in the hour is tried again soon, never a week later; a look that was really made keeps its age-based interval', async () => {
+        const { artifactId } = await pending();
+        await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, paymentLooksPerOwner: 1 } }, sara);
+        const old = await lostOrder(artifactId, word(), wish(), { status: 'not_paid', providerRef: 'chg_TS01', reconciled: false, createdAt: new Date(Date.now() - 40 * 24 * 3_600_000), closedAt: new Date(Date.now() - 39 * 24 * 3_600_000), nextLookAt: null });
+        const young = await lostOrder(artifactId, word(), wish(), { status: 'not_paid', providerRef: 'chg_TS02', reconciled: false, createdAt: new Date(Date.now() - 80 * 3_600_000), closedAt: new Date(Date.now() - 60 * 3_600_000), nextLookAt: null });
+        const sent = gateway({ record: (orderId) => paidRecord(orderId, { status: 'INITIATED' }) });
+        // The owner's hourly room for looks is one: the first order is asked (its look is made, so its own interval stands), the second finds no room
+        await prisma.appKeyCall.deleteMany({ where: { ownerId: 'page-payments' } });
+        await verifyOrder(young.id, undefined, undefined, { background: true });
+        expect(sent.filter((target) => target.method === 'GET')).toHaveLength(1);
+        const made = await prisma.appPageOrder.findUniqueOrThrow({ where: { id: young.id } });
+        expect(made.nextLookAt!.getTime() - Date.now()).toBeGreaterThan(5 * 3_600_000);
+        await verifyOrder(old.id, undefined, undefined, { background: true });
+        expect(sent.filter((target) => target.method === 'GET')).toHaveLength(1);
+        const waited = await prisma.appPageOrder.findUniqueOrThrow({ where: { id: old.id } });
+        // Weekly is what its age would give; with no room it is tried again within the quarter hour instead
+        expect(waited.nextLookAt!.getTime() - Date.now()).toBeLessThanOrEqual(15 * 60_000 + 5_000);
+        expect(waited.nextLookAt!.getTime() - Date.now()).toBeGreaterThan(0);
+      });
+
       it('the short look interval is only for Check payment and Restore: a page that refreshes itself, a poll or a notice keeps the age-grown spacing on an order in the long wait', async () => {
         const { artifactId } = await pending();
         await saveServerLimits({ bricks: { paymentCheckSeconds: 5, checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);

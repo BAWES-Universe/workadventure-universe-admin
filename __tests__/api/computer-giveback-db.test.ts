@@ -1080,6 +1080,41 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect([(await decisionOf(first.id))?.state, (await decisionOf(second.id))?.state]).toEqual(['given', 'given']);
       });
 
+      it('an incident correction gives back every eligible job, a batch at a time, never stopping at a limit nobody is told about', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const route = 'universe-ai/model-incident';
+        const sara = await person('sara');
+        expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+        const refused: string[] = [];
+        for (let index = 0; index < 3; index++) {
+          const ended = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx', { route })]));
+          expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+          refused.push(ended.id);
+        }
+        expect(await correctRouteTogether({ route, from: minutes(-60), to: minutes(600) }, 1)).toMatchObject({ corrected: 3 });
+        for (const id of refused) expect(await decisionOf(id)).toMatchObject({ state: 'given', basis: 'incident' });
+        // Said twice it changes nothing
+        expect(await correctRouteTogether({ route, from: minutes(-60), to: minutes(600) }, 1)).toMatchObject({ corrected: 0, uncounted: 0 });
+      });
+
+      it('an incident correction leaves a job alone whose outside effect was delivered while its decision waited: it stays pending and is decided by its evidence', async () => {
+        await limitsAre(LAUNCH);
+        const route = 'universe-ai/model-delivered';
+        const sara = await person('sara');
+        const held = await job(sara, { ...ours, turns: [1] }, async (id) => {
+          await recordFaults(sara.brickId, id, [fault(1, 'provider_5xx', { route })]);
+          await planEffect(id, { key: 'mail-1', kind: 'send' });
+        });
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', basis: 'effect_unresolved' });
+        // The send went out before the decision was decided again
+        await prisma.computerEffect.updateMany({ where: { jobId: held.id }, data: { state: 'done' } });
+        expect(await correctRouteTogether({ route, from: minutes(-60), to: minutes(600) })).toMatchObject({ corrected: 0, uncounted: 0 });
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending' });
+        expect(await givenBack(held.id)).toBe(false);
+        expect(await resolveDecision(held.id, minutes(30))).toBe('resolved');
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'refused', basis: 'delivered' });
+      });
+
       it('a provider fault the relay stamped in the future is not counted towards a pause yet', async () => {
         await limitsAre({ ...LAUNCH, pauseMinRuns: 2 });
         const route = 'universe-ai/model-clock';

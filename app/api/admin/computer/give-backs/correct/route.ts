@@ -7,7 +7,16 @@ import { correctRouteTogether } from '@/lib/computer-fault-ops';
 
 export const runtime = 'nodejs';
 
-const bodySchema = z.object({ route: z.string().min(1).max(120), from: z.coerce.date(), to: z.coerce.date() }).strict();
+// A bound is an ISO timestamp STRING, checked before it becomes a date: a coercing date would read null as the start of 1970 and a bare number as some year, and
+// an incident correction over a range nobody meant would give back jobs outside the incident
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})$/;
+const timestamp = z
+  .string()
+  .max(40)
+  .regex(ISO_TIMESTAMP)
+  .refine((value) => Number.isFinite(Date.parse(value)))
+  .transform((value) => new Date(value));
+const bodySchema = z.object({ route: z.string().min(1).max(120), from: timestamp, to: timestamp }).strict();
 
 /**
  * POST /api/admin/computer/give-backs/correct { route, from, to } (super admins only)

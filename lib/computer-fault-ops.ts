@@ -75,31 +75,40 @@ export async function giveBackOverview(now: Date = new Date()): Promise<GiveBack
  * computer is left alone. None of these count towards anyone's bound. Safe to say twice. `corrected` is the jobs given back now; `uncounted` the goodwill ones
  * freed from the bound.
  */
-export async function correctRouteTogether(input: { route: string; from: Date; to: Date }): Promise<{ corrected: number; uncounted: number; costMicros: number }> {
-  const candidates = await prisma.$queryRaw<Array<{ job_id: string; person_id: string }>>(Prisma.sql`
-    SELECT DISTINCT d."job_id", d."person_id" FROM "computer_give_back_decisions" d
-    JOIN "computer_job_faults" f ON f."job_id" = d."job_id"
-    WHERE f."route" = ${input.route} AND f."at" >= ${input.from} AND f."at" <= ${input.to} AND f."source" = 'universe-ai' AND f."reason" IN (${Prisma.join([...PROVIDER_REASONS, ...OURS_REASONS])})
-      AND (d."state" = 'pending' OR (d."state" = 'refused' AND d."basis" IN ('cap', 'paused')) OR (d."state" = 'given' AND d."basis" = 'goodwill'))
-    LIMIT 500`);
+export async function correctRouteTogether(input: { route: string; from: Date; to: Date }, batch = 500): Promise<{ corrected: number; uncounted: number; costMicros: number }> {
   let corrected = 0;
   let uncounted = 0;
   let costMicros = 0;
-  for (const one of candidates) {
-    const job = { id: one.job_id, personId: one.person_id };
-    const changed = await prisma.$transaction(async (tx) => {
-      await lockPerson(tx, job.personId);
-      return correctDecisionForIncident(tx, job, input.route);
-    });
-    if (!changed) continue;
-    if (changed === 'uncounted') {
-      uncounted++;
-      continue;
+  // Every eligible job, a batch at a time in the order of their ids (a job the correction leaves as it is, or one it changes, is never read twice): an incident that
+  // touched more jobs than one batch is corrected whole, not up to a limit nobody is told about
+  let after = '';
+  for (;;) {
+    const candidates = await prisma.$queryRaw<Array<{ job_id: string; person_id: string }>>(Prisma.sql`
+      SELECT DISTINCT d."job_id", d."person_id" FROM "computer_give_back_decisions" d
+      JOIN "computer_job_faults" f ON f."job_id" = d."job_id"
+      WHERE f."route" = ${input.route} AND f."at" >= ${input.from} AND f."at" <= ${input.to} AND f."source" = 'universe-ai' AND f."reason" IN (${Prisma.join([...PROVIDER_REASONS, ...OURS_REASONS])})
+        AND (d."state" = 'pending' OR (d."state" = 'refused' AND d."basis" IN ('cap', 'paused')) OR (d."state" = 'given' AND d."basis" = 'goodwill'))
+        AND d."job_id" > ${after}
+      ORDER BY d."job_id" ASC
+      LIMIT ${batch}`);
+    for (const one of candidates) {
+      const job = { id: one.job_id, personId: one.person_id };
+      const changed = await prisma.$transaction(async (tx) => {
+        await lockPerson(tx, job.personId);
+        return correctDecisionForIncident(tx, job, input.route);
+      });
+      if (!changed) continue;
+      if (changed === 'uncounted') {
+        uncounted++;
+        continue;
+      }
+      await giveBackAfter(job);
+      corrected++;
+      const cost = await prisma.meterEvent.aggregate({ where: { jobId: job.id, pool: 'computer', kind: { in: ['computer_time', 'model_call'] }, payerKind: 'universe' }, _sum: { costMicros: true } });
+      costMicros += Number(cost._sum.costMicros ?? 0);
     }
-    await giveBackAfter(job);
-    corrected++;
-    const cost = await prisma.meterEvent.aggregate({ where: { jobId: job.id, pool: 'computer', kind: { in: ['computer_time', 'model_call'] }, payerKind: 'universe' }, _sum: { costMicros: true } });
-    costMicros += Number(cost._sum.costMicros ?? 0);
+    if (candidates.length < batch) break;
+    after = candidates[candidates.length - 1].job_id;
   }
   return { corrected, uncounted, costMicros };
 }

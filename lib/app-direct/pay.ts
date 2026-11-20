@@ -641,6 +641,9 @@ export interface OrderView {
   pollAfterMs: number;
 }
 
+/** When an order in the long wait whose look had no room in the hour's budget is tried again: soon, not at its age-based interval (nothing was asked of the service). */
+const NO_ROOM_RETRY_MS = 15 * 60 * 1000;
+
 /**
  * How far apart the looks are for an order that may still have been paid but that nothing is waiting for (closed past the late-payment window, or
  * one that could not be confirmed): every 6 hours for the first 3 days, daily for a month, then weekly. It never stops: only the service saying
@@ -795,6 +798,9 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // No room for looks: it waits, but an order past its open time still ends (it is not left "checking" because looks ran short)
   if (!budget) {
     lookStats.noRoom += 1;
+    // The claim above moved the order's own schedule on by its age-based interval, but nothing was asked of the service: an order in the long wait is tried again when the
+    // hourly room comes back, never a week later. The age-based interval stays for a look that was really made
+    if (reconciling) await prisma.appPageOrder.updateMany({ where: { id: order.id, reconciled: false }, data: { nextLookAt: new Date(now.getTime() + Math.min(reconcileEveryMs(sinceWindow), NO_ROOM_RETRY_MS)) } }).catch(() => undefined);
     return unreadable();
   }
   lookStats.made += 1;

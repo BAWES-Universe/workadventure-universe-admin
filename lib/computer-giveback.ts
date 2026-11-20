@@ -193,6 +193,8 @@ export async function uncountGiveBack(tx: Prisma.TransactionClient, jobId: strin
 
 /** An incident's correction of one decision: a goodwill give-back is re-labelled and freed from the bound (true), a held or cap/pause-refused one becomes a give-back (the caller gives it back). */
 export async function correctDecisionForIncident(tx: Prisma.TransactionClient, job: { id: string; personId: string }, route: string): Promise<'uncounted' | 'given' | null> {
+  // Delivered work is left alone: a job with an outside effect that is done is never given back by a correction (a held decision stays held, and is decided by its evidence)
+  if ((await tx.computerEffect.count({ where: { jobId: job.id, state: 'done' } })) > 0) return null;
   const freed = await tx.computerGiveBackDecision.updateMany({ where: { jobId: job.id, state: 'given', basis: 'goodwill' }, data: { basis: 'incident', route } });
   if (freed.count > 0) {
     await uncountGiveBack(tx, job.id);
