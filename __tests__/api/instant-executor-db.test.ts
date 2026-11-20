@@ -1210,6 +1210,9 @@ run('the bounded Instant executor, in a real database', () => {
       };
       const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
       let slow: Promise<number> | null = null;
+      // The slow sweep's read is held until `open` is called; it is declared here so the cleanup can always release it
+      let open: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (open = resolve));
       try {
         for (let n = 0; n < 6; n += 1) {
           const key = callId();
@@ -1222,15 +1225,23 @@ run('the bounded Instant executor, in a real database', () => {
           await prisma.meterEvent.deleteMany({ where: { eventId: `instant:${id}` } });
         }
         await prisma.$executeRawUnsafe(`ALTER TABLE meter_events ADD CONSTRAINT instant_event_refused CHECK (event_id NOT LIKE 'instant:%') NOT VALID`);
-        // The slow sweep reads the cursor (there is none) and is held there, one page of two runs to do
-        let open!: () => void;
-        const gate = new Promise<void>((resolve) => (open = resolve));
+        // The slow sweep reads the cursor (there is none) and is held there, one page of two runs to do. The signal comes once the read has
+        // finished (not when it starts), so the faster sweep below can only start after the slow one has what it read
+        let readDone!: () => void;
+        const slowHasRead = new Promise<void>((resolve) => (readDone = resolve));
         const real = prisma.appSetting.findUnique.bind(prisma.appSetting);
-        const reading = jest.spyOn(prisma.appSetting, 'findUnique').mockImplementationOnce(((args: never) => real(args).then(async (row: unknown) => { await gate; return row; })) as never);
+        jest.spyOn(prisma.appSetting, 'findUnique').mockImplementationOnce(((args: never) =>
+          real(args).then(async (row: unknown) => {
+            readDone();
+            await gate;
+            return row;
+          })) as never);
         slow = backfillMeterEvents(new Date(), 2, 1);
-        for (let waited = 0; reading.mock.calls.length === 0; waited += 50) {
-          if (waited >= 5_000) throw new Error('the slow sweep never read the cursor');
-          await pause(50);
+        let timer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([slowHasRead, new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error('the slow sweep never read the cursor')), 5_000)))]);
+        } finally {
+          if (timer) clearTimeout(timer);
         }
         // A faster sweep goes two pages on from the same place and saves where it got to: the fourth run
         await backfillMeterEvents(new Date(), 2, 2);
@@ -1243,6 +1254,8 @@ run('the bounded Instant executor, in a real database', () => {
         await backfillMeterEvents(new Date(), 2, 1);
         expect(await cursorId()).toBe(ids[5]);
       } finally {
+        // Release the slow sweep first (it may still be held if something above failed), wait for it, then put everything back
+        open();
         if (slow) await Promise.allSettled([slow]);
         jest.restoreAllMocks();
         quiet.mockRestore();
