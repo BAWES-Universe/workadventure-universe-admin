@@ -892,7 +892,8 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         const held = await heldForEffect();
         let finished = false;
         let settled: Promise<boolean> = Promise.resolve(false);
-        await prisma.$transaction(async (tx) => {
+        let fixtureError: { error: unknown } | null = null;
+        const fixture = async (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]) => {
           await lockPerson(tx, held.personId);
           // The lock this fixture holds, read from its own granted row in the lock table, and the fixture's own backend
           const mine = (await tx.$queryRaw<Array<{ pid: number; classid: number; objid: number; objsubid: number }>>`
@@ -914,8 +915,20 @@ run('a computer job that failed on our side, and the bound on giving it back', (
           expect(finished).toBe(false);
           // ...and the effect has not moved
           expect((await tx.computerEffect.findFirstOrThrow({ where: { jobId: held.id } })).state).toBe('planned');
-        });
-        expect(await settled).toBe(true);
+        };
+        try {
+          await prisma.$transaction(fixture);
+        } catch (error) {
+          fixtureError = { error };
+        }
+        // The person's lock is released (the fixture's transaction is over, committed or rolled back): the settlement can finish, and it is always awaited, so no settlement is left
+        // dangling whatever happened above. The fixture's own error, when there is one, is the one the test fails with
+        const outcome = await settled.then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+        if (fixtureError) throw (fixtureError as { error: unknown }).error;
+        expect(outcome).toEqual({ value: true });
         expect((await prisma.computerEffect.findFirstOrThrow({ where: { jobId: held.id } })).state).toBe('done');
       });
     });

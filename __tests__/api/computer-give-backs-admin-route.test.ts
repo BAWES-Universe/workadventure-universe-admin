@@ -79,6 +79,8 @@ describe('computer give-backs for operations', () => {
     expect((await post({ route: 'r', from: '2028-02-29T00:00:00Z', to: '2028-03-01T00:00:00-05:30' })).status).toBe(200);
     // Years before 100 are years, not 1900s: a leap day of the year 96 exists, and the 29th of February of the year 97 does not
     expect((await post({ route: 'r', from: '0096-02-29T00:00:00Z', to: '2026-01-01T00:00:00Z' })).status).toBe(200);
+    // ...and it reached the correction as that very instant, not as a 1996 one
+    expect(((correct.mock.calls.at(-1)?.[0] as { from: Date }).from).toISOString()).toBe('0096-02-29T00:00:00.000Z');
     expect((await post({ route: 'r', from: '0097-02-29T00:00:00Z', to: '2026-01-01T00:00:00Z' })).status).toBe(400);
     correct.mockClear();
     for (const body of [{}, { route: 'r', from: 'x', to: 'y' }, { route: 'r', from: '2026-11-20T02:00:00Z', to: '2026-11-20T01:00:00Z' }, { route: 'r', from: '2026-11-20T00:00:00Z', to: '2026-11-20T01:00:00Z', extra: 1 }]) {
