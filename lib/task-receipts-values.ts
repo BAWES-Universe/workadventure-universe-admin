@@ -166,7 +166,7 @@ interface Group {
   unpriced: boolean;
   /** An Instant run whose charge the credit books have not acknowledged yet: it may already have been debited, so it is "settlement pending", not a price nobody knows. */
   settling?: boolean;
-  /** An Instant run that could not be confirmed and whose hold is still reserved: it is being released. */
+  /** An Instant run that failed or could not be confirmed and whose hold is still reserved: it is being released. */
   releasing?: boolean;
   priced: boolean;
   charged: boolean;
@@ -202,15 +202,26 @@ export function receiptLines(events: readonly LineEvent[], botName: string): Rec
   for (const event of events) {
     if (event.kind === 'app_use' && event.route === 'instant') {
       const name = appName(event.detail);
-      const found = group(`instant:${name ?? ''}`, 0, name ? `Instant ${name}` : 'Instant Apps', true);
-      found.count += event.quantity;
+      const label = name ? `Instant ${name}` : 'Instant Apps';
       const taken = instantTaken(event);
       if (taken === null) {
         const detail = isRecord(event.detail) ? event.detail : {};
-        if (detail.instant !== true || event.costMicros === null) found.unpriced = true;
-        else if (detail.unconfirmed === true) found.releasing = true;
-        else found.settling = true;
+        if (detail.instant !== true || event.costMicros === null) {
+          const found = group(`instant:${name ?? ''}`, 0, label, true);
+          found.count += event.quantity;
+          found.unpriced = true;
+        } else {
+          // A run whose hold is being given back (it failed, or could not be confirmed) and a run whose charge the books have not acknowledged are two different
+          // things the person is waiting on, so they are two lines: one never hides the other (the second may already have been debited)
+          const releasing = detail.unconfirmed === true || detail.state === 'failed';
+          const found = group(`instant:${name ?? ''}:${releasing ? 'releasing' : 'settling'}`, 0, label, true);
+          found.count += event.quantity;
+          if (releasing) found.releasing = true;
+          else found.settling = true;
+        }
       } else {
+        const found = group(`instant:${name ?? ''}`, 0, label, true);
+        found.count += event.quantity;
         found.micros += taken;
         found.priced = true;
       }

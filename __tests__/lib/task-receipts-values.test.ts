@@ -53,6 +53,35 @@ describe('what a task’s receipt says it used', () => {
     expect(receiptLines([event({ costMicros: 20_000, detail: { instant: true, runId: 'r4', customerMicros: 0, customerState: 'released', unconfirmed: true } })], 'Brick')).toEqual([{ label: 'Instant Apps, 1 use', amountMicros: 0 }]);
   });
 
+  it('a run that failed on the provider with its hold still reserved says "Hold being released", not "Settlement pending"; a run that went through with its charge unacknowledged stays "Settlement pending"', () => {
+    const failed = receiptLines([event({ costMicros: 20_000, detail: { instant: true, runId: 'r5', customerMicros: null, customerState: 'held', unconfirmed: false, state: 'failed' } })], 'Brick');
+    expect(failed).toEqual([{ label: 'Instant Apps, 1 use', note: 'Hold being released' }]);
+    expect(spentOf('done', null, failed)).toBeNull();
+    expect(receiptLines([event({ costMicros: 20_000, detail: { instant: true, runId: 'r6', customerMicros: null, customerState: 'held', unconfirmed: false, state: 'succeeded' } })], 'Brick')).toEqual([{ label: 'Instant Apps, 1 use', note: 'Settlement pending' }]);
+  });
+
+  it('a group holding both a run awaiting its charge and a run awaiting its release shows both, each with its own count, and a charged run in the same App keeps its amount', () => {
+    const settling = event({ costMicros: 20_000, detail: { instant: true, runId: 'a', customerMicros: null, customerState: 'held', state: 'succeeded' } });
+    const releasing = event({ costMicros: 20_000, detail: { instant: true, runId: 'b', customerMicros: null, customerState: 'held', unconfirmed: true } });
+    const failed = event({ costMicros: 20_000, detail: { instant: true, runId: 'c', customerMicros: null, customerState: 'held', state: 'failed' } });
+    const charged = event({ costMicros: 20_000, detail: { instant: true, runId: 'd', customerMicros: 30_000, customerState: 'charged', state: 'succeeded' } });
+    expect(receiptLines([settling, releasing, failed], 'Brick')).toEqual([
+      { label: 'Instant Apps, 1 use', note: 'Settlement pending' },
+      { label: 'Instant Apps, 2 uses', note: 'Hold being released' },
+    ]);
+    // The order the runs arrive in does not decide which one is shown
+    expect(receiptLines([releasing, settling], 'Brick').map((line) => line.note).sort()).toEqual(['Hold being released', 'Settlement pending']);
+    const mixed = receiptLines([charged, settling, releasing], 'Brick');
+    expect(mixed).toEqual([
+      { label: 'Instant Apps, 1 use', amountMicros: 30_000 },
+      { label: 'Instant Apps, 1 use', note: 'Settlement pending' },
+      { label: 'Instant Apps, 1 use', note: 'Hold being released' },
+    ]);
+    // Nothing pending is added into a total
+    expect(spentOf('done', null, mixed)).toBeNull();
+    expect(spentOf('done', 30_000, mixed)).toBe(30_000);
+  });
+
   it('leaves out disk sizes and other bookkeeping, and a name that is long or missing is not used', () => {
     expect(receiptLines([event({ kind: 'size_change', route: 'computer' }), event({ kind: 'stored_bytes', route: null })], 'Brick')).toEqual([]);
     expect(receiptLines([event({ detail: { app: 'x'.repeat(41) } })], 'Brick')[0].label).toBe('Instant Apps, 1 use');
