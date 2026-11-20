@@ -5,7 +5,7 @@ import { releaseRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
 import { verifyJobToken } from '@/lib/computer-token';
 import { givenBackJob } from '@/lib/computer-values';
 import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
-import { routeIsPaused } from '@/lib/computer-fault-ops';
+import { routeIsPaused } from '@/lib/computer-route-pause';
 
 /**
  * A model call a Brick's computer makes (build handoff v2, section 5): room is taken BEFORE the call, and what it really cost is
@@ -28,7 +28,10 @@ import { routeIsPaused } from '@/lib/computer-fault-ops';
 const CALL_ID = /^[A-Za-z0-9_.:-]{1,80}$/;
 const MAX_MICROS = 2_000_000_000;
 
-export const callRoomKey = (jobId: string, callId: string) => `computer:call:${jobId}:${callId}`;
+// A function declaration (hoisted), so a module that is part of an import cycle still finds it while this one is loading
+export function callRoomKey(jobId: string, callId: string): string {
+  return `computer:call:${jobId}:${callId}`;
+}
 
 export type Authorized =
   | { ok: true; jobId: string; botId: string; personId: string; /** Null when the call is on the owner's own key: no room was taken. */ reservedMicros: number | null }

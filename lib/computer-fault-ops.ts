@@ -2,9 +2,14 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getInstantLimits } from '@/lib/instant/state';
 import { INSTANT_LIMITS_RECOMMENDED, type InstantLimits } from '@/lib/instant/values';
-import { OURS_REASONS, UNRESOLVED_REASONS } from '@/lib/computer-faults';
+import { OURS_REASONS } from '@/lib/computer-faults';
+import { PROVIDER_REASONS, routeIsPaused } from '@/lib/computer-route-pause';
+
 import { refundOverview, type RefundOverview } from '@/lib/computer-refunds';
 import { correctDecisionForIncident, giveBackAfter, giveBackSettingsProblems, lockPerson, readGiveBackLimits } from '@/lib/computer-giveback';
+
+// Where the route pause lives now (see lib/computer-route-pause); re-exported so operations code keeps one place to ask
+export { routeIsPaused };
 
 /**
  * One provider failing for many people is an incident, not many people's bad luck (the per-person bound cannot see it). Failures are counted by the route
@@ -14,27 +19,6 @@ import { correctDecisionForIncident, giveBackAfter, giveBackSettingsProblems, lo
  * new platform-funded work on that route is paused. Nothing is stored: it lifts by itself once the window passes with fewer, and the person's own key is never paused.
  * Operations see what is at risk and correct every affected job together.
  */
-
-/** The reasons that count towards a provider's failures: what a provider does (or refuses on our key), not what the relay or the person does. */
-const PROVIDER_REASONS: readonly string[] = [...UNRESOLVED_REASONS, 'provider_key_ours'];
-
-type PauseLimits = Pick<InstantLimits, 'pauseMinRuns' | 'pauseWindowMinutes'>;
-
-/** How many different PEOPLE had a job with a provider failure on this route inside the window ending now. */
-export async function routeFailurePeople(route: string, now: Date, limits: Pick<InstantLimits, 'pauseWindowMinutes'>): Promise<number> {
-  const since = new Date(now.getTime() - limits.pauseWindowMinutes * 60 * 1000);
-  const rows = await prisma.$queryRaw<Array<{ jobs: number }>>(Prisma.sql`
-    SELECT COUNT(DISTINCT j."person_id")::int AS jobs FROM "computer_job_faults" f JOIN "computer_jobs" j ON j."id" = f."job_id"
-    WHERE f."route" = ${route} AND f."source" = 'universe-ai' AND f."kind" <> 'answered' AND f."at" >= ${since} AND f."reason" IN (${Prisma.join([...PROVIDER_REASONS])})`);
-  return rows[0]?.jobs ?? 0;
-}
-
-/** Whether new platform-funded work on this route is paused now. Limits that cannot be read never pause work on a blip. */
-export async function routeIsPaused(route: string, now: Date = new Date()): Promise<boolean> {
-  const limits: PauseLimits & Partial<InstantLimits> = await getInstantLimits();
-  if (limits.pauseMinRuns === null || limits.pauseMinRuns === undefined) return false;
-  return (await routeFailurePeople(route, now, limits)) >= limits.pauseMinRuns;
-}
 
 export interface GiveBackOverview {
   at: string;
