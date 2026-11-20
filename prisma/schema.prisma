@@ -3698,6 +3698,8 @@ model ComputerJobFault {
   id             String   @id @default(uuid())
   jobId          String   @map("job_id")
   turn           Int?
+  // The runner's run of the job the turn was numbered in (a restart makes a new run and numbers turns from 1 again); null from a runner that names none
+  run            String?  @db.VarChar(40)
   callId         String   @map("call_id") @db.VarChar(120)
   // fault, not_ours, uncertain, answered: what the relay says; the CLASS (ours, the person's, unresolved) is worked out here from the reason
   kind           String   @db.VarChar(12)
@@ -3734,6 +3736,8 @@ model ComputerGiveBackDecision {
   route         String?   @db.VarChar(120)
   // The turns the runner judged failed
   judgedTurns   Int[]     @map("judged_turns")
+  // The run those turns were numbered in (null: the runner named none)
+  judgedRun     String?   @map("judged_run") @db.VarChar(40)
   attempts      Int       @default(0)
   nextAttemptAt DateTime? @map("next_attempt_at")
   lastError     String?   @map("last_error") @db.VarChar(200)

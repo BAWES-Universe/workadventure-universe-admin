@@ -64,13 +64,13 @@ const wipe = async () => {
 
 let clock = 0;
 /** A job that starts and then is ended as the runner says; every job in these tests runs 5 minutes. */
-async function job(p: { id: string; brickId: string }, ending: { outcome: 'done' | 'failed'; cause?: 'ours' | 'agent'; turns?: number[] }, before?: (jobId: string) => Promise<void>) {
+async function job(p: { id: string; brickId: string }, ending: { outcome: 'done' | 'failed'; cause?: 'ours' | 'agent'; turns?: number[]; run?: string }, before?: (jobId: string) => Promise<void>) {
   const at = clock;
   clock += 10;
   const started = await startJob({ botId: p.brickId, personId: p.id, title: 'Job' }, minutes(at));
   if (!started.ok) throw new Error('the job did not start');
   if (before) await before(started.job.id);
-  await finishJob(started.job.id, ending.outcome, minutes(at + 5), null, ending.cause ?? null, ending.turns);
+  await finishJob(started.job.id, ending.outcome, minutes(at + 5), null, ending.cause ?? null, ending.turns, ending.run);
   return prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } });
 }
 const ours = { outcome: 'failed' as const, cause: 'ours' as const };
@@ -623,7 +623,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
   });
 
   describe('one provider failing for many people', () => {
-    it('pauses new platform-funded work on that route once as many jobs failed in the window as Instant’s smallest batch, never a person’s own key, and lifts by itself', async () => {
+    it('pauses new platform-funded work on that route once as many different people had a job fail in the window as Instant’s smallest batch, never a person’s own key, and lifts by itself', async () => {
       await limitsAre({ ...LAUNCH, pauseMinRuns: 3 });
       const people3 = [await person('a'), await person('b'), await person('c')];
       const route = 'universe-ai/model-z';
@@ -639,14 +639,14 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       for (const s of started.slice(0, 2)) await recordFaults(s.brickId, s.id, [fault(1, 'provider_5xx', { route })]);
       expect(await routeIsPaused(route)).toBe(false);
       expect(await authorizeModelCall({ token, callId: 'p1', estimateMicros: 1_000, payer: 'universe', route }, new Date())).toMatchObject({ ok: true });
-      // Many rows of one job are one job; a third job makes three
+      // Many rows of one job are one; a third person makes three
       await recordFaults(started[1].brickId, started[1].id, [fault(2, 'provider_429', { route })]);
       expect(await routeIsPaused(route)).toBe(false);
       await recordFaults(started[2].brickId, started[2].id, [fault(1, 'provider_5xx', { route })]);
       expect(await routeIsPaused(route)).toBe(true);
-      expect((await giveBackOverview()).routes).toContainEqual({ route, failedJobs: 3, paused: true });
-      // New platform-funded work waits (the relay answers busy, nothing is held); another route and the person's own key are untouched
-      expect(await authorizeModelCall({ token, callId: 'p2', estimateMicros: 1_000, payer: 'universe', route }, new Date())).toEqual({ ok: false, reason: 'pool', full: false });
+      expect((await giveBackOverview()).routes).toContainEqual({ route, failedPeople: 3, paused: true });
+      // New platform-funded work waits (our own decision: answered full, so the relay records it as a fault of ours; nothing is held); another route and the person's own key are untouched
+      expect(await authorizeModelCall({ token, callId: 'p2', estimateMicros: 1_000, payer: 'universe', route }, new Date())).toEqual({ ok: false, reason: 'pool', full: true });
       expect(await authorizeModelCall({ token, callId: 'p3', estimateMicros: 1_000, payer: 'universe', route: 'universe-ai/other' }, new Date())).toMatchObject({ ok: true });
       expect(await authorizeModelCall({ token, callId: 'p4', estimateMicros: 1_000, payer: 'own-key', route }, new Date())).toMatchObject({ ok: true });
       // A fault of the person's, or of our relay, is not a provider failing
@@ -704,6 +704,9 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await decisionOf(held.id)).toMatchObject({ state: 'pending' });
       const result = await correctRouteTogether({ route, from: new Date(base.getTime() - 60_000), to: new Date(base.getTime() + 60_000) });
       expect(result.corrected).toBe(2);
+      // The goodwill one given back before the incident was known is freed from the bound too (it was the provider's)
+      expect(result.uncounted).toBe(1);
+      expect(await decisionOf(first.id)).toMatchObject({ state: 'given', basis: 'incident' });
       expect(await decisionOf(capped.id)).toMatchObject({ state: 'given', basis: 'incident' });
       expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'incident' });
       expect(await givenBack(capped.id)).toBe(true);
@@ -711,8 +714,8 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await givenBack(theirs.id)).toBe(false);
       expect(await givenBack(delivered.id)).toBe(false);
       // None of them used the bound: they are incidents, not the person's goodwill
-      expect(await prisma.computerJob.count({ where: { personId: sara.id, runnerFault: true } })).toBe(1);
-      expect(await correctRouteTogether({ route, from: new Date(base.getTime() - 60_000), to: new Date(base.getTime() + 60_000) })).toEqual({ corrected: 0, costMicros: 0 });
+      expect(await prisma.computerJob.count({ where: { personId: sara.id, runnerFault: true } })).toBe(0);
+      expect(await correctRouteTogether({ route, from: new Date(base.getTime() - 60_000), to: new Date(base.getTime() + 60_000) })).toEqual({ corrected: 0, uncounted: 0, costMicros: 0 });
     });
 
     it('tells operations what is at risk: decisions by state with their cost, the oldest held one, and the failing routes', async () => {
@@ -727,8 +730,214 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(overview.pending.jobs).toBe(1);
       expect(overview.pending.costMicros).toBeGreaterThan(0);
       expect(overview.pending.oldestMinutes).toBeGreaterThanOrEqual(0);
-      expect(overview.routes).toContainEqual({ route: 'universe-ai/model-o', failedJobs: 1, paused: false });
+      expect(overview.routes).toContainEqual({ route: 'universe-ai/model-o', failedPeople: 1, paused: false });
       expect(held.id).toBeTruthy();
+    });
+  });
+
+  describe('holes found by the read of the amend (late evidence, purge, pause by one person)', () => {
+    it('un-counts a goodwill give-back when a confirmed fault of ours arrives late: the bound is not used, and the next unclear failure is still given back', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      const first = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+      expect(await decisionOf(first.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ runnerFault: true });
+      // Our key was out of credit on that very turn; the row reaches Orbit late
+      await recordFaults(sara.brickId, first.id, [fault(1, 'provider_key_ours', { providerStatus: 402 })]);
+      await afterLateEvidence(first.id);
+      expect(await decisionOf(first.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'provider_key_ours' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ endedBy: 'error', runnerFault: false });
+      expect(await givenBack(first.id)).toBe(true);
+      // The bound (1) is free again
+      const next = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+      expect(await decisionOf(next.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+      // Said twice, or at the same moment, it changes nothing more
+      await Promise.all([afterLateEvidence(first.id), afterLateEvidence(first.id)]);
+      expect(await decisionOf(first.id)).toMatchObject({ basis: 'universe_fault' });
+      expect(await prisma.computerJob.count({ where: { personId: sara.id, runnerFault: true } })).toBe(1);
+    });
+
+    it('does not touch a give-back that is already uncounted, or a decision the runner did not call ours, when a late row arrives', async () => {
+      await limitsAre(LAUNCH);
+      const sara = await person('sara');
+      const orbit = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'relay_down')]));
+      const before = await decisionOf(orbit.id);
+      await recordFaults(sara.brickId, orbit.id, [fault(1, 'provider_key_ours')]);
+      await afterLateEvidence(orbit.id);
+      expect(await decisionOf(orbit.id)).toMatchObject({ basis: 'universe_fault', reason: before?.reason });
+    });
+
+    it('lets one person alone never pause a route: three jobs of one person with fieldless 400s are one person', async () => {
+      await limitsAre({ ...LAUNCH, pauseMinRuns: 3 });
+      const sara = await person('sara');
+      const route = 'universe-ai/model-solo';
+      for (let n = 0; n < 3; n++) {
+        const brickId = n === 0 ? sara.brickId : (await createBrick({ ownerId: sara.id, name: `Solo ${n}` })).id;
+        if (n > 0) await giveComputer(brickId, sara.id);
+        const s = await startJob({ botId: brickId, personId: sara.id, title: `Solo ${n}` }, minutes(0));
+        if (!s.ok) throw new Error('no');
+        await recordFaults(brickId, s.job.id, [fault(1, 'fieldless_400', { route })]);
+      }
+      expect(await routeIsPaused(route)).toBe(false);
+      expect((await giveBackOverview()).routes).toContainEqual({ route, failedPeople: 1, paused: false });
+      // A second and a third person make three people
+      for (const name of ['two', 'three']) {
+        const p = await person(name);
+        const s = await startJob({ botId: p.brickId, personId: p.id, title: 'Other' }, minutes(0));
+        if (!s.ok) throw new Error('no');
+        await recordFaults(p.brickId, s.job.id, [fault(1, 'provider_5xx', { route })]);
+      }
+      expect(await routeIsPaused(route)).toBe(true);
+    });
+
+    it('gives back, uncounted and with the bound spent, a job that fails because OUR pause refused its call (the route is paused: answered full, recorded as a fault of ours)', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1, pauseMinRuns: 2 });
+      const sara = await person('sara');
+      expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+      const route = 'universe-ai/model-paused';
+      for (const name of ['p1', 'p2']) {
+        const p = await person(name);
+        const s = await startJob({ botId: p.brickId, personId: p.id, title: 'Failing' }, minutes(0));
+        if (!s.ok) throw new Error('no');
+        await recordFaults(p.brickId, s.job.id, [fault(1, 'provider_5xx', { route })]);
+      }
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Refused by the pause' }, minutes(100));
+      if (!started.ok) throw new Error('no');
+      const { token } = (await mintJobToken(started.job.id, 'model', new Date())) as { token: string };
+      const answer = await authorizeModelCall({ token, callId: 'x1', estimateMicros: 1_000, payer: 'universe', route }, new Date());
+      expect(answer).toEqual({ ok: false, reason: 'pool', full: true });
+      // The game reads full as a confirmed pool_busy and writes a fault row; three such turns end the job as ours
+      await recordFaults(sara.brickId, started.job.id, [fault(1, 'pool_busy'), fault(2, 'pool_busy'), fault(3, 'pool_busy')]);
+      await finishJob(started.job.id, 'failed', minutes(105), null, 'ours', [1, 2, 3]);
+      expect(await decisionOf(started.job.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'pool_busy' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ endedBy: 'error', runnerFault: false });
+      expect(await givenBack(started.job.id)).toBe(true);
+    });
+
+    it('corrects a goodwill give-back of the same incident together: it is freed from the bound, and the next unclear failure is given back', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      const route = 'universe-ai/model-inc';
+      const base = new Date();
+      const first = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx', { route, at: base })]));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ runnerFault: true });
+      expect(await correctRouteTogether({ route, from: new Date(base.getTime() - 60_000), to: new Date(base.getTime() + 60_000) })).toEqual({ corrected: 0, uncounted: 1, costMicros: 0 });
+      expect(await decisionOf(first.id)).toMatchObject({ state: 'given', basis: 'incident' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ endedBy: 'error', runnerFault: false });
+      expect(await givenBack(first.id)).toBe(true);
+      const next = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+      expect(await decisionOf(next.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+    });
+
+    describe('runs: a bot-server restart makes a new run that numbers its turns from 1 again', () => {
+      it('does not mix two runs that use the same turn numbers: the rows of an earlier run are not the turns of the new one', async () => {
+        await limitsAre(LAUNCH);
+        const sara = await person('sara');
+        // Run A's turn 1 was the person's (their job set a field the provider refused); run B's turn 1 crashed and left no row
+        const rowsA = [fault(1, 'field_job_set', { run: 'runa' })];
+        const mixed = await job(sara, { ...ours, turns: [1], run: 'runb' }, withFaults(sara, rowsA));
+        expect(await decisionOf(mixed.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason: 'no_row', judgedRun: 'runb' });
+        // The same rows judged in the run they belong to are the person's
+        const own = await job(sara, { ...ours, turns: [1], run: 'runa' }, withFaults(sara, [fault(1, 'field_job_set', { run: 'runa' })]));
+        expect(await decisionOf(own.id)).toMatchObject({ state: 'refused', basis: 'person_caused', judgedRun: 'runa' });
+      });
+
+      it('reads a confirmed fault of ours only in the run it was written in, and a late row of another run changes nothing', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const sara = await person('sara');
+        expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+        // Our fault on turn 1 of run A; the job's new run B crashed on its turn 1 with no row: B's ending is unresolved, and the bound is spent
+        const ended = await job(sara, { ...ours, turns: [1], run: 'runb' }, withFaults(sara, [fault(1, 'provider_key_ours', { run: 'runa' })]));
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+        await afterLateEvidence(ended.id);
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+        // A late row of OUR fault in run B itself does give it back
+        await recordFaults(sara.brickId, ended.id, [fault(1, 'provider_key_ours', { run: 'runb' })]);
+        await afterLateEvidence(ended.id);
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
+      });
+
+      it('keeps the run a held decision was judged in: decided again later (the Limits now set) it reads the same run’s rows, not another run’s', async () => {
+        await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
+        const sara = await person('sara');
+        const held = await job(sara, { ...ours, turns: [1], run: 'runb' }, withFaults(sara, [fault(1, 'provider_5xx', { run: 'runb' }), fault(1, 'allowance', { run: 'runa', callId: 'other-run' })]));
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', judgedRun: 'runb', reason: 'provider_5xx' });
+        await limitsAre(LAUNCH);
+        await sweepComputers(new Date(NOW.getTime() + 3 * 60 * 60_000));
+        // Decided from run B's own row (the provider's 5xx), not as "no row" (run lost) and not from run A's allowance
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason: 'provider_5xx' });
+      });
+
+      it('matches no run with no run, so rows and finishes from a game that names none read as before; a run on only one side is not a match', async () => {
+        await limitsAre(LAUNCH);
+        const sara = await person('sara');
+        const none = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'field_job_set')]));
+        expect(await decisionOf(none.id)).toMatchObject({ state: 'refused', basis: 'person_caused', judgedRun: null });
+        const finishOnly = await job(sara, { ...ours, turns: [1], run: 'runx' }, withFaults(sara, [fault(1, 'field_job_set')]));
+        expect(await decisionOf(finishOnly.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason: 'no_row' });
+        const rowOnly = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'field_job_set', { run: 'runx' })]));
+        expect(await decisionOf(rowOnly.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason: 'no_row' });
+      });
+
+      it('keeps the run of a row once, like the rest of it (a row said twice changes nothing)', async () => {
+        const sara = await person('sara');
+        const s = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, minutes(0));
+        if (!s.ok) throw new Error('no');
+        const row = fault(2, 'provider_5xx', { run: 'runa', callId: 'same' });
+        expect(await recordFaults(sara.brickId, s.job.id, [row])).toEqual({ stored: 1 });
+        expect(await recordFaults(sara.brickId, s.job.id, [{ ...row, run: 'runb' }])).toEqual({ stored: 0 });
+        expect(await prisma.computerJobFault.findFirstOrThrow({ where: { jobId: s.job.id } })).toMatchObject({ run: 'runa' });
+      });
+    });
+
+    describe('a Brick purged while a give-back still waits', () => {
+      const purge = (brickId: string, now: Date) => jest.requireActual('@/lib/brick-purge').purgeBrick(brickId, now) as Promise<string>;
+      const deleteBrick = (brickId: string, at: Date) => prisma.bot.update({ where: { id: brickId }, data: { deletedAt: at, goneAt: at, enabled: false, enabledBeforeDelete: true } });
+
+      it('is never a final charge: a decision held for missing Limits is given back, uncounted, before the jobs and their rows are deleted', async () => {
+        await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
+        const sara = await person('sara');
+        const held = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending' });
+        expect(await givenBack(held.id)).toBe(false);
+        const at = minutes(10);
+        await deleteBrick(sara.brickId, at);
+        const spy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        expect(await purge(sara.brickId, minutes(120))).toBe('purged');
+        spy.mockRestore();
+        expect(await prisma.computerJob.count({ where: { id: held.id } })).toBe(0);
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'orbit_fault', reason: 'brick_purged' });
+        // What the job took is not on the person any more
+        expect(await givenBack(held.id)).toBe(true);
+      });
+
+      it('decides a decision held for an unconfirmed effect with the effect closed, by the goodwill rules, before the purge', async () => {
+        await limitsAre(LAUNCH);
+        const sara = await person('sara');
+        const held = await job(sara, { ...ours, turns: [1] }, async (id) => {
+          await recordFaults(sara.brickId, id, [fault(1, 'provider_5xx')]);
+          await planEffect(id, { key: 'mail-1', kind: 'send' });
+        });
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', basis: 'effect_unresolved' });
+        await deleteBrick(sara.brickId, minutes(10));
+        const spy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        expect(await purge(sara.brickId, minutes(120))).toBe('purged');
+        spy.mockRestore();
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+        expect(await givenBack(held.id)).toBe(true);
+      });
+
+      it('gives back a decision whose job is already gone (purged before this fix), in the person’s favour and uncounted', async () => {
+        await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
+        const sara = await person('sara');
+        const held = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+        const timeEvent = await timeOf(held.id);
+        // The job is removed while its decision waits (an older purge)
+        await prisma.computerJob.delete({ where: { id: held.id } });
+        await sweepComputers(new Date(NOW.getTime() + 3 * 60 * 60_000));
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'orbit_fault', reason: 'job_removed' });
+        expect((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: timeEvent.eventId } })).personKey).toBe('unknown');
+      });
     });
   });
 });

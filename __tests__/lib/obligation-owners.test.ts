@@ -20,9 +20,11 @@ function* sources(dir: string): Generator<string> {
 const files = [...sources('lib'), ...sources('app')].map((file) => ({ file, text: fs.readFileSync(path.join(root, file), 'utf8') }));
 
 /** The files that write this table: through its Prisma model, or by a raw INSERT / UPDATE / DELETE statement. */
+/** A raw statement that writes this table. PostgreSQL keywords are case-insensitive, so `update instant_runs set ...` is a writer as much as `UPDATE`. The table names are fixed strings of this file, never input. */
+const sqlWriter = (table: string): RegExp => new RegExp(`(INSERT\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+"?${table}"?\\b`, 'i');
 const writers = (model: string, table: string): string[] => {
   const viaModel = new RegExp(`\\.${model}\\.(create|createMany|update|updateMany|upsert|delete|deleteMany)\\b`);
-  const viaSql = new RegExp(`(INSERT\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+"?${table}"?\\b`);
+  const viaSql = sqlWriter(table);
   return files.filter(({ text }) => viaModel.test(text) || viaSql.test(text)).map(({ file }) => file).sort();
 };
 const callers = (name: string): string[] => files.filter(({ text }) => new RegExp(`(?<![\\w.])${name}\\(`).test(text.replace(new RegExp(`(async )?function ${name}\\(`, 'g'), ''))).map(({ file }) => file).sort();
@@ -46,8 +48,30 @@ const OWNERS: Array<[string, string, string[], string]> = [
   ['meterGrant', 'meter_grants', ['lib/meter-grants.ts'], 'extra usage granted to someone (a unique key per grant)'],
   ['appUse', 'app_uses', ['lib/app-uses.ts'], 'an App use counted against a connection (a lock per connection and universe)'],
   // A job has several column families, each owned by one file (state and ending, model calls and claims, the report to the person, visits)
-  ['computerJob', 'computer_jobs', ['lib/computer-broker.ts', 'lib/computer-giveback.ts', 'lib/computer-report.ts', 'lib/computer-visits.ts', 'lib/computer.ts'], 'a computer job (split by what is written: ending and time in computer.ts, calls and claims in computer-broker.ts, the give-back decision’s mark on the job in computer-giveback.ts, the report in computer-report.ts, visits in computer-visits.ts)'],
+  ['computerJob', 'computer_jobs', ['lib/computer-broker.ts', 'lib/computer-giveback.ts', 'lib/computer-report.ts', 'lib/computer-visits.ts', 'lib/computer.ts'], 'a computer job (split by what is written: ending and time in computer.ts, calls and claims in computer-broker.ts, the report in computer-report.ts, visits in computer-visits.ts, and whether a failed job was given back (its ending mark and whether it counts against the person’s bound) in computer-giveback.ts, always under the person’s give-back lock)'],
+  ['computerGiveBackDecision', 'computer_give_back_decisions', ['lib/computer-giveback.ts'], 'whether a failed computer job is given back, and why (one row per job; every write under the person’s advisory lock `computer:giveback:<person>`)'],
+  ['computerJobFault', 'computer_job_faults', ['lib/computer-faults.ts'], 'what the game relay saw go wrong on a job’s model calls (a unique key per job and call; written once, an unsure row settled once)'],
+  ['computerRefundObligation', 'computer_refund_obligations', ['lib/computer-refunds.ts'], 'a refund of credit a failed job drew, owed until the books acknowledge it (a unique hold key; the amount and refund key are fixed when it is written)'],
 ];
+
+describe('the raw SQL writer detector', () => {
+  const matcher = sqlWriter('instant_runs');
+
+  it('finds a writer in upper case, lower case and mixed case, quoted or not', () => {
+    for (const statement of [
+      `UPDATE instant_runs SET state = 'failed' WHERE id = 'run-1'`,
+      `update instant_runs set state = 'failed' where id = 'run-1'`,
+      `Update "instant_runs" Set state = 'failed'`,
+      `INSERT INTO instant_runs (id) VALUES ('a')`,
+      `insert into instant_runs (id) values ('a')`,
+      `delete   from instant_runs where id = 'a'`,
+    ]) expect(matcher.test(statement)).toBe(true);
+  });
+
+  it('does not find a read, or another table whose name merely begins the same', () => {
+    for (const statement of [`SELECT * FROM instant_runs`, `select state from instant_runs where id = 'a'`, `UPDATE instant_runs_archive SET a = 1`, `update instant_run_events set a = 1`]) expect(matcher.test(statement)).toBe(false);
+  });
+});
 
 describe('who may write each obligation’s record', () => {
   it.each(OWNERS)('%s (%s): only %j', (model, table, owners) => {
@@ -74,7 +98,7 @@ describe('one writer for what many paths lead to', () => {
   it('a computer job’s credit is given back by ONE function, whoever notices the end (the end, a late call, the sweep)', () => {
     expect(callers('giveBackComputerCredit')).toEqual(['lib/computer-calls.ts']);
     expect(countIn('lib/computer-calls.ts', /giveBackComputerCredit\(/g)).toBe(1);
-    // The calls of a job are given back by the one function in computer-calls.ts (safe to ask twice); the end, the sweep and the give-back decision all ask it
+    // The give-back's own decision (a late fault row, a retry, a purge) and the end of a job and the sweep all reach it, and it is still one function
     expect(callers('giveBackModelCalls')).toEqual(['lib/computer-calls.ts', 'lib/computer-giveback.ts', 'lib/computer.ts']);
   });
 

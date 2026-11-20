@@ -44,6 +44,8 @@ export function faultClassOf(row: { kind: string; reason: string; source: string
 
 export interface FaultInput {
   turn?: number | null;
+  /** The runner's run the turn was numbered in; absent from a runner that names none. */
+  run?: string | null;
   callId: string;
   kind: FaultKind;
   reason: string;
@@ -66,6 +68,7 @@ export async function recordFaults(botId: string, jobId: string, rows: FaultInpu
     const data = {
       jobId,
       turn: row.turn ?? null,
+      run: row.run ? row.run.slice(0, 40) : null,
       callId: row.callId.slice(0, 120),
       kind: row.kind,
       reason: row.reason.slice(0, 32),
@@ -104,10 +107,10 @@ export interface FaultRow {
 
 type Db = Pick<Prisma.TransactionClient, 'computerJobFault'>;
 
-/** The rows that count for a ruling: the ones for the turns the runner judged failed, or every row of the job when it named no turns. Answered calls are left out. */
-export async function readFaultRows(db: Db, jobId: string, turns: readonly number[] | null | undefined): Promise<FaultRow[]> {
+/** The rows that count for a ruling: the ones for the turns the runner judged failed IN THE RUN it names (a restart makes a new run that numbers turns again; no run matches no run), or every row of the job when it named no turns. Answered calls are left out. */
+export async function readFaultRows(db: Db, jobId: string, turns: readonly number[] | null | undefined, run: string | null | undefined = null): Promise<FaultRow[]> {
   const rows = await db.computerJobFault.findMany({
-    where: { jobId, ...(turns && turns.length > 0 ? { OR: [{ turn: { in: [...turns] } }, { turn: null }] } : {}) },
+    where: { jobId, ...(turns && turns.length > 0 ? { OR: [{ turn: { in: [...turns] }, run: run ?? null }, { turn: null }] } : {}) },
     orderBy: [{ at: 'asc' }, { callId: 'asc' }],
     take: 500,
   });

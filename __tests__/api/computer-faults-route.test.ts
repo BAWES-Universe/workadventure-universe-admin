@@ -41,6 +41,13 @@ describe('POST /api/bots/:id/computer-jobs/:jobId/faults', () => {
     expect(late).toHaveBeenCalledWith('job-1');
   });
 
+  it('takes the run a row’s turn was numbered in, up to 40 characters, and keeps none for a runner that names none', async () => {
+    record.mockResolvedValue({ stored: 2 });
+    expect((await call({ faults: [{ ...good, run: 'mi8x3k2a1b2c3d4e' }, { ...good, callId: 'c2' }] })).status).toBe(200);
+    expect(record).toHaveBeenCalledWith('brick-1', 'job-1', [expect.objectContaining({ callId: 'c1', run: 'mi8x3k2a1b2c3d4e' }), expect.objectContaining({ callId: 'c2', run: null })]);
+    for (const run of ['x'.repeat(41), '', 'has space']) expect((await call({ faults: [{ ...good, run }] })).status).toBe(400);
+  });
+
   it('knows no job that is not the Brick’s', async () => {
     record.mockResolvedValue(null);
     expect((await call({ faults: [good] })).status).toBe(404);

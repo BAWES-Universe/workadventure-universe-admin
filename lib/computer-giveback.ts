@@ -93,9 +93,9 @@ export async function decideRunnerFinish(
   job: JobRef,
   turns: readonly number[] | null | undefined,
   now: Date,
-  options: { effectsClosed?: boolean } = {},
+  options: { effectsClosed?: boolean; run?: string | null } = {},
 ): Promise<Verdict> {
-  const rows = await readFaultRows(tx, job.id, turns);
+  const rows = await readFaultRows(tx, job.id, turns, options.run);
   const ours = rows.find((row) => row.cls === 'ours');
   // Nothing was charged for a job that never started: there is nothing to hold back
   if (!job.startedAt) return { state: 'given', basis: 'universe_fault', counted: false, reason: ours?.reason ?? 'not_started', route: ours?.route ?? null };
@@ -141,6 +141,7 @@ export async function writeDecision(
   hint: string | null,
   turns: readonly number[] | null | undefined,
   now: Date,
+  run: string | null | undefined = null,
 ): Promise<void> {
   const data = {
     state: verdict.state,
@@ -149,6 +150,7 @@ export async function writeDecision(
     reason: verdict.reason,
     route: verdict.route,
     judgedTurns: [...(turns ?? [])],
+    judgedRun: turns && turns.length > 0 ? (run ?? null) : null,
     nextAttemptAt: verdict.state === 'pending' ? new Date(now.getTime() + retryWaitMs(0)) : null,
   };
   await tx.computerGiveBackDecision.upsert({ where: { jobId: job.id }, create: { jobId: job.id, personId: job.personId, ...data }, update: data });
@@ -178,6 +180,27 @@ export async function applyGiveBack(tx: Prisma.TransactionClient, job: { id: str
   return changed.count > 0;
 }
 
+/** A counted goodwill give-back is freed from the person's bound (the job is no longer a counted one). Safe to say twice. */
+export async function uncountGiveBack(tx: Prisma.TransactionClient, jobId: string): Promise<void> {
+  await tx.computerJob.updateMany({ where: { id: jobId, runnerFault: true }, data: { runnerFault: false } });
+}
+
+/** An incident's correction of one decision: a goodwill give-back is re-labelled and freed from the bound (true), a held or cap/pause-refused one becomes a give-back (the caller gives it back). */
+export async function correctDecisionForIncident(tx: Prisma.TransactionClient, job: { id: string; personId: string }, route: string): Promise<'uncounted' | 'given' | null> {
+  const freed = await tx.computerGiveBackDecision.updateMany({ where: { jobId: job.id, state: 'given', basis: 'goodwill' }, data: { basis: 'incident', route } });
+  if (freed.count > 0) {
+    await uncountGiveBack(tx, job.id);
+    return 'uncounted';
+  }
+  const flipped = await tx.computerGiveBackDecision.updateMany({
+    where: { jobId: job.id, OR: [{ state: 'pending' }, { state: 'refused', basis: { in: ['cap', 'paused'] } }] },
+    data: { state: 'given', basis: 'incident', route, nextAttemptAt: null, lastError: null },
+  });
+  if (flipped.count === 0) return null;
+  await applyGiveBack(tx, job, false);
+  return 'given';
+}
+
 /** The calls and credit of a job that was given back. Never throws. */
 export async function giveBackAfter(job: { id: string; personId: string }, now: Date = new Date()): Promise<void> {
   await giveBackModelCalls(job.id, job.personId, now).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
@@ -187,20 +210,31 @@ export async function giveBackAfter(job: { id: string; personId: string }, now: 
  * Decides a `pending` decision again (limits now readable or set, an outside effect now confirmed or closed). A decision that is still not possible stays
  * pending with a longer wait; one that is `given` gives back everything the job took. Safe to say twice.
  */
-export async function resolveDecision(jobId: string, now: Date = new Date()): Promise<'resolved' | 'pending' | 'none'> {
+export async function resolveDecision(jobId: string, now: Date = new Date(), options: { closing?: boolean } = {}): Promise<'resolved' | 'pending' | 'none'> {
   const decision = await prisma.computerGiveBackDecision.findUnique({ where: { jobId } });
   if (!decision || decision.state !== 'pending') return 'none';
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, personId: true, startedAt: true } });
   if (!job) {
-    await prisma.computerGiveBackDecision.update({ where: { jobId }, data: { state: 'refused', nextAttemptAt: null, lastError: 'The job was removed before it could be decided' } });
+    // The job is gone (its Brick was purged) while the decision still waited: never a final charge. It is given back in the person's favour, uncounted; what the
+    // job wrote is found by its id (the time event and the calls), and the credit by the refund obligations
+    const gone = { id: jobId, personId: decision.personId };
+    await prisma.$transaction(async (tx) => {
+      await lockPerson(tx, gone.personId);
+      await tx.computerGiveBackDecision.update({ where: { jobId }, data: { state: 'given', basis: 'orbit_fault', reason: 'job_removed', nextAttemptAt: null, lastError: null, attempts: { increment: 1 } } });
+      await applyGiveBack(tx, gone, false);
+    });
+    await giveBackAfter(gone, now);
     return 'resolved';
   }
   const limits = await readGiveBackLimits();
   const closeAfter = (limits?.unreachableWaitMinutes ?? INSTANT_LIMITS_RECOMMENDED.unreachableWaitMinutes) * MINUTE;
-  const effectsClosed = now.getTime() - decision.decidedAt.getTime() >= closeAfter;
+  // A purge closes the decision: the Brick's jobs and fault rows are about to go, so nothing more can ever be learned for it
+  const effectsClosed = options.closing === true || now.getTime() - decision.decidedAt.getTime() >= closeAfter;
   const verdict = await prisma.$transaction(async (tx) => {
     await lockPerson(tx, job.personId);
-    const next = await decideRunnerFinish(tx, limits, job, decision.judgedTurns, now, { effectsClosed });
+    let next = await decideRunnerFinish(tx, limits, job, decision.judgedTurns, now, { effectsClosed, run: decision.judgedRun });
+    // Limits that cannot be read or are not set cannot be waited out when the evidence is about to be deleted: the person is not charged for it
+    if (options.closing && next.state === 'pending') next = { state: 'given', basis: 'orbit_fault', counted: false, reason: 'brick_purged', route: next.route };
     if (next.state === 'pending') {
       await tx.computerGiveBackDecision.update({
         where: { jobId },
@@ -251,24 +285,51 @@ export async function sweepGiveBackDecisions(now: Date = new Date(), batch = 50)
  * again, and a class 1 fault in what was judged makes it one. A pending decision is decided now. Nothing else ever changes a decision.
  */
 export async function afterLateEvidence(jobId: string, now: Date = new Date()): Promise<void> {
-  const decision = await prisma.computerGiveBackDecision.findUnique({ where: { jobId } });
-  if (!decision || decision.state === 'given' || decision.causeHint !== 'ours') return;
-  if (decision.state === 'pending') {
+  const first = await prisma.computerGiveBackDecision.findUnique({ where: { jobId } });
+  if (!first || first.causeHint !== 'ours') return;
+  if (first.state === 'pending') {
     await resolveDecision(jobId, now);
     return;
   }
+  // Only a goodwill give-back is counted: the other `given` ones are already uncounted, and nothing is left to learn from a late row
+  if (first.state === 'given' && first.basis !== 'goodwill') return;
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, personId: true, startedAt: true } });
   if (!job) return;
   const applied = await prisma.$transaction(async (tx) => {
     await lockPerson(tx, job.personId);
-    const rows = await readFaultRows(tx, jobId, decision.judgedTurns);
+    // Read again under the person's lock: a decision made in the meantime (a parallel retry) is the one that stands
+    const decision = await tx.computerGiveBackDecision.findUnique({ where: { jobId } });
+    if (!decision || decision.state === 'pending' || (decision.state === 'given' && decision.basis !== 'goodwill')) return false;
+    const rows = await readFaultRows(tx, jobId, decision.judgedTurns, decision.judgedRun);
     const ours = rows.find((row) => row.cls === 'ours');
     if (!ours) return false;
     await tx.computerGiveBackDecision.update({ where: { jobId }, data: { state: 'given', basis: 'universe_fault', reason: ours.reason, route: ours.route, nextAttemptAt: null } });
+    if (decision.state === 'given') {
+      // It was counted against the person's bound as goodwill, and a fault of ours (it names no one's words) uses none of it: un-counted, nothing else to give back
+      await uncountGiveBack(tx, jobId);
+      return false;
+    }
     await applyGiveBack(tx, job, false);
     return true;
   });
   if (applied) await giveBackAfter(job, now);
+}
+
+/**
+ * A Brick is about to be purged: its jobs and their fault rows go with it, so nothing more can be learned for a decision still waiting. Each is decided now
+ * with its outside effects closed, and one that still cannot be decided (the Limits unreadable or not set) is given back, uncounted, in the person's favour:
+ * never a final charge. Returns false when one could not be written yet (the Brick waits for the next sweep). Never throws.
+ */
+export async function decidePendingForPurge(botId: string, now: Date = new Date()): Promise<boolean> {
+  try {
+    const waiting = await prisma.$queryRaw<Array<{ job_id: string }>>(Prisma.sql`
+      SELECT d."job_id" FROM "computer_give_back_decisions" d JOIN "computer_jobs" j ON j."id" = d."job_id" WHERE d."state" = 'pending' AND j."bot_id" = ${botId} LIMIT 500`);
+    for (const one of waiting) await resolveDecision(one.job_id, now, { closing: true });
+    return true;
+  } catch (error) {
+    console.error('[Computer] Could not decide a Brick’s give-backs before its purge:', error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
 }
 
 /**

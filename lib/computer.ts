@@ -37,7 +37,7 @@ import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
 import { recordRefundObligationsForBrick, sweepRefundObligations } from '@/lib/computer-refunds';
-import { decideRunnerFinish, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, noteEffectSettled, sweepGiveBackDecisions, type Verdict } from '@/lib/computer-giveback';
+import { decidePendingForPurge, decideRunnerFinish, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, noteEffectSettled, sweepGiveBackDecisions, type Verdict } from '@/lib/computer-giveback';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -1018,7 +1018,7 @@ export async function stopJobForRefusal(jobId: string, why: { reason: 'allowance
 }
 
 /** The job finished: its machine is saved and rests, what it cost is counted, and the next job in line starts. Safe to say twice. */
-export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date(), why?: string | null, cause?: FinishCause | null, turns?: number[] | null): Promise<JobView | null> {
+export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date(), why?: string | null, cause?: FinishCause | null, turns?: number[] | null, run?: string | null): Promise<JobView | null> {
   // A job that never started (still in line) did not finish: it is stopped by the person or starts, never "done"
   const current = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
   if (current && current.status !== 'queued') {
@@ -1028,7 +1028,7 @@ export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: 
     // Only a failure the runner says is ours is given back; one with no cause (or the agent's own) is the person's, so a run cannot be made free by ending it "failed"
     // Only this ending is steered by the job's own words (a brief can crash its own machine), so only this one is bounded; the endings Orbit saw itself are always given back
     const ours = outcome === 'failed' && cause === 'ours';
-    await endJob(jobId, outcome, ours ? 'error' : null, now, true, undefined, true, ours ? { turns: turns ?? null } : null);
+    await endJob(jobId, outcome, ours ? 'error' : null, now, true, undefined, true, ours ? { turns: turns ?? null, run: turns && turns.length > 0 ? (run ?? null) : null } : null);
   }
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return job ? jobView(job) : null;
@@ -1147,7 +1147,7 @@ const END_TRIES = 4;
  * `outside` false writes only our own tables (the Brick's purge ends its jobs this way, so a slow provider or backup never holds the purge):
  * the machine, its browser and the agent's turn are left to the purge's own removal of the machine.
  */
-async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, runner: { turns: number[] | null } | null = null): Promise<void> {
+async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, runner: { turns: number[] | null; run?: string | null } | null = null): Promise<void> {
   // The job can change under this (a person's answer moves it between running and waiting): the end is tried again on what it is now, and
   // only a job that is over, or no longer the one the caller meant, is let go
   let job: NonNullable<Awaited<ReturnType<typeof prisma.computerJob.findUnique>>> | null = null;
@@ -1201,7 +1201,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         let verdict: Verdict | null = null;
         if (runnerJudged) {
           await lockPerson(tx, ref.personId);
-          verdict = await decideRunnerFinish(tx, limits, ref, runner.turns, now);
+          verdict = await decideRunnerFinish(tx, limits, ref, runner.turns, now, { run: runner.run ?? null });
         }
         const given = !verdict || verdict.state === 'given';
         const counted = verdict?.state === 'given' && verdict.counted;
@@ -1209,7 +1209,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         const done = await tx.computerJob.updateMany({ where, data });
         if (done.count === 1) {
           if (turnHold) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
-          if (verdict) await writeDecision(tx, ref, verdict, 'ours', runner?.turns ?? null, now);
+          if (verdict) await writeDecision(tx, ref, verdict, 'ours', runner?.turns ?? null, now, runner?.run ?? null);
           else if (orbitSeen) await writeOrbitDecision(tx, ref);
         }
         return { done, verdict };
@@ -2436,6 +2436,8 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
     WHERE j."bot_id" = ${botId} AND j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
   if (Number(unwritten[0]?.n ?? 0) !== 0) return false;
+  // A give-back still waiting for a decision is decided now (its jobs and fault rows go with the Brick), and never becomes a final charge
+  if (!(await decidePendingForPurge(botId, now))) return false;
   // The refunds owed for this Brick's failed jobs are written first (only what is written outlives the jobs)
   await recordRefundObligationsForBrick(botId).catch((error) => console.error('[Computer] Could not keep the refunds a Brick’s jobs owe:', error instanceof Error ? error.message : 'unknown'));
   // A failed job's model calls that are still written against the person (or credit it drew that has not gone back) are not in the books as given back yet (the give-back above never throws, so
