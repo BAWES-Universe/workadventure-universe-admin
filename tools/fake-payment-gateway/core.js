@@ -47,7 +47,11 @@ function parseFlags(description) {
 
 function createGateway(options = {}) {
   const now = options.now || Date.now;
-  const publicUrl = (options.publicUrl || 'http://localhost:8080').replace(/\/+$/, '');
+  const clean = (address) => String(address).replace(/\/+$/, '');
+  // The address the links of the request being answered are made from: the one given with the request (a server behind a proxy takes it from the
+  // request), else the one the gateway was made with. It is set for the length of one `handle` call and nothing else reads it.
+  const defaultPublicUrl = clean(options.publicUrl || 'http://localhost:8080');
+  let publicUrl = defaultPublicUrl;
   const controlToken = options.controlToken || '';
   // How a notice reaches Orbit: (url, body) => status. Tests give their own; the server uses fetch.
   const send = options.send || (async () => 200);
@@ -257,8 +261,17 @@ function createGateway(options = {}) {
     return json(404, { error: 'No such control' });
   }
 
-  /** One request in, one answer out. `request`: { method, path, query?, headers (lower case), json? } */
+  /** One request in, one answer out. `request`: { method, path, query?, headers (lower case), json?, publicUrl? } */
   function handle(request) {
+    publicUrl = typeof request.publicUrl === 'string' && request.publicUrl ? clean(request.publicUrl) : defaultPublicUrl;
+    try {
+      return handleRequest(request);
+    } finally {
+      publicUrl = defaultPublicUrl;
+    }
+  }
+
+  function handleRequest(request) {
     const path = request.path;
     const method = request.method;
     if (path.startsWith('/control/')) return control(request, path);
