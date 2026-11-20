@@ -116,6 +116,40 @@ describe('the migrations 0.5.0 ships', () => {
   });
 });
 
+describe('the command line is checked before anything is written', () => {
+  it('a historical cutoff before the last baseline migration is a matching inventory, not a missing baseline (the baseline is asked of the whole shipping list)', () => {
+    const copy = isolated();
+    try {
+      const early = manifest.baseline.migrations[0];
+      expect(manifest.baseline.migrations.length).toBeGreaterThan(1);
+      const result = check(copy.dir, ['--through', early]);
+      expect({ status: result.status, err: result.stderr }).toEqual({ status: 0, err: '' });
+    } finally {
+      fs.rmSync(copy.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('--through with no operand, with another flag as its operand, or together with --write is refused and nothing is rewritten; --write alone still writes', () => {
+    const copy = isolated();
+    try {
+      const manifestFile = path.join(copy.dir, 'prisma/migration-manifest.json');
+      const docFile = path.join(copy.dir, 'docs/RELEASE-0.5.0-MIGRATIONS.md');
+      // An unlisted migration that a rewrite would add to the inventory
+      fs.mkdirSync(path.join(copy.migrations, '20261119135002_not_listed'));
+      const before = [fs.readFileSync(manifestFile, 'utf8'), fs.readFileSync(docFile, 'utf8')];
+      for (const args of [['--through'], ['--through', '--write'], ['--write', '--through'], ['--through', manifest.shipping.lastMigration, '--write'], ['--through', ''], ['--bogus']]) {
+        const result = check(copy.dir, args);
+        expect({ args, status: result.status }).toEqual({ args, status: 2 });
+        expect([fs.readFileSync(manifestFile, 'utf8'), fs.readFileSync(docFile, 'utf8')]).toEqual(before);
+      }
+      expect(check(copy.dir, ['--write']).status).toBe(0);
+      expect(JSON.parse(fs.readFileSync(manifestFile, 'utf8')).shipping.migrations).toContain('20261119135002_not_listed');
+    } finally {
+      fs.rmSync(copy.dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('the key-form holds migration is superseded', () => {
   const old = manifest.superseded.find((one) => one.name === '20261119135000_app_key_holds');
 

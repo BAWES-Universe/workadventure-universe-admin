@@ -45,7 +45,8 @@ export function differences(manifest, names, { through = null } = {}) {
   if (all.some((name, index) => index > 0 && all[index - 1] >= name)) problems.push('the shipping list is not in strictly increasing order');
   if (through === null && listed.length > 0 && listed[listed.length - 1] !== last) problems.push(`lastMigration is ${last} but the list ends with ${listed[listed.length - 1]}`);
   for (const old of manifest.superseded) if (names.includes(old.name) || listed.includes(old.name)) problems.push(`superseded and still shipped: ${old.name}`);
-  for (const name of manifest.baseline.migrations) if (!listed.includes(name)) problems.push(`in the v0.3.44 baseline but not shipped: ${name}`);
+  // Every migration production already ran is shipped: asked of the manifest's whole list, because a historical cutoff only narrows what is compared with the directory
+  for (const name of manifest.baseline.migrations) if (!all.includes(name)) problems.push(`in the v0.3.44 baseline but not shipped: ${name}`);
   // A migration production already ran must not change: Prisma refuses to deploy over one whose file differs from what it recorded
   for (const name of manifest.baseline.migrations) {
     const file = path.join(root, 'prisma/migrations', name, 'migration.sql');
@@ -56,10 +57,33 @@ export function differences(manifest, names, { through = null } = {}) {
   return problems;
 }
 
+/**
+ * The command line, read and checked BEFORE anything is written: `--write` alone rewrites the list; `--through <name>` alone is the historical check; nothing else.
+ * Returns { write, through } or { error }.
+ */
+export function parseArguments(args) {
+  const known = new Set(['--write', '--through']);
+  const write = args.includes('--write');
+  const cut = args.indexOf('--through');
+  if (cut >= 0) {
+    const operand = args[cut + 1];
+    if (operand === undefined || operand === '' || operand.startsWith('--')) return { error: '--through needs the name of the last migration to compare' };
+    if (write) return { error: '--write and --through cannot be used together (a historical check never rewrites the list)' };
+  }
+  const rest = args.filter((arg, index) => !(known.has(arg) || (cut >= 0 && index === cut + 1)));
+  if (rest.length > 0) return { error: `unknown argument: ${rest[0]}` };
+  return { write, through: cut >= 0 ? args[cut + 1] : null };
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const parsed = parseArguments(process.argv.slice(2));
+  if (parsed.error) {
+    console.error(parsed.error);
+    process.exit(2);
+  }
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   const names = directoryNames();
-  if (process.argv.includes('--write')) {
+  if (parsed.write) {
     manifest.shipping = { lastMigration: names[names.length - 1], count: names.length, migrations: names };
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     const doc = fs.readFileSync(docPath, 'utf8');
@@ -69,13 +93,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     fs.writeFileSync(docPath, `${doc.slice(0, from + START.length)}\n${listFor(names)}\n${doc.slice(to)}`);
     console.log(`Wrote ${names.length} migrations (last ${names[names.length - 1]}).`);
   } else {
-    const cut = process.argv.indexOf('--through');
-    const through = cut >= 0 ? process.argv[cut + 1] ?? '' : null;
-    if (through === '') {
-      console.error('--through needs the name of the last migration to compare');
-      process.exit(2);
-    }
-    const problems = differences(manifest, names, { through });
+    const problems = differences(manifest, names, { through: parsed.through });
     if (problems.length > 0) {
       console.error(`${problems.join('\n')}\n\nA migration added on purpose for this release: run node scripts/migration-manifest.mjs --write`);
       process.exit(1);
