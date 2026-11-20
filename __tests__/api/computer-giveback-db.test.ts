@@ -28,6 +28,8 @@ import { afterLateEvidence, decidePendingForPurge, decideRunnerFinish, lockPerso
 import { correctRouteTogether, giveBackOverview, giveBackReadiness, routeIsPaused } from '@/lib/computer-fault-ops';
 import { mintJobToken, revokeJobTokens } from '@/lib/computer-token';
 import { WorkerDied, afterWorkerDied } from '../helpers/worker-died';
+import { activityFor } from '@/lib/task-receipts';
+import { OUTCOME_WORDS } from '@/lib/task-receipt-words';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -1269,6 +1271,57 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       if (!lapsing.ok) throw new Error('no');
       await sweepComputers(minutes(200));
       expect(await decisionOf(lapsing.job.id)).toMatchObject({ state: 'given', basis: 'orbit_fault' });
+    });
+  });
+
+  describe('what the person reads while Orbit is still deciding (GPT observation: a provisional charge reads "still deciding")', () => {
+    const itemOf = async (personId: string, jobId: string) => {
+      return (await activityFor(personId)).find((item) => item.id === `act_job_${jobId}`);
+    };
+
+    it('an outside effect still to be confirmed: charged for now, and the receipt says Orbit is still deciding, never Done and never refunded; once decided it is refunded, on the same line', async () => {
+      const sara = await person('sara');
+      const held = await job(sara, ours, async (jobId) => {
+        await planEffect(jobId, { key: 'mail-open', kind: 'send' });
+      });
+      expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', basis: 'effect_unresolved' });
+      // The money rows: the time is on the person for now
+      expect(await givenBack(held.id)).toBe(false);
+      const cost = Number((await timeOf(held.id)).costMicros);
+      expect(cost).toBeGreaterThan(0);
+      const deciding = await itemOf(sara.id, held.id);
+      expect(deciding).toMatchObject({ state: 'done', outcome: 'deciding', outcomeText: OUTCOME_WORDS.deciding, spentMicros: cost });
+      expect(deciding?.outcomeText).not.toBe(OUTCOME_WORDS.done);
+      expect(deciding?.outcomeText).not.toBe(OUTCOME_WORDS.refunded);
+      expect(deciding?.outcomeNote).toContain('We’re still checking this one. If it was our fault, the time comes back.');
+      expect(deciding?.outcomeNote).toContain('is charged for now.');
+      // The effect is settled as not done: the decision is made, the time goes back, and the same line now says refunded
+      const effect = await prisma.computerEffect.findFirstOrThrow({ where: { jobId: held.id } });
+      expect(await settleEffect(held.id, effect.effectKey, 'failed')).toBe(true);
+      // (settling the effect decides it itself; a sweep that comes after finds nothing left to decide)
+      await resolveDecision(held.id, minutes(60));
+      expect(await decisionOf(held.id)).toMatchObject({ state: 'given' });
+      const after = await itemOf(sara.id, held.id);
+      expect(after).toMatchObject({ id: deciding?.id, state: 'refunded', outcome: 'refunded', outcomeText: OUTCOME_WORDS.refunded, spentMicros: null });
+    });
+
+    it('limits that are missing: the same words, with no word about limits; and once they are set and Orbit decides to charge, it reads as an ordinary failed job', async () => {
+      await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
+      const sara = await person('sara');
+      const held = await job(sara, { ...ours, turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+      expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', basis: 'limits_missing' });
+      const item = await itemOf(sara.id, held.id);
+      expect(item).toMatchObject({ state: 'done', outcome: 'deciding', outcomeText: OUTCOME_WORDS.deciding });
+      expect(item?.outcomeNote).toContain('We’re still checking this one. If it was our fault, the time comes back.');
+      expect(item?.outcomeNote).not.toMatch(/limit/i);
+      // The Limits are set, and the person's bound is already used: Orbit decides to charge, and it reads as what it is, a job that did not finish (never "refunded")
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+      expect(await resolveDecision(held.id, minutes(60))).toBe('resolved');
+      expect(await decisionOf(held.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+      const decided = await itemOf(sara.id, held.id);
+      expect(decided).toMatchObject({ id: item?.id, state: 'done', outcome: 'failed', outcomeText: OUTCOME_WORDS.failed });
+      expect(decided?.outcomeNote).toMatch(/^It didn’t finish\. Computer time used \$0\.03\./);
     });
   });
 

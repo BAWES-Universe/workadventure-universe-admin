@@ -16,6 +16,13 @@ export type ReceiptState = 'done' | 'refunded' | 'checking';
  */
 export type ReceiptOutcome = 'done' | 'partial' | 'refunded' | 'failed' | 'unconfirmed';
 /**
+ * What Activity says a task came to at the time of reading: the stored outcome, or one read from what is true now.
+ *  - stopped: a computer job was stopped before it finished (at the person's spending rule, or by them): starting a computer is not proof it finished.
+ *  - deciding: nothing was verified and Orbit is still deciding whether the computer's cost is given back (the person is charged provisionally meanwhile).
+ *  - refund_pending: the computer's cost is owed back and the books have not acknowledged it yet ("$0.03 refund pending"), so it is not "refunded" yet.
+ */
+export type ActivityOutcome = ReceiptOutcome | 'stopped' | 'deciding' | 'refund_pending';
+/**
  * How one Instant action of a task ended: it worked (the run's own record says so, or the provider's log confirmed it later), it did not
  * (the provider said so), or `unknown`: nobody could confirm whether it went out. An unknown action is never called a failure, and what
  * was taken for it is its own record's to say.
@@ -108,6 +115,8 @@ export interface ReceiptLine {
   label: string;
   amountMicros?: number;
   note?: string;
+  /** On the computer's line when its cost was given back and the books acknowledged it: what came back, in whole micros. */
+  returnedMicros?: number;
 }
 
 /** The part of a meter event a line is made from. */
@@ -136,7 +145,7 @@ const plural = (n: number, one: string, many: string) => `${n.toLocaleString('en
  * (`costMicros`) and what the person was charged (`detail.customerMicros`); only the second is theirs, and a run whose charge is not known
  * yet has none. A use recorded without the executor's mark is read by its cost as before.
  */
-function instantTaken(event: LineEvent): number | null {
+export function instantTaken(event: LineEvent): number | null {
   if (isRecord(event.detail) && event.detail.instant === true) return typeof event.detail.customerMicros === 'number' ? event.detail.customerMicros : null;
   return event.costMicros;
 }
@@ -171,6 +180,19 @@ interface Group {
   priced: boolean;
   charged: boolean;
   note?: string;
+}
+
+/**
+ * The computer's line of a receipt, once it is known what became of a cost that was given back. A cost the books have not yet acknowledged giving back is
+ * "Refund pending", never "Nothing": the credit is not back until they say so. One that came back says so and what came back. Any other line is left as it is.
+ */
+export function withComputerRefund(lines: readonly ReceiptLine[], refund: { returnedMicros: number; pendingMicros: number }): ReceiptLine[] {
+  return lines.map((line) => {
+    if (!line.label.startsWith('Computer') || line.amountMicros !== undefined || line.note !== 'Nothing') return line;
+    if (refund.pendingMicros > 0) return { label: line.label, note: 'Refund pending' };
+    if (refund.returnedMicros > 0) return { label: line.label, note: 'Given back', returnedMicros: refund.returnedMicros };
+    return line;
+  });
 }
 
 /**

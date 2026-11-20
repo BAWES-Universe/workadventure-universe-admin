@@ -1,4 +1,4 @@
-import { actionOutcomeOfRun, activityIdOf, categoryOf, computerTakenOf, jobActivityIdOf, outcomeOfActions, outcomeOfRuns, readActions, readActivityId, receiptLines, receiptLink, spentOf, stateOfOutcome, takenForRun, type LineEvent } from '@/lib/task-receipts-values';
+import { actionOutcomeOfRun, activityIdOf, categoryOf, computerTakenOf, withComputerRefund, jobActivityIdOf, outcomeOfActions, outcomeOfRuns, readActions, readActivityId, receiptLines, receiptLink, spentOf, stateOfOutcome, takenForRun, type LineEvent } from '@/lib/task-receipts-values';
 
 const event = (over: Partial<LineEvent>): LineEvent => ({ kind: 'app_use', route: 'instant', quantity: 1, costMicros: 30_000, detail: null, ...over });
 
@@ -179,6 +179,14 @@ describe('how a task came to end, from its runs', () => {
     expect(computerTakenOf([time(30_000, { givenBack: true })])).toBeUndefined();
     expect(computerTakenOf([time(30_000), time(10_000)])).toBe(40_000);
     expect(computerTakenOf([time(30_000), time(null)])).toBeNull();
+  });
+
+  it('the computer’s line says what became of a cost that was given back: pending until the books acknowledge it, then returned; any other line is untouched', () => {
+    const lines = [{ label: 'Instant gmail, 1 use', amountMicros: 9_000 }, { label: 'Computer, 5 minutes', note: 'Nothing' }];
+    expect(withComputerRefund(lines, { returnedMicros: 0, pendingMicros: 30_000 })[1]).toEqual({ label: 'Computer, 5 minutes', note: 'Refund pending' });
+    expect(withComputerRefund(lines, { returnedMicros: 30_000, pendingMicros: 0 })[1]).toEqual({ label: 'Computer, 5 minutes', note: 'Given back', returnedMicros: 30_000 });
+    expect(withComputerRefund(lines, { returnedMicros: 0, pendingMicros: 0 })).toEqual(lines);
+    expect(withComputerRefund(lines, { returnedMicros: 30_000, pendingMicros: 0 })[0]).toEqual(lines[0]);
   });
 
   it('reads stored actions back (an unknown one too) and drops anything that is not the shape written', () => {

@@ -163,6 +163,46 @@ export async function sweepRefundObligations(now: Date = new Date(), batch = 50)
   return result;
 }
 
+/** What became of the credit a failed computer job drew: what the books acknowledged giving back, and what is still owed to the person. */
+export interface RefundState {
+  returnedMicros: number;
+  pendingMicros: number;
+}
+
+/**
+ * Per job (of the ones that failed on our side), what the funding books gave back and what they still owe: the settled credit holds of the job
+ * (what came back is a hold's own `refunded_micros`) and the refund obligations, which are the durable record of what is owed. An obligation not acknowledged is owed
+ * (its amount, fixed when it was written); a hold with no obligation yet is owed what it still has; an obligation whose hold is gone (the Brick was purged) is still
+ * owed. A job with nothing drawn from credit has no entry. Reads only; this is what a receipt and a report read BEFORE they say a refund is made.
+ */
+export async function refundStatesFor(jobIds: readonly string[]): Promise<Map<string, RefundState>> {
+  const out = new Map<string, RefundState>();
+  if (jobIds.length === 0) return out;
+  const [holds, obligations] = await Promise.all([
+    prisma.creditHold.findMany({ where: { jobKey: { in: [...jobIds] }, category: 'computers', state: 'settled' }, select: { jobKey: true, holdKey: true, customerMicros: true, refundedMicros: true } }),
+    prisma.computerRefundObligation.findMany({ where: { jobId: { in: [...jobIds] } }, select: { jobId: true, holdKey: true, amountMicros: true, state: true } }),
+  ]);
+  const entry = (id: string): RefundState => {
+    let found = out.get(id);
+    if (!found) {
+      found = { returnedMicros: 0, pendingMicros: 0 };
+      out.set(id, found);
+    }
+    return found;
+  };
+  const obligated = new Map(obligations.map((one) => [one.holdKey, one] as const));
+  for (const hold of holds) {
+    if (!hold.jobKey) continue;
+    const state = entry(hold.jobKey);
+    state.returnedMicros += Number(hold.refundedMicros);
+    const ob = obligated.get(hold.holdKey);
+    state.pendingMicros += ob ? (ob.state === 'owed' ? Number(ob.amountMicros) : 0) : Math.max(0, Number(hold.customerMicros ?? 0) - Number(hold.refundedMicros));
+  }
+  const seen = new Set(holds.map((hold) => hold.holdKey));
+  for (const one of obligations) if (!seen.has(one.holdKey) && one.state === 'owed') entry(one.jobId).pendingMicros += Number(one.amountMicros);
+  return out;
+}
+
 export interface RefundObligationRow {
   jobId: string;
   personId: string;

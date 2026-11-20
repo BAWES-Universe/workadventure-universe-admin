@@ -1,5 +1,6 @@
 import { prisma } from '@/lib/db';
 import { readFilesList } from '@/lib/computer-files';
+import { refundStatesFor } from '@/lib/computer-refunds';
 import { silentEnding, type UndeliverableWhy, type WaitingFor } from '@/lib/computer-values';
 import { cardsOfJobs, handedPathsOf, HAND_OVER_ALIVE_MS, HAND_OVER_LATEST_MS, madeInJob, type Card } from '@/lib/computer-file-cards';
 
@@ -56,6 +57,11 @@ export interface Report {
   handed: Card[];
   /** The minutes of this try do not count against the person's month (proved in the books, or none were used). */
   givenBack: boolean;
+  /**
+   * Credit this failed try drew that is owed back to the person and not yet acknowledged by the books, in whole micros (0 when none): a report never promises a refund as made while this is above 0.
+   * Optional for older readers; Activity says the same amount ("$0.03 refund pending").
+   */
+  refundPendingMicros?: number;
 }
 
 /**
@@ -256,6 +262,8 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
   // Every file a job handed over is not "left on the computer": the ones the chat already took, and the ones the person has deleted since, as much as the ones still to send
   const handedPaths = await handedPathsOf(ended.filter((job) => job.status === 'done').map((job) => job.id));
 
+  // What a failed try drew from credit and is still owed back (one read for the page): said with the report, never promised as made while the books have not acknowledged it
+  const owedBack = await refundStatesFor(ended.filter((job) => job.status === 'failed').map((job) => job.id));
   const reports: Report[] = [];
   for (const job of ended) {
     const kind = kindOfEnding(job.status, job.endedBy);
@@ -283,6 +291,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
       files: kind === 'done' && job.writes ? filesMadeBy(job.endFiles, job.startFiles, new Set(handedPaths.get(job.id) ?? [])) : [],
       handed: kind === 'done' ? (cardsOf.get(job.id) ?? []).map((card) => ({ id: card.id, name: card.name, bytes: card.bytes, mime: card.mime })) : [],
       givenBack: kind === 'failed' ? await givenBackIn(job.id, job.secondsRun) : false,
+      ...(kind === 'failed' && (owedBack.get(job.id)?.pendingMicros ?? 0) > 0 ? { refundPendingMicros: owedBack.get(job.id)?.pendingMicros } : {}),
     });
   }
   for (const job of waiting) {

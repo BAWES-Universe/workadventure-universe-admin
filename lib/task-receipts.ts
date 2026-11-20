@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { givenBackJob } from '@/lib/computer-values';
+import { refundStatesFor } from '@/lib/computer-refunds';
 import { paidBy, payerFromRow, payerOf, payerToRow, type PaidBy, type Payer } from '@/lib/paid-by';
 import {
   activityIdOf,
@@ -8,6 +9,7 @@ import {
   computerTakenOf,
   givenBackCall,
   givenBackTime,
+  instantTaken,
   jobActivityIdOf,
   outcomeOfActions,
   outcomeOfRuns,
@@ -18,7 +20,9 @@ import {
   spentOf,
   stateOfOutcome,
   takenForRun,
+  withComputerRefund,
   type ActionOutcome,
+  type ActivityOutcome,
   type LineEvent,
   type ReceiptAction,
   type ReceiptCategory,
@@ -26,7 +30,7 @@ import {
   type ReceiptOutcome,
   type ReceiptState,
 } from '@/lib/task-receipts-values';
-import { actionWords, HOLD_BEING_RELEASED, HOLD_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote } from '@/lib/task-receipt-words';
+import { actionWords, HOLD_BEING_RELEASED, HOLD_RELEASED, NOTHING_TAKEN, outcomeNote, outcomeTextOf, type NoteFacts } from '@/lib/task-receipt-words';
 import { isOver } from '@/lib/computer-values';
 import { isUnconfirmedRun } from '@/lib/instant/values';
 
@@ -46,15 +50,25 @@ export interface ActivityItem {
   /** ISO time: when it finished, or began while it has not. */
   at: string;
   state: ReceiptState;
-  /** How the task came to end: done (every step worked), partial, failed (it did not finish and something was taken for it), unconfirmed (nobody could confirm an action), or refunded. `state` stays done for everything but refunded, since something worked or was taken. */
-  outcome: ReceiptOutcome;
+  /**
+   * How the task came to end: done (every step worked), partial, failed (it did not finish and something was taken for it), unconfirmed (nobody could confirm an action),
+   * refunded, stopped (a computer job was stopped before it finished: at the person's spending rule, or by them), deciding (nothing was verified and Orbit is still deciding whether
+   * the computer's cost is given back: it is charged provisionally meanwhile) or refund_pending (the cost is owed back and the books have not acknowledged it yet).
+   * `state` stays done for everything but refunded, since something worked or was taken.
+   */
+  outcome: ActivityOutcome;
   /** The words for `outcome` ("Partly done"; see `lib/task-receipt-words.ts`). */
   outcomeText: string;
   /** The sentence under a partly done receipt ("Two steps worked and one didn’t. Nothing was taken for the one that didn’t."); null otherwise. */
   outcomeNote: string | null;
   /** Each Instant action of the task and how it ended. Empty for a task with none (a computer's). */
   actions: ActivityAction[];
+  /** What the person pays for the task, net of anything given back: null when nothing, and while a refund is still pending (the net amount is said once it is settled). */
   spentMicros: number | null;
+  /** The computer's cost the books have acknowledged giving back, in whole micros. Absent when none. */
+  returnedMicros?: number;
+  /** The computer's cost still owed back to the person: not acknowledged by the books yet ("$0.03 refund pending"). Absent when none. */
+  refundPendingMicros?: number;
   category: ReceiptCategory | null;
   payer: PaidBy['payer'];
   payerName: string | null;
@@ -267,18 +281,18 @@ const jobOf = (tx: Tx, task: Task): Promise<JobRow> => tx.computerJob.findFirst(
 
 /** The task ran a computer job for the person: it started and did not fail on our side (a job given back did nothing for them). */
 const jobRan = (job: JobRow): job is NonNullable<JobRow> => job !== null && job.startedAt !== null && !givenBackJob(job.status, job.endedBy);
-/** That job did not finish: it failed after running (the agent gave up, or it hit its turn cap), and its time is the person's like any other run. */
-const jobFailed = (job: JobRow): boolean => jobRan(job) && job?.status === 'failed';
+/** That job did not finish: it failed after running (the agent gave up, or it hit its turn cap) or was stopped before it finished (their spending rule, or their own Stop), and its time is the person's like any other run. */
+const jobFailed = (job: JobRow): boolean => jobRan(job) && (job?.status === 'failed' || job?.status === 'stopped');
 
 /**
- * What a task came to, from its Instant runs and its computer job if it has one. A job that ran is a step of the task: finished (or stopped
- * by the person) it worked; failed it did not. So a failed job with every App failed is `failed` ("It didn't finish": the computer time
+ * What a task came to, from its Instant runs and its computer job if it has one. A job that ran is a step of the task: finished it worked; failed or
+ * stopped before it finished (a spending rule, or the person's own Stop) it did not. So a failed job with every App failed is `failed` ("It didn't finish": the computer time
  * is the person's), never done; a job that finished with an App that did not work is partly done. A job that never ran, or failed on our
  * side (`givenBackJob`), did nothing for the person: the Apps alone decide.
  */
 const outcomeWithJob = (view: ReturnType<typeof outcomeOfRuns>, job: JobRow): ReceiptOutcome => {
   if (!jobRan(job)) return view.outcome;
-  const outcome = outcomeOfActions([...view.actions.map((action) => action.outcome), job.status === 'failed' ? 'failed' : 'worked']);
+  const outcome = outcomeOfActions([...view.actions.map((action) => action.outcome), job.status === 'done' ? 'worked' : 'failed']);
   // Nothing was verified and a job that ran took the person's time: not "nothing taken" (neither refunded nor unconfirmed, both of which are stored as refunded and
   // leave the job's time out of what the task took). The action that could not be confirmed still says so on its own line
   return outcome === 'refunded' || outcome === 'unconfirmed' ? 'failed' : outcome;
@@ -479,8 +493,17 @@ interface Header {
   runId: string | null;
   outcome: ReceiptOutcome | null;
   actions: ReceiptAction[];
-  /** How the task's computer job came out, when one ran for the person (the agent finished it, or gave up); none when no job ran or it failed on our side. */
-  job: 'worked' | 'failed' | null;
+  /**
+   * How the task's computer job came out, when one ran for the person: the agent finished it (`worked`), gave up (`failed`), it was stopped before it finished (`stopped`), or it
+   * failed on our side so none of its cost is the person's (`returned`). None when no job ran.
+   */
+  job: 'worked' | 'failed' | 'stopped' | 'returned' | null;
+  /** Why a stopped job stopped (the job's own `ended_by`: rule, person, allowance, pool). */
+  stoppedBy: string | null;
+  /** What became of a computer cost that was given back: what the books acknowledged giving back, and what they still owe the person. */
+  refund: { returnedMicros: number; pendingMicros: number };
+  /** Orbit has not decided yet whether the failed job's cost is given back (the person is charged provisionally): an outside effect still to confirm, or limits missing. */
+  deciding: 'effect' | 'limits' | null;
   /** Runs of the task nobody could confirm whose credit is still on hold. */
   heldRuns: ReadonlySet<string>;
   /** Runs of the task nobody could confirm whose hold the credit books acknowledged giving back, and how much came back (whole micros). */
@@ -503,6 +526,9 @@ const headerOfRow = (row: ReceiptRow): Header => ({
   outcome: row.outcome as ReceiptOutcome | null,
   actions: readActions(row.actions),
   job: null,
+  stoppedBy: null,
+  refund: { returnedMicros: 0, pendingMicros: 0 },
+  deciding: null,
   heldRuns: new Set<string>(),
   releasedRuns: new Map<string, number>(),
   letGoRuns: new Set<string>(),
@@ -559,42 +585,69 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 
 /**
  * How a task reads at the time of reading. A computer job that ran is a step of the task, read from the job's own record (so a receipt that
- * was settled before this existed, or before the job's last word, is still put right): a job that failed with nothing else that worked is
- * `failed`, never done. Without a job, the stored outcome stands (a state put right at read time, refunded, wins over it).
+ * was settled before this existed, or before the job's last word, is still put right):
+ *  - a job that failed (the agent gave up) with nothing else that worked is `failed`, never done; one stopped before it finished is `stopped` (a spending rule or their own
+ *    Stop: starting a computer is not proof it finished); one that failed on our side is a step that did not work whose cost is the books' to give back;
+ *  - nothing verified and the computer's cost owed back but not acknowledged by the books is `refund_pending`, never refunded;
+ *  - nothing verified and Orbit still deciding whether to give the cost back is `deciding`.
+ * Without a job, the stored outcome stands (a state put right at read time, refunded, wins over it).
  */
-function outcomeOfHeader(header: Header): ReceiptOutcome {
+function outcomeOfHeader(header: Header): ActivityOutcome {
   // Nothing was taken: refunded, or (when nobody could confirm an action) said as that, never as a failure
-  if (header.state === 'refunded') return header.outcome === 'unconfirmed' ? 'unconfirmed' : 'refunded';
+  // (a job our own pool cut off, whose time was given back, is still a stopped job: said as that, with its time given back)
+  if (header.state === 'refunded') return header.outcome === 'unconfirmed' ? 'unconfirmed' : header.job === 'returned' && header.stoppedBy === 'pool' ? 'stopped' : 'refunded';
+  const pending = header.refund.pendingMicros > 0;
   if (header.job !== null) {
-    const outcome = outcomeOfActions([...header.actions.map((action) => action.outcome), header.job]);
-    return outcome === 'refunded' || outcome === 'unconfirmed' ? 'failed' : outcome;
+    const outcome = outcomeOfActions([...header.actions.map((action) => action.outcome), header.job === 'worked' ? 'worked' : 'failed']);
+    if (outcome === 'refunded' || outcome === 'unconfirmed') {
+      // Nothing was verified. A cost given back is the books' to say: refunded only once they acknowledged it, and never while Orbit is still deciding
+      if (header.job === 'returned') return pending ? 'refund_pending' : header.stoppedBy === 'pool' && outcome === 'refunded' ? 'stopped' : outcome === 'refunded' ? 'failed' : outcome;
+      if (header.job === 'stopped') return 'stopped';
+      return header.deciding !== null ? 'deciding' : 'failed';
+    }
+    return outcome;
   }
   return header.outcome === 'partial' || header.outcome === 'failed' || header.outcome === 'unconfirmed' ? header.outcome : 'done';
 }
 
 function itemOf(header: Header, events: readonly LineEvent[], botName: string, readerId: string): ActivityItem {
-  const lines = receiptLines(events, botName);
   const who = paidBy(header.payer, readerId);
   // A hold is pending for any run whose credit is still on hold and that was let go unconfirmed (or whose action did not work), whatever its action says now: late evidence, that
   // it failed or that it worked, does not give the credit back, only the books do. `heldRuns` holds exactly those runs
   const holdPending = header.actions.some((action) => header.heldRuns.has(action.run));
   const stated = outcomeOfHeader(header);
   // "Refunded, nothing taken" is not said while a hold is still on: it reads as not finished (with the release wording) until the books acknowledge the release
-  const outcome: ReceiptOutcome = holdPending && stated === 'refunded' ? 'failed' : stated;
+  const outcome: ActivityOutcome = holdPending && stated === 'refunded' ? 'failed' : stated;
+  // The computer's line says what became of a cost that was given back: "Refund pending" until the books acknowledge it, then "Given back"
+  const lines = withComputerRefund(receiptLines(events, botName), header.refund);
   // Once the books acknowledged giving a hold back, the amount that came back is said (never before: a hold still on is "being released")
   const releasedOf = (run: string): number => header.releasedRuns.get(run) ?? 0;
   const releasedMicros = holdPending ? 0 : header.actions.reduce((sum, action) => (action.outcome === 'unknown' || (action.outcome === 'worked' && header.letGoRuns.has(action.run)) ? sum + releasedOf(action.run) : sum), 0);
-  const computerMicros = header.job === null ? undefined : (computerTakenOf(events) ?? null);
+  const computerMicros = header.job === null || header.job === 'returned' ? undefined : (computerTakenOf(events) ?? null);
+  // What the person pays net of anything given back, said once it is settled: never while a refund is pending (their credit is not back yet)
+  const spent = header.refund.pendingMicros > 0 ? null : spentOf(header.state, header.chargedMicros, lines);
+  const appCharges = header.job === null ? [] : header.actions.filter((action) => action.outcome === 'worked' && !header.letGoRuns.has(action.run)).map((action) => ({ label: action.label, micros: takenForRun(events, action.run) }));
+  const facts: NoteFacts = {
+    ...(header.job === null ? {} : { job: header.job, ...(computerMicros === undefined ? {} : { computerMicros }) }),
+    holdPending,
+    ...(releasedMicros > 0 ? { releasedMicros } : {}),
+    ...(header.refund.returnedMicros > 0 ? { returnedMicros: header.refund.returnedMicros } : {}),
+    ...(header.refund.pendingMicros > 0 ? { refundPendingMicros: header.refund.pendingMicros } : {}),
+    ...(header.deciding === null ? {} : { deciding: header.deciding }),
+    ...(header.stoppedBy === null ? {} : { stoppedBy: header.stoppedBy }),
+    ...(appCharges.length > 0 ? { appCharges } : {}),
+    ...(spent !== null ? { netMicros: spent } : {}),
+  };
   return {
     id: header.id,
     title: header.title,
     at: header.at.toISOString(),
-    // An unconfirmed action's credit still on hold is not given back yet: the task is not shown as refunded until it is
-    state: holdPending && header.state === 'refunded' ? 'done' : header.state,
+    // An unconfirmed action's credit still on hold is not given back yet: the task is not shown as refunded until it is. A cost still owed back is not refunded either
+    state: (holdPending || header.refund.pendingMicros > 0) && header.state === 'refunded' ? 'done' : header.state,
     // `state` stays done for a task that partly worked or that took something and did not finish; a state put right at read time wins over the stored outcome
     outcome,
-    outcomeText: OUTCOME_WORDS[outcome],
-    outcomeNote: outcomeNote(outcome, header.actions, { ...(header.job === null ? {} : { job: header.job, computerMicros }), holdPending, ...(releasedMicros > 0 ? { releasedMicros } : {}) }),
+    outcomeText: outcomeTextOf(outcome, { stoppedBy: header.stoppedBy, refundPendingMicros: header.refund.pendingMicros, givenBack: header.job === 'returned' }),
+    outcomeNote: outcomeNote(outcome, header.actions, facts),
     actions: header.actions.map((action): ActivityAction => {
       // A run let go unconfirmed was never charged and is never charged later (its hold goes back whatever late evidence says), so a worked action on it shows no amount taken: its hold wording
       // comes from the run's own money state, not from what the action says now. An ordinary worked run shows what the books took (or settlement pending), as ever
@@ -606,7 +659,9 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
       const takenText = held ? HOLD_BEING_RELEASED : released > 0 || (action.outcome === 'worked' && wasReleased) ? HOLD_RELEASED : action.outcome === 'worked' ? null : NOTHING_TAKEN;
       return { label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome), takenText, ...(taken === null ? {} : { amountMicros: taken }), ...(released > 0 ? { releasedMicros: released } : {}) };
     }),
-    spentMicros: spentOf(header.state, header.chargedMicros, lines),
+    spentMicros: spent,
+    ...(header.refund.returnedMicros > 0 && header.refund.pendingMicros === 0 ? { returnedMicros: header.refund.returnedMicros } : {}),
+    ...(header.refund.pendingMicros > 0 ? { refundPendingMicros: header.refund.pendingMicros } : {}),
     category: categoryOf(header.category, events),
     payer: who.payer,
     payerName: who.payerName,
@@ -647,6 +702,39 @@ async function receiptsNewest(personId: string, limit: number): Promise<ReceiptR
   return rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 }
 
+/** What the books say became of a computer job's cost, per job: what was acknowledged given back, what is still owed, and whether Orbit is still deciding. */
+interface ComputerMoney {
+  returnedMicros: number;
+  pendingMicros: number;
+  deciding: 'effect' | 'limits' | null;
+}
+
+/**
+ * Reads, for the computer jobs of a list, the money states a receipt must not say "refunded" over before they are true: what the books gave back and what they still owe for a job
+ * that failed on our side (`refundStatesFor`: the refund obligations and the settled credit holds), and the give-back decision of a failed job that is still `pending` (an outside effect to confirm, or limits missing:
+ * the person is charged provisionally and Orbit is still deciding). Reads only.
+ */
+async function computerMoneyOf(jobs: readonly { id: string; given: boolean }[]): Promise<Map<string, ComputerMoney>> {
+  const out = new Map<string, ComputerMoney>();
+  if (jobs.length === 0) return out;
+  const givenIds = jobs.filter((job) => job.given).map((job) => job.id);
+  const [refunds, decisions] = await Promise.all([
+    refundStatesFor(givenIds),
+    prisma.computerGiveBackDecision.findMany({ where: { jobId: { in: jobs.map((job) => job.id) }, state: 'pending' }, select: { jobId: true, basis: true } }),
+  ]);
+  const entry = (id: string): ComputerMoney => {
+    let found = out.get(id);
+    if (!found) {
+      found = { returnedMicros: 0, pendingMicros: 0, deciding: null };
+      out.set(id, found);
+    }
+    return found;
+  };
+  for (const [id, state] of refunds) Object.assign(entry(id), state);
+  for (const decision of decisions) entry(decision.jobId).deciding = decision.basis === 'effect_unresolved' ? 'effect' : 'limits';
+  return out;
+}
+
 /**
  * The Activity list of a person: their finished tasks, newest first, at most `ACTIVITY_LISTED`. Tasks that are still running are not
  * listed (their status is in the chat), and neither is one the system is still looking up (an answer did not come back): it is listed
@@ -681,6 +769,9 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
       outcome: null,
       actions: [],
       job: null,
+      stoppedBy: null,
+      refund: { returnedMicros: 0, pendingMicros: 0 },
+      deciding: null,
       heldRuns: new Set<string>(),
       releasedRuns: new Map<string, number>(),
       letGoRuns: new Set<string>(),
@@ -697,6 +788,7 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
   const behindReceipts = receiptJobKeys.length === 0 ? [] : await prisma.computerJob.findMany({ where: { personId, id: { in: receiptJobKeys } }, select: { id: true, botId: true, status: true, endedBy: true, startedAt: true } });
   const jobRows = new Map([...jobs, ...behindReceipts].map((job) => [`${job.botId}:${job.id}`, job]));
   const failedJobs = new Set([...jobRows.values()].filter((job) => givenBackJob(job.status, job.endedBy)).map((job) => `${job.botId}:${job.id}`));
+  const computerMoney = await computerMoneyOf([...jobRows.values()].map((job) => ({ id: job.id, given: givenBackJob(job.status, job.endedBy) })));
   // Runs of these tasks whose credit is on hold or was given back and that were let go unconfirmed, or did not work (nobody could confirm them, or later evidence said they failed): said as
   // a hold being released, or released, not as a charge or as "nothing taken", until the books acknowledge the release. A run let go unconfirmed (its own reason is `unclear`) keeps that
   // wording when late evidence says it WORKED too: it was never charged and never will be. An ordinary run that worked is not one of these, and waits for its settlement as ever
@@ -710,20 +802,26 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
     const forHeader = events.get(header.id) ?? [];
     // A computer job that failed is "refunded, nothing taken" only when the books show nothing was taken: a price not known yet is not "nothing"
     // (the platform's model calls count too: one still written against the person is something taken; a call on their own key never was)
-    const mayHaveTaken = forHeader.some(
-      (event) =>
-        ((event.kind === 'computer_time' && !givenBackTime(event)) || (event.kind === 'model_call' && event.payerKind === 'universe' && !givenBackCall(event))) &&
-        (event.costMicros === null || event.costMicros > 0),
-    );
+    const money = computerMoney.get(header.taskKey);
+    const mayHaveTaken =
+      forHeader.some(
+        (event) =>
+          ((event.kind === 'computer_time' && !givenBackTime(event)) || (event.kind === 'model_call' && event.payerKind === 'universe' && !givenBackCall(event))) &&
+          (event.costMicros === null || event.costMicros > 0),
+      ) ||
+      // An App's charge is something taken however the computer ended: a Gmail that went out and was charged is never hidden behind a refunded computer. A price not known yet is not "nothing"
+      forHeader.some((event) => event.kind === 'app_use' && event.route === 'instant' && (instantTaken(event) === null || (instantTaken(event) ?? 0) > 0)) ||
+      // A cost owed back and not acknowledged by the books is still on the person: it is not refunded until they say so
+      (money?.pendingMicros ?? 0) > 0;
     // A receipt already stored as refunded does not hold either while something is still on the person: until it is given back it reads as done
     const key = `${header.botId}:${header.taskKey}`;
     const failed = failedJobs.has(key);
     const state: ReceiptState = failed ? (!mayHaveTaken ? 'refunded' : header.state === 'refunded' ? 'done' : header.state) : header.state;
     const jobRow = jobRows.get(key) ?? null;
-    const job = jobRan(jobRow) ? (jobRow.status === 'failed' ? 'failed' : 'worked') : null;
-    // A job still going has not come out yet
-    const over = jobRow !== null && isOver(jobRow.status);
-    return itemOf({ ...header, state, job: over ? job : null, heldRuns: new Set(header.actions.filter((action) => held.has(action.run)).map((action) => action.run)), releasedRuns: new Map(header.actions.filter((action) => released.has(action.run)).map((action) => [action.run, released.get(action.run) as number] as const)), letGoRuns: new Set(header.actions.filter((action) => letGo.has(action.run)).map((action) => action.run)) }, forHeader, names.get(header.botId) ?? 'Brick', personId);
+    // A job still going has not come out yet; one that never started did nothing
+    const over = jobRow !== null && isOver(jobRow.status) && jobRow.startedAt !== null;
+    const job: Header['job'] = !over ? null : givenBackJob(jobRow.status, jobRow.endedBy) ? 'returned' : jobRow.status === 'failed' ? 'failed' : jobRow.status === 'stopped' ? 'stopped' : 'worked';
+    return itemOf({ ...header, state, job, stoppedBy: jobRow?.status === 'stopped' ? jobRow.endedBy ?? null : null, refund: job === 'returned' ? { returnedMicros: money?.returnedMicros ?? 0, pendingMicros: money?.pendingMicros ?? 0 } : { returnedMicros: 0, pendingMicros: 0 }, deciding: job === 'failed' ? money?.deciding ?? null : null, heldRuns: new Set(header.actions.filter((action) => held.has(action.run)).map((action) => action.run)), releasedRuns: new Map(header.actions.filter((action) => released.has(action.run)).map((action) => [action.run, released.get(action.run) as number] as const)), letGoRuns: new Set(header.actions.filter((action) => letGo.has(action.run)).map((action) => action.run)) }, forHeader, names.get(header.botId) ?? 'Brick', personId);
   });
   return items.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : -1)).slice(0, limit);
 }

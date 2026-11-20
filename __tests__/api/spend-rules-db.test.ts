@@ -22,6 +22,7 @@ import { releaseRoom, renewRoom, reserveRoom, settleRoom } from '@/lib/meter-all
 import { memberUsage } from '@/lib/meter-usage';
 import { changeRule, checkSpend, chatRuleKey, endRule, listRules, ownerSpendAllowed, proposeRule } from '@/lib/spend-rules';
 import { activityFor, closeReceipt, openReceipt } from '@/lib/task-receipts';
+import { OUTCOME_WORDS, STOPPED_AT_RULE } from '@/lib/task-receipt-words';
 import { POST as postRule, GET as getRules } from '@/app/api/bots/[id]/spend-rules/route';
 import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
 import { GET as getPaidBy } from '@/app/api/bots/[id]/paid-by/route';
@@ -29,6 +30,7 @@ import { POST as postJob } from '@/app/api/bots/[id]/computer-jobs/route';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, renewJob, startJob, sweepComputers } from '@/lib/computer';
 import { recordFaults } from '@/lib/computer-faults';
+import { reportsToTell } from '@/lib/computer-report';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_LATEST_MS } from '@/lib/computer-file-cards';
 import { mintJobToken } from '@/lib/computer-token';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
@@ -1106,6 +1108,87 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(renewed).toEqual({ ok: false, reason: 'rule', words: expect.stringContaining('No more than $0.10 a month') });
       const ended = await prisma.computerJob.findUnique({ where: { id: started.job.id } });
       expect(ended).toMatchObject({ status: 'stopped', endedBy: 'rule' });
+    });
+
+    describe('what the payer reads on the receipt of a job stopped at their spending rule (GPT observation 2)', () => {
+      /** A job that ran, then stopped at a rule the person said, with its receipt closed the way the bot server closes it ("done"). */
+      async function stoppedAtRule(title: string) {
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 100_000 });
+        if (!made.ok) throw new Error('not made');
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title }, NOW);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: started.job.id, title, category: 'computer' }, NOW);
+        await prisma.meterReservation.updateMany({ where: { jobId: started.job.id }, data: { createdAt: NOW } });
+        expect(await renewJob(started.job.id, new Date(NOW.getTime() + 60_000))).toMatchObject({ ok: true });
+        expect(await renewJob(started.job.id, new Date(NOW.getTime() + 600_000))).toMatchObject({ ok: false, reason: 'rule' });
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'rule', startedAt: expect.any(Date) });
+        await closeReceipt({ botId: sara.brickId, taskKey: started.job.id, personId: sara.id, state: 'done' }, new Date(NOW.getTime() + 601_000));
+        return { sara, jobId: started.job.id };
+      }
+
+      it('says "Stopped at your spending rule" and never Done: starting a computer is not proof that it finished', async () => {
+        const { sara, jobId } = await stoppedAtRule('Make the report');
+        // The stored receipt does not say done either
+        expect((await prisma.taskReceipt.findFirstOrThrow({ where: { taskKey: jobId } })).outcome).not.toBe('done');
+        const [item, ...rest] = (await activityFor(sara.id)).filter((one) => one.title === 'Make the report');
+        expect(rest).toEqual([]);
+        expect(item).toMatchObject({ state: 'done', outcome: 'stopped', outcomeText: STOPPED_AT_RULE, actions: [] });
+        expect(item.outcomeText).not.toBe(OUTCOME_WORDS.done);
+        expect(item.outcomeNote).toMatch(/^It stopped before it finished, and nothing was confirmed as done\./);
+        // Without a receipt of its own (the job alone) it reads the same
+        await prisma.taskReceipt.deleteMany({ where: { taskKey: jobId } });
+        expect((await activityFor(sara.id)).find((one) => one.title === 'Make the report')).toMatchObject({ outcome: 'stopped', outcomeText: STOPPED_AT_RULE });
+      });
+
+      it('verified work and the computer’s usage are shown apart: a Gmail that went out is partly done with its own charge, and the rule stop is still said', async () => {
+        const { sara, jobId } = await stoppedAtRule('Mail then stopped');
+        const run = await prisma.instantRun.create({
+          data: { runKey: `k-${randomUUID()}`, botId: sara.brickId, personId: sara.id, taskKey: jobId, toolSlug: 'GMAIL_SEND_EMAIL', toolkit: 'gmail', argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v', topMicros: BigInt(10_000), holdMicros: BigInt(10_000), state: 'succeeded', customerState: 'charged', customerMicros: BigInt(9_000), providerUserId: `u-${randomUUID().slice(0, 6)}` } as never,
+        });
+        await prisma.meterEvent.create({
+          data: { eventId: `instant:${run.id}`, kind: 'app_use', pool: 'chat', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(7_000), basis: 'measured', detail: { instant: true, taskKey: jobId, runId: run.id, app: 'gmail', customerMicros: 9_000 } } as never,
+        });
+        const { settleReceipt } = await import('@/lib/task-receipts');
+        await settleReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId }, new Date(NOW.getTime() + 700_000));
+        const item = (await activityFor(sara.id)).find((one) => one.title === 'Mail then stopped');
+        expect(item).toMatchObject({ outcome: 'partial', outcomeText: OUTCOME_WORDS.partial });
+        expect(item?.actions).toEqual([{ label: 'gmail', outcome: 'worked', text: 'Gmail · worked', takenText: null, amountMicros: 9_000 }]);
+        expect(item?.outcomeNote).toContain('The computer stopped at your spending rule.');
+        expect(item?.outcomeNote).toContain('Gmail charged $0.009.');
+      });
+    });
+
+    describe('whatever stopped a job before it finished, the receipt and the Brick’s report never say done (Opus R1b)', () => {
+      const LATER = new Date(NOW.getTime() + 86_400_000);
+      /** A job that ran and was then ended as `stopped` by `endedBy`, its receipt closed the way the bot server closes it ("done"). */
+      async function stoppedBy(endedBy: string, title: string) {
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title }, NOW);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: started.job.id, title, category: 'computer' }, NOW);
+        await prisma.computerJob.update({ where: { id: started.job.id }, data: { status: 'stopped', endedBy, startedAt: NOW, endedAt: new Date(NOW.getTime() + 60_000) } });
+        await closeReceipt({ botId: sara.brickId, taskKey: started.job.id, personId: sara.id, state: 'done' }, new Date(NOW.getTime() + 61_000));
+        return { sara, jobId: started.job.id };
+      }
+
+      it.each([
+        ['rule', STOPPED_AT_RULE, 'rule'],
+        ['allowance', 'Stopped: your computer time ran out', 'month'],
+        ['person', 'Stopped by you', null],
+        ['pool', 'Stopped: our computers were busy', 'failed'],
+      ])('stopped by %s: the receipt says "%s", and the report kind is %s, never done', async (endedBy, words, kind) => {
+        const { sara, jobId } = await stoppedBy(endedBy, `Stopped by ${endedBy}`);
+        const item = (await activityFor(sara.id)).find((one) => one.title === `Stopped by ${endedBy}`);
+        expect(item).toMatchObject({ state: 'done', outcome: 'stopped', outcomeText: words });
+        expect(item?.outcomeText).not.toBe(OUTCOME_WORDS.done);
+        expect((await prisma.taskReceipt.findFirstOrThrow({ where: { taskKey: jobId } })).outcome).not.toBe('done');
+        const reports = (await reportsToTell(50, LATER)).filter((report) => report.jobId === jobId);
+        expect(reports.map((report) => report.kind)).toEqual(kind === null ? [] : [kind]);
+        expect(reports.map((report) => report.kind)).not.toContain('done');
+      });
     });
 
     it('a model call a rule refuses ends the job right there as "rule", so a later "failed, ours" from the runner changes nothing and nothing is given back', async () => {
