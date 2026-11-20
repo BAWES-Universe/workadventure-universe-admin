@@ -34,7 +34,9 @@ async function start(env) {
   child.kill();
   throw new Error('the server did not start');
 }
+// A child that has already exited never emits `exit` again, so waiting for it would never end: it is done at once. A live one has its listener in place before it is signalled
 const stop = ({ child }) => new Promise((resolve) => {
+  if (child.exitCode !== null || child.signalCode !== null) return resolve();
   child.once('exit', resolve);
   child.kill();
 });
@@ -76,7 +78,11 @@ test('with BASE_URL, every checkout uses it whatever the request says', async ()
   }
 });
 
-test('a notice goes to Orbit when it is listed, and a payment made with an invented key and any address gets no request to that address', async () => {
+/**
+ * Two servers that stand for Orbit and for an internal address a payment names; the gateway is started against them and everything is closed whatever happens,
+ * the gateway's start included (a gateway that does not start must not leave them listening).
+ */
+async function withTargets(startEnv, body, closed = []) {
   const hits = { orbit: [], internal: [] };
   const mk = (list) => http.createServer((req, res) => {
     list.push(req.url);
@@ -84,10 +90,21 @@ test('a notice goes to Orbit when it is listed, and a payment made with an inven
   });
   const orbit = mk(hits.orbit);
   const internal = mk(hits.internal);
+  closed.push(orbit, internal);
   await Promise.all([orbit, internal].map((s) => new Promise((resolve) => s.listen(0, '127.0.0.1', resolve))));
   const origin = (s) => `http://127.0.0.1:${s.address().port}`;
-  const server = await start({ BASE_URL: 'https://fake-pay.example.org', NOTICE_ORIGINS: origin(orbit) });
+  let server = null;
   try {
+    server = await start(startEnv(origin(orbit)));
+    return await body({ server, hits, origin: (s) => origin(s), orbit, internal });
+  } finally {
+    if (server) await stop(server);
+    await Promise.all([orbit, internal].map((s) => new Promise((resolve) => s.close(resolve))));
+  }
+}
+
+test('a notice goes to Orbit when it is listed, and a payment made with an invented key and any address gets no request to that address', async () => {
+  await withTargets((orbitOrigin) => ({ BASE_URL: 'https://fake-pay.example.org', NOTICE_ORIGINS: orbitOrigin }), async ({ server, hits, origin, orbit, internal }) => {
     const good = await charge(server, {}, { reference: { order: 'good', idempotent: 'good' }, post: { url: `${origin(orbit)}/api/app-pay/notice/good` } });
     const bad = await charge(server, {}, { reference: { order: 'bad', idempotent: 'bad' }, post: { url: `${origin(internal)}/admin` } });
     for (const id of [good.id, bad.id]) {
@@ -100,8 +117,22 @@ test('a notice goes to Orbit when it is listed, and a payment made with an inven
     assert.deepEqual(hits.internal, []);
     const notices = await fetch(`${server.url}/control/notices`, { headers: { 'x-control-token': CONTROL } }).then((r) => r.json());
     assert.ok(JSON.stringify(notices).includes(bad.id));
-  } finally {
-    await stop(server);
-    await Promise.all([orbit, internal].map((s) => new Promise((resolve) => s.close(resolve))));
-  }
+  });
+});
+
+test('stopping a gateway that has already exited does not wait for an exit that will never come', async () => {
+  const server = await start({});
+  await new Promise((resolve) => {
+    server.child.once('exit', resolve);
+    server.child.kill();
+  });
+  await Promise.race([stop(server), new Promise((_, reject) => setTimeout(() => reject(new Error('stop() never ended')), 3000))]);
+});
+
+test('a gateway that does not start leaves nothing listening: both callback servers are closed', async () => {
+  const servers = [];
+  // No control token: the gateway refuses to run, and start() gives up
+  await assert.rejects(withTargets(() => ({ CONTROL_TOKEN: '' }), async () => undefined, servers), /did not start/);
+  assert.equal(servers.length, 2);
+  for (const one of servers) assert.equal(one.listening, false);
 });

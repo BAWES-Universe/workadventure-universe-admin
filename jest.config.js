@@ -31,6 +31,9 @@ const customJestConfig = {
     '!**/.next/**',
   ],
   testTimeout: 10000,
+  // The database suites (ROLES_DB_TEST) share ONE database and its settings rows (the Instant limits, the meter, the bot limits): they run one at a time, whichever command
+  // starts jest, so one suite can never delete or reseed what another is reading
+  ...(process.env.ROLES_DB_TEST ? { maxWorkers: 1 } : {}),
 }
 
 // createJestConfig is exported this way to ensure that next/jest can load the Next.js config which is async
