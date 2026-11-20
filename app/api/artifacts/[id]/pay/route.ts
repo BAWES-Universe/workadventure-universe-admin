@@ -53,7 +53,7 @@ export const POST = artifactRoute('POST /api/artifacts/:id/pay', 'game', schema,
   const accountId = account && !account.isGuest ? account.id : null;
   const buyer: 'account' | 'guest' = accountId ? 'account' : 'guest';
   if (body.order) {
-    const view = await orderForArtifact(body.order, params.id);
+    const view = await orderForArtifact(body.order, params.id, {}, { accountId });
     if (!view) throw new ArtifactError('not_found', 404, 'No such order.');
     return { ...view, buyer };
   }

@@ -641,6 +641,16 @@ export interface OrderView {
   pollAfterMs: number;
 }
 
+/**
+ * How far apart the looks are for an order that may still have been paid but that nothing is waiting for (closed past the late-payment window, or
+ * one that could not be confirmed): every 6 hours for the first 3 days, daily for a month, then weekly. It never stops: only the service saying
+ * paid, a final failed state, or a payment for something else ends it, because a look that could not be made proves nothing about a payment.
+ */
+export function reconcileEveryMs(sinceWindowMs: number): number {
+  const day = 24 * HOUR;
+  return sinceWindowMs < 3 * day ? 6 * HOUR : sinceWindowMs < 33 * day ? day : 7 * day;
+}
+
 /** 3 seconds for a new order, slowing to 15: a buyer who pays is seen quickly, and tabs left open on an order nobody pays cost little. */
 export function pollAfterMs(createdAt: Date, now: Date = new Date()): number {
   const minutes = (now.getTime() - createdAt.getTime()) / 60_000;
@@ -675,7 +685,7 @@ const stateOf = (status: string): OrderState => (status === 'paid' ? 'paid' : st
  * Asks the service about one order and moves it on. Safe to call as often as anyone likes (the visitor's page, the return page, the
  * service's notice): the service itself is asked at most once in `paymentCheckSeconds` (more for an order that has waited long) for an order, and "paid" is written once.
  */
-export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?: { contacted: boolean }): Promise<OrderView | null> {
+export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?: { contacted: boolean }, how: { background?: boolean } = {}): Promise<OrderView | null> {
   const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, include: { connection: true, job: { select: { artifact: { select: { title: true } } } } } });
   if (!order) return null;
   const view = (status: string, mode: string | null = order.mode): OrderView => ({ status: stateOf(status), checkoutUrl: status === 'pending' ? order.checkoutUrl : null, testPayment: mode === 'test', orderId: order.id, pollAfterMs: pollAfterMs(order.createdAt) });
@@ -691,22 +701,39 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
     const ended = await moveOrder(order.id, { from: 'creating', to: 'not_paid', reason: 'start_never_finished', data: { closedAt: new Date(openUntil) } });
     return view(ended ? 'not_paid' : order.status);
   }
-  // Paid and cannot-confirm are final. A closed (not paid) order is asked about again for a while: the buyer may still pay at the service
-  // after it was closed, and that is real money.
-  if (order.status !== 'pending' && order.status !== 'not_paid') return view(order.status);
   const wasClosed = order.status === 'not_paid';
   // The late window runs from when the order was closed (an order closed because its time ran out closed at the end of that time)
   const closedAt = order.closedAt ?? new Date(order.createdAt.getTime() + limits.checkoutOpenHours * HOUR);
-  if (wasClosed && now.getTime() - closedAt.getTime() > limits.latePaymentHours * HOUR) return nothingMoreToAsk(view(order.status));
+  const windowEndsAt = closedAt.getTime() + limits.latePaymentHours * HOUR;
+  const pastWindow = wasClosed && now.getTime() > windowEndsAt;
+  // An order the service has not had the last word about, with a payment that may exist at the service (it has its reference), is never given up on
+  // because a look could not be made: a closed one past its late window, and one that could not be confirmed (the app was disconnected, the key
+  // could not be read). It waits in a long, slow reconciliation, and a payment found there is counted once, like any late one.
+  const reconciling = !order.reconciled && !!order.providerRef && (pastWindow || order.status === 'cant_confirm');
+  // Paid is final, and so is cannot-confirm for a payment for something else (a person looks at it). A closed (not paid) order is asked about
+  // again for a while: the buyer may still pay at the service after it was closed, and that is real money.
+  if (order.status !== 'pending' && order.status !== 'not_paid' && !reconciling) return view(order.status);
+  if (pastWindow && !reconciling) return nothingMoreToAsk(view(order.status));
   // What the order may still become: a pending one anything, a closed one only paid (or cannot-confirm for a payment that does not match)
-  const open = { in: ['pending', 'not_paid'] };
+  const open = { in: ['pending', 'not_paid', 'cant_confirm'] };
+  const sinceWindow = Math.max(0, now.getTime() - windowEndsAt);
+  // A look that cannot be made now (no app, no key) is put off by the order's own schedule, so a sweep does not come back to it every pass
+  const putOff = async () => {
+    await prisma.appPageOrder.updateMany({ where: { id: order.id, reconciled: false }, data: { nextLookAt: new Date(now.getTime() + reconcileEveryMs(sinceWindow)) } }).catch(() => undefined);
+    return later(view(order.status));
+  };
 
-  const connection = order.connection;
+  // An order whose app was disconnected (its connection row is gone) is asked about through the page's app as it is now, when the owner has connected
+  // one again: what counts a payment is still the exact amount, currency, reference and mode, so another key can never make one up
+  const nowJob = reconciling && !order.connection ? await prisma.appPageJob.findUnique({ where: { artifactId: order.artifactId }, include: { connection: true } }) : null;
+  const connection = order.connection ?? (nowJob && nowJob.ownerId === order.ownerId ? nowJob.connection : null);
   const definition = connection && connection.kind === 'direct' ? definitionOf(connection) : null;
   // The app was disconnected: what it said could not be checked any more, and a payment is never assumed. A definition that changed since
   // the checkout began (a new key, a new catalog) is not a reason to give up on a payment that may be real: the look below uses the
   // definition now in force, and "paid" still needs the exact amount, currency, reference and mode.
   if (!connection || !definition?.payment || !order.providerRef) {
+    // No payment can exist for an order with no reference at the service. With one, the app may be connected again (or its key given again): it waits
+    if (reconciling) return putOff();
     if (wasClosed) return nothingMoreToAsk(view(order.status));
     await moveOrder(order.id, { from: 'pending', to: 'cant_confirm', reason: 'app_gone' });
     return view('cant_confirm');
@@ -724,9 +751,11 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // more adds one more `paymentCheckSeconds`, up to sixty of them): a buyer who pays is seen at once, while tabs left open on an order nobody
   // is paying cost an owner a small and shrinking share of their looks instead of the same share for the whole open time.
   const spacing = limits.paymentCheckSeconds * Math.min(60, 1 + Math.floor((now.getTime() - order.createdAt.getTime()) / 60_000));
+  // An order in the long wait is looked at by its own schedule when a sweep asks; a buyer pressing Check payment is looked at as soon as the ordinary spacing allows
+  const due = reconciling && how.background ? { OR: [{ nextLookAt: null }, { nextLookAt: { lte: now } }] } : { OR: [{ checkedAt: null }, { checkedAt: { lt: new Date(now.getTime() - (reconciling ? limits.paymentCheckSeconds : spacing) * 1000) } }] };
   const taken = await prisma.appPageOrder.updateMany({
-    where: { id: order.id, status: open, OR: [{ checkedAt: null }, { checkedAt: { lt: new Date(now.getTime() - spacing * 1000) } }] },
-    data: { checkedAt: now, checks: { increment: 1 } },
+    where: { id: order.id, status: open, ...(reconciling ? { reconciled: false } : {}), ...due },
+    data: { checkedAt: now, checks: { increment: 1 }, ...(reconciling ? { nextLookAt: new Date(now.getTime() + reconcileEveryMs(sinceWindow)) } : {}) },
   });
   if (taken.count === 0) {
     lookStats.spaced += 1;
@@ -738,7 +767,9 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   try {
     key = readKey(connection);
   } catch {
-    // A key that cannot be read can never be used to ask again: a closed order stays as it is, an open one can no longer be confirmed
+    // A key that cannot be read cannot ask now: an open order can no longer be confirmed, and a closed one with a payment that may exist keeps waiting
+    // (the key may be given again). The order's own schedule is already moved on by the look that was taken
+    if (reconciling) return later(view(order.status));
     if (wasClosed) return nothingMoreToAsk(view(order.status));
     await moveOrder(order.id, { from: 'pending', to: 'cant_confirm', reason: 'key_unreadable' });
     return view('cant_confirm');
@@ -793,6 +824,8 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   const status = valueAt(record, lookup.statusPath);
   // An answer that names no state at all is not an answer: asked again, never read as "still open" and left
   if (typeof status !== 'string' || !status) return unreadable();
+  // The service answered in a way that could be read: kept for support ("last heard from the service")
+  await prisma.appPageOrder.updateMany({ where: { id: order.id }, data: { lastReadAt: now } }).catch(() => undefined);
   const expired = now.getTime() - order.createdAt.getTime() > limits.checkoutOpenHours * HOUR;
   if (typeof status === 'string' && lookup.successStates.includes(status)) {
     const amount = valueAt(record, lookup.amountPath);
@@ -810,21 +843,36 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
       sameMode;
     // Completed at the service, but not for what we asked: never counted as paid
     if (!same) {
-      await moveOrder(order.id, { from: open.in, to: 'cant_confirm', reason: 'paid_for_something_else' });
+      // A payment for something else is for a person to look at: nothing more is asked automatically
+      await moveOrder(order.id, { from: open.in, to: 'cant_confirm', reason: 'paid_for_something_else', data: { reconciled: true } });
       return view('cant_confirm');
     }
-    // Late is decided by the state the order really left, read under the lock: a close that came in while the service was being asked counts
-    const left = await moveOrder(order.id, { from: open.in, to: 'paid', reason: (was) => (was === 'not_paid' ? 'paid_late' : 'paid'), data: { paidAt: now } });
-    if (left) await tellOwnerPaid(order, connection.name, definition.service !== 'custom', order.job?.artifact.title ?? 'your page', left === 'not_paid');
+    // Late is decided by the state the order really left, read under the lock: a close that came in while the service was being asked counts, and
+    // so does one found in the long wait (it was not paid when it was closed or could not be confirmed). Only the look that moved it tells the owner.
+    const left = await moveOrder(order.id, { from: open.in, to: 'paid', reason: (was) => (was === 'pending' ? 'paid' : 'paid_late'), data: { paidAt: now } });
+    if (left) await tellOwnerPaid(order, connection.name, definition.service !== 'custom', order.job?.artifact.title ?? 'your page', left !== 'pending');
     return view('paid');
   }
-  // A closed order that the service still does not call completed stays closed
-  if (wasClosed) return view('not_paid');
+  const failed = typeof status === 'string' && lookup.failedStates.includes(status);
+  // An order that could not be confirmed, and the service can be read again: it goes on as it would have (open while its time lasts, closed after)
+  if (order.status === 'cant_confirm') {
+    if (failed) {
+      await moveOrder(order.id, { from: 'cant_confirm', to: 'not_paid', reason: 'service_says_failed', data: { closedAt: now, reconciled: true } });
+      return view('not_paid');
+    }
+    if (!expired) return (await moveOrder(order.id, { from: 'cant_confirm', to: 'pending', reason: 'readable_again' })) ? view('pending') : view(order.status);
+    return (await moveOrder(order.id, { from: 'cant_confirm', to: 'not_paid', reason: 'open_time_ran_out', data: { closedAt: now } })) ? view('not_paid') : view(order.status);
+  }
+  // A closed order that the service still does not call completed stays closed. When the service names a final failed state nothing more is asked
+  // after the late window: that is its last word. Anything else (started, authorised only) is not, and stays in the long wait.
+  if (wasClosed) {
+    if (failed) await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'not_paid' }, data: { reconciled: true } }).catch(() => undefined);
+    return failed && pastWindow ? nothingMoreToAsk(view('not_paid')) : view('not_paid');
+  }
   // Only a state the service names as final closes an order early; anything else (started, authorised only, a state we never heard of) stays
   // open until it has been open too long. A payment that completes after that is still real money and is still counted above.
-  const failed = typeof status === 'string' && lookup.failedStates.includes(status);
   if (!failed && !expired) return view('pending');
-  const closed = await moveOrder(order.id, { from: 'pending', to: 'not_paid', reason: failed ? 'service_says_failed' : 'open_time_ran_out', data: { closedAt: now } });
+  const closed = await moveOrder(order.id, { from: 'pending', to: 'not_paid', reason: failed ? 'service_says_failed' : 'open_time_ran_out', data: { closedAt: now, ...(failed ? { reconciled: true } : {}) } });
   return closed ? view('not_paid') : view('pending');
 }
 
@@ -858,9 +906,13 @@ async function tellOwnerPaid(
 }
 
 /** One order as the visitor's page may ask about it: only on the page it was made for. */
-export async function orderForArtifact(orderId: string, artifactId: string, deps: GuardDeps = {}): Promise<OrderView | null> {
-  const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, select: { artifactId: true } });
+export async function orderForArtifact(orderId: string, artifactId: string, deps: GuardDeps = {}, viewer?: { accountId: string | null }): Promise<OrderView | null> {
+  const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, select: { artifactId: true, buyerKey: true } });
   if (!order || order.artifactId !== artifactId) return null;
+  // An order made under an account is that account's to be told about: when another account (or nobody) is signed in now, on the same device, it
+  // is answered like an order that is not there, so a checkout that was in flight for the account that left tells nothing to the one that came.
+  // A guest's order (no account) is the browser's own, and stays reachable: guest recovery on a shared device is deliberate.
+  if (viewer && order.buyerKey?.startsWith('acct:') && order.buyerKey !== (viewer.accountId ? accountBuyerKey(viewer.accountId) : null)) return null;
   return verifyOrder(orderId, deps);
 }
 
@@ -900,14 +952,20 @@ const ownsOrder = (ownKeys: string[], buyerKey: string | null): boolean => !!buy
  * from when the order was closed (an order closed because its time ran out closed at the end of that time), the same as `verifyOrder`
  * reads it. An open order past its time is still a candidate, so a sweep that was down never leaves one open for ever.
  */
-function askable(now: Date, limits: Awaited<ReturnType<typeof getBrickLimits>>): Prisma.AppPageOrderWhereInput {
+function askable(now: Date, limits: Awaited<ReturnType<typeof getBrickLimits>>, longWait = false): Prisma.AppPageOrderWhereInput {
   const lateWindow = limits.latePaymentHours * HOUR;
   const closedFrom = new Date(now.getTime() - lateWindow);
   // A closed order with no close time ran out of time at createdAt + open hours
   const unclosedFrom = new Date(now.getTime() - lateWindow - limits.checkoutOpenHours * HOUR);
   return {
     providerRef: { not: null },
-    OR: [{ status: 'pending' }, { status: 'not_paid', closedAt: { gte: closedFrom } }, { status: 'not_paid', closedAt: null, createdAt: { gte: unclosedFrom } }],
+    OR: [
+      { status: 'pending' },
+      { status: 'not_paid', closedAt: { gte: closedFrom } },
+      { status: 'not_paid', closedAt: null, createdAt: { gte: unclosedFrom } },
+      // The long wait (Restore asks about these too): an order the service has not had the last word about may still have been paid, however long ago it closed
+      ...(longWait ? [{ reconciled: false, providerRef: { not: null }, status: { in: ['not_paid', 'cant_confirm'] } }] : []),
+    ],
   };
 }
 
@@ -944,7 +1002,7 @@ export async function restorePurchase(input: { artifactId: string; buyerKeys: st
   const now = new Date();
   const due = new Date(now.getTime() - limits.paymentCheckSeconds * 1000);
   const open = await prisma.appPageOrder.findMany({
-    where: { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, AND: [askable(now, limits), { OR: [{ checkedAt: null }, { checkedAt: { lt: due } }] }] },
+    where: { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, AND: [askable(now, limits, true), { OR: [{ checkedAt: null }, { checkedAt: { lt: due } }] }] },
     orderBy: [{ checkedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'desc' }],
     take: RESTORE_LOOKS,
     select: { id: true },
@@ -999,6 +1057,24 @@ export async function sweepPageOrders(now: Date = new Date(), deps: GuardDeps = 
     if (await moveOrder(order.id, { from: 'creating', to: 'not_paid', reason: 'start_never_finished', data: { closedAt: new Date(order.createdAt.getTime() + limits.checkoutOpenHours * HOUR) } }).catch(() => false)) sweep.ended += 1;
   }
   const quiet = new Date(now.getTime() - SWEEP_QUIET_MS);
+  // The long wait is a pass of its own, by each order's own schedule, so orders that are due never wait behind ones that are not
+  const waiting = await prisma.appPageOrder.findMany({
+    where: { reconciled: false, providerRef: { not: null }, status: { in: ['not_paid', 'cant_confirm'] }, AND: [{ OR: [{ nextLookAt: null }, { nextLookAt: { lte: now } }] }, { NOT: { AND: [{ status: 'not_paid' }, { OR: [{ closedAt: { gte: new Date(now.getTime() - limits.latePaymentHours * HOUR) } }, { closedAt: null, createdAt: { gte: new Date(now.getTime() - limits.latePaymentHours * HOUR - limits.checkoutOpenHours * HOUR) } }] }] } }] },
+    orderBy: [{ nextLookAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
+    take: SWEEP_BATCH,
+    select: { id: true, status: true },
+  });
+  for (const order of waiting) {
+    const before = order.status;
+    const trace = { contacted: false };
+    const view = await verifyOrder(order.id, deps, trace, { background: true }).catch((error) => {
+      console.error('[PagePayments] A reconciliation look failed:', error instanceof Error ? error.message : 'unknown');
+      return null;
+    });
+    if (!view) continue;
+    if (trace.contacted) sweep.looked += 1;
+    if (stateOf(before) !== view.status) sweep.moved += 1;
+  }
   const open = await prisma.appPageOrder.findMany({
     where: { AND: [askable(now, limits), { OR: [{ checkedAt: null }, { checkedAt: { lt: quiet } }] }] },
     orderBy: [{ checkedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
@@ -1035,6 +1111,8 @@ export interface PaymentLoad {
   looks: { made: number; spaced: number; noRoom: number; since: string };
   /** How long, in the last day, an order took from being made to being found paid. */
   recoveryLastDay: { paid: number; p50Seconds: number | null; p95Seconds: number | null };
+  /** Orders in the long wait (closed past their late window, or not confirmable, and the service has not had the last word): how many, how long the oldest has waited, and how many have never once been read. An age that keeps growing is an alert. */
+  unconfirmed: { count: number; oldestSeconds: number | null; neverRead: number };
 }
 
 /** What dev is measured with (GPT's evidence point 4): active orders, the oldest unsettled order, looks throttled, how long recovery takes. */
@@ -1042,13 +1120,17 @@ export async function pagePaymentLoad(now: Date = new Date()): Promise<PaymentLo
   const limits = await getBrickLimits();
   const day = new Date(now.getTime() - 24 * HOUR);
   const hour = new Date(now.getTime() - HOUR);
-  const [pending, oldestPending, starting, oldestStarting, looksLastHour, paid] = await Promise.all([
+  const longWait = { reconciled: false, providerRef: { not: null }, OR: [{ status: 'cant_confirm' }, { status: 'not_paid', OR: [{ closedAt: { lt: new Date(now.getTime() - limits.latePaymentHours * HOUR) } }, { closedAt: null, createdAt: { lt: new Date(now.getTime() - (limits.latePaymentHours + limits.checkoutOpenHours) * HOUR) } }] }] } satisfies Prisma.AppPageOrderWhereInput;
+  const [pending, oldestPending, starting, oldestStarting, looksLastHour, paid, unconfirmed, oldestUnconfirmed, neverRead] = await Promise.all([
     prisma.appPageOrder.count({ where: { status: 'pending' } }),
     prisma.appPageOrder.findFirst({ where: { status: 'pending' }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
     prisma.appPageOrder.count({ where: { status: 'creating' } }),
     prisma.appPageOrder.findFirst({ where: { status: 'creating' }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
     prisma.appKeyCall.count({ where: { ownerId: LOOKUP_ROWS, createdAt: { gte: hour } } }),
     prisma.appPageOrder.findMany({ where: { status: 'paid', paidAt: { gte: day } }, select: { createdAt: true, paidAt: true }, take: 5_000 }),
+    prisma.appPageOrder.count({ where: longWait }),
+    prisma.appPageOrder.findFirst({ where: longWait, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
+    prisma.appPageOrder.count({ where: { ...longWait, lastReadAt: null } }),
   ]);
   const seconds = (from: Date | undefined) => (from ? Math.max(0, Math.round((now.getTime() - from.getTime()) / 1000)) : null);
   const spans = paid.flatMap((order) => (order.paidAt ? [Math.max(0, Math.round((order.paidAt.getTime() - order.createdAt.getTime()) / 1000))] : [])).sort((a, b) => a - b);
@@ -1063,5 +1145,6 @@ export async function pagePaymentLoad(now: Date = new Date()): Promise<PaymentLo
     looksAllowedPerHour: limits.keyCallsPlatform,
     looks: { made: lookStats.made, spaced: lookStats.spaced, noRoom: lookStats.noRoom, since: lookStats.since.toISOString() },
     recoveryLastDay: { paid: spans.length, p50Seconds: at(0.5), p95Seconds: at(0.95) },
+    unconfirmed: { count: unconfirmed, oldestSeconds: seconds(oldestUnconfirmed?.createdAt), neverRead },
   };
 }

@@ -482,6 +482,12 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
       const limit = setTimeout(() => look.abort(), Math.min(ASK_FOR_MS, left));
       try {
         const response = await ask(`${base}?order=${encodeURIComponent(orderId)}`, { cache: 'no-store', signal: look.signal });
+        // Orbit answers an order as "not there" when it is not this buyer's any more (another account signed in on this device while the checkout
+        // was on its way) or the page is no longer shared: the line of the one that left is cleared, and nothing of it is told to the one that came
+        if (response.status === 404) {
+          if (over || destroyed) return;
+          return finish({}, 'unavailable');
+        }
         const body = response.ok ? ((await response.json()) as { status?: string; testPayment?: boolean; pollAfterMs?: number }) : null;
         if (over || destroyed) return;
         if (body?.pollAfterMs && Number.isFinite(body.pollAfterMs)) next = Math.min(MOST_POLL_MS, Math.max(LEAST_POLL_MS, body.pollAfterMs));

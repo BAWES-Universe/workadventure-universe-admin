@@ -230,6 +230,38 @@ describe('a paying page on the public share link', () => {
     host.destroy();
   });
 
+  it('clears the line of a checkout that Orbit no longer answers for this buyer (another account signed in on the device), and tells the page nothing but that it is unavailable', async () => {
+    let signedInElsewhere = false;
+    const { tap, host, lines, told } = setup((call) => (call.init?.method === 'POST' ? { body: started } : signedInElsewhere ? { status: 404, body: { error: 'Not found' } } : { body: { status: 'checking', pollAfterMs: 3000 } }));
+    tap({ request: 'a' });
+    await flush();
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(lines.at(-1)).toMatchObject({ checking: true });
+    // Another account signs in on this device: the order is no longer this buyer's, and the previous account's status is gone
+    signedInElsewhere = true;
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(lines.at(-1)).toMatchObject({ checking: false, paid: null, problem: null, canCheck: false, needsUpdate: false });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'unavailable', request: 'a' });
+    expect(told().some((message) => message.status === 'paid')).toBe(false);
+    host.destroy();
+  });
+
+  it('a restored test purchase stays a test one for the page and the line, and a second restore of the same purchase starts nothing', async () => {
+    const { tap, host, lines, told, calls } = setup((call) => (call.body.restore ? { body: { status: 'paid', testPayment: true, orderId: 'o-1', paidAt: '2026-11-19T10:00:00Z', via: 'own', buyer: 'guest' } } : 'lost'));
+    tap({ request: 'r1', restore: true });
+    await flush();
+    expect(lines.at(-1)).toMatchObject({ paid: { test: true } });
+    tap({ request: 'r2', restore: true });
+    await flush();
+    // Both are told a test payment, never a plain paid, and nothing but Restore was asked of Orbit (no start, no second purchase)
+    expect(told()).toEqual([
+      { universe: 'app-result', session: 's1', status: 'paid', request: 'r1', test: true },
+      { universe: 'app-result', session: 's1', status: 'paid', request: 'r2', test: true },
+    ]);
+    expect(calls.every((call) => call.body.restore === true)).toBe(true);
+    host.destroy();
+  });
+
   it('answers the document that asked, and no other: the same document tapping again is the same request', async () => {
     const { tap, told, host } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
     tap({ request: 'a', session: 's-one' });

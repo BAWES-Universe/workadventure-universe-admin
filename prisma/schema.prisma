@@ -1652,6 +1652,13 @@ model AppPageOrder {
   buyerKey       String?  @map("buyer_key") @db.VarChar(80)
   // The description the service was (or will be) sent, kept so a start carried on later sends exactly what the first one did
   description    String?  @db.VarChar(200)
+  // The last time the service answered a look at this order in a way that could be read (any state), for support: "last heard from the service".
+  lastReadAt     DateTime? @map("last_read_at")
+  // The service has said the last word about this order: a final failed state, or a payment for something else that a person has to look at.
+  // Until then an order that was closed (or could not be confirmed) may still have been paid, and is looked at again, slowly, with no end date.
+  reconciled     Boolean  @default(false)
+  // When the next look is due for an order in that long wait (null: due now). Kept on the order so a restart never loses the schedule.
+  nextLookAt     DateTime? @map("next_look_at")
 
   job        AppPageJob?    @relation(fields: [jobId], references: [id], onDelete: SetNull)
   connection AppConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
