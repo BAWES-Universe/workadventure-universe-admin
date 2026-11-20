@@ -41,6 +41,7 @@ import { personUsage } from '@/lib/meter-person';
 import { WorkerDied, afterWorkerDied } from '../helpers/worker-died';
 import { activityFor, closeReceipt, openReceipt, settleCheckingReceipts } from '@/lib/task-receipts';
 import { OUTCOME_WORDS } from '@/lib/task-receipt-words';
+import { reportsToTell } from '@/lib/computer-report';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 // What happens to a failed job's calls is the release's own rule (`giveBackModelCalls`); the part that needs it runs where it is
@@ -1055,6 +1056,30 @@ run('credit for computers, on the real books', () => {
       await sweepComputers(at(700));
       expect((await computerCredit(prisma as never, sara.id, NOW)).availableMicros).toBe(1_000_000);
       expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(2);
+    });
+
+    it('the task reply says the same: while the refund is pending the report carries the amount owed, and once it is acknowledged it carries none', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(async () => {
+        throw new Error('books unreachable');
+      });
+      const mute = quiet();
+      try {
+        await failedOnOurSide(jobId, at(10));
+      } finally {
+        mute.mockRestore();
+      }
+      const later = at(60 * 24);
+      const failed = async () => (await reportsToTell(50, later)).find((report) => report.jobId === jobId);
+      expect(await failed()).toMatchObject({ kind: 'failed', givenBack: true, refundPendingMicros: 30_000 });
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(actualRefund());
+      await sweepComputers(at(600));
+      const after = await failed();
+      expect(after).toMatchObject({ kind: 'failed', givenBack: true });
+      expect(after).not.toHaveProperty('refundPendingMicros');
     });
 
     it('a pending refund beside a Gmail that was charged: the Gmail charge and the pending refund are each said, and the net amount waits until it is settled', async () => {

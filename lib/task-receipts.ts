@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { givenBackJob } from '@/lib/computer-values';
+import { refundStatesFor } from '@/lib/computer-refunds';
 import { paidBy, payerFromRow, payerOf, payerToRow, type PaidBy, type Payer } from '@/lib/paid-by';
 import {
   activityIdOf,
@@ -708,20 +709,17 @@ interface ComputerMoney {
 }
 
 /**
- * Reads, for the computer jobs of a list, the money states a receipt must not say "refunded" over before they are true: the refund obligations (lib/computer-refunds) and
- * the settled credit holds of a job that failed on our side (what came back is the hold's own `refunded_micros`; what is still owed is the obligation that is not acknowledged,
- * or, when none was written yet, what the hold still has), and the give-back decision of a failed job that is still `pending` (an outside effect to confirm, or limits missing:
+ * Reads, for the computer jobs of a list, the money states a receipt must not say "refunded" over before they are true: what the books gave back and what they still owe for a job
+ * that failed on our side (`refundStatesFor`: the refund obligations and the settled credit holds), and the give-back decision of a failed job that is still `pending` (an outside effect to confirm, or limits missing:
  * the person is charged provisionally and Orbit is still deciding). Reads only.
  */
 async function computerMoneyOf(jobs: readonly { id: string; given: boolean }[]): Promise<Map<string, ComputerMoney>> {
   const out = new Map<string, ComputerMoney>();
   if (jobs.length === 0) return out;
-  const ids = jobs.map((job) => job.id);
   const givenIds = jobs.filter((job) => job.given).map((job) => job.id);
-  const [holds, obligations, decisions] = await Promise.all([
-    givenIds.length === 0 ? Promise.resolve([]) : prisma.creditHold.findMany({ where: { jobKey: { in: givenIds }, category: 'computers', state: 'settled' }, select: { jobKey: true, holdKey: true, customerMicros: true, refundedMicros: true } }),
-    givenIds.length === 0 ? Promise.resolve([]) : prisma.computerRefundObligation.findMany({ where: { jobId: { in: givenIds } }, select: { jobId: true, holdKey: true, amountMicros: true, state: true } }),
-    prisma.computerGiveBackDecision.findMany({ where: { jobId: { in: ids }, state: 'pending' }, select: { jobId: true, basis: true } }),
+  const [refunds, decisions] = await Promise.all([
+    refundStatesFor(givenIds),
+    prisma.computerGiveBackDecision.findMany({ where: { jobId: { in: jobs.map((job) => job.id) }, state: 'pending' }, select: { jobId: true, basis: true } }),
   ]);
   const entry = (id: string): ComputerMoney => {
     let found = out.get(id);
@@ -731,19 +729,7 @@ async function computerMoneyOf(jobs: readonly { id: string; given: boolean }[]):
     }
     return found;
   };
-  const obligated = new Map(obligations.map((one) => [one.holdKey, one] as const));
-  for (const hold of holds) {
-    if (!hold.jobKey) continue;
-    const money = entry(hold.jobKey);
-    money.returnedMicros += Number(hold.refundedMicros);
-    const ob = obligated.get(hold.holdKey);
-    // The obligation is the durable record: owed until the books acknowledge it. A hold with none yet is owed what it still has
-    const owed = ob ? (ob.state === 'owed' ? Number(ob.amountMicros) : 0) : Math.max(0, Number(hold.customerMicros ?? 0) - Number(hold.refundedMicros));
-    money.pendingMicros += owed;
-  }
-  // An obligation whose hold is not among the settled ones read (the hold was purged with its Brick) is still owed
-  const seen = new Set(holds.map((hold) => hold.holdKey));
-  for (const one of obligations) if (!seen.has(one.holdKey) && one.state === 'owed') entry(one.jobId).pendingMicros += Number(one.amountMicros);
+  for (const [id, state] of refunds) Object.assign(entry(id), state);
   for (const decision of decisions) entry(decision.jobId).deciding = decision.basis === 'effect_unresolved' ? 'effect' : 'limits';
   return out;
 }
