@@ -1674,6 +1674,39 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await givenBack(ownEvidence.id)).toBe(true);
     });
 
+    it('a decision judged on no turn is read on every row of the job only when the runner called it ours; for any other hint a numbered fault of another run never reverses it, and a turnless one of its own run does', async () => {
+      await limitsAre(LAUNCH);
+      const sara = await person('sara');
+      const route = 'universe-ai/model-no-turn';
+      const window = { route, from: minutes(-60), to: minutes(600) };
+      // The agent ended on its own: the runner named no turn and nothing was recorded, so the decision judged no turn (run b)
+      const agentEnded = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' });
+      const turnless = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' });
+      expect(await decisionOf(agentEnded.id)).toMatchObject({ state: 'refused', basis: 'agent_ended', judgedRun: 'runb', judgedTurns: [] });
+      expect(await decisionOf(turnless.id)).toMatchObject({ state: 'refused', basis: 'agent_ended', judgedTurns: [] });
+      // A provider failure of ANOTHER run of the job (a numbered turn) is not what this decision judged
+      await recordFaults(sara.brickId, agentEnded.id, [fault(3, 'provider_5xx', { route, run: 'runa' })]);
+      // A turnless one of its own run is part of its evidence
+      await recordFaults(sara.brickId, turnless.id, [fault(null, 'provider_5xx', { route, run: 'runb' })]);
+      expect(await correctRouteTogether(window)).toMatchObject({ corrected: 1, uncounted: 0 });
+      expect(await decisionOf(agentEnded.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      expect(await givenBack(agentEnded.id)).toBe(false);
+      expect(await decisionOf(turnless.id)).toMatchObject({ state: 'given', basis: 'incident' });
+    });
+
+    it('the legacy verdict the runner called ours with no turns named keeps reading every row of the job: a provider row of any run on the route qualifies', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      const route = 'universe-ai/model-legacy';
+      const first = await job(sara, ours);
+      // The cap is used; this one is refused as capped, with every row of the job its evidence
+      const capped = await job(sara, ours, withFaults(sara, [fault(4, 'provider_5xx', { route, run: 'runz' })]));
+      expect(await decisionOf(first.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+      expect(await decisionOf(capped.id)).toMatchObject({ state: 'refused', basis: 'cap', judgedTurns: [] });
+      expect(await correctRouteTogether({ route, from: minutes(-60), to: minutes(600) })).toMatchObject({ corrected: 1 });
+      expect(await decisionOf(capped.id)).toMatchObject({ state: 'given', basis: 'incident' });
+    });
+
     it('corrects every affected job together: held, cap-refused and delivered ones are given back uncounted (an App’s own delivery stays), person-caused ones are left alone, and it is safe to say twice', async () => {
       await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
       const sara = await person('sara');

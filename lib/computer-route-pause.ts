@@ -34,7 +34,8 @@ export async function routeIsPaused(route: string, now: Date = new Date()): Prom
 /**
  * The faults an incident correction may rely on for one decision (aliases `d` = computer_give_back_decisions, `f` = computer_job_faults): a fault on the route in the window, of a
  * provider or of ours, that is part of THE DECISION'S OWN EVIDENCE: the rows `readFaultRows` reads for what the decision judged (its judged turns of its judged run, and the turnless rows
- * of that run or of no run; every row of the job when the decision named no turns). A fault of another run of the same job never reverses a decision judged on this one.
+ * of that run or of no run; every row of the job only for a decision the runner called `ours` and named no turns, the legacy verdict that reads every row). Any other hint (the agent ended, the agent's own) with no turn judged read the turnless rows of its judged run, so
+ * a numbered fault of another run, or of a turn nobody judged, never reverses it. A fault of another run of the same job never reverses a decision judged on this one.
  */
 export function incidentFaultMatch(route: string, from: Date, to: Date, ours: readonly string[]): Prisma.Sql {
   // A provider reason is a failure of a provider whatever the row's kind (unresolved by design, which is what makes an incident a reason to reverse a refusal). A reason that is OURS
@@ -46,7 +47,7 @@ export function incidentFaultMatch(route: string, from: Date, to: Date, ours: re
     : Prisma.sql`f."reason" IN (${Prisma.join([...PROVIDER_REASONS])})`;
   return Prisma.sql`f."route" = ${route} AND f."at" >= ${from} AND f."at" <= ${to} AND f."source" = 'universe-ai' AND f."kind" <> 'answered' AND ${reason}
     AND (
-      cardinality(d."judged_turns") = 0
+      (cardinality(d."judged_turns") = 0 AND d."cause_hint" = 'ours')
       OR (f."turn" = ANY(d."judged_turns") AND f."run" IS NOT DISTINCT FROM d."judged_run")
       OR (f."turn" IS NULL AND (f."run" IS NULL OR f."run" = d."judged_run"))
     )`;
