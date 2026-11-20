@@ -1064,6 +1064,39 @@ run('The files a finished computer job made reach the chat as cards, in a real d
       expect((await roomOf(id)).settledMicros).toBe(priced(after.secondsRun));
     });
 
+    it('a job that ended at 0 seconds keeps its room while a hand-over may still add seconds, then settles at what the hand-over made it, or is given back when none came', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const started_ = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', writes: false }, minutes(-60));
+      if (!started_.ok) throw new Error('no job');
+      const id = started_.job.id;
+      await finishJob(id, 'done', minutes(-1));
+      // Ended at 0 seconds, room still held and lapsed, and a hand-over is in progress (the machine's files are claimed)
+      await prisma.computerJob.update({ where: { id }, data: { secondsRun: 0 } });
+      await prisma.meterReservation.updateMany({ where: { jobId: id, reservationKey: { startsWith: 'computer:job:' } }, data: { state: 'held', settledMicros: null, closedAt: null, expiresAt: minutes(-30) } });
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date() } });
+      await sweepComputers(new Date());
+      // Not given back while the hand-over may still add seconds
+      expect((await roomOf(id)).state).toBe('held');
+      // The hand-over adds its seconds and lets go; the next sweep settles the room at the whole
+      await prisma.computerJob.update({ where: { id }, data: { secondsRun: { increment: 42 }, handOverAliveAt: null } });
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: null } });
+      await sweepComputers(new Date());
+      expect(await roomOf(id)).toMatchObject({ state: 'settled', settledMicros: priced(42) });
+
+      // A job that ended at 0 seconds with no hand-over at all (no claim, no beat) is given back, as before
+      const other = await person('tom');
+      await giveComputer(other.brickId, other.id);
+      const idle = await startJob({ botId: other.brickId, personId: other.id, title: 'Idle', writes: false }, minutes(-60));
+      if (!idle.ok) throw new Error('no job');
+      await finishJob(idle.job.id, 'done', minutes(-1));
+      await prisma.computerJob.update({ where: { id: idle.job.id }, data: { secondsRun: 0, handOverAliveAt: null } });
+      await prisma.meterReservation.updateMany({ where: { jobId: idle.job.id, reservationKey: { startsWith: 'computer:job:' } }, data: { state: 'held', settledMicros: null, closedAt: null, expiresAt: minutes(-30) } });
+      await prisma.brickComputer.updateMany({ where: { botId: other.brickId }, data: { filesClaimedAt: null } });
+      await sweepComputers(new Date());
+      expect((await roomOf(idle.job.id)).state).toBe('released');
+    });
+
     it('a crashed ending whose mark ages out is settled by the sweep exactly once: not while the mark is young, then once at what the job ran, however often the sweep comes back', async () => {
       const sara = await person('sara');
       const id = await started(sara, 'Visa form', minutes(-60));

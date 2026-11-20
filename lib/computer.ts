@@ -1547,9 +1547,10 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
     if (job && !isOver(job.status) && HOLDS_MACHINE.includes(job.status as never)) {
       await endJob(job.id, 'stopped', 'error', now);
       stopped++;
-    } else if (job && isOver(job.status) && job.startedAt && job.secondsRun > 0 && job.reservationKey === reservation.reservationKey) {
+    } else if (job && isOver(job.status) && job.startedAt && job.reservationKey === reservation.reservationKey) {
       // A job that ran and ended, whose room was left held (its settlement did not get through): the room is settled at what it ran, never given back, so the
-      // time it took is never lost between the room and the books (the sweep writes its time below)
+      // time it took is never lost between the room and the books (the sweep writes its time below). A job that ended at 0 seconds comes here too: its end marked
+      // a hand-over to come whatever the seconds, and that hand-over adds seconds, so its room is decided on the fresh seconds below (none: given back, as ever)
       const lease = await prisma.meterReservation.findUnique({ where: { reservationKey: reservation.reservationKey }, select: { terms: true } });
       // ...but not while its files are still being handed over: that hand-over adds its seconds to the job's time and settles the room itself afterwards
       // (a room settled here first at the shorter time would stay, close() keeps the first settlement). The same two conditions recordMissingComputerTime waits
@@ -1562,6 +1563,12 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
       const fresh = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { secondsRun: true, endedAt: true, handOverAliveAt: true } });
       if (!fresh) continue;
       if ((row?.filesClaimedAt && row.filesClaimedAt.getTime() > now.getTime() - FILES_CLAIM_MS) || (fresh.handOverAliveAt && fresh.handOverAliveAt.getTime() > now.getTime() - HAND_OVER_ALIVE_MS)) continue;
+      // Both stale: nothing is handing files over, so the seconds just read are the job's last. None: the room is given back, as for any job that ran no time
+      if (fresh.secondsRun <= 0) {
+        await releaseRoom({ key: reservation.reservationKey }, now);
+        released++;
+        continue;
+      }
       const provider = providerFor(row);
       const pinned = pinnedMicrosPerMinute(lease?.terms, fresh.secondsRun, (fresh.endedAt ?? now).getTime());
       const cost = costOfSeconds(fresh.secondsRun, pinned ?? (provider ? provider.microsPerMinute() : null));
