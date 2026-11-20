@@ -209,26 +209,101 @@ run('a computer job that failed on our side, and the bound on giving it back', (
     expect(await givenBack((await job(sara, ours)).id)).toBe(true);
   });
 
-  it('always gives back a failure only our own servers cause (a room that lapsed, a start that broke), whatever the bound: an outage is never refused', async () => {
+  it('always gives back a failure only our own servers cause (a room that lapsed), and it uses none of the person’s bound', async () => {
     await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
     const sara = await person('sara');
-    // The bound is used up by the runner's own report
-    expect(await givenBack((await job(sara, ours)).id)).toBe(true);
-    expect(await givenBack((await job(sara, ours)).id)).toBe(false);
     // The bot server goes down: three running jobs on three Bricks lose their renewals and the sweep stops them. All three are given back.
     const lapsing = [] as string[];
     for (let n = 0; n < 3; n++) {
-      const brick = n === 0 ? sara : { id: sara.id, brickId: (await createBrick({ ownerId: sara.id, name: `Lapsing ${n}` })).id };
-      if (n > 0) await giveComputer(brick.brickId, sara.id);
-      const started = await startJob({ botId: brick.brickId, personId: sara.id, title: `Lapsing ${n}` }, minutes(100));
+      const brickId = n === 0 ? sara.brickId : (await createBrick({ ownerId: sara.id, name: `Lapsing ${n}` })).id;
+      if (n > 0) await giveComputer(brickId, sara.id);
+      const started = await startJob({ botId: brickId, personId: sara.id, title: `Lapsing ${n}` }, minutes(100));
       if (!started.ok) throw new Error('no');
       lapsing.push(started.job.id);
     }
     expect(await sweepComputers(minutes(200))).toMatchObject({ stopped: 3 });
     for (const id of lapsing) {
-      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'stopped', endedBy: 'error' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'stopped', endedBy: 'error', runnerFault: false });
       expect(await givenBack(id)).toBe(true);
     }
+    // None of that used the bound (1): a later failure the runner reports is still given back, and only then is the bound used up
+    expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+    const refused = await job(sara, ours);
+    expect(refused).toMatchObject({ status: 'failed', endedBy: null });
+    expect(await givenBack(refused.id)).toBe(false);
+  });
+
+  it('does not mark an Orbit-seen failure as the runner’s when the job also has an unproven first turn: the lapse is given back past the bound', async () => {
+    await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+    const sara = await person('sara');
+    expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+    const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Unproven turn' }, minutes(100));
+    if (!started.ok) throw new Error('no');
+    // Its first turn was sent and never named, so the ending also writes the machine's turn hold in the same transaction
+    await prisma.computerJob.update({ where: { id: started.job.id }, data: { firstTurnSentAt: minutes(101), agentResponseId: null } });
+    expect(await sweepComputers(minutes(200))).toMatchObject({ stopped: 1 });
+    expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'error', runnerFault: false });
+    expect(await givenBack(started.job.id)).toBe(true);
+    // And it used none of the bound (1): the next runner give-back is refused only because of the first one
+    const next = await job(sara, ours);
+    expect(next).toMatchObject({ status: 'failed', endedBy: null });
+  });
+
+  it('always gives back a machine that would not start, and it uses none of the bound either', async () => {
+    await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+    const sara = await person('sara');
+    const provider = new FakeComputerProvider();
+    setComputerProviderForTests(provider);
+    provider.failNext.create = true;
+    expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'Broken start' }, minutes(0))).toEqual({ ok: false, reason: 'broken_start' });
+    expect(await prisma.computerJob.findFirstOrThrow({ where: { personId: sara.id, title: 'Broken start' } })).toMatchObject({ status: 'failed', endedBy: 'error', runnerFault: false });
+    clock = 10;
+    expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+  });
+
+  describe('when the Limits cannot be read', () => {
+    /** Reading the Instant Limits fails this many times (every other read goes through). */
+    const failLimitsReads = (times: number) => {
+      const real = prisma.appSetting.findUnique.bind(prisma.appSetting);
+      let left = times;
+      return jest.spyOn(prisma.appSetting, 'findUnique').mockImplementation(((args: { where?: { key?: string } }) => {
+        if (args?.where?.key === 'instant-limits' && left > 0) {
+          left--;
+          return Promise.reject(new Error('database blip'));
+        }
+        return real(args as never);
+      }) as never);
+    };
+    afterEach(() => jest.restoreAllMocks());
+
+    it('is read once more: a single failed read gives the same answer as a good one', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      expect(await givenBack((await job(sara, ours)).id)).toBe(true);
+      failLimitsReads(1);
+      // The bound (1) is used up: the second read is good and the answer is "not given back", not "unbounded"
+      const second = await job(sara, ours);
+      expect(second).toMatchObject({ status: 'failed', endedBy: null });
+    });
+
+    it('does not read as "no bound" when it fails twice: the runner’s ours is not given back this time, never unbounded', async () => {
+      await limitsAre(LAUNCH);
+      const sara = await person('sara');
+      failLimitsReads(2);
+      const ended = await job(sara, ours);
+      expect(ended).toMatchObject({ status: 'failed', endedBy: null, runnerFault: false });
+      expect(await givenBack(ended.id)).toBe(false);
+    });
+
+    it('never touches a failure Orbit saw itself: it is given back even when the Limits cannot be read', async () => {
+      await limitsAre(LAUNCH);
+      const sara = await person('sara');
+      const lapsing = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Lapsing' }, minutes(100));
+      if (!lapsing.ok) throw new Error('no');
+      failLimitsReads(10);
+      expect(await sweepComputers(minutes(200))).toMatchObject({ stopped: 1 });
+      expect(await givenBack(lapsing.job.id)).toBe(true);
+    });
   });
 
   it('leaves a model call on the person’s own key as it was: it is never limited, whatever the give-backs are', async () => {
