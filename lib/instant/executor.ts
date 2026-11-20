@@ -641,11 +641,24 @@ async function lookUp(run: Row, instant: InstantAdapter, now: Date): Promise<{ l
 const LATE_EVIDENCE_DAYS = 35;
 
 /**
- * A run let go unconfirmed whose vendor cost is still the estimate and whose late evidence has not been read yet. Only its own log is asked,
- * for a bounded time: what it finds changes the vendor side only (see `applyLateEvidence`).
+ * A run nobody could vouch for: let go after Composio could not be asked (`releasedUnconfirmed`), or let go after the wait with no log line of it
+ * (`noLog`) or a line nobody could read (`unreadableLog`). All three end the same way for the person (nothing taken, hold given back) and all three
+ * are looked for in Composio's log a while longer.
+ */
+function isLetGoUnconfirmed(detail: unknown): boolean {
+  return isObject(detail) && (detail.releasedUnconfirmed === true || detail.noLog === true || detail.unreadableLog === true);
+}
+
+/**
+ * A run let go unconfirmed whose vendor cost is still the estimate and whose late evidence is not all in: not read yet, or a success was read whose charge
+ * is not posted yet. Only its own log is asked, for a bounded time: what it finds changes the vendor side and what the receipt says, never what the person pays
+ * (see `applyLateEvidence`).
  */
 function awaitsLateEvidence(run: Row, now: Date): boolean {
-  if (run.state !== 'failed' || run.providerBasis !== 'estimated' || !isObject(run.detail) || run.detail.releasedUnconfirmed !== true || run.detail.lateEvidence !== undefined) return false;
+  if (run.state !== 'failed' || run.providerBasis !== 'estimated' || !isLetGoUnconfirmed(run.detail)) return false;
+  const seen = isObject(run.detail) ? run.detail.lateEvidence : undefined;
+  // A success that is written down but has no charge yet is looked for again until the charge turns up (or the days run out); any other answer is final
+  if (seen !== undefined && !(isObject(seen) && seen.status === 'success' && (seen.chargeMicros === null || seen.chargeMicros === undefined))) return false;
   return !run.finishedAt || now.getTime() - run.finishedAt.getTime() <= LATE_EVIDENCE_DAYS * 24 * 60 * MINUTE;
 }
 
@@ -660,9 +673,16 @@ async function applyLateEvidence(run: Row, line: InstantLog, tx: Prisma.Transact
   const detail = isObject(run.detail) ? run.detail : {};
   const estimated = asNumber(run.providerMicros);
   const verified = line.chargeMicros;
-  // A line that says the tool worked but carries no charge yet (it may be posted later) is not the evidence: nothing is written, so the run is looked for again
-  // until a charge turns up or the days run out. A failed or unknown line is the answer as it is, and is written down once.
-  if (verified === null && line.status === 'success') return;
+  // A line that says the tool worked but carries no charge yet (it may be posted later): that it worked is written down at once (so the receipt can say so, and it never
+  // waits on a charge that may not come), and the run is looked for again until the charge turns up or the days run out. A failed or unknown line is the answer as it is,
+  // and is written down once.
+  // A line Composio has no word on yet (still running, or a word we cannot read) says nothing new: it is not written down, and the run is looked for again
+  if (line.status === 'unknown') return;
+  if (verified === null && line.status === 'success') {
+    if (isObject(detail.lateEvidence)) return;
+    await tx.instantRun.update({ where: { id: run.id }, data: { detail: { ...detail, lateEvidence: { status: line.status, chargeMicros: null, at: now.toISOString() } } as Prisma.InputJsonValue } });
+    return;
+  }
   const next = { ...detail, lateEvidence: { status: line.status, chargeMicros: verified, at: now.toISOString() }, ...(verified !== null ? { adjustment: { estimatedMicros: estimated, verifiedMicros: verified } } : {}) };
   await tx.instantRun.update({
     where: { id: run.id },

@@ -95,9 +95,10 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
     take: BATCH,
     select: { id: true },
   });
-  // Runs let go unconfirmed are looked for in Composio's log a little longer (bounded days, a few a sweep): what turns up corrects the vendor cost only
+  // Runs let go unconfirmed (released after Composio could not be asked, or after the wait with no log or no readable one) are looked for in Composio's log a little longer
+  // (bounded days, a few a sweep): what turns up corrects the vendor cost and what the receipt says, and never what the person pays
   const lateRuns = await prisma.instantRun.findMany({
-    where: { state: 'failed', providerBasis: 'estimated', finishedAt: { gte: new Date(now.getTime() - 35 * 24 * 60 * 60 * 1000) }, detail: { path: ['releasedUnconfirmed'], equals: true } },
+    where: { state: 'failed', providerBasis: 'estimated', finishedAt: { gte: new Date(now.getTime() - 35 * 24 * 60 * 60 * 1000) }, OR: [{ detail: { path: ['releasedUnconfirmed'], equals: true } }, { detail: { path: ['noLog'], equals: true } }, { detail: { path: ['unreadableLog'], equals: true } }] },
     orderBy: [{ checkedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
     take: 25,
     select: { id: true },
