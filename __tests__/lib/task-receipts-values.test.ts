@@ -1,4 +1,4 @@
-import { activityIdOf, categoryOf, jobActivityIdOf, readActivityId, receiptLines, receiptLink, spentOf, type LineEvent } from '@/lib/task-receipts-values';
+import { activityIdOf, categoryOf, jobActivityIdOf, outcomeOfRuns, readActions, readActivityId, receiptLines, receiptLink, spentOf, stateOfOutcome, takenForRun, type LineEvent } from '@/lib/task-receipts-values';
 
 const event = (over: Partial<LineEvent>): LineEvent => ({ kind: 'app_use', route: 'instant', quantity: 1, costMicros: 30_000, detail: null, ...over });
 
@@ -74,5 +74,55 @@ describe('the category and the ids', () => {
     expect(readActivityId('act_')).toBeNull();
     expect(readActivityId('nope')).toBeNull();
     expect(receiptLink('act_abc')).toBe('[What it used](#usage=act_abc)');
+  });
+});
+
+describe('how a task came to end, from its runs', () => {
+  const runs = (...states: string[]) => states.map((state, index) => ({ id: `r${index}`, state, toolkit: index % 2 === 0 ? 'gmail' : 'exa' }));
+
+  it('every action worked is done; some worked is partly done; none worked is refunded, nothing taken', () => {
+    expect(outcomeOfRuns(runs('succeeded', 'succeeded'))).toMatchObject({ open: false, outcome: 'done' });
+    expect(outcomeOfRuns(runs('succeeded', 'failed'))).toMatchObject({ open: false, outcome: 'partial' });
+    expect(outcomeOfRuns(runs('failed', 'failed'))).toMatchObject({ open: false, outcome: 'refunded' });
+    // No run at all is nothing worked
+    expect(outcomeOfRuns([])).toEqual({ open: false, outcome: 'refunded', actions: [] });
+  });
+
+  it('keeps each action’s own outcome, in order; a refused run never went out and is not an action', () => {
+    expect(outcomeOfRuns(runs('succeeded', 'refused', 'failed')).actions).toEqual([
+      { run: 'r0', label: 'gmail', outcome: 'worked' },
+      { run: 'r2', label: 'gmail', outcome: 'failed' },
+    ]);
+    expect(outcomeOfRuns(runs('refused', 'refused'))).toEqual({ open: false, outcome: 'refunded', actions: [] });
+  });
+
+  it('a run that has not ended means the task cannot be settled yet, and is not counted as an action', () => {
+    for (const state of ['reserving', 'held', 'sent', 'ambiguous']) {
+      expect(outcomeOfRuns(runs('succeeded', state))).toMatchObject({ open: true, actions: [{ run: 'r0', outcome: 'worked' }] });
+    }
+  });
+
+  it('partly done is still a done receipt (something worked); only none-worked is refunded', () => {
+    expect(stateOfOutcome('done')).toBe('done');
+    expect(stateOfOutcome('partial')).toBe('done');
+    expect(stateOfOutcome('refunded')).toBe('refunded');
+  });
+
+  it('reads stored actions back and drops anything that is not the shape written', () => {
+    expect(readActions([{ run: 'a', label: 'gmail', outcome: 'worked' }, { run: 'b', label: 'exa', outcome: 'refunded' }, null, 'x', { run: 1, label: 'x', outcome: 'failed' }])).toEqual([{ run: 'a', label: 'gmail', outcome: 'worked' }]);
+    expect(readActions(null)).toEqual([]);
+    expect(readActions({})).toEqual([]);
+  });
+});
+
+describe('what one Instant run took (takenForRun)', () => {
+  const runEvent = (runId: string, customerMicros: unknown) => event({ detail: { instant: true, runId, customerMicros } });
+  it('reads the run’s own charge by its id: zero is a price, a price not known yet or no record is null, and another run’s is never lent', () => {
+    const events = [runEvent('a', 20_000), runEvent('b', 0), runEvent('c', null), event({ kind: 'model_call', route: 'universe-ai', detail: { runId: 'd', customerMicros: 5 } })];
+    expect(takenForRun(events, 'a')).toBe(20_000);
+    expect(takenForRun(events, 'b')).toBe(0);
+    expect(takenForRun(events, 'c')).toBeNull();
+    expect(takenForRun(events, 'd')).toBeNull();
+    expect(takenForRun(events, 'zzz')).toBeNull();
   });
 });
