@@ -132,7 +132,7 @@ export async function sweepRefundObligations(now: Date = new Date(), batch = 50)
     for (const one of old) {
       // One obligation's trouble never ends the loop for the rest. The row is locked (FOR UPDATE SKIP LOCKED) in a transaction, Sentry is told INSIDE it, and `alertedAt` is
       // set before the commit: two sweeps never both get the row (the other skips it), and a worker that dies or a capture that throws rolls back, so `alertedAt` stays empty
-      // and the next sweep tells it. The worst case (a capture followed by a commit that fails) is a second alert, never a lost one
+      // and the next sweep tells it. The worst case before the flush (a capture followed by a commit that fails) is a second alert. The mark means handed to Sentry and flushed, not accepted by it (lib/computer-alerts)
       try {
         const told = await prisma.$transaction(async (tx) => {
           // What the alert says is read from the row AS LOCKED: a try that failed between the candidate read and the lock (a support retry) is in it, never the older figures

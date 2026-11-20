@@ -308,7 +308,7 @@ export async function sweepGiveBackDecisions(now: Date = new Date(), batch = 50)
     const old = await prisma.computerGiveBackDecision.findMany({ where: { state: 'pending', alertedAt: null, decidedAt: { lte: new Date(now.getTime() - alertAfter) } }, take: 20 });
     for (const one of old) {
       // One row's trouble never ends the loop for the rest. The row is locked (FOR UPDATE SKIP LOCKED) in a transaction, Sentry is told INSIDE it, and `alertedAt` is set before the
-      // commit: two sweeps never both get the row, and a worker that dies or a capture that throws rolls back, so the next sweep tells it (a duplicate at worst, never a lost alert)
+      // commit: two sweeps never both get the row, and a worker that dies or a capture that throws rolls back, so the next sweep tells it (a duplicate at worst; the mark means handed to Sentry and flushed, not accepted by it: lib/computer-alerts)
       try {
         const told = await prisma.$transaction(async (tx) => {
           const locked = await tx.$queryRaw<Array<{ job_id: string }>>(Prisma.sql`SELECT "job_id" FROM "computer_give_back_decisions" WHERE "job_id" = ${one.jobId} AND "state" = 'pending' AND "alerted_at" IS NULL FOR UPDATE SKIP LOCKED`);
@@ -447,7 +447,7 @@ async function lateLookFailed(jobId: string, mark: Date, now: Date): Promise<voi
     if (rescheduled !== 1 || told || now.getTime() - first < LATE_LOOK_ALERT_MS) return;
     // Told once, by the same shape as the other alerts: the row is locked (FOR UPDATE SKIP LOCKED) while its marker is still the one just written, Sentry is told (and flushed) inside the
     // transaction (lib/computer-alerts), and `late_look_told` is set before the commit. A sweep that finds it locked skips it; a capture that throws or a worker that dies rolls back, and the next
-    // failing look tells it (a duplicate at worst, never a lost alert)
+    // failing look tells it (a duplicate at worst; the mark means handed to Sentry and flushed, not accepted by it: lib/computer-alerts)
     const toldMarker = `${LATE_LOOK_TOLD}:${first}`;
     try {
       await prisma.$transaction(async (tx) => {
