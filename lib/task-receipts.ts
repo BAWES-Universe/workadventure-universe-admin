@@ -8,14 +8,24 @@ import {
   givenBackCall,
   givenBackTime,
   jobActivityIdOf,
+  outcomeOfRuns,
+  readActions,
   receiptLines,
   receiptLink,
+  RUN_OPEN_STATES,
   spentOf,
+  stateOfOutcome,
+  takenForRun,
+  type ActionOutcome,
   type LineEvent,
+  type ReceiptAction,
   type ReceiptCategory,
   type ReceiptLine,
+  type ReceiptOutcome,
   type ReceiptState,
 } from '@/lib/task-receipts-values';
+import { actionWords, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote } from '@/lib/task-receipt-words';
+import { isOver } from '@/lib/computer-values';
 
 /**
  * One receipt per task (paying spec 3, part O4): the Activity list on the Usage page. A line for each task, and on tap what it used
@@ -33,6 +43,14 @@ export interface ActivityItem {
   /** ISO time: when it finished, or began while it has not. */
   at: string;
   state: ReceiptState;
+  /** How the task came to end: done (every action worked), partial, or refunded. `state` stays done for a partly done task, since something worked. */
+  outcome: ReceiptOutcome;
+  /** The words for `outcome` ("Partly done"; see `lib/task-receipt-words.ts`). */
+  outcomeText: string;
+  /** The sentence under a partly done receipt ("Two steps worked and one didn’t. Nothing was taken for the one that didn’t."); null otherwise. */
+  outcomeNote: string | null;
+  /** Each Instant action of the task and how it ended. Empty for a task with none (a computer's). */
+  actions: ActivityAction[];
   spentMicros: number | null;
   category: ReceiptCategory | null;
   payer: PaidBy['payer'];
@@ -40,6 +58,20 @@ export interface ActivityItem {
   /** The label as the reader sees it ("Paid by you"). */
   paidBy: string;
   lines: ReceiptLine[];
+}
+
+export interface ActivityAction {
+  label: string;
+  outcome: ActionOutcome;
+  /** "Gmail · didn't work" */
+  text: string;
+  /** "Nothing taken" for an action that did not work; null for one that did (what it took is on the receipt's own lines). */
+  takenText: string | null;
+  /**
+   * What was taken from credit for this action, in whole micros: only for an action that worked and whose price the books know (zero is a
+   * price). Absent for an action that did not work (nothing was taken) and while the price is not known yet (the receipt's line says "Price not known yet").
+   */
+  amountMicros?: number;
 }
 
 type ReceiptRow = NonNullable<Awaited<ReturnType<typeof prisma.taskReceipt.findUnique>>>;
@@ -61,10 +93,36 @@ export interface OpenInput {
 }
 
 /**
- * Opens a task's receipt, once per Brick and task: opening it again finds it and changes nothing (the first title and payer stand).
- * Returns the id the game uses and the link a reply can carry.
+ * How long an open receipt's lease lasts after it is opened or renewed. Well past the bot server's own retries (it gives up on a call after
+ * 150 s) and the longest an Instant run can take. Internal, not a person-facing limit: nobody sets it.
  */
-export async function openReceipt(input: OpenInput, now: Date = new Date()): Promise<{ id: string; link: string; created: boolean; payer: Payer }> {
+export const RECEIPT_LEASE_MS = 10 * 60 * 1000;
+
+/**
+ * A computer's receipt is on no lease: its job is its own record (it can run for hours), and `settleReceipt` reads the job. A receipt opened
+ * without a category for a computer job's id gets a lease, but the sweep leaves it while that job runs and ends it with the job.
+ */
+const hasLease = (category: string | null | undefined): boolean => category !== 'computer';
+
+const leaseFrom = (now: Date): Date => new Date(now.getTime() + RECEIPT_LEASE_MS);
+
+export interface OpenedReceipt {
+  id: string;
+  link: string;
+  created: boolean;
+  payer: Payer;
+  /** The turn the receipt is on. Send it with every close and renewal. */
+  generation: number;
+  /** When the lease runs out unless it is renewed; null for a receipt with none (a computer's) or one that is not running. */
+  leaseUntil: Date | null;
+}
+
+/**
+ * Opens a task's receipt, once per Brick and task: opening it again finds it and changes nothing (the first title and payer stand), except
+ * that opening a receipt that is still running renews its lease. Returns the id the game uses and the link a reply can carry, and the
+ * generation and lease it is on.
+ */
+export async function openReceipt(input: OpenInput, now: Date = new Date()): Promise<OpenedReceipt> {
   if (!input.taskKey || input.taskKey.length > 255) throw new RangeError('taskKey is required (up to 255 characters)');
   if (input.boundMicros !== undefined && input.boundMicros !== null && !wholeMicros(input.boundMicros)) throw new RangeError('boundMicros must be a whole number, 0 or more');
   const title = input.title.trim().slice(0, 120) || 'A task';
@@ -81,38 +139,77 @@ export async function openReceipt(input: OpenInput, now: Date = new Date()): Pro
         category: input.category ?? null,
         boundMicros: input.boundMicros === undefined || input.boundMicros === null ? null : BigInt(input.boundMicros),
         startedAt: now,
+        leaseUntil: hasLease(input.category) ? leaseFrom(now) : null,
         ...row,
       },
     ],
     skipDuplicates: true,
   });
-  const found = await prisma.taskReceipt.findUnique({ where: { botId_taskKey: { botId: input.botId, taskKey: input.taskKey } } });
+  let found = await prisma.taskReceipt.findUnique({ where: { botId_taskKey: { botId: input.botId, taskKey: input.taskKey } } });
   if (!found) throw new Error('receipt not found after opening');
   // One Brick's task is one person's: a key used for someone else is the first one's, and whoever asked has a bug to find
   if (found.personId !== input.personId) throw new RangeError('taskKey belongs to another person');
+  // Opening again is a sign the task is alive: a receipt still running (and on a lease) is renewed, never moved to another state
+  if (created.count === 0 && found.state === 'running' && found.leaseUntil !== null) {
+    // Under the receipt's lock, like settling is: a renewal and a settlement of the same task never overlap
+    const task = { botId: input.botId, taskKey: input.taskKey };
+    found = await prisma.$transaction(async (tx) => {
+      await receiptLock(tx, task.botId, task.taskKey);
+      await tx.taskReceipt.updateMany({ where: { id: found!.id, state: 'running', leaseUntil: { lt: leaseFrom(now) } }, data: { leaseUntil: leaseFrom(now) } });
+      return (await tx.taskReceipt.findUnique({ where: { id: found!.id } })) ?? found!;
+    });
+  }
   const id = activityIdOf(found.id);
   // The payer is the one stored on the receipt: a replay after ownership changed still names who paid then
-  return { id, link: receiptLink(id), created: created.count > 0, payer: payerFromRow(found) };
+  return { id, link: receiptLink(id), created: created.count > 0, payer: payerFromRow(found), generation: found.generation, leaseUntil: found.state === 'running' ? found.leaseUntil : null };
 }
 
-export type Closed = { ok: true; id: string; state: ReceiptState } | { ok: false; reason: 'not_found' };
+/** Where a receipt stands right now. `running` is a task that has not ended; it is never a word the bot server sends. */
+export type ReceiptNow = ReceiptState | 'running';
 
-/** A run of an Instant tool that has not ended yet: still going out, or its answer did not come back and nobody can say whether it ran. */
-const RUN_OPEN_STATES = ['reserving', 'held', 'sent', 'ambiguous'];
+export type Closed = { ok: true; id: string; state: ReceiptNow; generation: number; stale?: true } | { ok: false; reason: 'not_found' };
 
-const receiptLock = (tx: Prisma.TransactionClient, botId: string, taskKey: string) => tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`receipt:${botId}:${taskKey}`}))`;
+type Tx = Prisma.TransactionClient;
+type Row = NonNullable<Awaited<ReturnType<Tx['taskReceipt']['findUnique']>>>;
+type Task = { botId: string; personId: string; taskKey: string };
+
+const receiptLock = (tx: Tx, botId: string, taskKey: string) => tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`receipt:${botId}:${taskKey}`}))`;
+
+/** The task's Instant runs, as their own records say. */
+const runRecordsOf = (tx: Tx, task: Task) =>
+  tx.instantRun.findMany({ where: { botId: task.botId, personId: task.personId, taskKey: task.taskKey }, select: { id: true, state: true, toolkit: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+
+const leaseLapsed = (row: Pick<Row, 'leaseUntil'>, now: Date): boolean => row.leaseUntil !== null && row.leaseUntil.getTime() <= now.getTime();
+const isTerminal = (state: string): boolean => state === 'done' || state === 'refunded';
+const asActions = (actions: readonly ReceiptAction[]): Prisma.InputJsonValue => actions.map((action) => ({ run: action.run, label: action.label, outcome: action.outcome }));
+
+/** Writes the end of a task: its state, how it came to end, and each action. `chargedMicros` is only kept for a task where something worked. */
+const endReceipt = async (tx: Tx, row: Row, outcome: ReceiptOutcome, actions: readonly ReceiptAction[], now: Date, charged: number | null = null): Promise<ReceiptState> => {
+  const state = stateOfOutcome(outcome);
+  const kept = state === 'refunded' ? BigInt(0) : charged !== null ? BigInt(charged) : row.chargedMicros;
+  await tx.taskReceipt.update({ where: { id: row.id }, data: { state, outcome, actions: asActions(actions), chargedMicros: kept, endedAt: row.endedAt && isTerminal(row.state) ? row.endedAt : now, leaseUntil: null } });
+  return state;
+};
 
 /**
  * Closes a task's receipt: done, refunded (a failure on our side: nothing was taken, whatever was held is given back) or checking (an
- * answer did not come back, and it is being looked into before anything is tried again). `checking` can still become done or
- * refunded; once a receipt is done or refunded it stays as it ended, so a second word, even a different one, changes nothing.
+ * answer did not come back, and it is being looked into before anything is tried again). It can be sent any number of times: once a
+ * receipt has ended, a second word, even a different one, changes nothing.
  *
- * The bot server's word is the task's end, not the money's: while one of the task's Instant runs has not ended (its answer did not come
- * back and the lookup is still waiting), a done or refunded word leaves the receipt in checking, and the run's settling ends it
- * (`settleReceipt`). The bot server can say done before Orbit knows what happened to a run, and that must never freeze the receipt.
+ * What a task came to is read from its Instant runs' own records, not from the word the bot server sends: that word says the task is over,
+ * and Orbit says how it went (done when every action worked, partly done when some did, refunded when none did). The bot server's
+ * done or refunded stands only for a task with no Instant run that went out (a computer's, one of Apps that never reached Orbit's runs, or one whose every run was refused
+ * before it ran), so a charge the word carries is never zeroed by a run that never went out.
+ * While one of the task's runs has not ended (its answer did not come back and the lookup is still waiting), the receipt is left in
+ * `checking` and the run's settling ends it (`settleReceipt`): the bot server can say done before Orbit knows what happened to a run, and
+ * that must never freeze the receipt.
+ *
+ * `generation` is the turn the close was sent for (from opening or renewing the receipt). A close for an older turn than the receipt is
+ * on changes nothing and answers with the generation it is on, so a late repeat never ends a newer turn. Without it, the close is for the
+ * turn the receipt is on (a bot server that does not send one yet).
  */
 export async function closeReceipt(
-  input: { botId: string; taskKey: string; personId: string; state: ReceiptState; chargedMicros?: number | null },
+  input: { botId: string; taskKey: string; personId: string; state: ReceiptState; chargedMicros?: number | null; generation?: number },
   now: Date = new Date(),
 ): Promise<Closed> {
   if (input.chargedMicros !== undefined && input.chargedMicros !== null && !wholeMicros(input.chargedMicros)) throw new RangeError('chargedMicros must be a whole number, 0 or more');
@@ -120,85 +217,217 @@ export async function closeReceipt(
     await receiptLock(tx, input.botId, input.taskKey);
     const row = await tx.taskReceipt.findUnique({ where: { botId_taskKey: { botId: input.botId, taskKey: input.taskKey } } });
     if (!row || row.personId !== input.personId) return { ok: false, reason: 'not_found' };
-    if (row.state === 'done' || row.state === 'refunded') return { ok: true, id: activityIdOf(row.id), state: row.state };
-    const waiting = input.state !== 'checking' && (await openRunsOf(tx, input)) > 0;
-    const state: ReceiptState = waiting ? 'checking' : input.state;
-    const charged = state === 'refunded' ? 0 : (input.chargedMicros ?? null);
-    const next = await tx.taskReceipt.update({
-      where: { id: row.id },
-      data: { state, chargedMicros: charged === null ? null : BigInt(charged), endedAt: state === 'checking' ? null : now },
-    });
-    return { ok: true, id: activityIdOf(next.id), state: next.state as ReceiptState };
+    const id = activityIdOf(row.id);
+    if (input.generation !== undefined && input.generation < row.generation) return { ok: true, id, state: row.state as ReceiptNow, generation: row.generation, stale: true };
+    const runs = await runRecordsOf(tx, input);
+    const view = outcomeOfRuns(runs);
+    if (isTerminal(row.state)) {
+      // Ended already: the word changes nothing. Only a task whose run records say otherwise is put right: a run that landed after the word,
+      // or one still going (then a newer turn is on it)
+      if (view.open) return { ok: true, id, state: await reopenForOpenRun(tx, row), generation: row.generation + 1 };
+      const state = view.actions.length === 0 ? (row.state as ReceiptState) : await reconcileEnded(tx, row, view, await jobOf(tx, input), now);
+      return { ok: true, id, state, generation: row.generation };
+    }
+    // The bot server's word is the task's end; an open run means the task is not settled yet, whatever the word is
+    if (view.open) {
+      await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'checking', outcome: null, endedAt: null, leaseUntil: null } });
+      return { ok: true, id, state: 'checking', generation: row.generation };
+    }
+    // A task whose computer job is still running is not over, whatever the word is (the job is its own record): it waits in checking, and ends
+    // when the job does (the bot server's close once the job is over, or the sweep)
+    const job = await jobOf(tx, input);
+    if (job && !isOver(job.status)) {
+      await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'checking', outcome: null, endedAt: null, leaseUntil: null } });
+      return { ok: true, id, state: 'checking', generation: row.generation };
+    }
+    if (view.actions.length > 0) {
+      // Every run has ended and some went out: the run records say how it went, whatever the word was
+      const state = await endReceipt(tx, row, outcomeWith(view, job), view.actions, now, input.chargedMicros ?? null);
+      return { ok: true, id, state, generation: row.generation };
+    }
+    if (input.state === 'checking') {
+      // Nothing of it reached Orbit's runs yet: it is looked at again (the request may still arrive), then ended by the sweep
+      await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'checking', outcome: null, endedAt: null, leaseUntil: null } });
+      return { ok: true, id, state: 'checking', generation: row.generation };
+    }
+    const outcome: ReceiptOutcome = input.state === 'refunded' ? 'refunded' : 'done';
+    const state = await endReceipt(tx, row, outcome, [], now, input.chargedMicros ?? null);
+    return { ok: true, id, state, generation: row.generation };
   });
 }
 
-const openRunsOf = (tx: Prisma.TransactionClient, task: { botId: string; personId: string; taskKey: string }) =>
-  tx.instantRun.count({ where: { botId: task.botId, personId: task.personId, taskKey: task.taskKey, state: { in: RUN_OPEN_STATES } } });
+type JobRow = { status: string; endedBy: string | null; startedAt: Date | null } | null;
+const jobOf = (tx: Tx, task: Task): Promise<JobRow> => tx.computerJob.findFirst({ where: { id: task.taskKey, botId: task.botId, personId: task.personId }, select: { status: true, endedBy: true, startedAt: true } });
 
 /**
- * Orbit's own word on a task's receipt from what its Instant runs came to. Called when a run ends or is looked up, and by the sweep for
- * a receipt still in checking (so a crash between a run's ending and this never leaves one behind). Safe to say twice and any number of
- * times; never asks a person, never calls a model.
- *
- * "Checking" means the task has ended (the bot server said so) and Orbit is still waiting to learn what a run of it came to. Orbit never
- * ends a task the bot server has not ended: a task still running keeps running while one of its runs is unclear, however that run ends,
- * because the task can still make more runs.
- *
- *  - Receipt done or refunded, and a run of the task still open: back to checking (the bot server's word came before Orbit knew).
- *  - Receipt in checking, every run ended: done when any run worked (what it took is read from the books by the task's key), and
- *    refunded, nothing taken, when none did. Runs nobody could vouch for when their wait ended count as not worked: the person's favour.
- *  - Receipt in checking, a run still open: stays in checking. One run ending never ends a task that has another still open.
- *  - Receipt running, or done/refunded with every run ended: left as it is. A task with no Instant run (a computer's) is not touched.
+ * What a task came to, from its Instant runs and its computer job if it has one. A job that ran is the task's work: runs that all failed do
+ * not make it refunded (the time the books took for the job stays on the receipt). A job that never ran, or that failed on our side
+ * (`givenBackJob`), did nothing for the person, so its Apps all failing is refunded, nothing taken, as for a task with no job.
  */
-export async function settleReceipt(task: { botId: string; personId: string; taskKey: string }, now: Date = new Date(), unwatchedBefore: Date | null = null): Promise<ReceiptState | null> {
+const outcomeWith = (view: ReturnType<typeof outcomeOfRuns>, job: JobRow): ReceiptOutcome => (view.outcome === 'refunded' && job !== null && job.startedAt !== null && !givenBackJob(job.status, job.endedBy) ? 'done' : view.outcome);
+
+/**
+ * A receipt that has ended whose runs now say it came to something else is put right from the run records (a run that landed after the word
+ * said the task was over): the books already charged what they charged, and the receipt must not say "nothing taken" over it. A receipt that
+ * ended before actions were written down (no actions at all) is left as it ended.
+ */
+async function reconcileEnded(tx: Tx, row: Row, view: ReturnType<typeof outcomeOfRuns>, job: JobRow, now: Date): Promise<ReceiptState> {
+  if (row.actions === null) return row.state as ReceiptState;
+  const outcome = outcomeWith(view, job);
+  const same = row.outcome === outcome && JSON.stringify(readActions(row.actions)) === JSON.stringify(view.actions);
+  if (same) return row.state as ReceiptState;
+  return endReceipt(tx, row, outcome, view.actions, now);
+}
+
+/** A receipt that ended while a run of its task has not ended: a newer turn is on it, so it is put back to checking on the next generation. */
+async function reopenForOpenRun(tx: Tx, row: Row): Promise<ReceiptState> {
+  await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'checking', outcome: null, actions: Prisma.DbNull, endedAt: null, leaseUntil: null, generation: { increment: 1 } } });
+  return 'checking';
+}
+
+export type Renewed = { ok: true; id: string; state: ReceiptNow; generation: number; leaseUntil: Date | null; renewed: boolean; stale?: true } | { ok: false; reason: 'not_found' };
+
+/**
+ * Renews a running receipt's lease: the bot server says the task is alive (a run starts, a turn ends). A renewal for an older generation
+ * than the receipt is on changes nothing and answers with the generation it is on, so the bot server can follow it. A receipt that is not running (the
+ * sweep ended it after its lease ran out, or the task was closed) is not brought back by a renewal: Orbit puts a receipt back to
+ * checking itself, on the next generation, when a run of the task turns up (`settleReceipt`). Safe to say any number of times.
+ */
+export async function renewReceipt(input: Task & { generation?: number }, now: Date = new Date()): Promise<Renewed> {
+  return prisma.$transaction(async (tx) => {
+    await receiptLock(tx, input.botId, input.taskKey);
+    const row = await tx.taskReceipt.findUnique({ where: { botId_taskKey: { botId: input.botId, taskKey: input.taskKey } } });
+    if (!row || row.personId !== input.personId) return { ok: false, reason: 'not_found' };
+    const id = activityIdOf(row.id);
+    const state = row.state as ReceiptNow;
+    if (input.generation !== undefined && input.generation < row.generation) return { ok: true, id, state, generation: row.generation, leaseUntil: state === 'running' ? row.leaseUntil : null, renewed: false, stale: true };
+    if (row.state !== 'running' || row.leaseUntil === null) return { ok: true, id, state, generation: row.generation, leaseUntil: null, renewed: false };
+    const next = leaseFrom(now);
+    const leaseUntil = row.leaseUntil.getTime() >= next.getTime() ? row.leaseUntil : next;
+    if (leaseUntil !== row.leaseUntil) await tx.taskReceipt.update({ where: { id: row.id }, data: { leaseUntil } });
+    return { ok: true, id, state, generation: row.generation, leaseUntil, renewed: true };
+  });
+}
+
+/**
+ * Orbit's own sign of life for a task: one of its runs is about to go out, so a running receipt's lease is extended whether or not the bot
+ * server renews it. Under the receipt's lock, so it never overlaps a settlement that read the old lease: either the extension commits first
+ * (and the settlement sees a live lease) or the settlement does (and the receipt is no longer running, so nothing is extended). Never throws a person-facing error.
+ */
+export async function touchLeaseForRun(task: Task, now: Date = new Date()): Promise<void> {
+  const next = leaseFrom(now);
+  await prisma.$transaction(async (tx) => {
+    await receiptLock(tx, task.botId, task.taskKey);
+    await tx.taskReceipt.updateMany({ where: { botId: task.botId, personId: task.personId, taskKey: task.taskKey, state: 'running', leaseUntil: { not: null, lt: next } }, data: { leaseUntil: next } });
+  });
+}
+
+/**
+ * Orbit's own word on a task's receipt from what its Instant runs came to. Called when a run ends or is looked up, and by the sweep, so a
+ * crash between a run's ending and this, a bot server that went away, or a close that never arrived never leaves one behind. Safe to say
+ * twice and any number of times; never asks a person, never calls a model, never starts anything outside.
+ *
+ * What a task came to is read from the runs' own records (`outcomeOfRuns`), never from the meter's rows. Money shown on the receipt is still
+ * read from the books by the task's key.
+ *
+ *  - Receipt running with its lease still on: left as it is (the task is alive and can make more runs), whatever its runs came to.
+ *  - Receipt running with its lease run out: the bot server went quiet. It moves to checking and is settled as below.
+ *  - Receipt in checking, a run still open: stays in checking until every run has ended.
+ *  - Receipt done or refunded, and a run of the task still open: back to checking on the next generation (the run turned up after the word).
+ *  - Every run ended (running with a lapsed lease, checking, or ended): done when all worked, partly done when some did, refunded, nothing
+ *    taken, when none did. A refused run never went out and is not an action. A run nobody could vouch for when its wait ended counts as
+ *    not worked: the person's favour. A receipt that had ended and does not agree with its runs is put right.
+ *  - No Instant run that went out (none at all, or every one refused), running with a lapsed lease, or in checking past the bot server's own retries: refunded, nothing taken (nothing
+ *    was ever sent). A model call's row in the books never makes it done. A computer's receipt is read from its job instead: ended when the
+ *    job is over, and left alone while it still runs.
+ */
+export async function settleReceipt(task: Task, now: Date = new Date(), unwatchedBefore: Date | null = null): Promise<ReceiptNow | null> {
   return prisma.$transaction(async (tx) => {
     await receiptLock(tx, task.botId, task.taskKey);
     const row = await tx.taskReceipt.findUnique({ where: { botId_taskKey: { botId: task.botId, taskKey: task.taskKey } } });
     if (!row || row.personId !== task.personId) return null;
-    const runs = await tx.instantRun.findMany({ where: { botId: task.botId, personId: task.personId, taskKey: task.taskKey }, select: { state: true } });
-    if (runs.length === 0) {
-      // A task with no Instant run has nothing here to look up, and the bot server may have closed it as checking because its request never
-      // reached Orbit. Once it has waited well past the bot server's own retries, it is ended so it never stays hidden for good: refunded
-      // (nothing was ever sent, so nothing was taken) when the books hold nothing for its key, done (what it took is read from the books) otherwise.
-      if (row.state === 'checking' && unwatchedBefore !== null && row.updatedAt < unwatchedBefore) {
-        const recorded = await tx.meterEvent.count({ where: { OR: [{ jobId: task.taskKey, botId: task.botId }, { botId: task.botId, detail: { path: ['taskKey'], equals: task.taskKey } }] } });
-        const state: ReceiptState = recorded === 0 ? 'refunded' : 'done';
-        await tx.taskReceipt.update({ where: { id: row.id }, data: { state, chargedMicros: recorded === 0 ? BigInt(0) : row.chargedMicros, endedAt: now } });
-        return state;
+    const runs = await runRecordsOf(tx, task);
+    const view = outcomeOfRuns(runs);
+    const lapsed = leaseLapsed(row, now);
+    if (view.open) {
+      if (row.state === 'checking') return 'checking';
+      if (row.state === 'running') {
+        if (!lapsed) return 'running';
+        await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'checking', leaseUntil: null, endedAt: null } });
+        return 'checking';
       }
-      return row.state as ReceiptState;
+      return reopenForOpenRun(tx, row);
     }
-    if (runs.some((run) => RUN_OPEN_STATES.includes(run.state))) {
-      if (row.state === 'checking' || row.state === 'running') return row.state as ReceiptState;
-      await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'checking', endedAt: null } });
-      return 'checking';
+    // A computer's job is its own record, whatever category the receipt was opened under
+    const job = await jobOf(tx, task);
+    if (view.actions.length > 0) {
+      if (isTerminal(row.state)) return reconcileEnded(tx, row, view, job, now);
+      // A task whose computer job is still running is not over, whatever its Instant runs came to: it waits (running or checking) for the job, then ends from the runs
+      if (job && !isOver(job.status)) return row.state as ReceiptNow;
+      // A running receipt on no lease (a computer's) is the job's: with the job over (or no job of that key after a lease's age) it is as good as lapsed
+      if (row.state === 'running' && !lapsed && !(row.leaseUntil === null && jobEnded(row, job, now))) return 'running';
+      return endReceipt(tx, row, outcomeWith(view, job), view.actions, now);
     }
-    if (row.state !== 'checking') return row.state as ReceiptState;
-    const worked = runs.some((run) => run.state === 'succeeded');
-    const state: ReceiptState = worked ? 'done' : 'refunded';
-    await tx.taskReceipt.update({ where: { id: row.id }, data: { state, chargedMicros: worked ? row.chargedMicros : BigInt(0), endedAt: now } });
-    return state;
+    // No Instant run that went out (none at all, or every one refused before it ran)
+    if (isTerminal(row.state)) return row.state as ReceiptState;
+    // A receipt waits for its job while it runs, and ends with it (one opened without a category for a job's id is the job's too). A running one
+    // with no lease ends when its job is over, or, when no job of that key exists at all, once it is as old as a lease; a checking one, or one
+    // whose lease ran out, only after the bot server's own retries.
+    if (job && !isOver(job.status)) return row.state as ReceiptNow;
+    if (job || row.category === 'computer') {
+      const waited = row.state === 'running' ? job !== null || row.startedAt.getTime() + RECEIPT_LEASE_MS <= now.getTime() : unwatchedBefore !== null && row.updatedAt < unwatchedBefore;
+      if (!waited) return row.state as ReceiptNow;
+      return endReceipt(tx, row, job ? 'done' : 'refunded', [], now);
+    }
+    const quiet = row.state === 'running' ? lapsed : unwatchedBefore !== null && row.updatedAt < unwatchedBefore;
+    if (!quiet) return row.state as ReceiptNow;
+    return endReceipt(tx, row, 'refunded', [], now);
   });
 }
+
+/** A running receipt on no lease: its computer job is over, or no job of its key exists after a lease's age (it is the job's own record that says so). */
+const jobEnded = (row: Row, job: { status: string } | null, now: Date): boolean => (job ? isOver(job.status) : row.startedAt.getTime() + RECEIPT_LEASE_MS <= now.getTime());
 
 /** How long a receipt in checking with no Instant run waits before it is ended: well past the bot server's own retries (it gives up after 150 s). Internal, not a person-facing limit. */
 export const UNWATCHED_CHECKING_WAIT_MS = 15 * 60 * 1000;
 
 /**
- * Receipts still in checking: the sweep says each one again. Oldest first. Those with Instant runs are settled once every run has ended; those
- * with none are ended after `UNWATCHED_CHECKING_WAIT_MS`, so none stays hidden for good.
+ * The sweep over receipts that need an end, oldest first, so none depends on the bot server or on the person writing again:
+ *  - running, with a lease that has run out; a computer's running receipt (no lease) once its job is over, or once it is a lease old with no job at all;
+ *  - in checking: those with Instant runs once every run has ended, those with none after `UNWATCHED_CHECKING_WAIT_MS`
+ *    (a computer's receipt only once its job is over);
+ *  - ended, with a run of its task that has not ended (it turned up after the word), or one that ended and the receipt has not recorded (the hook that records it did not finish).
+ * Returns how many left `running` or `checking` in this pass.
  */
 export async function settleCheckingReceipts(limit: number, now: Date = new Date(), unwatchedWaitMs: number = UNWATCHED_CHECKING_WAIT_MS): Promise<number> {
   const unwatchedBefore = new Date(now.getTime() - unwatchedWaitMs);
+  const leaseBefore = new Date(now.getTime() - RECEIPT_LEASE_MS);
+  const open = Prisma.raw(RUN_OPEN_STATES.map((state) => `'${state}'`).join(', '));
   const rows = await prisma.$queryRaw<Array<{ botId: string; personId: string; taskKey: string }>>(Prisma.sql`
     SELECT r."bot_id" AS "botId", r."person_id" AS "personId", r."task_key" AS "taskKey"
     FROM task_receipts r
-    WHERE r."state" = 'checking'
-      AND (
-        (r."updated_at" < ${unwatchedBefore} AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key"))
-        OR (EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key") AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" IN ('reserving', 'held', 'sent', 'ambiguous')))
-      )
-    ORDER BY r."updated_at" ASC
+    WHERE (
+      (r."state" = 'running' AND r."lease_until" IS NOT NULL AND r."lease_until" <= ${now}
+        AND NOT EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key" AND j."status" NOT IN ('done', 'stopped', 'failed')))
+      OR (r."state" = 'running' AND r."category" = 'computer' AND r."lease_until" IS NULL AND (
+        EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key" AND j."status" IN ('done', 'stopped', 'failed'))
+        OR (r."started_at" <= ${leaseBefore} AND NOT EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key"))))
+      OR (r."state" = 'checking' AND (
+        (r."updated_at" < ${unwatchedBefore}
+          AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key")
+          AND NOT EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key" AND j."status" NOT IN ('done', 'stopped', 'failed')))
+        OR (EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key") AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" IN (${open}))
+          AND NOT EXISTS (SELECT 1 FROM computer_jobs j WHERE j."id" = r."task_key" AND j."status" NOT IN ('done', 'stopped', 'failed')))
+      ))
+      OR (r."state" IN ('done', 'refunded') AND (
+        EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" IN (${open}))
+        -- A run that went out and ended, and is not among the actions the receipt recorded: it landed after the word and the hook that records it did not finish (a retry of the same work, never a new action)
+        -- (A receipt that ended before this existed has no actions written down at all: it is left as it ended, never judged afresh.)
+        OR (r."actions" IS NOT NULL AND EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" <> 'refused' AND i."state" NOT IN (${open})
+          AND NOT (r."actions" @> jsonb_build_array(jsonb_build_object('run', i."id")))))
+      ))
+    )
+    ORDER BY COALESCE(r."lease_until", r."updated_at") ASC
     LIMIT ${limit}`);
   let settled = 0;
   for (const row of rows) {
@@ -206,7 +435,7 @@ export async function settleCheckingReceipts(limit: number, now: Date = new Date
       console.error('[Receipts] Could not settle a receipt:', error instanceof Error ? error.message : 'unknown');
       return null;
     });
-    if (state && state !== 'checking') settled += 1;
+    if (state && state !== 'checking' && state !== 'running') settled += 1;
   }
   return settled;
 }
@@ -222,6 +451,8 @@ interface Header {
   botId: string;
   taskKey: string;
   runId: string | null;
+  outcome: ReceiptOutcome | null;
+  actions: ReceiptAction[];
 }
 
 const headerOfRow = (row: ReceiptRow): Header => ({
@@ -235,6 +466,8 @@ const headerOfRow = (row: ReceiptRow): Header => ({
   botId: row.botId,
   taskKey: row.taskKey,
   runId: row.runId,
+  outcome: row.outcome as ReceiptOutcome | null,
+  actions: readActions(row.actions),
 });
 
 /**
@@ -294,6 +527,14 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
     title: header.title,
     at: header.at.toISOString(),
     state: header.state,
+    // `state` stays done for a task that partly worked (something worked and may have been taken); a state put right at read time wins over the stored outcome
+    outcome: header.state === 'refunded' ? 'refunded' : header.outcome === 'partial' ? 'partial' : 'done',
+    outcomeText: OUTCOME_WORDS[header.state === 'refunded' ? 'refunded' : header.outcome === 'partial' ? 'partial' : 'done'],
+    outcomeNote: header.state === 'refunded' ? null : outcomeNote(header.outcome ?? 'done', header.actions),
+    actions: header.actions.map((action): ActivityAction => {
+      const taken = action.outcome === 'worked' ? takenForRun(events, action.run) : null;
+      return { label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome), takenText: action.outcome === 'failed' ? NOTHING_TAKEN : null, ...(taken === null ? {} : { amountMicros: taken }) };
+    }),
     spentMicros: spentOf(header.state, header.chargedMicros, lines),
     category: categoryOf(header.category, events),
     payer: who.payer,
@@ -366,6 +607,8 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
       botId: job.botId,
       taskKey: job.id,
       runId: job.runId,
+      outcome: null,
+      actions: [],
     }));
   const all = [...headers, ...computerHeaders];
   const [events, bots] = await Promise.all([eventsFor(all), prisma.bot.findMany({ where: { id: { in: [...new Set(all.map((header) => header.botId))] } }, select: { id: true, name: true } })]);
