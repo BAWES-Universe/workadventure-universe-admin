@@ -484,6 +484,8 @@ interface Header {
   heldRuns: ReadonlySet<string>;
   /** Runs of the task nobody could confirm whose hold the credit books acknowledged giving back, and how much came back (whole micros). */
   releasedRuns: ReadonlyMap<string, number>;
+  /** Runs of the task that were let go unconfirmed (the run's own state says so: its reason is `unclear`), whatever late evidence says its action did: such a run is never charged, now or later. */
+  letGoRuns: ReadonlySet<string>;
 }
 
 const headerOfRow = (row: ReceiptRow): Header => ({
@@ -502,6 +504,7 @@ const headerOfRow = (row: ReceiptRow): Header => ({
   job: null,
   heldRuns: new Set<string>(),
   releasedRuns: new Map<string, number>(),
+  letGoRuns: new Set<string>(),
 });
 
 /**
@@ -571,14 +574,15 @@ function outcomeOfHeader(header: Header): ReceiptOutcome {
 function itemOf(header: Header, events: readonly LineEvent[], botName: string, readerId: string): ActivityItem {
   const lines = receiptLines(events, botName);
   const who = paidBy(header.payer, readerId);
-  // A hold is pending for any action that did not work, whatever its outcome says now: late evidence that confirms a failure does not give the credit back, only the books do
-  const holdPending = header.actions.some((action) => action.outcome !== 'worked' && header.heldRuns.has(action.run));
+  // A hold is pending for any run whose credit is still on hold and that was let go unconfirmed (or whose action did not work), whatever its action says now: late evidence, that
+  // it failed or that it worked, does not give the credit back, only the books do. `heldRuns` holds exactly those runs
+  const holdPending = header.actions.some((action) => header.heldRuns.has(action.run));
   const stated = outcomeOfHeader(header);
   // "Refunded, nothing taken" is not said while a hold is still on: it reads as not finished (with the release wording) until the books acknowledge the release
   const outcome: ReceiptOutcome = holdPending && stated === 'refunded' ? 'failed' : stated;
   // Once the books acknowledged giving a hold back, the amount that came back is said (never before: a hold still on is "being released")
   const releasedOf = (run: string): number => header.releasedRuns.get(run) ?? 0;
-  const releasedMicros = holdPending ? 0 : header.actions.reduce((sum, action) => (action.outcome === 'unknown' ? sum + releasedOf(action.run) : sum), 0);
+  const releasedMicros = holdPending ? 0 : header.actions.reduce((sum, action) => (action.outcome === 'unknown' || (action.outcome === 'worked' && header.letGoRuns.has(action.run)) ? sum + releasedOf(action.run) : sum), 0);
   const computerMicros = header.job === null ? undefined : (computerTakenOf(events) ?? null);
   return {
     id: header.id,
@@ -591,9 +595,14 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
     outcomeText: OUTCOME_WORDS[outcome],
     outcomeNote: outcomeNote(outcome, header.actions, { ...(header.job === null ? {} : { job: header.job, computerMicros }), holdPending, ...(releasedMicros > 0 ? { releasedMicros } : {}) }),
     actions: header.actions.map((action): ActivityAction => {
-      const taken = action.outcome === 'worked' ? takenForRun(events, action.run) : null;
-      const released = action.outcome === 'unknown' && !header.heldRuns.has(action.run) ? releasedOf(action.run) : 0;
-      const takenText = action.outcome === 'worked' ? null : header.heldRuns.has(action.run) ? HOLD_BEING_RELEASED : released > 0 ? HOLD_RELEASED : NOTHING_TAKEN;
+      // A run let go unconfirmed was never charged and is never charged later (its hold goes back whatever late evidence says), so a worked action on it shows no amount taken: its hold wording
+      // comes from the run's own money state, not from what the action says now. An ordinary worked run shows what the books took (or settlement pending), as ever
+      const letGo = header.letGoRuns.has(action.run);
+      const held = header.heldRuns.has(action.run);
+      const taken = action.outcome === 'worked' && !letGo ? takenForRun(events, action.run) : null;
+      const wasReleased = (action.outcome === 'unknown' || (action.outcome === 'worked' && letGo)) && !held && header.releasedRuns.has(action.run);
+      const released = wasReleased ? releasedOf(action.run) : 0;
+      const takenText = held ? HOLD_BEING_RELEASED : released > 0 || (action.outcome === 'worked' && wasReleased) ? HOLD_RELEASED : action.outcome === 'worked' ? null : NOTHING_TAKEN;
       return { label: action.label, outcome: action.outcome, text: actionWords(action.label, action.outcome), takenText, ...(taken === null ? {} : { amountMicros: taken }), ...(released > 0 ? { releasedMicros: released } : {}) };
     }),
     spentMicros: spentOf(header.state, header.chargedMicros, lines),
@@ -673,6 +682,7 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
       job: null,
       heldRuns: new Set<string>(),
       releasedRuns: new Map<string, number>(),
+      letGoRuns: new Set<string>(),
     }));
   const all = [...headers, ...computerHeaders];
   const [events, bots] = await Promise.all([eventsFor(all), prisma.bot.findMany({ where: { id: { in: [...new Set(all.map((header) => header.botId))] } }, select: { id: true, name: true } })]);
@@ -686,10 +696,13 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
   const behindReceipts = receiptJobKeys.length === 0 ? [] : await prisma.computerJob.findMany({ where: { personId, id: { in: receiptJobKeys } }, select: { id: true, botId: true, status: true, endedBy: true, startedAt: true } });
   const jobRows = new Map([...jobs, ...behindReceipts].map((job) => [`${job.botId}:${job.id}`, job]));
   const failedJobs = new Set([...jobRows.values()].filter((job) => givenBackJob(job.status, job.endedBy)).map((job) => `${job.botId}:${job.id}`));
-  // Runs of these tasks that did not work (nobody could confirm them, or later evidence said they failed) whose credit is still on hold: said as a hold being released,
-  // not as a charge or as "nothing taken", until the books acknowledge the release
-  const unworkedRuns = all.flatMap((header) => header.actions.filter((action) => action.outcome !== 'worked').map((action) => action.run));
-  const moneyRows = unworkedRuns.length === 0 ? [] : await prisma.instantRun.findMany({ where: { id: { in: unworkedRuns }, customerState: { in: ['held', 'released'] } }, select: { id: true, customerState: true, holdMicros: true } });
+  // Runs of these tasks whose credit is on hold or was given back and that were let go unconfirmed, or did not work (nobody could confirm them, or later evidence said they failed): said as
+  // a hold being released, or released, not as a charge or as "nothing taken", until the books acknowledge the release. A run let go unconfirmed (its own reason is `unclear`) keeps that
+  // wording when late evidence says it WORKED too: it was never charged and never will be. An ordinary run that worked is not one of these, and waits for its settlement as ever
+  const actionOutcomeOf = new Map(all.flatMap((header) => header.actions.map((action) => [action.run, action.outcome] as const)));
+  const money = actionOutcomeOf.size === 0 ? [] : await prisma.instantRun.findMany({ where: { id: { in: [...actionOutcomeOf.keys()] }, customerState: { in: ['held', 'released'] } }, select: { id: true, customerState: true, holdMicros: true, reason: true } });
+  const moneyRows = money.filter((run) => actionOutcomeOf.get(run.id) !== 'worked' || run.reason === 'unclear');
+  const letGo = new Set(money.filter((run) => run.reason === 'unclear').map((run) => run.id));
   const held = new Set(moneyRows.filter((run) => run.customerState === 'held').map((run) => run.id));
   const released = new Map(moneyRows.filter((run) => run.customerState === 'released').map((run) => [run.id, Number(run.holdMicros)] as const));
   const items = all.map((header) => {
@@ -709,7 +722,7 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
     const job = jobRan(jobRow) ? (jobRow.status === 'failed' ? 'failed' : 'worked') : null;
     // A job still going has not come out yet
     const over = jobRow !== null && isOver(jobRow.status);
-    return itemOf({ ...header, state, job: over ? job : null, heldRuns: new Set(header.actions.filter((action) => held.has(action.run)).map((action) => action.run)), releasedRuns: new Map(header.actions.filter((action) => released.has(action.run)).map((action) => [action.run, released.get(action.run) as number] as const)) }, forHeader, names.get(header.botId) ?? 'Brick', personId);
+    return itemOf({ ...header, state, job: over ? job : null, heldRuns: new Set(header.actions.filter((action) => held.has(action.run)).map((action) => action.run)), releasedRuns: new Map(header.actions.filter((action) => released.has(action.run)).map((action) => [action.run, released.get(action.run) as number] as const)), letGoRuns: new Set(header.actions.filter((action) => letGo.has(action.run)).map((action) => action.run)) }, forHeader, names.get(header.botId) ?? 'Brick', personId);
   });
   return items.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : -1)).slice(0, limit);
 }
