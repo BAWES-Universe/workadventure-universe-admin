@@ -29,8 +29,8 @@ export type NoRoom =
   | { ok: false; reason: 'allowance'; leftMicros: number }
   /** Jobs at once are taken, for this member or for everyone: wait in line. */
   | { ok: false; reason: 'busy' }
-  /** Our own pool has no more room for new work. */
-  | { ok: false; reason: 'pool' }
+  /** Our own pool has no more room for new work. `full` is true when it has none even for the smallest step (the envelope is at its ceiling), false when it only refused a step for its own size. */
+  | { ok: false; reason: 'pool'; full?: boolean }
   /** The reservation is not one that is held and in time any more: stop safely. */
   | { ok: false; reason: 'closed' }
   /** The key was used before for someone else: the first stands, and whoever asked has a bug to find. */
@@ -230,7 +230,7 @@ async function fits(tx: Tx, personId: string, extraMicros: number, now: Date, se
     const mine = await tx.meterReservation.count({ where: { personKey: `person:${personId}`, state: 'held', expiresAt: { gt: now }, NOT: [{ reservationKey: { startsWith: CALL_ROOM_PREFIX } }, { reservationKey: { startsWith: DISK_ROOM_PREFIX } }] } });
     if (mine >= (settings.atOnceMember ?? 0) || envelope.jobsRunning >= (settings.atOnceAll ?? 0)) return { ok: false, reason: 'busy' };
   }
-  if (envelope.totalMicros + extraMicros > (settings.poolCeilingMicros ?? 0)) return { ok: false, reason: 'pool' };
+  if (envelope.totalMicros + extraMicros > (settings.poolCeilingMicros ?? 0)) return { ok: false, reason: 'pool', full: envelope.totalMicros + 1 > (settings.poolCeilingMicros ?? 0) };
   return null;
 }
 

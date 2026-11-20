@@ -646,7 +646,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await routeIsPaused(route)).toBe(true);
       expect((await giveBackOverview()).routes).toContainEqual({ route, failedJobs: 3, paused: true });
       // New platform-funded work waits (the relay answers busy, nothing is held); another route and the person's own key are untouched
-      expect(await authorizeModelCall({ token, callId: 'p2', estimateMicros: 1_000, payer: 'universe', route }, new Date())).toEqual({ ok: false, reason: 'pool' });
+      expect(await authorizeModelCall({ token, callId: 'p2', estimateMicros: 1_000, payer: 'universe', route }, new Date())).toEqual({ ok: false, reason: 'pool', full: false });
       expect(await authorizeModelCall({ token, callId: 'p3', estimateMicros: 1_000, payer: 'universe', route: 'universe-ai/other' }, new Date())).toMatchObject({ ok: true });
       expect(await authorizeModelCall({ token, callId: 'p4', estimateMicros: 1_000, payer: 'own-key', route }, new Date())).toMatchObject({ ok: true });
       // A fault of the person's, or of our relay, is not a provider failing

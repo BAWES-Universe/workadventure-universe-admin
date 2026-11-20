@@ -234,7 +234,20 @@ run('what a computer may ask of Orbit, in a real database', () => {
       const { jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
       await setUp({ poolCeilingMicros: 70_000 });
-      expect(await call(token, 'c1', 50_000)).toEqual({ ok: false, reason: 'pool' });
+      // Refused for its own size: there is room for a smaller call, so the pool is not full
+      expect(await call(token, 'c1', 50_000)).toEqual({ ok: false, reason: 'pool', full: false });
+    });
+
+    it('says the pool is FULL only when it has no room even for the smallest call (so the relay can tell our full pool from a call too big for the room left)', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      // The job already holds its first stretch (60,000): a ceiling at exactly that leaves nothing for any call
+      await setUp({ poolCeilingMicros: 60_000 });
+      expect(await call(token, 'c1', 1)).toEqual({ ok: false, reason: 'pool', full: true });
+      expect(await call(token, 'c2', 50_000)).toEqual({ ok: false, reason: 'pool', full: true });
+      // One millionth of room left: a bigger call is refused for its size, not because the pool is full
+      await setUp({ poolCeilingMicros: 60_001 });
+      expect(await call(token, 'c3', 2)).toEqual({ ok: false, reason: 'pool', full: false });
     });
 
     it('is not another job running: a call does not use up the jobs allowed at once', async () => {
