@@ -134,7 +134,7 @@ run('the bounded Instant executor, in a real database', () => {
     setInstantFunds(undefined);
     forgetDriftClock();
     await resumeInstant(sara);
-    await prisma.appSetting.deleteMany({ where: { key: { in: ['instant-limits'] } } });
+    await prisma.appSetting.deleteMany({ where: { key: { in: ['instant-limits', 'instant-meter-backfill-cursor'] } } });
     await giveApp(brick, sara, 'exa');
   });
   afterEach(async () => {
@@ -149,7 +149,7 @@ run('the bounded Instant executor, in a real database', () => {
   afterAll(async () => {
     if (envBefore.service === undefined) delete process.env.BOT_SERVICE_TOKEN;
     else process.env.BOT_SERVICE_TOKEN = envBefore.service;
-    await prisma.appSetting.deleteMany({ where: { key: { in: ['instant-limits', 'instant-state'] } } });
+    await prisma.appSetting.deleteMany({ where: { key: { in: ['instant-limits', 'instant-state', 'instant-meter-backfill-cursor'] } } });
     await prisma.bot.deleteMany({ where: { id: { in: [brick, omarBrick] } } });
     await prisma.user.deleteMany({ where: { id: { in: [sara, omar] } } });
     await prisma.$disconnect();
@@ -1158,6 +1158,44 @@ run('the bounded Instant executor, in a real database', () => {
       await backfillMeterEvents(new Date(), 25);
       expect(await prisma.meterEvent.count({ where: { eventId: { in: ids.map((id) => `instant:${id}`) } } })).toBe(26);
       expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${ids[0]}` } })).toMatchObject({ occurredAt: new Date(Date.UTC(2020, 0, 1, 0, 0, 0)) });
+    }, 60_000);
+
+    it('a sweep goes on from where the last one stopped: runs that keep failing do not starve the one behind them, and they are tried again once the end is reached', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      const ids: string[] = [];
+      const { backfillMeterEvents } = await import('@/lib/instant/executor');
+      const has = async (id: string) => (await prisma.meterEvent.count({ where: { eventId: `instant:${id}` } })) === 1;
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        for (let n = 0; n < 6; n += 1) {
+          const key = callId();
+          await runInstant(ask({ callId: key, arguments: { query: `cur${n}` } }), { adapter: p.adapter, funds: f.funds });
+          ids.push(await runIdOf(key));
+        }
+        // The oldest five keep failing (their event cannot be written); the sixth, the newest, can be. A sweep reads one page of two runs
+        for (const [n, id] of ids.entries()) {
+          await prisma.instantRun.update({ where: { id }, data: { finishedAt: new Date(Date.UTC(2020, 0, 1, 0, 0, n)) } });
+          await prisma.meterEvent.deleteMany({ where: { eventId: `instant:${id}` } });
+        }
+        const refused = ids.slice(0, 5).map((id) => `'instant:${id}'`).join(', ');
+        await prisma.$executeRawUnsafe(`ALTER TABLE meter_events ADD CONSTRAINT instant_event_refused CHECK (event_id NOT IN (${refused})) NOT VALID`);
+        // Each sweep starts after the run the one before ended on, so the third reaches the sixth
+        await backfillMeterEvents(new Date(), 2, 1);
+        expect(await has(ids[5])).toBe(false);
+        await backfillMeterEvents(new Date(), 2, 1);
+        expect(await has(ids[5])).toBe(false);
+        await backfillMeterEvents(new Date(), 2, 1);
+        expect(await has(ids[5])).toBe(true);
+        // Past the end the next sweep starts over from the oldest, so the ones that failed are tried again once they can be written
+        await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT instant_event_refused');
+        for (let sweep = 0; sweep < 4; sweep += 1) await backfillMeterEvents(new Date(), 2, 1);
+      } finally {
+        quiet.mockRestore();
+        await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT IF EXISTS instant_event_refused');
+      }
+      for (const id of ids) expect(await has(id)).toBe(true);
     }, 60_000);
 
     it('a run that finished before midnight and settled after it is on the day it finished, whether its event is written when it settles or later by the sweep', async () => {
