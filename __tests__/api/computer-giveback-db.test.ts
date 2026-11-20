@@ -1392,7 +1392,16 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       it('a confirmed fault of ours is given back when an App delivered, and the App’s own charge is not touched; a completed give-back is never taken back', async () => {
         await limitsAre(LAUNCH);
         const sara = await person('sara');
+        let appRunId = '';
         const delivered = await job(sara, { outcome: 'failed', cause: 'agent', turns: [2] }, async (id) => {
+          // The App that delivered was charged on its own run before the give-back: Instant's own record of it, and the books' line for it
+          const appRun = await prisma.instantRun.create({
+            data: { runKey: `k-${randomUUID()}`, botId: sara.brickId, personId: sara.id, taskKey: id, toolSlug: 'GMAIL_SEND_EMAIL', toolkit: 'gmail', argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v', topMicros: BigInt(10_000), holdMicros: BigInt(10_000), state: 'succeeded', customerState: 'charged', customerMicros: BigInt(9_000), providerUserId: `u-${randomUUID().slice(0, 6)}` } as never,
+          });
+          appRunId = appRun.id;
+          await prisma.meterEvent.create({
+            data: { eventId: `instant:${appRun.id}`, kind: 'app_use', pool: 'chat', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(7_000), basis: 'measured', detail: { instant: true, taskKey: id, runId: appRun.id, app: 'gmail', customerMicros: 9_000 } } as never,
+          });
           await planEffect(id, { key: 'mail-1', kind: 'send' });
           await settleEffect(id, 'mail-1', 'done', 'ali@example.test');
           await recordFaults(sara.brickId, id, [row401(2)]);
@@ -1400,12 +1409,18 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(await decisionOf(delivered.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
         expect(await givenBack(delivered.id)).toBe(true);
         expect(await prisma.computerEffect.count({ where: { jobId: delivered.id, state: 'done' } })).toBe(1);
+        // The App's own charge is untouched by the give-back of the computer
+        const appCharge = async () => ({ run: await prisma.instantRun.findUniqueOrThrow({ where: { id: appRunId } }), event: await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${appRunId}` } }) });
+        expect((await appCharge()).run).toMatchObject({ state: 'succeeded', customerState: 'charged', customerMicros: BigInt(9_000) });
+        expect((await appCharge()).event).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
         // Nothing that arrives later takes it back
         await recordFaults(sara.brickId, delivered.id, [fault(2, 'allowance', { callId: 'late-person' }), fault(2, 'provider_5xx', { callId: 'late-unresolved' })]);
         await afterLateEvidence(delivered.id);
         await sweepLateEvidence(minutes(40));
         expect(await decisionOf(delivered.id)).toMatchObject({ state: 'given', basis: 'universe_fault' });
         expect(await givenBack(delivered.id)).toBe(true);
+        expect((await appCharge()).run).toMatchObject({ customerState: 'charged', customerMicros: BigInt(9_000) });
+        expect((await appCharge()).event).toMatchObject({ personKey: `person:${sara.id}` });
       });
 
       it('an incident operations establishes gives back a job the runner called the agent’s own and nothing recorded (a provider row arrived late on its judged turn); one with person evidence is left alone', async () => {
