@@ -33,7 +33,7 @@ import { monthOf } from '@/lib/meter-values';
 /** Read from Limits by the caller BEFORE its transaction opens: a read that fails inside a transaction leaves the transaction aborted. */
 export type GiveBackLimits = Pick<InstantLimits, 'goodwillPerPersonPerMonth' | 'pauseMinRuns' | 'pauseFailureRateBps'>;
 
-export type GiveBackVerdict = { give: true } | { give: false; why: 'outside_effect' | 'person_limit' | 'paused' };
+export type GiveBackVerdict = { give: true } | { give: false; why: 'outside_effect' | 'person_limit' | 'paused' | 'limits_unreadable' };
 
 /** The most give-backs one person may have in a month, or null when Limits carry no number to read one from. */
 export function personGiveBackBound(limits: Pick<InstantLimits, 'goodwillPerPersonPerMonth' | 'pauseMinRuns' | 'pauseFailureRateBps'>): number | null {

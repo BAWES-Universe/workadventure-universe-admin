@@ -35,8 +35,8 @@ import { computersArePaused } from '@/lib/capability-pause';
 import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
-import { getInstantLimits } from '@/lib/instant/state';
-import { judgeJobGiveBack, type GiveBackVerdict } from '@/lib/computer-giveback';
+import { getInstantLimitsStrict } from '@/lib/instant/state';
+import { judgeJobGiveBack, type GiveBackLimits, type GiveBackVerdict } from '@/lib/computer-giveback';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -1137,6 +1137,18 @@ async function untilCleaned(botId: string): Promise<void> {
 /** How many times an end is tried again when the job's state moved between reading it and writing the end. */
 const END_TRIES = 4;
 
+/** Limits for the bound on give-backs, read twice at most; null when they could not be read, which is never the same as none being set. */
+async function readGiveBackLimits(): Promise<GiveBackLimits | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await getInstantLimitsStrict();
+    } catch (error) {
+      console.error('[Computer] Could not read the limits for the bound on give-backs:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+  return null;
+}
+
 /**
  * Ends a job once. Whatever it ran is worked out from the seconds the machine was held for it, recorded in the meter's books as
  * one event under the job's id, and its reserved room is settled to that. Then the machine rests if no other job holds it, and
@@ -1192,10 +1204,14 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       const personId = job.personId;
       const startedAt = job.startedAt;
       // Read before the transaction opens: a read of Limits that fails inside it would leave the transaction aborted
-      const limits = judged ? await getInstantLimits() : null;
+      // (read twice at most: a read that fails twice is not "no numbers set", and the give-back is refused below)
+      const limits = judged ? await readGiveBackLimits() : null;
       const result = await prisma.$transaction(async (tx) => {
         let verdict: GiveBackVerdict = { give: true };
-        if (judged && limits) {
+        if (judged && !limits) {
+          // Limits could not be read (not the same as none being set): the bound is not known, so the runner's "ours" is not given back this time
+          verdict = { give: false, why: 'limits_unreadable' };
+        } else if (judged && limits) {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`computer:giveback:${personId}`}))`;
           verdict = await judgeJobGiveBack(tx, limits, { id: jobId, personId, startedAt }, now);
         }
