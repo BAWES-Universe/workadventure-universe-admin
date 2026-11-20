@@ -2505,6 +2505,8 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
     WHERE j."bot_id" = ${botId} AND (j."status" IN ('failed', 'stopped') AND j."ended_by" IN ('error', 'pool'))
       AND (
         EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
+        -- ...or the job's own time, written against the person by an end that overlapped the decision that gave the job back (the same condition the repair sweep looks for): once the job is gone nothing can find it to detach it
+        OR EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time' AND e."person_key" = 'person:' || j."person_id")
         -- ...or credit the job drew that has not gone back and that no refund obligation covers yet: an obligation keeps the minimum references to finish the
         -- reimbursement (job, person, hold key, refund key, amount) without the job, so a refund the books cannot take yet never holds the deletion for ever
         OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros"
