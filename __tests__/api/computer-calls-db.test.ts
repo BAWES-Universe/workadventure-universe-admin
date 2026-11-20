@@ -10,6 +10,7 @@ jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
+import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { currentEnvelope } from '@/lib/meter-allowance';
@@ -63,12 +64,14 @@ run('what a computer may ask of Orbit, in a real database', () => {
   });
   beforeEach(async () => {
     await wipe();
+    await seedGiveBackLimits();
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
     setComputerProviderForTests(new FakeComputerProvider());
     await setUp();
   });
   afterAll(async () => {
     await wipe();
+    await clearGiveBackLimits();
     setComputerProviderForTests(null);
     process.env.COMPUTER_PROVIDER = env;
     await prisma.user.deleteMany({ where: { id: { in: people } } });

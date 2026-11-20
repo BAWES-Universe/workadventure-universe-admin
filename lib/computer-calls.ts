@@ -5,6 +5,7 @@ import { releaseRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
 import { verifyJobToken } from '@/lib/computer-token';
 import { givenBackJob } from '@/lib/computer-values';
 import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
+import { routeIsPaused } from '@/lib/computer-fault-ops';
 
 /**
  * A model call a Brick's computer makes (build handoff v2, section 5): room is taken BEFORE the call, and what it really cost is
@@ -41,7 +42,7 @@ export type Authorized =
   | { ok: false; reason: 'rule'; ruleId: string; why: 'own_accounts' | 'cap'; leftMicros: number | null; words: string };
 
 export async function authorizeModelCall(
-  input: { token: string; callId: string; estimateMicros: number; payer: 'universe' | 'own-key' },
+  input: { token: string; callId: string; estimateMicros: number; payer: 'universe' | 'own-key'; /** The provider and route the call goes to, when the relay names it: new platform-funded work on a route that is failing for many people waits. */ route?: string | null },
   now: Date = new Date(),
 ): Promise<Authorized> {
   if (!CALL_ID.test(input.callId)) return { ok: false, reason: 'refused' };
@@ -54,6 +55,8 @@ export async function authorizeModelCall(
     return still.ok && still.generation === verified.generation ? { ok: true, ...base, reservedMicros: null } : { ok: false, reason: 'refused' };
   }
   if (!Number.isSafeInteger(input.estimateMicros) || input.estimateMicros <= 0 || input.estimateMicros > MAX_MICROS) return { ok: false, reason: 'refused' };
+  // One provider failing for many people: nothing new is sent to it for now (the relay answers busy, and nothing is held or charged). Never for a person's own key.
+  if (input.route && (await routeIsPaused(input.route, now).catch(() => false))) return { ok: false, reason: 'pool' };
   const room = await reserveRoom({ key: callRoomKey(base.jobId, input.callId), personId: base.personId, amountMicros: input.estimateMicros, botId: base.botId, jobId: base.jobId, newJob: false }, now);
   if (room.ok) {
     // The room may have waited for the pool's lock while the person took the machine: the key must still be good after it, or the room goes back

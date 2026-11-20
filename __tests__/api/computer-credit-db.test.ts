@@ -16,6 +16,7 @@ jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
+import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { memberAllowance } from '@/lib/meter-allowance';
@@ -133,12 +134,14 @@ run('credit for computers, on the real books', () => {
     // The give-back is the real one again, whatever a test did to it
     (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(jest.requireActual('@/lib/credit-spend').refundHold);
     await wipe();
+    await seedGiveBackLimits();
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
     setComputerProviderForTests(new FakeComputerProvider());
     await setUp();
   });
   afterAll(async () => {
     await wipe();
+    await clearGiveBackLimits();
     setComputerProviderForTests(null);
     process.env.COMPUTER_PROVIDER = env;
     await prisma.user.deleteMany({ where: { id: { in: people } } });

@@ -22,6 +22,7 @@ jest.mock('@/lib/auth-session', () => ({
 }));
 
 import { prisma } from '@/lib/db';
+import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
@@ -140,6 +141,7 @@ run('two read-only jobs that run at once on one computer, each calling on its ow
   });
   beforeEach(async () => {
     await wipe();
+    await seedGiveBackLimits();
     await prisma.brickComputer.deleteMany({
       where: { bot: { ownerId: { in: people } } },
     });
@@ -162,6 +164,7 @@ run('two read-only jobs that run at once on one computer, each calling on its ow
   afterAll(async () => {
     await new Promise<void>((resolve) => bank.close(() => resolve()));
     await wipe();
+    await clearGiveBackLimits();
     setComputerProviderForTests(null);
     process.env.COMPUTER_PROVIDER = env;
     await prisma.user.deleteMany({ where: { id: { in: people } } });

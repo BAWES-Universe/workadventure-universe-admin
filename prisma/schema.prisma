@@ -3601,6 +3601,7 @@ model ComputerJob {
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
+  faults  ComputerJobFault[]
   tokens  ComputerJobToken[]
   visits  ComputerJobVisit[]
   files   ComputerJobFile[]
@@ -3675,6 +3676,63 @@ model ComputerJobFile {
   @@index([jobId])
   @@index([ownerId, createdAt])
   @@map("computer_job_files")
+}
+
+// What the game relay saw go wrong (or not) on a job's model calls, written by the bot server one row per call (or per turn: call_id 'turn:<n>') BEFORE the
+// job finishes, and once per (job, call): a row written again changes nothing, except that an 'uncertain' one may be settled once. Orbit, not the runner's
+// memory, judges whether a failed job is given back from these rows (lib/computer-giveback). Never any content of a call: a reason word, a status and a route.
+model ComputerJobFault {
+  id             String   @id @default(uuid())
+  jobId          String   @map("job_id")
+  turn           Int?
+  callId         String   @map("call_id") @db.VarChar(120)
+  // fault, not_ours, uncertain, answered: what the relay says; the CLASS (ours, the person's, unresolved) is worked out here from the reason
+  kind           String   @db.VarChar(12)
+  reason         String   @db.VarChar(32)
+  // universe-ai or own-key
+  source         String   @db.VarChar(12)
+  // The provider and route the call went to ("universe-ai:<providerId>"): what a provider's failures are counted by
+  route          String?  @db.VarChar(120)
+  providerStatus Int?     @map("provider_status")
+  at             DateTime
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, callId])
+  @@index([route, at])
+  @@map("computer_job_faults")
+}
+
+// Whether a computer job that failed is given back, and why, kept for good (one row per job): the decision, the basis it rests on, the reason the relay
+// or Orbit named, and what is still to be done. A decision that could not be made yet (Limits unreadable or not set, an outside effect still to be
+// confirmed) is `pending` and is tried again by the sweep with a growing wait; the person is charged provisionally and a decision that turns out `given`
+// gives it all back. Not tied to the job by a foreign key: the record of what was decided about a person's money outlives the job's own removal.
+model ComputerGiveBackDecision {
+  jobId         String    @id @map("job_id")
+  personId      String    @map("person_id")
+  // given, refused, pending
+  state         String    @db.VarChar(8)
+  // given: universe_fault, orbit_fault, goodwill, incident; refused: person_caused, delivered, cap, paused; pending: effect_unresolved, limits_unreadable, limits_missing
+  basis         String    @db.VarChar(20)
+  // What the runner said ('ours') and the reason of the row (or the Orbit ending) the decision rests on
+  causeHint     String?   @map("cause_hint") @db.VarChar(10)
+  reason        String?   @db.VarChar(32)
+  route         String?   @db.VarChar(120)
+  // The turns the runner judged failed
+  judgedTurns   Int[]     @map("judged_turns")
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime? @map("next_attempt_at")
+  lastError     String?   @map("last_error") @db.VarChar(200)
+  // When the age of a pending decision was last told to Sentry
+  alertedAt     DateTime? @map("alerted_at")
+  // An outside effect that was still unconfirmed when the decision was made settled as done afterwards
+  deliveredLate Boolean   @default(false) @map("delivered_late")
+  decidedAt     DateTime  @default(now()) @map("decided_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@index([state, nextAttemptAt])
+  @@map("computer_give_back_decisions")
 }
 
 // An effect outside the computer that a job meant to have, written BEFORE it is tried and once per key, so a retry looks up

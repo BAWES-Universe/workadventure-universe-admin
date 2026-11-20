@@ -13,6 +13,7 @@ jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
+import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { memoryStore } from '../helpers/archive-store';
 import { setArchiveStoreForTests } from '@/lib/computer-archives';
 import { createBrick } from '@/lib/brick-create';
@@ -118,6 +119,7 @@ run('a Brick’s computer, in a real database', () => {
   });
   beforeEach(async () => {
     await wipe();
+    await seedGiveBackLimits();
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
     provider = new FakeComputerProvider();
     setComputerProviderForTests(provider);
@@ -126,6 +128,7 @@ run('a Brick’s computer, in a real database', () => {
   });
   afterAll(async () => {
     await wipe();
+    await clearGiveBackLimits();
     setArchiveStoreForTests(null);
     setComputerProviderForTests(null);
     process.env.COMPUTER_PROVIDER = env;
