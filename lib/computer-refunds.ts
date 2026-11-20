@@ -1,4 +1,5 @@
 import * as Sentry from '@sentry/nextjs';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { refundHold } from '@/lib/credit-spend';
 import { retryWaitMs } from '@/lib/computer-retry';
@@ -34,10 +35,24 @@ export async function recordRefundObligations(jobId: string): Promise<number> {
   return created.count;
 }
 
-/** The obligations of a Brick's failed jobs that have none yet, so a purge may go on without the jobs (the obligations carry what is needed). */
-export async function recordRefundObligationsForBrick(botId: string): Promise<void> {
-  const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['failed', 'stopped'] }, endedBy: 'error' }, select: { id: true }, take: 500 });
-  for (const job of jobs) await recordRefundObligations(job.id);
+/**
+ * The obligations of a Brick's failed jobs that have none yet, so a purge may go on without the jobs (the obligations carry what is needed). EVERY job that qualifies,
+ * a page at a time in the order of their ids: a Brick with more of them than one page is never left blocked on the ones a first page never reached.
+ */
+export async function recordRefundObligationsForBrick(botId: string, page = 500): Promise<void> {
+  let after: string | undefined;
+  for (;;) {
+    const jobs = await prisma.computerJob.findMany({
+      where: { botId, status: { in: ['failed', 'stopped'] }, endedBy: 'error' },
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: page,
+      ...(after ? { cursor: { id: after }, skip: 1 } : {}),
+    });
+    for (const job of jobs) await recordRefundObligations(job.id);
+    if (jobs.length < page) return;
+    after = jobs[jobs.length - 1].id;
+  }
 }
 
 export type AttemptResult = 'acknowledged' | 'owed' | 'none';
@@ -68,9 +83,16 @@ export async function attemptRefundObligation(holdKey: string, now: Date = new D
       });
       return 'acknowledged';
     }
-    await prisma.computerRefundObligation.updateMany({
-      where: { id: one.id, state: 'owed' },
-      data: { attempts: { increment: 1 }, lastAttemptAt: now, lastError: error, nextAttemptAt: new Date(now.getTime() + retryWaitMs(one.attempts + 1)) },
+    // The wait is worked out from the count that THIS write advances: the row is locked while it is read and written, so two tries that fail together (the sweep and a
+    // support retry) record two attempts one after the other and the second waits the longer time, never the same one from the same old count
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "computer_refund_obligations" WHERE "id" = ${one.id} FOR UPDATE`);
+      const current = await tx.computerRefundObligation.findUnique({ where: { id: one.id }, select: { attempts: true, state: true } });
+      if (!current || current.state !== 'owed') return;
+      await tx.computerRefundObligation.update({
+        where: { id: one.id },
+        data: { attempts: current.attempts + 1, lastAttemptAt: now, lastError: error, nextAttemptAt: new Date(now.getTime() + retryWaitMs(current.attempts + 1)) },
+      });
     });
     return 'owed';
   } catch (caught) {
@@ -139,9 +161,15 @@ export interface RefundOverview {
 
 /** What is owed and not yet acknowledged, for operations and support. Reads only. */
 export async function refundOverview(now: Date = new Date()): Promise<RefundOverview> {
-  const owed = await prisma.computerRefundObligation.findMany({ where: { state: 'owed' }, orderBy: { createdAt: 'asc' }, take: 100 });
-  const totals = await prisma.computerRefundObligation.aggregate({ where: { state: 'owed' }, _count: { _all: true }, _sum: { amountMicros: true }, _min: { createdAt: true } });
-  const overdueCount = await prisma.computerRefundObligation.count({ where: { state: 'owed', createdAt: { lte: new Date(now.getTime() - REFUND_OVERDUE_MS) } } });
+  // The rows, the totals and the overdue count are read in ONE snapshot: a refund acknowledged between three separate reads would be listed as overdue and counted as none owed
+  const { owed, totals, overdueCount } = await prisma.$transaction(
+    async (tx) => ({
+      owed: await tx.computerRefundObligation.findMany({ where: { state: 'owed' }, orderBy: { createdAt: 'asc' }, take: 100 }),
+      totals: await tx.computerRefundObligation.aggregate({ where: { state: 'owed' }, _count: { _all: true }, _sum: { amountMicros: true }, _min: { createdAt: true } }),
+      overdueCount: await tx.computerRefundObligation.count({ where: { state: 'owed', createdAt: { lte: new Date(now.getTime() - REFUND_OVERDUE_MS) } } }),
+    }),
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  );
   const oldest = totals._min.createdAt;
   return {
     owed: {
