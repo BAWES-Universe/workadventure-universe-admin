@@ -355,16 +355,20 @@ async function unreportedTime(db: Db, rooms: Prisma.MeterReservationWhereInput[]
   const have = new Set(written.map((event) => event.eventId));
   const missing = ids.filter((id) => !have.has(`computer:${id}:time`));
   if (missing.length === 0) return 0;
-  const jobs = await db.computerJob.findMany({ where: { id: { in: missing } }, select: { id: true, status: true, endedBy: true, startedAt: true, secondsRun: true } });
+  const jobs = await db.computerJob.findMany({ where: { id: { in: missing } }, select: { id: true, status: true, endedBy: true, startedAt: true, endedAt: true, secondsRun: true } });
   const byId = new Map(jobs.map((job) => [job.id, job]));
   let total = 0;
   for (const room of settled) {
     const job = byId.get(room.jobId as string);
     if (!job || room.settledMicros === null || givenBackJob(job.status, job.endedBy)) continue;
+    // The event it will become is written at the moment the job ended (a sweep that settles the room later does not move it), so the period and the split
+    // are read from that moment, never from when the room happened to close
+    const occurred = (job.endedAt ?? room.closedAt)?.getTime();
+    if (start && occurred !== undefined && occurred < start.getTime()) continue;
     const cost = room.settledMicros;
     total += Number(cost);
-    if (start && job.startedAt && room.closedAt && job.startedAt.getTime() < start.getTime()) {
-      total -= Number(crossedShare(cost, room.closedAt.getTime(), job.startedAt.getTime(), job.secondsRun, start.getTime(), room.terms));
+    if (start && occurred !== undefined && job.startedAt && job.startedAt.getTime() < start.getTime()) {
+      total -= Number(crossedShare(cost, occurred, job.startedAt.getTime(), job.secondsRun, start.getTime(), room.terms));
     }
   }
   return total;

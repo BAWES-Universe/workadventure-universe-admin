@@ -1233,6 +1233,54 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await ask(sara, 970_001, later)).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
     });
 
+    it('a room the sweep settles after midnight for a job that ended before it counts in the old month only: the event it becomes is written at the job’s end', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      // 23:53 to 23:58 on the last day of November: $0.03
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, new Date('2026-11-30T23:53:00Z'));
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      record.mockRejectedValue(new Error('books down'));
+      (settleRoom as jest.Mock).mockRejectedValueOnce(new Error('books down'));
+      await finishJob(started.job.id, 'done', new Date('2026-11-30T23:58:00Z'));
+      // Its room lapses at 00:03 and the sweep settles it at 00:20 in December, the books still down
+      await sweepComputers(new Date('2026-12-01T00:20:00Z'));
+      expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      // December's cap sees none of it (it ran in November), and November's cap sees all of it
+      const december = new Date('2026-12-01T00:30:00Z');
+      expect(await ask(sara, 1_000_000, december)).toEqual({ ok: true });
+      expect(await ask(sara, 970_000, new Date('2026-11-30T23:59:00Z'))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, new Date('2026-11-30T23:59:00Z'))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      // Written later it is the same: the event is November's
+      record.mockImplementation(actualRecord);
+      await sweepComputers(new Date('2026-12-01T00:40:00Z'));
+      expect((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${started.job.id}:time` } })).occurredAt).toEqual(new Date('2026-11-30T23:58:00Z'));
+      expect(await ask(sara, 1_000_000, december)).toEqual({ ok: true });
+    });
+
+    it('a renewal taken while the provider’s rate was not known (1 micro of room) does not pull the job’s price down: that stretch is priced by its neighbour', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const provider = new FakeComputerProvider();
+      setComputerProviderForTests(provider);
+      const rate = jest.spyOn(provider, 'microsPerMinute').mockReturnValue(6000);
+      try {
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        // The rate is not known at the renewal at minute 4 (it holds 1 micro), and known again when the job ends at minute 8
+        rate.mockReturnValue(null);
+        expect(await renewJob(started.job.id, minutes(4))).toMatchObject({ ok: true });
+        expect((await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).terms).toEqual([expect.objectContaining({ micros: 60_000 }), expect.objectContaining({ micros: 1 })]);
+        rate.mockReturnValue(6000);
+        await finishJob(started.job.id, 'done', minutes(8));
+        // 8 minutes at 6,000: 48,000 (counting the 1 micro as a price would say about 24,000)
+        expect((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${started.job.id}:time` } })).costMicros).toBe(BigInt(48_000));
+      } finally {
+        rate.mockRestore();
+      }
+    });
+
     it('a job that failed on our side is not counted while its time is unwritten: it takes nothing from the person', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
