@@ -649,6 +649,46 @@ run('credit for computers, on the real books', () => {
         expect(view.rows[0].lastAttemptAt).not.toBeNull();
       });
 
+      it('two sweeps running together tell Sentry once about an overdue refund, and a capture that throws is told again by the next sweep', async () => {
+        const { holdKey } = await stuck();
+        const created = (await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).createdAt;
+        const spy = quiet();
+        const overdueAt = new Date(created.getTime() + 61 * 60_000);
+        (Sentry.captureMessage as jest.Mock).mockClear();
+        // Another sweep claims the alert between this one's read of the overdue rows and its own claim: this one says nothing (the claim is a write only one can win)
+        const realFindMany = prisma.computerRefundObligation.findMany.bind(prisma.computerRefundObligation);
+        const findMany = jest.spyOn(prisma.computerRefundObligation, 'findMany').mockImplementation(((args: { where?: { alertedAt?: null } }) => {
+          const read = realFindMany(args as never);
+          if (args?.where?.alertedAt === null) return read.then(async (rows) => {
+            await prisma.computerRefundObligation.updateMany({ where: { holdKey }, data: { alertedAt: overdueAt } });
+            return rows;
+          });
+          return read;
+        }) as never);
+        try {
+          expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 0 });
+        } finally {
+          findMany.mockRestore();
+        }
+        expect(Sentry.captureMessage).not.toHaveBeenCalled();
+        // Two sweeps together tell it once
+        await prisma.computerRefundObligation.update({ where: { holdKey }, data: { alertedAt: null } });
+        const [one, other] = await Promise.all([sweepRefundObligations(overdueAt), sweepRefundObligations(overdueAt)]);
+        expect(one.alerted + other.alerted).toBe(1);
+        expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+        // A capture that throws gives the claim back, so the obligation is not left as "told" when nobody was
+        await prisma.computerRefundObligation.update({ where: { holdKey }, data: { alertedAt: null } });
+        (Sentry.captureMessage as jest.Mock).mockClear();
+        (Sentry.captureMessage as jest.Mock).mockImplementationOnce(() => {
+          throw new Error('sentry down');
+        });
+        expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 0 });
+        expect((await prisma.computerRefundObligation.findUniqueOrThrow({ where: { holdKey } })).alertedAt).toBeNull();
+        expect(await sweepRefundObligations(overdueAt)).toMatchObject({ alerted: 1 });
+        expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+        spy.mockRestore();
+      });
+
       it('makes the readiness check fail while a refund is overdue, and pass once it is acknowledged', async () => {
         await seedGiveBackLimits({});
         const { holdKey } = await stuck();

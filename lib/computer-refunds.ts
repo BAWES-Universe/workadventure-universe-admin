@@ -126,13 +126,21 @@ export async function sweepRefundObligations(now: Date = new Date(), batch = 50)
     }
     const old = await prisma.computerRefundObligation.findMany({ where: { state: 'owed', alertedAt: null, createdAt: { lte: new Date(now.getTime() - REFUND_OVERDUE_MS) } }, take: 20 });
     for (const one of old) {
-      Sentry.captureMessage('A refund of credit a failed computer job drew has not been acknowledged by the books for over an hour', {
-        level: 'error',
-        tags: { area: 'computer', step: 'refund_obligation_age' },
-        extra: { jobId: one.jobId, holdKey: one.holdKey, amountMicros: Number(one.amountMicros), attempts: one.attempts, lastError: one.lastError, since: one.createdAt.toISOString() },
-      });
-      await prisma.computerRefundObligation.update({ where: { id: one.id }, data: { alertedAt: now } });
-      result.alerted++;
+      // Claimed first, by a write that only one of two sweeps running together can win: the one that wins tells Sentry, so an obligation is told once, never twice
+      const claimed = await prisma.computerRefundObligation.updateMany({ where: { id: one.id, state: 'owed', alertedAt: null }, data: { alertedAt: now } });
+      if (claimed.count !== 1) continue;
+      try {
+        Sentry.captureMessage('A refund of credit a failed computer job drew has not been acknowledged by the books for over an hour', {
+          level: 'error',
+          tags: { area: 'computer', step: 'refund_obligation_age' },
+          extra: { jobId: one.jobId, holdKey: one.holdKey, amountMicros: Number(one.amountMicros), attempts: one.attempts, lastError: one.lastError, since: one.createdAt.toISOString() },
+        });
+        result.alerted++;
+      } catch (error) {
+        // The alert did not go: the claim is given back so the next sweep tells it (never an overdue refund nobody was told about)
+        console.error('[Computer] Could not tell Sentry about an overdue refund:', error instanceof Error ? error.message : 'unknown');
+        await prisma.computerRefundObligation.updateMany({ where: { id: one.id, alertedAt: now }, data: { alertedAt: null } }).catch(() => undefined);
+      }
     }
   } catch (error) {
     console.error('[Computer] The refund sweep failed:', error instanceof Error ? error.message : 'unknown');
