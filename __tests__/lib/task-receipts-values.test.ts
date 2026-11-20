@@ -1,4 +1,4 @@
-import { activityIdOf, categoryOf, jobActivityIdOf, outcomeOfRuns, readActions, readActivityId, receiptLines, receiptLink, spentOf, stateOfOutcome, takenForRun, type LineEvent } from '@/lib/task-receipts-values';
+import { actionOutcomeOfRun, activityIdOf, categoryOf, computerTakenOf, jobActivityIdOf, outcomeOfActions, outcomeOfRuns, readActions, readActivityId, receiptLines, receiptLink, spentOf, stateOfOutcome, takenForRun, type LineEvent } from '@/lib/task-receipts-values';
 
 const event = (over: Partial<LineEvent>): LineEvent => ({ kind: 'app_use', route: 'instant', quantity: 1, costMicros: 30_000, detail: null, ...over });
 
@@ -108,7 +108,40 @@ describe('how a task came to end, from its runs', () => {
     expect(stateOfOutcome('refunded')).toBe('refunded');
   });
 
-  it('reads stored actions back and drops anything that is not the shape written', () => {
+  it('a run nobody could confirm is unknown, never failed: until the provider’s own log says so, then it is what the log said', () => {
+    expect(actionOutcomeOfRun({ state: 'failed', reason: 'unclear', detail: { noLog: true } })).toBe('unknown');
+    expect(actionOutcomeOfRun({ state: 'failed', reason: 'unclear', detail: null })).toBe('unknown');
+    expect(actionOutcomeOfRun({ state: 'failed', reason: 'unclear', detail: { lateEvidence: { status: 'success' } } })).toBe('worked');
+    expect(actionOutcomeOfRun({ state: 'failed', reason: 'unclear', detail: { lateEvidence: { status: 'failed' } } })).toBe('failed');
+    expect(actionOutcomeOfRun({ state: 'failed', reason: 'provider_failed' })).toBe('failed');
+    expect(actionOutcomeOfRun({ state: 'succeeded' })).toBe('worked');
+  });
+
+  it('adds steps up: all worked is done, some is partly done, none is unconfirmed when any could not be confirmed, else refunded', () => {
+    expect(outcomeOfActions(['worked', 'worked'])).toBe('done');
+    expect(outcomeOfActions(['worked', 'unknown'])).toBe('partial');
+    expect(outcomeOfActions(['worked', 'failed'])).toBe('partial');
+    expect(outcomeOfActions(['unknown'])).toBe('unconfirmed');
+    expect(outcomeOfActions(['failed', 'unknown'])).toBe('unconfirmed');
+    expect(outcomeOfActions(['failed'])).toBe('refunded');
+    expect(outcomeOfActions([])).toBe('refunded');
+  });
+
+  it('a task nobody could confirm took nothing (refunded money state); one that did not finish took something (done state)', () => {
+    expect(stateOfOutcome('unconfirmed')).toBe('refunded');
+    expect(stateOfOutcome('failed')).toBe('done');
+  });
+
+  it('what the computer took: none written, a total, or not known yet (never a made-up total)', () => {
+    const time = (costMicros: number | null, detail: unknown = null) => event({ kind: 'computer_time', route: 'computer', quantity: 300, costMicros, detail });
+    expect(computerTakenOf([])).toBeUndefined();
+    expect(computerTakenOf([time(30_000, { givenBack: true })])).toBeUndefined();
+    expect(computerTakenOf([time(30_000), time(10_000)])).toBe(40_000);
+    expect(computerTakenOf([time(30_000), time(null)])).toBeNull();
+  });
+
+  it('reads stored actions back (an unknown one too) and drops anything that is not the shape written', () => {
+    expect(readActions([{ run: 'u', label: 'gmail', outcome: 'unknown' }])).toEqual([{ run: 'u', label: 'gmail', outcome: 'unknown' }]);
     expect(readActions([{ run: 'a', label: 'gmail', outcome: 'worked' }, { run: 'b', label: 'exa', outcome: 'refunded' }, null, 'x', { run: 1, label: 'x', outcome: 'failed' }])).toEqual([{ run: 'a', label: 'gmail', outcome: 'worked' }]);
     expect(readActions(null)).toEqual([]);
     expect(readActions({})).toEqual([]);

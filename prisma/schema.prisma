@@ -2316,9 +2316,10 @@ model TaskReceipt {
   leaseUntil    DateTime? @map("lease_until")
   // Which turn of the task the receipt is on. A close or renewal that carries an older number never ends or extends a newer turn.
   generation    Int       @default(1)
-  // How the task came to end, from its run records: done (every action worked), partial (some worked and some did not) or refunded (none did)
-  outcome       String?   @db.VarChar(8)
-  // Each Instant action of the task and how it ended (worked or failed), written when the receipt settles: [{ run, label, outcome }]
+  // How the task came to end, from its run records and its computer job: done, partial (a verified step and another that did not work or could
+  // not be confirmed), refunded (nothing worked, nothing taken), failed (nothing verified and a job that ran took the person's time) or unconfirmed
+  outcome       String?   @db.VarChar(12)
+  // Each Instant action of the task and how it ended (worked, failed or unknown), written when the receipt settles: [{ run, label, outcome }]
   actions       Json?
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at")
