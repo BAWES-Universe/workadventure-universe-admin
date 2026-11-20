@@ -641,6 +641,49 @@ async function lookUp(run: Row, instant: InstantAdapter, now: Date): Promise<{ l
 const LATE_EVIDENCE_DAYS = 35;
 
 /**
+ * How far apart two looks at the same run's log are, by how long ago the run was let go: often while a log line is likely to turn up, then less and less.
+ * Counted from the run's last look (`checkedAt`, which every look stamps), so a run whose log has no line yet (or a line nobody can read) is asked again
+ * only when its spacing has passed, never on every sweep. Every run is due again after its spacing, so none is skipped for ever, and the 35 days are the limit.
+ */
+const LATE_LOOK_BANDS: ReadonlyArray<{ fromHours: number; everyMinutes: number }> = [
+  { fromHours: 0, everyMinutes: 15 },
+  { fromHours: 24, everyMinutes: 2 * 60 },
+  { fromHours: 7 * 24, everyMinutes: 12 * 60 },
+];
+
+/** The spacing, in minutes, between two looks at a run let go `ageMs` ago. */
+export function lateLookSpacingMinutes(ageMs: number): number {
+  const hours = ageMs / (60 * MINUTE);
+  let every = LATE_LOOK_BANDS[0].everyMinutes;
+  for (const band of LATE_LOOK_BANDS) if (hours >= band.fromHours) every = band.everyMinutes;
+  return every;
+}
+
+/**
+ * The runs that are due a look at their log now: let go unconfirmed, vendor cost still the estimate, late evidence not all in (none written yet, or a success whose
+ * charge is not posted yet: the same question `awaitsLateEvidence` asks of one run), let go within the 35 days, and not looked at since their spacing began.
+ */
+export function lateRunsDueWhere(now: Date): Prisma.InstantRunWhereInput {
+  const ago = (hours: number) => new Date(now.getTime() - hours * 60 * MINUTE);
+  const bands = LATE_LOOK_BANDS.map((band, index) => {
+    const older = LATE_LOOK_BANDS[index + 1];
+    return {
+      finishedAt: { ...(older ? { gt: ago(older.fromHours) } : { gte: ago(LATE_EVIDENCE_DAYS * 24) }), lte: ago(band.fromHours) },
+      OR: [{ checkedAt: null }, { checkedAt: { lte: new Date(now.getTime() - band.everyMinutes * MINUTE) } }],
+    };
+  });
+  return {
+    state: 'failed',
+    providerBasis: 'estimated',
+    AND: [
+      { OR: [{ detail: { path: ['releasedUnconfirmed'], equals: true } }, { detail: { path: ['noLog'], equals: true } }, { detail: { path: ['unreadableLog'], equals: true } }] },
+      { OR: [{ detail: { path: ['lateEvidence'], equals: Prisma.DbNull } }, { AND: [{ detail: { path: ['lateEvidence', 'status'], equals: 'success' } }, { detail: { path: ['lateEvidence', 'chargeMicros'], equals: Prisma.JsonNull } }] }] },
+      { OR: bands },
+    ],
+  };
+}
+
+/**
  * A run nobody could vouch for: let go after Composio could not be asked (`releasedUnconfirmed`), or let go after the wait with no log line of it
  * (`noLog`) or a line nobody could read (`unreadableLog`). All three end the same way for the person (nothing taken, hold given back) and all three
  * are looked for in Composio's log a while longer.
@@ -711,7 +754,7 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
   const seen = await prisma.instantRun.findUnique({ where: { id: runId } });
   if (!seen) return;
   // Tried now: the sweep goes oldest attempt first, so runs that cannot be settled never keep the rest from being tried
-  await prisma.instantRun.updateMany({ where: { id: runId }, data: { checkedAt: new Date() } });
+  await prisma.instantRun.updateMany({ where: { id: runId }, data: { checkedAt: ctx.now } });
   const late = awaitsLateEvidence(seen, ctx.now);
   const looked = instant && (late || needsLookup(seen, ctx.now, limits)) ? await lookUp(seen, instant, ctx.now) : null;
   await withRun(runId, async (run, tx) => {

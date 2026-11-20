@@ -3655,6 +3655,95 @@ run('the bounded Instant executor, in a real database', () => {
         expect(f.left()).toBe(1_000_000);
       });
 
+      it('a run whose log has no line yet is asked again only when its spacing has passed (15 minutes the first day, 2 hours to the seventh, 12 hours after), counted from the last look, and a line that turns up later is still applied', async () => {
+        const p = fakeProvider();
+        const f = fakeFunds(1_000_000);
+        const { rowId, at, row } = await letGo(p, f);
+        if (route === 'noLog') p.script.byUser.set(row.providerUserId, []);
+        p.instant.findLogs.mockClear();
+        const sweepAt = async (minutes: number) => {
+          await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + minutes * MIN) });
+          return p.instant.findLogs.mock.calls.length;
+        };
+        // The first day: the run was just looked at (at 0), so nothing inside 15 minutes asks Composio again, however often the sweep runs
+        expect(await sweepAt(1)).toBe(0);
+        expect(await sweepAt(5)).toBe(0);
+        expect(await sweepAt(14)).toBe(0);
+        expect(await sweepAt(16)).toBe(1);
+        expect(await sweepAt(17)).toBe(1);
+        expect(await sweepAt(30)).toBe(1);
+        expect(await sweepAt(32)).toBe(2);
+        // Past the first day it is 2 hours from the last look
+        expect(await sweepAt(25 * 60)).toBe(3);
+        expect(await sweepAt(26 * 60)).toBe(3);
+        expect(await sweepAt(27 * 60 + 1)).toBe(4);
+        // Past the seventh day it is 12 hours
+        expect(await sweepAt(8 * 24 * 60)).toBe(5);
+        expect(await sweepAt(8 * 24 * 60 + 11 * 60)).toBe(5);
+        expect(await sweepAt(8 * 24 * 60 + 12 * 60 + 1)).toBe(6);
+        // A run still without a line is not written down as an answer
+        expect((await runOf(rowId)).detail).not.toHaveProperty('lateEvidence');
+        // The line arrives: the next look after the spacing applies it, once, and the person is charged nothing
+        p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', TOP - 1_000, 'log-late')]);
+        expect(await sweepAt(8 * 24 * 60 + 13 * 60)).toBe(6);
+        expect(await sweepAt(8 * 24 * 60 + 25 * 60)).toBe(7);
+        expect(await runOf(rowId)).toMatchObject({ providerBasis: 'measured' });
+        expect((await runOf(rowId)).detail).toMatchObject({ lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 } });
+        // The answer is final: it is not asked again
+        expect(await sweepAt(10 * 24 * 60)).toBe(7);
+        expect(f.left()).toBe(1_000_000);
+        expect(f.funds.settle).not.toHaveBeenCalled();
+      });
+
+      it('every run that is due is asked, once, in one sweep (the oldest look goes first), and none is asked again inside its spacing', async () => {
+        const p = fakeProvider();
+        const f = fakeFunds(1_000_000);
+        const ids: string[] = [];
+        let at = new Date();
+        for (let index = 0; index < 3; index++) {
+          const made = await letGo(p, f);
+          ids.push(made.rowId);
+          at = made.at;
+        }
+        if (route === 'noLog') for (const id of ids) p.script.byUser.set((await runOf(id)).providerUserId, []);
+        p.instant.findLogs.mockClear();
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 20 * MIN) });
+        // All three were due, all three were asked, once
+        expect(p.instant.findLogs.mock.calls.length).toBe(3);
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 21 * MIN) });
+        expect(p.instant.findLogs.mock.calls.length).toBe(3);
+      });
+
+      it('a late success with no charge yet keeps being looked for within the days (spaced), and a final answer (a failure, or a success with its charge) is never looked for again', async () => {
+        const p = fakeProvider();
+        const f = fakeFunds(1_000_000);
+        const { rowId, at, row } = await letGo(p, f);
+        p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', null, 'log-nocharge')]);
+        p.instant.findLogs.mockClear();
+        const sweepAt = async (minutes: number) => {
+          await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + minutes * MIN) });
+          return p.instant.findLogs.mock.calls.length;
+        };
+        expect(await sweepAt(16)).toBe(1);
+        expect((await runOf(rowId)).detail).toMatchObject({ lateEvidence: { status: 'success', chargeMicros: null } });
+        // Inside the spacing the charge that is posted now waits; after it, it is applied
+        p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', TOP - 1_000, 'log-nocharge')]);
+        expect(await sweepAt(20)).toBe(1);
+        expect(await runOf(rowId)).toMatchObject({ providerBasis: 'estimated' });
+        expect(await sweepAt(32)).toBe(2);
+        expect(await runOf(rowId)).toMatchObject({ providerBasis: 'measured' });
+        expect(await sweepAt(24 * 60)).toBe(2);
+        // A failure is final too
+        const second = await letGo(p, f);
+        p.script.byUser.set(second.row.providerUserId, [p.line(second.row.providerUserId, 'failed', null, 'log-failed')]);
+        p.instant.findLogs.mockClear();
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(second.at.getTime() + 16 * MIN) });
+        expect((await runOf(second.rowId)).detail).toMatchObject({ lateEvidence: { status: 'failed' } });
+        const asked = p.instant.findLogs.mock.calls.length;
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(second.at.getTime() + 2 * 24 * 60 * MIN) });
+        expect(p.instant.findLogs.mock.calls.length).toBe(asked);
+      });
+
       it('past the days late evidence is looked for, it is no longer asked about', async () => {
         const p = fakeProvider();
         const f = fakeFunds(1_000_000);
