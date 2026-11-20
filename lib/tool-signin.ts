@@ -277,31 +277,30 @@ export async function dropOrphanedToolSignInNotices(userId: string): Promise<voi
  * A good answer from a key: clears a "stopped working" mark, but only when the key is still the one that was used (a late answer from a
  * key that has been replaced says nothing about the new one) and only when the connection is marked right now (not as it was when the
  * call began, since another call may have reported a refusal in between).
+ *
+ * Every good answer is written down, as the moment the key was seen working, so a refusal seen before it that reports after it is old news
+ * however close the two were (a write only once in a while would leave the moment of an earlier answer, and a refusal between the two would
+ * count as the newest word). It is written first, then anything marked lost that is not newer than it is cleared in what is saved now: a
+ * refusal that was saved between the read above and these writes is cleared, and one that comes after is refused by its own check.
  */
 export async function reportKeyWorked(connectionId: string, keyVersion: number, now: Date = new Date()): Promise<void> {
-  const row = await prisma.appConnection.findUnique({ where: { id: connectionId }, select: { keyVersion: true, signInLostAt: true, lastWorkedAt: true, heldRefusalAt: true, noticesPendingAt: true } });
+  const row = await prisma.appConnection.findUnique({ where: { id: connectionId }, select: { keyVersion: true, signInLostAt: true, noticesPendingAt: true } });
   if (!row || row.keyVersion !== keyVersion) return;
   if (row.signInLostAt) {
     await reportConnectionSignIn(connectionId, { state: 'ok' }, now, keyVersion);
     return;
   }
-  // No loss to clear, but the success is still seen: a refusal of an earlier call that reports after it is old news and never marks a
-  // working key as lost. Written at most once a minute for a connection, so a busy key costs one write a minute, not one a call. While a
-  // refusal is held (it may be older than a good call that was not written down) the good call is written at once, so the question
-  // "was that refusal before a good call?" gets an exact answer, and it clears the held refusal
-  if (!row.lastWorkedAt || row.heldRefusalAt || now.getTime() - row.lastWorkedAt.getTime() >= LAST_WORKED_EVERY_MS) {
-    await prisma.appConnection.updateMany({
-      where: { id: connectionId, keyVersion, OR: [{ lastWorkedAt: null }, { lastWorkedAt: { lt: now } }] },
-      data: { lastWorkedAt: now },
-    });
-  }
-  if (row.heldRefusalAt) await prisma.appConnection.updateMany({ where: { id: connectionId, keyVersion, heldRefusalAt: { lte: now } }, data: { heldRefusalAt: null } });
-  // The cards of an earlier change that did not finish are finished now
-  if (row.noticesPendingAt) await finishConnectionNotices(connectionId);
+  await prisma.appConnection.updateMany({ where: { id: connectionId, keyVersion, OR: [{ lastWorkedAt: null }, { lastWorkedAt: { lt: now } }] }, data: { lastWorkedAt: now } });
+  const [lost] = await Promise.all([
+    prisma.appConnection.updateMany({
+      where: { id: connectionId, keyVersion, signInLostAt: { lte: now } },
+      data: { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, noticesPendingAt: new Date() },
+    }),
+    prisma.appConnection.updateMany({ where: { id: connectionId, keyVersion, signInLostAt: null, noAnswerAt: { lte: now } }, data: { noAnswerAt: null } }),
+  ]);
+  // The cards of a loss cleared here, and of an earlier change that did not finish, are finished now
+  if (lost.count === 1 || row.noticesPendingAt) await finishConnectionNotices(connectionId);
 }
-
-/** How often a key's good calls are written down for a connection. */
-const LAST_WORKED_EVERY_MS = 60_000;
 
 /** The same report, for the connection a grant belongs to: its fields move, and the cards of every Brick that uses it follow. */
 export async function reportConnectionSignIn(connectionId: string, report: ToolSignInReport, at: Date, onlyKeyVersion?: number): Promise<{ changed: boolean }> {
@@ -314,45 +313,21 @@ export async function reportConnectionSignIn(connectionId: string, report: ToolS
 
 async function applyConnectionReport(connectionId: string, report: ToolSignInReport, at: Date, onlyKeyVersion?: number): Promise<{ changed: boolean }> {
   // A failure is old news when the tool was connected again, or a call with the current key worked, after it was seen
-  // A good call is written down at most once a minute, so the time kept can be up to a minute older than the latest good call: a failure
-  // that started within that minute of the kept time may be older than a good call that was not written down, and is old news too
-  const workedBefore = new Date(at.getTime() - LAST_WORKED_EVERY_MS);
-  const afterLastReconnect = { AND: [{ OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: at } }] }, { OR: [{ lastWorkedAt: null }, { lastWorkedAt: { lt: workedBefore } }] }] };
-
-  // A refusal inside the minute after the kept good call may be older than a good call that was not written down: it is held, not dropped. A
-  // second one before any good call after it is two refusals in a row, so the key is failing and is marked; one good call after it clears it
-  const insideMinute = { AND: [{ OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: at } }] }, { lastWorkedAt: { gte: workedBefore, lte: at } }] };
-  const heldAfterReconnect = { OR: [{ reconnectedAt: null }, { heldRefusalAt: { gte: prisma.appConnection.fields.reconnectedAt } }] };
-  const second = { AND: [{ heldRefusalAt: { not: null } }, { heldRefusalAt: { not: at } }, heldAfterReconnect] };
-  const first = { OR: [{ heldRefusalAt: null }, { AND: [{ heldRefusalAt: { not: null } }, { NOT: heldAfterReconnect }] }] };
+  const afterLastReconnect = { AND: [{ OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: at } }] }, { OR: [{ lastWorkedAt: null }, { lastWorkedAt: { lt: at } }] }] };
 
   if (report.state === 'expired') {
     const result = await prisma.appConnection.updateMany({
       where: { id: connectionId, signInLostAt: null, ...afterLastReconnect },
-      data: { signInLostAt: at, signInLostStatus: report.status ?? null, noAnswerAt: null, noticesPendingAt: new Date(), heldRefusalAt: null },
+      data: { signInLostAt: at, signInLostStatus: report.status ?? null, noAnswerAt: null, noticesPendingAt: new Date() },
     });
-    if (result.count === 1) return { changed: true };
-    const repeated = await prisma.appConnection.updateMany({
-      where: { id: connectionId, signInLostAt: null, ...insideMinute, ...second },
-      data: { signInLostAt: at, signInLostStatus: report.status ?? null, noAnswerAt: null, noticesPendingAt: new Date(), heldRefusalAt: null },
-    });
-    if (repeated.count === 1) return { changed: true };
-    await prisma.appConnection.updateMany({ where: { id: connectionId, signInLostAt: null, ...insideMinute, ...first }, data: { heldRefusalAt: at } });
-    return { changed: false };
+    return { changed: result.count === 1 };
   }
   if (report.state === 'no-answer') {
     const result = await prisma.appConnection.updateMany({
       where: { id: connectionId, signInLostAt: null, noAnswerAt: null, ...afterLastReconnect },
-      data: { noAnswerAt: at, heldRefusalAt: null },
+      data: { noAnswerAt: at },
     });
-    if (result.count === 1) return { changed: true };
-    const repeated = await prisma.appConnection.updateMany({
-      where: { id: connectionId, signInLostAt: null, noAnswerAt: null, ...insideMinute, ...second },
-      data: { noAnswerAt: at, heldRefusalAt: null },
-    });
-    if (repeated.count === 1) return { changed: true };
-    await prisma.appConnection.updateMany({ where: { id: connectionId, signInLostAt: null, noAnswerAt: null, ...insideMinute, ...first }, data: { heldRefusalAt: at } });
-    return { changed: false };
+    return { changed: result.count === 1 };
   }
   // A success of one key says nothing about another: when it names the key it used, only that key's connection is written (the owner
   // may have replaced it, and the new key may have a refusal of its own, since the success was read)
@@ -360,8 +335,6 @@ async function applyConnectionReport(connectionId: string, report: ToolSignInRep
   await prisma.appConnection.updateMany({ where: { id: connectionId, ...ofKey, OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: at } }] }, data: { reconnectedAt: at } });
   // A key that worked is written down as such, so a refusal seen before it that reports after it is old news
   if (onlyKeyVersion !== undefined) await prisma.appConnection.updateMany({ where: { id: connectionId, ...ofKey, OR: [{ lastWorkedAt: null }, { lastWorkedAt: { lt: at } }] }, data: { lastWorkedAt: at } });
-  // A good call after a held refusal says that refusal was not the end of a working key
-  await prisma.appConnection.updateMany({ where: { id: connectionId, ...ofKey, heldRefusalAt: { lte: at } }, data: { heldRefusalAt: null } });
   const lost = await prisma.appConnection.updateMany({
     where: { id: connectionId, ...ofKey, signInLostAt: { lte: at } },
     data: { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, noticesPendingAt: new Date() },

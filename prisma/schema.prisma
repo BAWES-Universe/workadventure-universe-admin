@@ -1449,9 +1449,6 @@ model AppConnection {
   reconnectedAt      DateTime? @map("reconnected_at")
   // When a call with the current key last worked (written at most once a minute): a refusal seen before it is old news
   lastWorkedAt       DateTime? @map("last_worked_at")
-  // A refusal seen inside the minute after the last good call written down, kept apart instead of dropped: it may be older than a good call that was
-  // not written down, so it alone marks nothing. A second one before any good call after it does (the key is failing); a good call after it clears it
-  heldRefusalAt      DateTime? @map("held_refusal_at")
   // Set with a change of the sign-in state, cleared once the cards of every Brick that uses it follow: a fan-out that failed is tried again
   noticesPendingAt   DateTime? @map("notices_pending_at")
   connectedById      String?   @map("connected_by_id")
