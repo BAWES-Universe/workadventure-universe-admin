@@ -189,9 +189,22 @@ async function readCursor(): Promise<string | null> {
   return typeof after === 'string' ? after : null;
 }
 
-async function writeCursor(after: string | null): Promise<void> {
+/**
+ * Keeps the place a pass ended on, but only if the place is still the one the pass started from: passes can overlap (the sweep takes no lock and may
+ * be asked twice at once), and a slower, older pass must never write its older place over a newer one (that would send the repair back over what
+ * was already passed). The check and the write are one step under a lock of their own, so two passes cannot both find the place unchanged. A pass
+ * that finds it changed leaves it as it is (what the other pass saved stands). Returns whether the place was saved.
+ */
+async function writeCursor(startedFrom: string | null, after: string | null): Promise<boolean> {
   const value = { after };
-  await prisma.appSetting.upsert({ where: { key: CURSOR_KEY }, create: { key: CURSOR_KEY, value }, update: { value } });
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('instant:reporting-cursor', 0))`;
+    const row = await tx.appSetting.findUnique({ where: { key: CURSOR_KEY } });
+    const stored = isRecord(row?.value) && typeof row?.value.after === 'string' ? row.value.after : null;
+    if (stored !== startedFrom) return false;
+    await tx.appSetting.upsert({ where: { key: CURSOR_KEY }, create: { key: CURSOR_KEY, value }, update: { value } });
+    return true;
+  });
 }
 
 export interface ReportingRepair {
@@ -233,7 +246,7 @@ export async function repairInstantReporting(opts: { limit?: number; now?: Date 
     }
   }
   // The place moves past what was looked at, mended or not (the ones that failed come round again); with nothing left to look at it goes back to the top
-  await writeCursor(ids.length >= limit ? ids[ids.length - 1].id : null).catch((error) => console.error('[Instant] Could not keep the place of the meter repair:', error instanceof Error ? error.message : 'unknown'));
+  await writeCursor(cursor, ids.length >= limit ? ids[ids.length - 1].id : null).catch((error) => console.error('[Instant] Could not keep the place of the meter repair:', error instanceof Error ? error.message : 'unknown'));
   out.remaining = await instantReportingGaps();
   // A run with no meter event for more than a day is something to look at, whatever the repair did this time: said once per pass, with the counts
   if (out.remaining.missing > 0 && out.remaining.oldestMissingAt && now.getTime() - out.remaining.oldestMissingAt.getTime() > MISSING_EVENT_ALERT_MS) {
