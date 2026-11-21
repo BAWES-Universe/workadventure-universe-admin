@@ -224,7 +224,8 @@ const LATE_SINCE_KEY = 'computer_late_report_since';
 /** How far back a let-go run is looked at (a little over the days its provider log is waited for). */
 const LATE_LOOK_DAYS = 36;
 /** Jobs read per page, and the most pages one look reads (a look that finds `size` reports stops at once; the cap only bounds a window of thousands that are all waiting on something). */
-const LATE_PAGE = 200;
+/** How many jobs are read at a time (an object so a test can make it small enough to page). */
+export const lateLimits = { page: 200 };
 const LATE_MAX_PAGES = 25;
 
 /**
@@ -269,21 +270,22 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
   const out: Report[] = [];
   // Jobs are read a page at a time, oldest confirmation first, until `size` reports are found or there are none left: a job that is dropped below (a refund still pending) is never marked, so a fixed window
   // would let enough of them crowd out every newer job for good. What can never change (a call on the person's own key, a deleted Brick) is dropped in the query, so such a job is never read at all
-  let after: { at: Date; id: string } = { at: new Date(0), id: '' };
+  // The marker of the page is kept as TEXT in UTC and bound back as a moment: a timestamptz read in a session whose zone is not UTC would otherwise be read back as another moment
+  let after: { at: string; id: string } = { at: '1970-01-01T00:00:00.000000Z', id: '' };
   for (let page = 0; page < LATE_MAX_PAGES && out.length < size; page++) {
-    const found = await prisma.$queryRaw<Array<{ job_id: string; first_at: Date }>>(Prisma.sql`
+    const found = await prisma.$queryRaw<Array<{ job_id: string; first_at: string }>>(Prisma.sql`
       WITH confirmed AS (${CONFIRMED_RUNS(lookBack)})
-      SELECT c."task_key" AS job_id, MIN(c."at") AS first_at
+      SELECT c."task_key" AS job_id, to_char(MIN(c."at") AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS first_at
       FROM confirmed c
         JOIN "computer_jobs" j ON j."id" = c."task_key" AND j."person_id" = c."person_id" AND j."bot_id" = c."bot_id"
         JOIN "bots" b ON b."id" = j."bot_id" AND b."deleted_at" IS NULL
-      WHERE c."at" >= ${since} AND c."told_at" IS NULL
+      WHERE c."at" >= ${since.toISOString()}::timestamptz AND c."told_at" IS NULL
         AND j."status" IN ('done', 'stopped', 'failed') AND j."ended_told_at" IS NOT NULL AND j."end_undeliverable_at" IS NULL
         AND NOT EXISTS (SELECT 1 FROM "computer_job_faults" f WHERE f."job_id" = j."id" AND f."call_id" = ${OWN_KEY_CALL_MARK} AND f."source" = ${ORBIT_SOURCE})
       GROUP BY c."task_key"
       HAVING (MIN(c."at"), c."task_key") > (${after.at}::timestamptz, ${after.id})
-      ORDER BY first_at ASC, c."task_key" ASC
-      LIMIT ${LATE_PAGE}`);
+      ORDER BY MIN(c."at") ASC, c."task_key" ASC
+      LIMIT ${lateLimits.page}`);
     if (found.length === 0) break;
     const last = found[found.length - 1];
     after = { at: last.first_at, id: last.job_id };
@@ -292,7 +294,7 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
     const runs = await prisma.$queryRaw<Array<{ job_id: string }>>(Prisma.sql`
       WITH confirmed AS (${CONFIRMED_RUNS(lookBack)})
       SELECT c."task_key" AS job_id FROM confirmed c
-      WHERE c."task_key" IN (${Prisma.join(ids)}) AND c."at" >= ${since} AND c."told_at" IS NULL
+      WHERE c."task_key" IN (${Prisma.join(ids)}) AND c."at" >= ${since.toISOString()}::timestamptz AND c."told_at" IS NULL
       ORDER BY c."at" ASC, c."id" ASC`);
     const jobs = await prisma.computerJob.findMany({ where: { id: { in: ids }, bot: { deletedAt: null } } });
     const jobOf = new Map(jobs.map((job) => [job.id, job]));
@@ -321,7 +323,7 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
           const untold = await tx.$queryRaw<Array<{ id: string; toolkit: string; batch: number | null }>>(Prisma.sql`
             WITH confirmed AS (${CONFIRMED_RUNS(lookBack)})
             SELECT c."id", c."toolkit", c."batch" FROM confirmed c
-            WHERE c."task_key" = ${job.id} AND c."at" >= ${since} AND c."told_at" IS NULL
+            WHERE c."task_key" = ${job.id} AND c."at" >= ${since.toISOString()}::timestamptz AND c."told_at" IS NULL
             ORDER BY c."at" ASC, c."id" ASC`);
           if (untold.length === 0) return null;
           const offered = untold.filter((one) => one.batch !== null);
@@ -372,7 +374,7 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
         holdReleased: true,
       });
     }
-    if (found.length < LATE_PAGE) break;
+    if (found.length < lateLimits.page) break;
   }
   return out;
 }

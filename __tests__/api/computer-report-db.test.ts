@@ -24,7 +24,7 @@ import { deleteBrick } from '@/lib/brick-delete';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, planEffect, requestHandover, settleEffect, startJob, stopJobFor, sweepComputers, takeOver, turnOffComputer } from '@/lib/computer';
-import { keepReportTold, reportsToTell } from '@/lib/computer-report';
+import { keepReportTold, lateLimits, reportsToTell } from '@/lib/computer-report';
 import { OWN_KEY_CALL_MARK, ORBIT_SOURCE } from '@/lib/computer-faults';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -391,7 +391,21 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     expect(await keepReportTold(randomUUID(), 'needs', 1)).toBe(false);
   });
 
-  describe('GPT round 3: the one follow-up when an App went out after all', () => {
+  // The follow-up compares what the database holds as a moment (timestamptz) with moments the code binds: it must say the same in any session time zone (Opus: a Date goes over the wire as a zone-less
+  // text, so a database set to Asia/Kuwait read the cutoff three hours early). Run in UTC and in a zone ahead of it, both set on the DATABASE so every new connection has it
+  describe.each(['UTC', 'Asia/Kuwait'])('GPT round 3 (database time zone %s): the one follow-up when an App went out after all', (zone) => {
+    // The pool closes a connection that has sat idle for 10 s, and a new one has the database's setting: so the zone is set on the database and the pool is left alone until every old connection is gone
+    const zoneNow = async () => ((await prisma.$queryRaw<Array<{ TimeZone: string }>>`SHOW timezone`)[0] as { TimeZone: string }).TimeZone;
+    const inZone = (name: string, shown: string) => (name === 'UTC' ? /UTC$/.test(shown) : shown === name);
+    const settle = async (name: string, alter: string) => {
+      if (inZone(name, await zoneNow())) return;
+      await prisma.$executeRawUnsafe(alter);
+      await new Promise((resolve) => setTimeout(resolve, 11_500));
+      expect(inZone(name, await zoneNow())).toBe(true);
+    };
+    beforeAll(() => settle(zone, `DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET timezone TO %L', current_database(), '${zone}'); END $$`), 30_000);
+    afterAll(() => settle('UTC', `DO $$ BEGIN EXECUTE format('ALTER DATABASE %I RESET timezone', current_database()); END $$`), 30_000);
+
     // The deploy of this change, then the provider's log (a minute later, so after it)
     const SINCE = new Date('2026-11-21T10:00:00Z');
     const LATER = new Date('2026-11-21T11:00:00Z');
@@ -523,6 +537,23 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       // Its confirmation marks A and only A; X is then offered as batch 2, never lost and never named twice
       expect(await keepReportTold(id, 'late', 1)).toBe(true);
       expect((await lateMine([id])).map((report) => [report.seq, report.apps])).toEqual([[2, ['Slack']]]);
+    });
+
+    it('Opus: jobs are read a page at a time, each once and oldest first, in every database time zone (the page marker is bound as a moment, never as a zone-less text)', async () => {
+      const ids: string[] = [];
+      for (let index = 0; index < 5; index++) {
+        const { who, id } = await lateJob(`pg${index}`);
+        // Confirmed a minute apart: all inside the 3 hours a zone-less marker would be wrong by
+        await prisma.$executeRaw`UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateEvidence,at}', to_jsonb(${new Date(LATER.getTime() + index * 60_000).toISOString()}::text)) WHERE "task_key" = ${id}`;
+        ids.push(id);
+        expect(who.id).toBeTruthy();
+      }
+      lateLimits.page = 2;
+      try {
+        expect((await lateMine(ids)).map((report) => report.jobId)).toEqual(ids);
+      } finally {
+        lateLimits.page = 200;
+      }
     });
 
     it('a follow-up that can never be delivered ends its batch for good, and the next batch still comes', async () => {
