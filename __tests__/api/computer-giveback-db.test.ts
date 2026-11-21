@@ -1364,10 +1364,17 @@ run('a computer job that failed on our side, and the bound on giving it back', (
           expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'agent_ended', causeHint: hint ?? 'none' });
           expect(await charged(ended.id)).toBe(true);
           expect(await seen(sara, minutes(6))).toBeLessThan(1);
-          // A late unresolved row decides nothing for a refused decision, and one of another run or turn is not evidence
-          await recordFaults(sara.brickId, ended.id, [fault(2, 'provider_5xx', { run: 'run1' }), row401(2, { run: 'other-run' }), row401(9, { run: 'run1' })]);
+          // A late row of another run, or of a turn nobody judged, is not evidence: nothing changes
+          await recordFaults(sara.brickId, ended.id, [row401(2, { run: 'other-run' }), row401(9, { run: 'run1' })]);
           await afterLateEvidence(ended.id);
+          expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
           expect(await charged(ended.id)).toBe(true);
+          // A late UNRESOLVED row for the judged turn is judged as it would have been on time: bounded goodwill, counted
+          await recordFaults(sara.brickId, ended.id, [fault(2, 'provider_5xx', { run: 'run1' })]);
+          await afterLateEvidence(ended.id);
+          expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+          expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: ended.id } })).toMatchObject({ endedBy: 'error', runnerFault: true });
+          expect(await charged(ended.id)).toBe(false);
           // The confirmed 401 for the same job, run and second turn: the charge is corrected, once
           await recordFaults(sara.brickId, ended.id, [row401(2, { run: 'run1' })]);
           await afterLateEvidence(ended.id);
@@ -1479,12 +1486,12 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         const ended = await job(sara, { outcome: 'failed', cause: 'agent', turns: [1, 2] });
         const theirs = await job(sara, { outcome: 'failed', cause: 'agent', turns: [1] }, withFaults(sara, [fault(1, 'allowance', { route })]));
         expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
-        // A late unresolved row alone decides nothing...
+        // A late unresolved row on its judged turn is judged as on time: bounded goodwill, counted...
         await recordFaults(sara.brickId, ended.id, [fault(2, 'provider_5xx', { route })]);
         await afterLateEvidence(ended.id);
-        expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
-        // ...until operations establish that the incident on that route caused the failure
-        expect(await correctRouteTogether({ route, from: minutes(-60), to: minutes(600) })).toMatchObject({ corrected: 1, uncounted: 0 });
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+        // ...and operations, once they establish that the incident on that route caused the failure, free it from the person's bound
+        expect(await correctRouteTogether({ route, from: minutes(-60), to: minutes(600) })).toMatchObject({ corrected: 0, uncounted: 1 });
         expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'incident' });
         expect(await givenBack(ended.id)).toBe(true);
         expect(await decisionOf(theirs.id)).toMatchObject({ state: 'refused', basis: 'person_caused' });
@@ -1532,6 +1539,145 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       if (!lapsing.ok) throw new Error('no');
       await sweepComputers(minutes(200));
       expect(await decisionOf(lapsing.job.id)).toMatchObject({ state: 'given', basis: 'orbit_fault' });
+    });
+  });
+
+  describe('unresolved evidence that arrives after the finish is judged as it would have been on time (GPT round 3, finding 1: the same outage, the same bound, the same job, a different payer by arrival order)', () => {
+    // A generic 500 on the person's OWN model provider for the named turn: unresolved evidence, so goodwill decides
+    const own500 = (turn = 1) => fault(turn, 'provider_5xx', { source: 'own-key', run: 'r1' });
+    const agentEnding = { outcome: 'failed' as const, cause: 'agent' as const, turns: [1], run: 'r1' };
+    /** The person's bound is used up for the month by an earlier job that was given back as goodwill (the same earlier job for both people of a comparison). */
+    const usedUp = async (p: { id: string; brickId: string }, origin: Date = NOW) => {
+      const earlier = await job(p, { outcome: 'failed', cause: 'agent', turns: [1], run: 'r0' }, withFaults(p, [fault(1, 'provider_5xx', { run: 'r0' })]), origin);
+      expect(await decisionOf(earlier.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+    };
+    const delivered = (id: string) => planEffect(id, { key: 'mail-1', kind: 'send' }).then(() => settleEffect(id, 'mail-1', 'done', 'ali@example.test'));
+    const verdictOf = async (jobId: string) => {
+      const row = await prisma.computerGiveBackDecision.findUniqueOrThrow({ where: { jobId } });
+      const one = await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
+      return { state: row.state, basis: row.basis, reason: row.reason, route: row.route, judgedTurns: row.judgedTurns, judgedRun: row.judgedRun, endedBy: one.endedBy, runnerFault: one.runnerFault, givenBack: await givenBack(jobId) };
+    };
+    /** The same job twice for two people: once with the row on time, once with the row after the finish (told to Orbit the way the route does: the late look). */
+    const bothOrders = async (before: (p: { id: string; brickId: string }) => Promise<void>, step?: (jobId: string) => Promise<void>) => {
+      const early = await person('early');
+      const late = await person('late');
+      await before(early);
+      await before(late);
+      const onTime = await job(early, agentEnding, async (id) => {
+        await step?.(id);
+        await recordFaults(early.brickId, id, [own500()]);
+      });
+      const after = await job(late, agentEnding, async (id) => {
+        await step?.(id);
+      });
+      // No evidence yet: the agent ended on its own
+      expect(await decisionOf(after.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      await recordFaults(late.brickId, after.id, [own500()]);
+      await afterLateEvidence(after.id);
+      return { onTime: await verdictOf(onTime.id), late: await verdictOf(after.id), lateId: after.id, latePerson: late };
+    };
+
+    it('goodwill available: the late row gives the computer time back as goodwill, counted, exactly as on time ($0.03 of five minutes)', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const { onTime, late } = await bothOrders(async () => undefined);
+      expect(onTime).toMatchObject({ state: 'given', basis: 'goodwill', endedBy: 'error', runnerFault: true, givenBack: true });
+      expect(late).toEqual(onTime);
+    });
+
+    it('goodwill exhausted: refused for the cap in both orders, and the person is charged in both', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const { onTime, late } = await bothOrders(usedUp);
+      expect(onTime).toMatchObject({ state: 'refused', basis: 'cap', givenBack: false });
+      expect(late).toEqual(onTime);
+    });
+
+    it('a verified delivery: refused as delivered in both orders (unresolved evidence never gives back what an App delivered)', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const { onTime, late } = await bothOrders(async () => undefined, delivered);
+      expect(onTime).toMatchObject({ state: 'refused', basis: 'delivered', givenBack: false });
+      expect(late).toEqual(onTime);
+    });
+
+    it('an effect still to be confirmed: held pending in both orders, the person charged provisionally, and the sweep decides it as it decides the on-time one', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const { onTime, late, lateId } = await bothOrders(async () => undefined, (id) => planEffect(id, { key: 'mail-1', kind: 'send' }).then(() => undefined));
+      expect(onTime).toMatchObject({ state: 'pending', basis: 'effect_unresolved', givenBack: false });
+      expect(late).toEqual(onTime);
+      // The effect is never confirmed: after the wait the decision closes by the goodwill rules, and a late one reaches the same end
+      await resolveDecision(lateId, new Date(Date.now() + 365 * 24 * 3_600_000));
+      expect((await verdictOf(lateId)).state).toBe('given');
+    });
+
+    it('the person’s own evidence that arrives late is still theirs, and an unresolved row for a turn nobody judged changes nothing', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      const theirs = await job(sara, agentEnding);
+      await recordFaults(sara.brickId, theirs.id, [fault(1, 'allowance', { run: 'r1' })]);
+      await afterLateEvidence(theirs.id);
+      expect(await decisionOf(theirs.id)).toMatchObject({ state: 'refused', basis: 'person_caused' });
+      expect(await givenBack(theirs.id)).toBe(false);
+      const other = await job(sara, agentEnding);
+      await recordFaults(sara.brickId, other.id, [own500(7)]);
+      await afterLateEvidence(other.id);
+      expect(await decisionOf(other.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      expect(await givenBack(other.id)).toBe(false);
+    });
+
+    it('the bound is read for the month the job ENDED in, whenever the late row arrives; the person’s lock is taken; saying it twice gives back once', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const october = new Date('2026-10-14T09:00:00Z');
+      const used = await person('oct-used');
+      const fresh = await person('oct-fresh');
+      // Both jobs ended in October. The first person used October's bound already; the second had not (and has used none since)
+      await usedUp(used, october);
+      const capped = await job(used, agentEnding, undefined, october);
+      const free = await job(fresh, agentEnding, undefined, october);
+      // The late rows arrive now, in November: October's bound is the one that counts
+      await recordFaults(used.brickId, capped.id, [own500()]);
+      await recordFaults(fresh.brickId, free.id, [own500()]);
+      await afterLateEvidence(capped.id);
+      await afterLateEvidence(free.id);
+      expect(await decisionOf(capped.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+      expect(await decisionOf(free.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+      // Said again (the route and the sweep both look): nothing changes and nothing is given back twice
+      await afterLateEvidence(free.id);
+      await sweepLateEvidence(new Date());
+      expect(await decisionOf(free.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+      expect(await prisma.computerJob.count({ where: { personId: fresh.id, runnerFault: true } })).toBe(1);
+      expect(await givenBack(free.id)).toBe(true);
+      // The look took the person's give-back lock: it waits for another holder of it
+      const waiting = await job(fresh, agentEnding, undefined, october);
+      await recordFaults(fresh.brickId, waiting.id, [own500()]);
+      let released: () => void = () => undefined;
+      const hold = new Promise<void>((resolve) => (released = resolve));
+      let held: () => void = () => undefined;
+      const inside = new Promise<void>((resolve) => (held = resolve));
+      const holder = prisma.$transaction(async (tx) => {
+        await lockPerson(tx, fresh.id);
+        held();
+        await hold;
+      });
+      await inside;
+      let finished = false;
+      const look = afterLateEvidence(waiting.id).then(() => {
+        finished = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(finished).toBe(false);
+      released();
+      await holder;
+      await look;
+      expect(finished).toBe(true);
+    });
+
+    it('a late row found by the sweep (not the route) gives the same answer', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      const ended = await job(sara, agentEnding);
+      await recordFaults(sara.brickId, ended.id, [own500()]);
+      await sweepLateEvidence(new Date());
+      expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+      expect(await givenBack(ended.id)).toBe(true);
     });
   });
 
@@ -1985,21 +2131,22 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await decisionOf(after.id)).toMatchObject({ state: 'refused', basis: 'agent_ended', judgedTurns: [] });
       await recordFaults(sara.brickId, after.id, [fault(2, 'provider_5xx', { route, run: 'runb' })]);
       await afterLateEvidence(after.id);
-      // A provider failure is unresolved, never ours alone: the one found on time is bounded goodwill, the late one leaves the refusal as it was. Both decisions stand on turn 2 of run b
+      // A provider failure is unresolved, never ours alone: the one found on time is bounded goodwill, and the late one is judged the same way. Both decisions stand on turn 2 of run b
       expect(await decisionOf(before.id)).toMatchObject({ state: 'given', basis: 'goodwill', judgedRun: 'runb', judgedTurns: [2] });
-      expect(await decisionOf(after.id)).toMatchObject({ state: 'refused', basis: 'agent_ended', judgedRun: 'runb', judgedTurns: [2] });
+      expect(await decisionOf(after.id)).toMatchObject({ state: 'given', basis: 'goodwill', judgedRun: 'runb', judgedTurns: [2] });
       // A turn nobody judged: turn 2 (a failure on another route) was the last one found, and a provider failure of THIS route arrives later still, on turn 3
       const unjudged = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' });
       await recordFaults(sara.brickId, unjudged.id, [fault(2, 'provider_5xx', { route: 'universe-ai/elsewhere', run: 'runb' })]);
       await afterLateEvidence(unjudged.id);
       await recordFaults(sara.brickId, unjudged.id, [fault(3, 'provider_5xx', { route, run: 'runb' })]);
       await afterLateEvidence(unjudged.id);
-      expect(await decisionOf(unjudged.id)).toMatchObject({ state: 'refused', basis: 'agent_ended', judgedTurns: [2] });
-      // The incident corrects both by the same evidence: the counted goodwill is freed from the bound, the refusal is given back
-      expect(await correctRouteTogether(window)).toMatchObject({ corrected: 1, uncounted: 1 });
+      // Its judged turn is 2, on ANOTHER route: that is what it was judged on (the person's bound is used by the two above: refused for the cap); the later row of turn 3 is for a turn nobody judged and changes nothing
+      expect(await decisionOf(unjudged.id)).toMatchObject({ state: 'refused', basis: 'cap', judgedTurns: [2] });
+      // The incident corrects both by the same evidence, whichever arrived first: the counted goodwill is freed from the bound. The one judged on another route's failure is not touched by it
+      expect(await correctRouteTogether(window)).toMatchObject({ corrected: 0, uncounted: 2 });
       expect(await decisionOf(before.id)).toMatchObject({ state: 'given', basis: 'incident' });
       expect(await decisionOf(after.id)).toMatchObject({ state: 'given', basis: 'incident' });
-      expect(await decisionOf(unjudged.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      expect(await decisionOf(unjudged.id)).toMatchObject({ state: 'refused', basis: 'cap' });
       expect(await givenBack(before.id)).toBe(true);
       expect(await givenBack(after.id)).toBe(true);
       expect(await givenBack(unjudged.id)).toBe(false);

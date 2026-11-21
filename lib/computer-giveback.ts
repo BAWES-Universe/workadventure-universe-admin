@@ -408,8 +408,11 @@ export async function afterLateEvidence(jobId: string, now: Date = new Date()): 
   }
   // Only a goodwill give-back is counted: the other `given` ones are already uncounted, and nothing is left to learn from a late row
   if (first.state === 'given' && first.basis !== 'goodwill') return;
-  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, personId: true, startedAt: true } });
+  // The job's own end is read with it: the goodwill count of a late decision is of the month the job ENDED in, whenever the decision is made
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, personId: true, startedAt: true, endedAt: true } });
   if (!job) return;
+  // Read before the transaction opens, as at the finish: a read of Limits that fails inside it would leave the transaction aborted. Only a refusal that had no evidence reads them
+  const limits = first.state === 'refused' && first.basis === 'agent_ended' ? await readGiveBackLimits() : null;
   const applied = await prisma.$transaction(async (tx) => {
     await lockPerson(tx, job.personId);
     // Read again under the person's lock: a decision made in the meantime (a parallel retry) is the one that stands
@@ -436,6 +439,21 @@ export async function afterLateEvidence(jobId: string, now: Date = new Date()): 
     const rows = await readFaultRows(tx, jobId, turns, decision.judgedRun, { turnlessOnly });
     const ours = oursFinding(rows);
     if (!ours) {
+      // A refusal that rested on NO evidence at all (the agent ended on its own, nothing recorded for what was judged) is judged again, now that there is something to read, EXACTLY as the finish would
+      // have judged it had the row been there on time: the same function, with the same rules for the person's own evidence, a delivered effect, an effect still to be confirmed, the person's
+      // bound and the pause, the month the job ended in, and under the same lock. A refusal that rested on evidence (cap, pause, delivered, the person's own) stays as it was
+      if (decision.state === 'refused' && decision.basis === 'agent_ended') {
+        const again = await decideRunnerFinish(tx, limits, job, chosen !== null ? [chosen] : turns, now, { run: decision.judgedRun, hint: hintOf(decision.causeHint) });
+        if (again.state === 'refused' && again.basis === 'agent_ended') {
+          if (chosen !== null) await tx.computerGiveBackDecision.update({ where: { jobId }, data: { judgedTurns: [chosen] } });
+          return false;
+        }
+        // Written as the finish writes it (one row per job, the hint and the run kept), then the give-back is made as the finish makes it: the job's time is written against nobody, once
+        await writeDecision(tx, job, again, decision.causeHint ?? 'ours', again.judgedTurns ?? (chosen !== null ? [chosen] : turns), now, decision.judgedRun);
+        if (again.state !== 'given') return false;
+        await applyGiveBack(tx, job, again.counted);
+        return true;
+      }
       if (chosen !== null) await tx.computerGiveBackDecision.update({ where: { jobId }, data: { judgedTurns: [chosen] } });
       return false;
     }
