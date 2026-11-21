@@ -454,6 +454,22 @@ export async function reviewAppSteps(botId: string, personId: string, input: { a
  * is writing it waits its turn, if the person's allowance or our room is used up it waits with its work saved (and the first
  * leads to "Ask for more"), and otherwise it runs and the machine is made or woken, here and nowhere else.
  */
+/**
+ * Whether a start the bot server could not see the answer of did reach Orbit: the newest job of this Brick for this person that began in the direct chat `originRef` with this title (as `startJob` stores it:
+ * trimmed, at most 200 characters), made no longer ago than `sinceSeconds` by Orbit's OWN clock (an elapsed time, so the two servers never compare clocks). Another person's or another Brick's job never matches.
+ * Read only. Answers its id and status, or null.
+ */
+export async function startedJobFor(botId: string, personId: string, input: { originRef: string; title: string; sinceSeconds: number }, now: Date = new Date()): Promise<{ id: string; status: string } | null> {
+  const title = input.title.trim().slice(0, 200);
+  if (!title) return null;
+  const found = await prisma.computerJob.findFirst({
+    where: { botId, personId, originKind: 'dm', originRef: input.originRef.slice(0, 255), title, createdAt: { gte: new Date(now.getTime() - input.sinceSeconds * 1000) } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { id: true, status: true },
+  });
+  return found;
+}
+
 /** The conversation a job began in: only a direct chat, by its id. A job always goes back to where it began; one with no conversation (a goal's run) goes to the person's own direct chat. */
 export interface JobOrigin {
   kind: 'dm';

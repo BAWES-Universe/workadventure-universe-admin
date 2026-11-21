@@ -58,6 +58,7 @@ import {
   requestHandover,
   settleEffect,
   startJob,
+  startedJobFor,
   startWindDown,
   stopJobFor,
   sweepComputers,
@@ -1559,6 +1560,51 @@ run('a Brick’s computer, in a real database', () => {
       const { jobId } = await waitingJob();
       await finishJob(jobId, 'done', minutes(1));
       expect(await planEffect(jobId, { key: 'k', kind: 'send' })).toEqual({ ok: false, reason: 'job_over' });
+    });
+  });
+
+  describe('whether a start that timed out on the caller’s side reached Orbit (game #2114)', () => {
+    const ref = (name: string) => `dm-${name}-${tag}`;
+    async function started(name: string, title: string, origin: string | null = ref(name)) {
+      const sara = await person(name);
+      await giveComputer(sara.brickId, sara.id);
+      const made = await startJob({ botId: sara.brickId, personId: sara.id, title, origin: origin ? { kind: 'dm', ref: origin } : null }, NOW);
+      if (!made.ok) throw new Error('no');
+      return { sara, jobId: made.job.id };
+    }
+
+    it('finds the job a person’s chat started with that title inside the window, with its status, and the title is compared as the start stored it (trimmed)', async () => {
+      const { sara, jobId } = await started('sam', 'Visa form');
+      expect(await startedJobFor(sara.brickId, sara.id, { originRef: ref('sam'), title: 'Visa form', sinceSeconds: 60 })).toEqual({ id: jobId, status: 'running' });
+      expect(await startedJobFor(sara.brickId, sara.id, { originRef: ref('sam'), title: '  Visa form  ', sinceSeconds: 60 })).toEqual({ id: jobId, status: 'running' });
+    });
+
+    it('never matches a job made before the window: the window is elapsed time by Orbit’s own clock', async () => {
+      const { sara, jobId } = await started('sol', 'Visa form');
+      await prisma.computerJob.update({ where: { id: jobId }, data: { createdAt: new Date(Date.now() - 5 * 60_000) } });
+      expect(await startedJobFor(sara.brickId, sara.id, { originRef: ref('sol'), title: 'Visa form', sinceSeconds: 60 })).toBeNull();
+      expect(await startedJobFor(sara.brickId, sara.id, { originRef: ref('sol'), title: 'Visa form', sinceSeconds: 600 })).toEqual({ id: jobId, status: 'running' });
+    });
+
+    it('never matches another person’s job, another Brick’s job, another title, another chat, or a job that began in no chat', async () => {
+      const a = await started('sia', 'Visa form');
+      const b = await started('sib', 'Visa form', ref('sia'));
+      // The same chat reference and title, but another person's Brick: neither finds the other's
+      expect(await startedJobFor(a.sara.brickId, b.sara.id, { originRef: ref('sia'), title: 'Visa form', sinceSeconds: 60 })).toBeNull();
+      expect(await startedJobFor(b.sara.brickId, a.sara.id, { originRef: ref('sia'), title: 'Visa form', sinceSeconds: 60 })).toBeNull();
+      expect(await startedJobFor(a.sara.brickId, a.sara.id, { originRef: ref('sia'), title: 'Visa form', sinceSeconds: 60 })).toEqual({ id: a.jobId, status: 'running' });
+      expect(await startedJobFor(a.sara.brickId, a.sara.id, { originRef: ref('sia'), title: 'Another form', sinceSeconds: 60 })).toBeNull();
+      expect(await startedJobFor(a.sara.brickId, a.sara.id, { originRef: ref('other'), title: 'Visa form', sinceSeconds: 60 })).toBeNull();
+      const none = await started('sic', 'Visa form', null);
+      expect(await startedJobFor(none.sara.brickId, none.sara.id, { originRef: ref('sic'), title: 'Visa form', sinceSeconds: 60 })).toBeNull();
+    });
+
+    it('answers the newest when the same chat started the same title twice', async () => {
+      const { sara, jobId } = await started('sid', 'Visa form');
+      const again = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', origin: { kind: 'dm', ref: ref('sid') } }, NOW);
+      if (!again.ok) throw new Error('no');
+      await prisma.computerJob.update({ where: { id: jobId }, data: { createdAt: new Date(Date.now() - 30_000) } });
+      expect(await startedJobFor(sara.brickId, sara.id, { originRef: ref('sid'), title: 'Visa form', sinceSeconds: 60 })).toMatchObject({ id: again.job.id });
     });
   });
 

@@ -3,10 +3,17 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
-import { computerView, startJob } from '@/lib/computer';
+import { computerView, startJob, startedJobFor } from '@/lib/computer';
 import { ownerSpendAllowed } from '@/lib/spend-rules';
 
 export const runtime = 'nodejs';
+
+// Whether a start that timed out on the bot server's side reached Orbit: the chat it began in, its title and how long ago at most (an elapsed time, so no two clocks are compared)
+const startedSchema = z.object({
+  originRef: z.string().min(1).max(255),
+  title: z.string().min(1).max(200),
+  sinceSeconds: z.coerce.number().int().min(1).max(600),
+});
 
 const bodySchema = z
   .object({
@@ -32,7 +39,9 @@ const bodySchema = z
 /**
  * GET /api/bots/:id/computer-jobs?userId=&isGuest= - whether this Brick's computer is there for its owner to use, so the bot server only
  * offers the computer when it is on. Read only: it never makes or wakes anything. Someone else's Brick, or a guest: `{ on: false }`.
- * Answers { available, on, busy } (busy: a job holds it or waits in line). Auth: service token only.
+ * Answers { available, on, busy } (busy: a job holds it or waits in line). With `originRef` (and `title`, `sinceSeconds`) it also answers `started: { id, status } | null`: the newest job of this Brick for this
+ * person that began in that direct chat with that title, made within `sinceSeconds` by Orbit's own clock, so a start that timed out on the caller's side can be told from one that did not reach Orbit. A caller that
+ * sends none of them gets no `started`. Auth: service token only.
  */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -44,10 +53,15 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const { id } = await params;
     const userId = request.nextUrl.searchParams.get('userId');
     if (!userId) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
+    const asked = request.nextUrl.searchParams.get('originRef') === null ? null : startedSchema.safeParse({ originRef: request.nextUrl.searchParams.get('originRef'), title: request.nextUrl.searchParams.get('title'), sinceSeconds: request.nextUrl.searchParams.get('sinceSeconds') });
+    if (asked && !asked.success) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
     const person = await resolveUsagePerson(userId, request.nextUrl.searchParams.get('isGuest') === 'true');
     const view = person.personId ? await computerView(id, person.personId) : null;
-    if (!view) return NextResponse.json({ available: false, on: false, busy: false });
-    return NextResponse.json({ available: view.available, on: view.on, busy: view.job !== null || view.queued.length > 0 });
+    // Only when asked: a guest, or someone else's Brick, never has a job to find
+    const started = asked?.success ? (person.personId ? await startedJobFor(id, person.personId, asked.data) : null) : undefined;
+    const extra = started === undefined ? {} : { started };
+    if (!view) return NextResponse.json({ available: false, on: false, busy: false, ...extra });
+    return NextResponse.json({ available: view.available, on: view.on, busy: view.job !== null || view.queued.length > 0, ...extra });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });
     console.error('[Computer] Could not read a computer:', error instanceof Error ? error.message : 'unknown');

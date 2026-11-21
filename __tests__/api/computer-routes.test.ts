@@ -257,6 +257,41 @@ describe('the bot server’s calls', () => {
     });
   });
 
+  describe('whether a start that timed out reached Orbit (game #2114)', () => {
+    const asked = '/x?userId=wa-sara&originRef=dm-1&title=Visa%20form&sinceSeconds=45';
+    const answer = async (path: string) => (await stateRoute(asBot(path, { method: 'GET' }), params)).json();
+
+    it('carries `started` only when the caller asked for it: an old caller gets the same answer as before', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
+      lib.startedJobFor.mockResolvedValue({ id: JOB, status: 'running' });
+      expect(await answer('/x?userId=wa-sara')).toEqual({ available: true, on: true, busy: false });
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
+      expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: { id: JOB, status: 'running' } });
+      expect(lib.startedJobFor).toHaveBeenCalledWith(BRICK, 'u-sara', { originRef: 'dm-1', title: 'Visa form', sinceSeconds: 45 });
+      lib.startedJobFor.mockResolvedValue(null);
+      expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: null });
+    });
+
+    it('says `started: null` for a guest and for a Brick that is not theirs, never looking for a job', async () => {
+      resolve.mockResolvedValue({ personId: null, guest: true });
+      lib.computerView.mockResolvedValue(null);
+      expect(await answer(`${asked}&isGuest=true`)).toEqual({ available: false, on: false, busy: false, started: null });
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
+      resolve.mockResolvedValue({ personId: 'u-omar', guest: false });
+      lib.startedJobFor.mockResolvedValue(null);
+      expect(await answer(asked)).toEqual({ available: false, on: false, busy: false, started: null });
+    });
+
+    it('refuses an ask that is not complete or is out of range, and reads nothing', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      for (const path of ['/x?userId=u&originRef=dm-1', '/x?userId=u&originRef=dm-1&title=A', '/x?userId=u&originRef=dm-1&title=A&sinceSeconds=0', '/x?userId=u&originRef=dm-1&title=A&sinceSeconds=601', '/x?userId=u&originRef=dm-1&title=A&sinceSeconds=1.5', '/x?userId=u&originRef=&title=A&sinceSeconds=5', `/x?userId=u&originRef=dm-1&title=${'a'.repeat(201)}&sinceSeconds=5`]) {
+        expect((await stateRoute(asBot(path, { method: 'GET' }), params)).status).toBe(400);
+      }
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
+    });
+  });
+
   it('says whether the computer is on for its owner, read only, and "off" for anyone else', async () => {
     resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
     lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
