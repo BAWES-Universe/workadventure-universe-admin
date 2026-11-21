@@ -741,6 +741,26 @@ export async function applyLateEvidence(run: Row, line: InstantLog, tx: Prisma.T
 }
 
 /**
+ * The follow-up to the person about an App that went out after all keeps two small marks on the run's own detail (never money): the batch number it was offered under, and when
+ * the person was told. They are written here, so the run's record has ONE writer; `lib/computer-report.ts` decides which runs and when. Each is a single-key UPDATE of the detail, which takes
+ * the row lock `applyLateEvidence` also takes, so neither undoes the other.
+ */
+export async function tagLateBatch(tx: Pick<Prisma.TransactionClient, '$executeRaw'>, runIds: string[], batch: number): Promise<void> {
+  if (runIds.length === 0) return;
+  await tx.$executeRaw(Prisma.sql`
+    UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateBatch}', to_jsonb(${batch}::int)) WHERE "id" IN (${Prisma.join(runIds)}) AND "detail"->'lateBatch' IS NULL`);
+}
+
+/** The person was told (or it can never be told): the runs of that follow-up are marked, once. `batch` is the number the reader was given; without it every run that was offered (carries a number) is marked. */
+export async function markLateTold(jobId: string, batch: number | undefined, toldAt: Date): Promise<void> {
+  const told = JSON.stringify(toldAt.toISOString());
+  const only = typeof batch === 'number' ? Prisma.sql`AND i."detail"->>'lateBatch' = ${String(batch)}` : Prisma.sql`AND i."detail"->'lateBatch' IS NOT NULL`;
+  await prisma.$executeRaw(Prisma.sql`
+    UPDATE "instant_runs" i SET "detail" = jsonb_set(i."detail", '{lateToldAt}', ${told}::jsonb)
+    WHERE i."task_key" = ${jobId} AND i."detail"->'lateEvidence'->>'status' = 'success' AND i."detail"->'lateToldAt' IS NULL ${only}`);
+}
+
+/**
  * Settles what can be settled on a run that has not finished honestly: one still "sent" past its wait, one with no answer, a worked
  * run whose charge is not known, a failed one whose charge is not known. Looks Composio's log up BY THE RUN'S OWN ID.
  *  - A log that says it worked: the person is charged (Composio's figure, or the top price once the wait for it is over) and, for a
