@@ -83,15 +83,15 @@ export type Verified =
 
 /**
  * Whether a key may act now: it exists, is for this scope, was not revoked, has not run out, belongs to a job that still holds the
- * machine, and was made under the job's CURRENT control generation.
+ * machine, and was made under the job's CURRENT control generation. `db` is the caller's transaction when it asks while holding one, so the look never waits for a second connection.
  */
-export async function verifyJobToken(token: string, scope: TokenScope, now: Date = new Date()): Promise<Verified> {
+export async function verifyJobToken(token: string, scope: TokenScope, now: Date = new Date(), db: Pick<Prisma.TransactionClient, 'computerJobToken' | 'brickComputer'> = prisma): Promise<Verified> {
   if (typeof token !== 'string' || !token.startsWith(PREFIX) || token.length > 200) return { ok: false, reason: 'refused' };
-  const row = await prisma.computerJobToken.findUnique({ where: { digest: digestOf(token) }, include: { job: { select: { id: true, botId: true, personId: true, status: true, controlGeneration: true } } } });
+  const row = await db.computerJobToken.findUnique({ where: { digest: digestOf(token) }, include: { job: { select: { id: true, botId: true, personId: true, status: true, controlGeneration: true } } } });
   if (!row || row.scope !== scope || row.revokedAt !== null || row.expiresAt <= now) return { ok: false, reason: 'refused' };
   if (isOver(row.job.status) || !live(row.job.status) || row.generation !== row.job.controlGeneration) return { ok: false, reason: 'refused' };
   // Control is not Brick's while it changes hands (or while the person holds it): a key made earlier does nothing then
-  if (!(await agentMayAct(row.job.botId))) return { ok: false, reason: 'refused' };
+  if (!(await agentMayAct(row.job.botId, db))) return { ok: false, reason: 'refused' };
   return { ok: true, jobId: row.job.id, botId: row.job.botId, personId: row.job.personId, tokenId: row.id, generation: row.generation };
 }
 

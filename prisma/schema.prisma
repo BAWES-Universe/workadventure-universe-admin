@@ -3558,6 +3558,9 @@ model ComputerJob {
   lastTriedAt    DateTime? @map("last_tried_at")
   // The run of a goal or task that started it (game #2002), so a run handed out again finds its job and never starts a second
   runId          String?   @map("run_id") @db.VarChar(36)
+  // The caller's own key for ONE start the person asked for (the bot server makes a uuid per start and sends it with the start and with every look for it): a start repeating a key finds the job that key made and never
+  // makes a second one, and "did my start reach Orbit" is read by this key alone. Null for a start that sent none. Unique per Brick and person (Postgres lets many rows have none).
+  startKey       String?   @map("start_key") @db.VarChar(64)
   // Goes up each time the person takes the machine and each time it is handed back (the take-over fence): a token and an agent
   // callback made under an older number are refused, so nothing the agent had in flight can act after the person took over
   controlGeneration Int    @default(0) @map("control_generation")
@@ -3620,6 +3623,7 @@ model ComputerJob {
   files   ComputerJobFile[]
 
   @@unique([botId, runId])
+  @@unique([botId, personId, startKey])
   @@index([botId, status])
   @@index([personId, status])
   @@index([status, endToldAt])
@@ -3689,6 +3693,19 @@ model ComputerJobFile {
   @@index([jobId])
   @@index([ownerId, createdAt])
   @@map("computer_job_files")
+}
+
+// A start with a key that has begun and has not yet saved its job (or ended without one): written before its first read and removed once its job exists, so the look for "did this start reach
+// Orbit" can tell a start that is still going on from one that never arrived. `fence` is the sha-256 (hex) of the Brick, person and key it is for. A row that was never removed (the process died) stops counting
+// after a few minutes and is deleted by the sweep.
+model ComputerStartMark {
+  id        String   @id @default(uuid())
+  fence     String   @db.VarChar(64)
+  startedAt DateTime @default(now()) @map("started_at")
+
+  @@index([fence, startedAt])
+  @@index([startedAt])
+  @@map("computer_start_marks")
 }
 
 // What the game relay saw go wrong (or not) on a job's model calls, written by the bot server one row per call (or per turn: call_id 'turn:<n>') BEFORE the

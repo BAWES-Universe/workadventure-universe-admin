@@ -171,10 +171,12 @@ async function admitAgain(jobId: string, callId: string, personId: string, token
     return await prisma.$transaction(
       async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${admitLockKey(jobId, callId)}, 0))`;
-        const at = clock();
+        // Every read is made through this transaction (a read through the pool while it holds a connection could wait for a second one that other requests in the same state hold: they would all wait for each other).
         // The key and the control generation are looked at again now that the lock is held: the check made before the wait says nothing about what happened during it
-        const still = await verifyJobToken(token, 'model', at);
+        const still = await verifyJobToken(token, 'model', clock(), tx);
         if (!still.ok || still.generation !== generation) return false;
+        // The time is read AFTER the look at the key, so a room that ran out while it was being made is not admitted
+        const at = clock();
         if (!(await holdsItsRoom(jobId, callId, personId, at, tx))) return false;
         await recordCallAdmission(tx, jobId, callId, at);
         return true;
@@ -249,9 +251,10 @@ async function refusedForPool(jobId: string, callId: string, route: string | nul
   }
 }
 
-/** Whether a call of the job was ever authorized: a room held for it, a model call priced, or the marker of one on the person's own key. The three reads the cutoff and its sweep both stand on. */
+/** Whether a call of the job was ever authorized: a room held or settled for it (not one given back), a model call priced, or the marker of one on the person's own key. The three reads the cutoff and its sweep both stand on. */
 async function hadAuthorizedCall(db: Pick<Prisma.TransactionClient, 'meterReservation' | 'meterEvent' | 'computerJobFault'>, jobId: string): Promise<boolean> {
-  if ((await db.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') } } })) > 0) return true;
+  // A room that was given back (an admission that was rejected) is not a call that was authorized: only a room still held, or one that settled, is
+  if ((await db.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') }, state: { in: ['held', 'settled'] } } })) > 0) return true;
   if ((await db.meterEvent.count({ where: { jobId, kind: 'model_call' } })) > 0) return true;
   return hasOwnKeyCall(db, jobId);
 }

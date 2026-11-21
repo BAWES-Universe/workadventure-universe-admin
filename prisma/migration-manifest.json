@@ -174,8 +174,8 @@
     }
   ],
   "shipping": {
-    "lastMigration": "20261120140000_page_order_long_wait_index",
-    "count": 186,
+    "lastMigration": "20261121150000_computer_start_key",
+    "count": 187,
     "migrations": [
       "20251205145742_init",
       "20251207200516_add_wam_url_and_auth_to_rooms_remove_from_worlds",
@@ -362,7 +362,8 @@
       "20261120120000_page_order_reconcile",
       "20261120130000_computer_refund_obligations",
       "20261120140000_computer_fault_run",
-      "20261120140000_page_order_long_wait_index"
+      "20261120140000_page_order_long_wait_index",
+      "20261121150000_computer_start_key"
     ]
   }
 }

@@ -44,11 +44,11 @@ const params = { params: Promise.resolve({ id: BRICK }) };
 const jobParams = { params: Promise.resolve({ id: BRICK, jobId: JOB }) };
 const tokenBefore = process.env.BOT_SERVICE_TOKEN;
 
-const call = (path: string, init: { method?: string; body?: unknown; token?: string | null } = {}) => {
+const call = (path: string, init: { method?: string; body?: unknown; token?: string | null; headers?: Record<string, string> } = {}) => {
   const token = init.token === undefined ? null : init.token;
-  return new NextRequest(`http://localhost:3333${path}`, { method: init.method ?? 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {}, ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }) });
+  return new NextRequest(`http://localhost:3333${path}`, { method: init.method ?? 'POST', headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers }, ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }) });
 };
-const asBot = (path: string, init: { method?: string; body?: unknown } = {}) => call(path, { ...init, token: SERVICE_TOKEN });
+const asBot = (path: string, init: { method?: string; body?: unknown; headers?: Record<string, string> } = {}) => call(path, { ...init, token: SERVICE_TOKEN });
 const job = { id: JOB, botId: BRICK, personId: 'u-sara', status: 'running', title: 'Visa form', detailsToFill: [] };
 
 beforeEach(() => {
@@ -257,20 +257,34 @@ describe('the bot server’s calls', () => {
     });
   });
 
-  describe('whether a start that timed out reached Orbit (game #2114)', () => {
-    const asked = '/x?userId=wa-sara&originRef=dm-1&title=Visa%20form&sinceSeconds=45';
+  describe('whether a start that timed out reached Orbit: by the start’s own key (game #2114)', () => {
+    const KEY = '3f2b8c1e-5d4a-4e7b-9a60-1c2d3e4f5a6b';
+    const asked = `/x?userId=wa-sara&attempt=${KEY}`;
     const answer = async (path: string) => (await stateRoute(asBot(path, { method: 'GET' }), params)).json();
 
-    it('carries `started` only when the caller asked for it: an old caller gets the same answer as before', async () => {
+    it('carries `started` only when the caller asked for it with its key: an old caller gets the same answer as before', async () => {
       resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
       lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
       lib.startedJobFor.mockResolvedValue({ id: JOB, status: 'running' });
       expect(await answer('/x?userId=wa-sara')).toEqual({ available: true, on: true, busy: false });
       expect(lib.startedJobFor).not.toHaveBeenCalled();
-      expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: { id: JOB, status: 'running' } });
-      expect(lib.startedJobFor).toHaveBeenCalledWith(BRICK, 'u-sara', { originRef: 'dm-1', title: 'Visa form', sinceSeconds: 45 });
+      expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: { id: JOB, status: 'running', attempt: KEY } });
+      expect(lib.startedJobFor).toHaveBeenCalledWith(BRICK, 'u-sara', KEY);
       lib.startedJobFor.mockResolvedValue(null);
       expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: null });
+    });
+
+    it('looks by the key alone: the chat, the title and the age a caller may still send are not what it looks for', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
+      lib.startedJobFor.mockResolvedValue(null);
+      await answer(`${asked}&originRef=dm-1&title=Visa%20form&sinceSeconds=45`);
+      expect(lib.startedJobFor).toHaveBeenCalledTimes(1);
+      expect(lib.startedJobFor).toHaveBeenCalledWith(BRICK, 'u-sara', KEY);
+      // Without the key, a title and an age alone ask nothing
+      lib.startedJobFor.mockClear();
+      expect(await answer('/x?userId=wa-sara&originRef=dm-1&title=Visa%20form&sinceSeconds=45')).toEqual({ available: true, on: true, busy: false });
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
     });
 
     it('says `started: null` for a guest and for a Brick that is not theirs, and never looks for a job for either', async () => {
@@ -284,15 +298,6 @@ describe('the bot server’s calls', () => {
       expect(await answer(asked)).toEqual({ available: false, on: false, busy: false, started: null });
       expect(lib.computerView).toHaveBeenLastCalledWith(BRICK, 'u-omar');
       expect(lib.startedJobFor).not.toHaveBeenCalled();
-    });
-
-    it('looks for the job of the owner it asked about, with exactly the chat, title and age it was given', async () => {
-      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
-      lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
-      lib.startedJobFor.mockResolvedValue(null);
-      await answer('/x?userId=wa-sara&originRef=dm-9&title=Book%20flights&sinceSeconds=120');
-      expect(lib.startedJobFor).toHaveBeenCalledTimes(1);
-      expect(lib.startedJobFor).toHaveBeenCalledWith(BRICK, 'u-sara', { originRef: 'dm-9', title: 'Book flights', sinceSeconds: 120 });
     });
 
     it('does not answer "no job reached Orbit" when who this was for could not be looked up: it answers retry (503), and reads nothing', async () => {
@@ -311,7 +316,7 @@ describe('the bot server’s calls', () => {
       expect(await old.json()).toEqual({ available: false, on: false, busy: false });
     });
 
-    it('answers retry (503, inProgress) while a start of that very job is still going on: not `started: null`, which says no job reached Orbit and lets the caller start it again', async () => {
+    it('answers retry (503, inProgress) while a start with that key is still going on: not `started: null`, which says no job was made', async () => {
       resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
       lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
       lib.startedJobFor.mockResolvedValue({ inProgress: true });
@@ -324,39 +329,41 @@ describe('the bot server’s calls', () => {
       expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: null });
     });
 
-    it('one title for the start and the look for it: trimmed before its length is read, never empty, never past 200 (the start made it exactly so)', async () => {
+    it('refuses a key that is not one (too short, too long, other characters), and reads nothing', async () => {
       resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
-      lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
-      lib.startedJobFor.mockResolvedValue(null);
-      // 200 characters and a space is a title the start accepts (it trims first), so the look accepts it too, and looks for the trimmed one
-      const padded = `${'a'.repeat(200)}%20`;
-      expect((await stateRoute(asBot(`/x?userId=u&originRef=dm-1&title=${padded}&sinceSeconds=5`, { method: 'GET' }), params)).status).toBe(200);
-      expect(lib.startedJobFor).toHaveBeenLastCalledWith(BRICK, 'u-sara', { originRef: 'dm-1', title: 'a'.repeat(200), sinceSeconds: 5 });
+      for (const key of ['', 'short', 'a'.repeat(65), 'has space in it', 'semi;colon-in-it', '..%2F..%2Fetc']) {
+        expect((await stateRoute(asBot(`/x?userId=u&attempt=${key}`, { method: 'GET' }), params)).status).toBe(400);
+      }
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
+    });
+
+    it('the start takes the key from the header `X-Computer-Start-Attempt`, passes it on, and refuses one that is not a key; a start without one is as before', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      lib.startJob.mockResolvedValue({ ok: false, reason: 'off' } as never);
+      const body = { userId: 'wa-sara', title: 'x', origin: { kind: 'dm', ref: 'dm-1' } };
+      expect((await startRoute(asBot('/x', { body, headers: { 'X-Computer-Start-Attempt': KEY } }), params)).status).toBe(200);
+      expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ botId: BRICK, personId: 'u-sara', startKey: KEY }));
+      lib.startJob.mockClear();
+      for (const bad of ['no', 'has space in it', 'a'.repeat(65), '']) {
+        expect((await startRoute(asBot('/x', { body, headers: { 'X-Computer-Start-Attempt': bad } }), params)).status).toBe(400);
+      }
+      expect(lib.startJob).not.toHaveBeenCalled();
+      await startRoute(asBot('/x', { body }), params);
+      expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ startKey: undefined }));
+    });
+
+    it('the key is never a body field: the body stays strict, so a start that carries it there is refused', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x', startKey: KEY } }), params)).status).toBe(400);
+      expect(lib.startJob).not.toHaveBeenCalled();
+    });
+
+    it('one title for the start: trimmed before its length is read, never empty, never past 200 (the start stores it exactly so)', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
       lib.startJob.mockResolvedValue({ ok: false, reason: 'off' } as never);
       expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: `${'a'.repeat(200)} ` } }), params)).status).toBe(200);
-      // A title of only spaces is no title for either: the start refuses it, and the look is refused before it looks for anything
-      lib.startedJobFor.mockClear();
-      expect((await stateRoute(asBot('/x?userId=u&originRef=dm-1&title=%20%20%20&sinceSeconds=5', { method: 'GET' }), params)).status).toBe(400);
       expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: '   ' } }), params)).status).toBe(400);
-      expect((await stateRoute(asBot(`/x?userId=u&originRef=dm-1&title=${'a'.repeat(201)}&sinceSeconds=5`, { method: 'GET' }), params)).status).toBe(400);
-      expect(lib.startedJobFor).not.toHaveBeenCalled();
-    });
-
-    it('asks for all three when any of them is sent: a title or an age without the chat is refused, never answered without `started`', async () => {
-      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
-      lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
-      for (const path of ['/x?userId=u&title=Visa&sinceSeconds=45', '/x?userId=u&title=Visa', '/x?userId=u&sinceSeconds=45', '/x?userId=u&originRef=', '/x?userId=u&title=&sinceSeconds=']) {
-        expect((await stateRoute(asBot(path, { method: 'GET' }), params)).status).toBe(400);
-      }
-      expect(lib.startedJobFor).not.toHaveBeenCalled();
-    });
-
-    it('refuses an ask that is not complete or is out of range, and reads nothing', async () => {
-      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
-      for (const path of ['/x?userId=u&originRef=dm-1', '/x?userId=u&originRef=dm-1&title=A', '/x?userId=u&originRef=dm-1&title=A&sinceSeconds=0', '/x?userId=u&originRef=dm-1&title=A&sinceSeconds=601', '/x?userId=u&originRef=dm-1&title=A&sinceSeconds=1.5', '/x?userId=u&originRef=&title=A&sinceSeconds=5', `/x?userId=u&originRef=dm-1&title=${'a'.repeat(201)}&sinceSeconds=5`]) {
-        expect((await stateRoute(asBot(path, { method: 'GET' }), params)).status).toBe(400);
-      }
-      expect(lib.startedJobFor).not.toHaveBeenCalled();
+      expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'a'.repeat(201) } }), params)).status).toBe(400);
     });
   });
 

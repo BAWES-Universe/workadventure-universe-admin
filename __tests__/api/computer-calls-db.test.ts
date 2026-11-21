@@ -920,23 +920,19 @@ run('what a computer may ask of Orbit, in a real database', () => {
 
           it('a request that asks again for a call whose room runs out while it waits for the lock is not authorized: the time is read after the wait, not before it (CodeRabbit)', async () => {
             const { jobId } = await running();
-            // The real clock (nothing fixed): the key is made now
+            // The real clock (nothing fixed): the key is made now, and the room is good for an hour
             const { token } = (await mintJobToken(jobId, 'model')) as { token: string };
             const ask = () => authorizeModelCall({ token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' });
             expect((await ask()).ok).toBe(true);
-            // The room has a moment left: the replay below starts inside it
-            const runsOutAt = Date.now() + 2_000;
-            await prisma.meterReservation.update({ where: { reservationKey: callRoomKey(jobId, 'c1') }, data: { expiresAt: new Date(runsOutAt) } });
             const lock = holdLock(admitLockKey(jobId, 'c1'), async () => undefined);
             let again: Promise<unknown> = Promise.resolve();
             try {
               await lock.ready;
               again = ask();
-              // It started while the room was still good, and is now waiting for the lock (had it been refused at once it would never wait)
+              // It started while the room was good, and is now really waiting for the lock (had it been refused at once it would never wait)
               expect(await waitingOnLock(admitLockKey(jobId, 'c1'))).toBe(true);
-              expect(Date.now()).toBeLessThan(runsOutAt);
-              // The wait goes on past the moment the room runs out
-              while (Date.now() < runsOutAt + 50) await new Promise((resolve) => setTimeout(resolve, 25));
+              // Only now does the room run out: at a moment after the request began and before the lock is let go
+              await prisma.meterReservation.update({ where: { reservationKey: callRoomKey(jobId, 'c1') }, data: { expiresAt: new Date() } });
               lock.release();
               await lock.done;
               expect(await again).toEqual({ ok: false, reason: 'refused' });
@@ -947,19 +943,102 @@ run('what a computer may ask of Orbit, in a real database', () => {
             }
           });
 
+          it('a room that runs out while the key is being looked at under the lock is not admitted: the time is read again after that look (CodeRabbit)', async () => {
+            const { jobId } = await running();
+            const { token } = (await mintJobToken(jobId, 'model')) as { token: string };
+            const ask = () => authorizeModelCall({ token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' });
+            expect((await ask()).ok).toBe(true);
+            // The room runs out while the replay is looking at the key under the call's lock (its own transaction's look is where that is made to happen)
+            const real = prisma.$transaction.bind(prisma) as (fn: (tx: unknown) => Promise<unknown>, options?: { maxWait?: number }) => Promise<unknown>;
+            let looks = 0;
+            const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: (tx: unknown) => Promise<unknown>, options?: { maxWait?: number }) => {
+              if (options?.maxWait !== 15_000) return real(fn, options);
+              return real((tx) =>
+                fn(
+                  new Proxy(tx as object, {
+                    get(target, property, receiver) {
+                      if (property !== 'computerJobToken') return Reflect.get(target, property, receiver);
+                      return {
+                        findUnique: async (args: never) => {
+                          const row = await (target as { computerJobToken: { findUnique: (a: never) => Promise<unknown> } }).computerJobToken.findUnique(args);
+                          looks += 1;
+                          await prisma.meterReservation.update({ where: { reservationKey: callRoomKey(jobId, 'c1') }, data: { expiresAt: new Date() } });
+                          return row;
+                        },
+                      };
+                    },
+                  }),
+                ),
+              options);
+            }) as never);
+            let answer: unknown;
+            try {
+              answer = await ask();
+            } finally {
+              spy.mockRestore();
+            }
+            expect(looks).toBe(1);
+            expect(answer).toEqual({ ok: false, reason: 'refused' });
+            expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(0);
+          });
+
+          it('a request that asks again reads the key only through the pool outside its transaction: under the call’s lock every read is the transaction’s, so requests waiting for a second connection never wait for each other (CodeRabbit)', async () => {
+            const { jobId } = await running();
+            const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+            expect((await call(token, 'c1')).ok).toBe(true);
+            const pooled = jest.spyOn(prisma.computerJobToken, 'findUnique');
+            const brick = jest.spyOn(prisma.brickComputer, 'findUnique');
+            try {
+              expect((await call(token, 'c1')).ok).toBe(true);
+              // Through the pool: the check on entry and the one after its room. The third, under the lock, is the transaction's own
+              expect(pooled).toHaveBeenCalledTimes(2);
+              expect(brick).toHaveBeenCalledTimes(2);
+            } finally {
+              pooled.mockRestore();
+              brick.mockRestore();
+            }
+            // And the replay was admitted all the same, with its marker
+            expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(1);
+          });
+
           describe('giving a room back when the look for a request admitted meanwhile fails (CodeRabbit)', () => {
-            /** A refusal at the cutoff (its lock wait fails, the first of the 15 s transactions), then the release steps as the test says: `attempt` is called with 1 for the first release and so on. */
-            const refusedThenReleases = async (attempt: (n: number, real: (fn: unknown, options?: { maxWait?: number }) => Promise<unknown>, fn: unknown, options?: { maxWait?: number }) => Promise<unknown>) => {
+            /**
+             * A refusal at the cutoff (its lock wait fails, the first of the 15 s transactions), then the releases of its room. `inside(n, tx)` is called with the number of the release and the release's own transaction: for the first
+             * release the look for a marker (`computerJobFault.count`) is made to fail INSIDE the transaction, after the admission lock was taken, so the whole transaction is rolled back and the retry is what releases the room.
+             */
+            const refusedThenReleases = async (beforeFailing?: (jobId: string) => Promise<void>) => {
               const { jobId } = await running();
               const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
               await prisma.computerJobFault.create({ data: { jobId, turn: null, run: null, callId: 'orbit:pool:c0', kind: 'fault', reason: 'pool_busy', source: 'orbit', route: null, providerStatus: 503, at: NOW } });
-              const real = prisma.$transaction.bind(prisma) as (fn: unknown, options?: { maxWait?: number }) => Promise<unknown>;
+              const real = prisma.$transaction.bind(prisma) as (fn: (tx: unknown) => Promise<unknown>, options?: { maxWait?: number }) => Promise<unknown>;
               let waits = 0;
-              const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options?: { maxWait?: number }) => {
+              let lockTakenBeforeFailing = false;
+              const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: (tx: unknown) => Promise<unknown>, options?: { maxWait?: number }) => {
                 if (options?.maxWait !== 15_000) return real(fn, options);
                 waits += 1;
                 if (waits === 1) return Promise.reject(new Error('could not wait for the lock'));
-                return attempt(waits - 1, real, fn, options);
+                if (waits > 2) return real(fn, options);
+                // The first release: its look for the marker fails inside the transaction
+                return real((tx) => {
+                  let locked = false;
+                  const failing = new Proxy(tx as object, {
+                    get(target, property, receiver) {
+                      if (property === '$executeRaw') return (...args: unknown[]) => { locked = true; return (target as { $executeRaw: (...a: unknown[]) => unknown }).$executeRaw(...args); };
+                      if (property === 'computerJobFault') {
+                        return {
+                          ...(target as { computerJobFault: object }).computerJobFault,
+                          count: async () => {
+                            lockTakenBeforeFailing = locked;
+                            await beforeFailing?.(jobId);
+                            throw new Error('the database went away');
+                          },
+                        };
+                      }
+                      return Reflect.get(target, property, receiver);
+                    },
+                  });
+                  return fn(failing);
+                }, options);
               }) as never);
               let answer: unknown;
               try {
@@ -967,30 +1046,25 @@ run('what a computer may ask of Orbit, in a real database', () => {
               } finally {
                 spy.mockRestore();
               }
-              return { jobId, answer, releases: waits - 1 };
+              return { jobId, answer, releases: waits - 1, lockTakenBeforeFailing };
             };
 
-            it('a look that fails is tried again: the room of a refused call is released, never left counted against the pool until it lapses', async () => {
-              const { jobId, answer, releases } = await refusedThenReleases((n, real, fn, options) => (n === 1 ? Promise.reject(new Error('the database went away')) : real(fn, options)));
+            it('a look that fails INSIDE the release is tried again: the room of a refused call is released, never left counted against the pool until it lapses', async () => {
+              const { jobId, answer, releases, lockTakenBeforeFailing } = await refusedThenReleases();
               expect(answer).toEqual({ ok: false, reason: 'refused' });
+              // The first release had taken the admission lock when its look failed (the whole transaction was undone), and the second one released the room
+              expect(lockTakenBeforeFailing).toBe(true);
               expect(releases).toBe(2);
               expect(await roomOf(jobId, 'c1')).toMatchObject({ state: 'released' });
             });
 
             it('the marker is looked for again on every attempt: a request admitted between the attempts keeps the room', async () => {
-              let admitted: { jobId: string } | null = null;
-              const { jobId, answer } = await refusedThenReleases(async (n, real, fn, options) => {
-                if (n === 1) {
-                  // The first release fails, and a replay is answered with the call's authorization before the next one
-                  const job = await prisma.computerJobFault.findFirstOrThrow({ where: { callId: 'orbit:pool:c0' }, orderBy: { at: 'desc' } });
-                  admitted = { jobId: job.jobId };
-                  await recordCallAdmission(prisma, job.jobId, 'c1', NOW);
-                  throw new Error('the database went away');
-                }
-                return real(fn, options);
+              const { jobId, answer, releases } = await refusedThenReleases(async (job) => {
+                // A replay is answered with the call's authorization before the failed release ends
+                await recordCallAdmission(prisma, job, 'c1', NOW);
               });
-              expect(admitted).toMatchObject({ jobId });
               expect(answer).toEqual({ ok: false, reason: 'refused' });
+              expect(releases).toBe(2);
               expect(await roomOf(jobId, 'c1')).toMatchObject({ state: 'held' });
             });
           });
@@ -1022,6 +1096,24 @@ run('what a computer may ask of Orbit, in a real database', () => {
               await Promise.allSettled([first]);
             }
           });
+        });
+
+        it('a room that was given back is not a call that was authorized: a job whose first call was rejected after it took its room is still stopped as ours once every call it makes is refused for the pool (CodeRabbit)', async () => {
+          const { jobId } = await running();
+          const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+          // Its first call takes a room, then the look at the cutoff is rejected: the call is refused and the room goes back (a `released` row stays)
+          const spy = jest.spyOn(prisma.computerJobFault, 'count').mockRejectedValueOnce(new Error('the database went away') as never);
+          try {
+            expect(await call(token, 'c0')).toEqual({ ok: false, reason: 'refused' });
+          } finally {
+            spy.mockRestore();
+          }
+          expect(await prisma.meterReservation.findUnique({ where: { reservationKey: callRoomKey(jobId, 'c0') } })).toMatchObject({ state: 'released' });
+          // Then the pool has no room for any call: two calls refused, and the job is stopped, as ours, as it would be had the first call never been made
+          await setUp({ poolCeilingMicros: 60_000 });
+          expect(await call(token, 'c1', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
+          expect(await call(token, 'c2', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
+          expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'stopped', endedBy: 'pool' });
         });
 
         it('controls that were never set up are OUR misconfiguration: answered as ours (the pool, full), told to Sentry once, and never a capacity refusal: no marker is kept and it never counts toward a cutoff', async () => {
