@@ -5,7 +5,9 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/computer-broker-db.test.ts --runInBand
  */
 import { randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import { promisify } from 'node:util';
+import http from 'node:http';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,6 +32,7 @@ import { FakeComputerProvider, setComputerProviderForTests, type TurnEvent } fro
 import { Agent37Error, Agent37Unreached } from '@/lib/agent37/client';
 import { fenceMachine, finishJob, settleTurnHold, underTurnHold, wakeIfStopped, setLeaderStopTimesForTests, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { verifyJobToken } from '@/lib/computer-token';
+import { readFaultRows, recordFaults } from '@/lib/computer-faults';
 import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -107,6 +110,93 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       // written whole and moved into place, readable by the machine's own user only
       expect(command).toMatch(/umask 077/);
       expect(command).toMatch(/mv .*relay\.json\.new.*relay\.json/);
+    });
+
+    describe('the computer asks the relay for its model list with the key it was given', () => {
+      const probeCommands = () => fake.commands.filter((one) => one.command.includes('/v1/models'));
+      const faultsOf = (jobId: string) => prisma.computerJobFault.findMany({ where: { jobId }, orderBy: { callId: 'asc' } });
+
+      it('a computer that cannot get it is a confirmed fault of ours: kept once per run, the runner is told, and nothing is kept for one that can or for a check that could not be made', async () => {
+        const { jobId } = await running();
+        // The relay answers (or the check says nothing: no curl, a command that did not say): prepared, and no fault
+        fake.execAnswer = (command) => (command.includes('/v1/models') ? { stdout: 'reach=ok\n' } : {});
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toMatchObject({ ok: true });
+        fake.execAnswer = (command) => (command.includes('/v1/models') ? { stdout: 'reach=nocurl\n' } : {});
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toMatchObject({ ok: true });
+        fake.execAnswer = (command) => (command.includes('/v1/models') ? { exitCode: 1, stdout: 'reach=down\n' } : {});
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toMatchObject({ ok: true });
+        fake.execAnswer = () => ({});
+        expect(await prepareJob(jobId, RELAY, NOW)).toMatchObject({ ok: true });
+        expect(await faultsOf(jobId)).toEqual([]);
+        // It cannot (a page that is not the relay's answered): told, and one confirmed fault of ours is kept, saying it twice changes nothing
+        fake.execAnswer = (command) => (command.includes('/v1/models') ? { stdout: 'reach=down\n' } : {});
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toEqual({ ok: false, reason: 'relay_unreachable' });
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toEqual({ ok: false, reason: 'relay_unreachable' });
+        expect(await faultsOf(jobId)).toMatchObject([{ jobId, turn: null, run: 'r-1', kind: 'fault', reason: 'relay_unreachable', source: 'universe-ai', route: null }]);
+        // A computer that cannot is never given a key it could not use: none is written and the one made is ended
+        const writesBefore = fake.commands.filter((one) => one.command.includes('relay.json')).length;
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toEqual({ ok: false, reason: 'relay_unreachable' });
+        expect(fake.commands.filter((one) => one.command.includes('relay.json'))).toHaveLength(writesBefore);
+        expect(await prisma.computerJobToken.count({ where: { jobId, scope: 'model', revokedAt: null } })).toBe(0);
+        // Another run says it for itself
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-2' })).toEqual({ ok: false, reason: 'relay_unreachable' });
+        expect((await faultsOf(jobId)).map((row) => row.run)).toEqual(['r-1', 'r-2']);
+        // Read as it is: a confirmed fault of ours, never the person's and never unresolved
+        expect(await readFaultRows(prisma, jobId, [], 'r-1', { turnlessOnly: true })).toMatchObject([{ cls: 'ours', reason: 'relay_unreachable', route: null }]);
+      });
+
+      it('the bot server’s own finding that the relay address answers something that is not the relay (relayReached false) is the same fault, kept once per run with its status, told at once with no key made', async () => {
+        const { sara, jobId } = await running();
+        const tokens = () => prisma.computerJobToken.count({ where: { jobId, scope: 'model' } });
+        const sent = fake.commands.length;
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1', relayReached: false, relayStatus: 404 })).toEqual({ ok: false, reason: 'relay_unreachable' });
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1', relayReached: false, relayStatus: 404 })).toEqual({ ok: false, reason: 'relay_unreachable' });
+        expect(fake.commands.length).toBe(sent);
+        expect(await tokens()).toBe(0);
+        expect(await faultsOf(jobId)).toMatchObject([{ turn: null, run: 'r-1', kind: 'fault', reason: 'relay_unreachable', source: 'universe-ai', route: null, providerStatus: 404 }]);
+        // True, or nothing said: as always
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1', relayReached: true })).toMatchObject({ ok: true });
+        expect(await faultsOf(jobId)).toHaveLength(1);
+        // The relay's own row of the same name (the game's: turn 1, route "unknown") is another row, never the one Orbit keeps
+        await recordFaults(sara.brickId, jobId, [{ turn: 1, run: 'r-1', callId: 'relay_unreachable', kind: 'fault', reason: 'relay_unreachable', source: 'universe-ai', route: 'unknown', at: NOW }]);
+        expect((await faultsOf(jobId)).map((row) => [row.callId, row.turn, row.route])).toEqual([['orbit:r-1:relay_unreachable', null, null], ['relay_unreachable', 1, 'unknown']]);
+      });
+
+      it('asks with the job’s own key, before the key is written (the write stays the last command), and the ask itself reads a 200 with a model list as reached and anything else as not (run in a real shell against a real server)', async () => {
+        const { jobId } = await running();
+        expect(await prepareJob(jobId, RELAY, NOW)).toMatchObject({ ok: true });
+        const writes = fake.commands.findIndex((one) => one.command.includes('relay.json'));
+        const asks = probeCommands();
+        expect(asks).toHaveLength(1);
+        expect(fake.commands.indexOf(asks[0])).toBeLessThan(writes);
+        expect(fake.commands.at(-1)?.command).toContain('relay.json');
+        const written = fake.commands[writes].command;
+        const token = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(written)?.[1] ?? '';
+        expect(asks[0].command).toContain(`Authorization: Bearer ${token}`);
+        expect(asks[0].command).toContain(`'${RELAY}/v1/models'`);
+        // The very command, against servers that answer as a relay, as a page that is not one, with a model list missing, and not at all
+        const server = http.createServer((request, response) => {
+          if (request.url === '/ok/v1/models' && request.headers.authorization === `Bearer ${token}`) response.end('{"object":"list","data":[{"id":"m"}]}');
+          else if (request.url === '/nolist/v1/models') response.end('{"object":"list"}');
+          else {
+            response.statusCode = 404;
+            response.setHeader('content-type', 'text/html');
+            response.end('<html>"data" 404</html>');
+          }
+        });
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const port = (server.address() as { port: number }).port;
+        try {
+          // (not spawnSync: this process answers the server, and must not be blocked while the shell waits)
+          const ask = async (base: string) => (await promisify(execFile)('sh', ['-c', asks[0].command.replace(`'${RELAY}/v1/models'`, `'${base}/v1/models'`)])).stdout.trim();
+          expect(await ask(`http://127.0.0.1:${port}/ok`)).toBe('reach=ok');
+          expect(await ask(`http://127.0.0.1:${port}/nolist`)).toBe('reach=down');
+          expect(await ask(`http://127.0.0.1:${port}/wrong`)).toBe('reach=down');
+          expect(await ask('http://127.0.0.1:9')).toBe('reach=down');
+        } finally {
+          await new Promise((resolve) => server.close(resolve));
+        }
+      });
     });
 
     it('leaves a newer key of the same job alone when a delayed write of an older one arrives, and never blocks another job’s', async () => {

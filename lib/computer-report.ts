@@ -1,4 +1,6 @@
 import { prisma } from '@/lib/db';
+import { RELAY_UNREACHABLE } from '@/lib/computer-faults';
+import { UNREACHABLE_WORDS } from '@/lib/task-receipt-words';
 import { readFilesList } from '@/lib/computer-files';
 import { refundStatesFor } from '@/lib/computer-refunds';
 import { silentEnding, type UndeliverableWhy, type WaitingFor } from '@/lib/computer-values';
@@ -264,7 +266,10 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
 
   // What a failed try drew from credit and is still owed back (one read for the page): said with the report, never promised as made while the books have not acknowledged it
   // Every job told as `failed` (a failed try, and one our own pool cut off, which stays `stopped` but is reported as failed too and can owe a refund as well)
-  const owedBack = await refundStatesFor(ended.filter((job) => kindOfEnding(job.status, job.endedBy) === 'failed').map((job) => job.id));
+  const failedIds = ended.filter((job) => kindOfEnding(job.status, job.endedBy) === 'failed').map((job) => job.id);
+  const owedBack = await refundStatesFor(failedIds);
+  // A job Orbit gave back because its computer could not reach our own model service says that, in the words a receipt uses, rather than the computer's own sentence about a model that never answered
+  const unreachable = new Set(failedIds.length === 0 ? [] : (await prisma.computerGiveBackDecision.findMany({ where: { jobId: { in: failedIds }, state: 'given', reason: RELAY_UNREACHABLE }, select: { jobId: true } })).map((one) => one.jobId));
   const reports: Report[] = [];
   for (const job of ended) {
     const kind = kindOfEnding(job.status, job.endedBy);
@@ -290,7 +295,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
       waitingFor: null,
       ready: null,
       waitedFor: kind === 'unanswered' ? (job.endWaitingFor as WaitingFor | null) : null,
-      why: kind === 'failed' || kind === 'rule' ? job.endNote : null,
+      why: kind === 'failed' && givenBack && pendingRefund === 0 && unreachable.has(job.id) ? UNREACHABLE_WORDS : kind === 'failed' || kind === 'rule' ? job.endNote : null,
       effects: effectsOf(job),
       files: kind === 'done' && job.writes ? filesMadeBy(job.endFiles, job.startFiles, new Set(handedPaths.get(job.id) ?? [])) : [],
       handed: kind === 'done' ? (cardsOf.get(job.id) ?? []).map((card) => ({ id: card.id, name: card.name, bytes: card.bytes, mime: card.mime })) : [],

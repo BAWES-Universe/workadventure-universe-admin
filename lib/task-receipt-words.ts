@@ -28,6 +28,9 @@ export const STOPPED_WORDS = {
 } as const;
 export const STOPPED_AT_RULE = STOPPED_WORDS.rule;
 
+/** What a person is told when the computer could not reach our own model service: ours, and nothing is charged for it. */
+export const UNREACHABLE_WORDS = 'We couldn’t reach our own service, you weren’t charged.';
+
 /** What a computer job that is still being looked at says while Orbit has not decided whether to give its cost back (never Done, never refunded). */
 export const STILL_CHECKING = 'We’re still checking this one. If it was our fault, the time comes back.';
 
@@ -99,6 +102,8 @@ export interface NoteFacts {
   returnedMicros?: number;
   /** Computer cost still owed back to the person: asked for, not acknowledged by the books yet. */
   refundPendingMicros?: number;
+  /** The computer was given back because it could not reach our own model service (its decision names that reason): the words say that, not a problem with the work. */
+  unreachable?: boolean;
   /** Why a charge is only provisional: Orbit is still deciding whether the computer cost is given back. */
   deciding?: 'effect' | 'limits';
   /** What each action that worked took, for a task with a computer (the receipt's lines say it for any other): null while its price is not known yet. */
@@ -121,6 +126,8 @@ export interface NoteFacts {
  * behind a refunded computer. What was taken is only ever said from the books' amounts the caller passes in; a hold still on is said as a hold being released.
  */
 export function outcomeNote(outcome: ActivityOutcome, actions: readonly { outcome: ActionOutcome; label?: string }[], facts: NoteFacts = {}): string | null {
+  // Refunded needs nothing more said, except why when the computer could not reach our own service: the person is told that, in the approved words
+  if (outcome === 'refunded' && facts.job === 'returned' && facts.unreachable) return UNREACHABLE_WORDS;
   if (outcome === 'done' || outcome === 'refunded') return null;
   const steps: ActionOutcome[] = [...actions.map((action) => action.outcome), ...(facts.job ? [facts.job === 'worked' ? ('worked' as const) : ('failed' as const)] : [])];
   const count = (wanted: ActionOutcome) => steps.filter((step) => step === wanted).length;
@@ -163,9 +170,11 @@ export function outcomeNote(outcome: ActivityOutcome, actions: readonly { outcom
     by === 'rule' ? ['The computer stopped at your spending rule.'] : by === 'allowance' ? ['The computer stopped because your computer time ran out.'] : by === 'person' ? ['You stopped the computer.'] : by === 'pool' ? ['The computer stopped because our computers were busy.'] : [];
   if (outcome === 'partial') {
     if (worked === 0 || failed + unknown === 0) return null;
-    // A computer that failed on our side, beside an App that worked: said as that, with what came back, what the App took and what the person pays in all
+    // A computer that failed on our side, beside an App that worked: said as that (the blanket "you weren’t charged" is never said beside an App that was), with what came back, what the App took and what the person pays in all
     if (facts.job === 'returned') {
-      const lead = pending
+      const lead = facts.unreachable
+        ? `We couldn’t reach our own service, so the computer part didn’t finish, and its time${pending ? ` (${dollars(facts.refundPendingMicros ?? 0)}) is refund pending.` : `${facts.returnedMicros !== undefined && facts.returnedMicros > 0 ? ` (${dollars(facts.returnedMicros)})` : ''} was given back.`}`
+        : pending
         ? `The computer part didn’t finish because of a problem on our side. Its time (${dollars(facts.refundPendingMicros ?? 0)}) is refund pending.`
         : `The computer part didn’t finish because of a problem on our side, and its time${facts.returnedMicros !== undefined && facts.returnedMicros > 0 ? ` (${dollars(facts.returnedMicros)})` : ''} was given back.`;
       const apps = (facts.appCharges ?? []).map((charge) => (charge.micros === null ? (charge.settling ? `${appLabel(charge.label)} worked. Its charge is ${SETTLEMENT_PENDING.toLowerCase()}.` : `${appLabel(charge.label)} worked. Its price is not known yet.`) : `${appLabel(charge.label)} worked and was charged ${dollars(charge.micros)}.`));
@@ -178,9 +187,9 @@ export function outcomeNote(outcome: ActivityOutcome, actions: readonly { outcom
     const stopped = facts.job !== 'stopped' ? [] : stoppedSaid(facts.stoppedBy).length > 0 ? stoppedSaid(facts.stoppedBy) : ['The computer was stopped before it finished.'];
     return [`${parts[0]} and ${rest.join(' and ')}.`, ...stopped, ...deciding, ...after].join(' ').trim();
   }
-  if (outcome === 'failed') return ['It didn’t finish.', ...after].join(' ');
+  if (outcome === 'failed') return [facts.job === 'returned' && facts.unreachable ? UNREACHABLE_WORDS : 'It didn’t finish.', ...after].join(' ');
   if (outcome === 'stopped') return ['It stopped before it finished, and nothing was confirmed as done.', ...after].join(' ');
-  if (outcome === 'refund_pending') return [`We’re returning ${dollars(facts.refundPendingMicros ?? 0)} to your credit.`, ...charged, ...taken].join(' ');
+  if (outcome === 'refund_pending') return [...(facts.job === 'returned' && facts.unreachable ? ['We couldn’t reach our own service.'] : []), `We’re returning ${dollars(facts.refundPendingMicros ?? 0)} to your credit.`, ...charged, ...taken].join(' ');
   if (outcome === 'deciding') return [STILL_CHECKING, ...computer, ...charged, ...taken].join(' ');
   // unconfirmed
   const names = labels.length > 0 ? listOf(labels) : 'it';

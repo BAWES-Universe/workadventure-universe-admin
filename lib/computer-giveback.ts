@@ -5,8 +5,8 @@ import { prisma } from '@/lib/db';
 import { getInstantLimitsStrict } from '@/lib/instant/state';
 import { INSTANT_LIMITS_RECOMMENDED, type InstantLimits } from '@/lib/instant/values';
 import { monthOf } from '@/lib/meter-values';
-import { giveBackModelCalls } from '@/lib/computer-calls';
-import { OURS_REASONS, readFaultRows } from '@/lib/computer-faults';
+import { callRoomKey, giveBackModelCalls } from '@/lib/computer-calls';
+import { OURS_REASONS, RELAY_UNREACHABLE, readFaultRows, recordRelayUnreachable } from '@/lib/computer-faults';
 import { incidentFaultMatch } from '@/lib/computer-route-pause';
 import { retryWaitMs } from '@/lib/computer-retry';
 
@@ -104,6 +104,20 @@ export async function lastFaultTurn(db: Pick<Prisma.TransactionClient, 'computer
 }
 
 /**
+ * True when a job's computer was readied for a model (a model key was made: prepare passed) and Orbit holds no trace at all of a model call for it: no fault row of any kind (answered ones too), no
+ * model call priced and no room held for one. Such a job never reached the relay, whoever's key the calls would have run on. Reads only.
+ */
+export async function neverReachedRelay(db: Pick<Prisma.TransactionClient, 'computerJobToken' | 'computerJobFault' | 'meterEvent' | 'meterReservation'>, jobId: string): Promise<boolean> {
+  if ((await db.computerJobToken.count({ where: { jobId, scope: 'model' } })) === 0) return false;
+  const [faults, events, rooms] = await Promise.all([
+    db.computerJobFault.count({ where: { jobId } }),
+    db.meterEvent.count({ where: { jobId, kind: 'model_call' } }),
+    db.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') } } }),
+  ]);
+  return faults === 0 && events === 0 && rooms === 0;
+}
+
+/**
  * Decides one failed job the runner reported as ours. Runs inside a transaction, under the person's give-back lock, so two jobs of one person deciding
  * together cannot both take the last give-back. `limits` are read before the transaction opens (null: they could not be read).
  */
@@ -128,9 +142,16 @@ export async function decideRunnerFinish(
   // those are read, and never an empty list of turns, which would read the numbered rows of every run
   const rows = await readFaultRows(tx, job.id, judged, options.run, { turnlessOnly: lenient && !!judged && judged.length === 0 });
   const judgedTurns = lenient && !(turns && turns.length > 0) ? [...(judged ?? [])] : undefined;
-  const ours = rows.find((row) => row.cls === 'ours');
+  // Orbit's own finding that the computer could not reach the relay names the reason when other rows of ours (the relay's own `relay_down`, written for the same thing) say it too
+  let ours = rows.find((row) => row.cls === 'ours' && row.reason === RELAY_UNREACHABLE) ?? rows.find((row) => row.cls === 'ours');
   // Nothing was charged for a job that never started: there is nothing to hold back
   if (!job.startedAt) return { state: 'given', basis: 'universe_fault', counted: false, reason: ours?.reason ?? 'not_started', route: ours?.route ?? null, judgedTurns };
+  // A job whose computer was readied to ask for a model, and for which Orbit holds not one trace of a call (no row of any kind, no call held room or was priced), never reached the relay: no brief makes a
+  // model call fail before it is asked, so this is ours (the address, the relay, the network between), kept as the confirmed fault it is so every later reading of the job finds it
+  if (!ours && (await neverReachedRelay(tx, job.id))) {
+    await recordRelayUnreachable(tx, job.id, { run: options.run ?? null, at: now });
+    ours = { turn: null, callId: RELAY_UNREACHABLE, kind: 'fault', reason: RELAY_UNREACHABLE, source: 'universe-ai', route: null, cls: 'ours' };
+  }
   // Class 1: any bad turn of ours makes the ending ours
   if (ours) return { state: 'given', basis: 'universe_fault', counted: false, reason: ours.reason, route: ours.route, judgedTurns };
   const person = rows.find((row) => row.cls === 'person');

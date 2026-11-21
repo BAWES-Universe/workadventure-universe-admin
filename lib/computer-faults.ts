@@ -6,7 +6,7 @@ import { prisma } from '@/lib/db';
  * process, judges whether a failed job is given back (lib/computer-giveback). The relay writes one row per call (or per turn with no call: call id
  * `turn:<n>`) BEFORE the job finishes. The relay says what it saw; the CLASS of each reason is Orbit's:
  *
- *  - `ours`: a fault no job's words can cause. A relay-side fault (no route, the call could not be authorized, a key could not be read, the pool is full)
+ *  - `ours`: a fault no job's words can cause. A relay-side fault (no route, the call could not be authorized, a key could not be read, the pool is full, the computer could not reach the relay)
  *    or the provider refusing OUR key or model (401, 402, 403, 404). Always given back, never counted. The relay must also say so (kind `fault`).
  *  - `person`: caused by the person, with evidence: their allowance or a spending rule stopped the call, the call ran on their own provider key, or the
  *    provider refused a request field the job itself set. Charged like any run. The relay must also say so (kind `not_ours`).
@@ -26,7 +26,12 @@ export const FAULT_SOURCES = ['universe-ai', 'own-key'] as const;
 export type FaultSource = (typeof FAULT_SOURCES)[number];
 export type FaultClass = 'ours' | 'person' | 'unresolved';
 
-export const OURS_REASONS: readonly string[] = ['relay_down', 'route_unknown', 'authorize_failed', 'key_decrypt_failed', 'pool_busy', 'provider_key_ours'];
+/**
+ * The computer could not reach the model relay at all (a wrong address, a relay that is down, a reply that is not the relay's): nothing about the job reached the relay, so there is no call to
+ * write a row for. Written by Orbit itself from what the runner says at prepare, or from the absence of every call at a failed finish (lib/computer-giveback). Ours, always.
+ */
+export const RELAY_UNREACHABLE = 'relay_unreachable';
+export const OURS_REASONS: readonly string[] = ['relay_down', 'route_unknown', 'authorize_failed', 'key_decrypt_failed', 'pool_busy', 'provider_key_ours', RELAY_UNREACHABLE];
 export const PERSON_REASONS: readonly string[] = ['field_job_set', 'allowance', 'rule', 'own_provider'];
 export const UNRESOLVED_REASONS: readonly string[] = ['provider_5xx', 'provider_429', 'stream_cut', 'timeout_no_output', 'timeout_after_output', 'fieldless_400', 'field_relay_set', 'provider_403'];
 
@@ -117,6 +122,19 @@ export async function recordFaults(botId: string, jobId: string, rows: FaultInpu
  */
 function keyOfCall(callId: string, run: string | null): string {
   return (run && callId.startsWith('turn:') ? `${run}:${callId}` : callId).slice(0, 120);
+}
+
+/**
+ * Keeps that a job's computer could not reach the model relay, as a confirmed fault of ours (kind `fault`, reason `relay_unreachable`, no route: it is no provider's). One row per job and run
+ * (the call id is Orbit's own, `orbit:<run>:relay_unreachable`, so it is never the relay's row of the same name), so saying it twice changes nothing. The job must exist. Never reads or writes anything of a call.
+ */
+export async function recordRelayUnreachable(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, input: { run?: string | null; status?: number | null; at?: Date } = {}): Promise<void> {
+  const run = input.run ? input.run.slice(0, 40) : null;
+  // `skipDuplicates` (ON CONFLICT DO NOTHING): inside a transaction a unique violation would abort the whole of it, and saying it twice must change nothing
+  await db.computerJobFault.createMany({
+    data: [{ jobId, turn: null, run, callId: `orbit:${run ? `${run}:` : ''}${RELAY_UNREACHABLE}`.slice(0, 120), kind: 'fault', reason: RELAY_UNREACHABLE, source: 'universe-ai', route: null, providerStatus: input.status ?? null, at: input.at ?? new Date() }],
+    skipDuplicates: true,
+  });
 }
 
 export interface FaultRow {

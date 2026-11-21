@@ -1,4 +1,4 @@
-import { actionWords, appLabel, dollars, HOLD_BEING_RELEASED, HOLD_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote, outcomeTextOf, SETTLEMENT_PENDING, STILL_CHECKING, STOPPED_AT_RULE } from '@/lib/task-receipt-words';
+import { actionWords, appLabel, dollars, HOLD_BEING_RELEASED, HOLD_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote, outcomeTextOf, SETTLEMENT_PENDING, STILL_CHECKING, STOPPED_AT_RULE, UNREACHABLE_WORDS } from '@/lib/task-receipt-words';
 
 describe('the words for how a task came to end (mock M2)', () => {
   it('names the outcomes as the mock does, and the two it did not have: a task that did not finish but took something, and one nobody could confirm', () => {
@@ -101,6 +101,23 @@ describe('the words for how a task came to end (mock M2)', () => {
       expect(outcomeNote('refund_pending', [], { job: 'returned', refundPendingMicros: 30_000 })).toBe('We’re returning $0.03 to your credit.');
       expect(outcomeNote('deciding', [], { job: 'failed', computerMicros: 30_000, deciding: 'limits' })).toBe(`${STILL_CHECKING} Computer time $0.03 is charged for now.`);
       expect(STILL_CHECKING).toBe('We’re still checking this one. If it was our fault, the time comes back.');
+    });
+
+    it('a computer that could not reach our own service says so in the approved words, and never "you weren’t charged" while a refund is pending or an App was charged', () => {
+      expect(UNREACHABLE_WORDS).toBe('We couldn’t reach our own service, you weren’t charged.');
+      // Given back in full: the words, for the refunded headline too (which says nothing more otherwise)
+      expect(outcomeNote('refunded', [], { job: 'returned', unreachable: true })).toBe(UNREACHABLE_WORDS);
+      expect(outcomeNote('refunded', [], { job: 'returned' })).toBeNull();
+      expect(outcomeNote('failed', [], { job: 'returned', unreachable: true, returnedMicros: 30_000 })).toBe(`${UNREACHABLE_WORDS} Computer cost of $0.03 was given back.`);
+      expect(outcomeNote('failed', [], { job: 'returned', returnedMicros: 30_000 })).toBe('It didn’t finish. Computer cost of $0.03 was given back.');
+      // Not the person's refund yet: never said as not charged
+      expect(outcomeNote('refund_pending', [], { job: 'returned', unreachable: true, refundPendingMicros: 30_000 })).toBe('We couldn’t reach our own service. We’re returning $0.03 to your credit.');
+      // Beside an App that worked and was charged
+      const note = outcomeNote('partial', [gmail], { job: 'returned', unreachable: true, returnedMicros: 30_000, appCharges: [{ label: 'gmail', micros: 9_000 }], netMicros: 9_000 });
+      expect(note).toBe('We couldn’t reach our own service, so the computer part didn’t finish, and its time ($0.03) was given back. Gmail worked and was charged $0.009. You pay $0.009 in all.');
+      expect(note).not.toContain('weren’t charged');
+      // Only a job given back says it
+      expect(outcomeNote('failed', [], { job: 'failed', unreachable: true, computerMicros: 30_000 })).toBe('It didn’t finish. Computer time used $0.03.');
     });
   });
 });

@@ -1,7 +1,7 @@
 /** What the game relay may write about a job's model calls, and who may: the bot server's token only (what is kept is tested against a real database in computer-giveback-db.test.ts). */
 import { NextRequest } from 'next/server';
 import { POST } from '@/app/api/bots/[id]/computer-jobs/[jobId]/faults/route';
-import { recordFaults } from '@/lib/computer-faults';
+import { faultClassOf, recordFaults } from '@/lib/computer-faults';
 import { afterLateEvidence } from '@/lib/computer-giveback';
 import { requireServiceToken } from '@/lib/service-tokens';
 
@@ -42,6 +42,20 @@ describe('POST /api/bots/:id/computer-jobs/:jobId/faults', () => {
     expect(await (await call({ faults: [good] })).json()).toEqual({ ok: true, stored: 0, conflicts: 1 });
     expect(record).toHaveBeenCalledWith('brick-1', 'job-1', [expect.objectContaining({ callId: 'c1', reason: 'provider_key_ours', providerStatus: 402, at: new Date('2026-11-20T10:00:00.000Z') })]);
     expect(late).toHaveBeenCalledWith('job-1');
+  });
+
+  it('takes the relay’s row for a computer that could not reach it (reason relay_unreachable, route "unknown", turn 1, no status), as the game writes it, and the per-turn one', async () => {
+    record.mockResolvedValue({ stored: 2, conflicts: 0 });
+    const rows = [
+      { callId: 'relay_unreachable', turn: 1, run: 'r-1', kind: 'fault', reason: 'relay_unreachable', source: 'universe-ai', route: 'unknown', providerStatus: null, at: '2026-11-21T00:00:00.000Z' },
+      { callId: 'relay_unreachable_r-1_2', turn: 2, run: 'r-1', kind: 'fault', reason: 'relay_unreachable', source: 'universe-ai', route: 'unknown', providerStatus: null, at: '2026-11-21T00:00:01.000Z' },
+    ];
+    expect((await call({ faults: rows })).status).toBe(200);
+    expect(record).toHaveBeenCalledWith('brick-1', 'job-1', [expect.objectContaining({ reason: 'relay_unreachable', route: 'unknown', turn: 1, providerStatus: null }), expect.objectContaining({ callId: 'relay_unreachable_r-1_2', turn: 2 })]);
+    // Read as ours when the relay says fault (never the person's, never unresolved)
+    expect(faultClassOf({ kind: 'fault', reason: 'relay_unreachable', source: 'universe-ai' })).toBe('ours');
+    expect(faultClassOf({ kind: 'uncertain', reason: 'relay_unreachable', source: 'universe-ai' })).toBe('unresolved');
+    expect(faultClassOf({ kind: 'fault', reason: 'relay_unreachable', source: 'own-key' })).toBe('ours');
   });
 
   it('takes the run a row’s turn was numbered in, up to 40 characters, and keeps none for a runner that names none', async () => {

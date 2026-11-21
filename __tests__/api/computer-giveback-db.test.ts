@@ -23,13 +23,14 @@ import { saveInstantLimits } from '@/lib/instant/state';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { computerView, finishJob, giveComputer, planEffect, renewJob, settleEffect, startJob, sweepComputers } from '@/lib/computer';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
-import { recordFaults, type FaultInput } from '@/lib/computer-faults';
+import { recordFaults, recordRelayUnreachable, type FaultInput } from '@/lib/computer-faults';
 import { afterLateEvidence, decidePendingForPurge, decideRunnerFinish, lockPerson, resolveDecision, sweepGiveBackDecisions, sweepLateEvidence } from '@/lib/computer-giveback';
 import { correctRouteTogether, giveBackOverview, giveBackReadiness, routeIsPaused } from '@/lib/computer-fault-ops';
 import { mintJobToken, revokeJobTokens } from '@/lib/computer-token';
 import { WorkerDied, afterWorkerDied } from '../helpers/worker-died';
 import { activityFor } from '@/lib/task-receipts';
-import { OUTCOME_WORDS } from '@/lib/task-receipt-words';
+import { OUTCOME_WORDS, UNREACHABLE_WORDS } from '@/lib/task-receipt-words';
+import { reportsToTell } from '@/lib/computer-report';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -1483,6 +1484,133 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       if (!lapsing.ok) throw new Error('no');
       await sweepComputers(minutes(200));
       expect(await decisionOf(lapsing.job.id)).toMatchObject({ state: 'given', basis: 'orbit_fault' });
+    });
+  });
+
+  describe('a computer that could not reach our own model relay (dev staging: a relay address that answered a page that was not the relay)', () => {
+    const readied = async (jobId: string) => {
+      await mintJobToken(jobId, 'model', NOW);
+    };
+    const item = async (personId: string, jobId: string) => (await activityFor(personId)).find((one) => one.id === `act_job_${jobId}`);
+
+    it('is a confirmed fault of ours whatever the runner said, given back at the cap too and never counted, with the money, the receipt and the report all saying so', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      // The bound is used: one unresolved failure was given back as goodwill, and the next one is refused for the cap (what a job nobody could prove was ours gets)
+      const used = await job(sara, { outcome: 'failed', cause: 'agent', turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+      expect(await decisionOf(used.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+      const capped = await job(sara, { outcome: 'failed', cause: 'agent', turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+      expect(await decisionOf(capped.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+      expect(await givenBack(capped.id)).toBe(false);
+      // The relay could not be reached: said at prepare (a run), under each thing the runner may say at the finish
+      const unreachable = async (ending: { outcome: 'failed'; cause?: 'ours' | 'agent'; turns?: number[]; run?: string }) =>
+        job(sara, ending, async (jobId) => {
+          await readied(jobId);
+          await recordRelayUnreachable(prisma, jobId, { run: ending.run ?? null, status: 404 });
+        });
+      const said = [await unreachable({ outcome: 'failed', cause: 'agent', run: 'r1' }), await unreachable({ outcome: 'failed', cause: 'ours', turns: [1, 2], run: 'r1' }), await unreachable({ outcome: 'failed', run: 'r1' }), await unreachable({ outcome: 'failed', cause: 'ours' })];
+      for (const one of said) {
+        expect(await decisionOf(one.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+        // The money: the time written against nobody, and the job takes none of the person's bound
+        expect(await givenBack(one.id)).toBe(true);
+        expect(one.runnerFault).toBe(false);
+      }
+      // The bound is exactly as it was: one used, and the next unresolved failure is still refused for it
+      const after = await job(sara, { outcome: 'failed', cause: 'agent', turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+      expect(await decisionOf(after.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+      // The receipt: in the words of the approved sentence, as a job that came back to the person
+      const seen = await item(sara.id, said[0].id);
+      expect(seen?.outcomeNote).toContain(UNREACHABLE_WORDS);
+      expect(seen?.outcomeNote).not.toContain('It didn’t finish.');
+      expect((await item(sara.id, capped.id))?.outcomeNote).not.toContain(UNREACHABLE_WORDS);
+      // The report the person is told in chat: the same sentence, never the computer's own words about a model that never answered
+      const told = (await reportsToTell(50, minutes(60 * 24))).filter((report) => report.kind === 'failed');
+      expect(told.find((report) => report.jobId === said[0].id)).toMatchObject({ givenBack: true, why: UNREACHABLE_WORDS });
+      expect(told.find((report) => report.jobId === capped.id)?.why).not.toBe(UNREACHABLE_WORDS);
+    });
+
+    it('the relay’s own row for the same thing (relay_down, no route) beside Orbit’s: one give-back, named by Orbit’s reason; the relay’s row alone is given back as it always was', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      const both = await job(sara, { outcome: 'failed', cause: 'ours', turns: [1], run: 'r1' }, async (jobId) => {
+        await readied(jobId);
+        await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', { run: 'r1', route: 'unknown' })]);
+        await recordRelayUnreachable(prisma, jobId, { run: 'r1' });
+      });
+      expect(await decisionOf(both.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+      expect((await item(sara.id, both.id))?.outcomeNote).toContain(UNREACHABLE_WORDS);
+      const relayOnly = await job(sara, { outcome: 'failed', cause: 'ours', turns: [1], run: 'r1' }, withFaults(sara, [fault(1, 'relay_down', { run: 'r1', route: 'unknown' })]));
+      expect(await decisionOf(relayOnly.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_down' });
+      expect(await givenBack(relayOnly.id)).toBe(true);
+      expect(relayOnly.runnerFault).toBe(false);
+    });
+
+    it('a row that says so and arrives after the finish gives the job back the same way, past the cap', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      await job(sara, { outcome: 'failed', cause: 'agent', turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+      // The finish had a row of another kind on record (so it was not read as "no call at all"), and the bound is used: refused for the cap
+      const rowed = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+        await readied(jobId);
+        await recordFaults(sara.brickId, jobId, [fault(1, 'stream_cut', { run: 'r1' })]);
+      });
+      expect(await decisionOf(rowed.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+      // The runner's word that the relay could not be reached reaches Orbit late: the same decision as on time
+      await recordRelayUnreachable(prisma, rowed.id, { run: 'r1' });
+      await afterLateEvidence(rowed.id);
+      expect(await decisionOf(rowed.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+      expect(await givenBack(rowed.id)).toBe(true);
+    });
+
+    it('a failed finish with the computer readied and not one trace of a call is the same fault, kept as a row; any trace of a call, or a computer never readied, is judged as ever', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      // Readied, nothing at all: ours, and Orbit keeps the fault row itself (so it is found again by every later reading)
+      const silent = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, readied);
+      expect(await decisionOf(silent.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+      expect(await givenBack(silent.id)).toBe(true);
+      expect(await prisma.computerJobFault.findMany({ where: { jobId: silent.id } })).toMatchObject([{ kind: 'fault', reason: 'relay_unreachable', run: 'r1', turn: null, route: null }]);
+      // The runner named turns and said ours, and no turn has a row: the same
+      const named = await job(sara, { outcome: 'failed', cause: 'ours', turns: [1, 2], run: 'r1' }, readied);
+      expect(await decisionOf(named.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+      // Never readied (no key was ever made): nothing says the model was meant to be reached, so it is the agent's ending as before
+      const never = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' });
+      expect(await decisionOf(never.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      expect(await prisma.computerJobFault.count({ where: { jobId: never.id } })).toBe(0);
+      // Any trace of a call is a call that reached us: an answered row, a row of any fault, a priced call or a room held for one
+      const answered = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+        await readied(jobId);
+        await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', { kind: 'answered', run: 'r1' })]);
+      });
+      expect(await decisionOf(answered.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      const unresolved = await job(sara, { outcome: 'failed', cause: 'agent', turns: [1] }, async (jobId) => {
+        await readied(jobId);
+        await recordFaults(sara.brickId, jobId, [fault(1, 'provider_5xx')]);
+      });
+      expect(await decisionOf(unresolved.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+      const roomHeld = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+        const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+        await authorizeModelCall({ token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' }, NOW);
+      });
+      expect(await decisionOf(roomHeld.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      const priced = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+        const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+        await authorizeModelCall({ token, callId: 'c1', estimateMicros: 1, payer: 'own-key' }, NOW);
+        await settleModelCall(jobId, 'c1', { costMicros: 900, basis: 'measured', payer: { kind: 'person', personId: sara.id }, route: 'own-key' }, NOW);
+      });
+      expect(await decisionOf(priced.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+    });
+
+    it('is never read as the person’s, and a fault row of another run never gives this run back', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      // The probe of run r0 could not reach the relay; the job that ended is judged on run r1: the row is not r1's
+      const other = await job(sara, { outcome: 'failed', cause: 'agent', turns: [1], run: 'r1' }, async (jobId) => {
+        await readied(jobId);
+        await recordRelayUnreachable(prisma, jobId, { run: 'r0' });
+        await recordFaults(sara.brickId, jobId, [fault(1, 'stream_cut', { run: 'r1' })]);
+      });
+      expect(await decisionOf(other.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason: 'stream_cut' });
     });
   });
 

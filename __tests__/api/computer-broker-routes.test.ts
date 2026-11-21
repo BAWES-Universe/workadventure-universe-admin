@@ -11,11 +11,13 @@ import { GET as stream } from '@/app/api/computer/jobs/[jobId]/stream/route';
 import { GET as running } from '@/app/api/computer/jobs/running/route';
 import * as computer from '@/lib/computer';
 import * as broker from '@/lib/computer-broker';
+import * as giveback from '@/lib/computer-giveback';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
 
 jest.mock('@/lib/db', () => ({ prisma: {} }));
 jest.mock('@/lib/computer-broker');
 jest.mock('@/lib/computer', () => ({ runnableJobsPage: jest.fn() }));
+jest.mock('@/lib/computer-giveback', () => ({ afterLateEvidence: jest.fn() }));
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
 const SERVICE_TOKEN = 'bot-server-secret';
@@ -60,7 +62,29 @@ describe('prepare', () => {
     lib.prepareJob.mockResolvedValueOnce({ ok: true, expiresAt: new Date('2026-11-15T12:15:00Z'), git: true });
     const answer = await prepare(req('POST', { relay: 'https://bot.example.test' }), params);
     expect(await answer.json()).toEqual({ ok: true, expiresAt: '2026-11-15T12:15:00.000Z', git: true });
-    expect(lib.prepareJob).toHaveBeenCalledWith('job-1', 'https://bot.example.test');
+    expect(lib.prepareJob).toHaveBeenCalledWith('job-1', 'https://bot.example.test', expect.any(Date), { run: null, relayReached: undefined, relayStatus: null });
+    expect(giveback.afterLateEvidence).not.toHaveBeenCalled();
+  });
+  it('says 409 relay_unreachable when the computer could not get the relay’s model list, names the run it was told, and judges a late row; no other refusal does', async () => {
+    (giveback.afterLateEvidence as jest.Mock).mockResolvedValue(undefined);
+    lib.prepareJob.mockResolvedValueOnce({ ok: false, reason: 'relay_unreachable' });
+    const answer = await prepare(req('POST', { relay: 'https://bot.example.test', run: 'r-1' }), params);
+    expect(answer.status).toBe(409);
+    expect(await answer.json()).toEqual({ ok: false, reason: 'relay_unreachable' });
+    expect(lib.prepareJob).toHaveBeenLastCalledWith('job-1', 'https://bot.example.test', expect.any(Date), { run: 'r-1', relayReached: undefined, relayStatus: null });
+    expect(giveback.afterLateEvidence).toHaveBeenCalledWith('job-1');
+    (giveback.afterLateEvidence as jest.Mock).mockClear();
+    lib.prepareJob.mockResolvedValueOnce({ ok: false, reason: 'failed' });
+    await prepare(req('POST', { relay: 'https://bot.example.test' }), params);
+    expect(giveback.afterLateEvidence).not.toHaveBeenCalled();
+    // What the bot server's own look at the relay saw is passed on as it is
+    lib.prepareJob.mockResolvedValueOnce({ ok: false, reason: 'relay_unreachable' });
+    expect((await prepare(req('POST', { relay: 'https://bot.example.test', run: 'r-1', relayReached: false, relayStatus: 404 }), params)).status).toBe(409);
+    expect(lib.prepareJob).toHaveBeenLastCalledWith('job-1', 'https://bot.example.test', expect.any(Date), { run: 'r-1', relayReached: false, relayStatus: 404 });
+    // Not a run word, a status or a flag: refused before anything is done
+    lib.prepareJob.mockClear();
+    for (const bad of [{ run: 'bad run!' }, { relayStatus: 700 }, { relayStatus: 1.5 }, { relayReached: 'no' }]) expect((await prepare(req('POST', { relay: 'https://bot.example.test', ...bad }), params)).status).toBe(400);
+    expect(lib.prepareJob).not.toHaveBeenCalled();
   });
   it('checks the body first, and says why in a word and a status', async () => {
     expect((await prepare(req('POST', { relay: 'x', extra: 1 }), params)).status).toBe(400);

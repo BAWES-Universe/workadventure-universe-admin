@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { agentCannotRun, providerFor, fenceMachine, finishJob, settleTurnHold, underTurnHold, wakeIfStopped } from '@/lib/computer';
+import { recordRelayUnreachable } from '@/lib/computer-faults';
 import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
 import { agentMayAct } from '@/lib/computer-control';
 import { jobTagOf } from '@/lib/computer-values';
@@ -94,7 +95,9 @@ export type Prepared =
   | NotLive
   /** Another prepare of the job holds its claim: the caller waits a few seconds and asks again, it is not a failure. */
   | { ok: false; reason: 'preparing' }
-  | { ok: false; reason: 'bad_relay' | 'failed' };
+  | { ok: false; reason: 'bad_relay' | 'failed' }
+  /** The key was written, but the computer could not get the relay's model list with it (no connection, a timeout, a reply that is not the relay's): a confirmed fault of ours, kept for the job. */
+  | { ok: false; reason: 'relay_unreachable' };
 
 /**
  * Gives the job's computer what it needs to ask for a model: a new key and the relay's address, written where the image's local
@@ -105,7 +108,7 @@ export type Prepared =
  * GitHub): a second key of scope "git" and the files that make plain `git clone https://github.com/owner/repo` go through Orbit's git
  * relay (see lib/github/git-login.ts). Without it the old git files are removed. `git` in the answer says whether the computer has it.
  */
-export async function prepareJob(jobId: string, relay: unknown, now: Date = new Date()): Promise<Prepared> {
+export async function prepareJob(jobId: string, relay: unknown, now: Date = new Date(), options: { run?: string | null; /** False: the bot server's own look at the relay got a reply that is not the relay's. */ relayReached?: boolean; relayStatus?: number | null } = {}): Promise<Prepared> {
   const address = relayAddressOf(relay);
   if (!address) return { ok: false, reason: 'bad_relay' };
   // One key is made and written at a time for a job: ending the old keys, making the new one and writing it are one piece, so a second
@@ -114,7 +117,12 @@ export async function prepareJob(jobId: string, relay: unknown, now: Date = new 
   if (claim === 'gone') return { ok: false, reason: 'not_found' };
   if (claim === 'busy') return { ok: false, reason: 'preparing' };
   try {
-    return await prepareClaimed(jobId, address, now, claim);
+    // The bot server itself found that the address answers something that is not the relay: a confirmed fault of ours, kept (once per run) and told at once, with no key made for a relay that is not there
+    if (options.relayReached === false) {
+      await recordRelayUnreachable(prisma, jobId, { run: options.run ?? null, status: options.relayStatus ?? null, at: now });
+      return { ok: false, reason: 'relay_unreachable' };
+    }
+    return await prepareClaimed(jobId, address, now, claim, options.run ?? null);
   } finally {
     await releaseOnJob(jobId, 'prepareClaimedAt', claim);
   }
@@ -133,7 +141,7 @@ async function endOwnKey(jobId: string, token: string, now: Date, claim: Date): 
   await revokeToken(token, now);
 }
 
-async function prepareClaimed(jobId: string, address: string, now: Date, claim: Date): Promise<Prepared> {
+async function prepareClaimed(jobId: string, address: string, now: Date, claim: Date, run: string | null): Promise<Prepared> {
   const live = await liveJob(jobId);
   if (!live.ok) return live;
   // A prepare that was held up past its claim (a stopped process, a database that did not answer) finds another one has it now: it changes no key and
@@ -148,6 +156,15 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
   if (!(await holdsPrepareClaim(jobId, claim))) {
     await revokeToken(minted.token, now);
     return { ok: false, reason: 'preparing' };
+  }
+  // The computer asks the relay for its model list with the key it was just given, the very thing its model address does on each call (asked BEFORE the key is written, so a computer that cannot reach the
+  // relay is never given a key that cannot be used). A computer that cannot (the address answers a page that is not the relay's, nothing answers, the key is refused) would fail every call before one
+  // reaches the relay, with nothing recorded: it is a confirmed fault of ours, kept before anything else is said, and the runner is told. A check that could not be made at all (no curl on the machine, a
+  // command that did not run) says nothing and changes nothing
+  if ((await relayProbe(live.provider, live.job.ref, address, minted.token)) === 'down') {
+    await recordRelayUnreachable(prisma, jobId, { run, at: now });
+    await endOwnKey(jobId, minted.token, now, claim);
+    return { ok: false, reason: 'relay_unreachable' };
   }
   const file = JSON.stringify({ url: address, token: minted.token });
   const gitPart = await gitLoginFor(jobId, live.job.generation, now);
@@ -194,6 +211,26 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
     return { ok: false, reason: 'preparing' };
   }
   return { ok: true, expiresAt: minted.expiresAt, git: gitPart.on };
+}
+
+/**
+ * Whether the computer can get the relay's model list (`GET <relay>/v1/models` with the job's key: a 200 whose body has `data`). `down` only when the machine ran curl and it did not; anything else
+ * (curl missing, the command did not run or said nothing) is `unknown`, which never counts against anyone.
+ */
+async function relayProbe(provider: NonNullable<ReturnType<typeof providerFor>>, ref: string, address: string, token: string): Promise<'ok' | 'down' | 'unknown'> {
+  const command =
+    `command -v curl >/dev/null 2>&1 || { echo reach=nocurl; exit 0; }; ` +
+    `r=$(curl -sS -m 10 -H 'Authorization: Bearer ${token}' -w '\n%{http_code}' '${address}/v1/models' 2>/dev/null); rc=$?; ` +
+    `code=$(printf '%s' "$r" | tail -n 1); ` +
+    `if [ "$rc" -eq 0 ] && [ "$code" = 200 ] && printf '%s' "$r" | grep -q '"data"'; then echo reach=ok; else echo reach=down; fi`;
+  try {
+    const done = await provider.exec(ref, command, { timeoutMs: 20_000 });
+    if (done.exitCode !== 0) return 'unknown';
+    if (/(^|\n)reach=down\s*($|\n)/.test(done.stdout)) return 'down';
+    return /(^|\n)reach=ok\s*($|\n)/.test(done.stdout) ? 'ok' : 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 /**
