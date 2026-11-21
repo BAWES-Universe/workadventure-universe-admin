@@ -38,7 +38,9 @@ import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/com
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
 const tag = randomUUID().slice(0, 8);
-const NOW = new Date('2026-11-15T12:00:00Z');
+// The real clock, not a fixed day: a failed start ends its job at the real now (the broker reads its own clock there), and a job that began on a fixed day is settled for every minute since, at the pretend price, so
+// each day that passed took more of the pool's room and the third job of a test eventually found none (the 504/502/503 test failed from 21 Nov: its job was queued for the pool). computer-db does the same
+const NOW = new Date();
 const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
 const people: string[] = [];
 let made = 0;
@@ -68,6 +70,8 @@ async function running(name = 'sara') {
   await giveComputer(sara.brickId, sara.id);
   const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, NOW);
   if (!started.ok) throw new Error('the job did not start');
+  // A job that waits in line (the pool has no room, the person's allowance is used) is not what these tests are about: say so at once instead of failing later with a misleading answer
+  if (started.job.status !== 'running') throw new Error(`the job did not start running: ${started.job.status}, queued for ${started.job.queuedFor}`);
   return { sara, jobId: started.job.id };
 }
 
