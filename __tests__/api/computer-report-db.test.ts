@@ -443,6 +443,15 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       expect(found[0].apps).toEqual(['Gmail', 'Slack']);
     });
 
+    it('ONE message per job: an App confirmed after the person was told is not announced by a second message (it stays on the receipt)', async () => {
+      const { who, id } = await lateJob();
+      const [first] = await lateMine([id]);
+      expect(first.apps).toEqual(['Gmail']);
+      expect(await keepReportTold(id, 'late')).toBe(true);
+      await letGo(id, who, 'slack', { at: new Date(LATER.getTime() + 3_600_000) });
+      expect(await lateMine([id])).toEqual([]);
+    });
+
     it('both arrival orders: confirmed before the first report was told, it waits for that report and is offered after it; confirmed after, at once', async () => {
       const who = await person('sara');
       const id = await started(who);
@@ -497,32 +506,60 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       expect(await lateMine([none.id, failed.id, charged.id, held.id, ran.id, early.id])).toEqual([]);
     });
 
-    it('never for a job that was not given back by a decision (a quick job that ended fine with no minutes counted) even though the books look given back', async () => {
-      const who = await person('sara');
-      const id = await started(who);
-      await finishJob(id, 'done', NOW);
-      await keepReportTold(id, 'done');
-      await prisma.meterEvent.deleteMany({ where: { eventId: `computer:${id}:time` } });
-      await prisma.computerJob.update({ where: { id }, data: { secondsRun: 0 } });
-      await prisma.computerGiveBackDecision.deleteMany({ where: { jobId: id } });
-      await letGo(id, who, 'gmail');
-      expect(await lateMine([id])).toEqual([]);
+    it('Release desk: ANY job gets it, whatever became of its computer: one that ended well, one the agent gave up on (the person paid for its time), a quick one with no minutes counted, and a given-back one; givenBack says which', async () => {
+      const done = await person('p1');
+      const doneId = await started(done);
+      await finishJob(doneId, 'done', minutes(9));
+      await keepReportTold(doneId, 'done');
+      await letGo(doneId, done, 'gmail', { at: new Date(LATER.getTime() + 60_000) });
+      const gaveUp = await person('p2');
+      const gaveUpId = await started(gaveUp);
+      await finishJob(gaveUpId, 'failed', minutes(6), 'Out of turns', 'agent');
+      await keepReportTold(gaveUpId, 'failed');
+      await letGo(gaveUpId, gaveUp, 'slack', { at: new Date(LATER.getTime() + 120_000) });
+      const quick = await person('p3');
+      const quickId = await started(quick);
+      await finishJob(quickId, 'done', NOW);
+      await keepReportTold(quickId, 'done');
+      await prisma.meterEvent.deleteMany({ where: { eventId: `computer:${quickId}:time` } });
+      await prisma.computerJob.update({ where: { id: quickId }, data: { secondsRun: 0 } });
+      await prisma.computerGiveBackDecision.deleteMany({ where: { jobId: quickId } });
+      await letGo(quickId, quick, 'notion', { at: new Date(LATER.getTime() + 180_000) });
+      const given = await lateJob('p4');
+      const found = await lateMine([doneId, gaveUpId, quickId, given.id]);
+      // Oldest confirmation first
+      expect(found.map((report) => [report.jobId, report.apps, report.givenBack])).toEqual([
+        [given.id, ['Gmail'], true],
+        [doneId, ['Gmail'], false],
+        [gaveUpId, ['Slack'], false],
+        [quickId, ['Notion'], false],
+      ]);
+      // The same rules for all of them: told once (ack), never twice; the ending's own marks are untouched
+      for (const report of found) {
+        expect(await keepReportTold(report.jobId, 'late')).toBe(true);
+      }
+      expect(await lateMine([doneId, gaveUpId, quickId, given.id])).toEqual([]);
+      // A done job whose App was charged, or whose first report was never delivered, is not told either
+      const charged = await person('p5');
+      const chargedId = await started(charged);
+      await finishJob(chargedId, 'done', minutes(9));
+      await keepReportTold(chargedId, 'done');
+      await letGo(chargedId, charged, 'gmail', { customerState: 'charged', customerMicros: 10_000 });
+      const untold = await person('p6');
+      const untoldId = await started(untold);
+      await finishJob(untoldId, 'done', minutes(9));
+      await letGo(untoldId, untold, 'gmail');
+      expect(await lateMine([chargedId, untoldId])).toEqual([]);
     });
 
-    it('never for a job with a call on the person’s own key, a computer that was not given back, a refund still pending, or a deleted Brick', async () => {
+    it('never for a job with a call on the person’s own key, a refund still pending, or a deleted Brick', async () => {
       const own = await lateJob('sara');
       await prisma.computerJobFault.create({ data: { jobId: own.id, turn: null, run: null, callId: OWN_KEY_CALL_MARK, kind: 'answered', reason: 'own_key', source: ORBIT_SOURCE, route: null, providerStatus: null, at: NOW } });
-      // The job ended on the agent's own account (nothing given back)
-      const who = await person('tom');
-      const agent = await started(who);
-      await finishJob(agent, 'failed', minutes(6), 'Out of turns', 'agent');
-      await keepReportTold(agent, 'failed');
-      await letGo(agent, who, 'gmail');
       const owed = await lateJob('lena');
       await prisma.computerRefundObligation.create({ data: { jobId: owed.id, personId: owed.who.id, holdKey: `h-${randomUUID()}`, refundKey: `r-${randomUUID()}`, amountMicros: BigInt(30_000), state: 'owed' } });
       const gone = await lateJob('omar');
       await deleteBrick(gone.who.brickId, gone.who.id);
-      expect(await lateMine([own.id, agent, owed.id, gone.id])).toEqual([]);
+      expect(await lateMine([own.id, owed.id, gone.id])).toEqual([]);
       // The same job offered once the refund is acknowledged: a pending refund only delays it
       await prisma.computerRefundObligation.updateMany({ where: { jobId: owed.id }, data: { state: 'acknowledged' } });
       expect((await lateMine([owed.id])).map((report) => report.kind)).toEqual(['late']);

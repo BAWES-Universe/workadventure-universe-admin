@@ -236,9 +236,10 @@ async function lateReportSince(now: Date): Promise<Date> {
 
 /**
  * The one follow-up for a job whose App was let go unconfirmed (its hold released, nothing charged) and that the provider's own log CONFIRMED later: the first report could only say it was not confirmed.
- * Offered once per job, and only when everything is already true that the receipt says: the first report was DELIVERED (a person who never got it is never told this), the confirmation came AFTER the deploy
- * that made this possible, the App's hold is released and nothing was ever charged for it, the job is Universe-paid (a job with a call on the person's own key is never told this), and the computer part was
- * given back and the books acknowledged it (no refund still pending). Told by `keepReportTold` with the kind `late`, which is the only thing that marks it.
+ * Offered once per job, for ANY job (one that ended well, failed on the person's side, or was given back), and only when everything is already true that the receipt says: the first report was DELIVERED (a person
+ * who never got it is never told this), the confirmation came AFTER the deploy that made this possible, the App's hold is released and nothing was ever charged for it, the job is Universe-paid (a job with a call
+ * on the person's own key is never told this), and no refund is still pending on it. ONE message per job: it names every App confirmed by the time it is offered; an App confirmed after the person was told
+ * stays only on their receipt (Activity), as it always did. Told by `keepReportTold` with the kind `late`, which is the only thing that marks it.
  */
 async function lateReports(size: number, now: Date): Promise<Report[]> {
   const since = await lateReportSince(now);
@@ -254,7 +255,6 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
              array_agg(i."toolkit" ORDER BY (i."detail"->'lateEvidence'->>'at')::timestamptz ASC, i."id" ASC) AS toolkits
       FROM "instant_runs" i
         JOIN "computer_jobs" j ON j."id" = i."task_key" AND j."person_id" = i."person_id" AND j."bot_id" = i."bot_id"
-        JOIN "computer_give_back_decisions" d ON d."job_id" = j."id" AND d."state" = 'given'
         JOIN "bots" b ON b."id" = j."bot_id" AND b."deleted_at" IS NULL
       WHERE i."state" = 'failed' AND i."reason" = 'unclear' AND i."created_at" >= ${lookBack}
         AND i."detail"->'lateEvidence'->>'status' = 'success'
@@ -283,15 +283,19 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
     const people = await prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.personId))] } }, select: { id: true, matrixChatId: true } });
     const chatOf = new Map(people.map((person) => [person.id, person.matrixChatId ?? null]));
     const owed = await refundStatesFor(jobs.map((job) => job.id));
+    const decisions = await prisma.computerGiveBackDecision.findMany({ where: { jobId: { in: jobs.map((job) => job.id) } }, select: { jobId: true, state: true } });
+    const decisionOf = new Map(decisions.map((one) => [one.jobId, one.state]));
     // In the order the query found them (the oldest confirmation first)
     for (const row of found) {
       if (out.length >= size) break;
       const job = jobOf.get(row.job_id);
       if (!job) continue;
-      // The computer part was given back, in the books, with no refund still pending (both may still change); and no call on the person's own key was ever made (their own bill is not ours to speak of)
-      if (!(await givenBackIn(job.id, job.secondsRun)) || (owed.get(job.id)?.pendingMicros ?? 0) > 0) continue;
+      // No refund still pending on the job (it may still change: the follow-up waits for the books, so it never says "you weren't charged" while something is still owed), and no call on the person's own key
+      // was ever made (their own bill is not ours to speak of). Any job qualifies, whatever became of its computer: the follow-up is about the App
+      if ((owed.get(job.id)?.pendingMicros ?? 0) > 0) continue;
       if (await hasOwnKeyCall(prisma, job.id)) continue;
-      // Only a computer that was given back by a decision (the query keeps those): a job that ended well has nothing "given back" to say
+      // Said as it is: whether the computer part was given back too (never decides whether the App's follow-up is told)
+      const givenBack = decisionOf.get(job.id) === 'given' && (await givenBackIn(job.id, job.secondsRun));
       out.push({
         key: `computer-told:${job.id}:late`,
         jobId: job.id,
@@ -310,7 +314,7 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
         effects: [],
         files: [],
         handed: [],
-        givenBack: true,
+        givenBack,
         apps: appsOf.get(job.id) ?? [],
         lateApps: appsOf.get(job.id) ?? [],
         holdReleased: true,
