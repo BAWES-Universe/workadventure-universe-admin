@@ -27,7 +27,7 @@ import {
   sleep,
 } from '@/lib/computer-control';
 import { cleanStepLabel } from '@/lib/computer-redact';
-import { callRoomKey, endStuckCutoffs, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
+import { callRoomKey, endIfCutoffDecided, endStuckCutoffs, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { reconcileComputers } from '@/lib/computer-reconcile';
 import { bringBackFromCold, coldStep, dropColdCopiesIfNewer } from '@/lib/computer-cold';
@@ -1541,6 +1541,13 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   const { computerWait } = await getBrickLimits();
   const unanswered = await prisma.computerJob.findMany({ where: { status: 'waiting', control: 'brick', stretchStarted: { lte: new Date(now.getTime() - computerWait * 60 * 1000) } }, select: { id: true }, orderBy: { stretchStarted: 'asc' }, take: batch });
   for (const job of unanswered) {
+    // A job Orbit already decided to end for its own capacity (its keys ended, whatever the request that decided it did after) is ended as THAT, ours, before the wait for its person is read against it: it is not one that
+    // went quiet, and a cutoff still in its grace period is not left for this pass to end as the person's. A job whose cutoff could not end it is ended by the pass below
+    const cutoff = await endIfCutoffDecided(job.id, now).catch(() => ({ decided: true, ended: false }));
+    if (cutoff.decided) {
+      if (cutoff.ended) stopped++;
+      continue;
+    }
     await endJob(job.id, 'stopped', 'unanswered', now);
     stopped++;
   }

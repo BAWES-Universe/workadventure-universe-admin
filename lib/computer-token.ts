@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { isOver } from '@/lib/computer-values';
 import { agentMayAct } from '@/lib/computer-control';
+import { cutoffLockKey, hasPoolCutoff } from '@/lib/computer-faults';
 
 /**
  * The key a job's computer holds (build handoff v2, section 5). It is the computer's only credential, and it grants nothing by
@@ -46,6 +47,24 @@ export async function mintJobToken(jobId: string, scope: TokenScope, now: Date =
   const expiresAt = new Date(now.getTime() + TOKEN_LIFE_MS);
   const digest = digestOf(token);
   await prisma.computerJobToken.create({ data: { jobId, scope, generation: job.controlGeneration, digest, expiresAt } });
+  if (scope === 'model') {
+    // A job Orbit decided to end for its own capacity never gets a model key again. The decision (and the end of every key) is made under the job's cutoff lock, so the key just made is looked at under that lock too:
+    // a decision that came before it is found here (the key is ended at once, and never given to anyone), and one that comes after it ends this key with the others. Database steps only
+    const cut = await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
+        if (!(await hasPoolCutoff(tx, jobId))) return false;
+        await tx.computerJobToken.updateMany({ where: { digest, revokedAt: null }, data: { revokedAt: now } });
+        return true;
+      },
+      { timeout: 15_000, maxWait: 15_000 },
+    ).catch(async (error) => {
+      // A key that cannot be looked at is not given out
+      await prisma.computerJobToken.updateMany({ where: { digest, revokedAt: null }, data: { revokedAt: now } }).catch(() => undefined);
+      throw error;
+    });
+    if (cut) return { ok: false, reason: 'not_running' };
+  }
   if (under) {
     // A take-over that came between the look and the key ends this key too: the fence only revokes the keys that existed when it ran
     const again = await read();

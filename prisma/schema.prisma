@@ -3704,7 +3704,7 @@ model ComputerJobFault {
   // fault, not_ours, uncertain, answered: what the relay says; the CLASS (ours, the person's, unresolved) is worked out here from the reason
   kind           String   @db.VarChar(12)
   reason         String   @db.VarChar(32)
-  // universe-ai or own-key
+  // universe-ai or own-key (the relay's rows); orbit for the rows Orbit makes itself (its capacity refusals, its cutoff, its own-key marker): who made a row
   source         String   @db.VarChar(12)
   // The provider and route the call went to ("universe-ai:<providerId>"): what a provider's failures are counted by
   route          String?  @db.VarChar(120)

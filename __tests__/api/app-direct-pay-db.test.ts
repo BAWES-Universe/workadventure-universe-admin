@@ -2120,6 +2120,128 @@ run('payments for pages, in a real database', () => {
           expect((await row(order.id)).nextLookAt!.getTime()).toBe(scheduled.getTime());
         });
 
+        it('a look at a disconnected app is counted and backed off only when it is DUE, by the same rule as a connected one: a page that refreshes inside the spacing changes nothing (CodeRabbit)', async () => {
+          const made = await pending();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
+          const lastLook = new Date(Date.now() - 30_000);
+          const scheduled = new Date(Date.now() + 5 * DAY);
+          const order = await longOrder(made.artifactId, word(), 'chg_LW52', 60, { checks: 5, checkedAt: lastLook, lastReadAt: lastLook, nextLookAt: scheduled });
+          await prisma.appPageOrder.update({ where: { id: order.id }, data: { connectionId: null } });
+          await prisma.appPageJob.deleteMany({ where: { artifactId: made.artifactId } });
+          await prisma.appConnection.delete({ where: { id: made.connectionId } });
+          // A refresh of the page: the order was looked at half a minute ago, so this is not a look that is due: nothing is counted, nothing moves
+          await verifyOrder(order.id);
+          expect(await row(order.id)).toMatchObject({ checks: 5, checkedAt: lastLook, nextLookAt: scheduled });
+          // A look that is due (the order's own schedule, asked by the sweep) is a failed look that needs a person: counted once, backed off
+          await prisma.appPageOrder.update({ where: { id: order.id }, data: { checkedAt: new Date(Date.now() - 2 * 3_600_000), nextLookAt: new Date(Date.now() - 1_000) } });
+          await verifyOrder(order.id, undefined, undefined, { background: true });
+          expect((await row(order.id)).checks).toBe(6);
+          expect(await nextIn(order.id)).toBeGreaterThan(0);
+        });
+
+        it('with the platform’s room for looks spent the sweep stops asking the service, but the orders of its batch still get their own time read: a pending one past its open time ends, counted as moved and not as a look, and a closed late-window one first never blocks the rest (CodeRabbit)', async () => {
+          const { artifactId, connectionId } = await setUp();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, keyCallsPlatform: 1 } }, sara);
+          await prisma.appKeyCall.create({ data: { connectionId, ownerId: 'page-payments', botId: 'page-payments', callId: `look:${sara}:spent:1`, operation: 'x', state: 'done', outcome: 'ok' } });
+          // First in line: an order closed a day ago (inside its late window), never looked at; behind it, three pending orders that ran out of their open hour
+          const closed = await longOrder(artifactId, word(), 'chg_PS0', 1, { checkedAt: null, createdAt: new Date(Date.now() - 30 * 3_600_000) });
+          const ran = [];
+          for (let i = 1; i <= 3; i += 1) ran.push(await lostOrder(artifactId, word(), wish(), { status: 'pending', providerRef: `chg_PS${i}`, reconciled: false, createdAt: new Date(Date.now() - (5 - i) * 3_600_000 - 3_600_000), checkedAt: null, checkoutUrl: 'https://checkout.examplepay.com/?mode=page&token=abc' }));
+          const sent = gateway({ record: () => paidRecord('x', { status: 'INITIATED' }) });
+          const noRoomBefore = lookStats.noRoom;
+          const done = await sweepPageOrders();
+          // Nothing was asked of the service, no room was used, and every pending order ended. Only the first order found the platform's room spent: the rest of the batch never asked the budget
+          expect(lookStats.noRoom - noRoomBefore).toBe(1);
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(0);
+          expect(await prisma.appKeyCall.count({ where: { ownerId: 'page-payments' } })).toBe(1);
+          for (const order of ran) expect((await row(order.id)).status).toBe('not_paid');
+          expect((await row(closed.id)).status).toBe('not_paid');
+          expect(done).toMatchObject({ looked: 0, moved: 3 });
+        });
+
+        it('an order that ran out of time while its OWNER had no room for looks ends, and the sweep counts it as moved before it moves on (CodeRabbit)', async () => {
+          const { artifactId, connectionId } = await setUp();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, paymentLooksPerOwner: 1 } }, sara);
+          await prisma.appKeyCall.create({ data: { connectionId, ownerId: 'page-payments', botId: 'page-payments', callId: `look:${sara}:spent:1`, operation: 'x', state: 'done', outcome: 'ok' } });
+          const ran = await lostOrder(artifactId, word(), wish(), { status: 'pending', providerRef: 'chg_OW1', reconciled: false, createdAt: new Date(Date.now() - 3 * 3_600_000), checkedAt: null, checkoutUrl: 'https://checkout.examplepay.com/?mode=page&token=abc' });
+          const sent = gateway({ record: () => paidRecord('x', { status: 'INITIATED' }) });
+          const done = await sweepPageOrders();
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(0);
+          expect((await row(ran.id)).status).toBe('not_paid');
+          expect(done).toMatchObject({ looked: 0, moved: 1 });
+        });
+
+        it('a look whose reservation committed but whose answer was lost is never found by the next one as a row that exists: it is looked at, and counted once (CodeRabbit)', async () => {
+          const { artifactId } = await setUp();
+          const order = await longOrder(artifactId, word(), 'chg_LW53', 60, { checks: 2, checkedAt: new Date(Date.now() - 3 * DAY), lastReadAt: new Date(Date.now() - 3 * DAY), nextLookAt: new Date(Date.now() - 60_000) });
+          const sent = gateway({ record: () => paidRecord('x', { status: 'INITIATED' }) });
+          // The first attempt's transaction commits (its claim and its row are kept) and the answer is lost
+          const real = prisma.$transaction.bind(prisma) as (fn: unknown, options?: unknown) => Promise<unknown>;
+          const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((fn: unknown, options?: unknown) => real(fn, options).then(() => Promise.reject(new Error('the connection was lost')))) as never);
+          const first: { contacted: boolean } = { contacted: false };
+          try {
+            await verifyOrder(order.id, undefined, first, { background: true });
+          } finally {
+            spy.mockRestore();
+          }
+          expect(first.contacted).toBe(false);
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(0);
+          // It was a look that was not read: tried again soon, never a month later
+          expect(await nextIn(order.id)).toBeLessThanOrEqual(15 * 60_000 + 5_000);
+          // The next attempt (due again) goes through, with a row of its own
+          await prisma.appPageOrder.update({ where: { id: order.id }, data: { nextLookAt: new Date(Date.now() - 1_000) } });
+          const second: { contacted: boolean } = { contacted: false };
+          await verifyOrder(order.id, undefined, second, { background: true });
+          expect(second.contacted).toBe(true);
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(1);
+          expect(await prisma.appKeyCall.count({ where: { ownerId: 'page-payments', callId: { startsWith: `look:${sara}:${order.id}:` } } })).toBe(2);
+        });
+
+        it('a row left under the same count by an attempt whose commit was lost never blocks the next look: each attempt has a reservation of its own (CodeRabbit)', async () => {
+          const { artifactId, connectionId } = await setUp();
+          const order = await longOrder(artifactId, word(), 'chg_LW56', 60, { checks: 2, checkedAt: new Date(Date.now() - 3 * DAY), lastReadAt: new Date(Date.now() - 3 * DAY), nextLookAt: new Date(Date.now() - 60_000) });
+          // What an attempt that took the count 3 left behind (its commit went through, its answer was lost)
+          await prisma.appKeyCall.create({ data: { connectionId, ownerId: 'page-payments', botId: 'page-payments', callId: `look:${sara}:${order.id}:3`, operation: 'x', state: 'done', outcome: 'ok' } });
+          const sent = gateway({ record: () => paidRecord('x', { status: 'INITIATED' }) });
+          const trace: { contacted: boolean } = { contacted: false };
+          await verifyOrder(order.id, undefined, trace, { background: true });
+          expect(trace.contacted).toBe(true);
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(1);
+        });
+
+        it('a look that finds no room keeps the order exactly as it was, with no write afterwards to undo anything: the decision and the claim are one transaction (CodeRabbit)', async () => {
+          const { artifactId } = await setUp();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, paymentLooksPerOwner: 1 } }, sara);
+          const first = new Date(Date.now() - 3 * DAY);
+          const scheduled = new Date(Date.now() - 60_000);
+          const order = await longOrder(artifactId, word(), 'chg_LW54', 60, { checks: 3, checkedAt: first, lastReadAt: first, nextLookAt: scheduled });
+          await prisma.appKeyCall.create({ data: { connectionId: (await row(order.id)).connectionId!, ownerId: 'page-payments', botId: 'page-payments', callId: `look:${sara}:spent:1`, operation: 'x', state: 'done', outcome: 'ok' } });
+          // Any write to the order made outside the transaction after the first one fails (as a database that went away would make a rollback write fail)
+          const real = prisma.appPageOrder.updateMany.bind(prisma.appPageOrder);
+          let writes = 0;
+          const spy = jest.spyOn(prisma.appPageOrder, 'updateMany').mockImplementation(((args: never) => (++writes === 1 ? real(args) : Promise.reject(new Error('the database went away')))) as never);
+          try {
+            await verifyOrder(order.id, undefined, undefined, { background: true });
+          } finally {
+            spy.mockRestore();
+          }
+          const kept = await row(order.id);
+          expect({ checks: kept.checks, checkedAt: kept.checkedAt?.getTime(), nextLookAt: kept.nextLookAt?.getTime() }).toEqual({ checks: 3, checkedAt: first.getTime(), nextLookAt: scheduled.getTime() });
+        });
+
+        it('a read never moves the time of the last good read backward: a look that was taken earlier and answers later leaves a newer read as it is (CodeRabbit)', async () => {
+          const { artifactId } = await setUp();
+          const newer = new Date(Date.now() + 60_000);
+          const order = await longOrder(artifactId, word(), 'chg_LW55', 60, { checks: 3, checkedAt: new Date(Date.now() - 3 * DAY), lastReadAt: newer, nextLookAt: new Date(Date.now() - 60_000) });
+          gateway({ record: () => paidRecord('x', { status: 'INITIATED' }) });
+          await verifyOrder(order.id, undefined, undefined, { background: true });
+          expect((await row(order.id)).lastReadAt!.getTime()).toBe(newer.getTime());
+          // A read that is newer than the one kept still moves it forward
+          await prisma.appPageOrder.update({ where: { id: order.id }, data: { lastReadAt: new Date(Date.now() - 3 * DAY), nextLookAt: new Date(Date.now() - 1_000) } });
+          await verifyOrder(order.id, undefined, undefined, { background: true });
+          expect((await row(order.id)).lastReadAt!.getTime()).toBeGreaterThan(Date.now() - 60_000);
+        });
+
         it('a budget denial restores the state immediately before ITS claim: a look that came in between the read and the claim is never undone (CodeRabbit)', async () => {
           const { artifactId } = await setUp();
           await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, paymentLooksPerOwner: 1 } }, sara);
@@ -2129,10 +2251,10 @@ run('payments for pages, in a real database', () => {
           const order = await longOrder(artifactId, word(), 'chg_LW70', 60, { checks: 3, checkedAt: first, lastReadAt: first, nextLookAt: new Date(Date.now() - 60_000) });
           // The owner's hourly room is spent
           await prisma.appKeyCall.create({ data: { connectionId: (await row(order.id)).connectionId!, ownerId: 'page-payments', botId: 'page-payments', callId: `look:${sara}:spent:1`, operation: 'x', state: 'done', outcome: 'ok' } });
-          // Another look reads the order and finishes between this check's read of the order and its claim
-          const real = prisma.appPageOrder.updateMany.bind(prisma.appPageOrder);
-          const spy = jest.spyOn(prisma.appPageOrder, 'updateMany').mockImplementationOnce(((args: never) =>
-            prisma.appPageOrder.update({ where: { id: order.id }, data: { checkedAt: mid, checks: { increment: 1 }, lastReadAt: mid, nextLookAt: scheduled } }).then(() => real(args))) as never);
+          // Another look reads the order and finishes between this check's read of the order and its claim (its transaction)
+          const real = prisma.$transaction.bind(prisma) as (fn: unknown, options?: unknown) => Promise<unknown>;
+          const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((fn: unknown, options?: unknown) =>
+            prisma.appPageOrder.update({ where: { id: order.id }, data: { checkedAt: mid, checks: { increment: 1 }, lastReadAt: mid, nextLookAt: scheduled } }).then(() => real(fn, options))) as never);
           await verifyOrder(order.id, undefined, undefined, { explicit: true });
           spy.mockRestore();
           const kept = await row(order.id);

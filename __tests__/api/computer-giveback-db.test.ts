@@ -1665,7 +1665,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await givenBack(early.id)).toBe(false);
       // No fault of ours was written for it, and the one marker says nothing about any failure
       const rows = await prisma.computerJobFault.findMany({ where: { jobId: early.id } });
-      expect(rows).toMatchObject([{ kind: 'answered', reason: 'own_key_call', source: 'own-key', turn: null, route: null }]);
+      expect(rows).toMatchObject([{ kind: 'answered', reason: 'own_key_call', source: 'orbit', turn: null, route: null }]);
       expect(await readFaultRows(prisma, early.id, null, 'r1')).toEqual([]);
       // The call's own report arrives late and says it was their provider refusing their key: theirs, as ever (never given back as ours)
       await recordFaults(sara.brickId, early.id, [fault(1, 'own_provider', { source: 'own-key', route: 'own-key', run: 'r1' })]);
