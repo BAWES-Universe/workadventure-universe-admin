@@ -21,6 +21,35 @@ describe('the host line’s wording (mock M1)', () => {
     expect(text({ checking: true, buyer: 'guest', receipt: 'https://x/a#receipt=c' })).toEqual(['Checking your payment…', 'Asking the payment service directly.', [], false]);
   });
 
+  it('R5: while an earlier payment may still count, the line says a new Buy starts a new payment, with Check payment (and Restore) still the actions; never on a payment that ended', () => {
+    const NOTE = 'This starts a new payment. Your earlier one is still being checked.';
+    const noteOf = (update: Partial<PayLine>) => describeLine(line(update), { copied: false })?.note;
+    for (const update of [
+      { problem: 'still_checking' as const, canCheck: true },
+      { problem: 'long_unconfirmed' as const, canCheck: true },
+      { problem: 'cant_confirm' as const, canCheck: true },
+      { problem: 'unavailable' as const, canCheck: true },
+      { canCheck: true },
+    ]) {
+      expect(noteOf(update)).toBe(NOTE);
+      // Check payment is still the obvious (primary) action
+      expect(describeLine(line(update), { copied: false })?.actions[0]).toMatchObject({ kind: 'check', label: 'Check payment', style: 'primary' });
+    }
+    // A payment that ended, a payment on its way right now, an update to make, nothing to check, a quiet restore offer: no such note
+    for (const update of [
+      { paid: { test: false }, buyer: 'account' as const },
+      { problem: 'not_paid' as const },
+      { problem: 'none' as const },
+      { problem: 'limit' as const },
+      { problem: 'unavailable' as const },
+      { checking: true },
+      { needsUpdate: true },
+      { offerRestore: true },
+    ]) {
+      expect(noteOf(update)).toBeUndefined();
+    }
+  });
+
   it('says nothing when there is nothing to say', () => {
     expect(describeLine(NO_PAY_LINE, { copied: false })).toBeNull();
   });

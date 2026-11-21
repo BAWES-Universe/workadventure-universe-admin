@@ -18,6 +18,8 @@ export const PAY_WORDS = {
   notHeard: { title: 'We haven’t heard back about your payment yet.', sub: 'If you paid, it still counts. Check it here before paying again.' },
   stillChecking: { title: 'We’re still checking your earlier payment.', sub: 'If you paid, it will show up here when your payment service confirms it.' },
   longUnconfirmed: { title: 'We could not confirm your earlier payment.', sub: 'If you paid, contact the page’s owner with the time of the payment. We keep checking in the background; press Check payment to see a later update.' },
+  /** Said under the line whenever an earlier payment may still count: pressing the page's Buy again then starts a NEW payment (a deliberate new purchase), and Check payment is the way to learn about the earlier one. */
+  buyAgainNote: 'This starts a new payment. Your earlier one is still being checked.',
   notPaid: { title: 'Not paid yet.', sub: 'If you already paid, it can take a while to show. Check it here before paying again.' },
   needsUpdate: { title: 'This page’s pay button needs an update.', sub: 'If you already paid, check it here before paying again.' },
   unavailable: { title: 'Payments unavailable', sub: null },
@@ -47,6 +49,8 @@ export interface PayView {
   actions: PayAction[];
   /** The line can be closed (a quiet offer, or "no purchase found"); a payment on its way never can. */
   closable: boolean;
+  /** Said under the line while an earlier payment is still being checked: what pressing Buy again would do. Never on a payment that ended (paid, not paid, none). */
+  note?: string;
 }
 
 /** "19 Nov": the day a purchase was made, in the buyer's own browser language, never a time zone dump. */
@@ -84,17 +88,19 @@ export function describeLine(line: PayLine, state: { copied: boolean }): PayView
   // Whatever else is pressed, a browser that cannot keep the buyer's code keeps offering the receipt link while the payment is not settled
   const save = line.keepReceipt && line.receipt ? [savePrompt(state.copied)] : [];
   if (line.problem === 'not_paid') return { ...PAY_WORDS.notPaid, actions: [check, ...save], closable: false };
-  if (line.problem === 'long_unconfirmed') return { ...PAY_WORDS.longUnconfirmed, actions: [check, ...save], closable: false };
-  if (line.problem === 'still_checking') return { ...PAY_WORDS.stillChecking, actions: [check, ...save], closable: false };
-  if (line.problem === 'cant_confirm') return { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false };
+  // While an earlier payment may still count (it is not known to have failed), a new Buy starts a NEW payment: the line says so (approved wording), and Check payment stays the obvious action
+  const again = PAY_WORDS.buyAgainNote;
+  if (line.problem === 'long_unconfirmed') return { ...PAY_WORDS.longUnconfirmed, actions: [check, ...save], closable: false, note: again };
+  if (line.problem === 'still_checking') return { ...PAY_WORDS.stillChecking, actions: [check, ...save], closable: false, note: again };
+  if (line.problem === 'cant_confirm') return { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false, note: again };
   // A start whose answer was lost: an order may or may not exist, so it is said like any other payment not heard back about
-  if (line.problem === 'unavailable') return line.canCheck ? { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false } : { ...PAY_WORDS.unavailable, actions: [], closable: false };
+  if (line.problem === 'unavailable') return line.canCheck ? { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false, note: again } : { ...PAY_WORDS.unavailable, actions: [], closable: false };
   if (line.problem === 'limit') return { ...PAY_WORDS.limit, actions: [], closable: false };
   if (line.needsUpdate) return { ...PAY_WORDS.needsUpdate, actions: line.checking ? [] : [check], closable: false };
   if (line.checking) {
     return { ...(save.length ? PAY_WORDS.saveReceipt : line.slow ? PAY_WORDS.slow : PAY_WORDS.checking), actions: [...resume, ...save], closable: false };
   }
   if (line.offerRestore) return { ...PAY_WORDS.boughtBefore, actions: [{ kind: 'restore', label: PAY_WORDS.buttons.restorePurchase, style: 'secondary' }], closable: true };
-  if (line.canCheck) return { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false };
+  if (line.canCheck) return { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false, note: again };
   return null;
 }

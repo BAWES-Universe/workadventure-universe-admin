@@ -110,6 +110,11 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
       ) : null}
       <p className="m-0 font-semibold">{view.title}</p>
       {view.sub ? <p className="m-0 text-[13px] leading-[1.4] text-[#b3acc7]">{view.sub}</p> : null}
+      {view.note ? (
+        <p className="m-0 text-[13px] leading-[1.4] text-[#b3acc7]" data-testid="pagePaymentsNote">
+          {view.note}
+        </p>
+      ) : null}
       {failed && line.receipt ? (
         <>
           <p className="m-0 text-[13px] leading-[1.4] text-[#b3acc7]">{PAY_WORDS.copyFailed}</p>

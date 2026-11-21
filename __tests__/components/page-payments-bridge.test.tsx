@@ -56,6 +56,14 @@ describe('the payment line on the shared page', () => {
     expect(screen.queryByRole('button')).toBeNull();
   });
 
+  it('R5: an earlier payment that is still being checked says that a new Buy starts a new payment, beside Check payment', async () => {
+    const { ask } = mount('', { status: 'cant_confirm', testPayment: false, buyer: 'guest' });
+    await ask({ request: 'r1' });
+    expect(screen.getByRole('status').textContent).toContain('We haven’t heard back about your payment yet.');
+    expect(screen.getByTestId('pagePaymentsNote').textContent).toBe('This starts a new payment. Your earlier one is still being checked.');
+    expect(screen.getByRole('button', { name: 'Check payment' })).toBeTruthy();
+  });
+
   it('offers Restore purchase quietly when nothing is found, which can be closed, and points to the receipt link when tapped', async () => {
     const { ask } = mount('', { status: 'none', testPayment: false, buyer: 'guest' });
     await ask({ request: 'r1', restore: true });
