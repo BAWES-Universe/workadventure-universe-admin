@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { RELAY_UNREACHABLE, hasOwnKeyCall } from '@/lib/computer-faults';
+import { ORBIT_SOURCE, OWN_KEY_CALL_MARK, RELAY_UNREACHABLE, hasOwnKeyCall } from '@/lib/computer-faults';
 import { UNREACHABLE_WORDS, appLabel } from '@/lib/task-receipt-words';
 import { readFilesList } from '@/lib/computer-files';
 import { refundStatesFor } from '@/lib/computer-refunds';
@@ -221,6 +221,9 @@ const EFFECTS = { select: { effectKey: true, kind: true, state: true, evidence: 
 const LATE_SINCE_KEY = 'computer_late_report_since';
 /** How far back a let-go run is looked at (a little over the days its provider log is waited for). */
 const LATE_LOOK_DAYS = 36;
+/** Jobs read per page, and the most pages one look reads (a look that finds `size` reports stops at once; the cap only bounds a window of thousands that are all waiting on something). */
+const LATE_PAGE = 200;
+const LATE_MAX_PAGES = 25;
 
 async function lateReportSince(now: Date): Promise<Date> {
   const row = await prisma.appSetting.findUnique({ where: { key: LATE_SINCE_KEY } });
@@ -240,60 +243,80 @@ async function lateReportSince(now: Date): Promise<Date> {
 async function lateReports(size: number, now: Date): Promise<Report[]> {
   const since = await lateReportSince(now);
   const lookBack = new Date(now.getTime() - LATE_LOOK_DAYS * 24 * 60 * 60 * 1000);
-  const found = await prisma.$queryRaw<Array<{ job_id: string; toolkit: string; at: Date }>>(Prisma.sql`
-    SELECT i."task_key" AS job_id, i."toolkit" AS toolkit, (i."detail"->'lateEvidence'->>'at')::timestamptz AS at
-    FROM "instant_runs" i JOIN "computer_jobs" j ON j."id" = i."task_key" AND j."person_id" = i."person_id" AND j."bot_id" = i."bot_id"
-    WHERE i."state" = 'failed' AND i."reason" = 'unclear' AND i."created_at" >= ${lookBack}
-      AND i."detail"->'lateEvidence'->>'status' = 'success'
-      AND i."customer_state" = 'released' AND COALESCE(i."customer_micros", 0) = 0
-      AND (i."detail"->'lateEvidence'->>'at')::timestamptz >= ${since}
-      AND j."status" IN ('done', 'stopped', 'failed') AND j."ended_told_at" IS NOT NULL AND j."late_told_at" IS NULL AND j."end_undeliverable_at" IS NULL
-    ORDER BY (i."detail"->'lateEvidence'->>'at')::timestamptz ASC, i."id" ASC
-    LIMIT ${size * 4}`);
-  if (found.length === 0) return [];
-  const appsOf = new Map<string, string[]>();
-  for (const row of found) {
-    const names = appsOf.get(row.job_id) ?? [];
-    const label = appLabel(row.toolkit);
-    if (!names.includes(label)) names.push(label);
-    appsOf.set(row.job_id, names);
-  }
-  const jobs = await prisma.computerJob.findMany({ where: { id: { in: [...appsOf.keys()] }, bot: { deletedAt: null } }, orderBy: [{ endedAt: 'asc' }, { id: 'asc' }] });
-  const people = await prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.personId))] } }, select: { id: true, matrixChatId: true } });
-  const chatOf = new Map(people.map((person) => [person.id, person.matrixChatId ?? null]));
-  const owed = await refundStatesFor(jobs.map((job) => job.id));
   const out: Report[] = [];
-  for (const job of jobs) {
-    if (out.length >= size) break;
-    // The computer part was given back, in the books, with no refund still pending; and no call on the person's own key was ever made (their own bill is not ours to speak of)
-    if (!(await givenBackIn(job.id, job.secondsRun)) || (owed.get(job.id)?.pendingMicros ?? 0) > 0) continue;
-    if (await hasOwnKeyCall(prisma, job.id)) continue;
-    // Only a computer that was given back in the books because it failed on our side or was refused no one's fault: a job that ended well has nothing "given back" to say
-    const decision = await prisma.computerGiveBackDecision.findUnique({ where: { jobId: job.id }, select: { state: true } });
-    if (decision?.state !== 'given') continue;
-    out.push({
-      key: `computer-told:${job.id}:late`,
-      jobId: job.id,
-      botId: job.botId,
-      matrixUserId: chatOf.get(job.personId) ?? null,
-      origin: originOf(job),
-      kind: 'late',
-      title: job.title,
-      writes: job.writes,
-      seconds: job.secondsRun,
-      seq: null,
-      waitingFor: null,
-      ready: null,
-      waitedFor: null,
-      why: null,
-      effects: [],
-      files: [],
-      handed: [],
-      givenBack: true,
-      apps: appsOf.get(job.id) ?? [],
-      lateApps: appsOf.get(job.id) ?? [],
-      holdReleased: true,
-    });
+  // Jobs are read a page at a time, oldest confirmation first, until `size` reports are found or there are none left: a job that is dropped below (a refund still pending, books not yet given back) is never
+  // marked, so a fixed window would let enough of them crowd out every newer job for good. What can never change (the decision is not a give-back, a call on the person's own key, a deleted Brick) is dropped in the
+  // query, so such a job is never read at all; only what may still change is checked below
+  let after: { at: Date; id: string } = { at: new Date(0), id: '' };
+  for (let page = 0; page < LATE_MAX_PAGES && out.length < size; page++) {
+    const found = await prisma.$queryRaw<Array<{ job_id: string; first_at: Date; toolkits: string[] }>>(Prisma.sql`
+      SELECT i."task_key" AS job_id, MIN((i."detail"->'lateEvidence'->>'at')::timestamptz) AS first_at,
+             array_agg(i."toolkit" ORDER BY (i."detail"->'lateEvidence'->>'at')::timestamptz ASC, i."id" ASC) AS toolkits
+      FROM "instant_runs" i
+        JOIN "computer_jobs" j ON j."id" = i."task_key" AND j."person_id" = i."person_id" AND j."bot_id" = i."bot_id"
+        JOIN "computer_give_back_decisions" d ON d."job_id" = j."id" AND d."state" = 'given'
+        JOIN "bots" b ON b."id" = j."bot_id" AND b."deleted_at" IS NULL
+      WHERE i."state" = 'failed' AND i."reason" = 'unclear' AND i."created_at" >= ${lookBack}
+        AND i."detail"->'lateEvidence'->>'status' = 'success'
+        AND i."customer_state" = 'released' AND COALESCE(i."customer_micros", 0) = 0
+        AND (i."detail"->'lateEvidence'->>'at')::timestamptz >= ${since}
+        AND j."status" IN ('done', 'stopped', 'failed') AND j."ended_told_at" IS NOT NULL AND j."late_told_at" IS NULL AND j."end_undeliverable_at" IS NULL
+        AND NOT EXISTS (SELECT 1 FROM "computer_job_faults" f WHERE f."job_id" = j."id" AND f."call_id" = ${OWN_KEY_CALL_MARK} AND f."source" = ${ORBIT_SOURCE})
+      GROUP BY i."task_key"
+      HAVING (MIN((i."detail"->'lateEvidence'->>'at')::timestamptz), i."task_key") > (${after.at}::timestamptz, ${after.id})
+      ORDER BY first_at ASC, i."task_key" ASC
+      LIMIT ${LATE_PAGE}`);
+    if (found.length === 0) break;
+    const last = found[found.length - 1];
+    after = { at: last.first_at, id: last.job_id };
+    const appsOf = new Map<string, string[]>();
+    for (const row of found) {
+      const names: string[] = [];
+      for (const toolkit of row.toolkits) {
+        const label = appLabel(toolkit);
+        if (!names.includes(label)) names.push(label);
+      }
+      appsOf.set(row.job_id, names);
+    }
+    const jobs = await prisma.computerJob.findMany({ where: { id: { in: [...appsOf.keys()] }, bot: { deletedAt: null } } });
+    const jobOf = new Map(jobs.map((job) => [job.id, job]));
+    const people = await prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.personId))] } }, select: { id: true, matrixChatId: true } });
+    const chatOf = new Map(people.map((person) => [person.id, person.matrixChatId ?? null]));
+    const owed = await refundStatesFor(jobs.map((job) => job.id));
+    // In the order the query found them (the oldest confirmation first)
+    for (const row of found) {
+      if (out.length >= size) break;
+      const job = jobOf.get(row.job_id);
+      if (!job) continue;
+      // The computer part was given back, in the books, with no refund still pending (both may still change); and no call on the person's own key was ever made (their own bill is not ours to speak of)
+      if (!(await givenBackIn(job.id, job.secondsRun)) || (owed.get(job.id)?.pendingMicros ?? 0) > 0) continue;
+      if (await hasOwnKeyCall(prisma, job.id)) continue;
+      // Only a computer that was given back by a decision (the query keeps those): a job that ended well has nothing "given back" to say
+      out.push({
+        key: `computer-told:${job.id}:late`,
+        jobId: job.id,
+        botId: job.botId,
+        matrixUserId: chatOf.get(job.personId) ?? null,
+        origin: originOf(job),
+        kind: 'late',
+        title: job.title,
+        writes: job.writes,
+        seconds: job.secondsRun,
+        seq: null,
+        waitingFor: null,
+        ready: null,
+        waitedFor: null,
+        why: null,
+        effects: [],
+        files: [],
+        handed: [],
+        givenBack: true,
+        apps: appsOf.get(job.id) ?? [],
+        lateApps: appsOf.get(job.id) ?? [],
+        holdReleased: true,
+      });
+    }
+    if (found.length < LATE_PAGE) break;
   }
   return out;
 }

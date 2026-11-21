@@ -528,6 +528,34 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       expect((await lateMine([owed.id])).map((report) => report.kind)).toEqual(['late']);
     });
 
+    it('Opus: jobs that are not eligible yet, ahead of an eligible one, never crowd it out: size 1 with four ineligible jobs (older confirmations) ahead of one eligible job still offers the eligible one', async () => {
+      const make = async (name: string, at: Date) => {
+        const who = await person(name);
+        const id = await started(who);
+        await finishJob(id, 'failed', minutes(6), 'The relay was not there', 'ours');
+        await keepReportTold(id, 'failed');
+        await letGo(id, who, 'gmail', { at });
+        return { who, id };
+      };
+      const crowd: string[] = [];
+      for (let n = 0; n < 4; n++) {
+        const one = await make(`crowd${n}`, new Date(LATER.getTime() + n * 60_000));
+        // A refund still owed back: dropped for now (it may be offered later), and never marked
+        await prisma.computerRefundObligation.create({ data: { jobId: one.id, personId: one.who.id, holdKey: `h-${randomUUID()}`, refundKey: `r-${randomUUID()}`, amountMicros: BigInt(30_000), state: 'owed' } });
+        crowd.push(one.id);
+      }
+      const eligible = await make('eligible', new Date(LATER.getTime() + 60 * 60_000));
+      const offered = (await reportsToTell(1, NOW, { accepts: ['late'] })).filter((report) => report.kind === 'late');
+      expect(offered.map((report) => report.jobId)).toEqual([eligible.id]);
+      // The ones never offered are still waiting, not lost: once their refunds are acknowledged they are offered, oldest first
+      await prisma.computerRefundObligation.updateMany({ where: { jobId: { in: crowd } }, data: { state: 'acknowledged' } });
+      expect((await reportsToTell(1, NOW, { accepts: ['late'] })).filter((report) => report.kind === 'late').map((report) => report.jobId)).toEqual([crowd[0]]);
+      // What can never change is not even read: a job whose decision is no give-back, one with a call on the person's own key, one whose Brick is gone
+      const own = await make('ownkey', new Date(LATER.getTime() - 60_000));
+      await prisma.computerJobFault.create({ data: { jobId: own.id, turn: null, run: null, callId: OWN_KEY_CALL_MARK, kind: 'answered', reason: 'own_key', source: ORBIT_SOURCE, route: null, providerStatus: null, at: NOW } });
+      expect((await reportsToTell(200, NOW, { accepts: ['late'] })).filter((report) => report.jobId === own.id)).toEqual([]);
+    });
+
     it('says nothing is told for an unknown job, and a confirmation sent before the deploy record exists keeps the time of the first look', async () => {
       expect(await keepReportTold(randomUUID(), 'late')).toBe(false);
       await prisma.appSetting.deleteMany({ where: { key: 'computer_late_report_since' } });
