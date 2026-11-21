@@ -30,7 +30,7 @@
 /** The id a page gives its request: short and plain, so it can only be echoed back and never carry anything else. */
 export const REQUEST_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
-export type PayProblem = 'unavailable' | 'limit' | 'not_paid' | 'cant_confirm' | 'still_checking' | 'none';
+export type PayProblem = 'unavailable' | 'limit' | 'not_paid' | 'cant_confirm' | 'still_checking' | 'long_unconfirmed' | 'none';
 
 /** What the host says under the page while a payment is on its way. */
 export interface PayLine {
@@ -495,6 +495,8 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         // this browser's code would not bring it back
         if (body?.status === 'paid') return finish({ paid: { test: body.testPayment === true }, ...(byReceipt ? { restored: { paidAt: null } } : {}) }, 'paid', body.testPayment === true);
         // Closed, and the service has not had the last word: still being checked (there is no link to go on with), told to the page as one that could not be confirmed yet
+        // More than 90 days past the late window: not "still checking" for ever, but told to contact the page's owner (the looks go on, and Check payment still asks)
+        if ((body as { longWaitOver?: boolean } | null)?.longWaitOver === true) return finish({ problem: 'long_unconfirmed', canCheck: true }, 'cant_confirm');
         if (body?.status === 'checking' && (body as { longWait?: boolean }).longWait === true) return finish({ problem: 'still_checking', canCheck: true }, 'cant_confirm');
         if (body?.status === 'not_paid') return finish({ problem: 'not_paid', canCheck: true }, 'not_paid');
         if (body?.status === 'cant_confirm') return finish({ problem: 'cant_confirm', canCheck: true }, 'cant_confirm');
@@ -622,7 +624,7 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         // This Restore is now the ask Check payment follows (what it asks, and the request the page hears the answer under), not the wish of an earlier checkout
         if (answer.ok && status === 'checking' && answer.body?.longWait === true) {
           target = { intentId: null, request, ticket };
-          return end({ problem: 'still_checking', canCheck: true }, 'cant_confirm', request, ticket);
+          return end({ problem: answer.body?.longWaitOver === true ? 'long_unconfirmed' : 'still_checking', canCheck: true }, 'cant_confirm', request, ticket);
         }
         // Their own start that never finished, not yet ready to be carried on: Orbit only does that when Restore is asked again after its wait,
         // so it is asked again, at the pace it gives, until the link comes, the purchase is found, or twenty minutes have passed
@@ -713,8 +715,10 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         if (answer.ok && status === 'checking' && answer.body?.longWait === true) {
           // An explicit Restore becomes the ask Check payment follows; Check payment itself stays on the wish it asked by
           if (restoring) target = { intentId: null, request: asked.request, ticket: asked.ticket };
-          return done({ problem: 'still_checking', canCheck: true }, 'cant_confirm');
+          return done({ problem: answer.body?.longWaitOver === true ? 'long_unconfirmed' : 'still_checking', canCheck: true }, 'cant_confirm');
         }
+        // A closed order more than 90 days past its late window: told to contact the page's owner (the looks go on), never "not paid yet" or "still checking"
+        if (answer.ok && answer.body?.longWaitOver === true && (status === 'not_paid' || status === 'cant_confirm')) return done({ problem: 'long_unconfirmed', canCheck: true }, 'cant_confirm');
         // This browser's own start that never finished and cannot be carried on yet (it may still be in flight, or its wait is not over): Orbit
         // resumes it only when it is asked about again by its wish (Check payment) or by Restore, never when an order is polled. So the same ask is
         // made again, at the pace the server gives, until the link comes (then it is adopted as any other), the purchase is found, or twenty

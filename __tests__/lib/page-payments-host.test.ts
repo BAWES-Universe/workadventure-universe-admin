@@ -423,6 +423,29 @@ describe('a paying page on the public share link', () => {
     checked.host.destroy();
   });
 
+  it('more than 90 days past the late window the buyer is told to contact the page’s owner, never "still checking" for ever: Restore, Check payment and a polled order all say so, and Check payment can still be pressed (the looks go on)', async () => {
+    const restoredOver = { status: 'checking', longWait: true, longWaitOver: true, orderId: 'o-9', checkoutUrl: null, testPayment: false, via: 'own', buyer: 'guest', pollAfterMs: 15_000 };
+    const checkedOver = { status: 'not_paid', longWaitOver: true, orderId: 'o-9', checkoutUrl: null, testPayment: false, buyer: 'guest', pollAfterMs: 15_000 };
+    const restored = setup((call) => (call.body.restore ? { body: restoredOver } : { body: { status: 'paid', testPayment: false } }));
+    restored.tap({ request: 'r1', restore: true });
+    await flush();
+    expect(restored.lines.at(-1)).toMatchObject({ problem: 'long_unconfirmed', canCheck: true, checking: false, paid: null });
+    expect(restored.told()).toEqual([{ universe: 'app-result', session: 's1', status: 'cant_confirm', request: 'r1' }]);
+    const view = describeLine(restored.lines.at(-1)!, { copied: false });
+    expect(view).toMatchObject({ title: 'We could not confirm your earlier payment.', closable: false, actions: [{ kind: 'check' }] });
+    expect(view?.sub).toContain('contact the page’s owner with the time of the payment');
+    expect(JSON.stringify(view)).not.toMatch(/still checking|Not paid yet/);
+    restored.host.destroy();
+    const checked = setup((call) => (call.body.check ? { body: checkedOver } : 'lost'));
+    checked.tap({ request: 'r2' });
+    await jest.advanceTimersByTimeAsync(10_000);
+    checked.host.checkPayment();
+    await flush();
+    expect(checked.lines.at(-1)).toMatchObject({ problem: 'long_unconfirmed', canCheck: true, checking: false });
+    expect(describeLine(checked.lines.at(-1)!, { copied: false })?.title).toBe('We could not confirm your earlier payment.');
+    checked.host.destroy();
+  });
+
   it('after a Restore that finds an order still being checked, Check payment follows that Restore (its ask and its request), while Check payment by an earlier wish stays on that wish', async () => {
     const unresolved = { status: 'checking', longWait: true, orderId: 'o-9', checkoutUrl: null, testPayment: false, via: 'own', buyer: 'guest', pollAfterMs: 15_000 };
     const earlier = setup((call) => (call.body.restore || call.body.check ? { body: unresolved } : 'lost'));

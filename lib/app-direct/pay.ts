@@ -642,6 +642,8 @@ export interface OrderView {
    * paid, so it is said to be still checked, never "not paid" or "no purchase". It has no link to go on with; the buyer is never asked to pay a second time for it.
    */
   longWait?: boolean;
+  /** Only for an order in the long wait that is more than 90 days past its late window: its buyer is told no payment could be confirmed and to contact the page's owner with the time of the payment (the looks go on, monthly). */
+  longWaitOver?: boolean;
   /** How long a host may wait before asking again, in milliseconds: short for a new order, longer the longer it has waited. */
   pollAfterMs: number;
 }
@@ -653,12 +655,24 @@ const UNREAD_RETRY_MS = NO_ROOM_RETRY_MS;
 
 /**
  * How far apart the looks are for an order that may still have been paid but that nothing is waiting for (closed past the late-payment window, or
- * one that could not be confirmed): every 6 hours for the first 3 days, daily for a month, then weekly. It never stops: only the service saying
- * paid, a final failed state, or a payment for something else ends it, because a look that could not be made proves nothing about a payment.
+ * one that could not be confirmed): every 6 hours for the first 3 days, daily for a month, weekly until 90 days past the window, then monthly. It never stops: only the service saying
+ * paid, a final failed state, or a payment for something else ends it, because a look that could not be made proves nothing about a payment, and a buyer who paid in advance must never need to pay twice.
  */
 export function reconcileEveryMs(sinceWindowMs: number): number {
   const day = 24 * HOUR;
-  return sinceWindowMs < 3 * day ? 6 * HOUR : sinceWindowMs < 33 * day ? day : 7 * day;
+  return sinceWindowMs < 3 * day ? 6 * HOUR : sinceWindowMs < 33 * day ? day : sinceWindowMs < LONG_WAIT_WORDS_MS ? 7 * day : 30 * day;
+}
+
+/**
+ * How long after the late window an order is still told to its buyer as "we're still checking your earlier payment". After this the buyer is told what a closed order says (if you paid, contact the page's owner with the
+ * time of the payment) and the page stops refreshing, while the looks go on in the background, monthly, for as long as the order is unsettled.
+ */
+const LONG_WAIT_WORDS_MS = 90 * 24 * HOUR;
+
+/** Whether an order in the long wait is past the point where its buyer is told to contact the page's owner (the looks do not stop). */
+function pastLongWaitWords(order: { closedAt: Date | null; createdAt: Date }, limits: Awaited<ReturnType<typeof getBrickLimits>>, now: Date): boolean {
+  const closedAt = order.closedAt ?? new Date(order.createdAt.getTime() + limits.checkoutOpenHours * HOUR);
+  return now.getTime() - (closedAt.getTime() + limits.latePaymentHours * HOUR) >= LONG_WAIT_WORDS_MS;
 }
 
 /** 3 seconds for a new order, slowing to 15: a buyer who pays is seen quickly, and tabs left open on an order nobody pays cost little. */
@@ -696,10 +710,16 @@ export const checksHaveEnded = (view: OrderView): boolean => over.has(view);
  */
 async function stillUnresolved(view: OrderView | null): Promise<OrderView | null> {
   if (!view || (view.status !== 'not_paid' && view.status !== 'cant_confirm')) return view;
-  const order = await prisma.appPageOrder.findUnique({ where: { id: view.orderId }, select: { status: true, reconciled: true, providerRef: true } });
+  const order = await prisma.appPageOrder.findUnique({ where: { id: view.orderId }, select: { status: true, reconciled: true, providerRef: true, closedAt: true, createdAt: true } });
   // Both words an order the service has not had the last word about can wear: closed (not paid), or one that could not be confirmed (the app was gone, a key could not be read).
   // A cannot-confirm the service settled (reconciled: a payment for something else) is final and stays as it is
   if (!order || (order.status !== 'not_paid' && order.status !== 'cant_confirm') || order.reconciled || !order.providerRef) return view;
+  // More than 90 days past the late window: no longer "we're still checking" (never for ever). The buyer is told what a closed order says, and the page stops refreshing; the looks go on in the background
+  if (pastLongWaitWords(order, await getBrickLimits(), new Date())) {
+    const told: OrderView = { ...view, checkoutUrl: null, longWaitOver: true, pollAfterMs: Math.max(view.pollAfterMs, 15_000) };
+    over.add(told);
+    return waiting.has(view) ? later(told) : told;
+  }
   const said: OrderView = { ...view, status: 'checking', checkoutUrl: null, longWait: true, pollAfterMs: Math.max(view.pollAfterMs, 15_000) };
   return waiting.has(view) ? later(said) : said;
 }
@@ -770,8 +790,13 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // page stops waiting, and a payment that turns out to be real is still found by the later looks (a closed order is asked about for a while).
   // The look that was taken moved the order's own schedule on by its age-based interval (up to a week) BEFORE the service was asked: a look that is not read is tried again soon instead,
   // never a week later. The age-based interval stays for a look that was read
+  // A look that is not read once is tried again soon; one that keeps not being read backs off (twice the time since the look before it, which was not read either) up to the order's own cadence
+  // (monthly after 90 days), and never stops. A look before it that WAS read makes this the first failure of a streak
+  const lastLookWasRead = !!order.lastReadAt && !!order.checkedAt && order.lastReadAt.getTime() >= order.checkedAt.getTime() - 1000;
+  const streakGap = order.checkedAt && !lastLookWasRead ? Math.max(0, now.getTime() - order.checkedAt.getTime()) : 0;
   const retrySoon = async (): Promise<void> => {
-    if (reconciling) await prisma.appPageOrder.updateMany({ where: { id: order.id, reconciled: false }, data: { nextLookAt: new Date(now.getTime() + Math.min(reconcileEveryMs(sinceWindow), UNREAD_RETRY_MS)) } }).catch(() => undefined);
+    const wait = Math.min(reconcileEveryMs(sinceWindow), Math.max(UNREAD_RETRY_MS, 2 * streakGap));
+    if (reconciling) await prisma.appPageOrder.updateMany({ where: { id: order.id, reconciled: false }, data: { nextLookAt: new Date(now.getTime() + wait) } }).catch(() => undefined);
   };
   const unreadable = async (): Promise<OrderView> => {
     await retrySoon();
@@ -1055,6 +1080,8 @@ export interface Restored {
   via?: 'own' | 'receipt';
   /** Only when checking: the order is closed (or could not be confirmed) and the service has not had the last word about it. It has no link; it is still checked, never "no purchase". */
   longWait?: boolean;
+  /** Only with `longWait`: more than 90 days past the late window, so the buyer is told to contact the page's owner with the time of the payment instead of "still checking" (the looks go on, monthly). */
+  longWaitOver?: boolean;
 }
 
 /** The most orders of one buyer asked about at the service in one restore: the rest are asked about by the next. */
@@ -1093,9 +1120,9 @@ export async function restorePurchase(input: { artifactId: string; buyerKeys: st
   if (!waiting) {
     // ... then one that is closed (or not confirmable) for what this page sells now, with the service never having had the last word: it may still have been paid, so it is
     // handed back as still being checked and never as "nothing found". A newer long-wait order never outranks an open one
-    const long = await prisma.appPageOrder.findFirst({ where: { ...mine, status: { in: ['not_paid', 'cant_confirm'] }, reconciled: false, providerRef: { not: null } }, orderBy: { createdAt: 'desc' }, select: { id: true, createdAt: true, buyerKey: true } });
+    const long = await prisma.appPageOrder.findFirst({ where: { ...mine, status: { in: ['not_paid', 'cant_confirm'] }, reconciled: false, providerRef: { not: null } }, orderBy: { createdAt: 'desc' }, select: { id: true, createdAt: true, closedAt: true, buyerKey: true } });
     if (!long) return none();
-    return { status: 'checking', testPayment: false, orderId: long.id, pollAfterMs: Math.max(pollAfterMs(long.createdAt), 15_000), checkoutUrl: null, via: viaOf(long.buyerKey), longWait: true };
+    return { status: 'checking', testPayment: false, orderId: long.id, pollAfterMs: Math.max(pollAfterMs(long.createdAt), 15_000), checkoutUrl: null, via: viaOf(long.buyerKey), longWait: true, ...(pastLongWaitWords(long, limits, new Date()) ? { longWaitOver: true } : {}) };
   }
   let checkoutUrl = waiting.status === 'pending' ? waiting.checkoutUrl : null;
   // An order whose start never finished (the server stopped, the answer was lost) goes on from here for its own buyer, with the same id: a reload
@@ -1200,6 +1227,13 @@ export interface PaymentLoad {
     neverChecked: number;
     /** Whose scheduled look is more than an hour late (the sweep is behind or stopped), as against an order that is merely old and looked at on time. */
     overdue: number;
+    /** Orders looked at in the last day that keep not being read (looked at again and again, an hour or more since the last good read): the payment service cannot be read for them. */
+    unreadLooks: number;
+    /**
+     * Why the looks are STALLED, if they are: `overdue` (a scheduled look is more than an hour late), `never_checked` (an order the schedule never reached) or `unreadable` (looks are made and not read).
+     * Empty while every long-wait order is looked at on schedule, however old it is: age alone is never a reason, an order waiting its month shows only in `count` and `oldestSeconds`. This is what the alert is on.
+     */
+    stalled: Array<'overdue' | 'never_checked' | 'unreadable'>;
   };
   /** Seconds since any order was last read at the service in a way that could be understood (null when none ever was): a number that keeps growing while orders wait is a service that cannot be read or a stalled worker. */
   sinceLastReadSeconds: number | null;
@@ -1212,7 +1246,7 @@ export async function pagePaymentLoad(now: Date = new Date()): Promise<PaymentLo
   const hour = new Date(now.getTime() - HOUR);
   const longWait = longWaitWhere(now, limits);
   const lateBy = new Date(now.getTime() - HOUR);
-  const [pending, oldestPending, starting, oldestStarting, looksLastHour, paid, unconfirmed, oldestUnconfirmed, neverRead, neverChecked, overdue, lastRead] = await Promise.all([
+  const [pending, oldestPending, starting, oldestStarting, looksLastHour, paid, unconfirmed, oldestUnconfirmed, neverRead, neverChecked, overdue, lastRead, recentLooks] = await Promise.all([
     prisma.appPageOrder.count({ where: { status: 'pending' } }),
     prisma.appPageOrder.findFirst({ where: { status: 'pending' }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
     prisma.appPageOrder.count({ where: { status: 'creating' } }),
@@ -1228,7 +1262,11 @@ export async function pagePaymentLoad(now: Date = new Date()): Promise<PaymentLo
       where: { AND: [longWait, { OR: [{ nextLookAt: { lt: lateBy } }, { nextLookAt: null, OR: [{ closedAt: { lt: new Date(lateBy.getTime() - limits.latePaymentHours * HOUR) } }, { status: 'cant_confirm', OR: [{ checkedAt: { lt: lateBy } }, { checkedAt: null, createdAt: { lt: lateBy } }] }, { closedAt: null, status: 'not_paid', createdAt: { lt: new Date(lateBy.getTime() - (limits.latePaymentHours + limits.checkoutOpenHours) * HOUR) } }] }] }] },
     }),
     prisma.appPageOrder.findFirst({ where: { lastReadAt: { not: null } }, orderBy: { lastReadAt: 'desc' }, select: { lastReadAt: true } }),
+    prisma.appPageOrder.findMany({ where: { ...longWait, checkedAt: { gte: day } }, select: { checkedAt: true, lastReadAt: true, checks: true }, take: 5_000 }),
   ]);
+  // Looked at in the last day and not read: more than one look and no good read, or the last good read an hour or more before the last look
+  const unreadLooks = recentLooks.filter((one) => (one.lastReadAt ? !!one.checkedAt && one.lastReadAt.getTime() < one.checkedAt.getTime() - HOUR : one.checks >= 3)).length;
+  const stalled: Array<'overdue' | 'never_checked' | 'unreadable'> = [...(overdue > 0 ? (['overdue'] as const) : []), ...(neverChecked > 0 ? (['never_checked'] as const) : []), ...(unreadLooks > 0 ? (['unreadable'] as const) : [])];
   const seconds = (from: Date | undefined) => (from ? Math.max(0, Math.round((now.getTime() - from.getTime()) / 1000)) : null);
   const spans = paid.flatMap((order) => (order.paidAt ? [Math.max(0, Math.round((order.paidAt.getTime() - order.createdAt.getTime()) / 1000))] : [])).sort((a, b) => a - b);
   const at = (share: number) => (spans.length === 0 ? null : spans[Math.min(spans.length - 1, Math.ceil(spans.length * share) - 1)]);
@@ -1242,7 +1280,7 @@ export async function pagePaymentLoad(now: Date = new Date()): Promise<PaymentLo
     looksAllowedPerHour: limits.keyCallsPlatform,
     looks: { made: lookStats.made, spaced: lookStats.spaced, noRoom: lookStats.noRoom, since: lookStats.since.toISOString() },
     recoveryLastDay: { paid: spans.length, p50Seconds: at(0.5), p95Seconds: at(0.95) },
-    unconfirmed: { count: unconfirmed, oldestSeconds: seconds(oldestUnconfirmed?.createdAt), neverRead, neverChecked, overdue },
+    unconfirmed: { count: unconfirmed, oldestSeconds: seconds(oldestUnconfirmed?.createdAt), neverRead, neverChecked, overdue, unreadLooks, stalled },
     sinceLastReadSeconds: seconds(lastRead?.lastReadAt ?? undefined),
   };
 }

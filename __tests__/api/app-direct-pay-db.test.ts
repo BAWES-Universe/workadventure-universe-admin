@@ -10,6 +10,7 @@ import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 
 const mockUser: { current: { id: string; isGuest?: boolean } | null } = { current: null };
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockUser.current) }));
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn() }));
 type Sent = { host: string; path: string; method: string; headers: Record<string, string>; body?: string };
 type Answered = { status: number; body?: unknown; redirected?: boolean };
 const mockSend: { current: ((target: Sent) => Answered | Promise<Answered>) | null } = { current: null };
@@ -31,6 +32,7 @@ jest.mock('@/lib/app-direct/guard', () => {
   };
 });
 
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { disconnect } from '@/lib/app-connections';
@@ -1874,6 +1876,136 @@ run('payments for pages, in a real database', () => {
         expect(blindLeft).toBeLessThanOrEqual(15 * 60_000 + 5_000);
       });
 
+      describe('the long wait never ends and never says "checking" for ever (Sentry MEDIUM; Opus R5/O3: no end date, a buyer who paid in advance never pays twice)', () => {
+        const DAY = 24 * 3_600_000;
+        // An order closed `closedDaysAgo` days ago; its late window (48 hours) ended two days after that
+        const longOrder = async (artifactId: string, code: string, ref: string, closedDaysAgo: number, over: Record<string, unknown> = {}) =>
+          lostOrder(artifactId, code, wish(), { status: 'not_paid', providerRef: ref, reconciled: false, createdAt: new Date(Date.now() - (closedDaysAgo + 1) * DAY), closedAt: new Date(Date.now() - closedDaysAgo * DAY), nextLookAt: null, ...over });
+        const setUp = async () => {
+          const made = await pending();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
+          await prisma.appKeyCall.deleteMany({ where: { ownerId: 'page-payments' } });
+          return made;
+        };
+        const row = (id: string) => prisma.appPageOrder.findUniqueOrThrow({ where: { id } });
+        const nextIn = async (id: string) => (await row(id)).nextLookAt!.getTime() - Date.now();
+
+        it('a payment found at day 200 is counted once, late, with one notice: the order is still looked at, monthly after 90 days', async () => {
+          const { artifactId } = await setUp();
+          const old = await longOrder(artifactId, word(), 'chg_LW01', 202);
+          // The service still calls it started: looked at, nothing ends, the next look is a month away
+          const sent = gateway({ record: () => paidRecord(old.id, { status: 'INITIATED' }) });
+          await sweepPageOrders();
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(1);
+          expect(await row(old.id)).toMatchObject({ status: 'not_paid', reconciled: false });
+          expect(await nextIn(old.id)).toBeGreaterThan(29 * DAY);
+          expect(await nextIn(old.id)).toBeLessThanOrEqual(30 * DAY + 5_000);
+          // A month later it was paid (the buyer paid in advance): found, counted once, with one notice
+          gateway({ record: () => paidRecord(old.id) });
+          const before = (await notices()).length;
+          await prisma.appPageOrder.update({ where: { id: old.id }, data: { nextLookAt: new Date(Date.now() - 1_000) } });
+          await sweepPageOrders();
+          expect(await row(old.id)).toMatchObject({ status: 'paid' });
+          expect((await prisma.appPageOrderEvent.findMany({ where: { orderId: old.id, toStatus: 'paid' } })).map((line) => line.reason)).toEqual(['paid_late']);
+          await sweepPageOrders();
+          expect((await notices()).slice(before)).toHaveLength(1);
+        });
+
+        it('the buyer’s words switch at 90 days past the window: "still checking" before, "contact the page’s owner" after (Check payment, the done page and Restore), and the page stops refreshing; the looks go on', async () => {
+          const { artifactId } = await setUp();
+          const code = word();
+          const intentId = wish();
+          const keys = [buyerOf(code)];
+          // 60 days past the window: still checking
+          const young = await lostOrder(artifactId, code, intentId, { status: 'not_paid', providerRef: 'chg_LW02', reconciled: false, createdAt: new Date(Date.now() - 63 * DAY), closedAt: new Date(Date.now() - 62 * DAY), nextLookAt: null });
+          gateway({ record: () => paidRecord(young.id, { status: 'INITIATED' }) });
+          const early = await checkPurchase({ artifactId, buyerKeys: keys, ownKeys: keys, intentId });
+          expect(early).toMatchObject({ status: 'checking', longWait: true });
+          expect(early).not.toHaveProperty('longWaitOver');
+          expect(await restorePurchase({ artifactId, buyerKeys: keys, ownKeys: keys })).toMatchObject({ status: 'checking', longWait: true, orderId: young.id });
+          expect(checksHaveEnded(early!)).toBe(false);
+          // 100 days past it: closed-order words, flagged, no refresh, and the order is still unsettled and still looked at
+          await prisma.appPageOrder.update({ where: { id: young.id }, data: { createdAt: new Date(Date.now() - 103 * DAY), closedAt: new Date(Date.now() - 102 * DAY), checkedAt: null } });
+          const late = await checkPurchase({ artifactId, buyerKeys: keys, ownKeys: keys, intentId });
+          expect(late).toMatchObject({ status: 'not_paid', longWaitOver: true, checkoutUrl: null });
+          expect(late).not.toHaveProperty('longWait');
+          expect(checksHaveEnded(late!)).toBe(true);
+          const seen = await verifyOrderForReturnPage(young.id);
+          expect(seen).toMatchObject({ status: 'not_paid' });
+          expect(checksHaveEnded(seen!)).toBe(true);
+          expect(await restorePurchase({ artifactId, buyerKeys: keys, ownKeys: keys })).toMatchObject({ status: 'checking', longWait: true, longWaitOver: true, orderId: young.id });
+          expect(await row(young.id)).toMatchObject({ status: 'not_paid', reconciled: false });
+          expect((await pagePaymentLoad()).unconfirmed.count).toBe(1);
+          // And it is still found when it was paid after all
+          gateway({ record: () => paidRecord(young.id) });
+          await prisma.appPageOrder.update({ where: { id: young.id }, data: { checkedAt: null, nextLookAt: null } });
+          expect(await checkPurchase({ artifactId, buyerKeys: keys, ownKeys: keys, intentId })).toMatchObject({ status: 'paid' });
+        });
+
+        it('an unreadable look keeps trying and backs off to the order’s own cadence, never stopping: soon after a read look, then twice the gap since the unread one, up to a month after 90 days', async () => {
+          const { artifactId } = await setUp();
+          mockSend.current = () => ({ status: 503, body: {} });
+          const lookFor = async (checkedAgo: number, readAgo: number | null) => {
+            const order = await longOrder(artifactId, word(), `chg_LW${Math.random().toString(36).slice(2, 6)}`, 102, { checkedAt: new Date(Date.now() - checkedAgo), lastReadAt: readAgo === null ? null : new Date(Date.now() - readAgo), nextLookAt: new Date(Date.now() - 1_000) });
+            await prisma.appKeyCall.deleteMany({ where: { ownerId: 'page-payments' } });
+            await verifyOrder(order.id, undefined, undefined, { background: true });
+            return nextIn(order.id);
+          };
+          // The look before it was read (last read at the same moment): the first failure, tried again within the quarter hour
+          const first = await lookFor(30 * DAY, 30 * DAY);
+          expect(first).toBeGreaterThan(0);
+          expect(first).toBeLessThanOrEqual(15 * 60_000 + 5_000);
+          // The look before it was NOT read, an hour ago: twice that
+          const second = await lookFor(60 * 60_000, 40 * DAY);
+          expect(second).toBeGreaterThan(110 * 60_000);
+          expect(second).toBeLessThanOrEqual(120 * 60_000 + 5_000);
+          // Unread for ten days: twenty days; unread for twenty: capped at the month the order's age gives, never beyond it and never stopped
+          const ten = await lookFor(10 * DAY, 40 * DAY);
+          expect(ten).toBeGreaterThan(19 * DAY);
+          expect(ten).toBeLessThanOrEqual(20 * DAY + 5_000);
+          const long = await lookFor(20 * DAY, 40 * DAY);
+          expect(long).toBeGreaterThan(29 * DAY);
+          expect(long).toBeLessThanOrEqual(30 * DAY + 5_000);
+          // Never read at all, looked at before: backs off the same way
+          const never = await lookFor(60 * 60_000, null);
+          expect(never).toBeGreaterThan(110 * 60_000);
+        });
+
+        it('the alert is on a STALLED look, never on age: an order of any age looked at on schedule shows only as a count and its age; an overdue look, an order the schedule never reached, and looks that are made and not read each stall', async () => {
+          const { artifactId } = await setUp();
+          const calm = await longOrder(artifactId, word(), 'chg_LW10', 202, { checkedAt: new Date(Date.now() - 3_600_000), lastReadAt: new Date(Date.now() - 3_600_000), nextLookAt: new Date(Date.now() + 20 * DAY) });
+          let load = (await pagePaymentLoad()).unconfirmed;
+          expect(load).toMatchObject({ count: 1, overdue: 0, neverChecked: 0, unreadLooks: 0, stalled: [] });
+          expect(load.oldestSeconds).toBeGreaterThan(200 * 86_400);
+          // A scheduled look more than an hour late
+          await prisma.appPageOrder.update({ where: { id: calm.id }, data: { nextLookAt: new Date(Date.now() - 2 * 3_600_000) } });
+          expect((await pagePaymentLoad()).unconfirmed.stalled).toEqual(['overdue']);
+          // An order the schedule never reached
+          await prisma.appPageOrder.update({ where: { id: calm.id }, data: { nextLookAt: new Date(Date.now() + 20 * DAY), checkedAt: null } });
+          expect((await pagePaymentLoad()).unconfirmed.stalled).toEqual(['never_checked']);
+          // Looked at again and again with no good read for hours
+          await prisma.appPageOrder.update({ where: { id: calm.id }, data: { checkedAt: new Date(Date.now() - 60_000), lastReadAt: new Date(Date.now() - 6 * 3_600_000), nextLookAt: new Date(Date.now() + 1_000) } });
+          load = (await pagePaymentLoad()).unconfirmed;
+          expect(load).toMatchObject({ unreadLooks: 1, stalled: ['unreadable'] });
+          // Back on schedule: the alert clears whatever the age
+          await prisma.appPageOrder.update({ where: { id: calm.id }, data: { lastReadAt: new Date(), checkedAt: new Date(), nextLookAt: new Date(Date.now() + 20 * DAY) } });
+          expect((await pagePaymentLoad()).unconfirmed.stalled).toEqual([]);
+        });
+
+        it('the long-wait pass takes a fixed batch per sweep, the oldest look first', async () => {
+          const { artifactId } = await setUp();
+          const ids: string[] = [];
+          for (let i = 0; i < 52; i += 1) ids.push((await longOrder(artifactId, word(), `chg_LB${i}`, 102, { nextLookAt: new Date(Date.now() - (60 - i) * 60_000) })).id);
+          const sent = gateway({ record: () => paidRecord('x', { status: 'INITIATED' }) });
+          await sweepPageOrders();
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(50);
+          // The two whose looks were most recently due are the ones left for the next pass
+          expect(await prisma.appPageOrder.count({ where: { id: { in: ids }, checkedAt: null } })).toBe(2);
+          expect((await row(ids[50])).checkedAt).toBeNull();
+          expect((await row(ids[51])).checkedAt).toBeNull();
+        });
+      });
+
       it('the short look interval is only for Check payment and Restore: a page that refreshes itself, a poll or a notice keeps the age-grown spacing on an order in the long wait', async () => {
         const { artifactId } = await pending();
         await saveServerLimits({ bricks: { paymentCheckSeconds: 5, checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
@@ -2206,14 +2338,16 @@ run('payments for pages, in a real database', () => {
           expect((await ask(artifactId, { restore: true, recoveryCode: code }, '198.51.100.142')).body).toMatchObject({ status: 'paid', orderId: paid.id });
         });
 
-        it('looks at least weekly for as long as it takes: 6 hours, then daily, then weekly, with no end', () => {
+        it('looks at least monthly for as long as it takes: 6 hours, then daily, then weekly until 90 days past the window, then monthly, with no end', () => {
           const day = 24 * 3_600_000;
           expect(reconcileEveryMs(0)).toBe(6 * 3_600_000);
           expect(reconcileEveryMs(2 * day)).toBe(6 * 3_600_000);
           expect(reconcileEveryMs(3 * day)).toBe(day);
           expect(reconcileEveryMs(32 * day)).toBe(day);
           expect(reconcileEveryMs(33 * day)).toBe(7 * day);
-          expect(reconcileEveryMs(2_000 * day)).toBe(7 * day);
+          expect(reconcileEveryMs(89 * day)).toBe(7 * day);
+          expect(reconcileEveryMs(90 * day)).toBe(30 * day);
+          expect(reconcileEveryMs(2_000 * day)).toBe(30 * day);
         });
       });
 
@@ -2593,6 +2727,32 @@ run('payments for pages, in a real database', () => {
       expect(answer.load.oldestPendingSeconds).toBeGreaterThanOrEqual(600);
       const load = await (await sweepLoad(request('/api/app-pay/sweep', { token: SERVICE_TOKEN }))).json();
       expect(load.load.looks.made).toBeGreaterThanOrEqual(1);
+    });
+
+    it('the sweep tells Sentry only when the looks are STALLED (looks made and not read), never because an order is old', async () => {
+      const sentry = Sentry.captureMessage as jest.Mock;
+      sentry.mockClear();
+      try {
+        const { artifactId } = await pending();
+        await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
+        const DAY = 24 * 3_600_000;
+        gateway();
+        const made = await checkout(artifactId, '198.51.100.74');
+        const calm = await prisma.appPageOrder.update({ where: { id: made.orderId }, data: { status: 'not_paid', providerRef: 'chg_AL01', reconciled: false, createdAt: new Date(Date.now() - 203 * DAY), closedAt: new Date(Date.now() - 202 * DAY), checkedAt: new Date(Date.now() - 3_600_000), lastReadAt: new Date(Date.now() - 3_600_000), nextLookAt: new Date(Date.now() + 20 * DAY) } });
+        const quiet = await (await sweepRoute(request('/api/app-pay/sweep', { method: 'POST', token: SERVICE_TOKEN }))).json();
+        expect(quiet.load.unconfirmed).toMatchObject({ count: 1, stalled: [] });
+        expect(sentry).not.toHaveBeenCalled();
+        // Its look is due and the service cannot be read, again and again: stalled
+        await prisma.appPageOrder.update({ where: { id: calm.id }, data: { checks: 5, lastReadAt: null, nextLookAt: new Date(Date.now() - 1_000) } });
+        await prisma.appKeyCall.deleteMany({ where: { ownerId: 'page-payments' } });
+        mockSend.current = () => ({ status: 503, body: {} });
+        const stalled = await (await sweepRoute(request('/api/app-pay/sweep', { method: 'POST', token: SERVICE_TOKEN }))).json();
+        expect(stalled.load.unconfirmed.stalled).toEqual(['unreadable']);
+        expect(sentry).toHaveBeenCalledTimes(1);
+        expect(sentry.mock.calls[0][0]).toContain('stalled: unreadable');
+      } finally {
+        sentry.mockClear();
+      }
     });
 
     it('measures how long orders took to be found paid', async () => {
