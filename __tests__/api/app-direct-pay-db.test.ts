@@ -1818,7 +1818,7 @@ run('payments for pages, in a real database', () => {
         expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: lost.id } })).toMatchObject({ status: 'pending' });
       });
 
-      it('an order in the long wait whose look had no room in the hour is tried again soon, never a week later; a look that was really made keeps its age-based interval', async () => {
+      it('an order in the long wait whose look had no room in the hour stays as due as it was (the whole claim given back), never a week later; a look that was really made keeps its age-based interval', async () => {
         const { artifactId } = await pending();
         await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, paymentLooksPerOwner: 1 } }, sara);
         const old = await lostOrder(artifactId, word(), wish(), { status: 'not_paid', providerRef: 'chg_TS01', reconciled: false, createdAt: new Date(Date.now() - 40 * 24 * 3_600_000), closedAt: new Date(Date.now() - 39 * 24 * 3_600_000), nextLookAt: null });
@@ -1833,9 +1833,15 @@ run('payments for pages, in a real database', () => {
         await verifyOrder(old.id, undefined, undefined, { background: true });
         expect(sent.filter((target) => target.method === 'GET')).toHaveLength(1);
         const waited = await prisma.appPageOrder.findUniqueOrThrow({ where: { id: old.id } });
-        // Weekly is what its age would give; with no room it is tried again within the quarter hour instead
-        expect(waited.nextLookAt!.getTime() - Date.now()).toBeLessThanOrEqual(15 * 60_000 + 5_000);
-        expect(waited.nextLookAt!.getTime() - Date.now()).toBeGreaterThan(0);
+        // Weekly is what its age would give; with no room nothing is moved: it was never scheduled and still is not (due at the next sweep), and no look is counted
+        expect(waited).toMatchObject({ nextLookAt: null, checkedAt: null, checks: 0 });
+        // The room is back: it is looked at, and its own interval stands from then
+        await prisma.appKeyCall.deleteMany({ where: { ownerId: 'page-payments' } });
+        await verifyOrder(old.id, undefined, undefined, { background: true });
+        expect(sent.filter((target) => target.method === 'GET')).toHaveLength(2);
+        const looked = await prisma.appPageOrder.findUniqueOrThrow({ where: { id: old.id } });
+        expect(looked.checks).toBe(1);
+        expect(looked.nextLookAt!.getTime() - Date.now()).toBeGreaterThan(5 * 24 * 3_600_000);
       });
 
       it('an order in the long wait whose look was taken but could not be READ (an error, a timeout, a refusal, a page that is not a record, no state, a key that cannot be read) is tried again soon, never a week later; a look that was read keeps the age-based interval', async () => {
@@ -2010,26 +2016,34 @@ run('payments for pages, in a real database', () => {
           expect((await pagePaymentLoad()).unconfirmed.unreadLooks).toBe(0);
         });
 
-        it('an order starved of look budget for sweep after sweep is not "unreadable": its claim is given back (no look counted, last look unchanged), it keeps the 15 minute retry and no backoff; a look really made and failed still counts', async () => {
+        it('an order starved of look budget for sweep after sweep is not "unreadable": the whole claim is given back (no look counted, last look and schedule unchanged), so it shows as OVERDUE once starved past the hour, and is looked at and cleared when the room is back', async () => {
           const { artifactId } = await setUp();
           await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, paymentLooksPerOwner: 1 } }, sara);
           const lastLook = new Date(Date.now() - 3 * DAY);
+          const due = new Date(Date.now() - 2 * 3_600_000);
           // The owner's hourly room is one look: the first order takes it, the second is starved
-          const first = await longOrder(artifactId, word(), 'chg_LW30', 60, { checks: 4, checkedAt: lastLook, lastReadAt: lastLook, nextLookAt: new Date(Date.now() - 10 * 60_000) });
-          const starved = await longOrder(artifactId, word(), 'chg_LW31', 60, { checks: 5, checkedAt: lastLook, lastReadAt: lastLook, nextLookAt: new Date(Date.now() - 60_000) });
+          const first = await longOrder(artifactId, word(), 'chg_LW30', 60, { checks: 4, checkedAt: lastLook, lastReadAt: lastLook, nextLookAt: new Date(Date.now() - 3 * 3_600_000) });
+          const starved = await longOrder(artifactId, word(), 'chg_LW31', 60, { checks: 5, checkedAt: lastLook, lastReadAt: lastLook, nextLookAt: due });
           const sent = gateway({ record: () => paidRecord('x', { status: 'INITIATED' }) });
           for (let sweep = 0; sweep < 4; sweep += 1) {
-            await prisma.appPageOrder.update({ where: { id: starved.id }, data: { nextLookAt: new Date(Date.now() - 1_000) } });
             await sweepPageOrders();
             const kept = await row(starved.id);
-            // Nothing was asked of the service for it: no look counted, the last look still the last, tried again within the quarter hour (never backed off)
-            expect({ sweep, checks: kept.checks, checkedAt: kept.checkedAt?.getTime(), soon: (await nextIn(starved.id)) <= 15 * 60_000 + 5_000 }).toEqual({ sweep, checks: 5, checkedAt: lastLook.getTime(), soon: true });
+            // Nothing was asked of the service for it: no look counted, the last look still the last, and its look still due exactly as it was (never pushed ahead)
+            expect({ sweep, checks: kept.checks, checkedAt: kept.checkedAt?.getTime(), nextLookAt: kept.nextLookAt?.getTime() }).toEqual({ sweep, checks: 5, checkedAt: lastLook.getTime(), nextLookAt: due.getTime() });
           }
           expect(sent.filter((target) => target.method === 'GET')).toHaveLength(1);
           expect((await row(first.id)).checks).toBe(5);
+          // Starved for two hours: overdue (and said), never "unreadable"
           const load = (await pagePaymentLoad()).unconfirmed;
-          expect(load).toMatchObject({ unreadLooks: 0 });
-          expect(load.stalled).not.toContain('unreadable');
+          expect(load).toMatchObject({ unreadLooks: 0, overdue: 1 });
+          expect(load.stalled).toEqual(['overdue']);
+          // The room is back: it is looked at at the next sweep, and the alert clears
+          await prisma.appKeyCall.deleteMany({ where: { ownerId: 'page-payments' } });
+          await sweepPageOrders();
+          expect(await row(starved.id)).toMatchObject({ checks: 6 });
+          expect((await row(starved.id)).lastReadAt!.getTime()).toBeGreaterThan(lastLook.getTime());
+          expect((await row(starved.id)).nextLookAt!.getTime()).toBeGreaterThan(Date.now());
+          expect((await pagePaymentLoad()).unconfirmed).toMatchObject({ overdue: 0, stalled: [] });
           // A look that really was made and not read, three times, does count
           await prisma.appKeyCall.deleteMany({ where: { ownerId: 'page-payments' } });
           const failing = await longOrder(artifactId, word(), 'chg_LW32', 60, { checks: 2, checkedAt: lastLook, lastReadAt: null, nextLookAt: null });
@@ -2042,6 +2056,30 @@ run('payments for pages, in a real database', () => {
           }
           expect((await row(failing.id)).checks).toBe(5);
           expect((await pagePaymentLoad()).unconfirmed).toMatchObject({ unreadLooks: 1, stalled: ['unreadable'] });
+        });
+
+        it('a key that cannot be read is a real failed look (it needs a person to give the key again): counted, backed off, and alerted as unreadable, never silent (Opus)', async () => {
+          const made = await pending();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
+          const lastLook = new Date(Date.now() - 3 * DAY);
+          // An order that was looked at and read before; then its app's key can no longer be read
+          const order = await longOrder(made.artifactId, word(), 'chg_LW40', 60, { checks: 5, checkedAt: lastLook, lastReadAt: lastLook, nextLookAt: new Date(Date.now() - 60_000) });
+          await prisma.appConnection.update({ where: { id: made.connectionId }, data: { keyCipher: 'not a key' } });
+          await sweepPageOrders();
+          const kept = await row(order.id);
+          // The look is counted (the claim stays), and the order is tried again soon (the first failure of a streak)
+          expect(kept.checks).toBe(6);
+          expect(kept.checkedAt!.getTime()).toBeGreaterThan(lastLook.getTime());
+          expect(kept.lastReadAt!.getTime()).toBe(lastLook.getTime());
+          expect(await nextIn(order.id)).toBeGreaterThan(0);
+          expect(await nextIn(order.id)).toBeLessThanOrEqual(15 * 60_000 + 5_000);
+          const load = (await pagePaymentLoad()).unconfirmed;
+          expect(load).toMatchObject({ unreadLooks: 1, stalled: ['unreadable'] });
+          // Looked at again an hour later, still unreadable: the wait doubles (the streak backs off), the alert stays
+          await prisma.appPageOrder.update({ where: { id: order.id }, data: { checkedAt: new Date(Date.now() - 2 * 3_600_000), nextLookAt: new Date(Date.now() - 1_000) } });
+          await sweepPageOrders();
+          expect(await nextIn(order.id)).toBeGreaterThan(3.5 * 3_600_000);
+          expect((await pagePaymentLoad()).unconfirmed.stalled).toEqual(['unreadable']);
         });
 
         it('the long-wait pass takes a fixed batch per sweep, the oldest look first', async () => {

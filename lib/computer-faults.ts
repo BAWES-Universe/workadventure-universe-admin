@@ -92,7 +92,7 @@ export async function recordFaults(botId: string, jobId: string, rows: FaultInpu
     // report of a different fault would be taken for the first said again and dropped. Each DIFFERENT report is kept under its own stable slot (`turn:1`, `turn:1~2`, ...); the same report said again is
     // the same slot, and changes nothing
     if (!run && data.callId.startsWith('turn:')) {
-      const outcome = await recordUnnamedTurnRow(jobId, data, row.kind);
+      const outcome = await recordUnnamedTurnRow(jobId, data);
       stored += outcome.stored;
       if (outcome.conflict) {
         conflicts++;
@@ -135,14 +135,14 @@ const sameReport = (a: { kind: string; reason: string; source: string; route: st
   a.kind === b.kind && a.reason === b.reason && a.source === b.source && a.route === b.route && a.providerStatus === b.providerStatus;
 
 /**
- * Keeps one turn-only row from a runner that names no run. The first slot is the plain key; a report that says the same as a row already kept there (a retry) changes nothing, an `uncertain` row is settled
- * once by a confirmed one, and a report that says something else goes to the next free slot, so no evidence is lost to a row of another unnamed run. Returns what was stored, and whether every slot was taken by
- * other reports (a conflict).
+ * Keeps one turn-only row from a runner that names no run. The first slot is the plain key; a report that says the same as a row already kept (a retry) changes nothing, and a report that says something else
+ * goes to the next free slot. A row of an unnamed run is NEVER settled by another report: every unnamed row has no run and the same turn number, so there is no telling whether a confirmed report belongs to the
+ * run of an uncertain row or to another run, and settling it would lose the evidence of the first (a person's row could turn an unresolved one into a charge). Both rows are kept and the ruling reads both (ours
+ * wins; a person's row beside an unresolved one reads as unresolved). Returns what was stored, and whether every slot was taken by other reports (a conflict).
  */
 async function recordUnnamedTurnRow(
   jobId: string,
   data: { jobId: string; turn: number | null; run: string | null; callId: string; kind: string; reason: string; source: string; route: string | null; providerStatus: number | null; at: Date },
-  kind: string,
 ): Promise<{ stored: number; conflict: boolean }> {
   for (let slot = 1; slot <= UNNAMED_TURN_SLOTS; slot += 1) {
     const callId = slot === 1 ? data.callId : `${data.callId}~${slot}`.slice(0, 120);
@@ -161,13 +161,6 @@ async function recordUnnamedTurnRow(
     // Not the same series (another run or turn under this key): never the one this report belongs to
     if (kept.run !== data.run || kept.turn !== data.turn) continue;
     if (sameReport(kept, data)) return { stored: 0, conflict: false };
-    if (kind !== 'uncertain' && kept.kind === 'uncertain') {
-      const settled = await prisma.computerJobFault.updateMany({
-        where: { jobId, callId, kind: 'uncertain', run: data.run, turn: data.turn },
-        data: { kind: data.kind, reason: data.reason, source: data.source, route: data.route, providerStatus: data.providerStatus, at: data.at, createdAt: new Date() },
-      });
-      if (settled.count > 0) return { stored: settled.count, conflict: false };
-    }
   }
   return { stored: 0, conflict: true };
 }

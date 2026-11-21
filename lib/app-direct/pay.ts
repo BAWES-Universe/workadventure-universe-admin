@@ -648,10 +648,8 @@ export interface OrderView {
   pollAfterMs: number;
 }
 
-/** When an order in the long wait whose look had no room in the hour's budget is tried again: soon, not at its age-based interval (nothing was asked of the service). */
-const NO_ROOM_RETRY_MS = 15 * 60 * 1000;
-/** The same for a look that was taken but could not be READ (an error, a refusal, a blip, no state, a key that cannot be read): one bad moment of the service must not put a payment that may be real a week away. */
-const UNREAD_RETRY_MS = NO_ROOM_RETRY_MS;
+/** When a look that was taken but could not be READ (an error, a refusal, a blip, no state, a key that cannot be read) is first tried again: soon, not at the order's age-based interval, so one bad moment of the service must not put a payment that may be real a week away. */
+const UNREAD_RETRY_MS = 15 * 60 * 1000;
 
 /**
  * How far apart the looks are for an order that may still have been paid but that nothing is waiting for (closed past the late-payment window, or
@@ -809,11 +807,12 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
     await retrySoon();
     return (await endIfOutOfTime()) ?? later(view(order.status));
   };
-  // A look that asked nothing of the service (no room in the hour's budget, a key that cannot be read) is no look: the claim made for it is given back (when it is still this one's), so it never counts as
-  // a look that was not read (the backoff, the "unreadable" count, the warning to Sentry) and the order's own record of its last look stays what it was. `wait` is when it is tried again (long wait only)
-  const giveBackClaim = async (wait: number | null): Promise<void> => {
+  // A look that asked nothing of the service because there was no room in the hour's budget is no look: the WHOLE claim made for it is given back (when it is still this one's), the order's own schedule
+  // included, so it stays as due as it was: it never counts as a look that was not read (the backoff, the "unreadable" count), the order's own record of its last look stays what it was, and a
+  // starvation that lasts past the late hour shows as an order that is overdue (the warning to Sentry) instead of being pushed ahead every time
+  const giveBackClaim = async (): Promise<void> => {
     await prisma.appPageOrder
-      .updateMany({ where: { id: order.id, checkedAt: now }, data: { checkedAt: order.checkedAt, checks: { decrement: 1 }, ...(reconciling && wait !== null ? { nextLookAt: new Date(now.getTime() + wait) } : {}) } })
+      .updateMany({ where: { id: order.id, checkedAt: now }, data: { checkedAt: order.checkedAt, checks: { decrement: 1 }, ...(reconciling ? { nextLookAt: order.nextLookAt } : {}) } })
       .catch(() => undefined);
   };
   // One look per order in a few seconds, whoever is asking. The longer an order has been waiting the further apart its looks are (a minute
@@ -838,10 +837,10 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   try {
     key = readKey(connection);
   } catch {
-    // A key that cannot be read cannot ask now: an open order can no longer be confirmed, and a closed one with a payment that may exist keeps waiting
-    // (the key may be given again). The order's own schedule was moved on by the look that was taken: it is tried again soon, not at its age-based interval
+    // A key that cannot be read cannot ask now: an open order can no longer be confirmed, and a closed one with a payment that may exist keeps waiting (the key may be given again). This IS a failed look,
+    // one that needs a person (the key given again): it is tried again soon with the same backoff as any look that was not read, counted as one that was not read, and said by the warning to Sentry
     if (reconciling) {
-      await giveBackClaim(Math.min(reconcileEveryMs(sinceWindow), UNREAD_RETRY_MS));
+      await retrySoon();
       return later(view(order.status));
     }
     if (wasClosed) return nothingMoreToAsk(view(order.status));
@@ -867,9 +866,9 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // No room for looks: it waits, but an order past its open time still ends (it is not left "checking" because looks ran short)
   if (!budget) {
     lookStats.noRoom += 1;
-    // The claim above moved the order's own schedule on by its age-based interval, but nothing was asked of the service: it is given back, and an order in the long wait is tried again when the
-    // hourly room comes back, never a week later and never backed off as if the service could not be read. The age-based interval stays for a look that was really made
-    await giveBackClaim(Math.min(reconcileEveryMs(sinceWindow), NO_ROOM_RETRY_MS));
+    // The claim above moved the order's own schedule on by its age-based interval, but nothing was asked of the service: the whole claim is given back, so an order in the long wait is due at the next sweep
+    // (when the hourly room is back it is looked at), never a week later and never backed off as if the service could not be read. The age-based interval stays for a look that was really made
+    await giveBackClaim();
     return (await endIfOutOfTime()) ?? later(view(order.status));
   }
   lookStats.made += 1;
