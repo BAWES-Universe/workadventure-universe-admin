@@ -213,6 +213,9 @@ export async function recordRelayUnreachable(db: Pick<Prisma.TransactionClient, 
   });
 }
 
+/** Whether a row (as the relay sends it, or as it is kept) is the relay's arrival row: answered / relay_reached from the relay. Such a row is invisible to every ruling about money except the one question it answers (`neverReachedRelay`) and the re-labelling of a reason. */
+export const isArrivalRow = (row: { kind: string; reason: string; source: string }): boolean => row.kind === 'answered' && row.reason === RELAY_REACHED && row.source === 'universe-ai';
+
 /** The rows that apply to a ruling on one run: those that name that run and those that name none (they cannot be told apart, so they count for every run). No run named: every row of the job. */
 export const rowsOfRun = (run: string | null | undefined): Prisma.ComputerJobFaultWhereInput => (run ? { OR: [{ run: null }, { run }] } : {});
 

@@ -24,7 +24,7 @@ import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/compute
 import { computerView, finishJob, giveComputer, planEffect, renewJob, settleEffect, startJob, sweepComputers } from '@/lib/computer';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { readFaultRows, recordFaults, recordRelayUnreachable, type FaultInput } from '@/lib/computer-faults';
-import { afterLateEvidence, decidePendingForPurge, decideRunnerFinish, lockPerson, resolveDecision, sweepGiveBackDecisions, sweepLateEvidence } from '@/lib/computer-giveback';
+import { afterArrival, afterLateEvidence, decidePendingForPurge, decideRunnerFinish, lockPerson, resolveDecision, sweepGiveBackDecisions, sweepLateEvidence } from '@/lib/computer-giveback';
 import { correctRouteTogether, giveBackOverview, giveBackReadiness, routeIsPaused } from '@/lib/computer-fault-ops';
 import { mintJobToken, revokeJobTokens } from '@/lib/computer-token';
 import { WorkerDied, afterWorkerDied } from '../helpers/worker-died';
@@ -1970,6 +1970,75 @@ run('a computer job that failed on our side, and the bound on giving it back', (
           await recordFaults(sara.brickId, jobId, [arrival('r1', 1)]);
         });
         expect(await decisionOf(observed.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+      });
+
+      it('an arrival row is invisible to every ruling about money: the judged turn, the classes, the late look and the late sweep are the same with an arrival on every turn as without any', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 20 });
+        const sara = await person('sara');
+        const verdicts = async (withArrivals: boolean, who: { id: string; brickId: string }) => {
+          const rowsOf = (rows: FaultInput[]) => async (jobId: string) => {
+            await readied(jobId);
+            await recordFaults(who.brickId, jobId, [...rows, ...(withArrivals ? [arrival('r1', 1), arrival('r1', 2), arrival('r1', 3)] : [])]);
+          };
+          const out: Array<Record<string, unknown>> = [];
+          // The runner names no turn: the judged turn is the last turn that has a ROW OF A FAULT (turn 1 here), never the last turn that had a call (turn 3)
+          for (const [ending, rows] of [
+            [{ outcome: 'failed' as const, cause: 'agent' as const, run: 'r1' }, [fault(1, 'stream_cut', { run: 'r1' })]],
+            [{ outcome: 'failed' as const, cause: 'agent' as const, run: 'r1' }, [fault(1, 'allowance', { run: 'r1' })]],
+            [{ outcome: 'failed' as const, cause: 'agent' as const, run: 'r1' }, [fault(1, 'relay_down', { run: 'r1' })]],
+            [{ outcome: 'failed' as const, cause: 'ours' as const, turns: [1, 2, 3], run: 'r1' }, [fault(1, 'stream_cut', { run: 'r1' })]],
+            [{ outcome: 'failed' as const, cause: 'agent' as const, run: 'r1' }, [fault(2, 'stream_cut', { run: 'r1' }), fault(1, 'allowance', { run: 'r1' })]],
+          ] as const) {
+            const ended = await job(who, { ...ending, turns: 'turns' in ending ? [...ending.turns] : undefined }, rowsOf([...rows]));
+            const kept = await decisionOf(ended.id);
+            out.push({ state: kept?.state, basis: kept?.basis, reason: kept?.reason, turns: kept?.judgedTurns, given: await givenBack(ended.id) });
+          }
+          // A failed finish with nothing but arrivals (every turn had a call, none went wrong) is the agent's own ending, as with no rows at all after a call
+          const calm = await job(who, { outcome: 'failed', cause: 'agent', run: 'r1' }, rowsOf([]));
+          out.push({ calm: (await decisionOf(calm.id))?.basis });
+          return out;
+        };
+        // Two people with the same history (none), so the month's bound and pause are the same for both
+        const without = await verdicts(false, sara);
+        const withThem = await verdicts(true, await person('tom'));
+        // With no arrival at all, the "calm" job (readied, no row of any kind) is the genuine outage; with arrivals it is the agent ending: that one entry alone differs, by the rule
+        expect(withThem.slice(0, -1)).toEqual(without.slice(0, -1));
+        expect(without.at(-1)).toEqual({ calm: 'universe_fault' });
+        expect(withThem.at(-1)).toEqual({ calm: 'agent_ended' });
+        expect(without[0]).toMatchObject({ state: 'given', basis: 'goodwill', turns: [1] });
+        expect(without[1]).toMatchObject({ state: 'refused', basis: 'person_caused' });
+        expect(without[2]).toMatchObject({ state: 'given', basis: 'universe_fault' });
+      });
+
+      it('the late look and the late sweep ignore an arrival row: it never re-judges a refusal, never resolves a pending decision and never moves money; a late fault row still does', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 20 });
+        const sara = await person('sara');
+        const refused = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [arrival('r1', 1)]);
+        });
+        expect(await decisionOf(refused.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+        // More arrivals, later: the sweep has nothing to look at, and the route's look (afterArrival) changes nothing
+        await recordFaults(sara.brickId, refused.id, [arrival('r1', 2), arrival('r1', 3)]);
+        expect((await sweepLateEvidence(new Date())).looked).toBe(0);
+        const before = await decisionOf(refused.id);
+        await afterArrival(refused.id);
+        expect(await decisionOf(refused.id)).toEqual(before);
+        expect(await givenBack(refused.id)).toBe(false);
+        // A real late row is looked at, as before (finding 1)
+        await recordFaults(sara.brickId, refused.id, [fault(3, 'stream_cut', { run: 'r1' })]);
+        expect((await sweepLateEvidence(new Date())).looked).toBe(1);
+        expect(await decisionOf(refused.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
+        // A decision still pending is not resolved by an arrival
+        const pending = await job(sara, { outcome: 'failed', cause: 'agent', turns: [1], run: 'r1' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [fault(1, 'stream_cut', { run: 'r1' })]);
+          await prisma.computerEffect.create({ data: { jobId, kind: 'email', key: `k-${jobId}`, state: 'planned' } as never }).catch(() => undefined);
+        });
+        const state = (await decisionOf(pending.id))?.state;
+        await recordFaults(sara.brickId, pending.id, [arrival('r1', 2)]);
+        await afterArrival(pending.id);
+        expect((await decisionOf(pending.id))?.state).toBe(state);
       });
 
       it('an inferred row Orbit kept earlier never names a reason once the run has an arrival row (judged again: by the hint, like any failed job)', async () => {

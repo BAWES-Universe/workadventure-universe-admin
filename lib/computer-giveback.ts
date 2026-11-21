@@ -418,6 +418,15 @@ async function relabelReached(jobId: string, run: string | null): Promise<void> 
 }
 
 /**
+ * What a batch of ONLY arrival rows does (the relay says a run reached it): nothing is judged and no money moves; a decision that named the computer as one that never reached the relay is re-labelled
+ * (`relabelReached`). Never resolves a pending decision and never re-judges a refusal: an arrival is no evidence of any class.
+ */
+export async function afterArrival(jobId: string): Promise<void> {
+  const decision = await prisma.computerGiveBackDecision.findUnique({ where: { jobId }, select: { state: true, basis: true, reason: true, judgedRun: true } });
+  if (decision && decision.state === 'given' && decision.basis === 'universe_fault' && decision.reason === RELAY_UNREACHABLE) await relabelReached(jobId, decision.judgedRun);
+}
+
+/**
  * New rows arrived for a job that is already over (the relay writes best effort, so one can be late): a decision that was not a give-back is looked at
  * again, and a class 1 fault in what was judged makes it one. A pending decision is decided now. Nothing else ever changes a decision.
  */
@@ -531,6 +540,8 @@ export async function sweepLateEvidence(now: Date = new Date(), batch = 50): Pro
           -- that arrives for an old decision (an uncertain row confirmed long after) is evidence all the same
           OR (COALESCE(d."last_error", '') NOT LIKE 'late_look%' AND EXISTS (
             SELECT 1 FROM "computer_job_faults" f WHERE f."job_id" = d."job_id"
+              -- An answered call (the relay's arrival row on nearly every turn included) says nothing wrong: it is new evidence only for the decision that named the relay unreachable, whose reason it re-labels
+              AND (f."kind" <> 'answered' OR (f."reason" = 'relay_reached' AND f."source" = 'universe-ai' AND d."reason" = 'relay_unreachable'))
               AND f."created_at" > ${new Date(now.getTime() - LATE_ROW_HORIZON_DAYS * 24 * 60 * MINUTE)}
               AND f."created_at" > d."updated_at" - ${Prisma.raw(`interval '${LATE_ROW_MARGIN_MINUTES} minutes'`)}))
         )

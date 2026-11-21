@@ -2,16 +2,17 @@
 import { NextRequest } from 'next/server';
 import { POST } from '@/app/api/bots/[id]/computer-jobs/[jobId]/faults/route';
 import { faultClassOf, recordFaults } from '@/lib/computer-faults';
-import { afterLateEvidence } from '@/lib/computer-giveback';
+import { afterArrival, afterLateEvidence } from '@/lib/computer-giveback';
 import { requireServiceToken } from '@/lib/service-tokens';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/computer-faults', () => ({ ...jest.requireActual('@/lib/computer-faults'), recordFaults: jest.fn() }));
-jest.mock('@/lib/computer-giveback', () => ({ afterLateEvidence: jest.fn() }));
+jest.mock('@/lib/computer-giveback', () => ({ afterLateEvidence: jest.fn(), afterArrival: jest.fn() }));
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
 const record = recordFaults as jest.Mock;
 const late = afterLateEvidence as jest.Mock;
+const arrived = afterArrival as jest.Mock;
 const auth = requireServiceToken as jest.Mock;
 const params = { params: Promise.resolve({ id: 'brick-1', jobId: 'job-1' }) };
 const call = (body: unknown) => POST(new NextRequest('http://localhost/api/bots/brick-1/computer-jobs/job-1/faults', { method: 'POST', body: JSON.stringify(body) }), params);
@@ -21,6 +22,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   auth.mockImplementation(() => undefined);
   late.mockResolvedValue(undefined);
+  arrived.mockResolvedValue(undefined);
 });
 
 describe('POST /api/bots/:id/computer-jobs/:jobId/faults', () => {
@@ -66,7 +68,7 @@ describe('POST /api/bots/:id/computer-jobs/:jobId/faults', () => {
     ];
     expect((await call({ faults: rows })).status).toBe(200);
     expect(record).toHaveBeenCalledWith('brick-1', 'job-1', [expect.objectContaining({ callId: 'arrival_r-1_2', kind: 'answered', reason: 'relay_reached', route: null, providerStatus: null, turn: 2 }), expect.objectContaining({ callId: 'arrival_r-1_', turn: null, run: 'r-1', route: null })]);
-    expect(late).toHaveBeenCalledWith('job-1');
+    expect(arrived).toHaveBeenCalledWith('job-1');
     expect(faultClassOf({ kind: 'answered', reason: 'relay_reached', source: 'universe-ai' })).toBeNull();
   });
 
@@ -96,6 +98,36 @@ describe('POST /api/bots/:id/computer-jobs/:jobId/faults', () => {
       expect((await call(body)).status).toBe(400);
     }
     expect(record).not.toHaveBeenCalled();
+  });
+
+  it('a row that is not shaped as the relay writes it never holds back the real fault rows sent with it: the rest are kept, and the answer says how many were left out', async () => {
+    record.mockResolvedValue({ stored: 1, conflicts: 0 });
+    const res = await call({ faults: [{ ...good, kind: 'maybe' }, good, { ...good, callId: 'c9', reason: 'has spaces' }] });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, stored: 1, conflicts: 0, rejected: 2 });
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(record).toHaveBeenCalledWith('brick-1', 'job-1', [expect.objectContaining({ callId: 'c1', reason: 'provider_key_ours' })]);
+    // Nothing that can be kept: refused, nothing written
+    record.mockClear();
+    expect((await call({ faults: [{ ...good, kind: 'maybe' }, { ...good, source: 'x' }] })).status).toBe(400);
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it('a batch of nothing but arrival rows judges nothing (it only re-labels a reason); with any other row the job is judged again as ever', async () => {
+    record.mockResolvedValue({ stored: 2, conflicts: 0 });
+    const arrival = (callId: string) => ({ callId, turn: 1, run: 'r-1', kind: 'answered', reason: 'relay_reached', source: 'universe-ai', route: null, providerStatus: null, at: '2026-11-21T00:00:00.000Z' });
+    expect((await call({ faults: [arrival('arrival_r-1_1'), arrival('arrival_r-1_2')] })).status).toBe(200);
+    expect(arrived).toHaveBeenCalledWith('job-1');
+    expect(late).not.toHaveBeenCalled();
+    arrived.mockClear();
+    expect((await call({ faults: [arrival('arrival_r-1_1'), good] })).status).toBe(200);
+    expect(late).toHaveBeenCalledWith('job-1');
+    expect(arrived).not.toHaveBeenCalled();
+    // Another answered row, or one that is not the relay's, is not an arrival
+    late.mockClear();
+    expect((await call({ faults: [{ ...arrival('x'), reason: 'provider_5xx' }] })).status).toBe(200);
+    expect(late).toHaveBeenCalled();
+    expect(arrived).not.toHaveBeenCalled();
   });
 
   it('keeps the rows even when judging the job again fails', async () => {
