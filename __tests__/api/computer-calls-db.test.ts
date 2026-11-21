@@ -8,11 +8,13 @@ import { randomUUID } from 'node:crypto';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn(), getClient: jest.fn(() => undefined), flush: jest.fn(async () => true) }));
 jest.mock('@/lib/computer-calls', () => {
   const actual = jest.requireActual('@/lib/computer-calls');
   return { ...actual, giveBackModelCalls: jest.fn(actual.giveBackModelCalls) };
 });
 
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
@@ -26,7 +28,7 @@ import { TOKEN_LIFE_MS, forgetOldTokens, mintJobToken, verifyJobToken } from '@/
 import { recordMeterEvent } from '@/lib/meter';
 import { reportsToTell } from '@/lib/computer-report';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
-import { authorizeModelCall, callRoomKey, cutoffLockKey, giveBackModelCalls, releaseModelCall, settleModelCall } from '@/lib/computer-calls';
+import { authorizeModelCall, callRoomKey, cutoffLockKey, endStuckCutoffs, giveBackModelCalls, releaseModelCall, settleModelCall } from '@/lib/computer-calls';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -534,6 +536,73 @@ run('what a computer may ask of Orbit, in a real database', () => {
         await cutoff;
         expect(await authorization).toEqual({ ok: false, reason: 'refused' });
         expect(await prisma.meterReservation.findUnique({ where: { reservationKey: callRoomKey(jobId, 'c1') } })).toMatchObject({ state: 'released' });
+      });
+
+      describe('a cutoff that was decided but could not end the job (Opus: the job would run on with dead keys)', () => {
+        const poolRefusal = (jobId: string, callId: string, at: Date = NOW) => prisma.computerJobFault.create({ data: { jobId, turn: null, run: null, callId: `orbit:pool:${callId}`, kind: 'fault', reason: 'pool_busy', source: 'universe-ai', route: null, providerStatus: 503, at } });
+
+        it('the sweep ends it as ours, once: time given back and never counted, and Sentry is told when the end failed (a second sweep changes nothing)', async () => {
+          const { jobId } = await running();
+          const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+          await setUp({ poolCeilingMicros: 60_000 });
+          expect(await call(token, 'c1', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
+          // The second refusal decides the cutoff (the keys end), and the end of the job fails once, at its first write
+          (Sentry.captureMessage as jest.Mock).mockClear();
+          const hold = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementationOnce((() => Promise.reject(new Error('the database went away'))) as never);
+          expect(await call(token, 'c2', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
+          hold.mockRestore();
+          expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+          expect(await prisma.computerJobToken.count({ where: { jobId, revokedAt: null } })).toBe(0);
+          expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+          expect((Sentry.captureMessage as jest.Mock).mock.calls[0][1]).toMatchObject({ level: 'error', tags: { area: 'computer', step: 'pool_cutoff_end' }, extra: { jobId } });
+          // Not at once: the request that decided it is left its moment to end the job itself
+          await sweepComputers(minutes(1));
+          expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+          // The sweep after that ends it as ours
+          await sweepComputers(minutes(5));
+          const ended = await jobOf(jobId);
+          expect(ended).toMatchObject({ status: 'stopped', endedBy: 'pool', runnerFault: false, endNote: POOL_BUSY_WORDS });
+          expect(await prisma.computerGiveBackDecision.findUnique({ where: { jobId } })).toMatchObject({ state: 'given', basis: 'orbit_fault', reason: 'pool_cut_off' });
+          expect((await timeOf(jobId)).personKey).toBe('unknown');
+          // Said twice it changes nothing
+          const events = await prisma.meterEvent.count({ where: { jobId } });
+          expect(await endStuckCutoffs(minutes(6), 50)).toBe(0);
+          await sweepComputers(minutes(6));
+          expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool', endedAt: ended.endedAt });
+          expect(await prisma.meterEvent.count({ where: { jobId } })).toBe(events);
+          expect(await prisma.computerGiveBackDecision.count({ where: { jobId } })).toBe(1);
+        });
+
+        it('leaves alone a job with a live key, a job that had a call authorized, and one whose last refusal is within its moment', async () => {
+          // A live key: two refusals kept (however they came) but the job still holds a good key
+          const live = await running('lia');
+          await mintJobToken(live.jobId, 'model', NOW);
+          await poolRefusal(live.jobId, 'a');
+          await poolRefusal(live.jobId, 'b');
+          // A call authorized (its room was held), keys ended since
+          const authorized = await running('ada');
+          const { token } = (await mintJobToken(authorized.jobId, 'model', NOW)) as { token: string };
+          expect((await call(token, 'ok-1')).ok).toBe(true);
+          await prisma.computerJobToken.updateMany({ where: { jobId: authorized.jobId }, data: { revokedAt: NOW } });
+          await poolRefusal(authorized.jobId, 'a');
+          await poolRefusal(authorized.jobId, 'b');
+          // A call on the person's own key was authorized (its marker only)
+          const own = await running('olu');
+          const { token: ownToken } = (await mintJobToken(own.jobId, 'model', NOW)) as { token: string };
+          expect((await authorizeModelCall({ token: ownToken, callId: 'own-1', estimateMicros: 5_000, payer: 'own-key' }, NOW)).ok).toBe(true);
+          await prisma.computerJobToken.updateMany({ where: { jobId: own.jobId }, data: { revokedAt: NOW } });
+          await poolRefusal(own.jobId, 'a');
+          await poolRefusal(own.jobId, 'b');
+          // Too new: its last refusal is only a minute old
+          const fresh = await running('fay');
+          await poolRefusal(fresh.jobId, 'a');
+          await poolRefusal(fresh.jobId, 'b', minutes(4));
+          // One refusal only is not a cutoff
+          const one = await running('ona');
+          await poolRefusal(one.jobId, 'a');
+          expect(await endStuckCutoffs(minutes(5), 50)).toBe(0);
+          for (const id of [live.jobId, authorized.jobId, own.jobId, fresh.jobId, one.jobId]) expect(await jobOf(id)).toMatchObject({ status: 'running' });
+        });
       });
 
       it('a call authorized before the cutoff counted is seen by it: the job is not stopped (the other half of the same race)', async () => {

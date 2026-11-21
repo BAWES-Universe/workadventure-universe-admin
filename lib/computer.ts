@@ -27,7 +27,7 @@ import {
   sleep,
 } from '@/lib/computer-control';
 import { cleanStepLabel } from '@/lib/computer-redact';
-import { callRoomKey, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
+import { callRoomKey, endStuckCutoffs, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { reconcileComputers } from '@/lib/computer-reconcile';
 import { bringBackFromCold, coldStep, dropColdCopiesIfNewer } from '@/lib/computer-cold';
@@ -1544,6 +1544,11 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
     await endJob(job.id, 'stopped', 'unanswered', now);
     stopped++;
   }
+  // A job whose cutoff for our own capacity was decided (its keys ended) but that could not be ended then keeps its lease and room through the service token: it is ended here, as ours
+  stopped += await endStuckCutoffs(now, batch).catch((error) => {
+    console.error('[Computer] Jobs whose cutoff was decided could not be ended:', error instanceof Error ? error.message : 'unknown');
+    return 0;
+  });
   // A job waiting for its person (it asked them to take over, or they did) is not one that went quiet: the worker renews nothing
   // while it waits, so the sweep renews the room for them, a little before it would lapse. If the allowance cannot give more, the job still stops safely.
   const soon = await prisma.meterReservation.findMany({

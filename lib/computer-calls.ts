@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { recordMeterEvent } from '@/lib/meter';
 import { releaseRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
@@ -7,7 +8,8 @@ import { givenBackJob } from '@/lib/computer-values';
 import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
 import { routeIsPaused } from '@/lib/computer-route-pause';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
-import { hasOwnKeyCall, hasPoolRefusals, recordOwnKeyCall, recordPoolRefusal, retirePoolRefusals } from '@/lib/computer-faults';
+import { tellSentry } from '@/lib/computer-alerts';
+import { ORBIT_POOL_CALL_PREFIX, hasOwnKeyCall, hasPoolRefusals, recordOwnKeyCall, recordPoolRefusal, retirePoolRefusals } from '@/lib/computer-faults';
 
 /**
  * A model call a Brick's computer makes (build handoff v2, section 5): room is taken BEFORE the call, and what it really cost is
@@ -127,9 +129,7 @@ async function refusedForPool(jobId: string, callId: string, route: string | nul
       async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
         // Only a job whose calls have ALL been refused so far: one that had a call authorized before (a room held or priced, or one on the person's own key, which leaves only its marker) is left to the relay's own words
-        const authorized = await tx.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') } } });
-        const priced = authorized > 0 ? 0 : await tx.meterEvent.count({ where: { jobId, kind: 'model_call' } });
-        if (authorized > 0 || priced > 0 || (await hasOwnKeyCall(tx, jobId))) return false;
+        if (await hadAuthorizedCall(tx, jobId)) return false;
         const refused = await recordPoolRefusal(tx, jobId, callId, { route, at: now });
         if (refused < POOL_REFUSALS_BEFORE_STOP) return false;
         // The decision is made durable here, under the lock: every key of the job ends, so a call authorized after this commit finds its key dead and is refused. Ending the job itself comes after
@@ -143,7 +143,53 @@ async function refusedForPool(jobId: string, callId: string, route: string | nul
     return;
   }
   // The slow end of the job, with no lock and no transaction held. Its keys already ended; the job is ended as ours (given back, never counted). Never throws
-  if (cutoff) await endForRefusal(jobId, { reason: 'pool', words: POOL_BUSY_WORDS }, now);
+  if (cutoff && !(await endForRefusal(jobId, { reason: 'pool', words: POOL_BUSY_WORDS }, now))) {
+    // The decision is made and the keys are ended, but the job could not be: nothing retries it from a call (every call is refused at its key now), so the sweep ends it (`endStuckCutoffs`), and Sentry is told
+    await tellSentry(() => Sentry.captureMessage('A computer job’s cutoff for our own capacity was decided but the job could not be ended: its keys are ended and the sweep ends it', { level: 'error', tags: { area: 'computer', step: 'pool_cutoff_end' }, extra: { jobId } })).catch(() => undefined);
+  }
+}
+
+/** Whether a call of the job was ever authorized: a room held for it, a model call priced, or the marker of one on the person's own key. The three reads the cutoff and its sweep both stand on. */
+async function hadAuthorizedCall(db: Pick<Prisma.TransactionClient, 'meterReservation' | 'meterEvent' | 'computerJobFault'>, jobId: string): Promise<boolean> {
+  if ((await db.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') } } })) > 0) return true;
+  if ((await db.meterEvent.count({ where: { jobId, kind: 'model_call' } })) > 0) return true;
+  return hasOwnKeyCall(db, jobId);
+}
+
+/** How long after its last refusal a job whose keys ended is left to the request that decided its cutoff, which ends it itself, before the sweep does. */
+const CUTOFF_GRACE_MS = 2 * 60_000;
+
+/**
+ * The sweep's half of the cutoff: a job still running or waiting whose cutoff was decided (two refusals of ours kept, never a call authorized, not one live key) but which was never ended, because the request
+ * that decided it could not end it (the database or the provider failed at that moment). Its lease and room keep renewing through the service token, so nothing else would ever end it. It is ended as
+ * ours exactly as the cutoff would have (`pool`: its time given back, never counted); safe to run twice (a job that is over is left as it is). Bounded by `batch`, oldest first. Returns how many it ended.
+ */
+export async function endStuckCutoffs(now: Date, batch: number): Promise<number> {
+  const quiet = new Date(now.getTime() - CUTOFF_GRACE_MS);
+  const refusal = { callId: { startsWith: ORBIT_POOL_CALL_PREFIX }, kind: 'fault' };
+  const jobs = await prisma.computerJob.findMany({
+    where: {
+      status: { in: ['running', 'waiting'] },
+      startedAt: { not: null },
+      tokens: { none: { revokedAt: null, expiresAt: { gt: now } } },
+      faults: { some: refusal },
+      NOT: { faults: { some: { ...refusal, at: { gt: quiet } } } },
+    },
+    orderBy: { startedAt: 'asc' },
+    take: batch,
+    select: { id: true },
+  });
+  let ended = 0;
+  for (const job of jobs) {
+    try {
+      if ((await prisma.computerJobFault.count({ where: { jobId: job.id, ...refusal } })) < POOL_REFUSALS_BEFORE_STOP) continue;
+      if (await hadAuthorizedCall(prisma, job.id)) continue;
+      if (await endForRefusal(job.id, { reason: 'pool', words: POOL_BUSY_WORDS }, now)) ended += 1;
+    } catch (error) {
+      console.error('[Computer] Could not end a job whose cutoff was decided:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+  return ended;
 }
 
 /** The lock a cutoff for our own capacity and an authorization that may be deciding at the same moment take one after the other (exported for the tests). */
@@ -177,13 +223,15 @@ async function holdsItsRoom(jobId: string, callId: string, personId: string, now
   return !!held && held.state === 'held' && held.expiresAt > now && held.jobId === jobId && held.personKey === `person:${personId}`;
 }
 
-/** Ends the job a call was refused for (computer.ts owns how a job ends; it is loaded when asked, as it reads this file). A refusal is answered whatever this does. */
-async function endForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule' | 'pool'; words: string }, now: Date): Promise<void> {
+/** Ends the job a call was refused for (computer.ts owns how a job ends; it is loaded when asked, as it reads this file). A refusal is answered whatever this does: never throws; says whether the job was ended. */
+async function endForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule' | 'pool'; words: string }, now: Date): Promise<boolean> {
   try {
     const { stopJobForRefusal } = await import('@/lib/computer');
     await stopJobForRefusal(jobId, why, now);
+    return true;
   } catch (error) {
     console.error('[Computer] Could not end a job whose model call was refused:', error instanceof Error ? error.message : 'unknown');
+    return false;
   }
 }
 
