@@ -6,7 +6,7 @@ import { getInstantLimitsStrict } from '@/lib/instant/state';
 import { INSTANT_LIMITS_RECOMMENDED, type InstantLimits } from '@/lib/instant/values';
 import { monthOf } from '@/lib/meter-values';
 import { callRoomKey, giveBackModelCalls } from '@/lib/computer-calls';
-import { OURS_REASONS, RELAY_REACHED, RELAY_UNREACHABLE, isInferredUnreachableRow, isRunnerNoRelayRow, readFaultRows, recordRelayUnreachable, relayReachedInRun, rowsOfRun, type FaultRow } from '@/lib/computer-faults';
+import { OURS_REASONS, RELAY_REACHED, lockRelayReach, RELAY_UNREACHABLE, isInferredUnreachableRow, isRunnerNoRelayRow, readFaultRows, recordRelayUnreachable, relayReachedInRun, rowsOfRun, type FaultRow } from '@/lib/computer-faults';
 import { incidentFaultMatch } from '@/lib/computer-route-pause';
 import { retryWaitMs } from '@/lib/computer-retry';
 
@@ -175,6 +175,8 @@ export async function decideRunnerFinish(
   if (!job.startedAt) return { state: 'given', basis: 'universe_fault', counted: false, reason: ours?.reason ?? 'not_started', route: ours?.route ?? null, judgedTurns };
   // A job whose computer was readied to ask for a model, and for which Orbit holds not one trace of a call (no row of any kind, no call held room or was priced), never reached the relay: no brief makes a
   // model call fail before it is asked, so this is ours (the address, the relay, the network between), kept as the confirmed fault it is so every later reading of the job finds it
+  // The arrival row's write takes the lock below too: the arrival and the trace are read as one, never with an arrival committing between the two reads
+  if (!ours) await lockRelayReach(tx, job.id);
   if (!ours && (await neverReachedRelay(tx, job.id, options.run ?? null))) {
     await recordRelayUnreachable(tx, job.id, { run: options.run ?? null, at: now, inferred: true });
     ours = { turn: null, callId: RELAY_UNREACHABLE, kind: 'fault', reason: RELAY_UNREACHABLE, source: 'universe-ai', route: null, cls: 'ours' };
@@ -236,8 +238,9 @@ export async function writeDecision(
     reason: verdict.reason,
     route: verdict.route,
     judgedTurns: [...(turns ?? [])],
-    // The run is kept whenever the runner named turns, and for a hint other than ours even with none: the last turn with a row is looked for again, in that run, when a row arrives late
-    judgedRun: (turns && turns.length > 0) || (hint !== null && hint !== 'ours') ? (run ?? null) : null,
+    // The run the runner reported is ALWAYS kept: where the relay's arrival is looked for again (the reachability of that run, never another's). Which fault rows are read is a separate matter and does not
+    // follow it: a finish that named no turns reads the rows of every run (readFaultRows with no turns takes no run), and only a hint other than ours or named turns look at one run's rows
+    judgedRun: run ?? null,
     nextAttemptAt: verdict.state === 'pending' ? new Date(now.getTime() + retryWaitMs(0)) : null,
   };
   await tx.computerGiveBackDecision.upsert({ where: { jobId: job.id }, create: { jobId: job.id, personId: job.personId, ...data }, update: data });

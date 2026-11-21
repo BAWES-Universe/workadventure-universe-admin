@@ -124,6 +124,24 @@ export async function recordFaults(botId: string, jobId: string, rows: FaultInpu
       }
       continue;
     }
+    // An arrival row (the relay says this run reached it) is written under the lock the finish's inference takes, in its own transaction, so the two never interleave. Written with skipDuplicates (a duplicate
+    // inside a transaction would abort it): a row already kept is then treated as below
+    if (isArrivalRow(data)) {
+      const made = await prisma.$transaction(async (tx) => {
+        await lockRelayReach(tx, jobId);
+        return tx.computerJobFault.createMany({ data: [data], skipDuplicates: true });
+      });
+      if (made.count > 0) {
+        stored++;
+        continue;
+      }
+      const kept = await prisma.computerJobFault.findUnique({ where: { jobId_callId: { jobId, callId: data.callId } }, select: { run: true, turn: true } });
+      if (kept && (kept.run !== data.run || kept.turn !== data.turn)) {
+        conflicts++;
+        console.error('[Computer] A fault row could not be kept: its call id is already used by another run or turn of the job. Job', jobId);
+      }
+      continue;
+    }
     try {
       await prisma.computerJobFault.create({ data });
       stored++;
@@ -223,6 +241,13 @@ export const rowsOfRun = (run: string | null | undefined): Prisma.ComputerJobFau
 export async function relayReachedInRun(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, run: string | null | undefined): Promise<boolean> {
   return (await db.computerJobFault.count({ where: { jobId, kind: 'answered', reason: RELAY_REACHED, source: 'universe-ai', ...rowsOfRun(run) } })) > 0;
 }
+
+/**
+ * The lock an arrival row's write and the finish's inference that the relay was never reached both take (per job, held to the end of the transaction), so one never lands between the other's two reads:
+ * the finish reads the arrival, then the trace of calls, and an arrival that committed between those two reads would be missed and an outage given back for a run that reached the relay. Taken before any
+ * read it protects, never while holding the person's lock the other way round (the arrival write takes only this one).
+ */
+export const lockRelayReach = (tx: Pick<Prisma.TransactionClient, '$executeRaw'>, jobId: string) => tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`computer:relay-reach:${jobId}`}))`;
 
 export interface FaultRow {
   turn: number | null;

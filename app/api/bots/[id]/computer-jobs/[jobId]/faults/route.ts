@@ -49,7 +49,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     rejected = read.flatMap((one) => {
       if (one.parsed.success) return [];
       const callId = typeof (one.row as { callId?: unknown } | null)?.callId === 'string' && ((one.row as { callId: string }).callId.length >= 1 && (one.row as { callId: string }).callId.length <= 120) ? (one.row as { callId: string }).callId : null;
-      return [{ callId, why: [...new Set(one.parsed.error.issues.map((issue) => issue.path.join('.') || 'answered'))].join(',').slice(0, 120) }];
+      return [{ callId, why: [...new Set(one.parsed.error.issues.map((issue) => issue.path.join('.') || (issue.code === 'custom' ? 'answered' : 'row')))].join(',').slice(0, 120) }];
     });
   } catch {
     return NextResponse.json({ error: 'Invalid request' }, { status: 400 });

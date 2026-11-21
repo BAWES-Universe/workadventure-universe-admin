@@ -633,7 +633,10 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
   // What the person pays net of anything given back, said once it is settled: never while a refund is pending (their credit is not back yet)
   const spent = header.refund.pendingMicros > 0 ? null : spentOf(header.state, header.chargedMicros, lines);
   const appCharges = header.job === null ? [] : header.actions.filter((action) => action.outcome === 'worked' && !header.letGoRuns.has(action.run)).map((action) => ({ label: action.label, micros: takenForRun(events, action.run), ...(settlingForRun(events, action.run) ? { settling: true } : {}) }));
-  const lateDelivered = header.actions.filter((action) => action.outcome === 'worked' && header.letGoRuns.has(action.run)).map((action) => action.label);
+  const lateActions = header.actions.filter((action) => action.outcome === 'worked' && header.letGoRuns.has(action.run));
+  const lateDelivered = lateActions.map((action) => action.label);
+  // Which of them still have their hold on: each App says its own
+  const lateHeld = lateActions.filter((action) => header.heldRuns.has(action.run)).map((action) => action.label);
   const facts: NoteFacts = {
     ...(header.job === null ? {} : { job: header.job, ...(computerMicros === undefined ? {} : { computerMicros }) }),
     holdPending,
@@ -644,7 +647,7 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
     ...(header.job === 'returned' && header.unreachable ? { unreachable: true } : {}),
     ...(header.job === 'returned' && header.reached ? { reached: true } : {}),
     // An App let go unconfirmed that the provider's log confirmed later: delivered, with its hold released (or on its way back) and nothing charged, said in its own words beside a computer given back
-    ...(lateDelivered.length > 0 ? { deliveredAfterRelease: lateDelivered } : {}),
+    ...(lateDelivered.length > 0 ? { deliveredAfterRelease: lateDelivered, deliveredHeld: lateHeld } : {}),
     ...(header.stoppedBy === null ? {} : { stoppedBy: header.stoppedBy }),
     ...(appCharges.length > 0 ? { appCharges } : {}),
     ...(spent !== null ? { netMicros: spent } : {}),

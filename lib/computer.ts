@@ -1116,8 +1116,8 @@ export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: 
     // under any hint, whichever arrives first, the rows or the finish (a row that comes after is looked at again: afterLateEvidence). Hint `ours` is judged as before; the agent's own, or
     // nothing, reads the turns the runner named (or the last turn with a row) and gives goodwill only for an unresolved row. A run is never made free by ending it "failed" with nothing recorded
     const ours = outcome === 'failed' && cause === 'ours';
-    const named = !!turns && turns.length > 0;
-    const runner = outcome !== 'failed' ? null : { turns: turns ?? null, run: named || !ours ? (run ?? null) : null, hint: ours ? ('ours' as const) : cause === 'agent' ? ('agent' as const) : ('none' as const) };
+    // The run the runner reported is carried whatever else it named: it is where the relay's arrival is looked for (never another run's). Which fault rows are read does not follow it (no turn named: every row of the job)
+    const runner = outcome !== 'failed' ? null : { turns: turns ?? null, run: run ?? null, hint: ours ? ('ours' as const) : cause === 'agent' ? ('agent' as const) : ('none' as const) };
     await endJob(jobId, outcome, ours ? 'error' : null, now, true, undefined, true, runner);
   }
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });

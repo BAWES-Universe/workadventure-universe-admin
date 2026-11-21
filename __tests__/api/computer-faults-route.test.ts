@@ -118,6 +118,11 @@ describe('POST /api/bots/:id/computer-jobs/:jobId/faults', () => {
     const odd = await call({ faults: [{ ...good, callId: 42 }, { ...good, callId: 'x'.repeat(121) }, 'not a row', null, good]});
     expect(await odd.json()).toMatchObject({ stored: 1, rejectedCount: 4, rejected: [{ callId: null }, { callId: null }, { callId: null }, { callId: null }] });
     expect(warned).toHaveBeenCalledTimes(1);
+    // A row that is no object at all is named as a ROW (never as an answered row: that name is only for the arrival refinement), and the answered one keeps its own name
+    warned.mockClear();
+    const shapes = await call({ faults: [null, 'text', 7, { ...good, callId: 'a9', kind: 'answered', reason: 'provider_5xx' }, good] });
+    expect((await shapes.json()).rejected).toEqual([{ callId: null, why: 'row' }, { callId: null, why: 'row' }, { callId: null, why: 'row' }, { callId: 'a9', why: 'answered' }]);
+    expect(warned).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ extra: { jobId: 'job-1', count: 4, paths: ['row', 'answered'] } }));
     // A clean batch warns about nothing and names nothing
     warned.mockClear();
     const clean = await call({ faults: [good] });

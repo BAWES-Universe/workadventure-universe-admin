@@ -1232,6 +1232,26 @@ run('credit for computers, on the real books', () => {
       expect(gone.id).toBeTruthy();
     });
 
+    it('CodeRabbit: two Apps delivered after the log confirmed them say EACH hold: one released, one still being released, never one for both', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      const letGoRun = (toolkit: string, customerState: string) =>
+        prisma.instantRun.create({
+          data: { runKey: `k-${randomUUID()}`, botId: sara.brickId, personId: sara.id, taskKey: jobId, toolSlug: `${toolkit.toUpperCase()}_SEND`, toolkit, argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v', topMicros: BigInt(10_000), holdMicros: BigInt(10_000), state: 'failed', reason: 'unclear', customerState, customerMicros: BigInt(0), detail: { noLog: true, releasedUnconfirmed: true, lateEvidence: { status: 'success' } }, providerUserId: `u-${randomUUID().slice(0, 6)}` } as never,
+        });
+      await letGoRun('gmail', 'released');
+      await letGoRun('slack', 'held');
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Two Apps', category: 'computer' }, NOW);
+      await failedOnOurSide(jobId, at(10));
+      await closeReceipt({ botId: sara.brickId, taskKey: jobId, personId: sara.id, state: 'done' }, at(11));
+      await settleCheckingReceipts(50, at(600));
+      const [item] = await itemFor(sara.id, 'Two Apps');
+      expect(item.outcomeNote).toContain('Gmail and Slack were delivered. Gmail’s hold was released and Slack’s hold is being released.');
+      expect(item.outcomeNote).not.toContain('Their holds');
+    });
+
     it('observation 3: the wallet cannot post the refund: "$0.05 refund pending" until it does; then the SAME receipt says refunded and the credit came back once', async () => {
       const sara = await running();
       const { jobId, token } = await job(sara);

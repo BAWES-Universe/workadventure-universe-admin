@@ -94,6 +94,11 @@ describe('the words for how a task came to end (mock M2)', () => {
       expect(outcomeNote('partial', [gmail], { ...late, holdPending: true })).toBe('Gmail was delivered. Its hold is being released. The computer part didn’t finish and its cost was returned.');
       // Two Apps
       expect(outcomeNote('partial', [gmail, gmail], { ...late, deliveredAfterRelease: ['gmail', 'slack'] })).toBe('Gmail and Slack were delivered. Their holds were released. The computer part didn’t finish and its cost was returned.');
+      // Each App says its OWN hold (CodeRabbit): one released and one still being released are never said as both
+      expect(outcomeNote('partial', [gmail, gmail], { ...late, deliveredAfterRelease: ['gmail', 'slack'], deliveredHeld: ['slack'], holdPending: true })).toBe('Gmail and Slack were delivered. Gmail’s hold was released and Slack’s hold is being released. The computer part didn’t finish and its cost was returned.');
+      // A hold still on for something else on the receipt does not say a late App's hold is on, when it was released
+      expect(outcomeNote('partial', [gmail], { ...late, deliveredHeld: [], holdPending: true })).toBe('Gmail was delivered. Its hold was released. The computer part didn’t finish and its cost was returned.');
+      expect(outcomeNote('partial', [gmail, gmail], { ...late, deliveredAfterRelease: ['gmail', 'slack'], deliveredHeld: ['gmail', 'slack'], holdPending: true })).toBe('Gmail and Slack were delivered. Their holds are being released. The computer part didn’t finish and its cost was returned.');
       // A relay that could not be reached keeps its own lead
       expect(outcomeNote('partial', [gmail], { ...late, unreachable: true })).toContain('We couldn’t reach our own service');
       // Without a late delivery the words are the ones they were

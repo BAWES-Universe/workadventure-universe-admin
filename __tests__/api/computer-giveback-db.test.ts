@@ -23,7 +23,7 @@ import { saveInstantLimits } from '@/lib/instant/state';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { computerView, finishJob, giveComputer, planEffect, renewJob, settleEffect, startJob, sweepComputers } from '@/lib/computer';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
-import { readFaultRows, recordFaults, recordRelayUnreachable, type FaultInput } from '@/lib/computer-faults';
+import { lockRelayReach, readFaultRows, recordFaults, recordRelayUnreachable, type FaultInput } from '@/lib/computer-faults';
 import { afterArrival, afterLateEvidence, decidePendingForPurge, decideRunnerFinish, lockPerson, resolveDecision, sweepGiveBackDecisions, sweepLateEvidence } from '@/lib/computer-giveback';
 import { correctRouteTogether, giveBackOverview, giveBackReadiness, routeIsPaused } from '@/lib/computer-fault-ops';
 import { mintJobToken, revokeJobTokens } from '@/lib/computer-token';
@@ -36,6 +36,8 @@ const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
 const tag = randomUUID().slice(0, 8);
 const NOW = new Date();
+/** The 15th, noon UTC, of last month: jobs made from it (a few hours of them at most) never cross a UTC month, whenever the suite runs. */
+const MIDMONTH = new Date(Date.UTC(NOW.getUTCFullYear(), NOW.getUTCMonth() - 1, 15, 12));
 const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
 const people: string[] = [];
 let made = 0;
@@ -1547,7 +1549,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
     const own500 = (turn = 1) => fault(turn, 'provider_5xx', { source: 'own-key', run: 'r1' });
     const agentEnding = { outcome: 'failed' as const, cause: 'agent' as const, turns: [1], run: 'r1' };
     /** The person's bound is used up for the month by an earlier job that was given back as goodwill (the same earlier job for both people of a comparison). */
-    const usedUp = async (p: { id: string; brickId: string }, origin: Date = NOW) => {
+    const usedUp = async (p: { id: string; brickId: string }, origin: Date = MIDMONTH) => {
       const earlier = await job(p, { outcome: 'failed', cause: 'agent', turns: [1], run: 'r0' }, withFaults(p, [fault(1, 'provider_5xx', { run: 'r0' })]), origin);
       expect(await decisionOf(earlier.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
     };
@@ -1559,6 +1561,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
     };
     /** The same job twice for two people: once with the row on time, once with the row after the finish (told to Orbit the way the route does: the late look). */
     const bothOrders = async (before: (p: { id: string; brickId: string }) => Promise<void>, step?: (jobId: string) => Promise<void>) => {
+      // One fixed mid-month origin for every job of the comparison (a bound is per calendar month: a run across midnight of the month's last day would split them)
       const early = await person('early');
       const late = await person('late');
       await before(early);
@@ -1566,10 +1569,10 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       const onTime = await job(early, agentEnding, async (id) => {
         await step?.(id);
         await recordFaults(early.brickId, id, [own500()]);
-      });
+      }, MIDMONTH);
       const after = await job(late, agentEnding, async (id) => {
         await step?.(id);
-      });
+      }, MIDMONTH);
       // No evidence yet: the agent ended on its own
       expect(await decisionOf(after.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
       await recordFaults(late.brickId, after.id, [own500()]);
@@ -1648,25 +1651,37 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       // The look took the person's give-back lock: it waits for another holder of it
       const waiting = await job(fresh, agentEnding, undefined, october);
       await recordFaults(fresh.brickId, waiting.id, [own500()]);
-      let released: () => void = () => undefined;
-      const hold = new Promise<void>((resolve) => (released = resolve));
-      let held: () => void = () => undefined;
-      const inside = new Promise<void>((resolve) => (held = resolve));
-      const holder = prisma.$transaction(async (tx) => {
-        await lockPerson(tx, fresh.id);
-        held();
-        await hold;
-      });
-      await inside;
       let finished = false;
-      const look = afterLateEvidence(waiting.id).then(() => {
-        finished = true;
-      });
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      expect(finished).toBe(false);
-      released();
-      await holder;
+      let look: Promise<void> = Promise.resolve();
+      let fixtureError: { error: unknown } | null = null;
+      const fixture = async (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]) => {
+        await lockPerson(tx, fresh.id);
+        // The lock this fixture holds, read from its own granted row in the lock table, and the fixture's own backend
+        const mine = (await tx.$queryRaw<Array<{ pid: number; classid: number; objid: number; objsubid: number }>>`
+          SELECT pg_backend_pid() AS pid, classid::int AS classid, objid::int AS objid, objsubid::int AS objsubid FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid()`)[0];
+        look = afterLateEvidence(waiting.id).finally(() => {
+          finished = true;
+        });
+        look.catch(() => undefined);
+        // A backend OTHER than the fixture's is waiting for that very lock (a barrier on the database's own lock table, no timer), never past the look finishing (it would have gone round the lock)
+        const waitingBackends = async () =>
+          (await prisma.$queryRaw<Array<{ n: number }>>`
+            SELECT COUNT(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid::int = ${mine.classid} AND objid::int = ${mine.objid} AND objsubid::int = ${mine.objsubid} AND pid <> ${mine.pid}`)[0].n;
+        const deadline = Date.now() + 5_000;
+        while (!finished && (await waitingBackends()) === 0) {
+          if (Date.now() > deadline) throw new Error('the late look never waited for the person’s lock');
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        expect(finished).toBe(false);
+      };
+      try {
+        await prisma.$transaction(fixture);
+      } catch (error) {
+        fixtureError = { error };
+      }
+      // The lock is released (the fixture's transaction is over, committed or rolled back): the look can finish, and it is always awaited, so none is left dangling whatever happened above
       await look;
+      if (fixtureError) throw (fixtureError as { error: unknown }).error;
       expect(finished).toBe(true);
     });
 
@@ -1956,6 +1971,116 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(await decisionOf(forged.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
       });
 
+      it('CodeRabbit A: a finish the runner called ours, with a run and no turn, KEEPS the run it reported: a later arrival of another run never re-labels it, one of its own run does (the all-runs reading of the rows is a separate matter)', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
+        const sara = await person('sara');
+        for (const way of ['route', 'sweep'] as const) {
+          const outage = await job(sara, { outcome: 'failed', cause: 'ours', run: 'r2' }, readied);
+          expect(await decisionOf(outage.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable', causeHint: 'ours', judgedTurns: [], judgedRun: 'r2' });
+          const look = () => (way === 'route' ? afterLateEvidence(outage.id) : sweepLateEvidence(new Date()).then(() => undefined));
+          // r1 reached the relay: that says nothing of r2
+          await recordFaults(sara.brickId, outage.id, [arrival('r1', 1)]);
+          await afterArrival(outage.id);
+          await look();
+          expect((await decisionOf(outage.id))?.reason).toBe('relay_unreachable');
+          // r2 reached it: only the reason moves
+          await recordFaults(sara.brickId, outage.id, [arrival('r2', 1)]);
+          await look();
+          await afterArrival(outage.id);
+          expect(await decisionOf(outage.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_reached' });
+          expect(await givenBack(outage.id)).toBe(true);
+        }
+        // The rows are still read on every run when no turn was named: a fault of ours of ANOTHER run is part of what a finish that named no turn judges
+        const mixed = await job(sara, { outcome: 'failed', cause: 'ours', run: 'r2' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [fault(1, 'provider_key_ours', { run: 'r1' })]);
+        });
+        expect(await decisionOf(mixed.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'provider_key_ours', judgedRun: 'r2' });
+      });
+
+      it('CodeRabbit B: the finish’s inference that the relay was never reached and the arrival row’s write are serialized by one lock: an arrival that commits while the finish waits is SEEN, and a run with no arrival still gets its give-back', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
+        const sara = await person('sara');
+        /** Holds the arrival writers' lock in a transaction, starts the finish of a ready job, proves the finish is WAITING for that lock (a barrier on the lock table, no timer), then runs `inside` and commits. */
+        const finishAgainstLock = async (inside: (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0], jobId: string) => Promise<void>) => {
+          const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, minutes(clock));
+          if (!started.ok) throw new Error('the job did not start');
+          const jobId = started.job.id;
+          await readied(jobId);
+          let finish: Promise<unknown> = Promise.resolve();
+          let finished = false;
+          let fixtureError: { error: unknown } | null = null;
+          try {
+            await prisma.$transaction(async (tx) => {
+              await lockRelayReach(tx, jobId);
+              const mine = (await tx.$queryRaw<Array<{ pid: number; classid: number; objid: number; objsubid: number }>>`
+                SELECT pg_backend_pid() AS pid, classid::int AS classid, objid::int AS objid, objsubid::int AS objsubid FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid()`)[0];
+              finish = finishJob(jobId, 'failed', minutes(clock + 5), null, 'agent', undefined, 'r1').finally(() => {
+                finished = true;
+              });
+              finish.catch(() => undefined);
+              const waiting = async () =>
+                (await prisma.$queryRaw<Array<{ n: number }>>`
+                  SELECT COUNT(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid::int = ${mine.classid} AND objid::int = ${mine.objid} AND objsubid::int = ${mine.objsubid} AND pid <> ${mine.pid}`)[0].n;
+              const deadline = Date.now() + 5_000;
+              while (!finished && (await waiting()) === 0) {
+                if (Date.now() > deadline) throw new Error('the finish never waited for the arrival writers’ lock');
+                await new Promise((resolve) => setImmediate(resolve));
+              }
+              expect(finished).toBe(false);
+              await inside(tx, jobId);
+            });
+          } catch (error) {
+            fixtureError = { error };
+          }
+          await finish;
+          if (fixtureError) throw (fixtureError as { error: unknown }).error;
+          clock += 10;
+          return jobId;
+        };
+        // An arrival of run r1 commits while the finish of r1 is waiting: it is seen, and no outage is inferred (judged like any failed job: the agent ended on its own)
+        const arrived = await finishAgainstLock(async (tx, jobId) => {
+          await tx.computerJobFault.create({ data: { jobId, turn: 1, run: 'r1', callId: 'arrival_r1_1', kind: 'answered', reason: 'relay_reached', source: 'universe-ai', route: null, providerStatus: null, at: new Date() } });
+        });
+        expect(await decisionOf(arrived)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+        expect(await givenBack(arrived)).toBe(false);
+        expect(await inferredRows(arrived)).toEqual([]);
+        // No arrival ever comes: the genuine outage still gets its give-back, once the lock is free
+        const outage = await finishAgainstLock(async () => undefined);
+        expect(await decisionOf(outage)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+        expect(await givenBack(outage)).toBe(true);
+        // And the arrival's own write (recordFaults) takes that lock: it waits for a holder of it
+        const sample = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, readied);
+        let wrote: Promise<unknown> = Promise.resolve();
+        let wroteDone = false;
+        let writeError: { error: unknown } | null = null;
+        try {
+          await prisma.$transaction(async (tx) => {
+            await lockRelayReach(tx, sample.id);
+            const mine = (await tx.$queryRaw<Array<{ pid: number; classid: number; objid: number; objsubid: number }>>`
+              SELECT pg_backend_pid() AS pid, classid::int AS classid, objid::int AS objid, objsubid::int AS objsubid FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid()`)[0];
+            wrote = recordFaults(sara.brickId, sample.id, [arrival('r1', 1)]).finally(() => {
+              wroteDone = true;
+            });
+            wrote.catch(() => undefined);
+            const deadline = Date.now() + 5_000;
+            for (;;) {
+              const n = (await prisma.$queryRaw<Array<{ n: number }>>`
+                SELECT COUNT(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid::int = ${mine.classid} AND objid::int = ${mine.objid} AND objsubid::int = ${mine.objsubid} AND pid <> ${mine.pid}`)[0].n;
+              if (wroteDone || n > 0) break;
+              if (Date.now() > deadline) throw new Error('the arrival write never waited for the lock');
+              await new Promise((resolve) => setImmediate(resolve));
+            }
+            expect(wroteDone).toBe(false);
+          });
+        } catch (error) {
+          writeError = { error };
+        }
+        await wrote;
+        if (writeError) throw (writeError as { error: unknown }).error;
+        expect(await prisma.computerJobFault.count({ where: { jobId: sample.id, reason: 'relay_reached' } })).toBe(1);
+      });
+
       it('the runner’s own marker, and Orbit’s own observation at prepare, are positive evidence: an arrival of the same run never overrides them', async () => {
         await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
         const sara = await person('sara');
@@ -2033,12 +2158,13 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         const pending = await job(sara, { outcome: 'failed', cause: 'agent', turns: [1], run: 'r1' }, async (jobId) => {
           await readied(jobId);
           await recordFaults(sara.brickId, jobId, [fault(1, 'stream_cut', { run: 'r1' })]);
-          await prisma.computerEffect.create({ data: { jobId, kind: 'email', key: `k-${jobId}`, state: 'planned' } as never }).catch(() => undefined);
+          // An outside effect planned and not settled: the decision cannot be made yet (the fixture is made the way the job makes it, and must have been made)
+          expect((await planEffect(jobId, { key: `k-${jobId}`.slice(0, 40), kind: 'send' })).ok).toBe(true);
         });
-        const state = (await decisionOf(pending.id))?.state;
+        expect(await decisionOf(pending.id)).toMatchObject({ state: 'pending', basis: 'effect_unresolved' });
         await recordFaults(sara.brickId, pending.id, [arrival('r1', 2)]);
         await afterArrival(pending.id);
-        expect((await decisionOf(pending.id))?.state).toBe(state);
+        expect(await decisionOf(pending.id)).toMatchObject({ state: 'pending', basis: 'effect_unresolved' });
       });
 
       it('afterArrival (what the route calls for a batch of ONLY arrival rows) re-labels an inferred relay_unreachable give-back at once with the wallet unchanged, and changes nothing on Orbit’s own prepare observation', async () => {
@@ -2115,6 +2241,8 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         // The words: the approved sentence, never the outage
         expect((await item(sara.id, late.id))?.outcomeNote).toBe(REACHED_WORDS);
         const told = (await reportsToTell(50, minutes(60 * 24))).filter((report) => report.kind === 'failed' && report.jobId === late.id);
+        // The failed report for THIS job exists (an empty list would pass `every` on its own), and it never says the outage
+        expect(told).toHaveLength(1);
         expect(told.every((report) => report.why !== UNREACHABLE_WORDS)).toBe(true);
         // Again: nothing more happens (no second give-back, no count)
         await afterLateEvidence(late.id);
@@ -2358,22 +2486,24 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       await limitsAre(LAUNCH);
       const sara = await person('sara');
       const route = 'universe-ai/model-both-orders';
-      const window = { route, from: minutes(-60), to: minutes(600) };
+      // One fixed mid-month origin: the bound is per calendar month, and three jobs and their rows made across midnight of the month's last day would not share one
+      const window = { route, from: new Date(MIDMONTH.getTime() - 60 * 60_000), to: new Date(MIDMONTH.getTime() + 600 * 60_000) };
+      const at = MIDMONTH;
       // The runner names no turn and says the agent ended: the last turn with a row is judged (run b). Row BEFORE the finish
-      const before = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' }, withFaults(sara, [fault(2, 'provider_5xx', { route, run: 'runb' })]));
+      const before = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' }, withFaults(sara, [fault(2, 'provider_5xx', { route, run: 'runb', at })]), MIDMONTH);
       // The same row AFTER the finish (the relay writes best effort)
-      const after = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' });
+      const after = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' }, undefined, MIDMONTH);
       expect(await decisionOf(after.id)).toMatchObject({ state: 'refused', basis: 'agent_ended', judgedTurns: [] });
-      await recordFaults(sara.brickId, after.id, [fault(2, 'provider_5xx', { route, run: 'runb' })]);
+      await recordFaults(sara.brickId, after.id, [fault(2, 'provider_5xx', { route, run: 'runb', at })]);
       await afterLateEvidence(after.id);
       // A provider failure is unresolved, never ours alone: the one found on time is bounded goodwill, and the late one is judged the same way. Both decisions stand on turn 2 of run b
       expect(await decisionOf(before.id)).toMatchObject({ state: 'given', basis: 'goodwill', judgedRun: 'runb', judgedTurns: [2] });
       expect(await decisionOf(after.id)).toMatchObject({ state: 'given', basis: 'goodwill', judgedRun: 'runb', judgedTurns: [2] });
       // A turn nobody judged: turn 2 (a failure on another route) was the last one found, and a provider failure of THIS route arrives later still, on turn 3
-      const unjudged = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' });
-      await recordFaults(sara.brickId, unjudged.id, [fault(2, 'provider_5xx', { route: 'universe-ai/elsewhere', run: 'runb' })]);
+      const unjudged = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runb' }, undefined, MIDMONTH);
+      await recordFaults(sara.brickId, unjudged.id, [fault(2, 'provider_5xx', { route: 'universe-ai/elsewhere', run: 'runb', at })]);
       await afterLateEvidence(unjudged.id);
-      await recordFaults(sara.brickId, unjudged.id, [fault(3, 'provider_5xx', { route, run: 'runb' })]);
+      await recordFaults(sara.brickId, unjudged.id, [fault(3, 'provider_5xx', { route, run: 'runb', at })]);
       await afterLateEvidence(unjudged.id);
       // Its judged turn is 2, on ANOTHER route: that is what it was judged on (the person's bound is used by the two above: refused for the cap); the later row of turn 3 is for a turn nobody judged and changes nothing
       expect(await decisionOf(unjudged.id)).toMatchObject({ state: 'refused', basis: 'cap', judgedTurns: [2] });
