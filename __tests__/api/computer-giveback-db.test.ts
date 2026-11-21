@@ -1998,6 +1998,64 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(await decisionOf(mixed.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'provider_key_ours', judgedRun: 'r2' });
       });
 
+      it('Opus on A: a finish scoped to r2 is never kept from the inference by an arrival of r1 (at the finish and on a later look); r2’s own arrival stops it; a finish that knows NO run counts only arrivals that name no run', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
+        const sara = await person('sara');
+        const moneyOf = (jobId: string) => prisma.meterEvent.findMany({ where: { jobId }, orderBy: { eventId: 'asc' }, select: { eventId: true, personKey: true, costMicros: true } });
+        // hint ours, no turns, run r2, only an r1 arrival: the outage is inferred and given back
+        const onlyR1 = await job(sara, { outcome: 'failed', cause: 'ours', run: 'r2' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [arrival('r1', 1)]);
+        });
+        expect(await decisionOf(onlyR1.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable', judgedRun: 'r2' });
+        expect(await inferredRows(onlyR1.id)).toMatchObject([{ kind: 'fault', run: 'r2' }]);
+        const money = await moneyOf(onlyR1.id);
+        // A later look (route and sweep) keeps it exactly as it is
+        await afterLateEvidence(onlyR1.id);
+        await sweepLateEvidence(new Date());
+        expect(await decisionOf(onlyR1.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+        expect(await moneyOf(onlyR1.id)).toEqual(money);
+        // the same finish with an arrival of r2: never inferred (no inferred row, no outage reason)
+        const ownArrival = await job(sara, { outcome: 'failed', cause: 'ours', run: 'r2' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [arrival('r2', 1)]);
+        });
+        expect((await decisionOf(ownArrival.id))?.reason).not.toBe('relay_unreachable');
+        expect(await inferredRows(ownArrival.id)).toEqual([]);
+        // No run known at all (an older runner): another run's arrival never counts (what is not known favours the person); an arrival that names no run does
+        const unknownR1 = await job(sara, { outcome: 'failed', cause: 'ours' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [arrival('r1', 1)]);
+        });
+        expect(await decisionOf(unknownR1.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable', judgedRun: null });
+        const unknownNone = await job(sara, { outcome: 'failed', cause: 'ours' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [arrival(null, 1)]);
+        });
+        expect((await decisionOf(unknownNone.id))?.reason).not.toBe('relay_unreachable');
+        expect(await inferredRows(unknownNone.id)).toEqual([]);
+        // The same on a later look: r1's arrival never re-labels the decision of a finish that knew no run
+        await recordFaults(sara.brickId, unknownR1.id, [arrival('r1', 2)]);
+        await afterArrival(unknownR1.id);
+        expect((await decisionOf(unknownR1.id))?.reason).toBe('relay_unreachable');
+      });
+
+      it('Opus on B: an arrival that was stored just before the decision committed (inside the margin), after Orbit inferred the outage, is found by the sweep: the reason becomes relay_reached and the wallet does not move', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
+        const sara = await person('sara');
+        const outage = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, readied);
+        expect(await decisionOf(outage.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+        const money = await prisma.meterEvent.findMany({ where: { jobId: outage.id }, orderBy: { eventId: 'asc' }, select: { eventId: true, personKey: true, costMicros: true } });
+        const decided = (await decisionOf(outage.id))?.updatedAt as Date;
+        // The write began before the decision committed and finished just after: its row is stamped one minute BEFORE the decision's last change, and no route ever looked at it
+        await prisma.computerJobFault.create({ data: { jobId: outage.id, turn: 1, run: 'r1', callId: 'arrival_r1_1', kind: 'answered', reason: 'relay_reached', source: 'universe-ai', route: null, providerStatus: null, at: decided, createdAt: new Date(decided.getTime() - 60_000) } });
+        expect((await decisionOf(outage.id))?.reason).toBe('relay_unreachable');
+        expect((await sweepLateEvidence(new Date())).looked).toBeGreaterThanOrEqual(1);
+        expect(await decisionOf(outage.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_reached' });
+        expect(await prisma.meterEvent.findMany({ where: { jobId: outage.id }, orderBy: { eventId: 'asc' }, select: { eventId: true, personKey: true, costMicros: true } })).toEqual(money);
+        expect(await givenBack(outage.id)).toBe(true);
+      });
+
       it('CodeRabbit B: the finish’s inference that the relay was never reached and the arrival row’s write are serialized by one lock: an arrival that commits while the finish waits is SEEN, and a run with no arrival still gets its give-back', async () => {
         await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
         const sara = await person('sara');

@@ -234,8 +234,11 @@ export async function recordRelayUnreachable(db: Pick<Prisma.TransactionClient, 
 /** Whether a row (as the relay sends it, or as it is kept) is the relay's arrival row: answered / relay_reached from the relay. Such a row is invisible to every ruling about money except the one question it answers (`neverReachedRelay`) and the re-labelling of a reason. */
 export const isArrivalRow = (row: { kind: string; reason: string; source: string }): boolean => row.kind === 'answered' && row.reason === RELAY_REACHED && row.source === 'universe-ai';
 
-/** The rows that apply to a ruling on one run: those that name that run and those that name none (they cannot be told apart, so they count for every run). No run named: every row of the job. */
-export const rowsOfRun = (run: string | null | undefined): Prisma.ComputerJobFaultWhereInput => (run ? { OR: [{ run: null }, { run }] } : {});
+/**
+ * The rows that apply to a ruling on one run: those that name that run and those that name none (they cannot be told apart, so they count for every run). A ruling that knows NO run (an older runner
+ * named none) is scoped to the rows that name none: another run's row never counts for it (what is not known favours the person: it is never taken for a trace or an arrival of a run nobody named).
+ */
+export const rowsOfRun = (run: string | null | undefined): Prisma.ComputerJobFaultWhereInput => (run ? { OR: [{ run: null }, { run }] } : { run: null });
 
 /** Whether the relay said it was reached by this run of the job (an arrival row of the run, or one that names no run): then the run is never judged to have missed the relay for want of a row. */
 export async function relayReachedInRun(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, run: string | null | undefined): Promise<boolean> {
