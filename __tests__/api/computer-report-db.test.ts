@@ -5,9 +5,17 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest --runInBand __tests__/api/computer-report-db.test.ts
  */
 import { randomUUID } from 'node:crypto';
+import * as Sentry from '@sentry/nextjs';
+import * as words from '@/lib/task-receipt-words';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
+jest.mock('@sentry/nextjs', () => ({ ...jest.requireActual('@sentry/nextjs'), captureException: jest.fn() }));
+// The App's name is read through a mock that says what the real one says, so one test can make the follow-up fail
+jest.mock('@/lib/task-receipt-words', () => {
+  const actual = jest.requireActual('@/lib/task-receipt-words');
+  return { ...actual, appLabel: jest.fn(actual.appLabel) };
+});
 
 import { prisma } from '@/lib/db';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
@@ -409,6 +417,8 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     }
 
     beforeEach(async () => {
+      // Runs with a dated confirmation left by an earlier killed run of this suite (this database is a throwaway one) would take a size-1 slot
+      await prisma.$executeRaw`DELETE FROM "instant_runs" WHERE "detail"->'lateEvidence'->>'at' IS NOT NULL`;
       await prisma.appSetting.upsert({ where: { key: 'computer_late_report_since' }, update: { value: SINCE.toISOString() }, create: { key: 'computer_late_report_since', value: SINCE.toISOString() } });
     });
 
@@ -419,7 +429,7 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       expect((await reportsToTell(200, NOW, { accepts: ['other'] })).filter((report) => report.jobId === id)).toEqual([]);
       const [late, ...rest] = await lateMine([id]);
       expect(rest).toEqual([]);
-      expect(late).toMatchObject({ key: `computer-told:${id}:late`, kind: 'late', jobId: id, botId: who.brickId, matrixUserId: expect.stringContaining('sara-'), apps: ['Gmail'], lateApps: ['Gmail'], holdReleased: true, givenBack: true, seq: null, effects: [], files: [] });
+      expect(late).toMatchObject({ key: `computer-told:${id}:late:${LATER.getTime()}`, through: LATER.toISOString(), kind: 'late', jobId: id, botId: who.brickId, matrixUserId: expect.stringContaining('sara-'), apps: ['Gmail'], lateApps: ['Gmail'], holdReleased: true, givenBack: true, seq: null, effects: [], files: [] });
       // Told (said twice: the same), it is never offered again, and the ending's own mark is untouched
       const told = await prisma.computerJob.findUniqueOrThrow({ where: { id }, select: { endToldAt: true, lateToldAt: true } });
       expect(told.lateToldAt).toBeNull();
@@ -443,13 +453,58 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       expect(found[0].apps).toEqual(['Gmail', 'Slack']);
     });
 
-    it('ONE message per job: an App confirmed after the person was told is not announced by a second message (it stays on the receipt)', async () => {
+    it('Opus: staggered confirmations of two Apps are BOTH told, each once: the second is a new follow-up with its own key, naming only itself; a confirmation that came between the offer and the confirmation is not lost', async () => {
       const { who, id } = await lateJob();
       const [first] = await lateMine([id]);
-      expect(first.apps).toEqual(['Gmail']);
-      expect(await keepReportTold(id, 'late')).toBe(true);
-      await letGo(id, who, 'slack', { at: new Date(LATER.getTime() + 3_600_000) });
+      expect(first).toMatchObject({ apps: ['Gmail'], through: LATER.toISOString() });
+      // B is confirmed after A was offered but BEFORE the reader confirms it: the reader says back what it was told (`through`), so B is not marked told
+      const bAt = new Date(LATER.getTime() + 3_600_000);
+      await letGo(id, who, 'slack', { at: bAt });
+      expect(await keepReportTold(id, 'late', undefined, { delivered: true }, undefined, { through: new Date(first.through as string) })).toBe(true);
+      // Said twice: the same
+      expect(await keepReportTold(id, 'late', undefined, { delivered: true }, undefined, { through: new Date(first.through as string) })).toBe(true);
+      const [second, ...rest] = await lateMine([id]);
+      expect(rest).toEqual([]);
+      expect(second).toMatchObject({ apps: ['Slack'], lateApps: ['Slack'], through: bAt.toISOString(), key: `computer-told:${id}:late:${bAt.getTime()}` });
+      expect(second.key).not.toBe(first.key);
+      expect(await keepReportTold(id, 'late', undefined, { delivered: true }, undefined, { through: new Date(second.through as string) })).toBe(true);
       expect(await lateMine([id])).toEqual([]);
+      // A third, much later (day 3): its own follow-up, once
+      await letGo(id, who, 'notion', { at: new Date(LATER.getTime() + 3 * 86_400_000) });
+      expect((await lateMine([id])).map((report) => report.apps)).toEqual([['Notion']]);
+      // An older reader that confirms without saying `through` covers everything confirmed up to now (never offered twice)
+      expect(await keepReportTold(id, 'late', undefined, { delivered: true }, new Date(LATER.getTime() + 4 * 86_400_000))).toBe(true);
+      expect(await lateMine([id])).toEqual([]);
+    });
+
+    it('Opus: a malformed confirmation time on one let-go run never stops the others, nor a pending ending report; and a follow-up that cannot be read at all is isolated (Sentry told once, the ending still listed)', async () => {
+      const bad = await lateJob('sara');
+      await prisma.$executeRaw`UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateEvidence,at}', '"not a time"') WHERE "task_key" = ${bad.id}`;
+      const good = await lateJob('omar');
+      // A pending ending report of another job, listed in the same GET
+      const ending = await started(await person('lena'), 'Ending');
+      await finishJob(ending, 'done', minutes(9));
+      const listed = await reportsToTell(200, NOW, { accepts: ['late'] });
+      expect(listed.filter((report) => report.jobId === bad.id)).toEqual([]);
+      expect(listed.filter((report) => report.kind === 'late').map((report) => report.jobId)).toEqual([good.id]);
+      expect(listed.filter((report) => report.kind === 'done').map((report) => report.jobId)).toEqual([ending]);
+      // The follow-up cannot be read at all: it is left out, Sentry is told, the ending is still listed
+      const spy = (words.appLabel as jest.Mock).mockImplementation(() => {
+        throw new Error('late look broke');
+      });
+      const captured = Sentry.captureException as jest.Mock;
+      captured.mockClear();
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const alone = await reportsToTell(200, NOW, { accepts: ['late'] });
+        expect(alone.filter((report) => report.kind === 'late')).toEqual([]);
+        expect(alone.filter((report) => report.kind === 'done').map((report) => report.jobId)).toEqual([ending]);
+        expect(captured).toHaveBeenCalledTimes(1);
+        expect(captured).toHaveBeenCalledWith(expect.any(Error), expect.objectContaining({ tags: expect.objectContaining({ area: 'computer', step: 'late_reports' }) }));
+      } finally {
+        spy.mockImplementation(((jest.requireActual('@/lib/task-receipt-words') as typeof words).appLabel) as never);
+        quiet.mockRestore();
+      }
     });
 
     it('both arrival orders: confirmed before the first report was told, it waits for that report and is offered after it; confirmed after, at once', async () => {

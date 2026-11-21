@@ -15,6 +15,8 @@ const toldSchema = z.object({
   // Whether it reached the person (the default, as it always was) or can never be delivered (and why): only the first is "told"
   outcome: z.enum(['delivered', 'undeliverable']).optional(),
   why: z.enum(UNDELIVERABLE_WHY).optional(),
+  // The follow-up (`late`) only: the `through` the report carried, said back, so only what it told is marked told
+  through: z.string().datetime().optional(),
 });
 
 function guard(request: NextRequest): NextResponse | null {
@@ -58,7 +60,9 @@ export async function POST(request: NextRequest) {
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
     if (parsed.data.outcome === 'undeliverable' && !parsed.data.why) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
     const outcome = parsed.data.outcome === 'undeliverable' && parsed.data.why ? ({ delivered: false, why: parsed.data.why } as const) : ({ delivered: true } as const);
-    const kept = await keepReportTold(parsed.data.jobId, parsed.data.kind, parsed.data.seq, outcome);
+    const kept = parsed.data.through
+      ? await keepReportTold(parsed.data.jobId, parsed.data.kind, parsed.data.seq, outcome, undefined, { through: new Date(parsed.data.through) })
+      : await keepReportTold(parsed.data.jobId, parsed.data.kind, parsed.data.seq, outcome);
     return kept ? NextResponse.json({ ok: true }) : NextResponse.json({ error: 'Job not found' }, { status: 404 });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });

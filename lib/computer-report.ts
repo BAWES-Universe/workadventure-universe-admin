@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { ORBIT_SOURCE, OWN_KEY_CALL_MARK, RELAY_UNREACHABLE, hasOwnKeyCall } from '@/lib/computer-faults';
 import { UNREACHABLE_WORDS, appLabel } from '@/lib/task-receipt-words';
@@ -73,6 +74,8 @@ export interface Report {
   apps?: string[];
   /** `late` only: the same names under the name the game reads them by (kept equal to `apps`) */
   lateApps?: string[];
+  /** `late` only: the latest confirmation this report covers (ISO). The reader says it back when it confirms the report, so only what it was told is marked told. */
+  through?: string;
   /** `late` only: those Apps' holds were released and nothing was charged for them, then or later. */
   holdReleased?: true;
 }
@@ -225,6 +228,18 @@ const LATE_LOOK_DAYS = 36;
 const LATE_PAGE = 200;
 const LATE_MAX_PAGES = 25;
 
+/**
+ * The Instant runs that were let go unconfirmed (failed / unclear, hold released, nothing charged) and that the provider's own log later CONFIRMED, with the time of that confirmation as a real timestamp. The time is
+ * read only from a value shaped as the executor writes it (ISO, UTC): anything else is a row that is left out here, never an error that would stop every report (the CASE keeps the cast from running on it).
+ */
+const CONFIRMED_RUNS = (lookBack: Date): Prisma.Sql => Prisma.sql`
+  SELECT i."id", i."task_key", i."person_id", i."bot_id", i."toolkit",
+         CASE WHEN i."detail"->'lateEvidence'->>'at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$' THEN (i."detail"->'lateEvidence'->>'at')::timestamptz END AS "at"
+  FROM "instant_runs" i
+  WHERE i."state" = 'failed' AND i."reason" = 'unclear' AND i."created_at" >= ${lookBack}
+    AND i."detail"->'lateEvidence'->>'status' = 'success'
+    AND i."customer_state" = 'released' AND COALESCE(i."customer_micros", 0) = 0`;
+
 async function lateReportSince(now: Date): Promise<Date> {
   const row = await prisma.appSetting.findUnique({ where: { key: LATE_SINCE_KEY } });
   const at = typeof row?.value === 'string' ? new Date(row.value) : null;
@@ -250,26 +265,26 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
   // query, so such a job is never read at all; only what may still change is checked below
   let after: { at: Date; id: string } = { at: new Date(0), id: '' };
   for (let page = 0; page < LATE_MAX_PAGES && out.length < size; page++) {
-    const found = await prisma.$queryRaw<Array<{ job_id: string; first_at: Date; toolkits: string[] }>>(Prisma.sql`
-      SELECT i."task_key" AS job_id, MIN((i."detail"->'lateEvidence'->>'at')::timestamptz) AS first_at,
-             array_agg(i."toolkit" ORDER BY (i."detail"->'lateEvidence'->>'at')::timestamptz ASC, i."id" ASC) AS toolkits
-      FROM "instant_runs" i
-        JOIN "computer_jobs" j ON j."id" = i."task_key" AND j."person_id" = i."person_id" AND j."bot_id" = i."bot_id"
+    const found = await prisma.$queryRaw<Array<{ job_id: string; first_at: Date; last_at: Date; toolkits: string[] }>>(Prisma.sql`
+      WITH confirmed AS (${CONFIRMED_RUNS(lookBack)})
+      SELECT c."task_key" AS job_id, MIN(c."at") AS first_at, MAX(c."at") AS last_at, array_agg(c."toolkit" ORDER BY c."at" ASC, c."id" ASC) AS toolkits
+      FROM confirmed c
+        JOIN "computer_jobs" j ON j."id" = c."task_key" AND j."person_id" = c."person_id" AND j."bot_id" = c."bot_id"
         JOIN "bots" b ON b."id" = j."bot_id" AND b."deleted_at" IS NULL
-      WHERE i."state" = 'failed' AND i."reason" = 'unclear' AND i."created_at" >= ${lookBack}
-        AND i."detail"->'lateEvidence'->>'status' = 'success'
-        AND i."customer_state" = 'released' AND COALESCE(i."customer_micros", 0) = 0
-        AND (i."detail"->'lateEvidence'->>'at')::timestamptz >= ${since}
-        AND j."status" IN ('done', 'stopped', 'failed') AND j."ended_told_at" IS NOT NULL AND j."late_told_at" IS NULL AND j."end_undeliverable_at" IS NULL
+      WHERE c."at" >= ${since}
+        -- Only what was confirmed after the last time the person was told about this job (the job's own watermark: the latest confirmation its last follow-up covered)
+        AND (j."late_told_at" IS NULL OR (c."at" AT TIME ZONE 'UTC') > j."late_told_at")
+        AND j."status" IN ('done', 'stopped', 'failed') AND j."ended_told_at" IS NOT NULL AND j."end_undeliverable_at" IS NULL
         AND NOT EXISTS (SELECT 1 FROM "computer_job_faults" f WHERE f."job_id" = j."id" AND f."call_id" = ${OWN_KEY_CALL_MARK} AND f."source" = ${ORBIT_SOURCE})
-      GROUP BY i."task_key"
-      HAVING (MIN((i."detail"->'lateEvidence'->>'at')::timestamptz), i."task_key") > (${after.at}::timestamptz, ${after.id})
-      ORDER BY first_at ASC, i."task_key" ASC
+      GROUP BY c."task_key"
+      HAVING (MIN(c."at"), c."task_key") > (${after.at}::timestamptz, ${after.id})
+      ORDER BY first_at ASC, c."task_key" ASC
       LIMIT ${LATE_PAGE}`);
     if (found.length === 0) break;
     const last = found[found.length - 1];
     after = { at: last.first_at, id: last.job_id };
     const appsOf = new Map<string, string[]>();
+    const throughOf = new Map(found.map((row) => [row.job_id, row.last_at] as const));
     for (const row of found) {
       const names: string[] = [];
       for (const toolkit of row.toolkits) {
@@ -297,7 +312,7 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
       // Said as it is: whether the computer part was given back too (never decides whether the App's follow-up is told)
       const givenBack = decisionOf.get(job.id) === 'given' && (await givenBackIn(job.id, job.secondsRun));
       out.push({
-        key: `computer-told:${job.id}:late`,
+        key: `computer-told:${job.id}:late:${(throughOf.get(job.id) as Date).getTime()}`,
         jobId: job.id,
         botId: job.botId,
         matrixUserId: chatOf.get(job.personId) ?? null,
@@ -317,12 +332,24 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
         givenBack,
         apps: appsOf.get(job.id) ?? [],
         lateApps: appsOf.get(job.id) ?? [],
+        through: (throughOf.get(job.id) as Date).toISOString(),
         holdReleased: true,
       });
     }
     if (found.length < LATE_PAGE) break;
   }
   return out;
+}
+
+/** The follow-up is isolated: if it cannot be read, Sentry is told and every ending and wait still goes out (it is offered again at the next look). */
+async function lateReportsSafely(size: number, now: Date): Promise<Report[]> {
+  try {
+    return await lateReports(size, now);
+  } catch (error) {
+    Sentry.captureException(error, { tags: { area: 'computer', step: 'late_reports' } });
+    console.error('[Computer] Could not read the follow-ups to tell:', error instanceof Error ? error.message : 'unknown');
+    return [];
+  }
 }
 
 /**
@@ -377,7 +404,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date(), options:
   });
   const jobs = [...ended, ...waiting];
   // The follow-up for an App that went out after all is offered only to a reader that said it understands it (an older game never sees the kind)
-  const late = options.accepts?.includes('late') ? await lateReports(size, now) : [];
+  const late = options.accepts?.includes('late') ? await lateReportsSafely(size, now) : [];
   if (jobs.length === 0) return late;
   const people = await prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.personId))] } }, select: { id: true, matrixChatId: true } });
   const chatOf = new Map(people.map((person) => [person.id, person.matrixChatId ?? null]));
@@ -457,7 +484,7 @@ export type ReportOutcome = { delivered: true } | { delivered: false; why: Undel
  * report that has not been confirmed either way is still to be tried. The files a job made stay the person's in Files whichever it was. Safe to say
  * twice. False when there is no such job.
  */
-export async function keepReportTold(jobId: string, kind: ReportKind, seq?: number | null, outcome: ReportOutcome = { delivered: true }, now: Date = new Date()): Promise<boolean> {
+export async function keepReportTold(jobId: string, kind: ReportKind, seq?: number | null, outcome: ReportOutcome = { delivered: true }, now: Date = new Date(), options: { through?: Date } = {}): Promise<boolean> {
   if (kind === 'needs') {
     if (typeof seq !== 'number') return false;
     const found = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } });
@@ -467,10 +494,18 @@ export async function keepReportTold(jobId: string, kind: ReportKind, seq?: numb
     return true;
   }
   if (kind === 'late') {
-    const there = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } });
+    const there = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, lateToldAt: true } });
     if (!there) return false;
-    // Told, or never to be told (it can never reach them): either way it is never offered again. It never touches the ending's own marks
-    await prisma.computerJob.updateMany({ where: { id: jobId, lateToldAt: null }, data: { lateToldAt: now } });
+    // Told, or never to be told (it can never reach them): either way what it covered is never offered again. The mark is a WATERMARK, the latest confirmation the report covered (the reader says it back
+    // with `through`); a confirmation that came after is a new follow-up. A reader that does not say it (an older confirmation) covers what is confirmed up to now. It never touches the ending's own marks
+    let through = options.through ?? null;
+    if (!through) {
+      const latest = await prisma.$queryRaw<Array<{ at: Date | null }>>(Prisma.sql`
+        WITH confirmed AS (${CONFIRMED_RUNS(new Date(now.getTime() - LATE_LOOK_DAYS * 24 * 60 * 60 * 1000))})
+        SELECT MAX(c."at") AS at FROM confirmed c WHERE c."task_key" = ${jobId} AND c."at" <= ${now}`);
+      through = latest[0]?.at ?? now;
+    }
+    await prisma.$executeRaw`UPDATE "computer_jobs" SET "late_told_at" = GREATEST(COALESCE("late_told_at", ${through}), ${through}) WHERE "id" = ${jobId}`;
     return true;
   }
   const found = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } });

@@ -97,6 +97,10 @@ describe('POST /api/computer/jobs/reports', () => {
     expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'late', undefined, { delivered: true });
     expect((await POST(call({ body: { jobId: 'j', kind: 'late', outcome: 'undeliverable', why: 'no_chat' } }))).status).toBe(200);
     expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'late', undefined, { delivered: false, why: 'no_chat' });
+    // The follow-up's ack says back the `through` the report carried, so only what it told is marked told; one that is not a time is refused
+    expect((await POST(call({ body: { jobId: 'j', kind: 'late', through: '2026-11-21T10:00:00.000Z' } }))).status).toBe(200);
+    expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'late', undefined, { delivered: true }, undefined, { through: new Date('2026-11-21T10:00:00.000Z') });
+    expect((await POST(call({ body: { jobId: 'j', kind: 'late', through: 'yesterday' } }))).status).toBe(400);
     lib.keepReportTold.mockResolvedValue(false);
     expect((await POST(call({ body: { jobId: 'gone', kind: 'late' } }))).status).toBe(404);
   });
