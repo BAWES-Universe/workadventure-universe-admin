@@ -1756,6 +1756,80 @@ run('a Brick’s computer, in a real database', () => {
       }
     });
 
+    describe('the renewal of a start’s mark ends with the start', () => {
+      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      const lived = { ...startMarkTiming };
+      beforeEach(() => {
+        startMarkTiming.lifeMs = 600;
+        startMarkTiming.beatMs = 40;
+      });
+      afterEach(() => {
+        Object.assign(startMarkTiming, lived);
+        jest.restoreAllMocks();
+      });
+
+      it('when the job is saved: no renewal runs after startJob returns, and none brings the mark back', async () => {
+        const sara = await person('sbe');
+        await giveComputer(sara.brickId, sara.id);
+        const renew = jest.spyOn(prisma.computerStartMark, 'updateMany');
+        const held = holdStartAtItsReads(() => startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey: keyOf(), origin: { kind: 'dm', ref: ref('sbe') } }, NOW));
+        await held.there;
+        await sleep(300);
+        // While the start works the mark is renewed (so the check below can fail)
+        expect(renew.mock.calls.length).toBeGreaterThanOrEqual(2);
+        held.go();
+        const made = (await held.running) as { ok: boolean };
+        expect(made.ok).toBe(true);
+        const after = renew.mock.calls.length;
+        await sleep(400);
+        expect(renew.mock.calls.length).toBe(after);
+        expect(await prisma.computerStartMark.count()).toBe(0);
+      });
+
+      it('when the start throws before it saved a job: the same, no renewal after it, no mark left', async () => {
+        const sara = await person('sbf');
+        await giveComputer(sara.brickId, sara.id);
+        const renew = jest.spyOn(prisma.computerStartMark, 'updateMany');
+        let go: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => (go = resolve));
+        jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementationOnce((() => gate.then(() => Promise.reject(new Error('The database went away')))) as never);
+        const running = startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey: keyOf(), origin: { kind: 'dm', ref: ref('sbf') } }, NOW);
+        const outcome = running.then(() => 'ended', (error: Error) => error.message);
+        await sleep(300);
+        expect(renew.mock.calls.length).toBeGreaterThanOrEqual(2);
+        go();
+        expect(await outcome).toBe('The database went away');
+        const after = renew.mock.calls.length;
+        await sleep(400);
+        expect(renew.mock.calls.length).toBe(after);
+        expect(await prisma.computerStartMark.count()).toBe(0);
+        expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+      });
+
+      it('a mark is dated by the app’s clock, not the database’s: moving the app’s clock moves it', async () => {
+        const sara = await person('sbg');
+        await giveComputer(sara.brickId, sara.id);
+        const later = new Date('2031-03-04T05:06:07.000Z');
+        // Only the clock is moved: the timers and the database run as they are
+        jest.useFakeTimers({ now: later, doNotFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'nextTick', 'queueMicrotask', 'performance', 'hrtime'] });
+        // The mark is written WITH the app's time (the database's own default is never what it is dated by)
+        const create = jest.spyOn(prisma.computerStartMark, 'create');
+        const held = holdStartAtItsReads(() => startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey: keyOf(), origin: { kind: 'dm', ref: ref('sbg') } }, NOW));
+        try {
+          await held.there;
+          expect(create).toHaveBeenCalledTimes(1);
+          expect((create.mock.calls[0][0] as { data: { startedAt?: Date } }).data.startedAt?.getTime()).toBe(later.getTime());
+          const [mark] = await prisma.computerStartMark.findMany();
+          expect(mark.startedAt.getTime()).toBe(later.getTime());
+        } finally {
+          jest.useRealTimers();
+          held.go();
+          held.spy.mockRestore();
+          await Promise.allSettled([held.running]);
+        }
+      });
+    });
+
     it('an older job of the same chat and title is not the answer while a second start of it is going on: "in progress", and then the second start’s own job', async () => {
       const first = await started('sez', 'Visa form');
       const secondKey = keyOf();

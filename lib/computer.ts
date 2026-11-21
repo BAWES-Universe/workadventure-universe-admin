@@ -483,9 +483,9 @@ async function startIsGoingOn(fence: string, now: Date): Promise<boolean> {
   return (await prisma.computerStartMark.count({ where: { fence, startedAt: { gt: new Date(now.getTime() - startMarkTiming.lifeMs) } } })) > 0;
 }
 
-/** Keeps that a start has begun, BEFORE it reads anything (so the look for it never finds neither the mark nor the job while it can still make the job). Throws when it could not be kept: the start is not made without it. */
+/** Keeps that a start has begun, BEFORE it reads anything (so the look for it never finds neither the mark nor the job while it can still make the job). Throws when it could not be kept: the start is not made without it. The time is the app's clock, as the renewals and the look use (never the database's own default). */
 async function markStart(fence: string): Promise<string> {
-  return (await prisma.computerStartMark.create({ data: { fence }, select: { id: true } })).id;
+  return (await prisma.computerStartMark.create({ data: { fence, startedAt: new Date() }, select: { id: true } })).id;
 }
 
 /** Renews a start's mark: it is still going on. Never throws: a beat that is missed is made up by the next one, and a start that dies stops beating (its mark then ages out). */
