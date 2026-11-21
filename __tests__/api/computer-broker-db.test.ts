@@ -145,6 +145,40 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         expect(await readFaultRows(prisma, jobId, [], 'r-1', { turnlessOnly: true })).toMatchObject([{ cls: 'ours', reason: 'relay_unreachable', route: null }]);
       });
 
+      it('a prepare that lost its claim while its probe ran says nothing: its key was ended by the newer prepare, so the probe failed on a key that was refused, and only the holder of the claim keeps a fault', async () => {
+        const { jobId } = await running();
+        let letGo: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => (letGo = resolve));
+        let reached: () => void = () => undefined;
+        const atTheProbe = new Promise<void>((resolve) => (reached = resolve));
+        let probes = 0;
+        fake.execAnswer = async (command: string) => {
+          if (!command.includes('/v1/models')) return {};
+          probes += 1;
+          if (probes === 1) {
+            reached();
+            await gate;
+            return { stdout: 'reach=down\n' };
+          }
+          return { stdout: 'reach=ok\n' };
+        };
+        const slow = prepareJob(jobId, RELAY, NOW, { run: 'r-1' });
+        await atTheProbe;
+        // Its claim lapsed meanwhile and a newer prepare took it, ended the first key, made and wrote its own
+        await prisma.computerJob.update({ where: { id: jobId }, data: { prepareClaimedAt: new Date(Date.now() - 50_000) } });
+        expect(await prepareJob(jobId, RELAY, minutes(1), { run: 'r-1' })).toMatchObject({ ok: true });
+        const written = fake.commands.filter((one) => one.command.includes('relay.json'));
+        expect(written).toHaveLength(1);
+        const goodToken = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(written[0].command)?.[1] ?? '';
+        // The first probe now answers "down" (its own key was refused): it holds no claim, so it keeps no fault and is told to ask again
+        letGo();
+        expect(await slow).toEqual({ ok: false, reason: 'preparing' });
+        expect(await faultsOf(jobId)).toEqual([]);
+        const live = await prisma.computerJobToken.findMany({ where: { jobId, revokedAt: null } });
+        expect(live).toHaveLength(1);
+        expect((await verifyJobToken(goodToken, 'model', minutes(2))).ok).toBe(true);
+      });
+
       it('the bot server’s own finding that the relay address answers something that is not the relay (relayReached false) is the same fault, kept once per run with its status, told at once with no key made', async () => {
         const { sara, jobId } = await running();
         const tokens = () => prisma.computerJobToken.count({ where: { jobId, scope: 'model' } });

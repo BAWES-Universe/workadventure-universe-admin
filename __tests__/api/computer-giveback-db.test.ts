@@ -23,7 +23,7 @@ import { saveInstantLimits } from '@/lib/instant/state';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { computerView, finishJob, giveComputer, planEffect, renewJob, settleEffect, startJob, sweepComputers } from '@/lib/computer';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
-import { recordFaults, recordRelayUnreachable, type FaultInput } from '@/lib/computer-faults';
+import { readFaultRows, recordFaults, recordRelayUnreachable, type FaultInput } from '@/lib/computer-faults';
 import { afterLateEvidence, decidePendingForPurge, decideRunnerFinish, lockPerson, resolveDecision, sweepGiveBackDecisions, sweepLateEvidence } from '@/lib/computer-giveback';
 import { correctRouteTogether, giveBackOverview, giveBackReadiness, routeIsPaused } from '@/lib/computer-fault-ops';
 import { mintJobToken, revokeJobTokens } from '@/lib/computer-token';
@@ -1599,6 +1599,31 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         await settleModelCall(jobId, 'c1', { costMicros: 900, basis: 'measured', payer: { kind: 'person', personId: sara.id }, route: 'own-key' }, NOW);
       });
       expect(await decisionOf(priced.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+    });
+
+    it('a call on the person’s own key that was authorized and whose report is not here yet is a call that was asked: a failed finish that comes first is never read as "no call at all", and a late row of theirs still decides it', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      // Authorized on the person's own key (no room, no price, no row yet), then the failed finish arrives before the call's report
+      const early = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+        await readied(jobId);
+        const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+        expect(await authorizeModelCall({ token, callId: 'k1', estimateMicros: 1, payer: 'own-key' }, NOW)).toMatchObject({ ok: true, reservedMicros: null });
+        // Asked again (a retry): the same marker, not another
+        await authorizeModelCall({ token, callId: 'k1', estimateMicros: 1, payer: 'own-key' }, NOW);
+        await authorizeModelCall({ token, callId: 'k2', estimateMicros: 1, payer: 'own-key' }, NOW);
+      });
+      expect(await decisionOf(early.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      expect(await givenBack(early.id)).toBe(false);
+      // No fault of ours was written for it, and the one marker says nothing about any failure
+      const rows = await prisma.computerJobFault.findMany({ where: { jobId: early.id } });
+      expect(rows).toMatchObject([{ kind: 'answered', reason: 'own_key_call', source: 'own-key', turn: null, route: null }]);
+      expect(await readFaultRows(prisma, early.id, null, 'r1')).toEqual([]);
+      // The call's own report arrives late and says it was their provider refusing their key: theirs, as ever (never given back as ours)
+      await recordFaults(sara.brickId, early.id, [fault(1, 'own_provider', { source: 'own-key', route: 'own-key', run: 'r1' })]);
+      await afterLateEvidence(early.id);
+      expect(await givenBack(early.id)).toBe(false);
+      expect(await decisionOf(early.id)).not.toMatchObject({ basis: 'universe_fault' });
     });
 
     it('is never read as the person’s, and a fault row of another run never gives this run back', async () => {

@@ -355,7 +355,7 @@ run('a Brick’s computer, in a real database', () => {
 
   describe('a step label never keeps or shows a secret', () => {
     const KEY = `cjt_${'Qw3Er5Ty7Ui9Op1As3Df5Gh7Jk9Lz1Xc3Vb5Nm7Aq9'.slice(0, 43)}`;
-    const SHAPES = [`T=${KEY} + 7 commands`, `curl -H "Authorization: Bearer ${KEY}" https://relay.example.test/v1/models`, 'git clone https://someone:pw@example.test/o/r.git', 'export OPENAI_API_KEY=sk-proj-abcdefghijkl1234 && run'];
+    const SHAPES = [`T=${KEY} + 7 commands`, `curl -H "Authorization: Bearer ${KEY}" https://relay.example.test/v1/models`, 'git clone https://someone:pw@example.test/o/r.git', 'export OPENAI_API_KEY=sk-proj-abcdefghijkl1234 && run', 'Checking service\nPASSWORD=hunter2 curl https://example.test', 'Checking service\tPASSWORD=hunter2 curl https://example.test'];
 
     it('is replaced by a plain phrase when written, in what is stored and in everything that is told back (the job, the Brick’s computer view)', async () => {
       const sara = await person('sara');
@@ -365,7 +365,7 @@ run('a Brick’s computer, in a real database', () => {
       for (const label of SHAPES) {
         expect((await reportProgress(job.job.id, { stepDone: 1, stepTotal: 3, label }))?.stepLabel).toBe(STEP_LABEL_FALLBACK);
         expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: job.job.id } })).stepLabel).toBe(STEP_LABEL_FALLBACK);
-        expect(JSON.stringify(await computerView(sara.brickId, sara.id))).not.toMatch(/cjt_|Bearer|pw@|sk-proj|OPENAI/);
+        expect(JSON.stringify(await computerView(sara.brickId, sara.id))).not.toMatch(/cjt_|Bearer|pw@|sk-proj|OPENAI|hunter2/);
       }
       // An honest label is kept as it was said, and a label taken away is taken away
       expect((await reportProgress(job.job.id, { stepDone: 2, label: 'Filling in your visa form' }))?.stepLabel).toBe('Filling in your visa form');

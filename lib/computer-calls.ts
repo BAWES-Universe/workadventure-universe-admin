@@ -7,7 +7,7 @@ import { givenBackJob } from '@/lib/computer-values';
 import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
 import { routeIsPaused } from '@/lib/computer-route-pause';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
-import { recordPoolRefusal } from '@/lib/computer-faults';
+import { recordOwnKeyCall, recordPoolRefusal } from '@/lib/computer-faults';
 
 /**
  * A model call a Brick's computer makes (build handoff v2, section 5): room is taken BEFORE the call, and what it really cost is
@@ -57,7 +57,11 @@ export async function authorizeModelCall(
   if (input.payer === 'own-key') {
     // No room is taken, but a call after the fence is refused all the same
     const still = await verifyJobToken(input.token, 'model', now);
-    return still.ok && still.generation === verified.generation ? { ok: true, ...base, reservedMicros: null } : { ok: false, reason: 'refused' };
+    if (!still.ok || still.generation !== verified.generation) return { ok: false, reason: 'refused' };
+    // A call on the person's own key leaves no room and no price: Orbit keeps one marker per job that one was authorized, so "authorized, its report not here yet" is never read as "no call at all" (which is ours, and
+    // an own key is never given back as ours). Never limits the call: the answer is the same whatever this does
+    await recordOwnKeyCall(prisma, base.jobId, now).catch((error) => console.error('[Computer] Could not note an own-key call:', error instanceof Error ? error.message : 'unknown'));
+    return { ok: true, ...base, reservedMicros: null };
   }
   if (!Number.isSafeInteger(input.estimateMicros) || input.estimateMicros <= 0 || input.estimateMicros > MAX_MICROS) return { ok: false, reason: 'refused' };
   // One provider failing for many people: nothing new is sent to it for now (nothing is held or charged). Never for a person's own key. A pause is OUR decision,

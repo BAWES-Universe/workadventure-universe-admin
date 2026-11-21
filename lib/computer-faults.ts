@@ -194,3 +194,18 @@ export async function recordPoolRefusal(db: Pick<Prisma.TransactionClient, 'comp
   });
   return db.computerJobFault.count({ where: { jobId, callId: { startsWith: ORBIT_POOL_CALL_PREFIX } } });
 }
+
+/** The call id of Orbit's one marker per job that a call on the person's own key was authorized. */
+export const OWN_KEY_CALL_MARK = 'orbit:own-key-call';
+
+/**
+ * Keeps that a call on the person's OWN key was authorized for this job (kind `answered`, so it says nothing about any failure: it is read as no row by every ruling and every count of faults). A call on
+ * the person's own key takes no room and prices nothing, so without this Orbit would hold no trace of it, and a failed finish that arrives before the call's own report would read "readied, and not one call
+ * ever asked", which is ours (`neverReachedRelay`). One row per job, so asking again changes nothing. The job must exist.
+ */
+export async function recordOwnKeyCall(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, at: Date = new Date()): Promise<void> {
+  await db.computerJobFault.createMany({
+    data: [{ jobId, turn: null, run: null, callId: OWN_KEY_CALL_MARK, kind: 'answered', reason: 'own_key_call', source: 'own-key', route: null, providerStatus: null, at }],
+    skipDuplicates: true,
+  });
+}

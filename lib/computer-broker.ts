@@ -162,6 +162,11 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
   // reaches the relay, with nothing recorded: it is a confirmed fault of ours, kept before anything else is said, and the runner is told. A check that could not be made at all (no curl on the machine, a
   // command that did not run) says nothing and changes nothing
   if ((await relayProbe(live.provider, live.job.ref, address, minted.token)) === 'down') {
+    // A prepare held up during the probe may have lost its claim, and a newer prepare then ended this key: the probe failed on a key that was refused, not on the relay. Only the prepare that still holds the claim says a fault
+    if (!(await holdsPrepareClaim(jobId, claim))) {
+      await revokeToken(minted.token, now);
+      return { ok: false, reason: 'preparing' };
+    }
     await recordRelayUnreachable(prisma, jobId, { run, at: now });
     await endOwnKey(jobId, minted.token, now, claim);
     return { ok: false, reason: 'relay_unreachable' };

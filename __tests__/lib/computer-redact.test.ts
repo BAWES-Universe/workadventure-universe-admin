@@ -32,6 +32,26 @@ describe('a step label never carries a secret', () => {
     }
   });
 
+  it('finds a command at the start of any line of the label as it was written, not only where the joined line begins (CodeRabbit: the lines were joined first, and the assignment then sat after plain words)', () => {
+    const risky = [
+      'Checking service\nPASSWORD=hunter2 curl https://example.test',
+      'Checking service\r\nPASSWORD=hunter2 curl https://example.test',
+      'PASSWORD=hunter2\nChecking service',
+      'Checking\nthe service\n  \tAPI_TOKEN=abc123 run.sh',
+      'Checking service\tPASSWORD=hunter2 curl https://example.test',
+      'Checking service\u2028SECRET=x',
+    ];
+    for (const text of risky) {
+      expect(hasSecretShape(text)).toBe(true);
+      expect(cleanStepLabel(text)).toBe(STEP_LABEL_FALLBACK);
+      expect(cleanStepLabel(`${text}\nand then more words`)).toBe(STEP_LABEL_FALLBACK);
+    }
+    // Ordinary words over several lines stay as they are, on one line
+    expect(cleanStepLabel('Checking service\nthen writing the report\n\tand sending it')).toBe('Checking service then writing the report and sending it');
+    expect(cleanStepLabel('Opening the page\nwith ?plan=2&tab=3 in it')).toBe('Opening the page with ?plan=2&tab=3 in it');
+    expect(cleanStepLabel('Setting up\nwidth is 10 in the sheet')).toBe('Setting up width is 10 in the sheet');
+  });
+
   it('keeps an ordinary label as it is, on one line and short, and hides only a key-like run in a file name', () => {
     expect(cleanStepLabel('Reading the inbox')).toBe('Reading the inbox');
     expect(cleanStepLabel('  Step 2: writing   the\nreport\t')).toBe('Step 2: writing the report');

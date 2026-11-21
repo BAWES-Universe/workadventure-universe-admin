@@ -104,8 +104,8 @@ export async function lastFaultTurn(db: Pick<Prisma.TransactionClient, 'computer
 }
 
 /**
- * True when a job's computer was readied for a model (a model key was made: prepare passed) and Orbit holds no trace at all of a model call for it: no fault row of any kind (answered ones too), no
- * model call priced and no room held for one. Such a job never reached the relay, whoever's key the calls would have run on. Reads only.
+ * True when a job's computer was readied for a model (a model key was made: prepare passed) and Orbit holds no trace at all of a model call for it: no fault row of any kind (answered ones too, which
+ * includes the marker that a call on the person's own key was authorized: such a call takes no room and prices nothing), no model call priced and no room held for one. Such a job never reached the relay, whoever's key the calls would have run on. Reads only.
  */
 export async function neverReachedRelay(db: Pick<Prisma.TransactionClient, 'computerJobToken' | 'computerJobFault' | 'meterEvent' | 'meterReservation'>, jobId: string): Promise<boolean> {
   if ((await db.computerJobToken.count({ where: { jobId, scope: 'model' } })) === 0) return false;
