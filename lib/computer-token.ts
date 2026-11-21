@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { isOver } from '@/lib/computer-values';
 import { agentMayAct } from '@/lib/computer-control';
@@ -76,10 +77,10 @@ export async function verifyJobToken(token: string, scope: TokenScope, now: Date
 }
 
 /** Every key of a job ends: the job is over, or the person took the machine. Safe to say twice. */
-export async function revokeJobTokens(jobId: string, now: Date = new Date(), onlyWhile?: { prepareClaim: Date }): Promise<number> {
+export async function revokeJobTokens(jobId: string, now: Date = new Date(), onlyWhile?: { prepareClaim: Date }, db: Pick<Prisma.TransactionClient, 'computerJobToken'> = prisma): Promise<number> {
   // `onlyWhile`: a prepare that holds the job's claim ends the keys only while it still holds it, in the same statement as the check, so one that
   // paused past its claim (another took it and made a key) never ends the key that was made since
-  const { count } = await prisma.computerJobToken.updateMany({ where: { jobId, revokedAt: null, ...(onlyWhile ? { job: { prepareClaimedAt: onlyWhile.prepareClaim } } : {}) }, data: { revokedAt: now } });
+  const { count } = await db.computerJobToken.updateMany({ where: { jobId, revokedAt: null, ...(onlyWhile ? { job: { prepareClaimedAt: onlyWhile.prepareClaim } } : {}) }, data: { revokedAt: now } });
   return count;
 }
 

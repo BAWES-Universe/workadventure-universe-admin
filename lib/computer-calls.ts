@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { recordMeterEvent } from '@/lib/meter';
 import { releaseRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
-import { verifyJobToken } from '@/lib/computer-token';
+import { revokeJobTokens, verifyJobToken } from '@/lib/computer-token';
 import { givenBackJob } from '@/lib/computer-values';
 import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
 import { routeIsPaused } from '@/lib/computer-route-pause';
@@ -118,39 +118,55 @@ export const POOL_REFUSALS_BEFORE_STOP = 2;
  * call authorized before is never stopped here: a refusal in the middle of its work is the relay's to tell, and the job's own renewal ends it if the pool stays full. Never throws: a refusal is answered whatever this does.
  */
 async function refusedForPool(jobId: string, callId: string, route: string | null, now: Date): Promise<void> {
+  let cutoff = false;
   try {
-    // One lock per job, held from the count to the end of the job: an authorization that is deciding at the same moment waits for it (`authorizedPastCutoff`), so the job is never stopped for a count of
-    // zero authorized calls that a call authorized meanwhile made wrong, and a call authorized after the stop is refused
-    await prisma.$transaction(
+    // One lock per job, held from the count to the moment the job's keys end, and DATABASE STEPS ONLY: no provider call and no other transaction is made while it is held (the end of the job is slow: it
+    // cancels the agent's turn, hands files over, rests the machine). An authorization that is deciding at the same moment waits for it (`authorizedPastCutoff`), so the job is never stopped for a count of
+    // zero authorized calls that a call authorized meanwhile made wrong, and a call authorized after the decision is refused
+    cutoff = await prisma.$transaction(
       async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
         // Only a job whose calls have ALL been refused so far: one that had a call authorized before (a room held or priced, or one on the person's own key, which leaves only its marker) is left to the relay's own words
         const authorized = await tx.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') } } });
         const priced = authorized > 0 ? 0 : await tx.meterEvent.count({ where: { jobId, kind: 'model_call' } });
-        if (authorized > 0 || priced > 0 || (await hasOwnKeyCall(tx, jobId))) return;
+        if (authorized > 0 || priced > 0 || (await hasOwnKeyCall(tx, jobId))) return false;
         const refused = await recordPoolRefusal(tx, jobId, callId, { route, at: now });
-        if (refused < POOL_REFUSALS_BEFORE_STOP) return;
-        await endForRefusal(jobId, { reason: 'pool', words: POOL_BUSY_WORDS }, now);
+        if (refused < POOL_REFUSALS_BEFORE_STOP) return false;
+        // The decision is made durable here, under the lock: every key of the job ends, so a call authorized after this commit finds its key dead and is refused. Ending the job itself comes after
+        await revokeJobTokens(jobId, now, undefined, tx);
+        return true;
       },
-      { timeout: 120_000, maxWait: 30_000 },
+      { timeout: 15_000, maxWait: 15_000 },
     );
   } catch (error) {
     console.error('[Computer] Could not note a model call refused for our capacity:', error instanceof Error ? error.message : 'unknown');
+    return;
   }
+  // The slow end of the job, with no lock and no transaction held. Its keys already ended; the job is ended as ours (given back, never counted). Never throws
+  if (cutoff) await endForRefusal(jobId, { reason: 'pool', words: POOL_BUSY_WORDS }, now);
 }
 
-const cutoffLockKey = (jobId: string): string => `computer-call-cutoff:${jobId}`;
+/** The lock a cutoff for our own capacity and an authorization that may be deciding at the same moment take one after the other (exported for the tests). */
+export const cutoffLockKey = (jobId: string): string => `computer-call-cutoff:${jobId}`;
 
 /**
  * Whether a call that was just authorized (its room held, or its marker kept) stands against a cutoff for our own capacity that may be deciding at the same moment. A job with no refusal of ours kept has none
- * (the common case: one count, nothing waited for). Otherwise this waits for the job's cutoff lock, which the cutoff holds until the job has ended, and then asks again whether the key is still good: a cutoff that
- * counted this call stopped nothing, and one that won ended the job (the key is gone), so the call is refused and its room goes back.
+ * (the common case: one count, nothing waited for). Otherwise this waits for the job's cutoff lock, which the cutoff holds only while it counts and ends the job's keys (database steps, no provider call), and
+ * then asks again whether the key is still good: a cutoff that counted this call ended no key, and one that won ended them, so the call is refused and its room goes back.
  */
 async function authorizedPastCutoff(jobId: string, token: string, generation: number, now: Date): Promise<boolean> {
   if (!(await hasPoolRefusals(prisma, jobId))) return true;
-  await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
-  });
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
+      },
+      { timeout: 15_000, maxWait: 15_000 },
+    );
+  } catch (error) {
+    // The wait failed (no connection, or a lock held too long): the key is still the guard, asked next, and a key that is good is the call's
+    console.error('[Computer] Could not wait for a cutoff that was deciding:', error instanceof Error ? error.message : 'unknown');
+  }
   const after = await verifyJobToken(token, 'model', now);
   return after.ok && after.generation === generation;
 }
