@@ -4,13 +4,15 @@ import { POST } from '@/app/api/bots/[id]/computer-jobs/[jobId]/faults/route';
 import { faultClassOf, recordFaults } from '@/lib/computer-faults';
 import { afterArrival, afterLateEvidence } from '@/lib/computer-giveback';
 import { requireServiceToken } from '@/lib/service-tokens';
+import * as Sentry from '@sentry/nextjs';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/computer-faults', () => ({ ...jest.requireActual('@/lib/computer-faults'), recordFaults: jest.fn() }));
 jest.mock('@/lib/computer-giveback', () => ({ afterLateEvidence: jest.fn(), afterArrival: jest.fn() }));
-jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
+jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn(), captureMessage: jest.fn() }));
 
 const record = recordFaults as jest.Mock;
+const warned = Sentry.captureMessage as jest.Mock;
 const late = afterLateEvidence as jest.Mock;
 const arrived = afterArrival as jest.Mock;
 const auth = requireServiceToken as jest.Mock;
@@ -104,13 +106,36 @@ describe('POST /api/bots/:id/computer-jobs/:jobId/faults', () => {
     record.mockResolvedValue({ stored: 1, conflicts: 0 });
     const res = await call({ faults: [{ ...good, kind: 'maybe' }, good, { ...good, callId: 'c9', reason: 'has spaces' }] });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, stored: 1, conflicts: 0, rejected: 2 });
+    expect(await res.json()).toEqual({ ok: true, stored: 1, conflicts: 0, rejected: [{ callId: 'c1', why: 'kind' }, { callId: 'c9', why: 'reason' }], rejectedCount: 2 });
     expect(record).toHaveBeenCalledTimes(1);
     expect(record).toHaveBeenCalledWith('brick-1', 'job-1', [expect.objectContaining({ callId: 'c1', reason: 'provider_key_ours' })]);
-    // Nothing that can be kept: refused, nothing written
+    // ONE warning for the batch, with the job, the count and the names of the wrong fields, and no content of any row
+    expect(warned).toHaveBeenCalledTimes(1);
+    expect(warned).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ level: 'warning', tags: { area: 'computer', step: 'faults_rejected' }, extra: { jobId: 'job-1', count: 2, paths: ['kind', 'reason'] } }));
+    expect(JSON.stringify(warned.mock.calls)).not.toContain('has spaces');
+    // A row with no readable call id is named by null (a call id over 120 characters is not readable either)
+    warned.mockClear();
+    const odd = await call({ faults: [{ ...good, callId: 42 }, { ...good, callId: 'x'.repeat(121) }, 'not a row', null, good]});
+    expect(await odd.json()).toMatchObject({ stored: 1, rejectedCount: 4, rejected: [{ callId: null }, { callId: null }, { callId: null }, { callId: null }] });
+    expect(warned).toHaveBeenCalledTimes(1);
+    // A clean batch warns about nothing and names nothing
+    warned.mockClear();
+    const clean = await call({ faults: [good] });
+    expect(await clean.json()).not.toHaveProperty('rejected');
+    expect(warned).not.toHaveBeenCalled();
+    // Nothing that can be kept: refused, nothing written, and the rows are named (and told once)
     record.mockClear();
-    expect((await call({ faults: [{ ...good, kind: 'maybe' }, { ...good, source: 'x' }] })).status).toBe(400);
+    const none = await call({ faults: [{ ...good, kind: 'maybe' }, { ...good, callId: 'c5', source: 'x' }] });
+    expect(none.status).toBe(400);
+    expect(await none.json()).toMatchObject({ error: 'Invalid request', rejectedCount: 2, rejected: [{ callId: 'c1', why: 'kind' }, { callId: 'c5', why: 'source' }] });
+    expect(warned).toHaveBeenCalledTimes(1);
     expect(record).not.toHaveBeenCalled();
+    // A broken Sentry never changes the answer
+    warned.mockImplementation(() => {
+      throw new Error('down');
+    });
+    record.mockResolvedValue({ stored: 1, conflicts: 0 });
+    expect((await call({ faults: [{ ...good, kind: 'maybe' }, good] })).status).toBe(200);
   });
 
   it('a batch of nothing but arrival rows judges nothing (it only re-labels a reason); with any other row the job is judged again as ever', async () => {
@@ -140,7 +165,7 @@ describe('POST /api/bots/:id/computer-jobs/:jobId/faults', () => {
       record.mockResolvedValue({ stored: 1, conflicts: 0 });
       const res = await call({ faults: [other, good] });
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ ok: true, stored: 1, conflicts: 0, rejected: 1 });
+      expect(await res.json()).toMatchObject({ ok: true, stored: 1, conflicts: 0, rejectedCount: 1, rejected: [{ callId: other.callId, why: expect.any(String) }] });
       // Only the real fault row was kept, and the job is judged as for any fault row
       expect(record).toHaveBeenCalledWith('brick-1', 'job-1', [expect.objectContaining({ callId: 'c1', kind: 'fault' })]);
       expect(late).toHaveBeenCalledWith('job-1');
