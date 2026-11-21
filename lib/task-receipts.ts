@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { givenBackJob } from '@/lib/computer-values';
-import { RELAY_UNREACHABLE } from '@/lib/computer-faults';
+import { RELAY_REACHED, RELAY_UNREACHABLE } from '@/lib/computer-faults';
 import { refundStatesFor } from '@/lib/computer-refunds';
 import { paidBy, payerFromRow, payerOf, payerToRow, type PaidBy, type Payer } from '@/lib/paid-by';
 import {
@@ -508,6 +508,8 @@ interface Header {
   deciding: 'effect' | 'limits' | null;
   /** The computer was given back because it could not reach our own model service (Orbit's decision names that reason): said as that, never as a problem with the work. */
   unreachable?: boolean;
+  /** Orbit's decision gave the job back and the relay says it was reached (the reason became `relay_reached`): said in its own words, never as "we couldn’t reach our own service". */
+  reached?: boolean;
   /** Runs of the task nobody could confirm whose credit is still on hold. */
   heldRuns: ReadonlySet<string>;
   /** Runs of the task nobody could confirm whose hold the credit books acknowledged giving back, and how much came back (whole micros). */
@@ -640,6 +642,7 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
     ...(header.refund.pendingMicros > 0 ? { refundPendingMicros: header.refund.pendingMicros } : {}),
     ...(header.deciding === null ? {} : { deciding: header.deciding }),
     ...(header.job === 'returned' && header.unreachable ? { unreachable: true } : {}),
+    ...(header.job === 'returned' && header.reached ? { reached: true } : {}),
     // An App let go unconfirmed that the provider's log confirmed later: delivered, with its hold released (or on its way back) and nothing charged, said in its own words beside a computer given back
     ...(lateDelivered.length > 0 ? { deliveredAfterRelease: lateDelivered } : {}),
     ...(header.stoppedBy === null ? {} : { stoppedBy: header.stoppedBy }),
@@ -717,6 +720,8 @@ interface ComputerMoney {
   deciding: 'effect' | 'limits' | null;
   /** Orbit's decision gave the job back because the computer could not reach our own service. */
   unreachable: boolean;
+  /** Orbit's decision gave the job back with the reason `relay_reached`: the relay was reached after all. */
+  reached: boolean;
 }
 
 /**
@@ -731,19 +736,22 @@ async function computerMoneyOf(jobs: readonly { id: string; given: boolean }[]):
   const [refunds, decisions, reached] = await Promise.all([
     refundStatesFor(givenIds),
     prisma.computerGiveBackDecision.findMany({ where: { jobId: { in: jobs.map((job) => job.id) }, state: 'pending' }, select: { jobId: true, basis: true } }),
-    givenIds.length === 0 ? [] : prisma.computerGiveBackDecision.findMany({ where: { jobId: { in: givenIds }, state: 'given', reason: RELAY_UNREACHABLE }, select: { jobId: true } }),
+    givenIds.length === 0 ? [] : prisma.computerGiveBackDecision.findMany({ where: { jobId: { in: givenIds }, state: 'given', reason: { in: [RELAY_UNREACHABLE, RELAY_REACHED] } }, select: { jobId: true, reason: true } }),
   ]);
   const entry = (id: string): ComputerMoney => {
     let found = out.get(id);
     if (!found) {
-      found = { returnedMicros: 0, pendingMicros: 0, deciding: null, unreachable: false };
+      found = { returnedMicros: 0, pendingMicros: 0, deciding: null, unreachable: false, reached: false };
       out.set(id, found);
     }
     return found;
   };
   for (const [id, state] of refunds) Object.assign(entry(id), state);
   for (const decision of decisions) entry(decision.jobId).deciding = decision.basis === 'effect_unresolved' ? 'effect' : 'limits';
-  for (const decision of reached) entry(decision.jobId).unreachable = true;
+  for (const decision of reached) {
+    if (decision.reason === RELAY_UNREACHABLE) entry(decision.jobId).unreachable = true;
+    else entry(decision.jobId).reached = true;
+  }
   return out;
 }
 
@@ -837,7 +845,7 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
     // A job still going has not come out yet; one that never started did nothing
     const over = jobRow !== null && isOver(jobRow.status) && jobRow.startedAt !== null;
     const job: Header['job'] = !over ? null : givenBackJob(jobRow.status, jobRow.endedBy) ? 'returned' : jobRow.status === 'failed' ? 'failed' : jobRow.status === 'stopped' ? 'stopped' : 'worked';
-    return itemOf({ ...header, state, job, stoppedBy: jobRow?.status === 'stopped' ? jobRow.endedBy ?? null : null, refund: job === 'returned' ? { returnedMicros: money?.returnedMicros ?? 0, pendingMicros: money?.pendingMicros ?? 0 } : { returnedMicros: 0, pendingMicros: 0 }, deciding: job === 'failed' ? money?.deciding ?? null : null, unreachable: job === 'returned' && money?.unreachable === true, heldRuns: new Set(header.actions.filter((action) => held.has(action.run)).map((action) => action.run)), releasedRuns: new Map(header.actions.filter((action) => released.has(action.run)).map((action) => [action.run, released.get(action.run) as number] as const)), letGoRuns: new Set(header.actions.filter((action) => letGo.has(action.run)).map((action) => action.run)) }, forHeader, names.get(header.botId) ?? 'Brick', personId);
+    return itemOf({ ...header, state, job, stoppedBy: jobRow?.status === 'stopped' ? jobRow.endedBy ?? null : null, refund: job === 'returned' ? { returnedMicros: money?.returnedMicros ?? 0, pendingMicros: money?.pendingMicros ?? 0 } : { returnedMicros: 0, pendingMicros: 0 }, deciding: job === 'failed' ? money?.deciding ?? null : null, unreachable: job === 'returned' && money?.unreachable === true, reached: job === 'returned' && money?.reached === true, heldRuns: new Set(header.actions.filter((action) => held.has(action.run)).map((action) => action.run)), releasedRuns: new Map(header.actions.filter((action) => released.has(action.run)).map((action) => [action.run, released.get(action.run) as number] as const)), letGoRuns: new Set(header.actions.filter((action) => letGo.has(action.run)).map((action) => action.run)) }, forHeader, names.get(header.botId) ?? 'Brick', personId);
   });
   return items.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : -1)).slice(0, limit);
 }

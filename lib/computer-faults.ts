@@ -39,6 +39,15 @@ export type FaultClass = 'ours' | 'person' | 'unresolved';
  */
 export const RELAY_UNREACHABLE = 'relay_unreachable';
 /**
+ * The relay's own word that it was REACHED: for every request it authenticated (Orbit's identify answered ok) the game writes one durable row per job, run and turn (call id `arrival_<run>_<turn>`,
+ * `arrival_<run>_` when the turn cannot be told), kind `answered`, this reason, source `universe-ai`, no route, no status. It carries no body, authorizes no spend and is never a fault (`answered` has no
+ * fault class). It is read for one thing: a run that has one reached the relay, so Orbit never concludes from the absence of rows that it did not (`neverReachedRelay`).
+ */
+export const RELAY_REACHED = 'relay_reached';
+/** The mark on the call id of the row Orbit keeps when it INFERRED that the relay was never reached (from the absence of every trace of a call). Its own observation at prepare has no such mark. */
+const INFERRED_CALL_SUFFIX = ':inferred';
+export const isInferredUnreachableRow = (row: { callId: string }): boolean => row.callId.startsWith('orbit:') && row.callId.endsWith(`${RELAY_UNREACHABLE}${INFERRED_CALL_SUFFIX}`);
+/**
  * The rows the game's runner keeps when its computer could not reach the model relay, as it knows it (it has no call to name): a call id that starts `relay_unreachable_` (the marker it keeps when its prepare
  * could not) or `no_call_` (a turn in which no call reached the relay), with the reason `relay_down` (read only on a row of ours, so the relay's word `fault`: `faultClassOf`). The relay's own `relay_down` (its 503 "service busy": the computer DID
  * reach us) is always a real call's id, never one of these. Such a row says the same thing as Orbit's own `relay_unreachable` finding.
@@ -195,13 +204,21 @@ function keyOfCall(callId: string, run: string | null): string {
  * Keeps that a job's computer could not reach the model relay, as a confirmed fault of ours (kind `fault`, reason `relay_unreachable`, no route: it is no provider's). One row per job and run
  * (the call id is Orbit's own, `orbit:<run>:relay_unreachable`, so it is never the relay's row of the same name), so saying it twice changes nothing. The job must exist. Never reads or writes anything of a call.
  */
-export async function recordRelayUnreachable(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, input: { run?: string | null; status?: number | null; at?: Date } = {}): Promise<void> {
+export async function recordRelayUnreachable(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, input: { run?: string | null; status?: number | null; at?: Date; inferred?: boolean } = {}): Promise<void> {
   const run = input.run ? input.run.slice(0, 40) : null;
   // `skipDuplicates` (ON CONFLICT DO NOTHING): inside a transaction a unique violation would abort the whole of it, and saying it twice must change nothing
   await db.computerJobFault.createMany({
-    data: [{ jobId, turn: null, run, callId: `orbit:${run ? `${run}:` : ''}${RELAY_UNREACHABLE}`.slice(0, 120), kind: 'fault', reason: RELAY_UNREACHABLE, source: 'universe-ai', route: null, providerStatus: input.status ?? null, at: input.at ?? new Date() }],
+    data: [{ jobId, turn: null, run, callId: `orbit:${run ? `${run}:` : ''}${RELAY_UNREACHABLE}${input.inferred ? INFERRED_CALL_SUFFIX : ''}`.slice(0, 120), kind: 'fault', reason: RELAY_UNREACHABLE, source: 'universe-ai', route: null, providerStatus: input.status ?? null, at: input.at ?? new Date() }],
     skipDuplicates: true,
   });
+}
+
+/** The rows that apply to a ruling on one run: those that name that run and those that name none (they cannot be told apart, so they count for every run). No run named: every row of the job. */
+export const rowsOfRun = (run: string | null | undefined): Prisma.ComputerJobFaultWhereInput => (run ? { OR: [{ run: null }, { run }] } : {});
+
+/** Whether the relay said it was reached by this run of the job (an arrival row of the run, or one that names no run): then the run is never judged to have missed the relay for want of a row. */
+export async function relayReachedInRun(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, run: string | null | undefined): Promise<boolean> {
+  return (await db.computerJobFault.count({ where: { jobId, kind: 'answered', reason: RELAY_REACHED, source: 'universe-ai', ...rowsOfRun(run) } })) > 0;
 }
 
 export interface FaultRow {

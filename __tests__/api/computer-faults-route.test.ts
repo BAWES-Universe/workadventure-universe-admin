@@ -58,6 +58,18 @@ describe('POST /api/bots/:id/computer-jobs/:jobId/faults', () => {
     expect(faultClassOf({ kind: 'fault', reason: 'relay_unreachable', source: 'own-key' })).toBe('ours');
   });
 
+  it('takes the relay’s arrival row as the game writes it (answered / relay_reached, no route, no status, a call id of its own per run and turn), with a turn or without one, and it is never a fault', async () => {
+    record.mockResolvedValue({ stored: 2, conflicts: 0 });
+    const rows = [
+      { callId: 'arrival_r-1_2', turn: 2, run: 'r-1', kind: 'answered', reason: 'relay_reached', source: 'universe-ai', route: null, providerStatus: null, at: '2026-11-21T00:00:00.000Z' },
+      { callId: 'arrival_r-1_', turn: null, run: 'r-1', kind: 'answered', reason: 'relay_reached', source: 'universe-ai', at: '2026-11-21T00:00:01.000Z' },
+    ];
+    expect((await call({ faults: rows })).status).toBe(200);
+    expect(record).toHaveBeenCalledWith('brick-1', 'job-1', [expect.objectContaining({ callId: 'arrival_r-1_2', kind: 'answered', reason: 'relay_reached', route: null, providerStatus: null, turn: 2 }), expect.objectContaining({ callId: 'arrival_r-1_', turn: null, run: 'r-1', route: null })]);
+    expect(late).toHaveBeenCalledWith('job-1');
+    expect(faultClassOf({ kind: 'answered', reason: 'relay_reached', source: 'universe-ai' })).toBeNull();
+  });
+
   it('takes the run a row’s turn was numbered in, up to 40 characters, and keeps none for a runner that names none', async () => {
     record.mockResolvedValue({ stored: 2 });
     expect((await call({ faults: [{ ...good, run: 'mi8x3k2a1b2c3d4e' }, { ...good, callId: 'c2' }] })).status).toBe(200);

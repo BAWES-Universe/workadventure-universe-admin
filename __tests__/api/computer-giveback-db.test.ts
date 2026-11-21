@@ -29,7 +29,7 @@ import { correctRouteTogether, giveBackOverview, giveBackReadiness, routeIsPause
 import { mintJobToken, revokeJobTokens } from '@/lib/computer-token';
 import { WorkerDied, afterWorkerDied } from '../helpers/worker-died';
 import { activityFor } from '@/lib/task-receipts';
-import { OUTCOME_WORDS, UNREACHABLE_WORDS } from '@/lib/task-receipt-words';
+import { OUTCOME_WORDS, REACHED_WORDS, UNREACHABLE_WORDS } from '@/lib/task-receipt-words';
 import { reportsToTell } from '@/lib/computer-report';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -1901,6 +1901,142 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       // The same job that never changed hands, readied and never asked, is still the relay's
       const untouched = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, readied);
       expect(await decisionOf(untouched.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+    });
+
+    describe('GPT round 3, finding 5: the relay says it was reached (the arrival row: answered / relay_reached, one per run and turn)', () => {
+      const arrival = (run: string | null, turn: number | null): FaultInput => ({ turn, run, callId: `arrival_${run ?? ''}_${turn ?? ''}`, kind: 'answered', reason: 'relay_reached', source: 'universe-ai', route: null, providerStatus: null, at: new Date() });
+      const inferredRows = (jobId: string) => prisma.computerJobFault.findMany({ where: { jobId, reason: 'relay_unreachable' }, select: { callId: true, run: true, kind: true } });
+
+      it('a run with an arrival row is NEVER inferred unreachable from the absence of other rows: judged like any failed job; the genuine outage (no arrival) keeps its refund and its words', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const sara = await person('sara');
+        // The relay authenticated the run's key (a body it could not read, say) and nothing else is held for it
+        const reached = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [arrival('r1', 1)]);
+        });
+        expect(await decisionOf(reached.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+        expect(await givenBack(reached.id)).toBe(false);
+        expect(await inferredRows(reached.id)).toEqual([]);
+        const seen = await item(sara.id, reached.id);
+        expect(seen?.outcomeNote ?? '').not.toContain(UNREACHABLE_WORDS);
+        expect(seen?.outcomeNote ?? '').not.toContain(REACHED_WORDS);
+        // The arrival row is never a fault, and no hint can turn it into one: the runner naming a turn without a row is unresolved and goodwill, as for any failed job
+        const named = await job(sara, { outcome: 'failed', cause: 'ours', turns: [1], run: 'r1' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [arrival('r1', 1)]);
+        });
+        expect(await decisionOf(named.id)).toMatchObject({ state: 'given', basis: 'goodwill', reason: 'no_row' });
+        // No arrival at all, the same readied job: the genuine outage, as before, with its row and its words
+        const outage = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, readied);
+        expect(await decisionOf(outage.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+        expect(await givenBack(outage.id)).toBe(true);
+        expect((await item(sara.id, outage.id))?.outcomeNote).toContain(UNREACHABLE_WORDS);
+        expect(await inferredRows(outage.id)).toMatchObject([{ kind: 'fault', run: 'r1' }]);
+      });
+
+      it('is scoped per RUN: an arrival of r1 never suppresses the inference for r2, and one that names no run counts for every run', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
+        const sara = await person('sara');
+        const other = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r2' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [arrival('r1', 1)]);
+        });
+        expect(await decisionOf(other.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+        const unnamed = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r2' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [arrival(null, null)]);
+        });
+        expect(await decisionOf(unnamed.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+        // An arrival whose source is not the relay's is no arrival
+        const forged = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [{ ...arrival('r1', 1), source: 'own-key' }]);
+        });
+        expect(await decisionOf(forged.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      });
+
+      it('the runner’s own marker, and Orbit’s own observation at prepare, are positive evidence: an arrival of the same run never overrides them', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
+        const sara = await person('sara');
+        const marked = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', { callId: 'relay_unreachable_r1_1', run: 'r1', route: 'unknown' }), arrival('r1', 2)]);
+        });
+        expect(await decisionOf(marked.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+        const observed = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+          await readied(jobId);
+          await recordRelayUnreachable(prisma, jobId, { run: 'r1', status: 404 });
+          await recordFaults(sara.brickId, jobId, [arrival('r1', 1)]);
+        });
+        expect(await decisionOf(observed.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+      });
+
+      it('an inferred row Orbit kept earlier never names a reason once the run has an arrival row (judged again: by the hint, like any failed job)', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const sara = await person('sara');
+        const done = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [arrival('r1', 1)]);
+          await recordRelayUnreachable(prisma, jobId, { run: 'r1', inferred: true });
+        });
+        // The row is there, and the arrival is there: the decision reads the arrival, not the row
+        expect(await decisionOf(done.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+        expect(await inferredRows(done.id)).toHaveLength(1);
+        // Without the arrival, the same row names the reason (it is Orbit's finding)
+        const bare = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+          await readied(jobId);
+          await recordRelayUnreachable(prisma, jobId, { run: 'r1', inferred: true });
+        });
+        expect(await decisionOf(bare.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+      });
+
+      it('an arrival row that lands AFTER Orbit inferred the outage keeps the give-back exactly as it was and only re-labels the reason: the receipt and the report stop saying "we couldn’t reach our own service"; saying it twice, and the sweep, change nothing more', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const sara = await person('sara');
+        const late = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, readied);
+        expect(await decisionOf(late.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+        expect((await item(sara.id, late.id))?.outcomeNote).toBe(UNREACHABLE_WORDS);
+        const moneyBefore = await prisma.meterEvent.findMany({ where: { jobId: late.id }, orderBy: { eventId: 'asc' }, select: { eventId: true, personKey: true, costMicros: true } });
+        const decisionBefore = await decisionOf(late.id);
+        // An arrival of ANOTHER run says nothing of this one
+        await recordFaults(sara.brickId, late.id, [arrival('r9', 1)]);
+        await afterLateEvidence(late.id);
+        expect((await decisionOf(late.id))?.reason).toBe('relay_unreachable');
+        // This run's own arrival: only the reason moves
+        await recordFaults(sara.brickId, late.id, [arrival('r1', 1)]);
+        await afterLateEvidence(late.id);
+        const after = await decisionOf(late.id);
+        expect(after).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_reached', route: null });
+        expect(after?.decidedAt).toEqual(decisionBefore?.decidedAt);
+        expect(await givenBack(late.id)).toBe(true);
+        expect(await prisma.meterEvent.findMany({ where: { jobId: late.id }, orderBy: { eventId: 'asc' }, select: { eventId: true, personKey: true, costMicros: true } })).toEqual(moneyBefore);
+        // Orbit's own inferred row stays as a record
+        expect(await inferredRows(late.id)).toMatchObject([{ kind: 'fault', run: 'r1' }]);
+        // The words: the approved sentence, never the outage
+        expect((await item(sara.id, late.id))?.outcomeNote).toBe(REACHED_WORDS);
+        const told = (await reportsToTell(50, minutes(60 * 24))).filter((report) => report.kind === 'failed' && report.jobId === late.id);
+        expect(told.every((report) => report.why !== UNREACHABLE_WORDS)).toBe(true);
+        // Again: nothing more happens (no second give-back, no count)
+        await afterLateEvidence(late.id);
+        expect(await decisionOf(late.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_reached' });
+        expect(await prisma.meterEvent.count({ where: { jobId: late.id } })).toBe(moneyBefore.length);
+        // The same by the sweep (not the route)
+        const swept = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, readied);
+        expect(await decisionOf(swept.id)).toMatchObject({ reason: 'relay_unreachable' });
+        await recordFaults(sara.brickId, swept.id, [arrival('r1', 3)]);
+        await sweepLateEvidence(new Date());
+        expect(await decisionOf(swept.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_reached' });
+        expect(await givenBack(swept.id)).toBe(true);
+        // A positive observation (Orbit's own at prepare) is never re-labelled by a late arrival
+        const seen = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+          await readied(jobId);
+          await recordRelayUnreachable(prisma, jobId, { run: 'r1', status: 404 });
+        });
+        await recordFaults(sara.brickId, seen.id, [arrival('r1', 1)]);
+        await afterLateEvidence(seen.id);
+        expect(await decisionOf(seen.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+      });
     });
 
     it('is never read as the person’s, and a fault row of another run never gives this run back', async () => {

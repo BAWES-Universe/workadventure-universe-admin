@@ -6,7 +6,7 @@ import { getInstantLimitsStrict } from '@/lib/instant/state';
 import { INSTANT_LIMITS_RECOMMENDED, type InstantLimits } from '@/lib/instant/values';
 import { monthOf } from '@/lib/meter-values';
 import { callRoomKey, giveBackModelCalls } from '@/lib/computer-calls';
-import { OURS_REASONS, RELAY_UNREACHABLE, isRunnerNoRelayRow, readFaultRows, recordRelayUnreachable, type FaultRow } from '@/lib/computer-faults';
+import { OURS_REASONS, RELAY_REACHED, RELAY_UNREACHABLE, isInferredUnreachableRow, isRunnerNoRelayRow, readFaultRows, recordRelayUnreachable, relayReachedInRun, rowsOfRun, type FaultRow } from '@/lib/computer-faults';
 import { incidentFaultMatch } from '@/lib/computer-route-pause';
 import { retryWaitMs } from '@/lib/computer-retry';
 
@@ -108,15 +108,20 @@ export async function lastFaultTurn(db: Pick<Prisma.TransactionClient, 'computer
  * includes the marker that a call on the person's own key was authorized: such a call takes no room and prices nothing), no model call priced and no room held for one. Such a job never reached the
  * relay, whoever's key the calls would have run on. A job whose control ever changed hands is never judged so: the person taking the machine (or giving it back) ends the agent's keys, a call after
  * that is refused and leaves no row, so the absence of a call says nothing about the relay. What Orbit keeps of it is the job's control generation (every change of control moves it up, `fenceControl`)
- * and who holds control now. Reads only.
+ * and who holds control now. A run the relay itself says it reached (an arrival row of that run: `relayReachedInRun`) never did not reach it, whatever else is or is not held: that is the first rule here, not a
+ * consequence of the count. The rows counted are the run's own (and those that name no run); another run's say nothing of this one. Reads only.
  */
-export async function neverReachedRelay(db: Pick<Prisma.TransactionClient, 'computerJob' | 'computerJobToken' | 'computerJobFault' | 'meterEvent' | 'meterReservation'>, jobId: string): Promise<boolean> {
+export async function neverReachedRelay(db: Pick<Prisma.TransactionClient, 'computerJob' | 'computerJobToken' | 'computerJobFault' | 'meterEvent' | 'meterReservation'>, jobId: string, run: string | null = null): Promise<boolean> {
   if ((await db.computerJobToken.count({ where: { jobId, scope: 'model' } })) === 0) return false;
+  // THE RULE: the relay said it was reached by this run (an arrival row: it authenticated the run's key), so the run did reach it, whatever else Orbit holds or does not hold. Only the run's own word counts: another run's arrival says nothing of this one
+  if (await relayReachedInRun(db, jobId, run)) return false;
   const job = await db.computerJob.findUnique({ where: { id: jobId }, select: { controlGeneration: true, control: true } });
   // A job that is not there, or whose control was ever the person's, is not judged by what it did not ask
   if (!job || job.controlGeneration > 0 || job.control !== 'brick') return false;
   const [faults, events, rooms] = await Promise.all([
-    db.computerJobFault.count({ where: { jobId } }),
+    // The run's own rows (and the rows that name no run): another run's call, answered or not, is not a trace of this run's. Calls priced or held a room are the job's (they carry no run)
+    // The arrival rows are not counted here: they are the rule above, and only the run's own (a row of another run is not read here at all)
+    db.computerJobFault.count({ where: { jobId, ...rowsOfRun(run), NOT: { kind: 'answered', reason: RELAY_REACHED, source: 'universe-ai' } } }),
     db.meterEvent.count({ where: { jobId, kind: 'model_call' } }),
     db.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') } } }),
   ]);
@@ -129,7 +134,9 @@ export async function neverReachedRelay(db: Pick<Prisma.TransactionClient, 'comp
  * The relay's own `relay_down` (a 503 it answered: the computer reached it) is under a real call's id and keeps its reason. The money, the basis and the count are those of any fault of ours; only the
  * reason (the words the person reads) and the route (no provider's) are this finding's. Used by the finish and by a row that arrives after it, so both say the same.
  */
-function oursFinding(rows: readonly FaultRow[]): FaultRow | undefined {
+function oursFinding(allRows: readonly FaultRow[], reached = false): FaultRow | undefined {
+  // The row Orbit kept when it INFERRED, from the absence of every trace, that the relay was never reached is ignored once the relay says it was (an arrival row): it stays as a record, and never names the reason
+  const rows = reached ? allRows.filter((row) => !isInferredUnreachableRow(row)) : allRows;
   const own = rows.find((row) => row.cls === 'ours' && row.reason === RELAY_UNREACHABLE);
   if (own) return own;
   const noRelay = rows.find((row) => row.cls === 'ours' && isRunnerNoRelayRow(row));
@@ -161,13 +168,15 @@ export async function decideRunnerFinish(
   // those are read, and never an empty list of turns, which would read the numbered rows of every run
   const rows = await readFaultRows(tx, job.id, judged, options.run, { turnlessOnly: lenient && !!judged && judged.length === 0 });
   const judgedTurns = lenient && !(turns && turns.length > 0) ? [...(judged ?? [])] : undefined;
-  let ours = oursFinding(rows);
+  // The relay's own word that this run reached it (an arrival row): Orbit's inference below is never made for it, and an inference made earlier names nothing
+  const reached = await relayReachedInRun(tx, job.id, options.run);
+  let ours = oursFinding(rows, reached);
   // Nothing was charged for a job that never started: there is nothing to hold back
   if (!job.startedAt) return { state: 'given', basis: 'universe_fault', counted: false, reason: ours?.reason ?? 'not_started', route: ours?.route ?? null, judgedTurns };
   // A job whose computer was readied to ask for a model, and for which Orbit holds not one trace of a call (no row of any kind, no call held room or was priced), never reached the relay: no brief makes a
   // model call fail before it is asked, so this is ours (the address, the relay, the network between), kept as the confirmed fault it is so every later reading of the job finds it
-  if (!ours && (await neverReachedRelay(tx, job.id))) {
-    await recordRelayUnreachable(tx, job.id, { run: options.run ?? null, at: now });
+  if (!ours && (await neverReachedRelay(tx, job.id, options.run ?? null))) {
+    await recordRelayUnreachable(tx, job.id, { run: options.run ?? null, at: now, inferred: true });
     ours = { turn: null, callId: RELAY_UNREACHABLE, kind: 'fault', reason: RELAY_UNREACHABLE, source: 'universe-ai', route: null, cls: 'ours' };
   }
   // Class 1: any bad turn of ours makes the ending ours
@@ -395,6 +404,20 @@ export async function sweepGiveBackDecisions(now: Date = new Date(), batch = 50)
 }
 
 /**
+ * The relay's arrival row reached Orbit AFTER a decision named the computer as one that never reached it (`given / universe_fault / relay_unreachable`): the money stays exactly as it is (the decision stays given,
+ * a completed refund is never taken back, nothing is charged or given again) and ONLY the reason is told differently, as `relay_reached`, so the receipt no longer says "we couldn't reach our own service". Orbit's
+ * own inferred row stays as a record. Nothing changes when the decision rests on positive evidence of an unreachable relay for that run: Orbit's own observation at prepare, or the runner's own marker (an arrival
+ * of another run never overrides them, and neither does one of this run: they say a call did not get through). Never a verdict: a refusal is never made a give-back here, and a give-back is never a refusal.
+ */
+async function relabelReached(jobId: string, run: string | null): Promise<void> {
+  if (!(await relayReachedInRun(prisma, jobId, run))) return;
+  const rows = await prisma.computerJobFault.findMany({ where: { jobId, kind: 'fault', ...rowsOfRun(run) }, select: { callId: true, reason: true } });
+  const positive = rows.some((row) => (row.reason === RELAY_UNREACHABLE && !isInferredUnreachableRow(row)) || isRunnerNoRelayRow(row));
+  if (positive) return;
+  await prisma.computerGiveBackDecision.updateMany({ where: { jobId, state: 'given', basis: 'universe_fault', reason: RELAY_UNREACHABLE }, data: { reason: RELAY_REACHED } });
+}
+
+/**
  * New rows arrived for a job that is already over (the relay writes best effort, so one can be late): a decision that was not a give-back is looked at
  * again, and a class 1 fault in what was judged makes it one. A pending decision is decided now. Nothing else ever changes a decision.
  */
@@ -404,6 +427,11 @@ export async function afterLateEvidence(jobId: string, now: Date = new Date()): 
   if (!first || !first.causeHint) return;
   if (first.state === 'pending') {
     await resolveDecision(jobId, now);
+    return;
+  }
+  // A give-back that Orbit made because it INFERRED the relay was never reached keeps its money when the relay later says it was: only the reason is told differently
+  if (first.state === 'given' && first.basis === 'universe_fault' && first.reason === RELAY_UNREACHABLE) {
+    await relabelReached(jobId, first.judgedRun);
     return;
   }
   // Only a goodwill give-back is counted: the other `given` ones are already uncounted, and nothing is left to learn from a late row
@@ -437,7 +465,7 @@ export async function afterLateEvidence(jobId: string, now: Date = new Date()): 
       }
     }
     const rows = await readFaultRows(tx, jobId, turns, decision.judgedRun, { turnlessOnly });
-    const ours = oursFinding(rows);
+    const ours = oursFinding(rows, await relayReachedInRun(tx, jobId, decision.judgedRun));
     if (!ours) {
       // A refusal that rested on NO evidence at all (the agent ended on its own, nothing recorded for what was judged) is judged again, now that there is something to read, EXACTLY as the finish would
       // have judged it had the row been there on time: the same function, with the same rules for the person's own evidence, a delivered effect, an effect still to be confirmed, the person's
@@ -495,7 +523,7 @@ export async function sweepLateEvidence(now: Date = new Date(), batch = 50): Pro
   try {
     const due = await prisma.$queryRaw<Array<{ job_id: string; mark: Date; attempts: number; last_error: string | null }>>(Prisma.sql`
       SELECT d."job_id", clock_timestamp() AS mark, d."attempts", d."last_error" FROM "computer_give_back_decisions" d
-      WHERE d."cause_hint" IS NOT NULL AND (d."state" = 'refused' OR (d."state" = 'given' AND d."basis" = 'goodwill'))
+      WHERE d."cause_hint" IS NOT NULL AND (d."state" = 'refused' OR (d."state" = 'given' AND d."basis" = 'goodwill') OR (d."state" = 'given' AND d."basis" = 'universe_fault' AND d."reason" = 'relay_unreachable'))
         AND (
           -- A look that threw is retried at its own time, however old the decision is: it is never dropped
           (d."last_error" LIKE 'late_look%' AND d."next_attempt_at" <= ${now})

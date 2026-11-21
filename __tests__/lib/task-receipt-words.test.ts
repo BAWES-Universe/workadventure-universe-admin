@@ -1,4 +1,4 @@
-import { actionWords, appLabel, dollars, HOLD_BEING_RELEASED, HOLD_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote, outcomeTextOf, SETTLEMENT_PENDING, STILL_CHECKING, STOPPED_AT_RULE, UNREACHABLE_WORDS } from '@/lib/task-receipt-words';
+import { actionWords, appLabel, dollars, HOLD_BEING_RELEASED, HOLD_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, outcomeNote, REACHED_WORDS, outcomeTextOf, SETTLEMENT_PENDING, STILL_CHECKING, STOPPED_AT_RULE, UNREACHABLE_WORDS } from '@/lib/task-receipt-words';
 
 describe('the words for how a task came to end (mock M2)', () => {
   it('names the outcomes as the mock does, and the two it did not have: a task that did not finish but took something, and one nobody could confirm', () => {
@@ -73,6 +73,16 @@ describe('the words for how a task came to end (mock M2)', () => {
       expect(outcomeTextOf('refund_pending', { refundPendingMicros: 30_000 })).toBe('$0.03 refund pending');
       expect(outcomeTextOf('deciding')).toBe('Still checking');
       expect(outcomeTextOf('done')).toBe('Done');
+    });
+
+    it('GPT round 3, finding 5: a computer given back that the relay says was reached has its own sentence, and never says it could not be reached', () => {
+      expect(REACHED_WORDS).toBe('The computer part didn’t finish, and its time was given back.');
+      expect(outcomeNote('refunded', [], { job: 'returned', reached: true })).toBe(REACHED_WORDS);
+      expect(outcomeNote('refunded', [], { job: 'returned', reached: true })).not.toContain('couldn’t reach');
+      expect(outcomeNote('refunded', [], { job: 'returned', unreachable: true })).toBe(UNREACHABLE_WORDS);
+      // Only a job given back says it
+      expect(outcomeNote('refunded', [], { job: 'failed', reached: true })).toBeNull();
+      expect(outcomeNote('refunded', [], { job: 'returned' })).toBeNull();
     });
 
     it('GPT round 3, finding 2: an App let go unconfirmed that was delivered after all is said first, in the approved words, beside a computer given back', () => {

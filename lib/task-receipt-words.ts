@@ -30,6 +30,8 @@ export const STOPPED_AT_RULE = STOPPED_WORDS.rule;
 
 /** What a person is told when the computer could not reach our own model service: ours, and nothing is charged for it. */
 export const UNREACHABLE_WORDS = 'We couldn’t reach our own service, you weren’t charged.';
+/** A computer that was given back although the relay says it WAS reached (an arrival row came after Orbit had said it was not): the approved sentence, never "we couldn’t reach our own service". */
+export const REACHED_WORDS = 'The computer part didn’t finish, and its time was given back.';
 
 /** What a person is told when a computer job was stopped because every call it made was refused for our own capacity: ours, given back, nothing is charged. */
 export const POOL_BUSY_WORDS = 'Computers are busy right now, so we stopped this and you weren’t charged.';
@@ -107,6 +109,8 @@ export interface NoteFacts {
   refundPendingMicros?: number;
   /** The computer was given back because it could not reach our own model service (its decision names that reason): the words say that, not a problem with the work. */
   unreachable?: boolean;
+  /** The computer was given back and the relay says it was reached by the run (the reason was told as `relay_unreachable` before the relay's arrival row came): the words say neither that nor a problem with the work. */
+  reached?: boolean;
   /** Apps let go unconfirmed (their hold released, nothing charged) that the provider's log confirmed later: delivered. Said first, in its own words, beside a computer that was given back. */
   deliveredAfterRelease?: readonly string[];
   /** Why a charge is only provisional: Orbit is still deciding whether the computer cost is given back. */
@@ -133,6 +137,7 @@ export interface NoteFacts {
 export function outcomeNote(outcome: ActivityOutcome, actions: readonly { outcome: ActionOutcome; label?: string }[], facts: NoteFacts = {}): string | null {
   // Refunded needs nothing more said, except why when the computer could not reach our own service: the person is told that, in the approved words
   if (outcome === 'refunded' && facts.job === 'returned' && facts.unreachable) return UNREACHABLE_WORDS;
+  if (outcome === 'refunded' && facts.job === 'returned' && facts.reached) return REACHED_WORDS;
   if (outcome === 'done' || outcome === 'refunded') return null;
   const steps: ActionOutcome[] = [...actions.map((action) => action.outcome), ...(facts.job ? [facts.job === 'worked' ? ('worked' as const) : ('failed' as const)] : [])];
   const count = (wanted: ActionOutcome) => steps.filter((step) => step === wanted).length;
