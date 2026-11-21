@@ -199,6 +199,53 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
   };
 }
 
+/** The size of room a new model call asks for, as far as the readiness check can tell (a few cents: a call of the usual size). The real size is each call's own; this is only what "a call would be refused" is judged by. */
+export const USUAL_CALL_ROOM_MICROS = 20_000;
+
+export interface PoolStatus {
+  ceilingMicros: number;
+  /** committed + reserved + unsettled + keptStorage + reserve: what `fits` compares to the ceiling. */
+  totalMicros: number;
+  committedMicros: number;
+  reservedMicros: number;
+  /** Spent and not settled yet, and the lapsed holds below (they are counted here too: it is the sum `fits` reads). */
+  unsettledMicros: number;
+  keptStorageMicros: number;
+  reserveMicros: number;
+  chatMicros: number;
+  /** Room that ran out and was never settled or released: what it spent is not known, so it keeps counting. A leak shows here. */
+  lapsed: { count: number; micros: number; oldestLapsedAt: Date | null };
+  /** What is left under the ceiling (never below 0). */
+  leftMicros: number;
+  /** A new call of the usual size would be refused for the pool now. */
+  refusing: boolean;
+}
+
+/** The pool as `fits` sees it, in parts, with the lapsed holds counted apart (how many, how much, and since when the oldest ran out). Reads only. Null when the usage controls are not set. */
+export async function poolStatusNow(now: Date = new Date()): Promise<PoolStatus | null> {
+  const settings = await getMeterSettings();
+  if (missingSettings(settings).length > 0) return null;
+  const [envelope, lapsed] = await Promise.all([
+    envelopeIn(prisma, now, settings),
+    prisma.meterReservation.aggregate({ where: { ...stillCounts(now), expiresAt: { lte: now } }, _count: { _all: true }, _sum: { amountMicros: true }, _min: { expiresAt: true } }),
+  ]);
+  const ceilingMicros = settings.poolCeilingMicros ?? 0;
+  return {
+    ceilingMicros,
+    totalMicros: envelope.totalMicros,
+    committedMicros: envelope.committedMicros,
+    reservedMicros: envelope.reservedMicros,
+    unsettledMicros: envelope.unsettledMicros,
+    keptStorageMicros: envelope.keptStorageMicros,
+    reserveMicros: envelope.reserveMicros,
+    chatMicros: envelope.chatMicros,
+    lapsed: { count: lapsed._count._all, micros: asNumber(lapsed._sum.amountMicros), oldestLapsedAt: lapsed._min.expiresAt ?? null },
+    leftMicros: Math.max(0, ceilingMicros - envelope.totalMicros),
+    // The same comparison `fits` makes for a call of the usual size
+    refusing: envelope.totalMicros + USUAL_CALL_ROOM_MICROS > ceilingMicros,
+  };
+}
+
 /** The envelope as it stands now, for a page or a check. Empty settings read as zero ceilings, so look at `missingSettings` too. */
 export async function currentEnvelope(now: Date = new Date()): Promise<Envelope> {
   const settings = await getMeterSettings();

@@ -6,6 +6,8 @@ import { verifyJobToken } from '@/lib/computer-token';
 import { givenBackJob } from '@/lib/computer-values';
 import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
 import { routeIsPaused } from '@/lib/computer-route-pause';
+import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
+import { recordPoolRefusal } from '@/lib/computer-faults';
 
 /**
  * A model call a Brick's computer makes (build handoff v2, section 5): room is taken BEFORE the call, and what it really cost is
@@ -62,7 +64,10 @@ export async function authorizeModelCall(
   // so it answers `full: true`: the relay records it as a confirmed fault of ours (pool_busy), never as the job's own doing
   // The pause gates only NEW call ids: a call that already holds its room (the same job, the same person, still held) is asked again by a retry, and is answered
   // with its own authorization whatever the route's state is now: it was authorized before the pause, and refusing its retry would make the relay record a fault of ours for a call that is going on
-  if (input.route && !(await holdsItsRoom(base.jobId, input.callId, base.personId, now)) && (await routeIsPaused(input.route, now).catch(() => false))) return { ok: false, reason: 'pool', full: true };
+  if (input.route && !(await holdsItsRoom(base.jobId, input.callId, base.personId, now)) && (await routeIsPaused(input.route, now).catch(() => false))) {
+    await refusedForPool(base.jobId, input.callId, input.route, now);
+    return { ok: false, reason: 'pool', full: true };
+  }
   const room = await reserveRoom({ key: callRoomKey(base.jobId, input.callId), personId: base.personId, amountMicros: input.estimateMicros, botId: base.botId, jobId: base.jobId, newJob: false }, now);
   if (room.ok) {
     // The room may have waited for the pool's lock while the person took the machine: the key must still be good after it, or the room goes back
@@ -85,7 +90,33 @@ export async function authorizeModelCall(
   }
   // Asked again for a call whose room was settled or lapsed: the first try is the call, and a second one is not another
   if (room.reason === 'closed' || room.reason === 'key_reused') return { ok: false, reason: 'refused' };
+  await refusedForPool(base.jobId, input.callId, input.route ?? null, now);
   return { ok: false, reason: 'pool', full: room.reason === 'pool' && room.full === true };
+}
+
+/** How many calls of a job that has never had one authorized may be refused for our own capacity before the job is stopped as ours: its first turn (and one retry of it) found no room. */
+export const POOL_REFUSALS_BEFORE_STOP = 2;
+
+/**
+ * A model call was refused for OUR capacity (the pool has no room, or its route is paused). For a job whose calls have ALL been refused so far (not one authorized, in any state) that is a confirmed fault of ours, kept by
+ * Orbit itself (one row per call, so a retried call counts once) whatever the relay writes about it. Such a job that has now had `POOL_REFUSALS_BEFORE_STOP` refused is not going anywhere: every call it makes
+ * is refused, and left alone it would spin on its person's allowance of time. It is stopped as `pool` (ours: its time given back, never counted, with the words the person is told). A job that had a
+ * call authorized before is never stopped here: a refusal in the middle of its work is the relay's to tell, and the job's own renewal ends it if the pool stays full. Never throws: a refusal is answered whatever this does.
+ */
+async function refusedForPool(jobId: string, callId: string, route: string | null, now: Date): Promise<void> {
+  try {
+    // Only a job whose calls have ALL been refused so far: one that had a call authorized before is left to the relay's own words
+    const [authorized, priced] = await Promise.all([
+      prisma.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') } } }),
+      prisma.meterEvent.count({ where: { jobId, kind: 'model_call' } }),
+    ]);
+    if (authorized > 0 || priced > 0) return;
+    const refused = await recordPoolRefusal(prisma, jobId, callId, { route, at: now });
+    if (refused < POOL_REFUSALS_BEFORE_STOP) return;
+    await endForRefusal(jobId, { reason: 'pool', words: POOL_BUSY_WORDS }, now);
+  } catch (error) {
+    console.error('[Computer] Could not note a model call refused for our capacity:', error instanceof Error ? error.message : 'unknown');
+  }
 }
 
 /** True when this call id already holds room for this job and person: room held and not lapsed (what reserving it again would answer with its own reservation). */
@@ -95,7 +126,7 @@ async function holdsItsRoom(jobId: string, callId: string, personId: string, now
 }
 
 /** Ends the job a call was refused for (computer.ts owns how a job ends; it is loaded when asked, as it reads this file). A refusal is answered whatever this does. */
-async function endForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule'; words: string }, now: Date): Promise<void> {
+async function endForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule' | 'pool'; words: string }, now: Date): Promise<void> {
   try {
     const { stopJobForRefusal } = await import('@/lib/computer');
     await stopJobForRefusal(jobId, why, now);

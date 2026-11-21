@@ -17,12 +17,15 @@ import { prisma } from '@/lib/db';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
-import { currentEnvelope } from '@/lib/meter-allowance';
+import { currentEnvelope, poolStatusNow, USUAL_CALL_ROOM_MICROS } from '@/lib/meter-allowance';
+import { computerReadiness, poolCheck } from '@/lib/computer-readiness';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { computerView, finishJob, giveComputer, handBack, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { activityFor } from '@/lib/task-receipts';
 import { TOKEN_LIFE_MS, forgetOldTokens, mintJobToken, verifyJobToken } from '@/lib/computer-token';
 import { recordMeterEvent } from '@/lib/meter';
+import { reportsToTell } from '@/lib/computer-report';
+import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { authorizeModelCall, callRoomKey, giveBackModelCalls, releaseModelCall, settleModelCall } from '@/lib/computer-calls';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -248,10 +251,163 @@ run('what a computer may ask of Orbit, in a real database', () => {
       // The job already holds its first stretch (60,000): a ceiling at exactly that leaves nothing for any call
       await setUp({ poolCeilingMicros: 60_000 });
       expect(await call(token, 'c1', 1)).toEqual({ ok: false, reason: 'pool', full: true });
-      expect(await call(token, 'c2', 50_000)).toEqual({ ok: false, reason: 'pool', full: true });
+      // (a job none of whose calls was ever authorized is stopped by its second refusal: this one is asked as a job that had a call)
+      expect(await call(token, 'c1', 1)).toEqual({ ok: false, reason: 'pool', full: true });
       // One millionth of room left: a bigger call is refused for its size, not because the pool is full
       await setUp({ poolCeilingMicros: 60_001 });
       expect(await call(token, 'c3', 2)).toEqual({ ok: false, reason: 'pool', full: false });
+    });
+
+    describe('the pool, as the readiness check reads it', () => {
+      const poolCheckNow = async (at: Date = NOW) => poolCheck(await poolStatusNow(at), at);
+
+      it('is green while a call of the usual size fits and red once it would be refused, with every part said; the refusal and the check agree', async () => {
+        // Empty: room for a call of the usual size
+        await setUp({ poolCeilingMicros: 1_000_000, reserveMicros: 100_000 });
+        const empty = await poolStatusNow(NOW);
+        expect(empty).toMatchObject({ ceilingMicros: 1_000_000, totalMicros: 100_000, reserveMicros: 100_000, committedMicros: 0, reservedMicros: 0, leftMicros: 900_000, refusing: false, lapsed: { count: 0, micros: 0, oldestLapsedAt: null } });
+        expect(await poolCheckNow()).toMatchObject({ name: 'pool', ok: true });
+        // A job holding its first stretch (60,000) and a ceiling that leaves less than a usual call: red, and a real call of that size is refused for the pool
+        const { jobId } = await running();
+        const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+        await setUp({ poolCeilingMicros: 60_000 + USUAL_CALL_ROOM_MICROS - 1, reserveMicros: 0 });
+        const full = await poolStatusNow(NOW);
+        expect(full).toMatchObject({ reservedMicros: 60_000, leftMicros: USUAL_CALL_ROOM_MICROS - 1, refusing: true });
+        const red = await poolCheckNow();
+        expect(red).toMatchObject({ name: 'pool', ok: false });
+        expect(red?.detail).toContain('would be refused for the pool');
+        expect(red?.detail).toMatch(/held for steps \$0\.06/);
+        expect(await authorizeModelCall({ token, callId: 'big', estimateMicros: USUAL_CALL_ROOM_MICROS, payer: 'universe' }, NOW)).toMatchObject({ ok: false, reason: 'pool' });
+        // One millionth more room and the same call fits, and the check is green again
+        await setUp({ poolCeilingMicros: 60_000 + USUAL_CALL_ROOM_MICROS, reserveMicros: 0 });
+        expect((await poolStatusNow(NOW))?.refusing).toBe(false);
+        expect(await poolCheckNow()).toMatchObject({ ok: true });
+        expect((await authorizeModelCall({ token, callId: 'fits', estimateMicros: USUAL_CALL_ROOM_MICROS, payer: 'universe' }, NOW)).ok).toBe(true);
+      });
+
+      it('says the kept storage, the recorded-and-not-settled spend and the chat apart, and counts the holds that ran out and were never settled (how many, how much, how long ago the oldest ran out): a leak shows here', async () => {
+        await setUp({ poolCeilingMicros: 10_000_000, reserveMicros: 500_000, storageMicrosPerGbMonth: 20_000 });
+        const { jobId } = await running();
+        // A hold that ran out two hours ago and a newer one that ran out ten minutes ago, neither settled nor released
+        const hold = (key: string, expiresAt: Date, amountMicros: number) => prisma.meterReservation.create({ data: { reservationKey: key, personKey: 'person:x', jobId, amountMicros, state: 'held', expiresAt, createdAt: minutes(-300) } });
+        await hold(`${callRoomKey(jobId, 'old')}`, minutes(-120), 7_000);
+        await hold(`${callRoomKey(jobId, 'newer')}`, minutes(-10), 3_000);
+        const brickId = (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).botId;
+        const event = (eventId: string, kind: string, pool: 'computer' | 'chat', costMicros: number | null, extra: Record<string, unknown> = {}) =>
+          recordMeterEvent({ eventId, kind, pool, occurredAt: NOW, personKey: 'person:x', personId: null, botId: null, brick: false, payerKind: 'universe', payerPersonId: null, route: null, jobId: null, quantity: 1, unit: 'call', costMicros, basis: 'measured', sourceRef: eventId, detail: null, ...extra } as never);
+        // A disk of 2 GB is kept: 2 x $0.02 a month
+        await event(`ev-disk-${tag}`, 'stored_bytes', 'computer', null, { botId: brickId, quantity: 2_000_000_000, unit: 'byte' });
+        await event(`ev-unsettled-${tag}`, 'model_call', 'computer', 4_000);
+        await event(`ev-chat-${tag}`, 'model_call', 'chat', 9_000);
+        const status = await poolStatusNow(NOW);
+        expect(status?.lapsed).toMatchObject({ count: 2, micros: 10_000, oldestLapsedAt: minutes(-120) });
+        expect(status?.chatMicros).toBe(9_000);
+        expect(status?.reserveMicros).toBe(500_000);
+        // The lapsed room is inside the unsettled sum `fits` reads, and the check says it apart from the spend that is only not settled yet
+        expect(status!.unsettledMicros).toBe(4_000 + 10_000);
+        const check = poolCheck(status, NOW);
+        expect(check.detail).toContain('held rooms that ran out and were never settled or given up $0.01 (2, the oldest ran out 2 h ago)');
+        expect(check.detail).toContain('recorded and not settled $0.004');
+        expect(check.detail).toContain('chat $0.009 is kept apart');
+        expect(check.detail).toContain('reserve $0.50');
+        expect(check.detail).toContain('kept storage $0.04');
+        expect(status?.keptStorageMicros).toBe(40_000);
+      });
+
+      it('is part of the readiness: not ready while a new call would be refused, and the parts are given beside the checks', async () => {
+        const { jobId } = await running();
+        expect(jobId).toBeTruthy();
+        await setUp({ poolCeilingMicros: 60_000, reserveMicros: 0 });
+        const answer = await computerReadiness();
+        expect(answer.ready).toBe(false);
+        expect(answer.checks.find((check) => check.name === 'pool')).toMatchObject({ ok: false });
+        expect(answer.pool).toMatchObject({ ceilingMicros: 60_000, refusing: true });
+      });
+    });
+
+    describe('a job every call of which is refused for our own pool (dev staging: pool refusals, every turn failing)', () => {
+      const poolRows = (jobId: string) => prisma.computerJobFault.findMany({ where: { jobId, callId: { startsWith: 'orbit:pool:' } }, orderBy: { callId: 'asc' } });
+      const jobOf = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
+      const timeOf = (jobId: string) => prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:time` } });
+
+      it('keeps a confirmed fault of ours for each refused call (a retried call once) and stops the job on the second: ended as pool, given back, never counted, in the words the person is told', async () => {
+        const { sara, jobId } = await running();
+        const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+        await setUp({ poolCeilingMicros: 60_000 });
+        // The first refused call: kept as a fault of ours, the job still running (a first turn may be one unlucky moment)
+        expect(await call(token, 'c1', 1_000)).toMatchObject({ ok: false, reason: 'pool' });
+        expect(await poolRows(jobId)).toMatchObject([{ callId: 'orbit:pool:c1', kind: 'fault', reason: 'pool_busy', source: 'universe-ai', turn: null, run: null, providerStatus: 503 }]);
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+        // The same call asked again (a retry) is the same call: still one row, still running
+        expect(await call(token, 'c1', 1_000)).toMatchObject({ ok: false, reason: 'pool' });
+        expect(await poolRows(jobId)).toHaveLength(1);
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+        // A second call refused: every call this job made was refused, so it stops here, as ours
+        expect(await call(token, 'c2', 1_000)).toMatchObject({ ok: false, reason: 'pool' });
+        expect(await poolRows(jobId)).toHaveLength(2);
+        const ended = await jobOf(jobId);
+        expect(ended).toMatchObject({ status: 'stopped', endedBy: 'pool', runnerFault: false, endNote: POOL_BUSY_WORDS });
+        // Given back in full by Orbit's own decision, which counts for nothing against the person's bound
+        expect(await prisma.computerGiveBackDecision.findUnique({ where: { jobId } })).toMatchObject({ state: 'given', basis: 'orbit_fault', reason: 'pool_cut_off' });
+        expect((await timeOf(jobId)).personKey).toBe('unknown');
+        // Whatever the runner says after it changes nothing (a job that is over is not ended again)
+        await finishJob(jobId, 'failed', NOW, 'Three turns failed', 'agent');
+        expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
+        // What the person reads: the Activity line and the report in chat
+        const seen = (await activityFor(sara.id)).find((item) => item.id === `act_job_${jobId}`);
+        expect(seen?.outcomeText).toBe('Stopped: our computers were busy, and its time was given back');
+        const told = (await reportsToTell(50, minutes(60 * 24))).find((report) => report.jobId === jobId);
+        expect(told).toMatchObject({ kind: 'failed', givenBack: true, why: POOL_BUSY_WORDS });
+      });
+
+      it('is given back at the goodwill cap too (it uses none of it)', async () => {
+        // A bound of nothing: a goodwill give-back would be refused for the cap at once; this one is ours and never asks
+        await seedGiveBackLimits({ goodwillPerPersonPerMonth: 0 });
+        const { jobId } = await running();
+        const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+        await setUp({ poolCeilingMicros: 60_000 });
+        await call(token, 'c1', 1_000);
+        await call(token, 'c2', 1_000);
+        expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool', runnerFault: false });
+        expect((await timeOf(jobId)).personKey).toBe('unknown');
+      });
+
+      it('never stops a job that has had a call authorized (a refusal in the middle of its work is left to the relay and the job’s own renewal), and keeps no row of its own for it', async () => {
+        const { jobId } = await running();
+        const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+        expect((await call(token, 'ok-1')).ok).toBe(true);
+        await setUp({ poolCeilingMicros: 60_000 });
+        for (const id of ['c1', 'c2', 'c3', 'c4']) expect(await call(token, id, 1_000)).toMatchObject({ ok: false, reason: 'pool' });
+        expect(await poolRows(jobId)).toEqual([]);
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+      });
+
+      it('counts a call refused because its route is paused (our decision) the same way', async () => {
+        const other = await running('cam');
+        await seedGiveBackLimits({ pauseMinRuns: 1 });
+        const { jobId } = await running('dee');
+        const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+        // One person's job had a provider failure on the route in the window: with a bound of one person, new work on it waits
+        await prisma.computerJobFault.create({ data: { jobId: other.jobId, turn: 1, callId: 'p1', kind: 'uncertain', reason: 'provider_5xx', source: 'universe-ai', route: 'universe-ai/slow', at: NOW } });
+        const paused = (id: string) => authorizeModelCall({ token, callId: id, estimateMicros: 5_000, payer: 'universe', route: 'universe-ai/slow' }, NOW);
+        expect(await paused('c1')).toEqual({ ok: false, reason: 'pool', full: true });
+        expect(await poolRows(jobId)).toMatchObject([{ callId: 'orbit:pool:c1', route: 'universe-ai/slow' }]);
+        expect(await paused('c2')).toEqual({ ok: false, reason: 'pool', full: true });
+        expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
+        expect(await jobOf(other.jobId)).toMatchObject({ status: 'running' });
+      });
+
+      it('is judged job by job: one job’s refusals never stop another', async () => {
+        const a = await running('ann');
+        const b = await running('bea');
+        const keyA = ((await mintJobToken(a.jobId, 'model', NOW)) as { token: string }).token;
+        await setUp({ poolCeilingMicros: 60_000 });
+        await call(keyA, 'c1', 1_000);
+        expect(await poolRows(b.jobId)).toEqual([]);
+        await call(keyA, 'c2', 1_000);
+        expect(await jobOf(a.jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
+        expect(await jobOf(b.jobId)).toMatchObject({ status: 'running' });
+      });
     });
 
     it('is not another job running: a call does not use up the jobs allowed at once', async () => {

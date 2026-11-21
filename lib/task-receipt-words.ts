@@ -31,6 +31,9 @@ export const STOPPED_AT_RULE = STOPPED_WORDS.rule;
 /** What a person is told when the computer could not reach our own model service: ours, and nothing is charged for it. */
 export const UNREACHABLE_WORDS = 'We couldn’t reach our own service, you weren’t charged.';
 
+/** What a person is told when a computer job was stopped because every call it made was refused for our own capacity: ours, given back, nothing is charged. */
+export const POOL_BUSY_WORDS = 'Computers are busy right now, so we stopped this and you weren’t charged.';
+
 /** What a computer job that is still being looked at says while Orbit has not decided whether to give its cost back (never Done, never refunded). */
 export const STILL_CHECKING = 'We’re still checking this one. If it was our fault, the time comes back.';
 

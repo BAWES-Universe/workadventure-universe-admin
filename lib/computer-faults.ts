@@ -179,3 +179,18 @@ export async function readFaultRows(db: Db, jobId: string, turns: readonly numbe
 }
 
 const FAULT_PAGE = 500;
+
+/** The prefix of the call ids Orbit gives its own pool-refusal rows (never the relay's). */
+export const ORBIT_POOL_CALL_PREFIX = 'orbit:pool:';
+
+/**
+ * Keeps that one model call of a job was refused for OUR capacity (the pool has no room, or its route is paused), as a confirmed fault of ours (kind `fault`, reason `pool_busy`, 503). One row per call
+ * (the call id is Orbit's own, so a retried call counts once and it is never the relay's row). Answers how many calls of this job are refused so far. The job must exist.
+ */
+export async function recordPoolRefusal(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, callId: string, input: { route?: string | null; at?: Date } = {}): Promise<number> {
+  await db.computerJobFault.createMany({
+    data: [{ jobId, turn: null, run: null, callId: `${ORBIT_POOL_CALL_PREFIX}${callId}`.slice(0, 120), kind: 'fault', reason: 'pool_busy', source: 'universe-ai', route: input.route ? input.route.slice(0, 120) : null, providerStatus: 503, at: input.at ?? new Date() }],
+    skipDuplicates: true,
+  });
+  return db.computerJobFault.count({ where: { jobId, callId: { startsWith: ORBIT_POOL_CALL_PREFIX } } });
+}

@@ -7,11 +7,36 @@ import { coldProvider, coldStatus } from '@/lib/computer-cold';
 import { STORAGE_DELETION_ALERT_MS, storageDeletionsWaiting } from '@/lib/computer-archives';
 import { computersArePaused } from '@/lib/capability-pause';
 import { giveBackReadiness } from '@/lib/computer-fault-ops';
+import { poolStatusNow, USUAL_CALL_ROOM_MICROS, type PoolStatus } from '@/lib/meter-allowance';
 
 export interface Readiness {
   /** Every check passed: a person's job can run now. */
   ready: boolean;
   checks: Check[];
+  /** The computer pool in parts (what the "pool" check says in words); absent when the usage controls are not set or it could not be read. */
+  pool?: PoolStatus;
+}
+
+const money = (micros: number): string => `$${(micros / 1_000_000).toFixed(micros >= 10_000 ? 2 : 3)}`;
+const ago = (ms: number): string => {
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  return minutes < 120 ? `${minutes} min` : minutes < 48 * 60 ? `${Math.round(minutes / 60)} h` : `${Math.round(minutes / 1440)} days`;
+};
+
+/**
+ * The pool check, in plain words: what the pool holds, in parts, against its ceiling, and whether a new call of the usual size would be refused (red). The holds that ran out and were never
+ * settled or given up are counted apart, with the age of the oldest: room that leaks shows there, long before the pool is full.
+ */
+export function poolCheck(status: PoolStatus | null, now: Date = new Date()): Check {
+  if (!status) return { name: 'pool', ok: false, detail: 'The pool could not be read (the usage controls are not set, or the books did not answer)' };
+  const old = status.lapsed.oldestLapsedAt ? `, the oldest ran out ${ago(now.getTime() - status.lapsed.oldestLapsedAt.getTime())} ago` : '';
+  const parts =
+    `settled ${money(status.committedMicros)}, held for steps ${money(status.reservedMicros)}, recorded and not settled ${money(status.unsettledMicros - status.lapsed.micros)}, ` +
+    `held rooms that ran out and were never settled or given up ${money(status.lapsed.micros)} (${status.lapsed.count}${old}), kept storage ${money(status.keptStorageMicros)}, reserve ${money(status.reserveMicros)}; chat ${money(status.chatMicros)} is kept apart`;
+  const left = `${money(status.leftMicros)} left under the ${money(status.ceilingMicros)} ceiling (${money(status.totalMicros)} counted)`;
+  return status.refusing
+    ? { name: 'pool', ok: false, detail: `A new call of the usual size (${money(USUAL_CALL_ROOM_MICROS)}) would be refused for the pool: ${left}. ${parts}` }
+    : { name: 'pool', ok: true, detail: `A new call of the usual size (${money(USUAL_CALL_ROOM_MICROS)}) fits: ${left}. ${parts}` };
 }
 
 /**
@@ -69,9 +94,12 @@ export async function computerReadiness(): Promise<Readiness> {
   // The settings the bound on give-backs reads must exist: missing numbers hold unresolved give-backs, they never mean "no bound"
   const giveBack = await giveBackReadiness().catch(() => ({ ok: false, detail: 'The give-back settings could not be checked' }));
   checks.push({ name: 'give-backs', ...giveBack });
+  // The pool: ready is not true while every new call would be refused for it
+  const pool = await poolStatusNow().catch(() => null);
+  checks.push(poolCheck(pool));
   const winding = await isWindingDown();
   checks.push({ name: 'wind-down', ok: !winding, detail: winding ? 'A wind-down is on: no computer takes new work' : 'No wind-down is on' });
   const paused = await computersArePaused();
   checks.push({ name: 'pause', ok: !paused, detail: paused ? 'Computers are paused: no new job starts until the team resumes them' : 'Computers are not paused' });
-  return { ready: checks.every((check) => check.ok), checks };
+  return { ready: checks.every((check) => check.ok), checks, ...(pool ? { pool } : {}) };
 }

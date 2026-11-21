@@ -1011,9 +1011,10 @@ export async function renewJob(
  * A model call of a running job was refused because the person's own allowance is used up, or a rule they said does not let it go on: the job ends now,
  * the way a refused renewal ends it, as theirs (`allowance` or `rule`). Whatever the computer's runner says about it later changes nothing: a job
  * that is over is not ended again, so a failed turn after the refusal can never end it as ours. Safe to say twice; a job already over is left as it is.
+ * `pool` is the other way round: every call the job made was refused for OUR capacity, so it ends as `pool` (ours: given back in full, never counted) with its words kept for the person.
  */
-export async function stopJobForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule'; words: string }, now: Date = new Date()): Promise<void> {
-  if (why.reason === 'rule') {
+export async function stopJobForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule' | 'pool'; words: string }, now: Date = new Date()): Promise<void> {
+  if (why.reason === 'rule' || why.reason === 'pool') {
     // Its words are kept for the message that tells the person (the report back)
     const kept = cleanEndNote(why.words);
     if (kept) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: kept } });
