@@ -11,7 +11,7 @@ jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException
 
 import { prisma } from '@/lib/db';
 import { setAdapterForTests, type InstantAdapter, type InstantCall, type InstantLog, type ReadyMadeAdapter } from '@/lib/app-adapter';
-import { evaluatePause, exposureIn, giveBack, instantRunKey, reconcileRun, runInstant, setInstantHooks } from '@/lib/instant/executor';
+import { applyLateEvidence, evaluatePause, exposureIn, giveBack, instantRunKey, reconcileRun, runInstant, setInstantHooks } from '@/lib/instant/executor';
 import { setInstantFunds, shutFunds, type InstantFunds } from '@/lib/instant/funds';
 import { getInstantPause, resumeInstant, saveInstantLimits } from '@/lib/instant/state';
 import { checkPriceDrift, forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
@@ -3504,6 +3504,23 @@ run('the bounded Instant executor, in a real database', () => {
       expect(p.sent).toHaveLength(1);
       // A late figure below the top price stops nothing
       expect((await getInstantPause()).paused).toBe(false);
+    });
+
+    it('Opus: a late charge that turns up never undoes what the follow-up to the person wrote on the same run (batch number, when it was told), even when the run was read before they were written', async () => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const { rowId, at, row } = await released(p, f);
+      p.setLogsDown(false);
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', null)]);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
+      // The run as the sweep read it, then the follow-up offers it (batch 1) and the person is told, then the charge turns up and is applied to the OLD copy
+      const stale = await runOf(rowId);
+      expect(stale.detail).toMatchObject({ lateEvidence: { status: 'success', chargeMicros: null } });
+      await prisma.$executeRaw`UPDATE "instant_runs" SET "detail" = jsonb_set(jsonb_set("detail", '{lateBatch}', '1'::jsonb), '{lateToldAt}', to_jsonb(${new Date().toISOString()}::text)) WHERE "id" = ${rowId}`;
+      await prisma.$transaction((tx) => applyLateEvidence(stale, p.line(row.providerUserId, 'success', TOP - 1_000), tx, new Date(at.getTime() + 120 * MIN)));
+      const after = await runOf(rowId);
+      expect(after.detail).toMatchObject({ lateBatch: 1, lateToldAt: expect.any(String), lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 }, adjustment: { estimatedMicros: TOP, verifiedMicros: TOP - 1_000 } });
+      expect(after.providerBasis).toBe('measured');
     });
 
     it('a vendor charge above the estimate is the real one: our cost follows it, the person still pays nothing', async () => {

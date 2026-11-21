@@ -712,8 +712,11 @@ function awaitsLateEvidence(run: Row, now: Date): boolean {
  * side: a charge on the line replaces the estimate (the books and the meter event say measured, with the estimate and the verified figure kept
  * on the run), so a vendor charge above or below the estimate is the real one, once.
  */
-async function applyLateEvidence(run: Row, line: InstantLog, tx: Prisma.TransactionClient, now: Date): Promise<void> {
-  const detail = isObject(run.detail) ? run.detail : {};
+export async function applyLateEvidence(run: Row, line: InstantLog, tx: Prisma.TransactionClient, now: Date): Promise<void> {
+  // What the run says about itself is read again here with the row locked, and that is what is written back: another writer of the run's detail (the follow-up to the person writes the batch number it
+  // offered and when it was told, into the same detail) is never undone by a copy read earlier. Their marks are UPDATEs, which take the same lock, so the two serialise
+  const [locked] = await tx.$queryRaw<Array<{ detail: unknown }>>`SELECT "detail" FROM "instant_runs" WHERE "id" = ${run.id} FOR UPDATE`;
+  const detail = isObject(locked?.detail) ? locked.detail : isObject(run.detail) ? run.detail : {};
   const estimated = asNumber(run.providerMicros);
   const verified = line.chargeMicros;
   // A line that says the tool worked but carries no charge yet (it may be posted later): that it worked is written down at once (so the receipt can say so, and it never

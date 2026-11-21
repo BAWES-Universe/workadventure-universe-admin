@@ -257,6 +257,11 @@ async function lateReportSince(now: Date): Promise<Date> {
  * on the person's own key is never told this), and no refund is still pending on it. ONE message per job: it names every App confirmed by the time it is offered; an App confirmed after the person was told
  * stays only on their receipt (Activity), as it always did. Told by `keepReportTold` with the kind `late`, which is the only thing that marks it.
  */
+/** One reader at a time decides and writes a job's batch (read, number, tag, read back). Held to the end of the transaction. */
+async function lockLateBatch(tx: Pick<Prisma.TransactionClient, '$executeRaw'>, jobId: string): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`computer:late-batch:${jobId}`}, 0))`;
+}
+
 async function lateReports(size: number, now: Date): Promise<Report[]> {
   const since = await lateReportSince(now);
   const lookBack = new Date(now.getTime() - LATE_LOOK_DAYS * 24 * 60 * 60 * 1000);
@@ -282,16 +287,12 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
     const last = found[found.length - 1];
     after = { at: last.first_at, id: last.job_id };
     const ids = found.map((row) => row.job_id);
-    // Every run of these jobs not yet told, and the highest batch number ever given on each job (told or not)
-    const runs = await prisma.$queryRaw<Array<{ id: string; job_id: string; toolkit: string; batch: number | null }>>(Prisma.sql`
+    // Every run of these jobs not yet told (a first look only: the batch itself is decided under the job's lock below)
+    const runs = await prisma.$queryRaw<Array<{ job_id: string }>>(Prisma.sql`
       WITH confirmed AS (${CONFIRMED_RUNS(lookBack)})
-      SELECT c."id", c."task_key" AS job_id, c."toolkit", c."batch" FROM confirmed c
+      SELECT c."task_key" AS job_id FROM confirmed c
       WHERE c."task_key" IN (${Prisma.join(ids)}) AND c."at" >= ${since} AND c."told_at" IS NULL
       ORDER BY c."at" ASC, c."id" ASC`);
-    const highest = await prisma.$queryRaw<Array<{ job_id: string; top: number | null }>>(Prisma.sql`
-      SELECT i."task_key" AS job_id, MAX(CASE WHEN i."detail"->>'lateBatch' ~ '^[0-9]+$' THEN (i."detail"->>'lateBatch')::int END) AS top
-      FROM "instant_runs" i WHERE i."task_key" IN (${Prisma.join(ids)}) GROUP BY i."task_key"`);
-    const topOf = new Map(highest.map((row) => [row.job_id, row.top ?? 0] as const));
     const jobs = await prisma.computerJob.findMany({ where: { id: { in: ids }, bot: { deletedAt: null } } });
     const jobOf = new Map(jobs.map((job) => [job.id, job]));
     const people = await prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.personId))] } }, select: { id: true, matrixChatId: true } });
@@ -308,20 +309,42 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
       // was ever made (their own bill is not ours to speak of). Any job qualifies, whatever became of its computer: the follow-up is about the App
       if ((owed.get(job.id)?.pendingMicros ?? 0) > 0) continue;
       if (await hasOwnKeyCall(prisma, job.id)) continue;
-      // The batch: a follow-up that was offered and not confirmed yet is offered again as it was (its runs stay together, and a run confirmed since waits for the next one); otherwise every run not told
-      // yet is one new batch, numbered after the highest the job has had (a number only goes up), and its runs are tagged so a confirmation of that number marks exactly them
-      const untold = runs.filter((one) => one.job_id === job.id);
-      if (untold.length === 0) continue;
-      const offered = untold.filter((one) => one.batch !== null);
-      const batch = offered.length > 0 ? Math.min(...offered.map((one) => one.batch as number)) : (topOf.get(job.id) ?? 0) + 1;
-      const inBatch = offered.length > 0 ? offered.filter((one) => one.batch === batch) : untold;
-      if (offered.length === 0) {
-        await prisma.$executeRaw(Prisma.sql`
-          UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateBatch}', to_jsonb(${batch}::int)) WHERE "id" IN (${Prisma.join(inBatch.map((one) => one.id))}) AND "detail"->'lateBatch' IS NULL`);
-      }
+      // The batch. Everything below is read AGAIN under the job's own lock, and the names are read back from the runs that carry the batch number after it is written: two readers looking at once (several
+      // game servers, overlapping hourly reads) can never give one number to different runs, and a report never names a run its confirmation will not mark, nor marks one it did not name. A follow-up that
+      // was offered and not confirmed yet is offered again as it was (its runs stay together, and a run confirmed since waits for the next one); otherwise every run not told yet is one new batch, numbered
+      // after the highest the job has had (a number only goes up), and its runs are tagged so a confirmation of that number marks exactly them
+      if (!runs.some((one) => one.job_id === job.id)) continue;
+      const made = await prisma.$transaction(
+        async (tx) => {
+          await lockLateBatch(tx, job.id);
+          const untold = await tx.$queryRaw<Array<{ id: string; toolkit: string; batch: number | null }>>(Prisma.sql`
+            WITH confirmed AS (${CONFIRMED_RUNS(lookBack)})
+            SELECT c."id", c."toolkit", c."batch" FROM confirmed c
+            WHERE c."task_key" = ${job.id} AND c."at" >= ${since} AND c."told_at" IS NULL
+            ORDER BY c."at" ASC, c."id" ASC`);
+          if (untold.length === 0) return null;
+          const offered = untold.filter((one) => one.batch !== null);
+          let batch: number;
+          if (offered.length > 0) batch = Math.min(...offered.map((one) => one.batch as number));
+          else {
+            const [top] = await tx.$queryRaw<Array<{ top: number | null }>>(Prisma.sql`
+              SELECT MAX(CASE WHEN i."detail"->>'lateBatch' ~ '^[0-9]+$' THEN (i."detail"->>'lateBatch')::int END) AS top FROM "instant_runs" i WHERE i."task_key" = ${job.id}`);
+            batch = (top?.top ?? 0) + 1;
+            await tx.$executeRaw(Prisma.sql`
+              UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateBatch}', to_jsonb(${batch}::int)) WHERE "id" IN (${Prisma.join(untold.map((one) => one.id))}) AND "detail"->'lateBatch' IS NULL`);
+          }
+          const named = await tx.$queryRaw<Array<{ toolkit: string }>>(Prisma.sql`
+            SELECT i."toolkit" FROM "instant_runs" i WHERE i."task_key" = ${job.id} AND i."detail"->>'lateBatch' = ${String(batch)} AND i."detail"->'lateToldAt' IS NULL AND i."detail"->'lateEvidence'->>'status' = 'success'
+            ORDER BY i."created_at" ASC, i."id" ASC`);
+          return { batch, toolkits: named.map((one) => one.toolkit) };
+        },
+        { maxWait: 15_000, timeout: 30_000 },
+      );
+      if (!made) continue;
+      const batch = made.batch;
       const names: string[] = [];
-      for (const one of inBatch) {
-        const label = appLabel(one.toolkit);
+      for (const toolkit of made.toolkits) {
+        const label = appLabel(toolkit);
         if (!names.includes(label)) names.push(label);
       }
       out.push({
@@ -510,10 +533,10 @@ export async function keepReportTold(jobId: string, kind: ReportKind, seq?: numb
     const there = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } });
     if (!there) return false;
     // Told, or never to be told (it can never reach them): either way the runs it named are never offered again. The runs are marked one by one, so a confirmation of a run that came after the report was
-    // offered is the next follow-up, never lost and never said twice. `seq` is the batch the reader was given: exactly its runs are marked. A reader that says none (an older game) marks every run confirmed
-    // up to now. It never touches the ending's own marks
+    // offered is the next follow-up, never lost and never said twice. `seq` is the batch the reader was given: exactly its runs are marked. A reader that says none marks every run that was OFFERED
+    // (one that carries a batch number): a run that was never named in a follow-up is never marked told. It never touches the ending's own marks
     const told = JSON.stringify(now.toISOString());
-    const batchOnly = typeof seq === 'number' ? Prisma.sql`AND i."detail"->>'lateBatch' = ${String(seq)}` : Prisma.sql`AND (i."detail"->'lateEvidence'->>'at') IS NOT NULL`;
+    const batchOnly = typeof seq === 'number' ? Prisma.sql`AND i."detail"->>'lateBatch' = ${String(seq)}` : Prisma.sql`AND i."detail"->'lateBatch' IS NOT NULL`;
     await prisma.$executeRaw(Prisma.sql`
       UPDATE "instant_runs" i SET "detail" = jsonb_set(i."detail", '{lateToldAt}', ${told}::jsonb)
       WHERE i."task_key" = ${jobId} AND i."detail"->'lateEvidence'->>'status' = 'success' AND i."detail"->'lateToldAt' IS NULL ${batchOnly}`);

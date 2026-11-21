@@ -479,9 +479,50 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       expect(await keepReportTold(id, 'late', 1)).toBe(true);
       expect(await keepReportTold(id, 'late', 9)).toBe(true);
       expect((await lateMine([id])).map((report) => report.seq)).toEqual([3]);
-      // An older reader confirms without a number: every confirmed run is marked (never offered twice)
+      // An older reader confirms without a number: every run that was OFFERED is marked (never offered twice); one that was never named in a follow-up is not
+      await letGo(id, who, 'zoom', { at: new Date(LATER.getTime() + 4 * 86_400_000) });
       expect(await keepReportTold(id, 'late')).toBe(true);
+      expect((await lateMine([id])).map((report) => [report.seq, report.apps])).toEqual([[4, ['Zoom']]]);
+      expect(await keepReportTold(id, 'late', 4)).toBe(true);
       expect(await lateMine([id])).toEqual([]);
+    });
+
+    it('Dev desk: two readers at once never give one batch number to different runs: a reader waits for the job’s lock, then reads again, and the report names exactly the runs its number marks', async () => {
+      const { who, id } = await lateJob();
+      let release: () => void = () => undefined;
+      const hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let locked: () => void = () => undefined;
+      const isLocked = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      // Reader 1, in the middle of its work: it holds the job's lock, tags run A with batch 1, and run X is confirmed before it lets go
+      const reader1 = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`computer:late-batch:${id}`}, 0))`;
+        locked();
+        await hold;
+        await tx.$executeRaw`UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateBatch}', '1'::jsonb) WHERE "task_key" = ${id} AND "toolkit" = 'gmail'`;
+      });
+      await isLocked;
+      // Reader 2 looks at the job meanwhile: it must wait for the lock
+      let settled = false;
+      const reader2 = lateMine([id]).then((found) => {
+        settled = true;
+        return found;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(settled).toBe(false);
+      await letGo(id, who, 'slack', { at: new Date(LATER.getTime() + 60_000) });
+      release();
+      await reader1;
+      const found = await reader2;
+      // It read again under the lock: batch 1 is A alone (as reader 1 wrote it), and X is not in it
+      expect(found.map((report) => [report.seq, report.apps])).toEqual([[1, ['Gmail']]]);
+      expect((await prisma.instantRun.findFirstOrThrow({ where: { taskKey: id, toolkit: 'slack' } })).detail).not.toHaveProperty('lateBatch');
+      // Its confirmation marks A and only A; X is then offered as batch 2, never lost and never named twice
+      expect(await keepReportTold(id, 'late', 1)).toBe(true);
+      expect((await lateMine([id])).map((report) => [report.seq, report.apps])).toEqual([[2, ['Slack']]]);
     });
 
     it('a follow-up that can never be delivered ends its batch for good, and the next batch still comes', async () => {
@@ -544,6 +585,7 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       expect(await lateMine([id])).toEqual([]);
       // Told as undeliverable: the follow-up is also over (never offered again)
       const { id: other } = await lateJob('omar');
+      expect(await lateMine([other])).toHaveLength(1);
       expect(await keepReportTold(other, 'late', undefined, { delivered: false, why: 'no_chat' })).toBe(true);
       expect(await lateMine([other])).toEqual([]);
     });
