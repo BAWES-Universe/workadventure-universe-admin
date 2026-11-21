@@ -6,7 +6,7 @@ import { getInstantLimitsStrict } from '@/lib/instant/state';
 import { INSTANT_LIMITS_RECOMMENDED, type InstantLimits } from '@/lib/instant/values';
 import { monthOf } from '@/lib/meter-values';
 import { callRoomKey, giveBackModelCalls } from '@/lib/computer-calls';
-import { OURS_REASONS, RELAY_UNREACHABLE, readFaultRows, recordRelayUnreachable } from '@/lib/computer-faults';
+import { OURS_REASONS, RELAY_UNREACHABLE, isRunnerNoRelayRow, readFaultRows, recordRelayUnreachable, type FaultRow } from '@/lib/computer-faults';
 import { incidentFaultMatch } from '@/lib/computer-route-pause';
 import { retryWaitMs } from '@/lib/computer-retry';
 
@@ -124,6 +124,19 @@ export async function neverReachedRelay(db: Pick<Prisma.TransactionClient, 'comp
 }
 
 /**
+ * The row of ours a decision rests on, or undefined. That the computer could not reach the relay names the reason when other rows of ours (the relay's own `relay_down`, written for the same thing) say it too:
+ * Orbit's own finding, or the runner's own marker of it (its prepare could not, or no call reached the relay: a `relay_down` row under a call id of its own), which is the same finding said by the runner.
+ * The relay's own `relay_down` (a 503 it answered: the computer reached it) is under a real call's id and keeps its reason. The money, the basis and the count are those of any fault of ours; only the
+ * reason (the words the person reads) and the route (no provider's) are this finding's. Used by the finish and by a row that arrives after it, so both say the same.
+ */
+function oursFinding(rows: readonly FaultRow[]): FaultRow | undefined {
+  const own = rows.find((row) => row.cls === 'ours' && row.reason === RELAY_UNREACHABLE);
+  if (own) return own;
+  const noRelay = rows.find((row) => row.cls === 'ours' && isRunnerNoRelayRow(row));
+  return noRelay ? { ...noRelay, reason: RELAY_UNREACHABLE, route: null } : rows.find((row) => row.cls === 'ours');
+}
+
+/**
  * Decides one failed job the runner reported as ours. Runs inside a transaction, under the person's give-back lock, so two jobs of one person deciding
  * together cannot both take the last give-back. `limits` are read before the transaction opens (null: they could not be read).
  */
@@ -148,8 +161,7 @@ export async function decideRunnerFinish(
   // those are read, and never an empty list of turns, which would read the numbered rows of every run
   const rows = await readFaultRows(tx, job.id, judged, options.run, { turnlessOnly: lenient && !!judged && judged.length === 0 });
   const judgedTurns = lenient && !(turns && turns.length > 0) ? [...(judged ?? [])] : undefined;
-  // Orbit's own finding that the computer could not reach the relay names the reason when other rows of ours (the relay's own `relay_down`, written for the same thing) say it too
-  let ours = rows.find((row) => row.cls === 'ours' && row.reason === RELAY_UNREACHABLE) ?? rows.find((row) => row.cls === 'ours');
+  let ours = oursFinding(rows);
   // Nothing was charged for a job that never started: there is nothing to hold back
   if (!job.startedAt) return { state: 'given', basis: 'universe_fault', counted: false, reason: ours?.reason ?? 'not_started', route: ours?.route ?? null, judgedTurns };
   // A job whose computer was readied to ask for a model, and for which Orbit holds not one trace of a call (no row of any kind, no call held room or was priced), never reached the relay: no brief makes a
@@ -422,7 +434,7 @@ export async function afterLateEvidence(jobId: string, now: Date = new Date()): 
       }
     }
     const rows = await readFaultRows(tx, jobId, turns, decision.judgedRun, { turnlessOnly });
-    const ours = rows.find((row) => row.cls === 'ours');
+    const ours = oursFinding(rows);
     if (!ours) {
       if (chosen !== null) await tx.computerGiveBackDecision.update({ where: { jobId }, data: { judgedTurns: [chosen] } });
       return false;

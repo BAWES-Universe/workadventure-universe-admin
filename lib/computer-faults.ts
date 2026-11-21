@@ -38,6 +38,14 @@ export type FaultClass = 'ours' | 'person' | 'unresolved';
  * write a row for. Written by Orbit itself from what the runner says at prepare, or from the absence of every call at a failed finish (lib/computer-giveback). Ours, always.
  */
 export const RELAY_UNREACHABLE = 'relay_unreachable';
+/**
+ * The rows the game's runner keeps when its computer could not reach the model relay, as it knows it (it has no call to name): a call id that starts `relay_unreachable_` (the marker it keeps when its prepare
+ * could not) or `no_call_` (a turn in which no call reached the relay), with the reason `relay_down` (read only on a row of ours, so the relay's word `fault`: `faultClassOf`). The relay's own `relay_down` (its 503 "service busy": the computer DID
+ * reach us) is always a real call's id, never one of these. Such a row says the same thing as Orbit's own `relay_unreachable` finding.
+ */
+export const RUNNER_NO_RELAY_CALL_PREFIXES: readonly string[] = ['relay_unreachable_', 'no_call_'];
+export const isRunnerNoRelayRow = (row: { callId: string; reason: string }): boolean =>
+  row.reason === 'relay_down' && RUNNER_NO_RELAY_CALL_PREFIXES.some((prefix) => row.callId.startsWith(prefix));
 export const OURS_REASONS: readonly string[] = ['relay_down', 'route_unknown', 'authorize_failed', 'key_decrypt_failed', 'pool_busy', 'provider_key_ours', RELAY_UNREACHABLE];
 export const PERSON_REASONS: readonly string[] = ['field_job_set', 'allowance', 'rule', 'own_provider'];
 export const UNRESOLVED_REASONS: readonly string[] = ['provider_5xx', 'provider_429', 'stream_cut', 'timeout_no_output', 'timeout_after_output', 'fieldless_400', 'field_relay_set', 'provider_403'];

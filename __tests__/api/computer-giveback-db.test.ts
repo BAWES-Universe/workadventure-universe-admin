@@ -1593,6 +1593,59 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(relayOnly.runnerFault).toBe(false);
     });
 
+    it('the runner’s own row of it (relay_down under its marker call id: its prepare could not, or no call reached the relay) names the same reason and the approved words; the relay’s own relay_down 503 does not (dev staging journey d)', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      // The shapes the runner writes: a marker for a prepare that could not reach the relay, and a turn in which no call reached it (route `unknown`, the relay's word `fault`)
+      const markers = [
+        { callId: 'relay_unreachable_r1_1', ending: { outcome: 'failed' as const, cause: 'ours' as const, turns: [1], run: 'r1' } },
+        { callId: 'no_call_r1_1', ending: { outcome: 'failed' as const, cause: 'ours' as const, turns: [1], run: 'r1' } },
+        // The runner named no turn and the hint was its own: the row with no turn is still the finding
+        { callId: 'relay_unreachable_r1_0', ending: { outcome: 'failed' as const, cause: 'agent' as const, run: 'r1' } },
+      ];
+      for (const { callId, ending } of markers) {
+        const one = await job(sara, ending, async (jobId) => {
+          await readied(jobId);
+          await recordFaults(sara.brickId, jobId, [fault(ending.turns ? 1 : null, 'relay_down', { callId, run: 'r1', route: 'unknown' })]);
+        });
+        expect(await decisionOf(one.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable', route: null });
+        // The money and the count are those of any fault of ours: given back, nothing counted against the person's bound
+        expect(await givenBack(one.id)).toBe(true);
+        expect(one.runnerFault).toBe(false);
+        expect((await item(sara.id, one.id))?.outcomeNote).toContain(UNREACHABLE_WORDS);
+      }
+      // The relay's own relay_down (its 503 "service busy": the computer DID reach it) is under a real call's id: it keeps its reason and gets no such sentence
+      const busy = await job(sara, { outcome: 'failed', cause: 'ours', turns: [1], run: 'r1' }, async (jobId) => {
+        await readied(jobId);
+        await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', { callId: 'call-4f1e', run: 'r1', route: 'unknown', providerStatus: 503 })]);
+      });
+      expect(await decisionOf(busy.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_down' });
+      expect(await givenBack(busy.id)).toBe(true);
+      expect((await item(sara.id, busy.id))?.outcomeNote ?? '').not.toContain(UNREACHABLE_WORDS);
+      // A marker id on a row that is not the relay's word `fault` is no finding of ours at all
+      const unsure = await job(sara, { outcome: 'failed', cause: 'ours', turns: [1], run: 'r1' }, async (jobId) => {
+        await readied(jobId);
+        await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', { callId: 'no_call_r1_1', kind: 'uncertain', run: 'r1' })]);
+      });
+      expect((await decisionOf(unsure.id))?.reason).not.toBe('relay_unreachable');
+    });
+
+    it('the runner’s marker row that arrives after the finish names the same reason as on time, past the cap', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      await job(sara, { outcome: 'failed', cause: 'agent', turns: [1] }, withFaults(sara, [fault(1, 'provider_5xx')]));
+      const rowed = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+        await readied(jobId);
+        await recordFaults(sara.brickId, jobId, [fault(1, 'stream_cut', { run: 'r1' })]);
+      });
+      expect(await decisionOf(rowed.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+      await recordFaults(sara.brickId, rowed.id, [fault(null, 'relay_down', { callId: 'relay_unreachable_r1_0', run: 'r1', route: 'unknown' })]);
+      await afterLateEvidence(rowed.id);
+      expect(await decisionOf(rowed.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable', route: null });
+      expect(await givenBack(rowed.id)).toBe(true);
+      expect((await item(sara.id, rowed.id))?.outcomeNote).toContain(UNREACHABLE_WORDS);
+    });
+
     it('a row that says so and arrives after the finish gives the job back the same way, past the cap', async () => {
       await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
       const sara = await person('sara');
