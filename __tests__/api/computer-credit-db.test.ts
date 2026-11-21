@@ -1163,6 +1163,8 @@ run('credit for computers, on the real books', () => {
       expect(item).toMatchObject({ state: 'done', outcome: 'partial', returnedMicros: 30_000 });
       expect(item.outcomeText).not.toBe(OUTCOME_WORDS.refunded);
       expect(item.actions).toMatchObject([{ label: 'gmail', outcome: 'worked' }]);
+      // The same payload game Usage reads (on time: the Gmail verified by its own run, nothing charged): state done, outcome partial, never refunded
+      expect((await memberUsage(sara.id, at(600))).activity.find((one) => one.id === item.id)).toMatchObject({ state: 'done', outcome: 'partial', outcomeText: OUTCOME_WORDS.partial });
       // No verified work: a computer given back with nothing else is refunded
       const other = await running('tom');
       const second = await job(other);
@@ -1207,7 +1209,8 @@ run('credit for computers, on the real books', () => {
       expect(await prisma.meterEvent.count({ where: { eventId: `instant:${run.id}` } })).toBe(0);
       // Game Usage reads the same items: the same words
       const usage = await memberUsage(sara.id, at(700));
-      expect(usage.activity.find((one) => one.id === item.id)).toMatchObject({ outcomeText: 'Partly done', outcomeNote: item.outcomeNote });
+      // The payload game Usage renders: state done (never refunded: the game would show only "Refunded" and drop the note), outcome partial, Orbit's own words
+      expect(usage.activity.find((one) => one.id === item.id)).toMatchObject({ state: 'done', outcome: 'partial', outcomeText: 'Partly done', outcomeNote: item.outcomeNote });
       // Said again (a sweep, a read): the same receipt, the same words
       await settleCheckingReceipts(50, at(800));
       expect(await itemFor(sara.id, 'Mail with report')).toEqual([item]);
