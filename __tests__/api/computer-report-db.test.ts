@@ -17,6 +17,7 @@ import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, planEffect, requestHandover, settleEffect, startJob, stopJobFor, sweepComputers, takeOver, turnOffComputer } from '@/lib/computer';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
+import { OWN_KEY_CALL_MARK, ORBIT_SOURCE } from '@/lib/computer-faults';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -40,11 +41,13 @@ const setUp = () =>
   saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
 
 const wipe = async () => {
+  await prisma.instantRun.deleteMany({ where: { personId: { in: people } } });
+  await prisma.computerRefundObligation.deleteMany({ where: { personId: { in: people } } });
   await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
   await prisma.meterEvent.deleteMany({});
   await prisma.meterReservation.deleteMany({});
   await prisma.meterGrant.deleteMany({});
-  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits', 'computer-wind-down'] } } });
+  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits', 'computer-wind-down', 'computer_late_report_since'] } } });
 };
 
 async function started(sara: { id: string; brickId: string }, title = 'Visa form', at: Date = NOW) {
@@ -378,5 +381,162 @@ run('Brick tells the person how a computer job went, in a real database', () => 
   it('says nothing is told for an unknown job', async () => {
     expect(await keepReportTold(randomUUID(), 'done')).toBe(false);
     expect(await keepReportTold(randomUUID(), 'needs', 1)).toBe(false);
+  });
+
+  describe('GPT round 3: the one follow-up when an App went out after all', () => {
+    // The deploy of this change, then the provider's log (a minute later, so after it)
+    const SINCE = new Date('2026-11-21T10:00:00Z');
+    const LATER = new Date('2026-11-21T11:00:00Z');
+    const lateMine = async (jobIds: string[]) => (await reportsToTell(200, NOW, { accepts: ['late'] })).filter((report) => report.kind === 'late' && jobIds.includes(report.jobId));
+
+    const letGo = (job: string, who: { id: string; brickId: string }, toolkit: string, over: { status?: string; at?: Date; customerState?: string; customerMicros?: number; state?: string; reason?: string } = {}) =>
+      prisma.instantRun.create({
+        data: {
+          runKey: `k-${randomUUID()}`, botId: who.brickId, personId: who.id, taskKey: job, toolSlug: `${toolkit.toUpperCase()}_SEND`, toolkit, argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v',
+          topMicros: BigInt(10_000), holdMicros: BigInt(10_000), state: over.state ?? 'failed', reason: over.reason ?? 'unclear', customerState: over.customerState ?? 'released', customerMicros: BigInt(over.customerMicros ?? 0),
+          detail: { noLog: true, releasedUnconfirmed: true, lateEvidence: { status: over.status ?? 'success', chargeMicros: 0, at: (over.at ?? LATER).toISOString() } }, providerUserId: `u-${randomUUID().slice(0, 6)}`,
+        } as never,
+      });
+
+    /** A computer job that failed on our side (given back) whose first report was delivered, with a Gmail let go unconfirmed that the log later confirmed */
+    async function lateJob(name = 'sara', toolkit = 'gmail') {
+      const who = await person(name);
+      const id = await started(who);
+      await finishJob(id, 'failed', minutes(6), 'The relay was not there', 'ours');
+      await keepReportTold(id, 'failed');
+      await letGo(id, who, toolkit);
+      return { who, id };
+    }
+
+    beforeEach(async () => {
+      await prisma.appSetting.upsert({ where: { key: 'computer_late_report_since' }, update: { value: SINCE.toISOString() }, create: { key: 'computer_late_report_since', value: SINCE.toISOString() } });
+    });
+
+    it('offers it once, with the Apps that went out, after the first report was delivered, and never to a reader that did not ask for it', async () => {
+      const { who, id } = await lateJob();
+      // An older game (no accepts) is never sent the kind; neither is one that asks for something else
+      expect((await mine([id])).map((report) => report.kind)).not.toContain('late');
+      expect((await reportsToTell(200, NOW, { accepts: ['other'] })).filter((report) => report.jobId === id)).toEqual([]);
+      const [late, ...rest] = await lateMine([id]);
+      expect(rest).toEqual([]);
+      expect(late).toMatchObject({ key: `computer-told:${id}:late`, kind: 'late', jobId: id, botId: who.brickId, matrixUserId: expect.stringContaining('sara-'), apps: ['Gmail'], lateApps: ['Gmail'], holdReleased: true, givenBack: true, seq: null, effects: [], files: [] });
+      // Told (said twice: the same), it is never offered again, and the ending's own mark is untouched
+      const told = await prisma.computerJob.findUniqueOrThrow({ where: { id }, select: { endToldAt: true, lateToldAt: true } });
+      expect(told.lateToldAt).toBeNull();
+      expect(await keepReportTold(id, 'late')).toBe(true);
+      const once = await prisma.computerJob.findUniqueOrThrow({ where: { id }, select: { endToldAt: true, lateToldAt: true } });
+      expect(once.lateToldAt).toBeInstanceOf(Date);
+      expect(once.endToldAt).toEqual(told.endToldAt);
+      expect(await keepReportTold(id, 'late')).toBe(true);
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id }, select: { lateToldAt: true } })).lateToldAt).toEqual(once.lateToldAt);
+      expect(await lateMine([id])).toEqual([]);
+      // Nothing about it comes back as an ending either
+      expect((await mine([id])).map((report) => report.kind)).toEqual([]);
+    });
+
+    it('one job with two Apps confirmed is one follow-up naming both, in the order confirmed, each once', async () => {
+      const { who, id } = await lateJob();
+      await letGo(id, who, 'slack', { at: new Date(LATER.getTime() + 60_000) });
+      await letGo(id, who, 'gmail', { at: new Date(LATER.getTime() + 120_000) });
+      const found = await lateMine([id]);
+      expect(found).toHaveLength(1);
+      expect(found[0].apps).toEqual(['Gmail', 'Slack']);
+    });
+
+    it('both arrival orders: confirmed before the first report was told, it waits for that report and is offered after it; confirmed after, at once', async () => {
+      const who = await person('sara');
+      const id = await started(who);
+      await finishJob(id, 'failed', minutes(6), 'The relay was not there', 'ours');
+      await letGo(id, who, 'gmail');
+      // The first report is not told yet: this follows it, never leads it
+      expect(await lateMine([id])).toEqual([]);
+      expect((await mine([id])).map((report) => report.kind)).toEqual(['failed']);
+      await keepReportTold(id, 'failed');
+      expect((await lateMine([id])).map((report) => report.apps)).toEqual([['Gmail']]);
+      // The other order (the first report delivered first, the confirmation later) is the one every other test here uses
+      const { id: second } = await lateJob('omar');
+      expect((await lateMine([second])).map((report) => report.kind)).toEqual(['late']);
+    });
+
+    it('a person who never got the first report (it could not be delivered) is never told, and a reply that could not be delivered still ends it for good', async () => {
+      const { id } = await lateJob('sara');
+      await prisma.computerJob.update({ where: { id }, data: { endUndeliverableAt: minutes(7), endUndeliverableWhy: 'no_chat' } });
+      expect(await lateMine([id])).toEqual([]);
+      // Told as undeliverable: the follow-up is also over (never offered again)
+      const { id: other } = await lateJob('omar');
+      expect(await keepReportTold(other, 'late', undefined, { delivered: false, why: 'no_chat' })).toBe(true);
+      expect(await lateMine([other])).toEqual([]);
+    });
+
+    it('never for an App the log said failed, one nobody could confirm, one that was charged, one not let go, or a confirmation from before this shipped', async () => {
+      // One person each: a person's month only gives back so many (a later one would not be "given back" for that reason, not the one under test)
+      const make = async (name: string) => {
+        const who = await person(name);
+        const id = await started(who);
+        await finishJob(id, 'failed', minutes(6), 'The relay was not there', 'ours');
+        await keepReportTold(id, 'failed');
+        // It is the sort of job that WOULD be offered: given back, first report told
+        expect((await prisma.computerGiveBackDecision.findUniqueOrThrow({ where: { jobId: id } })).state).toBe('given');
+        return { who, id };
+      };
+      const none = await make('p1');
+      const failed = await make('p2');
+      const charged = await make('p3');
+      const held = await make('p4');
+      const ran = await make('p5');
+      const early = await make('p6');
+      // No log said anything
+      await prisma.instantRun.create({
+        data: { runKey: `k-${randomUUID()}`, botId: none.who.brickId, personId: none.who.id, taskKey: none.id, toolSlug: 'GMAIL_SEND', toolkit: 'gmail', argsHash: 'h', priceVersion: 'v', topMicros: BigInt(1), holdMicros: BigInt(1), state: 'failed', reason: 'unclear', customerState: 'released', customerMicros: BigInt(0), detail: { noLog: true, releasedUnconfirmed: true }, providerUserId: 'u' } as never,
+      });
+      await letGo(failed.id, failed.who, 'gmail', { status: 'failed' });
+      await letGo(charged.id, charged.who, 'gmail', { customerState: 'charged', customerMicros: 10_000 });
+      await letGo(held.id, held.who, 'gmail', { customerState: 'held' });
+      await letGo(ran.id, ran.who, 'gmail', { state: 'succeeded', reason: 'ok' });
+      await letGo(early.id, early.who, 'gmail', { at: new Date(SINCE.getTime() - 60_000) });
+      expect(await lateMine([none.id, failed.id, charged.id, held.id, ran.id, early.id])).toEqual([]);
+    });
+
+    it('never for a job that was not given back by a decision (a quick job that ended fine with no minutes counted) even though the books look given back', async () => {
+      const who = await person('sara');
+      const id = await started(who);
+      await finishJob(id, 'done', NOW);
+      await keepReportTold(id, 'done');
+      await prisma.meterEvent.deleteMany({ where: { eventId: `computer:${id}:time` } });
+      await prisma.computerJob.update({ where: { id }, data: { secondsRun: 0 } });
+      await prisma.computerGiveBackDecision.deleteMany({ where: { jobId: id } });
+      await letGo(id, who, 'gmail');
+      expect(await lateMine([id])).toEqual([]);
+    });
+
+    it('never for a job with a call on the person’s own key, a computer that was not given back, a refund still pending, or a deleted Brick', async () => {
+      const own = await lateJob('sara');
+      await prisma.computerJobFault.create({ data: { jobId: own.id, turn: null, run: null, callId: OWN_KEY_CALL_MARK, kind: 'answered', reason: 'own_key', source: ORBIT_SOURCE, route: null, providerStatus: null, at: NOW } });
+      // The job ended on the agent's own account (nothing given back)
+      const who = await person('tom');
+      const agent = await started(who);
+      await finishJob(agent, 'failed', minutes(6), 'Out of turns', 'agent');
+      await keepReportTold(agent, 'failed');
+      await letGo(agent, who, 'gmail');
+      const owed = await lateJob('lena');
+      await prisma.computerRefundObligation.create({ data: { jobId: owed.id, personId: owed.who.id, holdKey: `h-${randomUUID()}`, refundKey: `r-${randomUUID()}`, amountMicros: BigInt(30_000), state: 'owed' } });
+      const gone = await lateJob('omar');
+      await deleteBrick(gone.who.brickId, gone.who.id);
+      expect(await lateMine([own.id, agent, owed.id, gone.id])).toEqual([]);
+      // The same job offered once the refund is acknowledged: a pending refund only delays it
+      await prisma.computerRefundObligation.updateMany({ where: { jobId: owed.id }, data: { state: 'acknowledged' } });
+      expect((await lateMine([owed.id])).map((report) => report.kind)).toEqual(['late']);
+    });
+
+    it('says nothing is told for an unknown job, and a confirmation sent before the deploy record exists keeps the time of the first look', async () => {
+      expect(await keepReportTold(randomUUID(), 'late')).toBe(false);
+      await prisma.appSetting.deleteMany({ where: { key: 'computer_late_report_since' } });
+      const { id } = await lateJob('sara');
+      // The confirmation is from before this first look (an hour before NOW): never offered, and the look is kept
+      const run = await prisma.instantRun.findFirstOrThrow({ where: { taskKey: id } });
+      await prisma.instantRun.update({ where: { id: run.id }, data: { detail: { noLog: true, releasedUnconfirmed: true, lateEvidence: { status: 'success', chargeMicros: 0, at: minutes(-60).toISOString() } } } });
+      expect(await lateMine([id])).toEqual([]);
+      expect(await prisma.appSetting.findUnique({ where: { key: 'computer_late_report_since' } })).toMatchObject({ value: NOW.toISOString() });
+    });
   });
 });

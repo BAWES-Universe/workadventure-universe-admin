@@ -1,6 +1,7 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { RELAY_UNREACHABLE } from '@/lib/computer-faults';
-import { UNREACHABLE_WORDS } from '@/lib/task-receipt-words';
+import { RELAY_UNREACHABLE, hasOwnKeyCall } from '@/lib/computer-faults';
+import { UNREACHABLE_WORDS, appLabel } from '@/lib/task-receipt-words';
 import { readFilesList } from '@/lib/computer-files';
 import { refundStatesFor } from '@/lib/computer-refunds';
 import { silentEnding, type UndeliverableWhy, type WaitingFor } from '@/lib/computer-values';
@@ -19,7 +20,11 @@ import { cardsOfJobs, handedPathsOf, HAND_OVER_ALIVE_MS, HAND_OVER_LATEST_MS, ma
  * no effect of that kind is on record.
  */
 
-export type ReportKind = 'done' | 'failed' | 'needs' | 'unanswered' | 'month' | 'rule';
+export type ReportKind = 'done' | 'failed' | 'needs' | 'unanswered' | 'month' | 'rule' | 'late';
+
+/** Kinds a reader must say it understands before it is sent one (a reader that does not, an older game, is never sent them). */
+export type OptInKind = 'late';
+export const OPT_IN_KINDS: readonly OptInKind[] = ['late'];
 
 export interface ReportEffect {
   kind: string;
@@ -64,6 +69,12 @@ export interface Report {
    * Optional for older readers; Activity says the same amount ("$0.03 refund pending").
    */
   refundPendingMicros?: number;
+  /** `late` only: the display names of the Apps that went out after all (let go unconfirmed, their hold released, confirmed later by the provider's own log), in the order they were confirmed. */
+  apps?: string[];
+  /** `late` only: the same names under the name the game reads them by (kept equal to `apps`) */
+  lateApps?: string[];
+  /** `late` only: those Apps' holds were released and nothing was charged for them, then or later. */
+  holdReleased?: true;
 }
 
 /**
@@ -206,11 +217,92 @@ const originOf = (job: { originKind: string | null; originRef: string | null }):
 // In the order they were planned, so what is said reads in the order it happened
 const EFFECTS = { select: { effectKey: true, kind: true, state: true, evidence: true }, orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }] };
 
+/** Where the deploy that made the follow-up possible is kept (the migration writes it once): only a confirmation that came after it can be offered, so no job corrected earlier is ever told about. */
+const LATE_SINCE_KEY = 'computer_late_report_since';
+/** How far back a let-go run is looked at (a little over the days its provider log is waited for). */
+const LATE_LOOK_DAYS = 36;
+
+async function lateReportSince(now: Date): Promise<Date> {
+  const row = await prisma.appSetting.findUnique({ where: { key: LATE_SINCE_KEY } });
+  const at = typeof row?.value === 'string' ? new Date(row.value) : null;
+  if (at && !Number.isNaN(at.getTime())) return at;
+  // Kept at the first look when the deploy's own record is missing: nothing earlier than now is ever offered
+  await prisma.appSetting.upsert({ where: { key: LATE_SINCE_KEY }, update: {}, create: { key: LATE_SINCE_KEY, value: now.toISOString() } });
+  return now;
+}
+
+/**
+ * The one follow-up for a job whose App was let go unconfirmed (its hold released, nothing charged) and that the provider's own log CONFIRMED later: the first report could only say it was not confirmed.
+ * Offered once per job, and only when everything is already true that the receipt says: the first report was DELIVERED (a person who never got it is never told this), the confirmation came AFTER the deploy
+ * that made this possible, the App's hold is released and nothing was ever charged for it, the job is Universe-paid (a job with a call on the person's own key is never told this), and the computer part was
+ * given back and the books acknowledged it (no refund still pending). Told by `keepReportTold` with the kind `late`, which is the only thing that marks it.
+ */
+async function lateReports(size: number, now: Date): Promise<Report[]> {
+  const since = await lateReportSince(now);
+  const lookBack = new Date(now.getTime() - LATE_LOOK_DAYS * 24 * 60 * 60 * 1000);
+  const found = await prisma.$queryRaw<Array<{ job_id: string; toolkit: string; at: Date }>>(Prisma.sql`
+    SELECT i."task_key" AS job_id, i."toolkit" AS toolkit, (i."detail"->'lateEvidence'->>'at')::timestamptz AS at
+    FROM "instant_runs" i JOIN "computer_jobs" j ON j."id" = i."task_key" AND j."person_id" = i."person_id" AND j."bot_id" = i."bot_id"
+    WHERE i."state" = 'failed' AND i."reason" = 'unclear' AND i."created_at" >= ${lookBack}
+      AND i."detail"->'lateEvidence'->>'status' = 'success'
+      AND i."customer_state" = 'released' AND COALESCE(i."customer_micros", 0) = 0
+      AND (i."detail"->'lateEvidence'->>'at')::timestamptz >= ${since}
+      AND j."status" IN ('done', 'stopped', 'failed') AND j."ended_told_at" IS NOT NULL AND j."late_told_at" IS NULL AND j."end_undeliverable_at" IS NULL
+    ORDER BY (i."detail"->'lateEvidence'->>'at')::timestamptz ASC, i."id" ASC
+    LIMIT ${size * 4}`);
+  if (found.length === 0) return [];
+  const appsOf = new Map<string, string[]>();
+  for (const row of found) {
+    const names = appsOf.get(row.job_id) ?? [];
+    const label = appLabel(row.toolkit);
+    if (!names.includes(label)) names.push(label);
+    appsOf.set(row.job_id, names);
+  }
+  const jobs = await prisma.computerJob.findMany({ where: { id: { in: [...appsOf.keys()] }, bot: { deletedAt: null } }, orderBy: [{ endedAt: 'asc' }, { id: 'asc' }] });
+  const people = await prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.personId))] } }, select: { id: true, matrixChatId: true } });
+  const chatOf = new Map(people.map((person) => [person.id, person.matrixChatId ?? null]));
+  const owed = await refundStatesFor(jobs.map((job) => job.id));
+  const out: Report[] = [];
+  for (const job of jobs) {
+    if (out.length >= size) break;
+    // The computer part was given back, in the books, with no refund still pending; and no call on the person's own key was ever made (their own bill is not ours to speak of)
+    if (!(await givenBackIn(job.id, job.secondsRun)) || (owed.get(job.id)?.pendingMicros ?? 0) > 0) continue;
+    if (await hasOwnKeyCall(prisma, job.id)) continue;
+    // Only a computer that was given back in the books because it failed on our side or was refused no one's fault: a job that ended well has nothing "given back" to say
+    const decision = await prisma.computerGiveBackDecision.findUnique({ where: { jobId: job.id }, select: { state: true } });
+    if (decision?.state !== 'given') continue;
+    out.push({
+      key: `computer-told:${job.id}:late`,
+      jobId: job.id,
+      botId: job.botId,
+      matrixUserId: chatOf.get(job.personId) ?? null,
+      origin: originOf(job),
+      kind: 'late',
+      title: job.title,
+      writes: job.writes,
+      seconds: job.secondsRun,
+      seq: null,
+      waitingFor: null,
+      ready: null,
+      waitedFor: null,
+      why: null,
+      effects: [],
+      files: [],
+      handed: [],
+      givenBack: true,
+      apps: appsOf.get(job.id) ?? [],
+      lateApps: appsOf.get(job.id) ?? [],
+      holdReleased: true,
+    });
+  }
+  return out;
+}
+
 /**
  * What Brick is to tell now, oldest first: endings not told yet, then waits for the person not told yet. A job whose person has no chat is still
  * listed (with no chat id) so the bot server can say it cannot and Orbit stops offering it.
  */
-export async function reportsToTell(limit = 50, now: Date = new Date()): Promise<Report[]> {
+export async function reportsToTell(limit = 50, now: Date = new Date(), options: { accepts?: readonly string[] } = {}): Promise<Report[]> {
   const size = Math.max(1, Math.min(limit, 200));
   // An ending is told once everything it does is finished; one a server left half done is told anyway after a while, never held for ever
   const unfinishedBefore = new Date(now.getTime() - UNFINISHED_ENDING_MS);
@@ -257,7 +349,9 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
     include: { effects: EFFECTS },
   });
   const jobs = [...ended, ...waiting];
-  if (jobs.length === 0) return [];
+  // The follow-up for an App that went out after all is offered only to a reader that said it understands it (an older game never sees the kind)
+  const late = options.accepts?.includes('late') ? await lateReports(size, now) : [];
+  if (jobs.length === 0) return late;
   const people = await prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.personId))] } }, select: { id: true, matrixChatId: true } });
   const chatOf = new Map(people.map((person) => [person.id, person.matrixChatId ?? null]));
   const cardsOf = await cardsOfJobs(ended.filter((job) => job.status === 'done').map((job) => job.id));
@@ -325,7 +419,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
       givenBack: false,
     });
   }
-  return reports;
+  return [...reports, ...late];
 }
 
 export type ReportOutcome = { delivered: true } | { delivered: false; why: UndeliverableWhy };
@@ -343,6 +437,13 @@ export async function keepReportTold(jobId: string, kind: ReportKind, seq?: numb
     if (!found) return false;
     // A wait that can never be said is not offered again either (the person still sees it in the bar and in Files), and it is not recorded as said
     await prisma.computerJob.updateMany({ where: { id: jobId, handoverSeq: seq }, data: { handoverUntold: false } });
+    return true;
+  }
+  if (kind === 'late') {
+    const there = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } });
+    if (!there) return false;
+    // Told, or never to be told (it can never reach them): either way it is never offered again. It never touches the ending's own marks
+    await prisma.computerJob.updateMany({ where: { id: jobId, lateToldAt: null }, data: { lateToldAt: now } });
     return true;
   }
   const found = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } });

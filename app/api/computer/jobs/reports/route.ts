@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
-import { keepReportTold, reportsToTell } from '@/lib/computer-report';
+import { OPT_IN_KINDS, keepReportTold, reportsToTell } from '@/lib/computer-report';
 import { UNDELIVERABLE_WHY } from '@/lib/computer-values';
 
 export const runtime = 'nodejs';
@@ -10,7 +10,7 @@ export const dynamic = 'force-dynamic';
 
 const toldSchema = z.object({
   jobId: z.string().min(1).max(64),
-  kind: z.enum(['done', 'failed', 'needs', 'unanswered', 'month', 'rule']),
+  kind: z.enum(['done', 'failed', 'needs', 'unanswered', 'month', 'rule', 'late']),
   seq: z.number().int().min(0).nullable().optional(),
   // Whether it reached the person (the default, as it always was) or can never be delivered (and why): only the first is "told"
   outcome: z.enum(['delivered', 'undeliverable']).optional(),
@@ -29,13 +29,15 @@ function guard(request: NextRequest): NextResponse | null {
 /**
  * GET /api/computer/jobs/reports - what Brick is to tell people about their computer jobs now (the report back): endings and waits for the person
  * that were not told yet, oldest first, each with the facts the job's own record proves. The bot server says each in the person's chat with the Brick
- * and then confirms it below. Auth: service token only.
+ * and then confirms it below. Auth: service token only. `?accepts=late` (comma list) opts in to the follow-up kinds an older reader does not know.
  */
 export async function GET(request: NextRequest) {
   const denied = guard(request);
   if (denied) return denied;
   try {
-    return NextResponse.json({ reports: await reportsToTell(50) }, { headers: { 'Cache-Control': 'no-store' } });
+    // A reader that understands the follow-up says so (`?accepts=late`); one that does not (an older game) is never sent the kind
+    const accepts = (request.nextUrl.searchParams.get('accepts') ?? '').split(',').map((word) => word.trim()).filter((word) => (OPT_IN_KINDS as readonly string[]).includes(word));
+    return NextResponse.json({ reports: await reportsToTell(50, new Date(), { accepts }) }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });
     console.error('[Computer] Could not list what to tell:', error instanceof Error ? error.message : 'unknown');

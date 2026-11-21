@@ -19,6 +19,8 @@ const call = (init: { method?: string; body?: unknown; token?: string | null } =
 
 beforeEach(() => {
   jest.resetAllMocks();
+  // The automock empties an array export: the kinds a reader may opt in to are the real ones
+  (lib as unknown as { OPT_IN_KINDS: string[] }).OPT_IN_KINDS = ['late'];
   process.env.BOT_SERVICE_TOKEN = TOKEN;
 });
 afterAll(() => {
@@ -39,6 +41,20 @@ describe('GET /api/computer/jobs/reports', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('Cache-Control')).toBe('no-store');
     expect(await response.json()).toEqual({ reports: [{ key: 'k', jobId: 'j' }] });
+  });
+
+  it('sends the follow-up kind only to a reader that asked for it (?accepts=late): an older game asks for nothing and is asked for nothing more', async () => {
+    lib.reportsToTell.mockResolvedValue([]);
+    const ask = (query: string) => GET(new NextRequest(`http://localhost:3333/api/computer/jobs/reports${query}`, { method: 'GET', headers: { Authorization: `Bearer ${TOKEN}` } }));
+    await ask('');
+    expect(lib.reportsToTell).toHaveBeenLastCalledWith(50, expect.any(Date), { accepts: [] });
+    await ask('?accepts=late');
+    expect(lib.reportsToTell).toHaveBeenLastCalledWith(50, expect.any(Date), { accepts: ['late'] });
+    // Words it does not know are dropped, never passed on
+    await ask('?accepts=late,%20sold,');
+    expect(lib.reportsToTell).toHaveBeenLastCalledWith(50, expect.any(Date), { accepts: ['late'] });
+    await ask('?accepts=sold');
+    expect(lib.reportsToTell).toHaveBeenLastCalledWith(50, expect.any(Date), { accepts: [] });
   });
 
   it('is a plain server error, with nothing of the cause, when it cannot read', async () => {
@@ -73,6 +89,16 @@ describe('POST /api/computer/jobs/reports', () => {
     // Delivered says nothing more than that
     expect((await POST(call({ body: { jobId: 'j', kind: 'done', outcome: 'delivered' } }))).status).toBe(200);
     expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'done', undefined, { delivered: true });
+  });
+
+  it('keeps the follow-up as told, and as never to be told when it can never be delivered', async () => {
+    lib.keepReportTold.mockResolvedValue(true);
+    expect((await POST(call({ body: { jobId: 'j', kind: 'late' } }))).status).toBe(200);
+    expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'late', undefined, { delivered: true });
+    expect((await POST(call({ body: { jobId: 'j', kind: 'late', outcome: 'undeliverable', why: 'no_chat' } }))).status).toBe(200);
+    expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'late', undefined, { delivered: false, why: 'no_chat' });
+    lib.keepReportTold.mockResolvedValue(false);
+    expect((await POST(call({ body: { jobId: 'gone', kind: 'late' } }))).status).toBe(404);
   });
 
   it('refuses what it does not understand, and says not found for a job that is not there', async () => {
