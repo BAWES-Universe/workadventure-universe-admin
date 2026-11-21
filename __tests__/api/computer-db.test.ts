@@ -1768,22 +1768,39 @@ run('a Brick’s computer, in a real database', () => {
         jest.restoreAllMocks();
       });
 
+      // Waits until a condition holds, looking every 10 ms, and fails when it does not within the deadline (never a fixed sleep for something that has to happen)
+      const until = async (what: string, holds: () => boolean, deadlineMs = 10_000) => {
+        const end = Date.now() + deadlineMs;
+        while (!holds()) {
+          if (Date.now() > end) throw new Error(`gave up waiting for ${what}`);
+          await sleep(10);
+        }
+      };
+
       it('when the job is saved: no renewal runs after startJob returns, and none brings the mark back', async () => {
         const sara = await person('sbe');
         await giveComputer(sara.brickId, sara.id);
         const renew = jest.spyOn(prisma.computerStartMark, 'updateMany');
         const held = holdStartAtItsReads(() => startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey: keyOf(), origin: { kind: 'dm', ref: ref('sbe') } }, NOW));
-        await held.there;
-        await sleep(300);
-        // While the start works the mark is renewed (so the check below can fail)
-        expect(renew.mock.calls.length).toBeGreaterThanOrEqual(2);
-        held.go();
-        const made = (await held.running) as { ok: boolean };
-        expect(made.ok).toBe(true);
-        const after = renew.mock.calls.length;
-        await sleep(400);
-        expect(renew.mock.calls.length).toBe(after);
-        expect(await prisma.computerStartMark.count()).toBe(0);
+        try {
+          // The start is inside its mocked read (its mark is made and its first reads are done): only then are the renewals counted
+          await held.there;
+          // While the start works the mark is renewed (so the check below can fail)
+          await until('two renewals of the mark while the start works', () => renew.mock.calls.length >= 2);
+          held.go();
+          const made = (await held.running) as { ok: boolean };
+          expect(made.ok).toBe(true);
+          const after = renew.mock.calls.length;
+          // Ten beats would fit in this wait
+          await sleep(400);
+          expect(renew.mock.calls.length).toBe(after);
+          expect(await prisma.computerStartMark.count()).toBe(0);
+        } finally {
+          // Whatever failed above, the start is let go and finished, so no timer outlives the test
+          held.go();
+          held.spy.mockRestore();
+          await Promise.allSettled([held.running]);
+        }
       });
 
       it('when the start throws before it saved a job: the same, no renewal after it, no mark left', async () => {
@@ -1792,18 +1809,29 @@ run('a Brick’s computer, in a real database', () => {
         const renew = jest.spyOn(prisma.computerStartMark, 'updateMany');
         let go: () => void = () => undefined;
         const gate = new Promise<void>((resolve) => (go = resolve));
-        jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementationOnce((() => gate.then(() => Promise.reject(new Error('The database went away')))) as never);
+        let entered: () => void = () => undefined;
+        const inside = new Promise<void>((resolve) => (entered = resolve));
+        jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementationOnce((() => {
+          entered();
+          return gate.then(() => Promise.reject(new Error('The database went away')));
+        }) as never);
         const running = startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey: keyOf(), origin: { kind: 'dm', ref: ref('sbf') } }, NOW);
         const outcome = running.then(() => 'ended', (error: Error) => error.message);
-        await sleep(300);
-        expect(renew.mock.calls.length).toBeGreaterThanOrEqual(2);
-        go();
-        expect(await outcome).toBe('The database went away');
-        const after = renew.mock.calls.length;
-        await sleep(400);
-        expect(renew.mock.calls.length).toBe(after);
-        expect(await prisma.computerStartMark.count()).toBe(0);
-        expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+        try {
+          // Inside the read that will fail: the mark is made, and only now are the renewals counted
+          await inside;
+          await until('two renewals of the mark while the start works', () => renew.mock.calls.length >= 2);
+          go();
+          expect(await outcome).toBe('The database went away');
+          const after = renew.mock.calls.length;
+          await sleep(400);
+          expect(renew.mock.calls.length).toBe(after);
+          expect(await prisma.computerStartMark.count()).toBe(0);
+          expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+        } finally {
+          go();
+          await Promise.allSettled([outcome]);
+        }
       });
 
       it('a mark is dated by the app’s clock, not the database’s: moving the app’s clock moves it', async () => {
