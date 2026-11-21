@@ -1992,6 +1992,24 @@ run('payments for pages, in a real database', () => {
           expect((await pagePaymentLoad()).unconfirmed.stalled).toEqual([]);
         });
 
+        it('an order unreadable for days stays "unreadable" while its looks back off to weekly and monthly (no one-day window), and clears the moment a look is read', async () => {
+          const { artifactId } = await setUp();
+          // Unreadable for 10 days: looked at 3 days ago (weekly cadence), the last good read 13 days ago, its next look days away
+          const stuck = await longOrder(artifactId, word(), 'chg_LW20', 60, { checks: 9, checkedAt: new Date(Date.now() - 3 * DAY), lastReadAt: new Date(Date.now() - 13 * DAY), nextLookAt: new Date(Date.now() + 4 * DAY) });
+          let load = (await pagePaymentLoad()).unconfirmed;
+          expect(load).toMatchObject({ unreadLooks: 1, stalled: ['unreadable'], overdue: 0 });
+          // Monthly after 90 days: looked at 20 days ago and never read since the window, still not clear
+          await prisma.appPageOrder.update({ where: { id: stuck.id }, data: { createdAt: new Date(Date.now() - 203 * DAY), closedAt: new Date(Date.now() - 202 * DAY), checkedAt: new Date(Date.now() - 20 * DAY), lastReadAt: null, nextLookAt: new Date(Date.now() + 10 * DAY) } });
+          load = (await pagePaymentLoad()).unconfirmed;
+          expect(load).toMatchObject({ unreadLooks: 1, stalled: ['unreadable'] });
+          // A look that was read: cleared (whatever the age, and however far off the next look is)
+          await prisma.appPageOrder.update({ where: { id: stuck.id }, data: { checkedAt: new Date(Date.now() - 20 * DAY), lastReadAt: new Date(Date.now() - 20 * DAY) } });
+          expect((await pagePaymentLoad()).unconfirmed).toMatchObject({ unreadLooks: 0, stalled: [] });
+          // Fewer than three looks and no read yet is not a pattern
+          await prisma.appPageOrder.update({ where: { id: stuck.id }, data: { checks: 2, lastReadAt: null } });
+          expect((await pagePaymentLoad()).unconfirmed.unreadLooks).toBe(0);
+        });
+
         it('the long-wait pass takes a fixed batch per sweep, the oldest look first', async () => {
           const { artifactId } = await setUp();
           const ids: string[] = [];

@@ -1202,6 +1202,22 @@ export async function sweepPageOrders(now: Date = new Date(), deps: GuardDeps = 
   return sweep;
 }
 
+/**
+ * How many orders in the long wait were looked at and NOT read: more than two looks and no good read at all, or the last good read an hour or more before the last look. Every such order counts, however
+ * long ago it was last looked at (an order whose looks have backed off to weekly or monthly is still one the service cannot be read for, until a look is read). The long wait is `longWaitWhere`, written here
+ * in SQL because two columns of a row are compared.
+ */
+async function unreadLookCount(now: Date, limits: Awaited<ReturnType<typeof getBrickLimits>>): Promise<number> {
+  const lateFor = new Date(now.getTime() - limits.latePaymentHours * HOUR);
+  const unclosedFor = new Date(now.getTime() - (limits.latePaymentHours + limits.checkoutOpenHours) * HOUR);
+  const rows = await prisma.$queryRaw<Array<{ n: number }>>(Prisma.sql`
+    SELECT COUNT(*)::int AS n FROM "app_page_orders"
+    WHERE "reconciled" = false AND "provider_ref" IS NOT NULL AND "checked_at" IS NOT NULL
+      AND ("status" = 'cant_confirm' OR ("status" = 'not_paid' AND ("closed_at" < ${lateFor} OR ("closed_at" IS NULL AND "created_at" < ${unclosedFor}))))
+      AND (("last_read_at" IS NULL AND "checks" >= 3) OR "last_read_at" < "checked_at" - interval '1 hour')`);
+  return rows[0]?.n ?? 0;
+}
+
 export interface PaymentLoad {
   takenAt: string;
   /** Orders that are open now, and how long the oldest has been. */
@@ -1227,7 +1243,7 @@ export interface PaymentLoad {
     neverChecked: number;
     /** Whose scheduled look is more than an hour late (the sweep is behind or stopped), as against an order that is merely old and looked at on time. */
     overdue: number;
-    /** Orders looked at in the last day that keep not being read (looked at again and again, an hour or more since the last good read): the payment service cannot be read for them. */
+    /** Orders whose last look was not read (more than two looks and no good read, or the last good read an hour or more before the last look), however long ago that look was: the payment service cannot be read for them. */
     unreadLooks: number;
     /**
      * Why the looks are STALLED, if they are: `overdue` (a scheduled look is more than an hour late), `never_checked` (an order the schedule never reached) or `unreadable` (looks are made and not read).
@@ -1262,10 +1278,9 @@ export async function pagePaymentLoad(now: Date = new Date()): Promise<PaymentLo
       where: { AND: [longWait, { OR: [{ nextLookAt: { lt: lateBy } }, { nextLookAt: null, OR: [{ closedAt: { lt: new Date(lateBy.getTime() - limits.latePaymentHours * HOUR) } }, { status: 'cant_confirm', OR: [{ checkedAt: { lt: lateBy } }, { checkedAt: null, createdAt: { lt: lateBy } }] }, { closedAt: null, status: 'not_paid', createdAt: { lt: new Date(lateBy.getTime() - (limits.latePaymentHours + limits.checkoutOpenHours) * HOUR) } }] }] }] },
     }),
     prisma.appPageOrder.findFirst({ where: { lastReadAt: { not: null } }, orderBy: { lastReadAt: 'desc' }, select: { lastReadAt: true } }),
-    prisma.appPageOrder.findMany({ where: { ...longWait, checkedAt: { gte: day } }, select: { checkedAt: true, lastReadAt: true, checks: true }, take: 5_000 }),
+    unreadLookCount(now, limits),
   ]);
-  // Looked at in the last day and not read: more than one look and no good read, or the last good read an hour or more before the last look
-  const unreadLooks = recentLooks.filter((one) => (one.lastReadAt ? !!one.checkedAt && one.lastReadAt.getTime() < one.checkedAt.getTime() - HOUR : one.checks >= 3)).length;
+  const unreadLooks = recentLooks;
   const stalled: Array<'overdue' | 'never_checked' | 'unreadable'> = [...(overdue > 0 ? (['overdue'] as const) : []), ...(neverChecked > 0 ? (['never_checked'] as const) : []), ...(unreadLooks > 0 ? (['unreadable'] as const) : [])];
   const seconds = (from: Date | undefined) => (from ? Math.max(0, Math.round((now.getTime() - from.getTime()) / 1000)) : null);
   const spans = paid.flatMap((order) => (order.paidAt ? [Math.max(0, Math.round((order.paidAt.getTime() - order.createdAt.getTime()) / 1000))] : [])).sort((a, b) => a - b);
