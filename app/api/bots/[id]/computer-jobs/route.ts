@@ -41,7 +41,7 @@ const bodySchema = z
  * offers the computer when it is on. Read only: it never makes or wakes anything. Someone else's Brick, or a guest: `{ on: false }`.
  * Answers { available, on, busy } (busy: a job holds it or waits in line). With `originRef` (and `title`, `sinceSeconds`) it also answers `started: { id, status } | null`: the newest job of this Brick for this
  * person that began in that direct chat with that title, made within `sinceSeconds` by Orbit's own clock, so a start that timed out on the caller's side can be told from one that did not reach Orbit. A caller that
- * sends none of them gets no `started`. Auth: service token only.
+ * sends none of them gets no `started`; one that sends some of them is refused (400). When who it was for could not be looked up just now the answer is 503 `{ retry: true }`, never `started: null`: the caller treats that as "not known" and asks again. Auth: service token only.
  */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -53,12 +53,18 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const { id } = await params;
     const userId = request.nextUrl.searchParams.get('userId');
     if (!userId) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
-    const asked = request.nextUrl.searchParams.get('originRef') === null ? null : startedSchema.safeParse({ originRef: request.nextUrl.searchParams.get('originRef'), title: request.nextUrl.searchParams.get('title'), sinceSeconds: request.nextUrl.searchParams.get('sinceSeconds') });
+    // Any of the three means the caller is asking whether a start reached Orbit: all of them are then needed (a partial ask is a mistake to refuse, not a legacy call). None of them: the legacy answer
+    const search = request.nextUrl.searchParams;
+    const asking = ['originRef', 'title', 'sinceSeconds'].some((key) => search.has(key));
+    const asked = asking ? startedSchema.safeParse({ originRef: search.get('originRef'), title: search.get('title'), sinceSeconds: search.get('sinceSeconds') }) : null;
     if (asked && !asked.success) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
-    const person = await resolveUsagePerson(userId, request.nextUrl.searchParams.get('isGuest') === 'true');
+    const person = await resolveUsagePerson(userId, search.get('isGuest') === 'true');
+    // Who this was for could not be looked up just now: "no job reached Orbit" is NOT known, and answering it would let the caller start the same job a second time. The same word as the meter's
+    // events: nothing is answered but `retry` (503), and the caller treats it as unknown, never as a miss
+    if (asked && person.lookupFailed) return NextResponse.json({ error: 'Could not tell who this was for, ask again', retry: true }, { status: 503 });
     const view = person.personId ? await computerView(id, person.personId) : null;
-    // Only when asked: a guest, or someone else's Brick, never has a job to find
-    const started = asked?.success ? (person.personId ? await startedJobFor(id, person.personId, asked.data) : null) : undefined;
+    // Only when asked: a guest, someone else's Brick or one that is not this person's has no job of theirs to find (only the owner starts work on a computer), so nothing is looked for there
+    const started = asked?.success ? (person.personId && view ? await startedJobFor(id, person.personId, asked.data) : null) : undefined;
     const extra = started === undefined ? {} : { started };
     if (!view) return NextResponse.json({ available: false, on: false, busy: false, ...extra });
     return NextResponse.json({ available: view.available, on: view.on, busy: view.job !== null || view.queued.length > 0, ...extra });

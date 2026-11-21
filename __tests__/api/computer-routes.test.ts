@@ -273,14 +273,51 @@ describe('the bot server’s calls', () => {
       expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: null });
     });
 
-    it('says `started: null` for a guest and for a Brick that is not theirs, never looking for a job', async () => {
+    it('says `started: null` for a guest and for a Brick that is not theirs, and never looks for a job for either', async () => {
       resolve.mockResolvedValue({ personId: null, guest: true });
       lib.computerView.mockResolvedValue(null);
       expect(await answer(`${asked}&isGuest=true`)).toEqual({ available: false, on: false, busy: false, started: null });
       expect(lib.startedJobFor).not.toHaveBeenCalled();
+      // Someone who is signed in, on a Brick that is not theirs: only the owner starts work on it, so no job of theirs can be there to find, and the lookup is not made (the mocked job would be found if it were)
       resolve.mockResolvedValue({ personId: 'u-omar', guest: false });
-      lib.startedJobFor.mockResolvedValue(null);
+      lib.startedJobFor.mockResolvedValue({ id: JOB, status: 'running' });
       expect(await answer(asked)).toEqual({ available: false, on: false, busy: false, started: null });
+      expect(lib.computerView).toHaveBeenLastCalledWith(BRICK, 'u-omar');
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
+    });
+
+    it('looks for the job of the owner it asked about, with exactly the chat, title and age it was given', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
+      lib.startedJobFor.mockResolvedValue(null);
+      await answer('/x?userId=wa-sara&originRef=dm-9&title=Book%20flights&sinceSeconds=120');
+      expect(lib.startedJobFor).toHaveBeenCalledTimes(1);
+      expect(lib.startedJobFor).toHaveBeenCalledWith(BRICK, 'u-sara', { originRef: 'dm-9', title: 'Book flights', sinceSeconds: 120 });
+    });
+
+    it('does not answer "no job reached Orbit" when who this was for could not be looked up: it answers retry (503), and reads nothing', async () => {
+      resolve.mockResolvedValue({ personId: null, guest: false, lookupFailed: true });
+      lib.startedJobFor.mockResolvedValue(null);
+      const response = await stateRoute(asBot(asked, { method: 'GET' }), params);
+      expect(response.status).toBe(503);
+      const body = await response.json();
+      expect(body.retry).toBe(true);
+      expect(body).not.toHaveProperty('started');
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
+      expect(lib.computerView).not.toHaveBeenCalled();
+      // A caller that did not ask whether a start reached Orbit keeps the answer it always had
+      const old = await stateRoute(asBot('/x?userId=wa-sara', { method: 'GET' }), params);
+      expect(old.status).toBe(200);
+      expect(await old.json()).toEqual({ available: false, on: false, busy: false });
+    });
+
+    it('asks for all three when any of them is sent: a title or an age without the chat is refused, never answered without `started`', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
+      for (const path of ['/x?userId=u&title=Visa&sinceSeconds=45', '/x?userId=u&title=Visa', '/x?userId=u&sinceSeconds=45', '/x?userId=u&originRef=', '/x?userId=u&title=&sinceSeconds=']) {
+        expect((await stateRoute(asBot(path, { method: 'GET' }), params)).status).toBe(400);
+      }
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
     });
 
     it('refuses an ask that is not complete or is out of range, and reads nothing', async () => {

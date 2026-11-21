@@ -803,9 +803,15 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // given back whole, because it recovers without anyone doing anything. Only from the state it was read in, so a look that came in meanwhile is never overwritten, and only when the look is DUE, by the same rule as a look
   // at a connected app (a page that refreshes inside the spacing counts nothing and moves nothing)
   const putOff = async () => {
-    await prisma.appPageOrder
-      .updateMany({ where: { id: order.id, reconciled: false, checkedAt: order.checkedAt, checks: order.checks, ...due }, data: { checkedAt: now, checks: { increment: 1 }, nextLookAt: new Date(now.getTime() + unreadWait()) } })
-      .catch(() => undefined);
+    // The status the order was READ in is part of the claim: a look that marked it paid since (the paid move leaves `reconciled`, `checkedAt` and `checks` as they were) must not have a failed look recorded on it
+    const counted = await prisma.appPageOrder
+      .updateMany({ where: { id: order.id, status: order.status, reconciled: false, checkedAt: order.checkedAt, checks: order.checks, ...due }, data: { checkedAt: now, checks: { increment: 1 }, nextLookAt: new Date(now.getTime() + unreadWait()) } })
+      .catch(() => null);
+    if (counted && counted.count === 0) {
+      // Nothing matched: either the look was not due (the order is as it was), or the order moved on since it was read. The state it is in NOW is the answer, never the snapshot
+      const current = await prisma.appPageOrder.findUnique({ where: { id: order.id }, select: { status: true } }).catch(() => null);
+      if (current && current.status !== order.status) return current.status === 'paid' ? view('paid') : later(view(current.status));
+    }
     return later(view(order.status));
   };
 
@@ -1209,8 +1215,41 @@ async function sweepPass(
   failure: string,
   deps: GuardDeps,
   room: Room,
+  /** Pending orders created before this have run out of their open time: they end without a look (see below). Only the pass that reads pending orders has them. */
+  expiredBefore?: Date,
 ): Promise<void> {
   const noRoomOwners: string[] = [];
+  try {
+    await readPages(sweep, where, orderBy, how, moved, failure, deps, room, noRoomOwners);
+  } finally {
+    // An owner whose room is spent is left out of the lookups above, but an expired pending checkout of theirs still ends: its own time is read (`expireOnly`), nothing is asked of the service and no room is used.
+    // Without this, a closed order that was refused first would leave every later expired pending order of that owner "checking" in each sweep, for as long as the owner stays at the cap
+    if (expiredBefore && noRoomOwners.length > 0) {
+      const left = await prisma.appPageOrder
+        .findMany({ where: { AND: [where(), { ownerId: { in: noRoomOwners }, status: 'pending', createdAt: { lt: expiredBefore } }] }, orderBy, take: SWEEP_BATCH, select: { id: true, status: true } })
+        .catch(() => []);
+      for (const order of left) {
+        const view = await verifyOrder(order.id, deps, undefined, { ...how, expireOnly: true }).catch((error) => {
+          console.error(`[PagePayments] ${failure}`, error instanceof Error ? error.message : 'unknown');
+          return null;
+        });
+        if (view && moved(view, order.status)) sweep.moved += 1;
+      }
+    }
+  }
+}
+
+async function readPages(
+  sweep: OrderSweep,
+  where: () => Prisma.AppPageOrderWhereInput,
+  orderBy: Prisma.AppPageOrderOrderByWithRelationInput[],
+  how: { background?: boolean },
+  moved: (view: OrderView, before: string) => boolean,
+  failure: string,
+  deps: GuardDeps,
+  room: Room,
+  noRoomOwners: string[],
+): Promise<void> {
   let asked = 0;
   for (let round = 0; round < SWEEP_ROUNDS && asked < SWEEP_BATCH; round += 1) {
     const page = await prisma.appPageOrder.findMany({
@@ -1293,6 +1332,7 @@ export async function sweepPageOrders(now: Date = new Date(), deps: GuardDeps = 
     'A sweep look failed:',
     deps,
     room,
+    openUntil,
   );
   return sweep;
 }

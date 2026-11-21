@@ -314,3 +314,25 @@ export async function recordOwnKeyCall(db: Pick<Prisma.TransactionClient, 'compu
 export async function hasOwnKeyCall(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string): Promise<boolean> {
   return (await db.computerJobFault.count({ where: { jobId, callId: OWN_KEY_CALL_MARK, source: ORBIT_SOURCE } })) > 0;
 }
+
+/** The lock one model call's admission and the rollback of its room take one after the other (per job and call id). Taken before the pool's lock, never while holding it. */
+export const admitLockKey = (jobId: string, callId: string): string => `computer-call-admit:${jobId}:${callId}`;
+
+/** The prefix of the call ids of Orbit's markers that a call was handed back as authorized to a second request that asked for it again (never the relay's). */
+export const ORBIT_ADMIT_PREFIX = 'orbit:admit:';
+
+/**
+ * Keeps that a request asking AGAIN for a model call whose room was taken by an earlier request was answered with its authorization (kind `answered`: no ruling reads it). The request that took the room may
+ * still be deciding whether the call stands, and gives the room back when it does not: with this kept, under the call's lock, it leaves the room to the call that was authorized. One row per call; safe to say twice.
+ */
+export async function recordCallAdmission(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, callId: string, at: Date = new Date()): Promise<void> {
+  await db.computerJobFault.createMany({
+    data: [{ jobId, turn: null, run: null, callId: `${ORBIT_ADMIT_PREFIX}${callId}`.slice(0, 120), kind: 'answered', reason: 'call_admitted', source: ORBIT_SOURCE, route: null, providerStatus: null, at }],
+    skipDuplicates: true,
+  });
+}
+
+/** Whether another request was answered with the authorization of this call (the marker above). Reads only. */
+export async function hasCallAdmission(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, callId: string): Promise<boolean> {
+  return (await db.computerJobFault.count({ where: { jobId, callId: `${ORBIT_ADMIT_PREFIX}${callId}`.slice(0, 120), source: ORBIT_SOURCE } })) > 0;
+}

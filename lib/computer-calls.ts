@@ -2,14 +2,14 @@ import { Prisma } from '@prisma/client';
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { recordMeterEvent } from '@/lib/meter';
-import { releaseRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
+import { releaseRoom, releaseRoomIn, reserveRoom, settleRoom } from '@/lib/meter-allowance';
 import { revokeJobTokens, verifyJobToken } from '@/lib/computer-token';
 import { givenBackJob } from '@/lib/computer-values';
 import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
 import { routeIsPaused } from '@/lib/computer-route-pause';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { tellSentry } from '@/lib/computer-alerts';
-import { ORBIT_SOURCE, POOL_CUTOFF_CALL, cutoffLockKey, hasOwnKeyCall, hasPoolCutoff, hasPoolRefusals, recordOwnKeyCall, recordPoolCutoff, recordPoolRefusal, retirePoolRefusals } from '@/lib/computer-faults';
+import { ORBIT_SOURCE, POOL_CUTOFF_CALL, admitLockKey, cutoffLockKey, hasCallAdmission, hasOwnKeyCall, hasPoolCutoff, hasPoolRefusals, recordCallAdmission, recordOwnKeyCall, recordPoolCutoff, recordPoolRefusal, retirePoolRefusals } from '@/lib/computer-faults';
 
 /**
  * A model call a Brick's computer makes (build handoff v2, section 5): room is taken BEFORE the call, and what it really cost is
@@ -95,10 +95,14 @@ export async function authorizeModelCall(
       return false;
     });
     if (!stands) {
-      // Only the room THIS request took goes back: asked again for a call that already holds its room, the hold is the first request's and is left to it
-      if (room.created) await releaseRoom({ key: callRoomKey(base.jobId, input.callId) }, now).catch((error) => console.error('[Computer] Could not give back room:', error instanceof Error ? error.message : 'unknown'));
+      // Only the room THIS request took goes back (asked again for a call that already holds its room, the hold is the first request's), and not even that one when another request was answered with this call's
+      // authorization meanwhile: its call goes on with the room, and the room is released only when no request used it
+      if (room.created) await giveBackUnusedRoom(base.jobId, input.callId, now);
       return { ok: false, reason: 'refused' };
     }
+    // Asked again for a call whose room an earlier request took: that request may still be deciding whether the call stands, and would give the room back. This answer is kept under the call's lock before it is
+    // given (and only while the room is still held), so the room is never released from under a call that was authorized; a room already given back is not authorized again
+    if (!room.created && !(await admitAgain(base.jobId, input.callId, base.personId, now))) return { ok: false, reason: 'refused' };
     // Capacity is back: what was refused before it stops deciding the turns that come after
     await retirePoolRefusals(prisma, base.jobId).catch((error) => console.error('[Computer] Could not retire a recovered pool refusal:', error instanceof Error ? error.message : 'unknown'));
     return { ok: true, ...base, reservedMicros: room.reservation.amountMicros };
@@ -125,6 +129,46 @@ export async function authorizeModelCall(
   const ours = room.reason === 'pool' && room.full === true;
   if (ours) await refusedForPool(base.jobId, input.callId, input.route ?? null, now);
   return { ok: false, reason: 'pool', full: ours };
+}
+
+/**
+ * The creator of a call's room gives it back because the call does not stand, unless another request was answered with the call's authorization (see `admitAgain`): the look for that answer and the release are ONE step
+ * under the call's lock, so a request cannot be answered between them. Never throws: a room that could not be given back is left to lapse, as before.
+ */
+async function giveBackUnusedRoom(jobId: string, callId: string, now: Date): Promise<void> {
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${admitLockKey(jobId, callId)}, 0))`;
+        if (await hasCallAdmission(tx, jobId, callId)) return;
+        await releaseRoomIn(tx, { key: callRoomKey(jobId, callId) }, now);
+      },
+      { timeout: 15_000, maxWait: 15_000 },
+    );
+  } catch (error) {
+    console.error('[Computer] Could not give back room:', error instanceof Error ? error.message : 'unknown');
+  }
+}
+
+/**
+ * Answers a request that asks again for a call whose room is already held: under the call's lock, the room must still be held (the request that took it may have given it back), and the answer is kept before it is
+ * given, so that request's rollback leaves the room alone. False (refused, nothing changed) when the room is gone or this could not be kept.
+ */
+async function admitAgain(jobId: string, callId: string, personId: string, now: Date): Promise<boolean> {
+  try {
+    return await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${admitLockKey(jobId, callId)}, 0))`;
+        if (!(await holdsItsRoom(jobId, callId, personId, now, tx))) return false;
+        await recordCallAdmission(tx, jobId, callId, now);
+        return true;
+      },
+      { timeout: 15_000, maxWait: 15_000 },
+    );
+  } catch (error) {
+    console.error('[Computer] Could not keep that a call was authorized again, so it is not:', error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
 }
 
 /** How often Sentry is told that the meter's controls are not set up: once, and again only after this long (every call of every job is refused for it, so a call each would flood it). */
@@ -277,8 +321,8 @@ const standsAgainstCutoff = (jobId: string, token: string, generation: number, n
   });
 
 /** True when this call id already holds room for this job and person: room held and not lapsed (what reserving it again would answer with its own reservation). */
-async function holdsItsRoom(jobId: string, callId: string, personId: string, now: Date): Promise<boolean> {
-  const held = await prisma.meterReservation.findUnique({ where: { reservationKey: callRoomKey(jobId, callId) }, select: { state: true, personKey: true, jobId: true, expiresAt: true } });
+async function holdsItsRoom(jobId: string, callId: string, personId: string, now: Date, db: Pick<Prisma.TransactionClient, 'meterReservation'> = prisma): Promise<boolean> {
+  const held = await db.meterReservation.findUnique({ where: { reservationKey: callRoomKey(jobId, callId) }, select: { state: true, personKey: true, jobId: true, expiresAt: true } });
   return !!held && held.state === 'held' && held.expiresAt > now && held.jobId === jobId && held.personKey === `person:${personId}`;
 }
 

@@ -442,16 +442,26 @@ export async function releaseRoom(input: { key: string }, now: Date = new Date()
 }
 
 async function close(key: string, state: 'settled' | 'released', now: Date, settledMicros: number | null): Promise<Reservation | null> {
-  return prisma.$transaction(async (tx) => {
-    await lockPool(tx);
-    const row = await tx.meterReservation.findUnique({ where: { reservationKey: key } });
-    if (!row) return null;
-    // Once it ended it stays as it ended: a second word, even a different one, changes nothing
-    if (row.state !== 'held') return viewOf(row);
-    const next = await tx.meterReservation.update({
-      where: { id: row.id },
-      data: { state, closedAt: now, settledMicros: settledMicros === null ? null : BigInt(settledMicros) },
-    });
-    return viewOf(next);
+  return prisma.$transaction((tx) => closeIn(tx, key, state, now, settledMicros));
+}
+
+/**
+ * `releaseRoom` inside a transaction the caller already holds (it takes the pool's lock first, like every step): for a caller that must decide to release and release as ONE step under a lock of its own,
+ * so nothing can use the room between the decision and the release.
+ */
+export async function releaseRoomIn(tx: Tx, input: { key: string }, now: Date = new Date()): Promise<Reservation | null> {
+  return closeIn(tx, input.key, 'released', now, null);
+}
+
+async function closeIn(tx: Tx, key: string, state: 'settled' | 'released', now: Date, settledMicros: number | null): Promise<Reservation | null> {
+  await lockPool(tx);
+  const row = await tx.meterReservation.findUnique({ where: { reservationKey: key } });
+  if (!row) return null;
+  // Once it ended it stays as it ended: a second word, even a different one, changes nothing
+  if (row.state !== 'held') return viewOf(row);
+  const next = await tx.meterReservation.update({
+    where: { id: row.id },
+    data: { state, closedAt: now, settledMicros: settledMicros === null ? null : BigInt(settledMicros) },
   });
+  return viewOf(next);
 }

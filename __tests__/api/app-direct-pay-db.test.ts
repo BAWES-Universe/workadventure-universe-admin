@@ -2171,6 +2171,76 @@ run('payments for pages, in a real database', () => {
           expect(done).toMatchObject({ looked: 0, moved: 1 });
         });
 
+        it('a closed order refused for its OWNER’s room first never leaves that owner’s expired pending order "checking": it ends without a look, in this sweep and not only in a later one (CodeRabbit)', async () => {
+          const { artifactId, connectionId } = await setUp();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, paymentLooksPerOwner: 1 } }, sara);
+          await prisma.appKeyCall.create({ data: { connectionId, ownerId: 'page-payments', botId: 'page-payments', callId: `look:${sara}:spent:1`, operation: 'x', state: 'done', outcome: 'ok' } });
+          const url = 'https://checkout.examplepay.com/?mode=page&token=abc';
+          // First in line: an order closed a day ago (inside its late window), never looked at; behind it, one pending order of the same owner past its open hour, and one still inside it
+          const closed = await longOrder(artifactId, word(), 'chg_EX0', 1, { checkedAt: null, createdAt: new Date(Date.now() - 30 * 3_600_000) });
+          const ran = await lostOrder(artifactId, word(), wish(), { status: 'pending', providerRef: 'chg_EX1', reconciled: false, createdAt: new Date(Date.now() - 3 * 3_600_000), checkedAt: null, checkoutUrl: url });
+          const fresh = await lostOrder(artifactId, word(), wish(), { status: 'pending', providerRef: 'chg_EX2', reconciled: false, createdAt: new Date(Date.now() - 10 * 60_000), checkedAt: null, checkoutUrl: url });
+          const sent = gateway({ record: () => paidRecord('x', { status: 'INITIATED' }) });
+          const done = await sweepPageOrders();
+          // The owner's room stays spent: nothing was asked of the service for any of them and no room was used. The expired one ended; the closed one was left exactly as it was; the one inside its open hour is still open
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(0);
+          expect(await prisma.appKeyCall.count({ where: { ownerId: 'page-payments' } })).toBe(1);
+          expect((await row(ran.id)).status).toBe('not_paid');
+          expect(await row(closed.id)).toMatchObject({ status: 'not_paid', checks: 0, checkedAt: null });
+          expect(await row(fresh.id)).toMatchObject({ status: 'pending', checks: 0, checkedAt: null });
+          expect(done).toMatchObject({ looked: 0, moved: 1 });
+        });
+
+        it('while one owner’s room is spent and their expired orders end without a look, another owner’s order is still asked about at the service (CodeRabbit)', async () => {
+          const { artifactId, connectionId } = await setUp();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, paymentLooksPerOwner: 1 } }, sara);
+          await prisma.appKeyCall.create({ data: { connectionId, ownerId: 'page-payments', botId: 'page-payments', callId: `look:${sara}:spent:1`, operation: 'x', state: 'done', outcome: 'ok' } });
+          const url = 'https://checkout.examplepay.com/?mode=page&token=abc';
+          await longOrder(artifactId, word(), 'chg_EX10', 1, { checkedAt: null, createdAt: new Date(Date.now() - 30 * 3_600_000) });
+          // Omar's order has room: it is asked about at the service like any other, and found paid
+          const his = await lostOrder(artifactId, word(), wish(), { status: 'pending', providerRef: 'chg_EX11', reconciled: false, ownerId: omar, createdAt: new Date(Date.now() - 3 * 3_600_000), checkedAt: null, checkoutUrl: url });
+          const sent = gateway({ record: () => paidRecord(his.id, { status: 'INITIATED' }) });
+          await sweepPageOrders();
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(1);
+          expect((await row(his.id)).checks).toBe(1);
+        });
+
+        it('a look at a disconnected app never records a failed look on an order that was marked paid after it was read: the answer is the order as it is now (CodeRabbit)', async () => {
+          const made = await pending();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
+          const lastLook = new Date(Date.now() - 2 * 3_600_000);
+          const order = await longOrder(made.artifactId, word(), 'chg_LW57', 60, { checks: 5, checkedAt: lastLook, lastReadAt: lastLook, nextLookAt: new Date(Date.now() - 1_000) });
+          await prisma.appPageOrder.update({ where: { id: order.id }, data: { connectionId: null } });
+          await prisma.appPageJob.deleteMany({ where: { artifactId: made.artifactId } });
+          await prisma.appConnection.delete({ where: { id: made.connectionId } });
+          // An earlier look finds the payment while this one is deciding that the app cannot be asked: the paid move leaves the count, the last look and the schedule as they were
+          const real = prisma.appPageJob.findUnique.bind(prisma.appPageJob);
+          const spy = jest.spyOn(prisma.appPageJob, 'findUnique').mockImplementationOnce(((args: never) => prisma.appPageOrder.update({ where: { id: order.id }, data: { status: 'paid' } }).then(() => real(args))) as never);
+          let told;
+          try {
+            told = await verifyOrder(order.id, undefined, undefined, { background: true });
+          } finally {
+            spy.mockRestore();
+          }
+          expect(await row(order.id)).toMatchObject({ status: 'paid', checks: 5, checkedAt: lastLook });
+          expect(told).toMatchObject({ status: 'paid', orderId: order.id });
+          expect(isWaiting(told!)).toBe(false);
+        });
+
+        it('a look at a disconnected app that is DUE and still disconnected records one failed look, and answers that it is waiting (CodeRabbit)', async () => {
+          const made = await pending();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
+          const lastLook = new Date(Date.now() - 2 * 3_600_000);
+          const order = await longOrder(made.artifactId, word(), 'chg_LW58', 60, { checks: 5, checkedAt: lastLook, lastReadAt: lastLook, nextLookAt: new Date(Date.now() - 1_000) });
+          await prisma.appPageOrder.update({ where: { id: order.id }, data: { connectionId: null } });
+          await prisma.appPageJob.deleteMany({ where: { artifactId: made.artifactId } });
+          await prisma.appConnection.delete({ where: { id: made.connectionId } });
+          const told = await verifyOrder(order.id, undefined, undefined, { background: true });
+          expect((await row(order.id)).checks).toBe(6);
+          expect(told).toMatchObject({ status: 'not_paid' });
+          expect(isWaiting(told!)).toBe(true);
+        });
+
         it('a look whose reservation committed but whose answer was lost is never found by the next one as a row that exists: it is looked at, and counted once (CodeRabbit)', async () => {
           const { artifactId } = await setUp();
           const order = await longOrder(artifactId, word(), 'chg_LW53', 60, { checks: 2, checkedAt: new Date(Date.now() - 3 * DAY), lastReadAt: new Date(Date.now() - 3 * DAY), nextLookAt: new Date(Date.now() - 60_000) });
@@ -2186,7 +2256,8 @@ run('payments for pages, in a real database', () => {
           }
           expect(first.contacted).toBe(false);
           expect(sent.filter((target) => target.method === 'GET')).toHaveLength(0);
-          // It was a look that was not read: tried again soon, never a month later
+          // It was a look that was not read: tried again soon (a time still to come, so a sweep does not return to it at once), never a month later
+          expect(await nextIn(order.id)).toBeGreaterThan(0);
           expect(await nextIn(order.id)).toBeLessThanOrEqual(15 * 60_000 + 5_000);
           // The next attempt (due again) goes through, with a row of its own
           await prisma.appPageOrder.update({ where: { id: order.id }, data: { nextLookAt: new Date(Date.now() - 1_000) } });
@@ -2209,22 +2280,25 @@ run('payments for pages, in a real database', () => {
           expect(sent.filter((target) => target.method === 'GET')).toHaveLength(1);
         });
 
-        it('a look that finds no room keeps the order exactly as it was, with no write afterwards to undo anything: the decision and the claim are one transaction (CodeRabbit)', async () => {
+        it('a look that finds no room keeps the order exactly as it was, with no write of its own outside the transaction (not even one that would undo a claim): the decision and the claim are one transaction (CodeRabbit)', async () => {
           const { artifactId } = await setUp();
           await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, paymentLooksPerOwner: 1 } }, sara);
           const first = new Date(Date.now() - 3 * DAY);
           const scheduled = new Date(Date.now() - 60_000);
           const order = await longOrder(artifactId, word(), 'chg_LW54', 60, { checks: 3, checkedAt: first, lastReadAt: first, nextLookAt: scheduled });
           await prisma.appKeyCall.create({ data: { connectionId: (await row(order.id)).connectionId!, ownerId: 'page-payments', botId: 'page-payments', callId: `look:${sara}:spent:1`, operation: 'x', state: 'done', outcome: 'ok' } });
-          // Any write to the order made outside the transaction after the first one fails (as a database that went away would make a rollback write fail)
-          const real = prisma.appPageOrder.updateMany.bind(prisma.appPageOrder);
+          // The denied look writes nothing to the order outside its transaction: not a compensating write, not a rollback. Any top-level write is counted (and fails, as a database that went away would make it fail)
           let writes = 0;
-          const spy = jest.spyOn(prisma.appPageOrder, 'updateMany').mockImplementation(((args: never) => (++writes === 1 ? real(args) : Promise.reject(new Error('the database went away')))) as never);
+          const spy = jest.spyOn(prisma.appPageOrder, 'updateMany').mockImplementation((() => {
+            writes += 1;
+            return Promise.reject(new Error('the database went away'));
+          }) as never);
           try {
             await verifyOrder(order.id, undefined, undefined, { background: true });
           } finally {
             spy.mockRestore();
           }
+          expect(writes).toBe(0);
           const kept = await row(order.id);
           expect({ checks: kept.checks, checkedAt: kept.checkedAt?.getTime(), nextLookAt: kept.nextLookAt?.getTime() }).toEqual({ checks: 3, checkedAt: first.getTime(), nextLookAt: scheduled.getTime() });
         });
