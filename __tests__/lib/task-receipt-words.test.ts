@@ -75,6 +75,21 @@ describe('the words for how a task came to end (mock M2)', () => {
       expect(outcomeTextOf('done')).toBe('Done');
     });
 
+    it('GPT round 3, finding 2: an App let go unconfirmed that was delivered after all is said first, in the approved words, beside a computer given back', () => {
+      const late = { job: 'returned' as const, returnedMicros: 30_000, deliveredAfterRelease: ['gmail'] };
+      expect(outcomeNote('partial', [gmail], late)).toBe('Gmail was delivered. Its hold was released. The computer part didn’t finish and its cost was returned.');
+      // The refund still pending: the cost is not yet back, and the words do not say it is
+      expect(outcomeNote('partial', [gmail], { job: 'returned', refundPendingMicros: 30_000, deliveredAfterRelease: ['gmail'] })).toBe('Gmail was delivered. Its hold was released. The computer part didn’t finish and its cost is being returned.');
+      // The hold itself still being given back
+      expect(outcomeNote('partial', [gmail], { ...late, holdPending: true })).toBe('Gmail was delivered. Its hold is being released. The computer part didn’t finish and its cost was returned.');
+      // Two Apps
+      expect(outcomeNote('partial', [gmail, gmail], { ...late, deliveredAfterRelease: ['gmail', 'slack'] })).toBe('Gmail and Slack were delivered. Their holds were released. The computer part didn’t finish and its cost was returned.');
+      // A relay that could not be reached keeps its own lead
+      expect(outcomeNote('partial', [gmail], { ...late, unreachable: true })).toContain('We couldn’t reach our own service');
+      // Without a late delivery the words are the ones they were
+      expect(outcomeNote('partial', [gmail], { job: 'returned', returnedMicros: 30_000 })).toBe('The computer part didn’t finish because of a problem on our side, and its time ($0.03) was given back.');
+    });
+
     it('a computer given back beside a Gmail that was charged: the problem on our side, the cost given back, the Gmail charge and the net are each said', () => {
       expect(outcomeNote('partial', [gmail], { job: 'returned', returnedMicros: 30_000, appCharges: [{ label: 'gmail', micros: 9_000 }], netMicros: 9_000 })).toBe(
         'The computer part didn’t finish because of a problem on our side, and its time ($0.03) was given back. Gmail worked and was charged $0.009. You pay $0.009 in all.',

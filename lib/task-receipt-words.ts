@@ -107,6 +107,8 @@ export interface NoteFacts {
   refundPendingMicros?: number;
   /** The computer was given back because it could not reach our own model service (its decision names that reason): the words say that, not a problem with the work. */
   unreachable?: boolean;
+  /** Apps let go unconfirmed (their hold released, nothing charged) that the provider's log confirmed later: delivered. Said first, in its own words, beside a computer that was given back. */
+  deliveredAfterRelease?: readonly string[];
   /** Why a charge is only provisional: Orbit is still deciding whether the computer cost is given back. */
   deciding?: 'effect' | 'limits';
   /** What each action that worked took, for a task with a computer (the receipt's lines say it for any other): null while its price is not known yet. */
@@ -181,7 +183,11 @@ export function outcomeNote(outcome: ActivityOutcome, actions: readonly { outcom
         ? `The computer part didn’t finish because of a problem on our side. Its time (${dollars(facts.refundPendingMicros ?? 0)}) is refund pending.`
         : `The computer part didn’t finish because of a problem on our side, and its time${facts.returnedMicros !== undefined && facts.returnedMicros > 0 ? ` (${dollars(facts.returnedMicros)})` : ''} was given back.`;
       const apps = (facts.appCharges ?? []).map((charge) => (charge.micros === null ? (charge.settling ? `${appLabel(charge.label)} worked. Its charge is ${SETTLEMENT_PENDING.toLowerCase()}.` : `${appLabel(charge.label)} worked. Its price is not known yet.`) : `${appLabel(charge.label)} worked and was charged ${dollars(charge.micros)}.`));
-      return [lead, ...apps, ...taken, ...net].join(' ');
+      // An App that was let go unconfirmed and was delivered after all (nothing charged, its hold released): said first, then what became of the computer, in the approved words
+      const late = (facts.deliveredAfterRelease ?? []).map(appLabel);
+      const lateSaid = late.length === 0 ? [] : [`${listOf(late)} ${late.length === 1 ? 'was' : 'were'} delivered.`, facts.holdPending ? (late.length === 1 ? 'Its hold is being released.' : 'Their holds are being released.') : late.length === 1 ? 'Its hold was released.' : 'Their holds were released.'];
+      const computerSaid = lateSaid.length > 0 && !facts.unreachable ? `The computer part didn’t finish and its cost ${pending ? 'is being returned' : 'was returned'}.` : lead;
+      return [...lateSaid, computerSaid, ...apps, ...taken, ...net].join(' ');
     }
     const parts = [`${capital(countWord(worked))} ${worked === 1 ? 'step' : 'steps'} worked`];
     const rest = [failed > 0 ? `${countWord(failed)} didn’t` : null, unknown > 0 ? `${countWord(unknown)} couldn’t be confirmed` : null].filter((part): part is string => part !== null);

@@ -40,6 +40,7 @@ import * as creditSpend from '@/lib/credit-spend';
 import { holdCredit, settleHold } from '@/lib/credit-spend';
 import { ensureIssued } from '@/lib/credit-issue';
 import { personUsage } from '@/lib/meter-person';
+import { memberUsage } from '@/lib/meter-usage';
 import { WorkerDied, afterWorkerDied } from '../helpers/worker-died';
 import { activityFor, closeReceipt, openReceipt, settleCheckingReceipts } from '@/lib/task-receipts';
 import { OUTCOME_WORDS } from '@/lib/task-receipt-words';
@@ -1172,6 +1173,60 @@ run('credit for computers, on the real books', () => {
       await closeReceipt({ botId: other.brickId, taskKey: second.jobId, personId: other.id, state: 'done' }, at(11));
       await settleCheckingReceipts(50, at(600));
       expect((await itemFor(other.id, 'Computer only'))[0]).toMatchObject({ state: 'refunded', outcome: 'refunded' });
+    });
+
+    it('GPT round 3, finding 2: a Gmail let go unconfirmed (its hold released) that the provider later CONFIRMED, beside a computer given back and nothing owed, reads "Partly done. Gmail was delivered..." in Activity and Usage, on the original receipt', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      // The App's result was uncertain: let go unconfirmed, its hold given back (nothing taken)
+      const run = await prisma.instantRun.create({
+        data: { runKey: `k-${randomUUID()}`, botId: sara.brickId, personId: sara.id, taskKey: jobId, toolSlug: 'GMAIL_SEND_EMAIL', toolkit: 'gmail', argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v', topMicros: BigInt(10_000), holdMicros: BigInt(10_000), state: 'failed', reason: 'unclear', customerState: 'released', customerMicros: BigInt(0), detail: { noLog: true, releasedUnconfirmed: true }, providerUserId: `u-${randomUUID().slice(0, 6)}` } as never,
+      });
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Mail with report', category: 'computer' }, NOW);
+      await failedOnOurSide(jobId, at(10));
+      await closeReceipt({ botId: sara.brickId, taskKey: jobId, personId: sara.id, state: 'done' }, at(11));
+      await settleCheckingReceipts(50, at(600));
+      const first = (await itemFor(sara.id, 'Mail with report'))[0];
+      // Before the provider says anything the Gmail could not be confirmed: not delivered, and not claimed to be
+      expect(first.outcomeNote ?? '').not.toContain('was delivered');
+      // The provider's log turns up and says it went out (the books do not charge it: its hold stays released)
+      await prisma.instantRun.update({ where: { id: run.id }, data: { detail: { noLog: true, releasedUnconfirmed: true, lateEvidence: { status: 'success' } } } });
+      await settleCheckingReceipts(50, at(700));
+      const [item, ...rest] = await itemFor(sara.id, 'Mail with report');
+      expect(rest).toEqual([]);
+      // The headline, the sentence and the action, from the ORIGINAL receipt (the same row), in the approved words
+      expect(item).toMatchObject({ id: first.id, state: 'done', outcome: 'partial', outcomeText: 'Partly done' });
+      expect(item.outcomeText).not.toBe(OUTCOME_WORDS.refunded);
+      expect(item.outcomeNote).toBe('Gmail was delivered. Its hold was released. The computer part didn’t finish and its cost was returned.');
+      expect(item.actions).toMatchObject([{ label: 'gmail', outcome: 'worked', takenText: 'Hold released' }]);
+      expect(item.actions[0]).not.toHaveProperty('amountMicros');
+      // No later charge: the Gmail is still nothing taken, and the computer's cost is back once
+      expect(await prisma.instantRun.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({ customerState: 'released', customerMicros: BigInt(0) });
+      expect(await prisma.meterEvent.count({ where: { eventId: `instant:${run.id}` } })).toBe(0);
+      // Game Usage reads the same items: the same words
+      const usage = await memberUsage(sara.id, at(700));
+      expect(usage.activity.find((one) => one.id === item.id)).toMatchObject({ outcomeText: 'Partly done', outcomeNote: item.outcomeNote });
+      // Said again (a sweep, a read): the same receipt, the same words
+      await settleCheckingReceipts(50, at(800));
+      expect(await itemFor(sara.id, 'Mail with report')).toEqual([item]);
+      // A Gmail whose log says it FAILED, or that nobody could confirm, is not "delivered": that task stays refunded as before
+      const other = await running('tom');
+      const second = await job(other);
+      await gift([other.id], 'computers', 1_000_000);
+      await call(second.token, 'a', 50_000, 30_000);
+      const gone = await prisma.instantRun.create({
+        data: { runKey: `k-${randomUUID()}`, botId: other.brickId, personId: other.id, taskKey: second.jobId, toolSlug: 'GMAIL_SEND_EMAIL', toolkit: 'gmail', argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v', topMicros: BigInt(10_000), holdMicros: BigInt(10_000), state: 'failed', reason: 'unclear', customerState: 'released', customerMicros: BigInt(0), detail: { noLog: true, releasedUnconfirmed: true, lateEvidence: { status: 'failed' } }, providerUserId: `u-${randomUUID().slice(0, 6)}` } as never,
+      });
+      await openReceipt({ botId: other.brickId, personId: other.id, taskKey: second.jobId, title: 'Mail that failed', category: 'computer' }, NOW);
+      await failedOnOurSide(second.jobId, at(10));
+      await closeReceipt({ botId: other.brickId, taskKey: second.jobId, personId: other.id, state: 'done' }, at(11));
+      await settleCheckingReceipts(50, at(900));
+      const failed = (await itemFor(other.id, 'Mail that failed'))[0];
+      expect(failed.outcomeNote ?? '').not.toContain('was delivered');
+      expect(failed.actions[0]).toMatchObject({ outcome: 'failed' });
+      expect(gone.id).toBeTruthy();
     });
 
     it('observation 3: the wallet cannot post the refund: "$0.05 refund pending" until it does; then the SAME receipt says refunded and the credit came back once', async () => {

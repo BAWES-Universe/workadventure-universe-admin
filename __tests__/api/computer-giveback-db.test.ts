@@ -1551,7 +1551,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       const earlier = await job(p, { outcome: 'failed', cause: 'agent', turns: [1], run: 'r0' }, withFaults(p, [fault(1, 'provider_5xx', { run: 'r0' })]), origin);
       expect(await decisionOf(earlier.id)).toMatchObject({ state: 'given', basis: 'goodwill' });
     };
-    const delivered = (id: string) => planEffect(id, { key: 'mail-1', kind: 'send' }).then(() => settleEffect(id, 'mail-1', 'done', 'ali@example.test'));
+    const delivered = (id: string) => planEffect(id, { key: 'mail-1', kind: 'send' }).then(() => settleEffect(id, 'mail-1', 'done', 'ali@example.test')).then(() => undefined);
     const verdictOf = async (jobId: string) => {
       const row = await prisma.computerGiveBackDecision.findUniqueOrThrow({ where: { jobId } });
       const one = await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });

@@ -631,6 +631,7 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
   // What the person pays net of anything given back, said once it is settled: never while a refund is pending (their credit is not back yet)
   const spent = header.refund.pendingMicros > 0 ? null : spentOf(header.state, header.chargedMicros, lines);
   const appCharges = header.job === null ? [] : header.actions.filter((action) => action.outcome === 'worked' && !header.letGoRuns.has(action.run)).map((action) => ({ label: action.label, micros: takenForRun(events, action.run), ...(settlingForRun(events, action.run) ? { settling: true } : {}) }));
+  const lateDelivered = header.actions.filter((action) => action.outcome === 'worked' && header.letGoRuns.has(action.run)).map((action) => action.label);
   const facts: NoteFacts = {
     ...(header.job === null ? {} : { job: header.job, ...(computerMicros === undefined ? {} : { computerMicros }) }),
     holdPending,
@@ -639,6 +640,8 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
     ...(header.refund.pendingMicros > 0 ? { refundPendingMicros: header.refund.pendingMicros } : {}),
     ...(header.deciding === null ? {} : { deciding: header.deciding }),
     ...(header.job === 'returned' && header.unreachable ? { unreachable: true } : {}),
+    // An App let go unconfirmed that the provider's log confirmed later: delivered, with its hold released (or on its way back) and nothing charged, said in its own words beside a computer given back
+    ...(lateDelivered.length > 0 ? { deliveredAfterRelease: lateDelivered } : {}),
     ...(header.stoppedBy === null ? {} : { stoppedBy: header.stoppedBy }),
     ...(appCharges.length > 0 ? { appCharges } : {}),
     ...(spent !== null ? { netMicros: spent } : {}),
@@ -825,9 +828,10 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
     // A receipt already stored as refunded does not hold either while something is still on the person: until it is given back it reads as done
     const key = `${header.botId}:${header.taskKey}`;
     const failed = failedJobs.has(key);
-    // An App that WORKED (verified by its own run, and not one let go unconfirmed) is work the person has whatever it took: a Gmail that went out for nothing (a zero charge, or a hold the books gave back)
-    // keeps the task partly done beside a computer that was given back. Verified work is looked at on its own, apart from what is still payable, before a task is called refunded
-    const verifiedWork = header.actions.some((action) => action.outcome === 'worked' && !letGo.has(action.run));
+    // An App that WORKED is work the person has whatever it took: a Gmail that went out for nothing (a zero charge, or a hold the books gave back) keeps the task partly done beside a computer that was
+    // given back. That includes one that was let go unconfirmed and that the provider's log CONFIRMED later (its hold is still released, and it is never charged): it was delivered, and the person is told so
+    // whatever is owed (they may be deciding whether to send it again). Verified work is looked at on its own, apart from what is still payable, before a task is called refunded
+    const verifiedWork = header.actions.some((action) => action.outcome === 'worked');
     const state: ReceiptState = failed ? (!mayHaveTaken && !verifiedWork ? 'refunded' : header.state === 'refunded' ? 'done' : header.state) : header.state;
     const jobRow = jobRows.get(key) ?? null;
     // A job still going has not come out yet; one that never started did nothing
