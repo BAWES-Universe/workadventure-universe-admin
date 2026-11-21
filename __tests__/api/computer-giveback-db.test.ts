@@ -2241,6 +2241,33 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       });
     });
 
+    it('two runs that name no run and both report a fault of turn 1 are both kept, never one dropped as the other said again (CodeRabbit: they shared the key turn:1)', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 0 });
+      const sara = await person('sara');
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, minutes(0));
+      if (!started.ok) throw new Error('no');
+      const jobId = started.job.id;
+      const rows = () => prisma.computerJobFault.findMany({ where: { jobId }, orderBy: { callId: 'asc' } });
+      // The first unnamed run: the person's own doing, confirmed
+      expect(await recordFaults(sara.brickId, jobId, [fault(1, 'field_job_set', { callId: 'turn:1' })])).toEqual({ stored: 1, conflicts: 0 });
+      // The second unnamed run numbers its turns from 1 again and says something else about its turn 1: kept, not taken for the first said again
+      expect(await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', { callId: 'turn:1' })])).toEqual({ stored: 1, conflicts: 0 });
+      expect((await rows()).map((row) => [row.callId, row.reason])).toEqual([['turn:1', 'field_job_set'], ['turn:1~2', 'relay_down']]);
+      // Either said again (a retry) is the same slot and changes nothing
+      expect(await recordFaults(sara.brickId, jobId, [fault(1, 'field_job_set', { callId: 'turn:1' })])).toEqual({ stored: 0, conflicts: 0 });
+      expect(await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', { callId: 'turn:1' })])).toEqual({ stored: 0, conflicts: 0 });
+      expect(await prisma.computerJobFault.count({ where: { jobId } })).toBe(2);
+      // An uncertain report of the same turn is settled once by a confirmed one, in its own slot
+      expect(await recordFaults(sara.brickId, jobId, [fault(2, 'provider_5xx', { callId: 'turn:2', kind: 'uncertain' })])).toEqual({ stored: 1, conflicts: 0 });
+      expect(await recordFaults(sara.brickId, jobId, [fault(2, 'relay_down', { callId: 'turn:2' })])).toEqual({ stored: 1, conflicts: 0 });
+      expect((await rows()).filter((row) => row.turn === 2).map((row) => [row.callId, row.kind, row.reason])).toEqual([['turn:2', 'fault', 'relay_down']]);
+      // Both are read when a ruling on turn 1 asks: the person's and ours
+      expect((await readFaultRows(prisma, jobId, [1])).map((row) => row.cls).sort()).toEqual(['ours', 'person']);
+      // More different reports than slots is counted and said, not dropped silently
+      const many = Array.from({ length: 9 }, (_, index) => fault(3, 'provider_5xx', { callId: 'turn:3', kind: 'uncertain', route: `route-${index}` }));
+      expect(await recordFaults(sara.brickId, jobId, many)).toEqual({ stored: 8, conflicts: 1 });
+    });
+
     describe('round 3: the decision itself', () => {
       it('late evidence gives the verdict evidence on time gives: a confirmed fault of ours beats a delivered effect, and a row that is not one changes nothing', async () => {
         await limitsAre(LAUNCH);

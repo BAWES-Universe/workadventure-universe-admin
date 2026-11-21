@@ -2010,6 +2010,40 @@ run('payments for pages, in a real database', () => {
           expect((await pagePaymentLoad()).unconfirmed.unreadLooks).toBe(0);
         });
 
+        it('an order starved of look budget for sweep after sweep is not "unreadable": its claim is given back (no look counted, last look unchanged), it keeps the 15 minute retry and no backoff; a look really made and failed still counts', async () => {
+          const { artifactId } = await setUp();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, paymentLooksPerOwner: 1 } }, sara);
+          const lastLook = new Date(Date.now() - 3 * DAY);
+          // The owner's hourly room is one look: the first order takes it, the second is starved
+          const first = await longOrder(artifactId, word(), 'chg_LW30', 60, { checks: 4, checkedAt: lastLook, lastReadAt: lastLook, nextLookAt: new Date(Date.now() - 10 * 60_000) });
+          const starved = await longOrder(artifactId, word(), 'chg_LW31', 60, { checks: 5, checkedAt: lastLook, lastReadAt: lastLook, nextLookAt: new Date(Date.now() - 60_000) });
+          const sent = gateway({ record: () => paidRecord('x', { status: 'INITIATED' }) });
+          for (let sweep = 0; sweep < 4; sweep += 1) {
+            await prisma.appPageOrder.update({ where: { id: starved.id }, data: { nextLookAt: new Date(Date.now() - 1_000) } });
+            await sweepPageOrders();
+            const kept = await row(starved.id);
+            // Nothing was asked of the service for it: no look counted, the last look still the last, tried again within the quarter hour (never backed off)
+            expect({ sweep, checks: kept.checks, checkedAt: kept.checkedAt?.getTime(), soon: (await nextIn(starved.id)) <= 15 * 60_000 + 5_000 }).toEqual({ sweep, checks: 5, checkedAt: lastLook.getTime(), soon: true });
+          }
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(1);
+          expect((await row(first.id)).checks).toBe(5);
+          const load = (await pagePaymentLoad()).unconfirmed;
+          expect(load).toMatchObject({ unreadLooks: 0 });
+          expect(load.stalled).not.toContain('unreadable');
+          // A look that really was made and not read, three times, does count
+          await prisma.appKeyCall.deleteMany({ where: { ownerId: 'page-payments' } });
+          const failing = await longOrder(artifactId, word(), 'chg_LW32', 60, { checks: 2, checkedAt: lastLook, lastReadAt: null, nextLookAt: null });
+          mockSend.current = () => ({ status: 503, body: {} });
+          for (let look = 0; look < 3; look += 1) {
+            await prisma.appKeyCall.deleteMany({ where: { ownerId: 'page-payments' } });
+            await prisma.appPageOrder.update({ where: { id: failing.id }, data: { nextLookAt: new Date(Date.now() - 1_000) } });
+            await prisma.appPageOrder.updateMany({ where: { id: { in: [first.id, starved.id] } }, data: { nextLookAt: new Date(Date.now() + 20 * DAY) } });
+            await sweepPageOrders();
+          }
+          expect((await row(failing.id)).checks).toBe(5);
+          expect((await pagePaymentLoad()).unconfirmed).toMatchObject({ unreadLooks: 1, stalled: ['unreadable'] });
+        });
+
         it('the long-wait pass takes a fixed batch per sweep, the oldest look first', async () => {
           const { artifactId } = await setUp();
           const ids: string[] = [];

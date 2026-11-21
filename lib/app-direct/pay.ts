@@ -798,12 +798,23 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
     const wait = Math.min(reconcileEveryMs(sinceWindow), Math.max(UNREAD_RETRY_MS, 2 * streakGap));
     if (reconciling) await prisma.appPageOrder.updateMany({ where: { id: order.id, reconciled: false }, data: { nextLookAt: new Date(now.getTime() + wait) } }).catch(() => undefined);
   };
-  const unreadable = async (): Promise<OrderView> => {
-    await retrySoon();
+  // An order past its open time ends, whatever stopped it being looked at
+  const endIfOutOfTime = async (): Promise<OrderView | null> => {
     if (!wasClosed && now.getTime() - order.createdAt.getTime() > limits.checkoutOpenHours * HOUR) {
       if (await moveOrder(order.id, { from: 'pending', to: 'not_paid', reason: 'open_time_ran_out', data: { closedAt: now } })) return view('not_paid');
     }
-    return later(view(order.status));
+    return null;
+  };
+  const unreadable = async (): Promise<OrderView> => {
+    await retrySoon();
+    return (await endIfOutOfTime()) ?? later(view(order.status));
+  };
+  // A look that asked nothing of the service (no room in the hour's budget, a key that cannot be read) is no look: the claim made for it is given back (when it is still this one's), so it never counts as
+  // a look that was not read (the backoff, the "unreadable" count, the warning to Sentry) and the order's own record of its last look stays what it was. `wait` is when it is tried again (long wait only)
+  const giveBackClaim = async (wait: number | null): Promise<void> => {
+    await prisma.appPageOrder
+      .updateMany({ where: { id: order.id, checkedAt: now }, data: { checkedAt: order.checkedAt, checks: { decrement: 1 }, ...(reconciling && wait !== null ? { nextLookAt: new Date(now.getTime() + wait) } : {}) } })
+      .catch(() => undefined);
   };
   // One look per order in a few seconds, whoever is asking. The longer an order has been waiting the further apart its looks are (a minute
   // more adds one more `paymentCheckSeconds`, up to sixty of them): a buyer who pays is seen at once, while tabs left open on an order nobody
@@ -830,7 +841,7 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
     // A key that cannot be read cannot ask now: an open order can no longer be confirmed, and a closed one with a payment that may exist keeps waiting
     // (the key may be given again). The order's own schedule was moved on by the look that was taken: it is tried again soon, not at its age-based interval
     if (reconciling) {
-      await retrySoon();
+      await giveBackClaim(Math.min(reconcileEveryMs(sinceWindow), UNREAD_RETRY_MS));
       return later(view(order.status));
     }
     if (wasClosed) return nothingMoreToAsk(view(order.status));
@@ -856,10 +867,10 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // No room for looks: it waits, but an order past its open time still ends (it is not left "checking" because looks ran short)
   if (!budget) {
     lookStats.noRoom += 1;
-    // The claim above moved the order's own schedule on by its age-based interval, but nothing was asked of the service: an order in the long wait is tried again when the
-    // hourly room comes back, never a week later. The age-based interval stays for a look that was really made
-    if (reconciling) await prisma.appPageOrder.updateMany({ where: { id: order.id, reconciled: false }, data: { nextLookAt: new Date(now.getTime() + Math.min(reconcileEveryMs(sinceWindow), NO_ROOM_RETRY_MS)) } }).catch(() => undefined);
-    return unreadable();
+    // The claim above moved the order's own schedule on by its age-based interval, but nothing was asked of the service: it is given back, and an order in the long wait is tried again when the
+    // hourly room comes back, never a week later and never backed off as if the service could not be read. The age-based interval stays for a look that was really made
+    await giveBackClaim(Math.min(reconcileEveryMs(sinceWindow), NO_ROOM_RETRY_MS));
+    return (await endIfOutOfTime()) ?? later(view(order.status));
   }
   lookStats.made += 1;
   // This call asked the service (as against one that was spaced, or had no room): a sweep counts these and no others
