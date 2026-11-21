@@ -34,6 +34,7 @@ import { diskRoomKey, envelopeIn, releaseRoom, reserveDiskRoom } from '@/lib/met
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { activityFor } from '@/lib/task-receipts';
 import { recordGrant } from '@/lib/meter-grants';
+import { STEP_LABEL_FALLBACK } from '@/lib/computer-redact';
 import { mintJobToken, TOKEN_LIFE_MS, TOKEN_RENEW_EVERY_SECONDS, verifyJobToken } from '@/lib/computer-token';
 import { CLAIM_MS, dbImageStore } from '@/lib/agent37/image';
 import { checkScreen, openScreen, screenTicket } from '@/lib/computer-screen';
@@ -52,6 +53,7 @@ import {
   liftWindDown,
   planEffect,
   renewJob,
+  getJob,
   reportProgress,
   requestHandover,
   settleEffect,
@@ -348,6 +350,38 @@ run('a Brick’s computer, in a real database', () => {
       expect(await reportProgress(job.job.id, { stepDone: 2, stepTotal: 5, label: 'Your visa form' })).toMatchObject({ stepDone: 2, stepTotal: 5, stepLabel: 'Your visa form' });
       await finishJob(job.job.id, 'done', minutes(1));
       expect(await reportProgress(job.job.id, { stepDone: 4 })).toMatchObject({ stepDone: 2, status: 'done' });
+    });
+  });
+
+  describe('a step label never keeps or shows a secret', () => {
+    const KEY = `cjt_${'Qw3Er5Ty7Ui9Op1As3Df5Gh7Jk9Lz1Xc3Vb5Nm7Aq9'.slice(0, 43)}`;
+    const SHAPES = [`T=${KEY} + 7 commands`, `curl -H "Authorization: Bearer ${KEY}" https://relay.example.test/v1/models`, 'git clone https://someone:pw@example.test/o/r.git', 'export OPENAI_API_KEY=sk-proj-abcdefghijkl1234 && run'];
+
+    it('is replaced by a plain phrase when written, in what is stored and in everything that is told back (the job, the Brick’s computer view)', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      for (const label of SHAPES) {
+        expect((await reportProgress(job.job.id, { stepDone: 1, stepTotal: 3, label }))?.stepLabel).toBe(STEP_LABEL_FALLBACK);
+        expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: job.job.id } })).stepLabel).toBe(STEP_LABEL_FALLBACK);
+        expect(JSON.stringify(await computerView(sara.brickId, sara.id))).not.toMatch(/cjt_|Bearer|pw@|sk-proj|OPENAI/);
+      }
+      // An honest label is kept as it was said, and a label taken away is taken away
+      expect((await reportProgress(job.job.id, { stepDone: 2, label: 'Filling in your visa form' }))?.stepLabel).toBe('Filling in your visa form');
+      expect((await reportProgress(job.job.id, { stepDone: 2, label: null }))?.stepLabel).toBeNull();
+    });
+
+    it('is cleaned again when read: a label stored before the rule (written straight into the row) never shows', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      await prisma.computerJob.update({ where: { id: job.job.id }, data: { stepLabel: SHAPES[0], stepDone: 1 } });
+      const view = await computerView(sara.brickId, sara.id);
+      expect(JSON.stringify(view)).not.toContain('cjt_');
+      expect(JSON.stringify(view)).toContain(STEP_LABEL_FALLBACK);
+      expect((await getJob(job.job.id))?.stepLabel).toBe(STEP_LABEL_FALLBACK);
     });
   });
 

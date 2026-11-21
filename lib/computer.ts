@@ -26,6 +26,7 @@ import {
   resumeTransition,
   sleep,
 } from '@/lib/computer-control';
+import { cleanStepLabel } from '@/lib/computer-redact';
 import { callRoomKey, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { reconcileComputers } from '@/lib/computer-reconcile';
@@ -173,7 +174,8 @@ function jobView(row: JobRow): JobView {
     writes: row.writes,
     stepDone: row.stepDone,
     stepTotal: row.stepTotal,
-    stepLabel: row.stepLabel,
+    // Read through the same rule it is written with: a label stored before the rule, or by any other route, never shows a secret
+    stepLabel: cleanStepLabel(row.stepLabel),
     waitingFor: row.waitingFor as WaitingFor | null,
     control: row.control === 'person' ? 'person' : 'brick',
     ready: row.readyWhat && row.readyWhere ? { what: row.readyWhat, where: row.readyWhere } : null,
@@ -960,7 +962,7 @@ export async function reportProgress(jobId: string, progress: { stepDone: number
   const stepTotal = progress.stepTotal === null || progress.stepTotal === undefined ? undefined : Math.max(1, Math.trunc(progress.stepTotal));
   await prisma.computerJob.updateMany({
     where: { id: jobId, status: { in: ['running', 'waiting'] } },
-    data: { stepDone, ...(stepTotal !== undefined ? { stepTotal } : {}), ...(progress.label !== undefined ? { stepLabel: progress.label === null ? null : progress.label.slice(0, 200) } : {}) },
+    data: { stepDone, ...(stepTotal !== undefined ? { stepTotal } : {}), ...(progress.label !== undefined ? { stepLabel: cleanStepLabel(progress.label) } : {}) },
   });
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return job ? jobView(job) : null;
