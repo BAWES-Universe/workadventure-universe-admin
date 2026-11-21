@@ -448,6 +448,28 @@ describe('a paying page on the public share link', () => {
     checked.host.destroy();
   });
 
+  it('a checkout that is polled and answers more than 90 days past the late window: the line says contact the owner, Check payment stays available, and the host sends no further polls (CodeRabbit nitpick: the polling path)', async () => {
+    // A successful checkout (the POST), then the order's poll (the GET) answers as Orbit does for an order in the long wait past its words: closed, with `longWaitOver`
+    const { tap, host, lines, told, calls } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'not_paid', longWaitOver: true, orderId: 'o-1', checkoutUrl: null, testPayment: false, buyer: 'guest', pollAfterMs: 15_000 } }));
+    tap({ request: 'req_1' });
+    await flush();
+    const polls = () => calls.filter((call) => call.init?.method !== 'POST').length;
+    expect(polls()).toBe(0);
+    // The first poll
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(polls()).toBe(1);
+    expect(calls.at(-1)?.url).toContain('?order=o-1');
+    expect(lines.at(-1)).toMatchObject({ problem: 'long_unconfirmed', canCheck: true, checking: false, paid: null });
+    const view = describeLine(lines.at(-1)!, { copied: false });
+    expect(view).toMatchObject({ title: 'We could not confirm your earlier payment.', closable: false, actions: [{ kind: 'check' }] });
+    expect(JSON.stringify(view)).not.toMatch(/still checking|Not paid yet/);
+    expect(told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'cant_confirm', request: 'req_1' });
+    // The watch is over: not one more poll, however long the page stays open (the buyer presses Check payment for an update)
+    await jest.advanceTimersByTimeAsync(10 * 60_000);
+    expect(polls()).toBe(1);
+    host.destroy();
+  });
+
   it('after a Restore that finds an order still being checked, Check payment follows that Restore (its ask and its request), while Check payment by an earlier wish stays on that wish', async () => {
     const unresolved = { status: 'checking', longWait: true, orderId: 'o-9', checkoutUrl: null, testPayment: false, via: 'own', buyer: 'guest', pollAfterMs: 15_000 };
     const earlier = setup((call) => (call.body.restore || call.body.check ? { body: unresolved } : 'lost'));
