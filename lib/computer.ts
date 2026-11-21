@@ -470,17 +470,27 @@ export async function startedJobFor(botId: string, personId: string, startKey: s
 /** What a start with a key is for: the sha-256 of the Brick, the person and the key. */
 export const startFenceOf = (botId: string, personId: string, startKey: string): string => createHash('sha256').update(`${botId}\n${personId}\n${startKey}`).digest('hex');
 
-/** How long a start's mark counts: a start whose process died never removes it, and it stops counting after this (the sweep deletes it later). A start reads a few rows and saves its job, which takes seconds. */
+/**
+ * How long a start's mark counts without being renewed, and how often a start that is still working renews it. A start whose process died never removes its mark and never renews it, so it stops counting after
+ * `lifeMs` (the sweep deletes it later). A start that is still going on renews it every `beatMs` (a quarter of the life) from the moment it is made until its job is saved or it ends, so it counts for as long
+ * as the start can still make its job, however long that takes (a start has no time limit of its own: nothing can cancel the reads and writes it is in the middle of). The numbers are fields, so a test can shorten them.
+ */
 export const START_MARK_MS = 2 * 60_000;
+export const startMarkTiming = { lifeMs: START_MARK_MS, beatMs: START_MARK_MS / 4 };
 
 /** Whether a start for this fence has begun and has not saved its job (or ended without one) within the mark's life. Reads only. */
 async function startIsGoingOn(fence: string, now: Date): Promise<boolean> {
-  return (await prisma.computerStartMark.count({ where: { fence, startedAt: { gt: new Date(now.getTime() - START_MARK_MS) } } })) > 0;
+  return (await prisma.computerStartMark.count({ where: { fence, startedAt: { gt: new Date(now.getTime() - startMarkTiming.lifeMs) } } })) > 0;
 }
 
 /** Keeps that a start has begun, BEFORE it reads anything (so the look for it never finds neither the mark nor the job while it can still make the job). Throws when it could not be kept: the start is not made without it. */
 async function markStart(fence: string): Promise<string> {
   return (await prisma.computerStartMark.create({ data: { fence }, select: { id: true } })).id;
+}
+
+/** Renews a start's mark: it is still going on. Never throws: a beat that is missed is made up by the next one, and a start that dies stops beating (its mark then ages out). */
+async function renewStartMark(id: string): Promise<void> {
+  await prisma.computerStartMark.updateMany({ where: { id }, data: { startedAt: new Date() } }).catch((error) => console.error('[Computer] Could not renew the mark of a start:', error instanceof Error ? error.message : 'unknown'));
 }
 
 /** Removes a start's mark once its job is saved or it ended without one. Never throws: a mark that stays stops counting by itself. */
@@ -505,10 +515,15 @@ type Begun = { done: Started } | { created: { id: string } };
 export async function startJob(input: StartInput, now: Date = new Date()): Promise<Started> {
   // A start with a key keeps a mark from before its first read until its job is saved, or it ends without one, so the look for it (`startedJobFor`) can say it is still going on. A start with no key is never asked about
   const mark = input.startKey ? await markStart(startFenceOf(input.botId, input.personId, input.startKey)) : null;
+  // The mark is renewed for as long as the start is going on, so a start that takes longer than the mark's life (a slow database, a pool that is busy) is still found to be going on by the look for it,
+  // never read as "no job can still reach Orbit". The beat is a timer, not a wait: it never holds the start, and it ends with the start, before the mark is removed
+  const beat = mark ? setInterval(() => void renewStartMark(mark), startMarkTiming.beatMs) : null;
+  beat?.unref?.();
   let begun: Begun;
   try {
     begun = await beginJob(input, now);
   } finally {
+    if (beat) clearInterval(beat);
     if (mark) await forgetStartMark(mark);
   }
   if ('done' in begun) return begun.done;
@@ -1547,16 +1562,18 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
  */
 async function giveBackMissingModelCalls(batch: number, botId: string | undefined, now: Date): Promise<void> {
   const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
-  // A job whose give-back keeps failing for a reason of its own still matches on every sweep, so a plain "oldest first" would let it (and others like it)
-  // take the whole batch for ever, and a plain LIMIT would take whichever the database returns. Half the batch is the oldest and half the newest of the jobs
-  // that match, so a job that can never be given back holds one slot at most and never keeps a newer one out
+  // A job whose give-back keeps failing for a reason of its own still matches on every sweep, so neither "oldest first" nor "oldest and newest" can be the whole rule: jobs that keep failing would take the same
+  // places on every sweep for ever and keep the others out. Half the batch is the newest of the jobs that match (a job that has just failed is looked at at once), and the other half is a window that moves:
+  // the jobs that match, in id order, from just after the one the last sweep ended on, and from the start again when they run out. Every job that matches is therefore tried once in every lap of ceil(matching / half) sweeps,
+  // whatever happens to the others. The place the window stands is kept in the settings (no column of its own), and only a sweep of every Brick moves it (one Brick's clean-up before its removal reads the window and leaves it)
   const half = Math.max(1, Math.ceil(batch / 2));
   try {
-    const jobs = await prisma.$queryRaw<Array<{ id: string; personId: string }>>(Prisma.sql`
-      SELECT "id", "personId" FROM (
-        SELECT j."id", j."person_id" AS "personId",
-          ROW_NUMBER() OVER (ORDER BY j."ended_at" ASC NULLS LAST, j."id") AS "oldest",
-          ROW_NUMBER() OVER (ORDER BY j."ended_at" DESC NULLS LAST, j."id") AS "newest"
+    // One Brick's own look (before its removal) takes its jobs from the start, as many as a batch, and leaves the place alone
+    const after = botId ? '' : ((await giveBackCursorRead()) ?? '');
+    const take = botId ? batch : half;
+    const jobs = await prisma.$queryRaw<Array<{ id: string; personId: string; ord: number }>>(Prisma.sql`
+      WITH matching AS (
+        SELECT j."id", j."person_id" AS "personId", j."ended_at" AS "endedAt"
         FROM "computer_jobs" j
         WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" IN ('error', 'pool')) ${only}
           AND (
@@ -1568,19 +1585,46 @@ async function giveBackMissingModelCalls(batch: number, botId: string | undefine
             OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros"
               AND NOT EXISTS (SELECT 1 FROM "computer_refund_obligations" o WHERE o."hold_key" = h."hold_key"))
           )
-      ) matching
-      WHERE "oldest" <= ${half} OR "newest" <= ${half}`);
+      ),
+      newest AS (SELECT "id", "personId", 0 AS "ord" FROM matching ORDER BY "endedAt" DESC NULLS LAST, "id" LIMIT ${half}),
+      ahead AS (SELECT "id", "personId", 1 AS "ord" FROM matching WHERE "id" > ${after} ORDER BY "id" LIMIT ${take}),
+      wrapped AS (SELECT "id", "personId", 2 AS "ord" FROM matching WHERE "id" <= ${after} ORDER BY "id" LIMIT GREATEST(${take} - (SELECT COUNT(*) FROM ahead), 0))
+      SELECT "id", "personId", "ord"::int AS "ord" FROM newest
+      UNION ALL SELECT "id", "personId", "ord"::int FROM ahead
+      UNION ALL SELECT "id", "personId", "ord"::int FROM wrapped
+      ORDER BY "ord", "id"`);
     // One job's trouble never skips the rest of the batch: it is said, and it stays eligible for the next sweep
+    const tried = new Set<string>();
     for (const job of jobs) {
+      if (tried.has(job.id)) continue;
+      tried.add(job.id);
       try {
         await giveBackModelCalls(job.id, job.personId, now);
       } catch (error) {
         console.error('[Computer] Could not give back a failed job’s model calls:', error instanceof Error ? error.message : 'unknown');
       }
     }
+    // The window stands on the last job it took (from the start, when it wrapped); with none to take it goes back to the start
+    if (!botId) {
+      const stood = jobs.filter((job) => job.ord > 0);
+      const wrappedTo = stood.filter((job) => job.ord === 2);
+      const last = stood.length === 0 ? '' : wrappedTo.length > 0 ? wrappedTo[wrappedTo.length - 1].id : stood[stood.length - 1].id;
+      await giveBackCursorWrite(last);
+    }
   } catch (error) {
     console.error('[Computer] Could not look for a failed job’s model calls:', error instanceof Error ? error.message : 'unknown');
   }
+}
+
+/** Where the window of the give-back look stands (the id it ended on), or null at the start. */
+const GIVE_BACK_CURSOR_KEY = 'computer_giveback_sweep_cursor';
+async function giveBackCursorRead(): Promise<string | null> {
+  const row = await prisma.appSetting.findUnique({ where: { key: GIVE_BACK_CURSOR_KEY } });
+  const value = row?.value as { after?: unknown } | null | undefined;
+  return typeof value?.after === 'string' && value.after !== '' ? value.after : null;
+}
+async function giveBackCursorWrite(after: string): Promise<void> {
+  await prisma.appSetting.upsert({ where: { key: GIVE_BACK_CURSOR_KEY }, create: { key: GIVE_BACK_CURSOR_KEY, value: { after } }, update: { value: { after } } });
 }
 
 /**

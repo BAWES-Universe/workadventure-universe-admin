@@ -61,6 +61,7 @@ import {
   startedJobFor,
   startFenceOf,
   START_MARK_MS,
+  startMarkTiming,
   startWindDown,
   stopJobFor,
   sweepComputers,
@@ -1718,6 +1719,37 @@ run('a Brick’s computer, in a real database', () => {
         // Nothing is left behind once the job is saved
         expect(await prisma.computerStartMark.count()).toBe(0);
       } finally {
+        held.go();
+        held.spy.mockRestore();
+        await Promise.allSettled([held.running]);
+      }
+    });
+
+    it('a start that takes longer than its mark’s life is still "in progress" for as long as it can make its job (the mark is renewed while it works): never a miss that sends the game to start again with a new key', async () => {
+      const sara = await person('slo');
+      await giveComputer(sara.brickId, sara.id);
+      const startKey = keyOf();
+      const lived = { ...startMarkTiming };
+      // A mark lives 0.6 s and is renewed every 0.15 s here; the start is held for 1.6 s, well past the old life
+      startMarkTiming.lifeMs = 600;
+      startMarkTiming.beatMs = 150;
+      const held = holdStartAtItsReads(() => startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey, origin: { kind: 'dm', ref: ref('slo') } }, NOW));
+      try {
+        await held.there;
+        await new Promise((resolve) => setTimeout(resolve, 1_600));
+        // The job is not saved yet and the start can still make it: not a miss, at any time after the mark's first life
+        expect(await startedJobFor(sara.brickId, sara.id, startKey)).toEqual({ inProgress: true });
+        expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+        held.go();
+        const made = await held.running;
+        if (!(made as { ok: boolean }).ok) throw new Error('the start did not run');
+        // It ended: no mark is left, and no beat brings one back
+        expect(await prisma.computerStartMark.count()).toBe(0);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        expect(await prisma.computerStartMark.count()).toBe(0);
+        expect(await startedJobFor(sara.brickId, sara.id, startKey)).toMatchObject({ id: (made as { job: { id: string } }).job.id });
+      } finally {
+        Object.assign(startMarkTiming, lived);
         held.go();
         held.spy.mockRestore();
         await Promise.allSettled([held.running]);

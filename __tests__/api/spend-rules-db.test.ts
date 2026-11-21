@@ -947,6 +947,25 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', NOW, null)).toMatchObject({ ok: false, why: 'cap' });
     });
 
+    it('a start asked again with the key of a start that already made its job finds that job, even when its own held room used the cap up exactly; a new key still gets the rule', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 60_000 });
+      const first = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report', startKey: 'key-first-1' }, NOW);
+      expect(first).toMatchObject({ ok: true });
+      const jobId = first.ok ? first.job.id : '';
+      // The first start's own room is the whole cap now: the pre-check the route makes before a start still lets the same key through, and the start answers the job it made
+      expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', NOW, null, 'key-first-1')).toEqual({ ok: true });
+      const again = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report', startKey: 'key-first-1' }, NOW);
+      expect(again.ok && again.job.id).toBe(jobId);
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(1);
+      // A key that has no job gets the rule as before, and so does no key; another person's key never exempts
+      expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', NOW, null, 'key-new-2')).toMatchObject({ ok: false, why: 'cap' });
+      expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', NOW, null, null)).toMatchObject({ ok: false, why: 'cap' });
+      const omar = await person('omar');
+      expect(await ownerSpendAllowed(sara.brickId, omar.id, 'computer', NOW, null, 'key-first-1')).toEqual({ ok: true });
+    });
+
     it('a queued job for a run, asked again after a rule is said, is refused with the rule’s words and taken away, not reported as started', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);

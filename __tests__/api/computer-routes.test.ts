@@ -243,7 +243,7 @@ describe('the bot server’s calls', () => {
       reason: 'rule',
       rule: { id: 'r1', why: 'cap', leftMicros: 0, words: 'No more than $1.00 a month from your credit for Brick' },
     });
-    expect(rules.ownerSpendAllowed).toHaveBeenCalledWith(BRICK, 'u-sara', 'computer', expect.any(Date), null);
+    expect(rules.ownerSpendAllowed).toHaveBeenCalledWith(BRICK, 'u-sara', 'computer', expect.any(Date), null, null);
     expect(lib.startJob).not.toHaveBeenCalled();
   });
 
@@ -343,6 +343,8 @@ describe('the bot server’s calls', () => {
       const body = { userId: 'wa-sara', title: 'x', origin: { kind: 'dm', ref: 'dm-1' } };
       expect((await startRoute(asBot('/x', { body, headers: { 'X-Computer-Start-Attempt': KEY } }), params)).status).toBe(200);
       expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ botId: BRICK, personId: 'u-sara', startKey: KEY }));
+      // The spend check before the start knows the key too, so a retry of a start that used the allowance up reaches the start and finds its job
+      expect(rules.ownerSpendAllowed).toHaveBeenLastCalledWith(BRICK, 'u-sara', 'computer', expect.any(Date), null, KEY);
       lib.startJob.mockClear();
       for (const bad of ['no', 'has space in it', 'a'.repeat(65), '']) {
         expect((await startRoute(asBot('/x', { body, headers: { 'X-Computer-Start-Attempt': bad } }), params)).status).toBe(400);

@@ -473,12 +473,14 @@ export async function checkSpend(attempt: SpendAttempt, now: Date = new Date(), 
  * through here (the start itself answers "not the owner") and their rules, which are about their own credit, are not read for it.
  * The step's own room is held to the same rules again where it is taken.
  */
-export async function ownerSpendAllowed(botId: string, personId: string, chargeClass: ChargeClass = 'computer', now: Date = new Date(), runId: string | null = null): Promise<Allowed | Refused> {
+export async function ownerSpendAllowed(botId: string, personId: string, chargeClass: ChargeClass = 'computer', now: Date = new Date(), runId: string | null = null, startKey: string | null = null): Promise<Allowed | Refused> {
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { roomId: true, ownerId: true, deletedAt: true } });
   if (!bot || !ownsBrick(bot, personId)) return { ok: true };
   // A run that already has its job asks for nothing new: asked again it finds that job (and the room it holds is already counted, so a cap
   // that room used up exactly must not hide the job the person already has)
   if (runId && (await prisma.computerJob.findUnique({ where: { botId_runId: { botId, runId } }, select: { id: true } }))) return { ok: true };
+  // ...and so does a start asked again with the key of a start that already made its job (a retry after a lost answer): the job is there, and the room it holds is already counted
+  if (startKey && (await prisma.computerJob.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select: { id: true } }))) return { ok: true };
   return checkSpend({ payerPersonId: personId, botId, taskKey: null, chargeClass, amountMicros: 1 }, now);
 }
 
