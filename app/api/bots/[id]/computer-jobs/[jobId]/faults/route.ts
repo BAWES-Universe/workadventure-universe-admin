@@ -19,7 +19,10 @@ const faultSchema = z.object({
   route: z.string().min(1).max(120).nullable().optional(),
   providerStatus: z.number().int().min(100).max(599).nullable().optional(),
   at: z.coerce.date(),
-});
+})
+  // The only answered row the relay ever sends is its arrival row (answered / relay_reached, from the relay, no route, no status). Any other answered row is refused: it would count as a trace of a call
+  // and could stop an outage from being given back
+  .refine((row) => row.kind !== 'answered' || (isArrivalRow(row) && !row.route && row.providerStatus == null), { message: 'answered rows are the relay’s arrival row only' });
 // The batch itself is bounded; each row is read on its own, so one row that is not shaped as the relay writes it never holds back the real fault rows sent with it
 const bodySchema = z.object({ faults: z.array(z.unknown()).min(1).max(50) });
 

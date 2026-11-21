@@ -123,11 +123,35 @@ describe('POST /api/bots/:id/computer-jobs/:jobId/faults', () => {
     expect((await call({ faults: [arrival('arrival_r-1_1'), good] })).status).toBe(200);
     expect(late).toHaveBeenCalledWith('job-1');
     expect(arrived).not.toHaveBeenCalled();
-    // Another answered row, or one that is not the relay's, is not an arrival
-    late.mockClear();
-    expect((await call({ faults: [{ ...arrival('x'), reason: 'provider_5xx' }] })).status).toBe(200);
-    expect(late).toHaveBeenCalled();
-    expect(arrived).not.toHaveBeenCalled();
+  });
+
+  it('refuses every answered row that is not the relay’s arrival row, per row: a real fault row sent in the same batch is kept', async () => {
+    const arrival = { callId: 'arrival_r-1_1', turn: 1, run: 'r-1', kind: 'answered', reason: 'relay_reached', source: 'universe-ai', route: null, providerStatus: null, at: '2026-11-21T00:00:00.000Z' };
+    for (const other of [
+      { ...arrival, callId: 'c7', reason: 'provider_5xx' },
+      { ...arrival, callId: 'c8', reason: 'body_unreadable', providerStatus: 413 },
+      { ...arrival, source: 'own-key' },
+      { ...arrival, route: 'universe-ai/m' },
+      { ...arrival, providerStatus: 200 },
+    ]) {
+      jest.clearAllMocks();
+      auth.mockImplementation(() => undefined);
+      late.mockResolvedValue(undefined);
+      record.mockResolvedValue({ stored: 1, conflicts: 0 });
+      const res = await call({ faults: [other, good] });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, stored: 1, conflicts: 0, rejected: 1 });
+      // Only the real fault row was kept, and the job is judged as for any fault row
+      expect(record).toHaveBeenCalledWith('brick-1', 'job-1', [expect.objectContaining({ callId: 'c1', kind: 'fault' })]);
+      expect(late).toHaveBeenCalledWith('job-1');
+    }
+    // Alone, such a row is a 400 and nothing is written
+    jest.clearAllMocks();
+    expect((await call({ faults: [{ ...arrival, reason: 'provider_5xx' }] })).status).toBe(400);
+    expect(record).not.toHaveBeenCalled();
+    // The arrival row itself, with or without a turn, still passes
+    record.mockResolvedValue({ stored: 2, conflicts: 0 });
+    expect((await call({ faults: [arrival, { ...arrival, callId: 'arrival_r-1_', turn: null }] })).status).toBe(200);
   });
 
   it('keeps the rows even when judging the job again fails', async () => {
