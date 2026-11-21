@@ -635,7 +635,9 @@ run('payments for pages, in a real database', () => {
         expect((await sweepPageOrders()).looked).toBe(1);
         const waiting = await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } });
         expect(waiting).toMatchObject({ status: 'not_paid', reconciled: false, lastReadAt: null });
-        expect(waiting.nextLookAt!.getTime()).toBeGreaterThan(Date.now() + 5 * 3_600_000);
+        // A look that could not be read is tried again soon, never at the week its age would give (one blip must not put a payment that may be real a week away)
+        expect(waiting.nextLookAt!.getTime()).toBeGreaterThan(Date.now());
+        expect(waiting.nextLookAt!.getTime()).toBeLessThanOrEqual(Date.now() + 15 * 60_000 + 5_000);
         const answer = await settle(orderId);
         expect(answer).toMatchObject({ status: 'not_paid' });
         // The page that refreshes itself is not told that no look will ever be made
@@ -1832,6 +1834,44 @@ run('payments for pages, in a real database', () => {
         // Weekly is what its age would give; with no room it is tried again within the quarter hour instead
         expect(waited.nextLookAt!.getTime() - Date.now()).toBeLessThanOrEqual(15 * 60_000 + 5_000);
         expect(waited.nextLookAt!.getTime() - Date.now()).toBeGreaterThan(0);
+      });
+
+      it('an order in the long wait whose look was taken but could not be READ (an error, a timeout, a refusal, a page that is not a record, no state, a key that cannot be read) is tried again soon, never a week later; a look that was read keeps the age-based interval', async () => {
+        const { artifactId } = await pending();
+        const longWait = (ref: string) => lostOrder(artifactId, word(), wish(), { status: 'not_paid', providerRef: ref, reconciled: false, createdAt: new Date(Date.now() - 40 * 24 * 3_600_000), closedAt: new Date(Date.now() - 39 * 24 * 3_600_000), nextLookAt: null });
+        const nextIn = async (id: string) => (await prisma.appPageOrder.findUniqueOrThrow({ where: { id } })).nextLookAt!.getTime() - Date.now();
+        const unreadable: Array<[string, (target: Sent) => Answered | Promise<Answered>]> = [
+          ['a 5xx', () => ({ status: 503, body: { error: 'down' } })],
+          ['a timeout', () => { throw new GuardError('timeout', 'no answer'); }],
+          ['a 401', () => ({ status: 401, body: { error: 'no' } })],
+          ['a page that is not a record', () => ({ status: 200, body: 'not a record' })],
+          ['an answer with no state', () => ({ status: 200, body: {} })],
+          ['a redirect', () => ({ status: 200, redirected: true, body: {} })],
+        ];
+        let n = 0;
+        for (const [name, answer] of unreadable) {
+          const order = await longWait(`chg_UR0${(n += 1)}`);
+          await prisma.appKeyCall.deleteMany({ where: { ownerId: 'page-payments' } });
+          mockSend.current = answer;
+          await verifyOrder(order.id, undefined, undefined, { background: true });
+          // Weekly is what its age would give: not read, so it is tried again within the quarter hour
+          const left = await nextIn(order.id);
+          expect({ name, soon: left > 0 && left <= 15 * 60_000 + 5_000 }).toEqual({ name, soon: true });
+        }
+        // A look that WAS read (still open at the service) keeps the interval its age gives
+        const read = await longWait('chg_UR10');
+        await prisma.appKeyCall.deleteMany({ where: { ownerId: 'page-payments' } });
+        gateway({ record: (orderId) => paidRecord(orderId, { status: 'INITIATED' }) });
+        await verifyOrder(read.id, undefined, undefined, { background: true });
+        expect(await nextIn(read.id)).toBeGreaterThan(5 * 24 * 3_600_000);
+        // A key that cannot be read cannot ask: the same
+        const other = await pending();
+        await prisma.appConnection.update({ where: { id: other.connectionId }, data: { keyCipher: 'not a key' } });
+        const blind = await lostOrder(other.artifactId, word(), wish(), { status: 'not_paid', providerRef: 'chg_UR11', reconciled: false, createdAt: new Date(Date.now() - 40 * 24 * 3_600_000), closedAt: new Date(Date.now() - 39 * 24 * 3_600_000), nextLookAt: null });
+        await verifyOrder(blind.id, undefined, undefined, { background: true });
+        const blindLeft = await nextIn(blind.id);
+        expect(blindLeft).toBeGreaterThan(0);
+        expect(blindLeft).toBeLessThanOrEqual(15 * 60_000 + 5_000);
       });
 
       it('the short look interval is only for Check payment and Restore: a page that refreshes itself, a poll or a notice keeps the age-grown spacing on an order in the long wait', async () => {

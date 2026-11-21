@@ -648,6 +648,8 @@ export interface OrderView {
 
 /** When an order in the long wait whose look had no room in the hour's budget is tried again: soon, not at its age-based interval (nothing was asked of the service). */
 const NO_ROOM_RETRY_MS = 15 * 60 * 1000;
+/** The same for a look that was taken but could not be READ (an error, a refusal, a blip, no state, a key that cannot be read): one bad moment of the service must not put a payment that may be real a week away. */
+const UNREAD_RETRY_MS = NO_ROOM_RETRY_MS;
 
 /**
  * How far apart the looks are for an order that may still have been paid but that nothing is waiting for (closed past the late-payment window, or
@@ -766,7 +768,13 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // A look the service never answered in a way we can read (an error, a refusal, an answer with no state) is asked again, as before. But an
   // order that has been open longer than its time allows, and still cannot be read, is closed like any other that ran out of time: the buyer's
   // page stops waiting, and a payment that turns out to be real is still found by the later looks (a closed order is asked about for a while).
+  // The look that was taken moved the order's own schedule on by its age-based interval (up to a week) BEFORE the service was asked: a look that is not read is tried again soon instead,
+  // never a week later. The age-based interval stays for a look that was read
+  const retrySoon = async (): Promise<void> => {
+    if (reconciling) await prisma.appPageOrder.updateMany({ where: { id: order.id, reconciled: false }, data: { nextLookAt: new Date(now.getTime() + Math.min(reconcileEveryMs(sinceWindow), UNREAD_RETRY_MS)) } }).catch(() => undefined);
+  };
   const unreadable = async (): Promise<OrderView> => {
+    await retrySoon();
     if (!wasClosed && now.getTime() - order.createdAt.getTime() > limits.checkoutOpenHours * HOUR) {
       if (await moveOrder(order.id, { from: 'pending', to: 'not_paid', reason: 'open_time_ran_out', data: { closedAt: now } })) return view('not_paid');
     }
@@ -795,8 +803,11 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
     key = readKey(connection);
   } catch {
     // A key that cannot be read cannot ask now: an open order can no longer be confirmed, and a closed one with a payment that may exist keeps waiting
-    // (the key may be given again). The order's own schedule is already moved on by the look that was taken
-    if (reconciling) return later(view(order.status));
+    // (the key may be given again). The order's own schedule was moved on by the look that was taken: it is tried again soon, not at its age-based interval
+    if (reconciling) {
+      await retrySoon();
+      return later(view(order.status));
+    }
     if (wasClosed) return nothingMoreToAsk(view(order.status));
     await moveOrder(order.id, { from: 'pending', to: 'cant_confirm', reason: 'key_unreadable' });
     return view('cant_confirm');

@@ -222,7 +222,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         const port = (server.address() as { port: number }).port;
         try {
           // (not spawnSync: this process answers the server, and must not be blocked while the shell waits)
-          const ask = async (base: string) => (await promisify(execFile)('sh', ['-c', asks[0].command.replace(`'${RELAY}/v1/models'`, `'${base}/v1/models'`)])).stdout.trim();
+          const ask = async (base: string) => (await promisify(execFile)('sh', ['-c', asks[0].command.replace(`'${RELAY}/v1/models'`, `'${base}/v1/models'`).replace(/sleep \d+/, 'sleep 0')])).stdout.trim();
           expect(await ask(`http://127.0.0.1:${port}/ok`)).toBe('reach=ok');
           expect(await ask(`http://127.0.0.1:${port}/nolist`)).toBe('reach=down');
           expect(await ask(`http://127.0.0.1:${port}/wrong`)).toBe('reach=down');
@@ -230,6 +230,88 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         } finally {
           await new Promise((resolve) => server.close(resolve));
         }
+      });
+    });
+
+    describe('the ask says down only for a definite wrong address, and asks once more before it is believed (Sentry: a redirect, a slow answer, a 429/5xx blip or a transient DNS failure wrote a confirmed fault)', () => {
+      const probeCommand = async () => {
+        const { jobId } = await running();
+        fake.commands.length = 0;
+        expect(await prepareJob(jobId, RELAY, NOW)).toMatchObject({ ok: true });
+        const ask = fake.commands.find((one) => one.command.includes('/v1/models'))?.command ?? '';
+        expect(ask).not.toBe('');
+        return ask;
+      };
+      const asked: string[] = [];
+
+      it('each class of answer, run in a real shell against a real server: the list is ok; a wrong address (refused, 404/410, 401/403, a 200 with no list, a page that is not JSON) is down; a redirect, 429, 5xx, a slow answer and a JSON error are not learned from', async () => {
+        const command = await probeCommand();
+        const server = http.createServer((request, response) => {
+          const path = (request.url ?? '').replace('/v1/models', '');
+          asked.push(path);
+          const send = (status: number, type: string, body: string, headers: Record<string, string> = {}) => {
+            response.writeHead(status, { 'content-type': type, ...headers });
+            response.end(body);
+          };
+          if (path === '/ok') send(200, 'application/json', '{"object":"list","data":[{"id":"m"}]}');
+          else if (path === '/nolist') send(200, 'application/json', '{"object":"list"}');
+          else if (path === '/html200') send(200, 'text/html', '<html>hello</html>');
+          else if (path === '/404' || path === '/410') send(Number(path.slice(1)), 'text/html', '<html>nope</html>');
+          else if (path === '/401' || path === '/403') send(Number(path.slice(1)), 'application/json', '{"error":"key"}');
+          else if (path === '/redirect') send(302, 'text/html', '', { location: '/ok/v1/models' });
+          else if (path === '/429' || path === '/500' || path === '/503') send(Number(path.slice(1)), 'application/json', '{"error":"busy"}');
+          else if (path === '/502html') send(502, 'text/html', '<html>bad gateway</html>');
+          else if (path === '/400json') send(400, 'application/json', '{"error":"what"}');
+          else if (path === '/400html') send(400, 'text/html', '<html>what</html>');
+          else if (path === '/slow') setTimeout(() => send(200, 'application/json', '{"data":[]}'), 3000);
+          else send(404, 'text/html', 'x');
+        });
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const port = (server.address() as { port: number }).port;
+        try {
+          // (the real wait before a second ask is kept short here; a slow answer is cut at one second instead of ten)
+          const ask = async (base: string) =>
+            (await promisify(execFile)('sh', ['-c', command.replace(`'${RELAY}/v1/models'`, `'${base}/v1/models'`).replace('-m 10', '-m 1').replace(/sleep \d+/, 'sleep 0')])).stdout.trim();
+          const at = (path: string) => ask(`http://127.0.0.1:${port}${path}`);
+          expect(await at('/ok')).toBe('reach=ok');
+          for (const down of ['/nolist', '/html200', '/404', '/410', '/401', '/403', '/400html']) expect({ down, said: await at(down) }).toEqual({ down, said: 'reach=down' });
+          for (const unsure of ['/redirect', '/429', '/500', '/503', '/502html', '/400json', '/slow']) expect({ unsure, said: await at(unsure) }).toEqual({ unsure, said: 'reach=unknown' });
+          // Nothing listens there: refused, a definite wrong address
+          expect(await ask('http://127.0.0.1:9')).toBe('reach=down');
+          // A definite "down" is asked a second time (and only that): the 404 was asked twice, the redirect once
+          expect(asked.filter((path) => path === '/404')).toHaveLength(2);
+          expect(asked.filter((path) => path === '/redirect')).toHaveLength(1);
+          expect(asked.filter((path) => path === '/503')).toHaveLength(1);
+          expect(asked.filter((path) => path === '/ok')).toHaveLength(1);
+        } finally {
+          await new Promise((resolve) => server.close(resolve));
+        }
+      });
+
+      it('down, then fine on the second ask, is fine: it keeps no fault and the job is prepared', async () => {
+        const command = await probeCommand();
+        let hits = 0;
+        const server = http.createServer((request, response) => {
+          hits += 1;
+          if (hits === 1) {
+            response.statusCode = 404;
+            response.end('<html>starting</html>');
+          } else response.end('{"object":"list","data":[{"id":"m"}]}');
+        });
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const port = (server.address() as { port: number }).port;
+        try {
+          const said = (await promisify(execFile)('sh', ['-c', command.replace(`'${RELAY}/v1/models'`, `'http://127.0.0.1:${port}/v1/models'`).replace(/sleep \d+/, 'sleep 0')])).stdout.trim();
+          expect(said).toBe('reach=ok');
+          expect(hits).toBe(2);
+        } finally {
+          await new Promise((resolve) => server.close(resolve));
+        }
+        // And the answers the prepare is given: only `down` writes a fault, `unknown` (and ok) never do
+        const { jobId } = await running();
+        fake.execAnswer = (cmd) => (cmd.includes('/v1/models') ? { stdout: 'reach=unknown\n' } : {});
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toMatchObject({ ok: true });
+        expect(await prisma.computerJobFault.count({ where: { jobId } })).toBe(0);
       });
     });
 

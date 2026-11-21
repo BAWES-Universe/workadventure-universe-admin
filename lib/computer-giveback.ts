@@ -105,10 +105,16 @@ export async function lastFaultTurn(db: Pick<Prisma.TransactionClient, 'computer
 
 /**
  * True when a job's computer was readied for a model (a model key was made: prepare passed) and Orbit holds no trace at all of a model call for it: no fault row of any kind (answered ones too, which
- * includes the marker that a call on the person's own key was authorized: such a call takes no room and prices nothing), no model call priced and no room held for one. Such a job never reached the relay, whoever's key the calls would have run on. Reads only.
+ * includes the marker that a call on the person's own key was authorized: such a call takes no room and prices nothing), no model call priced and no room held for one. Such a job never reached the
+ * relay, whoever's key the calls would have run on. A job whose control ever changed hands is never judged so: the person taking the machine (or giving it back) ends the agent's keys, a call after
+ * that is refused and leaves no row, so the absence of a call says nothing about the relay. What Orbit keeps of it is the job's control generation (every change of control moves it up, `fenceControl`)
+ * and who holds control now. Reads only.
  */
-export async function neverReachedRelay(db: Pick<Prisma.TransactionClient, 'computerJobToken' | 'computerJobFault' | 'meterEvent' | 'meterReservation'>, jobId: string): Promise<boolean> {
+export async function neverReachedRelay(db: Pick<Prisma.TransactionClient, 'computerJob' | 'computerJobToken' | 'computerJobFault' | 'meterEvent' | 'meterReservation'>, jobId: string): Promise<boolean> {
   if ((await db.computerJobToken.count({ where: { jobId, scope: 'model' } })) === 0) return false;
+  const job = await db.computerJob.findUnique({ where: { id: jobId }, select: { controlGeneration: true, control: true } });
+  // A job that is not there, or whose control was ever the person's, is not judged by what it did not ask
+  if (!job || job.controlGeneration > 0 || job.control !== 'brick') return false;
   const [faults, events, rooms] = await Promise.all([
     db.computerJobFault.count({ where: { jobId } }),
     db.meterEvent.count({ where: { jobId, kind: 'model_call' } }),

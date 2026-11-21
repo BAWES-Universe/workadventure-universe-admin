@@ -218,18 +218,28 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
   return { ok: true, expiresAt: minted.expiresAt, git: gitPart.on };
 }
 
+/** How long the machine waits before it asks a second time, when the first ask found the address definitely wrong. */
+const PROBE_RETRY_WAIT_SECONDS = 2;
+
 /**
- * Whether the computer can get the relay's model list (`GET <relay>/v1/models` with the job's key: a 200 whose body has `data`). `down` only when the machine ran curl and it did not; anything else
- * (curl missing, the command did not run or said nothing) is `unknown`, which never counts against anyone.
+ * Whether the computer can get the relay's model list (`GET <relay>/v1/models` with the job's key: a 200 whose body has `data`; the game's relay answers exactly that, bots/server/ComputerModelRelay.ts
+ * `router.get('/v1/models')`). Only a DEFINITE wrong address is `down`: a name that does not resolve or a connection refused (curl 6, 7), a 404 or 410, a 401 or 403 for a key that was just made, a 200
+ * with no model list, any other answer that is a page and not JSON. It is asked ONCE more after a short wait before it is believed; an answer that is fine the second time is fine. Everything else is
+ * `unknown`, which never counts against anyone: a timeout (curl 28) or any other curl error, a redirect, a 429 or 5xx (a blip, a busy relay), a JSON error answer that is none of the above, a
+ * machine with no curl, a command that did not run or said nothing.
  */
 async function relayProbe(provider: NonNullable<ReturnType<typeof providerFor>>, ref: string, address: string, token: string): Promise<'ok' | 'down' | 'unknown'> {
   const command =
     `command -v curl >/dev/null 2>&1 || { echo reach=nocurl; exit 0; }; ` +
-    `r=$(curl -sS -m 10 -H 'Authorization: Bearer ${token}' -w '\n%{http_code}' '${address}/v1/models' 2>/dev/null); rc=$?; ` +
-    `code=$(printf '%s' "$r" | tail -n 1); ` +
-    `if [ "$rc" -eq 0 ] && [ "$code" = 200 ] && printf '%s' "$r" | grep -q '"data"'; then echo reach=ok; else echo reach=down; fi`;
+    // ask: 0 = the relay's list, 2 = a definite wrong address, 1 = anything else (nothing is learned)
+    `ask() { r=$(curl -sS -m 10 -H 'Authorization: Bearer ${token}' -w '\n%{http_code}' '${address}/v1/models' 2>/dev/null); rc=$?; code=$(printf '%s' "$r" | tail -n 1); ` +
+    `if [ "$rc" -eq 6 ] || [ "$rc" -eq 7 ]; then return 2; fi; [ "$rc" -eq 0 ] || return 1; ` +
+    `case "$code" in 200) printf '%s' "$r" | grep -q '"data"' && return 0 || return 2;; 404|410|401|403) return 2;; 3??|429|5??) return 1;; esac; ` +
+    `printf '%s' "$r" | sed '$d' | grep -q '^[[:space:]]*[{[]' && return 1 || return 2; }; ` +
+    `ask; a=$?; if [ "$a" -eq 2 ]; then sleep ${PROBE_RETRY_WAIT_SECONDS}; ask; a=$?; fi; ` +
+    `case "$a" in 0) echo reach=ok;; 2) echo reach=down;; *) echo reach=unknown;; esac`;
   try {
-    const done = await provider.exec(ref, command, { timeoutMs: 20_000 });
+    const done = await provider.exec(ref, command, { timeoutMs: 40_000 });
     if (done.exitCode !== 0) return 'unknown';
     if (/(^|\n)reach=down\s*($|\n)/.test(done.stdout)) return 'down';
     return /(^|\n)reach=ok\s*($|\n)/.test(done.stdout) ? 'ok' : 'unknown';

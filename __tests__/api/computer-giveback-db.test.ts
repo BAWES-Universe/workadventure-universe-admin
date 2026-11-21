@@ -1626,6 +1626,36 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await decisionOf(early.id)).not.toMatchObject({ basis: 'universe_fault' });
     });
 
+    it('a job whose control changed hands before any call (the person took the machine, or gave it back) is never read as "no call reached the relay": its keys ended, a later call was refused and left no row, and that is the takeover, not the relay', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      // What taking the machine does (fenceControl): the control generation goes up and the agent's keys end; a call with the old key is then refused and leaves nothing
+      const tookOver = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+        const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+        await prisma.computerJob.update({ where: { id: jobId }, data: { controlGeneration: { increment: 1 } } });
+        await revokeJobTokens(jobId, NOW);
+        expect(await authorizeModelCall({ token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' }, NOW)).toEqual({ ok: false, reason: 'refused' });
+      });
+      expect(await decisionOf(tookOver.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      expect(await givenBack(tookOver.id)).toBe(false);
+      expect(await prisma.computerJobFault.count({ where: { jobId: tookOver.id } })).toBe(0);
+      // Given back to the agent, and taken again: the generation only goes up
+      const backAgain = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+        await mintJobToken(jobId, 'model', NOW);
+        await prisma.computerJob.update({ where: { id: jobId }, data: { controlGeneration: 2 } });
+      });
+      expect(await decisionOf(backAgain.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      // The person holds the machine at the moment it fails
+      const holding = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, async (jobId) => {
+        await mintJobToken(jobId, 'model', NOW);
+        await prisma.computerJob.update({ where: { id: jobId }, data: { control: 'person', status: 'waiting', waitingFor: 'signin' } });
+      });
+      expect(await decisionOf(holding.id)).toMatchObject({ state: 'refused', basis: 'agent_ended' });
+      // The same job that never changed hands, readied and never asked, is still the relay's
+      const untouched = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, readied);
+      expect(await decisionOf(untouched.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_unreachable' });
+    });
+
     it('is never read as the person’s, and a fault row of another run never gives this run back', async () => {
       await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
       const sara = await person('sara');
