@@ -20,7 +20,7 @@ import { resumeInstant, saveInstantLimits } from '@/lib/instant/state';
 import { forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
 import { instantRulesAndReceipts } from '@/lib/instant/rules-and-receipts';
 import { activityFor, closeReceipt, openReceipt, RECEIPT_LEASE_MS, renewReceipt, settleCheckingReceipts, settleReceipt, touchLeaseForRun, UNWATCHED_CHECKING_WAIT_MS } from '@/lib/task-receipts';
-import { NOTHING_TAKEN, OUTCOME_WORDS, actionWords, outcomeNote } from '@/lib/task-receipt-words';
+import { HOLD_BEING_RELEASED, HOLD_RELEASED, NOTHING_TAKEN, OUTCOME_WORDS, actionWords, outcomeNote } from '@/lib/task-receipt-words';
 import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
@@ -326,7 +326,8 @@ run('receipts that always settle (O1)', () => {
       const failed = await makeRun(job.id, 'failed', { reason: 'provider_failed', toolkit: 'gmail' });
       await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'done', endedAt: at(5) } });
       expect(await settleCheckingReceipts(50, at(6))).toBe(1);
-      expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'done', actions: [{ run: failed.id, outcome: 'failed' }] });
+      // The job finished and its App did not: partly done (the computer's work is a step that worked), never plain Done and never refunded
+      expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'partial', actions: [{ run: failed.id, outcome: 'failed' }] });
       // A job that never ran (refused by a rule before it started) or failed on our side did nothing for the person: its Apps all failing is refunded, nothing taken
       const never = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Never ran', status: 'stopped', endedBy: 'rule', endedAt: at(1) } });
       await open(never.id, { category: 'computer' });
@@ -347,6 +348,16 @@ run('receipts that always settle (O1)', () => {
   });
 
   describe('the migration', () => {
+    it('amend O4: the outcome column holds every outcome (failed and unconfirmed fit), and still refuses anything else; rows written before keep their outcome', async () => {
+      for (const outcome of ['done', 'partial', 'refunded', 'failed', 'unconfirmed']) {
+        await open(`outcome-${outcome}`);
+        await prisma.taskReceipt.updateMany({ where: { botId: brick, taskKey: `outcome-${outcome}` }, data: { outcome } });
+        expect((await receipt(`outcome-${outcome}`)).outcome).toBe(outcome);
+      }
+      await open('outcome-bad');
+      await expect(prisma.taskReceipt.updateMany({ where: { botId: brick, taskKey: 'outcome-bad' }, data: { outcome: 'lost' } })).rejects.toThrow();
+    });
+
     it('gives a receipt still running when it lands a fresh lease, not an already-lapsed one; a computer’s receipt stays on none', async () => {
       const { readFileSync } = await import('node:fs');
       const sql = readFileSync('prisma/migrations/20261119100000_task_receipt_lease/migration.sql', 'utf8');
@@ -683,7 +694,7 @@ run('receipts that always settle (O1)', () => {
       expect(item.actions[0]).toMatchObject({ label: 'gmail', outcome: 'worked', text: actionWords('gmail', 'worked'), takenText: null });
     });
 
-    it('a worked action whose price is not known yet has no amount, and the receipt says "Price not known yet" with no total made up', async () => {
+    it('a worked action whose charge the books have not acknowledged has no amount, and the receipt says "Settlement pending" (it may already have been debited) with no total made up', async () => {
       await open('amount-2');
       const known = await makeRun('amount-2', 'succeeded', { customerMicros: BigInt(20_000), toolkit: 'gmail' });
       const unknown = await makeRun('amount-2', 'succeeded', { customerMicros: null, customerState: 'held', toolkit: 'exa' });
@@ -694,7 +705,7 @@ run('receipts that always settle (O1)', () => {
       expect(item.actions[0]).toMatchObject({ outcome: 'worked', amountMicros: 20_000 });
       expect(item.actions[1]).toMatchObject({ outcome: 'worked' });
       expect(item.actions[1]).not.toHaveProperty('amountMicros');
-      expect(item.lines.some((line) => line.note === 'Price not known yet')).toBe(true);
+      expect(item.lines.some((line) => line.note === 'Settlement pending')).toBe(true);
       expect(item.spentMicros).toBeNull();
     });
 
@@ -720,6 +731,186 @@ run('receipts that always settle (O1)', () => {
       const byTotal = new Map(items.map((item) => [item.spentMicros, item.actions.map((action) => action.amountMicros)]));
       expect(byTotal.get(11_000)).toEqual([11_000]);
       expect(byTotal.get(22_000)).toEqual([22_000]);
+    });
+  });
+
+  describe('amend O4: a failed computer and a failed or unconfirmed action are never Done', () => {
+    const computerTime = (jobId: string, costMicros: number) =>
+      prisma.meterEvent.create({ data: { eventId: `ct-${jobId}`, kind: 'computer_time', pool: 'computer', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'person', route: null, jobId, quantity: BigInt(300), unit: 'second', costMicros: BigInt(costMicros), basis: 'measured', detail: {} } as never });
+    const instantEvent = (taskKey: string, runId: string, customerMicros: number) =>
+      prisma.meterEvent.create({ data: { eventId: `instant:${runId}`, kind: 'app_use', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(0), basis: 'measured', detail: { instant: true, taskKey, runId, app: 'gmail', customerMicros } } as never });
+
+    it('GPT’s case: a computer job that failed and a Gmail that failed is not Done: it says it did not finish, what the computer took, and that Gmail took nothing', async () => {
+      const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Send a message', status: 'running', startedAt: START } });
+      await open(job.id, { category: 'computer', title: 'Send a message' });
+      const gmail = await makeRun(job.id, 'failed', { reason: 'provider_failed', toolkit: 'gmail' });
+      await computerTime(job.id, 30_000);
+      await instantEvent(job.id, gmail.id, 0);
+      // The agent gave up: the job failed with no word from us (the person's time, chargeable); the bot server still says done
+      await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'failed', endedAt: at(5) } });
+      await closeReceipt({ botId: brick, taskKey: job.id, personId: sara, state: 'done' }, at(6));
+      expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'failed', actions: [{ run: gmail.id, outcome: 'failed' }] });
+      const item = (await activityFor(sara)).find((candidate) => candidate.title === 'Send a message');
+      expect(item).toMatchObject({ state: 'done', outcome: 'failed', outcomeText: OUTCOME_WORDS.failed, spentMicros: 30_000 });
+      expect(item?.outcomeText).not.toBe(OUTCOME_WORDS.done);
+      expect(item?.outcomeNote).toBe('It didn’t finish. Computer time used $0.03. Gmail charged $0.');
+      expect(item?.actions).toEqual([{ label: 'gmail', outcome: 'failed', text: actionWords('gmail', 'failed'), takenText: NOTHING_TAKEN }]);
+    });
+
+    it('a failed computer job with an action nobody could confirm is failed, not unconfirmed: the job ran and took the person’s time, so the receipt is never stored as refunded and its time is counted', async () => {
+      const job = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Send and confirm', status: 'running', startedAt: START } });
+      await open(job.id, { category: 'computer', title: 'Send and confirm' });
+      const gmail = await makeRun(job.id, 'failed', { reason: 'unclear', toolkit: 'gmail', customerState: 'released', customerMicros: BigInt(0), detail: { releasedUnconfirmed: true } });
+      await computerTime(job.id, 30_000);
+      await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'failed', endedAt: at(5) } });
+      // Ended by the close
+      await closeReceipt({ botId: brick, taskKey: job.id, personId: sara, state: 'refunded' }, at(6));
+      expect(await receipt(job.id)).toMatchObject({ state: 'done', outcome: 'failed', actions: [{ run: gmail.id, outcome: 'unknown' }] });
+      const item = (await activityFor(sara)).find((candidate) => candidate.title === 'Send and confirm');
+      expect(item).toMatchObject({ state: 'done', outcome: 'failed', spentMicros: 30_000 });
+      // The App that could not be confirmed still says so on its own line
+      expect(item?.actions).toEqual([expect.objectContaining({ label: 'gmail', outcome: 'unknown' })]);
+      // The same job ended by the sweep, and a receipt that was stored the old way (refunded + unconfirmed) is read as failed
+      const swept = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Swept and confirm', status: 'running', startedAt: START } });
+      await open(swept.id, { category: 'computer', title: 'Swept and confirm' });
+      await makeRun(swept.id, 'failed', { reason: 'unclear', toolkit: 'gmail', customerState: 'released', customerMicros: BigInt(0), detail: { releasedUnconfirmed: true } });
+      await prisma.computerJob.update({ where: { id: swept.id }, data: { status: 'failed', endedAt: at(5) } });
+      await settleCheckingReceipts(50, at(6));
+      expect(await receipt(swept.id)).toMatchObject({ state: 'done', outcome: 'failed' });
+    });
+
+    it('a failed computer job with no Instant action at all is failed too, whether the close or the sweep ends it; and from Activity alone when it has no receipt', async () => {
+      const closed = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Gave up, closed', status: 'failed', startedAt: START, endedAt: at(5) } });
+      await open(closed.id, { category: 'computer', title: 'Gave up, closed' });
+      await closeReceipt({ botId: brick, taskKey: closed.id, personId: sara, state: 'done' }, at(6));
+      expect(await receipt(closed.id)).toMatchObject({ state: 'done', outcome: 'failed' });
+      const swept = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Gave up, swept', status: 'running', startedAt: START } });
+      await open(swept.id, { category: 'computer', title: 'Gave up, swept' });
+      await prisma.computerJob.update({ where: { id: swept.id }, data: { status: 'failed', endedAt: at(5) } });
+      await settleCheckingReceipts(50, at(6));
+      expect(await receipt(swept.id)).toMatchObject({ state: 'done', outcome: 'failed' });
+      // No receipt row at all: the job's own record is what Activity reads
+      const bare = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Gave up, no receipt', status: 'failed', startedAt: START, endedAt: at(5) } });
+      await computerTime(bare.id, 20_000);
+      const item = (await activityFor(sara)).find((candidate) => candidate.title === 'Gave up, no receipt');
+      expect(item).toMatchObject({ outcome: 'failed', outcomeText: OUTCOME_WORDS.failed, state: 'done' });
+      expect(item?.outcomeNote).toBe('It didn’t finish. Computer time used $0.02.');
+    });
+
+    it('a failed job reads failed even from a receipt settled as done before this existed; a finished job with a failed App is partly done; a job that failed on our side is unchanged (refunded)', async () => {
+      const old = await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Old failed job', status: 'failed', startedAt: START, endedAt: at(5) } });
+      await prisma.taskReceipt.create({ data: { botId: brick, personId: sara, taskKey: old.id, title: 'Old failed job', category: 'computer', state: 'done', outcome: 'done', startedAt: START, endedAt: at(5), payerKind: 'person', payerPersonId: sara } as never });
+      await computerTime(old.id, 10_000);
+      expect((await activityFor(sara)).find((candidate) => candidate.title === 'Old failed job')).toMatchObject({ outcome: 'failed', outcomeText: OUTCOME_WORDS.failed });
+      await prisma.computerJob.create({ data: { botId: brick, personId: sara, title: 'Failed on our side O4', status: 'failed', endedBy: 'error', startedAt: START, endedAt: at(5) } });
+      expect((await activityFor(sara)).find((candidate) => candidate.title === 'Failed on our side O4')).toMatchObject({ outcome: 'refunded', state: 'refunded' });
+    });
+
+    it('an action nobody could confirm is never "didn’t work": worked plus unknown is partly done; unknown alone is unconfirmed; each says it could not be confirmed', async () => {
+      await open('unk-1');
+      const worked = await makeRun('unk-1', 'succeeded', { customerMicros: BigInt(9_000), toolkit: 'exa' });
+      const unclear = await makeRun('unk-1', 'failed', { reason: 'unclear', toolkit: 'gmail', customerState: 'released', detail: { releasedUnconfirmed: true } });
+      await closeReceipt({ botId: brick, taskKey: 'unk-1', personId: sara, state: 'done' }, at(3));
+      expect(await receipt('unk-1')).toMatchObject({ state: 'done', outcome: 'partial', actions: [{ run: worked.id, outcome: 'worked' }, { run: unclear.id, outcome: 'unknown' }] });
+      const [partly] = (await activityFor(sara)).filter((candidate) => candidate.title === 'Find the weather');
+      expect(partly.actions[1]).toEqual({ label: 'gmail', outcome: 'unknown', text: actionWords('gmail', 'unknown'), takenText: HOLD_RELEASED, releasedMicros: 10_000 });
+      expect(partly.actions[1].text).not.toContain("didn't");
+      expect(partly.outcomeNote).toBe('One step worked and one couldn’t be confirmed. Your hold of $0.01 was released.');
+
+      await open('unk-2');
+      const only = await makeRun('unk-2', 'failed', { reason: 'unclear', toolkit: 'gmail', customerState: 'released', detail: { releasedUnconfirmed: true } });
+      await closeReceipt({ botId: brick, taskKey: 'unk-2', personId: sara, state: 'refunded' }, at(3));
+      // Nothing was taken (its hold was given back), so the money state is refunded; the words say it could not be confirmed, never that it failed
+      expect(await receipt('unk-2')).toMatchObject({ state: 'refunded', outcome: 'unconfirmed', actions: [{ run: only.id, outcome: 'unknown' }] });
+      expect((await activityFor(sara)).find((candidate) => candidate.outcome === 'unconfirmed' && candidate.actions[0]?.label === 'gmail')).toMatchObject({ state: 'refunded', outcomeText: OUTCOME_WORDS.unconfirmed, spentMicros: null });
+    });
+
+    it('while the credit of an unconfirmed action is still on hold it says the hold is being released; after, the released amount is shown', async () => {
+      await open('unk-hold');
+      const held = await makeRun('unk-hold', 'failed', { reason: 'unclear', toolkit: 'exa', customerState: 'held', detail: { releasedUnconfirmed: true } });
+      await closeReceipt({ botId: brick, taskKey: 'unk-hold', personId: sara, state: 'refunded' }, at(3));
+      const find = async () => (await activityFor(sara)).find((candidate) => candidate.actions.some((action) => action.label === 'exa' && candidate.outcome === 'unconfirmed'));
+      const before = await find();
+      // Not shown as refunded while the credit is still reserved
+      expect(before).toMatchObject({ state: 'done', outcome: 'unconfirmed' });
+      expect(before?.actions[0]).toMatchObject({ outcome: 'unknown', takenText: HOLD_BEING_RELEASED });
+      expect(before?.outcomeNote).toContain('We’re releasing your hold.');
+      await prisma.instantRun.update({ where: { id: held.id }, data: { customerState: 'released', customerMicros: BigInt(0) } });
+      const after = await find();
+      expect(after).toMatchObject({ state: 'refunded', outcome: 'unconfirmed' });
+      expect(after?.actions[0]).toMatchObject({ outcome: 'unknown', takenText: HOLD_RELEASED, releasedMicros: 10_000 });
+      expect(after?.outcomeNote).not.toContain('releasing');
+    });
+
+    it('late evidence that confirms a failure keeps the release wording until the books release the hold: not "refunded", not "nothing taken", while the release is still refused', async () => {
+      await open('late-held', { title: 'Late held task' });
+      const run = await makeRun('late-held', 'failed', { reason: 'unclear', toolkit: 'gmail', customerState: 'held', detail: { noLog: true, releasedUnconfirmed: true } });
+      await closeReceipt({ botId: brick, taskKey: 'late-held', personId: sara, state: 'refunded' }, at(3));
+      const find = async () => (await activityFor(sara)).find((candidate) => candidate.title === 'Late held task');
+      // The provider's log turns up and says it failed; the books still refuse to release the hold (twice)
+      await prisma.instantRun.update({ where: { id: run.id }, data: { detail: { noLog: true, releasedUnconfirmed: true, lateEvidence: { status: 'failed' } } } });
+      await settleCheckingReceipts(50, at(401));
+      await settleCheckingReceipts(50, at(402));
+      expect(await receipt('late-held')).toMatchObject({ actions: [{ run: run.id, outcome: 'failed' }] });
+      const before = await find();
+      expect(before?.state).not.toBe('refunded');
+      expect(before?.actions[0]).toMatchObject({ outcome: 'failed', takenText: HOLD_BEING_RELEASED });
+      expect(before?.outcomeNote).toContain('We’re releasing your hold.');
+      expect(before?.outcomeNote).not.toContain('Nothing was taken');
+      // The books acknowledge the release: now nothing was taken and it is refunded
+      await prisma.instantRun.update({ where: { id: run.id }, data: { customerState: 'released', customerMicros: BigInt(0) } });
+      const after = await find();
+      expect(after).toMatchObject({ state: 'refunded' });
+      expect(after?.actions[0]).toMatchObject({ outcome: 'failed', takenText: NOTHING_TAKEN });
+      expect(after?.outcomeNote ?? '').not.toContain('releasing');
+    });
+
+    it('a run let go unconfirmed that late evidence says WORKED keeps the hold wording from the run’s own state (being released, then released) and shows no amount taken: it is never charged', async () => {
+      await open('late-worked-held', { title: 'Late worked held task' });
+      const run = await makeRun('late-worked-held', 'failed', { reason: 'unclear', toolkit: 'gmail', customerState: 'held', detail: { noLog: true, releasedUnconfirmed: true } });
+      await closeReceipt({ botId: brick, taskKey: 'late-worked-held', personId: sara, state: 'refunded' }, at(3));
+      const find = async () => (await activityFor(sara)).find((candidate) => candidate.title === 'Late worked held task');
+      expect((await find())?.actions[0]).toMatchObject({ outcome: 'unknown', takenText: HOLD_BEING_RELEASED });
+      // The provider's log turns up and says it went out; the books have not released the hold yet
+      await prisma.instantRun.update({ where: { id: run.id }, data: { detail: { noLog: true, releasedUnconfirmed: true, lateEvidence: { status: 'success' } } } });
+      await settleCheckingReceipts(50, at(401));
+      // A stray settle event for the run (a charge recorded against it): the receipt still shows no amount taken for a run that was let go, so the guard is what holds it
+      await prisma.meterEvent.create({ data: { eventId: `instant:${run.id}`, kind: 'app_use', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(5_000), basis: 'measured', detail: { instant: true, taskKey: 'late-worked-held', runId: run.id, app: 'gmail', customerMicros: 7_000 } } as never });
+      expect(await receipt('late-worked-held')).toMatchObject({ actions: [{ run: run.id, outcome: 'worked' }] });
+      const held = await find();
+      expect(held?.actions[0]).toMatchObject({ outcome: 'worked', takenText: HOLD_BEING_RELEASED });
+      expect(held?.actions[0]).not.toHaveProperty('amountMicros');
+      // The books acknowledge the release: released, still no amount taken
+      await prisma.instantRun.update({ where: { id: run.id }, data: { customerState: 'released', customerMicros: BigInt(0) } });
+      const released = await find();
+      expect(released?.actions[0]).toMatchObject({ outcome: 'worked', takenText: HOLD_RELEASED });
+      expect(released?.actions[0]).not.toHaveProperty('amountMicros');
+    });
+
+    it('a later confirmed success updates the ORIGINAL receipt (the same row, the same id) and the charge stays what the books recorded; a later confirmed failure is a failure, never unknown', async () => {
+      await open('late-1');
+      const run = await makeRun('late-1', 'failed', { reason: 'unclear', toolkit: 'gmail', customerState: 'released', customerMicros: BigInt(0), detail: { noLog: true } });
+      await closeReceipt({ botId: brick, taskKey: 'late-1', personId: sara, state: 'refunded' }, at(3));
+      const first = await receipt('late-1');
+      expect(first).toMatchObject({ outcome: 'unconfirmed', actions: [{ run: run.id, outcome: 'unknown' }] });
+      // Nothing new: the sweep leaves it
+      expect(await settleCheckingReceipts(50, at(400))).toBe(0);
+      expect(await receipt('late-1')).toMatchObject({ outcome: 'unconfirmed' });
+      // The provider's log turns up and says it went out
+      await prisma.instantRun.update({ where: { id: run.id }, data: { detail: { noLog: true, lateEvidence: { status: 'success' } } } });
+      await settleCheckingReceipts(50, at(401));
+      const second = await receipt('late-1');
+      // What the person was charged stays what the books say (the run's hold was given back: nothing), the receipt is the same row, now done
+      expect(second).toMatchObject({ id: first.id, state: 'done', outcome: 'done', chargedMicros: BigInt(0), actions: [{ run: run.id, outcome: 'worked' }] });
+      // Said again, nothing moves
+      expect(await settleCheckingReceipts(50, at(402))).toBe(0);
+      // A log that says it failed settles to a failure
+      await open('late-2');
+      const gone = await makeRun('late-2', 'failed', { reason: 'unclear', toolkit: 'gmail', customerState: 'released', detail: { noLog: true } });
+      await closeReceipt({ botId: brick, taskKey: 'late-2', personId: sara, state: 'refunded' }, at(3));
+      await prisma.instantRun.update({ where: { id: gone.id }, data: { detail: { noLog: true, lateEvidence: { status: 'failed' } } } });
+      await settleCheckingReceipts(50, at(403));
+      expect(await receipt('late-2')).toMatchObject({ state: 'refunded', outcome: 'refunded', actions: [{ run: gone.id, outcome: 'failed' }] });
     });
   });
 

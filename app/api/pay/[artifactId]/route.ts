@@ -29,7 +29,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   if (!meOriginAllowed(request) || !(await isOpenByLink(artifactId))) return respond({ error: 'Not found' }, 404);
   const order = request.nextUrl.searchParams.get('order');
   if (!order) return respond({ enabled: await pageTakesPayments(artifactId) });
-  const view = await orderForArtifact(order, artifactId);
+  // Who is signed in now: an order made under an account is told only to that account (see `orderForArtifact`)
+  const session = await getSessionUser(request).catch(() => null);
+  const view = await orderForArtifact(order, artifactId, {}, { accountId: session?.id ?? null });
   return view ? respond(view) : respond({ error: 'Not found' }, 404);
 }
 

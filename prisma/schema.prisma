@@ -1652,6 +1652,13 @@ model AppPageOrder {
   buyerKey       String?  @map("buyer_key") @db.VarChar(80)
   // The description the service was (or will be) sent, kept so a start carried on later sends exactly what the first one did
   description    String?  @db.VarChar(200)
+  // The last time the service answered a look at this order in a way that could be read (any state), for support: "last heard from the service".
+  lastReadAt     DateTime? @map("last_read_at")
+  // The service has said the last word about this order: a final failed state, or a payment for something else that a person has to look at.
+  // Until then an order that was closed (or could not be confirmed) may still have been paid, and is looked at again, slowly, with no end date.
+  reconciled     Boolean  @default(false)
+  // When the next look is due for an order in that long wait (null: due now). Kept on the order so a restart never loses the schedule.
+  nextLookAt     DateTime? @map("next_look_at")
 
   job        AppPageJob?    @relation(fields: [jobId], references: [id], onDelete: SetNull)
   connection AppConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
@@ -1663,6 +1670,7 @@ model AppPageOrder {
   @@index([ownerId, createdAt])
   @@index([visitorHash, createdAt])
   @@index([status, createdAt])
+  @@index([reconciled, status, nextLookAt])
   @@map("app_page_orders")
 }
 
@@ -2309,9 +2317,10 @@ model TaskReceipt {
   leaseUntil    DateTime? @map("lease_until")
   // Which turn of the task the receipt is on. A close or renewal that carries an older number never ends or extends a newer turn.
   generation    Int       @default(1)
-  // How the task came to end, from its run records: done (every action worked), partial (some worked and some did not) or refunded (none did)
-  outcome       String?   @db.VarChar(8)
-  // Each Instant action of the task and how it ended (worked or failed), written when the receipt settles: [{ run, label, outcome }]
+  // How the task came to end, from its run records and its computer job: done, partial (a verified step and another that did not work or could
+  // not be confirmed), refunded (nothing worked, nothing taken), failed (nothing verified and a job that ran took the person's time) or unconfirmed
+  outcome       String?   @db.VarChar(12)
+  // Each Instant action of the task and how it ended (worked, failed or unknown), written when the receipt settles: [{ run, label, outcome }]
   actions       Json?
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at")
@@ -3413,10 +3422,14 @@ model ComputerArchive {
   proofMs       Int?      @map("proof_ms")
   // Why it failed, in a few plain words
   failure       String?   @db.VarChar(200)
+  // When this copy was first taken for deletion and its object was not deleted yet (the row is deleted with the object, so any row with this set is a
+  // deletion still waiting). The oldest of these is what the team reads to tell a bucket that is slow from one that has stopped accepting deletes.
+  deletionSince DateTime? @map("deletion_since")
 
   @@unique([botId, generation])
   @@index([botId, state])
   @@index([state, createdAt])
+  @@index([deletionSince])
   @@map("computer_archives")
 }
 
@@ -3545,6 +3558,9 @@ model ComputerJob {
   lastTriedAt    DateTime? @map("last_tried_at")
   // The run of a goal or task that started it (game #2002), so a run handed out again finds its job and never starts a second
   runId          String?   @map("run_id") @db.VarChar(36)
+  // The caller's own key for ONE start the person asked for (the bot server makes a uuid per start and sends it with the start and with every look for it): a start repeating a key finds the job that key made and never
+  // makes a second one, and "did my start reach Orbit" is read by this key alone. Null for a start that sent none. Unique per Brick and person (Postgres lets many rows have none).
+  startKey       String?   @map("start_key") @db.VarChar(64)
   // Goes up each time the person takes the machine and each time it is handed back (the take-over fence): a token and an agent
   // callback made under an older number are refused, so nothing the agent had in flight can act after the person took over
   controlGeneration Int    @default(0) @map("control_generation")
@@ -3601,11 +3617,13 @@ model ComputerJob {
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
+  faults  ComputerJobFault[]
   tokens  ComputerJobToken[]
   visits  ComputerJobVisit[]
   files   ComputerJobFile[]
 
   @@unique([botId, runId])
+  @@unique([botId, personId, startKey])
   @@index([botId, status])
   @@index([personId, status])
   @@index([status, endToldAt])
@@ -3675,6 +3693,107 @@ model ComputerJobFile {
   @@index([jobId])
   @@index([ownerId, createdAt])
   @@map("computer_job_files")
+}
+
+// A start with a key that has begun and has not yet saved its job (or ended without one): written before its first read and removed once its job exists, so the look for "did this start reach
+// Orbit" can tell a start that is still going on from one that never arrived. `fence` is the sha-256 (hex) of the Brick, person and key it is for. A row that was never removed (the process died) stops counting
+// after a few minutes and is deleted by the sweep.
+model ComputerStartMark {
+  id        String   @id @default(uuid())
+  fence     String   @db.VarChar(64)
+  startedAt DateTime @default(now()) @map("started_at")
+
+  @@index([fence, startedAt])
+  @@index([startedAt])
+  @@map("computer_start_marks")
+}
+
+// What the game relay saw go wrong (or not) on a job's model calls, written by the bot server one row per call (or per turn: call_id 'turn:<n>') BEFORE the
+// job finishes, and once per (job, call): a row written again changes nothing, except that an 'uncertain' one may be settled once. Orbit, not the runner's
+// memory, judges whether a failed job is given back from these rows (lib/computer-giveback). Never any content of a call: a reason word, a status and a route.
+model ComputerJobFault {
+  id             String   @id @default(uuid())
+  jobId          String   @map("job_id")
+  turn           Int?
+  // The runner's run of the job the turn was numbered in (a restart makes a new run and numbers turns from 1 again); null from a runner that names none
+  run            String?  @db.VarChar(40)
+  callId         String   @map("call_id") @db.VarChar(120)
+  // fault, not_ours, uncertain, answered: what the relay says; the CLASS (ours, the person's, unresolved) is worked out here from the reason
+  kind           String   @db.VarChar(12)
+  reason         String   @db.VarChar(32)
+  // universe-ai or own-key (the relay's rows); orbit for the rows Orbit makes itself (its capacity refusals, its cutoff, its own-key marker): who made a row
+  source         String   @db.VarChar(12)
+  // The provider and route the call went to ("universe-ai:<providerId>"): what a provider's failures are counted by
+  route          String?  @db.VarChar(120)
+  providerStatus Int?     @map("provider_status")
+  at             DateTime
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, callId])
+  @@index([route, at])
+  @@map("computer_job_faults")
+}
+
+// Whether a computer job that failed is given back, and why, kept for good (one row per job): the decision, the basis it rests on, the reason the relay
+// or Orbit named, and what is still to be done. A decision that could not be made yet (Limits unreadable or not set, an outside effect still to be
+// confirmed) is `pending` and is tried again by the sweep with a growing wait; the person is charged provisionally and a decision that turns out `given`
+// gives it all back. Not tied to the job by a foreign key: the record of what was decided about a person's money outlives the job's own removal.
+model ComputerGiveBackDecision {
+  jobId         String    @id @map("job_id")
+  personId      String    @map("person_id")
+  // given, refused, pending
+  state         String    @db.VarChar(8)
+  // given: universe_fault, orbit_fault, goodwill, incident; refused: person_caused, delivered, cap, paused, agent_ended (the runner said the agent's own and nothing wrong was recorded on what was judged); pending: effect_unresolved, limits_unreadable, limits_missing
+  basis         String    @db.VarChar(20)
+  // What the runner said ('ours', 'agent', or 'none' when it said nothing) and the reason of the row (or the Orbit ending) the decision rests on
+  causeHint     String?   @map("cause_hint") @db.VarChar(10)
+  reason        String?   @db.VarChar(32)
+  route         String?   @db.VarChar(120)
+  // The turns the runner judged failed
+  judgedTurns   Int[]     @map("judged_turns")
+  // The run those turns were numbered in (null: the runner named none)
+  judgedRun     String?   @map("judged_run") @db.VarChar(40)
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime? @map("next_attempt_at")
+  lastError     String?   @map("last_error") @db.VarChar(200)
+  // When the age of a pending decision was last told to Sentry
+  alertedAt     DateTime? @map("alerted_at")
+  // An outside effect that was still unconfirmed when the decision was made settled as done afterwards
+  deliveredLate Boolean   @default(false) @map("delivered_late")
+  decidedAt     DateTime  @default(now()) @map("decided_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@index([state, nextAttemptAt])
+  @@map("computer_give_back_decisions")
+}
+
+// A refund of credit a computer job drew and that was given back (the job failed on our side), owed until the funding books acknowledge it. Written once per
+// hold BEFORE the refund is asked, with the amount fixed, so a retry asks for exactly the same refund under the same key, and it outlives the job and the Brick
+// (it keeps the minimum references to finish the reimbursement: job id, person, hold key, refund key, amount; no foreign keys on purpose).
+model ComputerRefundObligation {
+  id                 String    @id @default(uuid())
+  jobId              String    @map("job_id") @db.VarChar(255)
+  personId           String    @map("person_id")
+  holdKey            String    @unique @map("hold_key") @db.VarChar(255)
+  refundKey          String    @map("refund_key") @db.VarChar(255)
+  amountMicros       BigInt    @map("amount_micros")
+  // owed or acknowledged (the books answered, with what they gave back)
+  state              String    @default("owed") @db.VarChar(12)
+  attempts           Int       @default(0)
+  lastAttemptAt      DateTime? @map("last_attempt_at")
+  lastError          String?   @map("last_error") @db.VarChar(200)
+  nextAttemptAt      DateTime? @map("next_attempt_at")
+  alertedAt          DateTime? @map("alerted_at")
+  acknowledgedAt     DateTime? @map("acknowledged_at")
+  acknowledgedMicros BigInt?   @map("acknowledged_micros")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  @@index([state, nextAttemptAt])
+  @@index([jobId])
+  @@map("computer_refund_obligations")
 }
 
 // An effect outside the computer that a job meant to have, written BEFORE it is tried and once per key, so a retry looks up

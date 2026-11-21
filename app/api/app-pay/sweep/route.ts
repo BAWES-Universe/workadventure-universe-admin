@@ -18,7 +18,12 @@ export async function POST(request: NextRequest) {
   try {
     requireServiceToken(request);
     const sweep = await sweepPageOrders();
-    return respond({ sweep, load: await pagePaymentLoad() });
+    const load = await pagePaymentLoad();
+    // The alert is on a STALLED look (a scheduled look overdue, an order the schedule never reached, looks that are made and not read), never on an order's age: an order waiting its month is only a count
+    if (load.unconfirmed.stalled.length > 0) {
+      Sentry.captureMessage(`Page payment looks are stalled: ${load.unconfirmed.stalled.join(', ')}`, { level: 'warning', tags: { area: 'page-payments' }, extra: { unconfirmed: load.unconfirmed } });
+    }
+    return respond({ sweep, load });
   } catch (error) {
     if (unauthorized(error)) return respond({ error: 'Unauthorized' }, 401);
     Sentry.captureException(error, { tags: { area: 'page-payments' } });

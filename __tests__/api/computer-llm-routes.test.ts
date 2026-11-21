@@ -33,7 +33,7 @@ afterAll(() => {
 
 describe.each([
   ['identify', identify, { token: 'cjt_x' }],
-  ['authorize', authorize, { token: 'cjt_x', callId: 'c1', estimateMicros: 5, payer: 'universe' }],
+  ['authorize', authorize, { token: 'cjt_x', callId: 'c1', estimateMicros: 5, payer: 'universe', route: 'universe-ai:p1' }],
   ['settle', settle, { jobId: 'j1', callId: 'c1', costMicros: 5 }],
 ] as const)('%s', (_name, route, body) => {
   it('is for the bot server only', async () => {
@@ -78,5 +78,23 @@ describe('settle', () => {
     lib.calls.settleModelCall.mockResolvedValueOnce({ ok: true });
     await settle(post({ jobId: 'j1', callId: 'c1', costMicros: 9, payerPersonId: 'p-owner' }));
     expect(lib.calls.settleModelCall).toHaveBeenCalledWith('j1', 'c1', expect.objectContaining({ payer: { kind: 'person', personId: 'p-owner' }, route: 'own-key' }));
+  });
+});
+
+describe('authorize: the route of a call we fund', () => {
+  const ok = { ok: true, jobId: 'j1', botId: 'b1', personId: 'p1', reservedMicros: 5 } as const;
+  it('refuses a call we fund that names no route (missing, null or empty) before asking anything: a call without one would reach the room unchecked while its provider’s route is paused', async () => {
+    for (const route of [undefined, null, '']) {
+      const body = { token: 'cjt_x', callId: 'c1', estimateMicros: 5, payer: 'universe', ...(route === undefined ? {} : { route }) };
+      expect((await authorize(post(body))).status).toBe(400);
+    }
+    expect(lib.calls.authorizeModelCall).not.toHaveBeenCalled();
+  });
+  it('passes the route of a call we fund on, and a person’s own key needs none', async () => {
+    lib.calls.authorizeModelCall.mockResolvedValue(ok);
+    expect((await authorize(post({ token: 'cjt_x', callId: 'c1', estimateMicros: 5, payer: 'universe', route: 'universe-ai:p1' }))).status).toBe(200);
+    expect(lib.calls.authorizeModelCall).toHaveBeenLastCalledWith(expect.objectContaining({ payer: 'universe', route: 'universe-ai:p1' }));
+    expect((await authorize(post({ token: 'cjt_x', callId: 'c2', estimateMicros: 0, payer: 'own-key' }))).status).toBe(200);
+    expect((await authorize(post({ token: 'cjt_x', callId: 'c3', estimateMicros: 0, payer: 'own-key', route: null }))).status).toBe(200);
   });
 });

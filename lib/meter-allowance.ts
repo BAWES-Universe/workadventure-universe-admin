@@ -29,8 +29,8 @@ export type NoRoom =
   | { ok: false; reason: 'allowance'; leftMicros: number }
   /** Jobs at once are taken, for this member or for everyone: wait in line. */
   | { ok: false; reason: 'busy' }
-  /** Our own pool has no more room for new work. */
-  | { ok: false; reason: 'pool' }
+  /** Our own pool has no more room for new work. `full` is true when it has none even for the smallest step (the envelope is at its ceiling), false when it only refused a step for its own size. */
+  | { ok: false; reason: 'pool'; full?: boolean }
   /** The reservation is not one that is held and in time any more: stop safely. */
   | { ok: false; reason: 'closed' }
   /** The key was used before for someone else: the first stands, and whoever asked has a bug to find. */
@@ -138,6 +138,8 @@ export interface Envelope {
   chatMicros: number;
   /** Jobs going now, everyone together. */
   jobsRunning: number;
+  /** The reservations that ran out and were never settled or released, read from the very rows `unsettledMicros` counts them from (so the two can never disagree, whatever settles or releases meanwhile). */
+  lapsed: { count: number; micros: number; oldestLapsedAt: Date | null };
 }
 
 /**
@@ -176,9 +178,15 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
   ]);
   let reserved = 0;
   let lapsed = 0;
+  let lapsedCount = 0;
+  let oldestLapsedAt: Date | null = null;
   for (const row of held) {
     if (row.expiresAt > now) reserved += Number(row.amountMicros);
-    else lapsed += Number(row.amountMicros);
+    else {
+      lapsed += Number(row.amountMicros);
+      lapsedCount += 1;
+      if (!oldestLapsedAt || row.expiresAt < oldestLapsedAt) oldestLapsedAt = row.expiresAt;
+    }
   }
   // A gigabyte is 10^9 bytes; rounded up in whole millionths of a dollar, and in BigInt so a very large disk cannot lose a digit
   const keptStorageMicros = storageMonthMicros(kept[0]?.bytes ?? BigInt(0), settings);
@@ -196,6 +204,53 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
     chatMicros: asNumber(chat._sum.costMicros),
     // The room held for one model call inside a job is not another job running
     jobsRunning: held.filter((row) => row.expiresAt > now && !isNoJob(row.reservationKey)).length,
+    lapsed: { count: lapsedCount, micros: lapsed, oldestLapsedAt },
+  };
+}
+
+/** The size of room a new model call asks for, as far as the readiness check can tell (a few cents: a call of the usual size). The real size is each call's own; this is only what "a call would be refused" is judged by. */
+export const USUAL_CALL_ROOM_MICROS = 20_000;
+
+export interface PoolStatus {
+  ceilingMicros: number;
+  /** committed + reserved + unsettled + keptStorage + reserve: what `fits` compares to the ceiling. */
+  totalMicros: number;
+  committedMicros: number;
+  reservedMicros: number;
+  /** Spent and not settled yet, and the lapsed holds below (they are counted here too: it is the sum `fits` reads). */
+  unsettledMicros: number;
+  keptStorageMicros: number;
+  reserveMicros: number;
+  chatMicros: number;
+  /** Room that ran out and was never settled or released: what it spent is not known, so it keeps counting. A leak shows here. */
+  lapsed: { count: number; micros: number; oldestLapsedAt: Date | null };
+  /** What is left under the ceiling (never below 0). */
+  leftMicros: number;
+  /** A new call of the usual size would be refused for the pool now. */
+  refusing: boolean;
+}
+
+/** The pool as `fits` sees it, in parts, with the lapsed holds counted apart (how many, how much, and since when the oldest ran out). Reads only. Null when the usage controls are not set. */
+export async function poolStatusNow(now: Date = new Date()): Promise<PoolStatus | null> {
+  const settings = await getMeterSettings();
+  if (missingSettings(settings).length > 0) return null;
+  // One read of the reservations, the envelope's own: the lapsed holds are counted from the same rows its unsettled spend counts them from, so a settlement or release in between can never leave
+  // `lapsed` larger than `unsettled` (a negative "recorded and not settled" in the check)
+  const envelope = await envelopeIn(prisma, now, settings);
+  const ceilingMicros = settings.poolCeilingMicros ?? 0;
+  return {
+    ceilingMicros,
+    totalMicros: envelope.totalMicros,
+    committedMicros: envelope.committedMicros,
+    reservedMicros: envelope.reservedMicros,
+    unsettledMicros: envelope.unsettledMicros,
+    keptStorageMicros: envelope.keptStorageMicros,
+    reserveMicros: envelope.reserveMicros,
+    chatMicros: envelope.chatMicros,
+    lapsed: envelope.lapsed,
+    leftMicros: Math.max(0, ceilingMicros - envelope.totalMicros),
+    // The same comparison `fits` makes for a call of the usual size
+    refusing: envelope.totalMicros + USUAL_CALL_ROOM_MICROS > ceilingMicros,
   };
 }
 
@@ -230,7 +285,7 @@ async function fits(tx: Tx, personId: string, extraMicros: number, now: Date, se
     const mine = await tx.meterReservation.count({ where: { personKey: `person:${personId}`, state: 'held', expiresAt: { gt: now }, NOT: [{ reservationKey: { startsWith: CALL_ROOM_PREFIX } }, { reservationKey: { startsWith: DISK_ROOM_PREFIX } }] } });
     if (mine >= (settings.atOnceMember ?? 0) || envelope.jobsRunning >= (settings.atOnceAll ?? 0)) return { ok: false, reason: 'busy' };
   }
-  if (envelope.totalMicros + extraMicros > (settings.poolCeilingMicros ?? 0)) return { ok: false, reason: 'pool' };
+  if (envelope.totalMicros + extraMicros > (settings.poolCeilingMicros ?? 0)) return { ok: false, reason: 'pool', full: envelope.totalMicros + 1 > (settings.poolCeilingMicros ?? 0) };
   return null;
 }
 
@@ -387,16 +442,26 @@ export async function releaseRoom(input: { key: string }, now: Date = new Date()
 }
 
 async function close(key: string, state: 'settled' | 'released', now: Date, settledMicros: number | null): Promise<Reservation | null> {
-  return prisma.$transaction(async (tx) => {
-    await lockPool(tx);
-    const row = await tx.meterReservation.findUnique({ where: { reservationKey: key } });
-    if (!row) return null;
-    // Once it ended it stays as it ended: a second word, even a different one, changes nothing
-    if (row.state !== 'held') return viewOf(row);
-    const next = await tx.meterReservation.update({
-      where: { id: row.id },
-      data: { state, closedAt: now, settledMicros: settledMicros === null ? null : BigInt(settledMicros) },
-    });
-    return viewOf(next);
+  return prisma.$transaction((tx) => closeIn(tx, key, state, now, settledMicros));
+}
+
+/**
+ * `releaseRoom` inside a transaction the caller already holds (it takes the pool's lock first, like every step): for a caller that must decide to release and release as ONE step under a lock of its own,
+ * so nothing can use the room between the decision and the release.
+ */
+export async function releaseRoomIn(tx: Tx, input: { key: string }, now: Date = new Date()): Promise<Reservation | null> {
+  return closeIn(tx, input.key, 'released', now, null);
+}
+
+async function closeIn(tx: Tx, key: string, state: 'settled' | 'released', now: Date, settledMicros: number | null): Promise<Reservation | null> {
+  await lockPool(tx);
+  const row = await tx.meterReservation.findUnique({ where: { reservationKey: key } });
+  if (!row) return null;
+  // Once it ended it stays as it ended: a second word, even a different one, changes nothing
+  if (row.state !== 'held') return viewOf(row);
+  const next = await tx.meterReservation.update({
+    where: { id: row.id },
+    data: { state, closedAt: now, settledMicros: settledMicros === null ? null : BigInt(settledMicros) },
   });
+  return viewOf(next);
 }

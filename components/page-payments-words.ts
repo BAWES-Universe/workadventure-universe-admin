@@ -9,15 +9,17 @@ export const PAY_WORDS = {
   checking: { title: 'Checking your payment…', sub: 'Asking the payment service directly.' },
   slow: { title: 'This is taking longer than usual…', sub: 'Your payment is still being checked.' },
   paidAccount: { title: 'Paid. Thank you.', sub: 'It’s saved to your account, so it comes back whenever you open this page.' },
-  paidGuest: { title: 'Paid. Thank you.', sub: 'Save your receipt link. It brings this purchase back on any device.' },
+  paidGuest: { title: 'Paid. Thank you.', sub: 'A guest purchase on this browser. Save your private receipt link: it brings this purchase back on any device, so share it with no one.' },
   paidTest: { title: 'Test payment received. No money moved.', sub: 'Only a live payment counts as a purchase.' },
   restored: (date: string | null) => ({ title: date ? `Your purchase from ${date} is back.` : 'Your purchase is back.', sub: null }),
-  saveReceipt: { title: 'Checking your payment…', sub: 'This browser can’t remember it. Save your receipt link now.' },
-  receiptCopied: { title: 'Receipt link copied.', sub: 'Keep it somewhere safe, like your notes or email.' },
+  saveReceipt: { title: 'Checking your payment…', sub: 'This browser can’t remember it. Save your private receipt link now.' },
+  receiptCopied: { title: 'Private receipt link copied.', sub: 'Keep it somewhere safe, like your notes or email. Anyone who has it can bring this purchase back.' },
   copyFailed: 'Couldn’t copy it. Select the link below and copy it yourself.',
-  notHeard: { title: 'We haven’t heard back about your payment yet.', sub: 'If you paid, it still counts. You can check now.' },
-  notPaid: { title: 'Not paid yet.', sub: 'If you just paid, it can take a few minutes to show.' },
-  needsUpdate: { title: 'This page’s pay button needs an update.', sub: 'If you already paid, you can check it here.' },
+  notHeard: { title: 'We haven’t heard back about your payment yet.', sub: 'If you paid, it still counts. Check it here before paying again.' },
+  stillChecking: { title: 'We’re still checking your earlier payment.', sub: 'If you paid, it will show up here when your payment service confirms it.' },
+  longUnconfirmed: { title: 'We could not confirm your earlier payment.', sub: 'If you paid, contact the page’s owner with the time of the payment. We keep checking in the background; press Check payment to see a later update.' },
+  notPaid: { title: 'Not paid yet.', sub: 'If you already paid, it can take a while to show. Check it here before paying again.' },
+  needsUpdate: { title: 'This page’s pay button needs an update.', sub: 'If you already paid, check it here before paying again.' },
   unavailable: { title: 'Payments unavailable', sub: null },
   limit: { title: 'Too many tries for now.', sub: 'Try again in a little while.' },
   boughtBefore: { title: 'Bought this before?', sub: null },
@@ -26,7 +28,7 @@ export const PAY_WORDS = {
   buttons: {
     checkPayment: 'Check payment',
     restorePurchase: 'Restore purchase',
-    copyReceipt: 'Copy receipt link',
+    copyReceipt: 'Copy private receipt link',
     copied: 'Copied',
     close: 'Close',
     resume: (app: string) => `Open ${app || 'the payment page'} again`,
@@ -82,6 +84,8 @@ export function describeLine(line: PayLine, state: { copied: boolean }): PayView
   // Whatever else is pressed, a browser that cannot keep the buyer's code keeps offering the receipt link while the payment is not settled
   const save = line.keepReceipt && line.receipt ? [savePrompt(state.copied)] : [];
   if (line.problem === 'not_paid') return { ...PAY_WORDS.notPaid, actions: [check, ...save], closable: false };
+  if (line.problem === 'long_unconfirmed') return { ...PAY_WORDS.longUnconfirmed, actions: [check, ...save], closable: false };
+  if (line.problem === 'still_checking') return { ...PAY_WORDS.stillChecking, actions: [check, ...save], closable: false };
   if (line.problem === 'cant_confirm') return { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false };
   // A start whose answer was lost: an order may or may not exist, so it is said like any other payment not heard back about
   if (line.problem === 'unavailable') return line.canCheck ? { ...PAY_WORDS.notHeard, actions: [check, ...save], closable: false } : { ...PAY_WORDS.unavailable, actions: [], closable: false };

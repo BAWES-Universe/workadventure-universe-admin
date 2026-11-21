@@ -9,6 +9,7 @@ import { drawComputerCredit } from '@/lib/computer-credit';
 import { DISK_ROOM_PREFIX, diskRoomKey, memberAllowance, releaseRoom, renewRoom, reserveDiskRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
+import { priceChanges, pinnedMicrosPerMinute } from '@/lib/spend-rules-values';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import {
@@ -25,7 +26,8 @@ import {
   resumeTransition,
   sleep,
 } from '@/lib/computer-control';
-import { callRoomKey, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
+import { cleanStepLabel } from '@/lib/computer-redact';
+import { callRoomKey, endIfCutoffDecided, endStuckCutoffs, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { reconcileComputers } from '@/lib/computer-reconcile';
 import { bringBackFromCold, coldStep, dropColdCopiesIfNewer } from '@/lib/computer-cold';
@@ -35,8 +37,8 @@ import { computersArePaused } from '@/lib/capability-pause';
 import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
-import { getInstantLimitsStrict } from '@/lib/instant/state';
-import { judgeJobGiveBack, type GiveBackLimits, type GiveBackVerdict } from '@/lib/computer-giveback';
+import { recordRefundObligationsForBrick, sweepRefundObligations } from '@/lib/computer-refunds';
+import { decidePendingForPurge, decideRunnerFinish, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, markDeliveredLate, noteEffectSettled, sweepGiveBackDecisions, sweepLateEvidence, type Verdict } from '@/lib/computer-giveback';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -172,7 +174,8 @@ function jobView(row: JobRow): JobView {
     writes: row.writes,
     stepDone: row.stepDone,
     stepTotal: row.stepTotal,
-    stepLabel: row.stepLabel,
+    // Read through the same rule it is written with: a label stored before the rule, or by any other route, never shows a secret
+    stepLabel: cleanStepLabel(row.stepLabel),
     waitingFor: row.waitingFor as WaitingFor | null,
     control: row.control === 'person' ? 'person' : 'brick',
     ready: row.readyWhat && row.readyWhere ? { what: row.readyWhat, where: row.readyWhere } : null,
@@ -451,50 +454,118 @@ export async function reviewAppSteps(botId: string, personId: string, input: { a
  * is writing it waits its turn, if the person's allowance or our room is used up it waits with its work saved (and the first
  * leads to "Ask for more"), and otherwise it runs and the machine is made or woken, here and nowhere else.
  */
+/**
+ * Whether a start the bot server could not see the answer of did reach Orbit: the newest job of this Brick for this person that began in the direct chat `originRef` with this title (as `startJob` stores it:
+ * trimmed, at most 200 characters), made no longer ago than `sinceSeconds` by Orbit's OWN clock (an elapsed time, so the two servers never compare clocks). Another person's or another Brick's job never matches.
+ * Read only. Answers its id and status, or null.
+ */
+export async function startedJobFor(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<{ id: string; status: string } | { inProgress: true } | null> {
+  // A start with this key that is still going on comes first: it has not saved its job yet, so "nothing found" is not a miss while the start can still make it. Only once no start is going on is the job this key made
+  // (or nothing) the answer, and a start that finished in between has saved its job before it removed its mark, so the look made after the mark is gone sees it. The key alone says which start: never a job of the
+  // same chat or title, however recent
+  if (await startIsGoingOn(startFenceOf(botId, personId, startKey), now)) return { inProgress: true };
+  return prisma.computerJob.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select: { id: true, status: true } });
+}
+
+/** What a start with a key is for: the sha-256 of the Brick, the person and the key. */
+export const startFenceOf = (botId: string, personId: string, startKey: string): string => createHash('sha256').update(`${botId}\n${personId}\n${startKey}`).digest('hex');
+
+/** How long a start's mark counts: a start whose process died never removes it, and it stops counting after this (the sweep deletes it later). A start reads a few rows and saves its job, which takes seconds. */
+export const START_MARK_MS = 2 * 60_000;
+
+/** Whether a start for this fence has begun and has not saved its job (or ended without one) within the mark's life. Reads only. */
+async function startIsGoingOn(fence: string, now: Date): Promise<boolean> {
+  return (await prisma.computerStartMark.count({ where: { fence, startedAt: { gt: new Date(now.getTime() - START_MARK_MS) } } })) > 0;
+}
+
+/** Keeps that a start has begun, BEFORE it reads anything (so the look for it never finds neither the mark nor the job while it can still make the job). Throws when it could not be kept: the start is not made without it. */
+async function markStart(fence: string): Promise<string> {
+  return (await prisma.computerStartMark.create({ data: { fence }, select: { id: true } })).id;
+}
+
+/** Removes a start's mark once its job is saved or it ended without one. Never throws: a mark that stays stops counting by itself. */
+async function forgetStartMark(id: string): Promise<void> {
+  await prisma.computerStartMark.deleteMany({ where: { id } }).catch((error) => console.error('[Computer] Could not remove the mark of a start:', error instanceof Error ? error.message : 'unknown'));
+}
+
+/** Marks that were never removed (their process died) are deleted. Returns how many. */
+export async function forgetOldStartMarks(now: Date = new Date(), olderThanMs: number = 60 * 60_000): Promise<number> {
+  return (await prisma.computerStartMark.deleteMany({ where: { startedAt: { lt: new Date(now.getTime() - olderThanMs) } } })).count;
+}
+
 /** The conversation a job began in: only a direct chat, by its id. A job always goes back to where it began; one with no conversation (a goal's run) goes to the person's own direct chat. */
 export interface JobOrigin {
   kind: 'dm';
   ref: string;
 }
 
-export async function startJob(input: { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; plan?: RoutePlan | null; origin?: JobOrigin | null }, now: Date = new Date()): Promise<Started> {
+type StartInput = { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; /** The caller's key for this one start: a start repeating it answers the job it made. */ startKey?: string | null; plan?: RoutePlan | null; origin?: JobOrigin | null };
+type Begun = { done: Started } | { created: { id: string } };
+
+export async function startJob(input: StartInput, now: Date = new Date()): Promise<Started> {
+  // A start with a key keeps a mark from before its first read until its job is saved, or it ends without one, so the look for it (`startedJobFor`) can say it is still going on. A start with no key is never asked about
+  const mark = input.startKey ? await markStart(startFenceOf(input.botId, input.personId, input.startKey)) : null;
+  let begun: Begun;
+  try {
+    begun = await beginJob(input, now);
+  } finally {
+    if (mark) await forgetStartMark(mark);
+  }
+  if ('done' in begun) return begun.done;
+  return tryNewJob(input, now, begun.created);
+}
+
+/** Everything a start does before its job exists, and the saving of the job: the part its mark covers. */
+async function beginJob(input: StartInput, now: Date): Promise<Begun> {
   const bot = await brickOf(input.botId, input.personId);
-  if (!bot) return { ok: false, reason: 'not_owner' };
+  if (!bot) return { done: { ok: false, reason: 'not_owner' } };
   const row = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
-  if (!row || !row.enabled) return { ok: false, reason: 'off' };
-  if (!providerFor(row)) return { ok: false, reason: 'not_open' };
+  if (!row || !row.enabled) return { done: { ok: false, reason: 'off' } };
+  if (!providerFor(row)) return { done: { ok: false, reason: 'not_open' } };
   // A wind-down is on (the team's command): computers take no new work
-  if (await isWindingDown()) return { ok: false, reason: 'not_open' };
+  if (await isWindingDown()) return { done: { ok: false, reason: 'not_open' } };
   // A run of a goal or task (game #2002) starts one job, ever: the same run again (it was handed out again) finds that job, whatever it
   // came to, and takes no second room. The run must be this person's, on this Brick.
   if (input.runId) {
-    if (!(await runIsTheirs(input.botId, input.personId, input.runId))) return { ok: false, reason: 'no_run' };
-    const again = await reuseRunJob(input.botId, input.runId, now);
-    if (again) return again;
+    if (!(await runIsTheirs(input.botId, input.personId, input.runId))) return { done: { ok: false, reason: 'no_run' } };
+    const again = await reuseJob(input.botId, { botId_runId: { botId: input.botId, runId: input.runId } }, now);
+    if (again) return { done: again };
+  }
+  // A start with a key that was already made (the caller asked again: its first answer was lost) finds the job that key made, whatever it came to, and takes no second room
+  if (input.startKey) {
+    const again = await reuseJob(input.botId, { botId_personId_startKey: { botId: input.botId, personId: input.personId, startKey: input.startKey } }, now);
+    if (again) return { done: again };
   }
   // The way: a connected app that would do this for less is used instead, before anything is made, woken or reserved
   const routed = await routeJob({ botId: input.botId, personId: input.personId, plan: input.plan, awakeMicrosPerMinute: providerFor(row)?.microsPerMinute() ?? null, hasMachine: !!row.providerRef }, now);
-  if (!routed.ok) return { ok: false, reason: 'cheaper_route', app: routed.app };
+  if (!routed.ok) return { done: { ok: false, reason: 'cheaper_route', app: routed.app } };
   // The team paused computers: no new job starts (one already going finishes, and a job already in line waits with its work saved).
   // A retry of a run that already has its job was answered above, so a pause never hides the job a run already made
-  if (await computersArePaused()) return { ok: false, reason: 'paused' };
+  if (await computersArePaused()) return { done: { ok: false, reason: 'paused' } };
   let created;
   try {
     created = await prisma.computerJob.create({
-      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null, route: routed.route, expectedMicros: BigInt(routed.expectedMicros), originKind: input.origin?.kind ?? null, originRef: input.origin?.ref.slice(0, 255) ?? null },
+      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null, startKey: input.startKey ?? null, route: routed.route, expectedMicros: BigInt(routed.expectedMicros), originKind: input.origin?.kind ?? null, originRef: input.origin?.ref.slice(0, 255) ?? null },
     });
   } catch (error) {
-    // Two asks for the same run at once: the first made the job, the second finds it
-    if (input.runId && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      const winner = await reuseRunJob(input.botId, input.runId, now);
-      if (winner) return winner;
+    // Two asks for the same run, or with the same key, at once: the first made the job, the second finds it
+    if ((input.runId || input.startKey) && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      const winner =
+        (input.runId ? await reuseJob(input.botId, { botId_runId: { botId: input.botId, runId: input.runId } }, now) : null) ??
+        (input.startKey ? await reuseJob(input.botId, { botId_personId_startKey: { botId: input.botId, personId: input.personId, startKey: input.startKey } }, now) : null);
+      if (winner) return { done: winner };
       // The first ask made the job and took it away again before this one could look: that is "controls not set up" or a rule the person
       // said (both leave no job behind). Whichever it was, this ask gets the same answer, not an error
       const words = await ruleWordsOf(input.botId, input.personId, now);
-      return words !== null ? { ok: false, reason: 'rule', words } : { ok: false, reason: 'not_set' };
+      return { done: words !== null ? { ok: false, reason: 'rule', words } : { ok: false, reason: 'not_set' } };
     }
     throw error;
   }
+  return { created: { id: created.id } };
+}
+
+/** What a start does once its job is saved: the first try, and the answer. */
+async function tryNewJob(input: StartInput, now: Date, created: { id: string }): Promise<Started> {
   const outcome = await tryStart(created.id, now);
   if (typeof outcome === 'object') {
     // Refused by a rule the person said in chat: no job was ever going to run, so none is left behind, and the answer carries the rule's words
@@ -536,12 +607,11 @@ async function ruleWordsOf(botId: string, personId: string, now: Date, taskKey: 
 }
 
 /**
- * The job a run already started, or null when it has none. Never a job that is still waiting for its first try or is being taken away:
+ * The job a run (or a start key) already made, or null when it has none. Never a job that is still waiting for its first try or is being taken away:
  * a job still queued is tried again here (a try is safe to repeat, and only one claims the machine), and one the first ask removed
  * ("controls not set up") answers the same way for this ask. A job that is running, over or in line is returned as it stands.
  */
-async function reuseRunJob(botId: string, runId: string, now: Date): Promise<Started | null> {
-  const where = { botId_runId: { botId, runId } };
+async function reuseJob(botId: string, where: Prisma.ComputerJobWhereUniqueInput, now: Date): Promise<Started | null> {
   let found = await prisma.computerJob.findUnique({ where, include: JOB_INCLUDE });
   if (!found) return null;
   const owner = found.personId;
@@ -959,7 +1029,7 @@ export async function reportProgress(jobId: string, progress: { stepDone: number
   const stepTotal = progress.stepTotal === null || progress.stepTotal === undefined ? undefined : Math.max(1, Math.trunc(progress.stepTotal));
   await prisma.computerJob.updateMany({
     where: { id: jobId, status: { in: ['running', 'waiting'] } },
-    data: { stepDone, ...(stepTotal !== undefined ? { stepTotal } : {}), ...(progress.label !== undefined ? { stepLabel: progress.label === null ? null : progress.label.slice(0, 200) } : {}) },
+    data: { stepDone, ...(stepTotal !== undefined ? { stepTotal } : {}), ...(progress.label !== undefined ? { stepLabel: cleanStepLabel(progress.label) } : {}) },
   });
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return job ? jobView(job) : null;
@@ -998,6 +1068,8 @@ export async function renewJob(
     return { ok: false, reason: 'rule', words: room.words };
   }
   const reason = room.reason === 'allowance' ? 'allowance' : room.reason === 'closed' ? 'closed' : 'pool';
+  // Our own pool or envelope having no room is OUR ending, like a closed room: kept as `pool` (the person is told our computers were busy) and given back in full (time, model calls, the
+  // credit they drew), never counted, with an orbit_fault decision that says why. A model call refused for the same cause is `pool_busy`, a fault of ours, so the two endings must not disagree
   await endJob(jobId, 'stopped', reason === 'allowance' ? 'allowance' : reason === 'closed' ? 'error' : 'pool', now);
   return { ok: false, reason };
 }
@@ -1006,9 +1078,10 @@ export async function renewJob(
  * A model call of a running job was refused because the person's own allowance is used up, or a rule they said does not let it go on: the job ends now,
  * the way a refused renewal ends it, as theirs (`allowance` or `rule`). Whatever the computer's runner says about it later changes nothing: a job
  * that is over is not ended again, so a failed turn after the refusal can never end it as ours. Safe to say twice; a job already over is left as it is.
+ * `pool` is the other way round: every call the job made was refused for OUR capacity, so it ends as `pool` (ours: given back in full, never counted) with its words kept for the person.
  */
-export async function stopJobForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule'; words: string }, now: Date = new Date()): Promise<void> {
-  if (why.reason === 'rule') {
+export async function stopJobForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule' | 'pool'; words: string }, now: Date = new Date()): Promise<void> {
+  if (why.reason === 'rule' || why.reason === 'pool') {
     // Its words are kept for the message that tells the person (the report back)
     const kept = cleanEndNote(why.words);
     if (kept) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: kept } });
@@ -1017,17 +1090,20 @@ export async function stopJobForRefusal(jobId: string, why: { reason: 'allowance
 }
 
 /** The job finished: its machine is saved and rests, what it cost is counted, and the next job in line starts. Safe to say twice. */
-export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date(), why?: string | null, cause?: FinishCause | null): Promise<JobView | null> {
+export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date(), why?: string | null, cause?: FinishCause | null, turns?: number[] | null, run?: string | null): Promise<JobView | null> {
   // A job that never started (still in line) did not finish: it is stopped by the person or starts, never "done"
   const current = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
   if (current && current.status !== 'queued') {
     // The computer's own sentence about why it could not go on is kept before the job ends, for the message that tells the person
     const note = outcome === 'failed' ? cleanEndNote(why) : null;
     if (note) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: note } });
-    // Only a failure the runner says is ours is given back; one with no cause (or the agent's own) is the person's, so a run cannot be made free by ending it "failed"
-    // Only this ending is steered by the job's own words (a brief can crash its own machine), so only this one is bounded; the endings Orbit saw itself are always given back
+    // The runner's cause is only a HINT. Every failed finish is judged by Orbit from the relay's durable rows (lib/computer-giveback): a confirmed fault only OURS can cause is given back
+    // under any hint, whichever arrives first, the rows or the finish (a row that comes after is looked at again: afterLateEvidence). Hint `ours` is judged as before; the agent's own, or
+    // nothing, reads the turns the runner named (or the last turn with a row) and gives goodwill only for an unresolved row. A run is never made free by ending it "failed" with nothing recorded
     const ours = outcome === 'failed' && cause === 'ours';
-    await endJob(jobId, outcome, ours ? 'error' : null, now, true, undefined, true, ours);
+    const named = !!turns && turns.length > 0;
+    const runner = outcome !== 'failed' ? null : { turns: turns ?? null, run: named || !ours ? (run ?? null) : null, hint: ours ? ('ours' as const) : cause === 'agent' ? ('agent' as const) : ('none' as const) };
+    await endJob(jobId, outcome, ours ? 'error' : null, now, true, undefined, true, runner);
   }
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return job ? jobView(job) : null;
@@ -1137,27 +1213,16 @@ async function untilCleaned(botId: string): Promise<void> {
 /** How many times an end is tried again when the job's state moved between reading it and writing the end. */
 const END_TRIES = 4;
 
-/** Limits for the bound on give-backs, read twice at most; null when they could not be read, which is never the same as none being set. */
-async function readGiveBackLimits(): Promise<GiveBackLimits | null> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      return await getInstantLimitsStrict();
-    } catch (error) {
-      console.error('[Computer] Could not read the limits for the bound on give-backs:', error instanceof Error ? error.message : 'unknown');
-    }
-  }
-  return null;
-}
-
 /**
  * Ends a job once. Whatever it ran is worked out from the seconds the machine was held for it, recorded in the meter's books as
  * one event under the job's id, and its reserved room is settled to that. Then the machine rests if no other job holds it, and
  * the next job in line is tried. A job that is already over is left exactly as it ended.
- * `bounded` is true only for the runner's own finish as ours: its give-back goes through the bound on give-backs (lib/computer-giveback).
+ * `runner` is set only for the runner's own finish as ours: whether it is given back is judged from the relay's durable rows and the bound on goodwill
+ * (lib/computer-giveback), and the decision is kept. Every other ending as `error` was seen by Orbit itself and is always given back (and recorded).
  * `outside` false writes only our own tables (the Brick's purge ends its jobs this way, so a slow provider or backup never holds the purge):
  * the machine, its browser and the agent's turn are left to the purge's own removal of the machine.
  */
-async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, bounded = false): Promise<void> {
+async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, runner: { turns: number[] | null; run?: string | null; /** What the runner said the cause was: `ours` is judged from the rows and bounded; any other is a hint read against the rows of the named turns. */ hint?: 'ours' | 'agent' | 'none' } | null = null): Promise<void> {
   // The job can change under this (a person's answer moves it between running and waiting): the end is tried again on what it is now, and
   // only a job that is over, or no longer the one the caller meant, is let go
   let job: NonNullable<Awaited<ReturnType<typeof prisma.computerJob.findUnique>>> | null = null;
@@ -1191,39 +1256,53 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       handoverUntold: false,
       // The person's own Stop, a computer turned off and a Brick deleted are never told: they just did it
       endToldAt: silentEnding(endedBy) ? now : null,
+      // A job that finished well and writes files hands them over next: it says so in the SAME write that ends it, so there is no moment when it is over and nothing says its time is
+      // still to be added (a sweep that settled its room in that gap would settle too little, and a room's first settlement is the one kept). The hand-over clears it when it is
+      // done; one that never runs (the server stopped) leaves a mark that ages out after HAND_OVER_ALIVE_MS, and the sweep settles the job then, once
+      ...(outside && held && status === 'done' && job.writes ? { handOverAliveAt: now } : {}),
     } as const;
-    // An ending the runner reported as ours (`bounded`) is given back only inside the bound (lib/computer-giveback): decided in the same transaction that writes the ending, under the person's
-    // give-back lock, so two of their jobs ending together cannot both take the last one. A job that is not given back ends as a failure that is the person's
-    const judged = bounded && endedBy === 'error' && job.startedAt !== null;
+    // An ending the runner reported as ours is decided from the relay's durable rows and the bound on goodwill (lib/computer-giveback), in the same transaction that
+    // writes the ending and under the person's give-back lock, so two of their jobs ending together cannot both take the last give-back. A job that is not given back
+    // ends as a failure that is the person's, charged provisionally when the decision cannot be made yet (it is then decided again by the sweep, never a final charge)
+    const runnerJudged = runner !== null && endedBy === 'error' && job.startedAt !== null;
+    // A failure the runner did not call ours is read against the rows too (the turns it named, or the last turn with a row): a confirmed fault of ours is given back, an unresolved one is bounded goodwill, nothing recorded stays the person's
+    const hintJudged = runner !== null && runner.hint !== 'ours' && endedBy === null && status === 'failed' && job.startedAt !== null;
+    // An ending Orbit saw itself is always given back; it is kept in the same record
+    const orbitSeen = runner === null && (endedBy === 'error' || endedBy === 'pool') && job.startedAt !== null;
     const turnHold = held && !!job.firstTurnSentAt && !job.agentResponseId;
     const where = { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted };
-    if (judged || turnHold) {
+    if (runnerJudged || hintJudged || orbitSeen || turnHold) {
       // The job's first turn was sent and never named: it may still run on the machine with nothing to cancel it by. The machine carries a hold from the
       // moment the job is over (one commit with the end), so no other job or turn starts beside that turn until the machine is proved asleep
       const botId = job.botId;
-      const personId = job.personId;
-      const startedAt = job.startedAt;
+      const ref = { id: jobId, personId: job.personId, startedAt: job.startedAt };
       // Read before the transaction opens: a read of Limits that fails inside it would leave the transaction aborted
-      // (read twice at most: a read that fails twice is not "no numbers set", and the give-back is refused below)
-      const limits = judged ? await readGiveBackLimits() : null;
+      const limits = runnerJudged || hintJudged ? await readGiveBackLimits() : null;
       const result = await prisma.$transaction(async (tx) => {
-        let verdict: GiveBackVerdict = { give: true };
-        if (judged && !limits) {
-          // Limits could not be read (not the same as none being set): the bound is not known, so the runner's "ours" is not given back this time
-          verdict = { give: false, why: 'limits_unreadable' };
-        } else if (judged && limits) {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`computer:giveback:${personId}`}))`;
-          verdict = await judgeJobGiveBack(tx, limits, { id: jobId, personId, startedAt }, now);
+        let verdict: Verdict | null = null;
+        if (runnerJudged || hintJudged) {
+          await lockPerson(tx, ref.personId);
+          verdict = await decideRunnerFinish(tx, limits, ref, runner.turns, now, { run: runner.run ?? null, hint: runner.hint });
         }
-        const done = await tx.computerJob.updateMany({ where, data: !verdict.give ? { ...endData, status: 'failed', endedBy: null } : judged ? { ...endData, runnerFault: true } : endData });
-        if (done.count === 1 && turnHold) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
+        const given = !verdict || verdict.state === 'given';
+        const counted = verdict?.state === 'given' && verdict.counted;
+        // A given-back ending ends as ours (`error`), counted or not: for a hinted one it was not ended so by the runner, so it is said here
+        const data = !given ? { ...endData, status: 'failed', endedBy: null } : { ...endData, ...(hintJudged ? { endedBy: 'error' as const } : {}), ...(counted ? { runnerFault: true } : {}) };
+        const done = await tx.computerJob.updateMany({ where, data });
+        if (done.count === 1) {
+          if (turnHold) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
+          if (verdict) await writeDecision(tx, ref, verdict, runner?.hint ?? 'ours', verdict.judgedTurns ?? runner?.turns ?? null, now, runner?.run ?? null);
+          else if (orbitSeen) await writeOrbitDecision(tx, ref, endedBy === 'pool' ? 'pool_cut_off' : null);
+        }
         return { done, verdict };
       });
       ended = result.done;
-      if (ended.count === 1 && !result.verdict.give) {
-        console.warn('[Computer] A job that failed on our side is not given back:', result.verdict.why);
-        // Limits that could not be read refuse a give-back on no fault of the person's: it is told to Sentry so it can be made good by hand
-        if (result.verdict.why === 'limits_unreadable') Sentry.captureMessage('A computer give-back was refused because the Limits could not be read', { level: 'error', tags: { area: 'computer', step: 'giveback_limits_unreadable' }, extra: { jobId } });
+      // A hinted ending that was given back is ours from here on: its time and calls are given back below like any
+      if (ended.count === 1 && hintJudged && result.verdict?.state === 'given') endedBy = 'error';
+      if (ended.count === 1 && result.verdict && result.verdict.state !== 'given') {
+        if (!hintJudged) console.warn('[Computer] A job that failed on our side is not given back (yet):', result.verdict.state, result.verdict.basis);
+        // Limits that could not be read hold a give-back on no fault of the person's: it is told to Sentry so it can be made good by hand, and the sweep decides it again
+        if (result.verdict.basis === 'limits_unreadable') Sentry.captureMessage('A computer give-back was held because the Limits could not be read', { level: 'error', tags: { area: 'computer', step: 'giveback_limits_unreadable' }, extra: { jobId } });
         status = 'failed';
         endedBy = null;
       }
@@ -1248,7 +1327,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     if (job.reservationKey) {
       if (held) {
         // What ran is written to the books first, and a write that fails is written again by the next sweep (same event id, so never twice)
-        const cost = await recordComputerTime({ id: job.id, botId: job.botId, personId: job.personId, runId: job.runId, startedAt: job.startedAt }, seconds, now, { endedBy, status });
+        const cost = await recordComputerTime({ id: job.id, botId: job.botId, personId: job.personId, runId: job.runId, startedAt: job.startedAt, reservationKey: job.reservationKey }, seconds, now, { endedBy, status });
         await settleRoom({ key: job.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
       } else {
         await releaseRoom({ key: job.reservationKey }, now);
@@ -1258,9 +1337,15 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // The job is over either way: the machine still rests and the line still moves, and the sweep gives the room back
     console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown');
   }
+  // A job that ended as a failure still waiting for its give-back to be decided may have been decided while its time was being written (the decision found no event to
+  // detach): it is read again NOW, after the event exists, and a given-back job's time is written against nobody (the sweep does the same for one this does not reach)
+  if (status === 'failed' && endedBy === null && job.startedAt) {
+    const current = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, endedBy: true } }).catch(() => null);
+    if (current && givenBackJob(current.status, current.endedBy)) await giveBackModelCalls(job.id, job.personId, now).catch((error) => console.error('[Computer] Could not give back a job’s time and model calls:', error instanceof Error ? error.message : 'unknown'));
+  }
   // A job that failed on our side takes nothing from the person's month, and neither do the model calls it made, nor the credit they drew (the sweep tries again if this fails)
   if (givenBackJob(status, endedBy)) {
-    await giveBackModelCalls(job.id, job.personId).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
+    await giveBackModelCalls(job.id, job.personId, now).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
   }
 
   // The list taken as THIS job ended is kept on the job, so a later job's list can never be read as this one's; none taken (another job still held the machine) says no files
@@ -1369,10 +1454,15 @@ async function handOver(job: { id: string; botId: string; personId: string; titl
  * Writes what a job ran into the meter's books as one event under the job's id; asked twice it is the same event. Returns the cost
  * it worked out (null when the provider has no price). The write never throws: a failure is logged and the sweep writes it again.
  */
-async function recordComputerTime(job: { id: string; botId: string; personId: string; runId?: string | null; startedAt?: Date | null }, seconds: number, at: Date, why: { endedBy: EndedBy | null; status: string }): Promise<number | null> {
+async function recordComputerTime(job: { id: string; botId: string; personId: string; runId?: string | null; startedAt?: Date | null; reservationKey?: string | null }, seconds: number, at: Date, why: { endedBy: EndedBy | null; status: string }): Promise<number | null> {
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
-  const cost = costOfSeconds(seconds, provider ? provider.microsPerMinute() : null);
+  // The job is priced at what its lease was priced at as each stretch was taken (the rates the room was held by), never at the provider's rate at the moment it
+  // closed: a price that changed while it ran must not make the books say something else than the room that was held for the same time. A lease with no
+  // recorded terms (an older row) keeps the provider's rate.
+  const lease = job.reservationKey ? await prisma.meterReservation.findUnique({ where: { reservationKey: job.reservationKey }, select: { terms: true } }) : null;
+  const pinned = lease ? pinnedMicrosPerMinute(lease.terms, seconds, at.getTime()) : null;
+  const cost = costOfSeconds(seconds, pinned ?? (provider ? provider.microsPerMinute() : null));
   // A job that failed on our side (the machine would not start or could not be reached, the agent's turn broke, the worker was lost) is not
   // the person's: what it ran stays in the books as our own cost (the provider still bills it), but is not written against them, so it
   // never draws from their month. A job that ran and ended any other way (done, stopped by them, out of room, nobody answered) is theirs.
@@ -1401,7 +1491,8 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
     // The run of a goal or task that started the job, when one did, so its computer time is on the books with its model calls
     // `startedMs`: when the job began, so a rule's cap counts a job that crossed midnight or the end of a month by the part that fell in its own
     // period, the same split the held room was counted by (lib/spend-rules.ts). Events without it (older ones) count whole in the period they end in.
-    detail: { endedBy: why.endedBy, status: why.status, ...(job.startedAt ? { startedMs: job.startedAt.getTime() } : {}), ...(job.runId ? { runId: job.runId } : {}), ...(givenBack ? { givenBack: true, forPersonId: job.personId } : {}) },
+    // `terms`: only for a job whose price changed while it ran, so that split follows the prices it ran at and not only its duration.
+    detail: { endedBy: why.endedBy, status: why.status, ...(job.startedAt ? { startedMs: job.startedAt.getTime() } : {}), ...(priceChanges(lease?.terms) ? { terms: priceChanges(lease?.terms) as unknown as Prisma.InputJsonValue } : {}), ...(job.runId ? { runId: job.runId } : {}), ...(givenBack ? { givenBack: true, forPersonId: job.personId } : {}) },
   }).catch((error) => console.error('[Computer] Could not record computer time:', error instanceof Error ? error.message : 'unknown'));
   return cost;
 }
@@ -1432,8 +1523,8 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
   const claimCutoff = new Date(now.getTime() - FILES_CLAIM_MS);
   // ...nor one that is waiting in line for its hand-over (it beats while it waits): the gap between two hand-overs on the machine is no reason to write its time
   const aliveCutoff = new Date(now.getTime() - HAND_OVER_ALIVE_MS);
-  const ended = await prisma.$queryRaw<Array<{ id: string; botId: string; personId: string; runId: string | null; startedAt: Date | null; secondsRun: number; status: string; endedBy: string | null; endedAt: Date | null }>>(Prisma.sql`
-    SELECT j."id", j."bot_id" AS "botId", j."person_id" AS "personId", j."run_id" AS "runId", j."started_at" AS "startedAt", j."seconds_run" AS "secondsRun", j."status", j."ended_by" AS "endedBy", j."ended_at" AS "endedAt"
+  const ended = await prisma.$queryRaw<Array<{ id: string; botId: string; personId: string; runId: string | null; startedAt: Date | null; secondsRun: number; status: string; endedBy: string | null; endedAt: Date | null; reservationKey: string }>>(Prisma.sql`
+    SELECT j."id", j."bot_id" AS "botId", j."person_id" AS "personId", j."run_id" AS "runId", j."started_at" AS "startedAt", j."seconds_run" AS "secondsRun", j."status", j."ended_by" AS "endedBy", j."ended_at" AS "endedAt", j."reservation_key" AS "reservationKey"
     FROM "computer_jobs" j
     WHERE j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0 AND j."ended_at" <= ${cutoff} ${only}
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')
@@ -1442,16 +1533,19 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
     ORDER BY j."ended_at" ASC
     LIMIT ${batch}`);
   for (const job of ended) {
-    await recordComputerTime(job, job.secondsRun, job.endedAt ?? now, { endedBy: job.endedBy as EndedBy | null, status: job.status });
+    const cost = await recordComputerTime(job, job.secondsRun, job.endedAt ?? now, { endedBy: job.endedBy as EndedBy | null, status: job.status });
+    // Its room is closed at what it ran too, when the end that wrote the time did not get to (a room already closed stays as it closed): so the time is in the
+    // books and the room is settled, never one of them only
+    await settleRoom({ key: job.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now).catch((error) => console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown'));
   }
-  await giveBackMissingModelCalls(batch, botId);
+  await giveBackMissingModelCalls(batch, botId, now);
 }
 
 /**
  * A job that failed on our side has its model calls, and the credit it drew, given back when it ends. If that write did not go through, or a call was recorded
  * in the same moment, the next sweep finds the call still written against the person (or credit the job still holds drawn) and gives it back too. Never throws.
  */
-async function giveBackMissingModelCalls(batch: number, botId?: string): Promise<void> {
+async function giveBackMissingModelCalls(batch: number, botId: string | undefined, now: Date): Promise<void> {
   const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
   // A job whose give-back keeps failing for a reason of its own still matches on every sweep, so a plain "oldest first" would let it (and others like it)
   // take the whole batch for ever, and a plain LIMIT would take whichever the database returns. Half the batch is the oldest and half the newest of the jobs
@@ -1464,15 +1558,26 @@ async function giveBackMissingModelCalls(batch: number, botId?: string): Promise
           ROW_NUMBER() OVER (ORDER BY j."ended_at" ASC NULLS LAST, j."id") AS "oldest",
           ROW_NUMBER() OVER (ORDER BY j."ended_at" DESC NULLS LAST, j."id") AS "newest"
         FROM "computer_jobs" j
-        WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error') ${only}
+        WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" IN ('error', 'pool')) ${only}
           AND (
             EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
-            -- ...or credit the job drew that has not gone back (a give-back that failed once is found again: giving back is safe to repeat)
-            OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros")
+            -- ...or the job's own time, written against the person by an end that overlapped the decision that gave the job back (the decision found no event to detach)
+            OR EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time' AND e."person_key" = 'person:' || j."person_id")
+            -- ...or credit the job drew that has not gone back and has no refund obligation yet (an obligation, once written, is asked again by its own sweep with a
+            -- growing wait: lib/computer-refunds)
+            OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros"
+              AND NOT EXISTS (SELECT 1 FROM "computer_refund_obligations" o WHERE o."hold_key" = h."hold_key"))
           )
       ) matching
       WHERE "oldest" <= ${half} OR "newest" <= ${half}`);
-    for (const job of jobs) await giveBackModelCalls(job.id, job.personId);
+    // One job's trouble never skips the rest of the batch: it is said, and it stays eligible for the next sweep
+    for (const job of jobs) {
+      try {
+        await giveBackModelCalls(job.id, job.personId, now);
+      } catch (error) {
+        console.error('[Computer] Could not give back a failed job’s model calls:', error instanceof Error ? error.message : 'unknown');
+      }
+    }
   } catch (error) {
     console.error('[Computer] Could not look for a failed job’s model calls:', error instanceof Error ? error.message : 'unknown');
   }
@@ -1489,6 +1594,14 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   let started = 0;
   // What the provider keeps up between jobs (the real one builds its image, a step at a time); a failure here never stops the sweep
   await getComputerProvider()?.maintain().catch((error) => console.error('[Computer] The provider could not be kept up:', error instanceof Error ? error.message : 'unknown'));
+  // Give-backs that could not be decided yet (Limits, or an outside effect still to be confirmed) are decided again, and an old one is told to Sentry
+  await sweepGiveBackDecisions(now).catch((error) => console.error('[Computer] The give-back decisions could not be decided again:', error instanceof Error ? error.message : 'unknown'));
+  // Evidence that was stored while a decision was being made is looked at again for every decision it is newer than (the route that stores it does not have to succeed at that)
+  await sweepLateEvidence(now).catch((error) => console.error('[Computer] Late evidence could not be looked at again:', error instanceof Error ? error.message : 'unknown'));
+  // Refunds of credit a failed job drew are owed until the books acknowledge them: asked again with a growing wait, and an old one is told to Sentry
+  await sweepRefundObligations(now).catch((error) => console.error('[Computer] The refund obligations could not be asked again:', error instanceof Error ? error.message : 'unknown'));
+  // The marks of starts whose process died are deleted (they stopped counting long before)
+  await forgetOldStartMarks(now).catch((error) => console.error('[Computer] Old marks of starts could not be deleted:', error instanceof Error ? error.message : 'unknown'));
   // A wind-down that is on goes on until every job is over and every machine is stopped and proven so
   await continueWindDown(now, batch).catch((error) => console.error('[Computer] The wind-down could not go on:', error instanceof Error ? error.message : 'unknown'));
   // A job that asked its person to take over and got no answer within the wait a super admin set ends, so it does not hold the
@@ -1497,9 +1610,21 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   const { computerWait } = await getBrickLimits();
   const unanswered = await prisma.computerJob.findMany({ where: { status: 'waiting', control: 'brick', stretchStarted: { lte: new Date(now.getTime() - computerWait * 60 * 1000) } }, select: { id: true }, orderBy: { stretchStarted: 'asc' }, take: batch });
   for (const job of unanswered) {
+    // A job Orbit already decided to end for its own capacity (its keys ended, whatever the request that decided it did after) is ended as THAT, ours, before the wait for its person is read against it: it is not one that
+    // went quiet, and a cutoff still in its grace period is not left for this pass to end as the person's. A job whose cutoff could not end it is ended by the pass below
+    const cutoff = await endIfCutoffDecided(job.id, now).catch(() => ({ decided: true, ended: false }));
+    if (cutoff.decided) {
+      if (cutoff.ended) stopped++;
+      continue;
+    }
     await endJob(job.id, 'stopped', 'unanswered', now);
     stopped++;
   }
+  // A job whose cutoff for our own capacity was decided (its keys ended) but that could not be ended then keeps its lease and room through the service token: it is ended here, as ours
+  stopped += await endStuckCutoffs(now, batch).catch((error) => {
+    console.error('[Computer] Jobs whose cutoff was decided could not be ended:', error instanceof Error ? error.message : 'unknown');
+    return 0;
+  });
   // A job waiting for its person (it asked them to take over, or they did) is not one that went quiet: the worker renews nothing
   // while it waits, so the sweep renews the room for them, a little before it would lapse. If the allowance cannot give more, the job still stops safely.
   const soon = await prisma.meterReservation.findMany({
@@ -1516,6 +1641,33 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
     if (job && !isOver(job.status) && HOLDS_MACHINE.includes(job.status as never)) {
       await endJob(job.id, 'stopped', 'error', now);
       stopped++;
+    } else if (job && isOver(job.status) && job.startedAt && job.reservationKey === reservation.reservationKey) {
+      // A job that ran and ended, whose room was left held (its settlement did not get through): the room is settled at what it ran, never given back, so the
+      // time it took is never lost between the room and the books (the sweep writes its time below). A job that ended at 0 seconds comes here too: its end marked
+      // a hand-over to come whatever the seconds, and that hand-over adds seconds, so its room is decided on the fresh seconds below (none: given back, as ever)
+      const lease = await prisma.meterReservation.findUnique({ where: { reservationKey: reservation.reservationKey }, select: { terms: true } });
+      // ...but not while its files are still being handed over: that hand-over adds its seconds to the job's time and settles the room itself afterwards
+      // (a room settled here first at the shorter time would stay, close() keeps the first settlement). The same two conditions recordMissingComputerTime waits
+      // by: the machine's files are claimed, or this job is waiting in line for its hand-over and beating. Once the claim or the beat is stale the hand-over is
+      // abandoned and the room is settled at what the job ran, on this or a later sweep.
+      // THE ORDER MATTERS: the claim is read first and the job (its seconds and its beat) after. A hand-over adds its seconds while it holds the claim and lets go of the claim and
+      // the beat after, so "both gone" read in this order always comes with the final seconds; read the other way round, a hand-over that finished between the two reads
+      // would be settled at the seconds from before it
+      const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
+      const fresh = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { secondsRun: true, endedAt: true, handOverAliveAt: true } });
+      if (!fresh) continue;
+      if ((row?.filesClaimedAt && row.filesClaimedAt.getTime() > now.getTime() - FILES_CLAIM_MS) || (fresh.handOverAliveAt && fresh.handOverAliveAt.getTime() > now.getTime() - HAND_OVER_ALIVE_MS)) continue;
+      // Both stale: nothing is handing files over, so the seconds just read are the job's last. None: the room is given back, as for any job that ran no time
+      if (fresh.secondsRun <= 0) {
+        await releaseRoom({ key: reservation.reservationKey }, now);
+        released++;
+        continue;
+      }
+      const provider = providerFor(row);
+      const pinned = pinnedMicrosPerMinute(lease?.terms, fresh.secondsRun, (fresh.endedAt ?? now).getTime());
+      const cost = costOfSeconds(fresh.secondsRun, pinned ?? (provider ? provider.microsPerMinute() : null));
+      await settleRoom({ key: reservation.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
+      released++;
     } else {
       await releaseRoom({ key: reservation.reservationKey }, now);
       released++;
@@ -2317,14 +2469,26 @@ export async function planEffect(jobId: string, input: { key: string; kind: Effe
 
 /** What happened to an effect, confirmed: done (with where it went, as proof) or failed (confirmed not done, so it may be tried again). */
 export async function settleEffect(jobId: string, key: string, state: 'done' | 'failed', evidence?: string | null): Promise<boolean> {
-  const { count } = await prisma.computerEffect.updateMany({
-    where: { jobId, effectKey: key, state: 'planned' },
-    data: { state, settledAt: new Date(), ...(evidence !== undefined ? { evidence: evidence === null ? null : evidence.slice(0, 500) } : {}) },
+  // The effect's own change and the fact that a give-back already made was for work that turned out delivered commit TOGETHER: a flag that cannot be written leaves the
+  // effect planned, and the settle is asked again (the charge is never touched either way)
+  // Under the person's give-back lock, taken BEFORE the effect is touched (the same order a decision made again takes it: lock first, then the effects). A retry that read
+  // this effect as planned and grants goodwill then either finishes first, and this settlement flags that give-back as delivered late, or comes after, and sees the effect done
+  const owner = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { personId: true } });
+  const count = await prisma.$transaction(async (tx) => {
+    if (owner) await lockPerson(tx, owner.personId);
+    const changed = await tx.computerEffect.updateMany({
+      where: { jobId, effectKey: key, state: 'planned' },
+      data: { state, settledAt: new Date(), ...(evidence !== undefined ? { evidence: evidence === null ? null : evidence.slice(0, 500) } : {}) },
+    });
+    if (changed.count > 0 && state === 'done') await markDeliveredLate(tx, jobId);
+    return changed.count;
   });
   if (count > 0) {
     // What Brick named is put in (or confirmed not): the tap is spent, and the next hand-over names its own
     const effect = await prisma.computerEffect.findUnique({ where: { jobId_effectKey: { jobId, effectKey: key } }, select: { kind: true } });
     if (effect?.kind === 'details') await prisma.computerJob.updateMany({ where: { id: jobId }, data: { readyWhat: null, readyWhere: null } });
+    // A give-back that was held for this effect is decided now
+    await noteEffectSettled(jobId).catch((error) => console.error('[Computer] Could not note a settled effect:', error instanceof Error ? error.message : 'unknown'));
   }
   return count > 0;
 }
@@ -2414,15 +2578,23 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
     WHERE j."bot_id" = ${botId} AND j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
   if (Number(unwritten[0]?.n ?? 0) !== 0) return false;
+  // A give-back still waiting for a decision is decided now (its jobs and fault rows go with the Brick), and never becomes a final charge
+  if (!(await decidePendingForPurge(botId, now))) return false;
+  // The refunds owed for this Brick's failed jobs are written first (only what is written outlives the jobs)
+  await recordRefundObligationsForBrick(botId).catch((error) => console.error('[Computer] Could not keep the refunds a Brick’s jobs owe:', error instanceof Error ? error.message : 'unknown'));
   // A failed job's model calls that are still written against the person (or credit it drew that has not gone back) are not in the books as given back yet (the give-back above never throws, so
   // a write that failed shows here). Once the jobs are gone nothing can find those calls to give them back, so the Brick waits for the next sweep
   const owed = await prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
     SELECT COUNT(*)::bigint AS "n" FROM "computer_jobs" j
-    WHERE j."bot_id" = ${botId} AND (j."status" IN ('failed', 'stopped') AND j."ended_by" = 'error')
+    WHERE j."bot_id" = ${botId} AND (j."status" IN ('failed', 'stopped') AND j."ended_by" IN ('error', 'pool'))
       AND (
         EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
-        -- ...or credit the job drew that has not gone back (the sweep's own check): found only by way of the job, so a purge must not delete the job first
-        OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros")
+        -- ...or the job's own time, written against the person by an end that overlapped the decision that gave the job back (the same condition the repair sweep looks for): once the job is gone nothing can find it to detach it
+        OR EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time' AND e."person_key" = 'person:' || j."person_id")
+        -- ...or credit the job drew that has not gone back and that no refund obligation covers yet: an obligation keeps the minimum references to finish the
+        -- reimbursement (job, person, hold key, refund key, amount) without the job, so a refund the books cannot take yet never holds the deletion for ever
+        OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros"
+          AND NOT EXISTS (SELECT 1 FROM "computer_refund_obligations" o WHERE o."hold_key" = h."hold_key"))
       )`);
   return Number(owed[0]?.n ?? 0) === 0;
 }

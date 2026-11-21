@@ -15,12 +15,13 @@ import { evaluatePause, exposureIn, giveBack, instantRunKey, reconcileRun, runIn
 import { setInstantFunds, shutFunds, type InstantFunds } from '@/lib/instant/funds';
 import { getInstantPause, resumeInstant, saveInstantLimits } from '@/lib/instant/state';
 import { checkPriceDrift, forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
-import { instantReportingGaps, instantRunsUnsettled, reportInstantRun, repairInstantReporting } from '@/lib/instant/report';
+import { customerAmountOf, instantReportingGaps, instantRunsUnsettled, reportInstantRun, repairInstantReporting } from '@/lib/instant/report';
 import { denyInstantOnSessions } from '@/lib/instant/sessions';
 import { admitInstantTool } from '@/lib/instant/values';
 import { instantRulesAndReceipts } from '@/lib/instant/rules-and-receipts';
 import { proposeRule } from '@/lib/spend-rules';
 import { activityFor, closeReceipt, openReceipt, settleCheckingReceipts } from '@/lib/task-receipts';
+import { dollars } from '@/lib/task-receipt-words';
 import { POST as runRoute } from '@/app/api/instant/run/route';
 import { GET as toolsRoute } from '@/app/api/instant/tools/route';
 
@@ -1610,6 +1611,271 @@ run('the bounded Instant executor, in a real database', () => {
       expect(customerOf(await eventOf(id))).toBe(Number((await runOf(id)).customerMicros));
       expect(await instantReportingGaps()).toMatchObject({ missing: 0, wrong: 0 });
     });
+  });
+
+  describe('an Instant run nobody could confirm, and one whose charge the books have not acknowledged: what the event and the receipt say (GPT O2a)', () => {
+    const eventOf = (runId: string) => prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `instant:${runId}` } });
+    const quietErrors = () => jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const itemTitled = async (title: string) => (await activityFor(sara)).find((item) => item.title === title)!;
+    /** A run that went out, could not be asked about for the whole long wait, and was let go unconfirmed; `releaseOk` says whether the books acknowledge giving the hold back. */
+    async function letGoUnconfirmed(task: string, title: string, releaseOk: boolean) {
+      await setLimits({ unclearWaitMinutes: 30, unreachableWaitMinutes: 600 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.state.releaseOk = releaseOk;
+      const key = callId();
+      await openReceipt({ botId: brick, personId: sara, taskKey: task, title, category: 'apps' });
+      p.script.runs.push({ kind: 'unclear', why: 'server', status: 500 });
+      await runInstant(ask({ callId: key, taskKey: task }), { adapter: p.adapter, funds: f.funds });
+      const id = await runIdOf(key);
+      p.setLogsDown(true);
+      const quiet = quietErrors();
+      try {
+        await reconcileRun(id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 601 * MIN) });
+      } finally {
+        quiet.mockRestore();
+      }
+      await closeReceipt({ botId: brick, taskKey: task, personId: sara, state: 'done' });
+      return { p, f, id };
+    }
+
+    it('while the books have not acknowledged the release, the credit is still reserved, the event does not say zero, and the receipt says we are releasing the hold: never "Refunded, nothing taken" or "didn\'t work"', async () => {
+      const { f, id } = await letGoUnconfirmed('o2a-1', 'O2a still held', false);
+      const row = await runOf(id);
+      expect(row).toMatchObject({ state: 'failed', reason: 'unclear', customerState: 'held', providerState: 'settled' });
+      const hold = Number(row.holdMicros);
+      // GPT's observation: the credit really is still set aside
+      expect(f.left()).toBe(1_000_000 - hold);
+      // The event: what the person was charged is not known (pending), NOT zero while the hold is reserved
+      const event = await eventOf(id);
+      expect(event.detail).toMatchObject({ instant: true, unconfirmed: true, customerState: 'held', customerMicros: null, holdMicros: hold, releasedMicros: null });
+      expect(customerAmountOf(row)).toBeNull();
+      const item = await itemTitled('O2a still held');
+      expect(item.outcomeText).toBe('Couldn’t confirm');
+      expect(item.outcomeNote).toBe('We couldn’t confirm whether Exa finished. We’re releasing your hold.');
+      expect(item.outcomeText + (item.outcomeNote ?? '')).not.toMatch(/Refunded|nothing taken/i);
+      expect(item).not.toHaveProperty('releasedMicros');
+      expect(item.actions[0]).toMatchObject({ label: 'exa', outcome: 'unknown', text: 'Exa · couldn’t confirm delivery', takenText: 'Hold being released' });
+      expect(item.actions[0]).not.toHaveProperty('releasedMicros');
+      expect(item.actions[0].text).not.toMatch(/didn.t work/);
+      // The Instant line is not a price of zero and not "nothing": the credit is being released
+      expect(item.lines[0]).toMatchObject({ note: 'Hold being released' });
+      expect(item.spentMicros).toBeNull();
+    });
+
+    it('after the books acknowledge it, the receipt shows the amount released and the event says zero; delivery stays unknown', async () => {
+      const { p, f, id } = await letGoUnconfirmed('o2a-2', 'O2a released later', false);
+      const hold = Number((await runOf(id)).holdMicros);
+      expect((await itemTitled('O2a released later')).actions[0].takenText).toBe('Hold being released');
+      // The books are reachable again: the sweep says the release again, and this time it is acknowledged
+      f.state.releaseOk = true;
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 700 * MIN) });
+      expect(await runOf(id)).toMatchObject({ customerState: 'released', state: 'failed', reason: 'unclear' });
+      expect(f.left()).toBe(1_000_000);
+      const event = await eventOf(id);
+      // Filled in, not "corrected": the event said pending before and says zero now, with the amount that came back
+      expect(event.detail).toMatchObject({ customerMicros: 0, customerState: 'released', releasedMicros: hold, unconfirmed: true });
+      expect((event.detail as { corrections?: unknown }).corrections).toBeUndefined();
+      const item = await itemTitled('O2a released later');
+      expect(item.outcomeText).toBe('Couldn’t confirm');
+      expect(item.outcomeNote).toBe(`We couldn’t confirm whether Exa finished. Your hold of ${dollars(hold)} was released.`);
+      expect(item.actions[0]).toMatchObject({ outcome: 'unknown', releasedMicros: hold, text: 'Exa · couldn’t confirm delivery', takenText: 'Hold released' });
+      expect(item.outcomeText + (item.outcomeNote ?? '')).not.toMatch(/Refunded|nothing taken/i);
+      expect(item.lines[0]).toMatchObject({ amountMicros: 0 });
+    });
+
+    it('a failed run that was never unconfirmed (the App said it did not work) keeps its words: "didn\'t work", nothing taken', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'o2a-3', title: 'O2a plain failure', category: 'apps' });
+      p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'boom', logId: 'o2a-3-log', chargeMicros: 4_000 });
+      await runInstant(ask({ taskKey: 'o2a-3' }), { adapter: p.adapter, funds: f.funds });
+      await closeReceipt({ botId: brick, taskKey: 'o2a-3', personId: sara, state: 'done' });
+      const item = await itemTitled('O2a plain failure');
+      expect(item.outcomeText).toBe('Refunded, nothing taken');
+      expect(item.actions[0]).toMatchObject({ text: "Exa · didn't work", takenText: 'Nothing taken' });
+      expect(item.actions[0]).not.toHaveProperty('releasedMicros');
+    });
+
+    it('a worked run whose charge the books have not acknowledged says "Settlement pending" (it may already have been debited), then the charge once they do', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.state.settleOk = false;
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'o2a-4', title: 'O2a pending charge', category: 'apps' });
+      p.script.runs.push({ kind: 'done', successful: true, data: { a: 1 }, error: null, logId: 'o2a-4-log', chargeMicros: 7_000 });
+      const quiet = quietErrors();
+      let id = '';
+      try {
+        const key = callId();
+        await runInstant(ask({ callId: key, taskKey: 'o2a-4' }), { adapter: p.adapter, funds: f.funds });
+        id = await runIdOf(key);
+      } finally {
+        quiet.mockRestore();
+      }
+      expect(await runOf(id)).toMatchObject({ state: 'succeeded', customerState: 'held' });
+      await closeReceipt({ botId: brick, taskKey: 'o2a-4', personId: sara, state: 'done' });
+      let item = await itemTitled('O2a pending charge');
+      expect(item.lines[0]).toMatchObject({ note: 'Settlement pending' });
+      expect(item.lines[0]).not.toHaveProperty('amountMicros');
+      expect(item.spentMicros).toBeNull();
+      expect(item.actions[0]).toMatchObject({ outcome: 'worked' });
+      expect(item.actions[0]).not.toHaveProperty('amountMicros');
+      f.state.settleOk = true;
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 10 * MIN) });
+      const charged = Number((await runOf(id)).customerMicros);
+      expect(charged).toBeGreaterThanOrEqual(7_000);
+      item = await itemTitled('O2a pending charge');
+      expect(item.lines[0]).toMatchObject({ amountMicros: charged });
+      expect(item.actions[0]).toMatchObject({ amountMicros: charged });
+    });
+
+    it('the first event of a run and the event the repair would write are the same, whichever way the run ended (one place decides what an event says)', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      const ids: string[] = [];
+      const endings: Array<[string, InstantCall]> = [
+        ['worked', { kind: 'done', successful: true, data: { a: 1 }, error: null, logId: 'c-w', chargeMicros: 7_000 }],
+        ['did not work', { kind: 'done', successful: false, data: null, error: 'x', logId: 'c-f', chargeMicros: 3_000 }],
+        ['rejected', { kind: 'rejected', status: 403, code: 'notenabled' }],
+      ];
+      for (const [name, call] of endings) {
+        p.script.runs.push(call);
+        const key = callId();
+        await runInstant(ask({ callId: key, arguments: { query: name } }), { adapter: p.adapter, funds: f.funds });
+        ids.push(await runIdOf(key));
+      }
+      // The same for a run written off unconfirmed
+      const { id: unconfirmedId } = await letGoUnconfirmed('o2a-5', 'O2a contract', true);
+      ids.push(unconfirmedId);
+      for (const id of ids) {
+        const first = await eventOf(id);
+        // Drop it and let the repair write it from the run's own rows: the row must come out the same
+        await prisma.meterEvent.delete({ where: { eventId: `instant:${id}` } });
+        expect(await reportInstantRun({ id })).toBe('written');
+        const again = await eventOf(id);
+        const shape = (event: typeof first) => ({ detail: event.detail, costMicros: event.costMicros, basis: event.basis, occurredAt: event.occurredAt, payerKind: event.payerKind, personKey: event.personKey, pool: event.pool, route: event.route, kind: event.kind, quantity: event.quantity, sourceRef: event.sourceRef });
+        expect(shape(again)).toEqual(shape(first));
+      }
+    });
+
+    it('a stale event already under the run\'s id is put right by the settlement itself, even when the books have not answered yet: the first write goes through the common writer, not a blind insert that leaves the gap for the repair', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      // A run that went well gives the shape of an event to copy
+      await runInstant(ask({ arguments: { query: 'donor' } }), { adapter: p.adapter, funds: f.funds });
+      const key = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'timeout', status: null });
+      await runInstant(ask({ callId: key, arguments: { query: 'stale-copy' } }), { adapter: p.adapter, funds: f.funds });
+      const id = await runIdOf(key);
+      // An earlier, partial write left a copy under this run's id that says other amounts
+      const donor = await prisma.meterEvent.findFirstOrThrow({ where: { kind: 'app_use', route: 'instant', personKey: `person:${sara}` } });
+      const { id: donorId, ...rest } = donor;
+      void donorId;
+      await prisma.meterEvent.create({
+        data: { ...rest, eventId: `instant:${id}`, sourceRef: `instant_runs:${id}`, costMicros: BigInt(1), detail: { ...(donor.detail as object), runId: id, customerMicros: 123 } as Prisma.InputJsonValue },
+      });
+      // The log is found, the books do not answer: the run settles with the provider (the charge 7,000), and the person's side stays pending
+      const row = await runOf(id);
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', 7_000, 'log-stale')]);
+      p.script.logs.set('log-stale', p.line(row.providerUserId, 'success', 7_000, 'log-stale'));
+      p.script.responses.set('log-stale', { successful: true, data: { hits: 1 } });
+      f.state.settleOk = false;
+      const quiet = quietErrors();
+      try {
+        await reconcileRun(id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 10 * MIN) });
+      } finally {
+        quiet.mockRestore();
+      }
+      expect(await runOf(id)).toMatchObject({ state: 'succeeded', providerState: 'settled', customerState: 'held' });
+      const event = await eventOf(id);
+      // Right at once (no repair ran): the cost of the run, and the person's side pending
+      expect(Number(event.costMicros)).toBe(7_000);
+      expect(event.detail).toMatchObject({ customerMicros: null, customerState: 'held', runId: id });
+      expect(await instantReportingGaps()).toMatchObject({ missing: 0, wrong: 0 });
+    });
+
+    it('three different times are kept: when it went out, when it is recognised as finished (the write-off moment for a run let go unconfirmed), and when a later change was made; the event keeps its own day through a repair in the next month', async () => {
+      await setLimits({ unclearWaitMinutes: 10, unreachableWaitMinutes: 60 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.state.releaseOk = false;
+      const key = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'server', status: 500 });
+      await runInstant(ask({ callId: key }), { adapter: p.adapter, funds: f.funds });
+      const id = await runIdOf(key);
+      // It went out at 23:55 on the last day of November
+      const dispatched = new Date(Date.UTC(2026, 10, 30, 23, 55, 0));
+      await prisma.instantRun.update({ where: { id }, data: { sentAt: dispatched, createdAt: dispatched } });
+      const novemberEnd = new Date(Date.UTC(2026, 10, 30, 23, 58, 0));
+      const writtenOff = new Date(Date.UTC(2026, 11, 1, 1, 30, 0));
+      const releasedAt = new Date(Date.UTC(2026, 11, 3, 9, 0, 0));
+      p.setLogsDown(true);
+      // Before the long wait ends it is still open: its top price counts as exposure in November (outstanding exposure carries across the boundary)
+      await reconcileRun(id, { funds: f.funds, adapter: p.adapter, now: novemberEnd });
+      expect(await runOf(id)).toMatchObject({ state: 'ambiguous', providerState: 'pending' });
+      const novemberOpen = await exposureIn(prisma, novemberEnd);
+      const decemberOpen = await exposureIn(prisma, new Date(Date.UTC(2026, 11, 1, 0, 10, 0)));
+      expect(novemberOpen).toBeGreaterThanOrEqual(TOP);
+      expect(decemberOpen).toBeGreaterThanOrEqual(TOP);
+      const quiet = quietErrors();
+      try {
+        await reconcileRun(id, { funds: f.funds, adapter: p.adapter, now: writtenOff });
+      } finally {
+        quiet.mockRestore();
+      }
+      const row = await runOf(id);
+      // Recognised as finished when it was written off, in December: that is its day
+      expect(row).toMatchObject({ state: 'failed', reason: 'unclear', customerState: 'held', providerState: 'settled' });
+      expect(row.finishedAt).toEqual(writtenOff);
+      const event = await eventOf(id);
+      expect(event.occurredAt).toEqual(writtenOff);
+      expect(event.detail).toMatchObject({ dispatchedAt: dispatched.toISOString(), finishedAt: writtenOff.toISOString() });
+      // The hold is acknowledged much later, and the repair runs in the next month too: neither moves the event off its day, and nothing is "corrected"
+      f.state.releaseOk = true;
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: releasedAt });
+      await repairInstantReporting({ now: new Date(Date.UTC(2026, 11, 20, 3, 0, 0)) });
+      const after = await eventOf(id);
+      expect(after.occurredAt).toEqual(writtenOff);
+      expect(after.detail).toMatchObject({ customerMicros: 0, dispatchedAt: dispatched.toISOString(), finishedAt: writtenOff.toISOString() });
+      // November's own settled total never gains it, December's does (by the day it was recognised as finished)
+      const novemberAfter = await exposureIn(prisma, novemberEnd);
+      expect(novemberAfter).toBeLessThan(novemberOpen + 1); // nothing is settled in November for it
+      expect(await exposureIn(prisma, new Date(Date.UTC(2026, 11, 25)))).toBeGreaterThanOrEqual(TOP);
+    }, 30_000);
+
+    it('a run that finished in November and is corrected in December stays a November event and does not take December capacity', async () => {
+      await setLimits({ chargeWaitMinutes: 60 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const key = callId();
+      p.script.runs.push({ kind: 'done', successful: true, data: { a: 1 }, error: null, logId: 'nov-dec', chargeMicros: null });
+      await runInstant(ask({ callId: key, arguments: { query: 'nov-dec' } }), { adapter: p.adapter, funds: f.funds });
+      const id = await runIdOf(key);
+      const finished = new Date(Date.UTC(2026, 10, 29, 12, 0, 0));
+      await prisma.instantRun.update({ where: { id }, data: { finishedAt: finished, sentAt: finished, checkAfter: new Date(finished.getTime() + 60 * MIN) } });
+      // The charge is found in December (the top price, as an estimate, because the log has none)
+      const december = new Date(Date.UTC(2026, 11, 2, 10, 0, 0));
+      await reconcileRun(id, { funds: f.funds, adapter: p.adapter, now: december });
+      const row = await runOf(id);
+      expect(row.providerState).toBe('settled');
+      const event = await eventOf(id);
+      expect(event.occurredAt).toEqual(finished);
+      expect(event.detail).toMatchObject({ finishedAt: finished.toISOString(), dispatchedAt: finished.toISOString() });
+      // A correction made in December (the verified charge replaces the estimate) is dated by when it was made, and the event stays where it was
+      await prisma.instantRun.update({ where: { id }, data: { providerMicros: BigInt(Number(row.providerMicros) - 500), providerBasis: 'measured' } });
+      expect(await reportInstantRun({ id }, december)).toBe('corrected');
+      const corrected = await eventOf(id);
+      expect(corrected.occurredAt).toEqual(finished);
+      expect((corrected.detail as { corrections: Array<{ at: string }> }).corrections[0].at).toBe(december.toISOString());
+      // November's settled exposure includes it, December's does not
+      const novemberTotal = await exposureIn(prisma, new Date(Date.UTC(2026, 10, 30)));
+      const decemberTotal = await exposureIn(prisma, december);
+      expect(novemberTotal - decemberTotal).toBe(Number(row.providerMicros) - 500);
+    }, 30_000);
   });
 
   describe('Instant stops by itself', () => {
@@ -3264,14 +3530,23 @@ run('the bounded Instant executor, in a real database', () => {
       p.setLogsDown(false);
       p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', null)]);
       await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
-      expect((await runOf(rowId)).detail).not.toHaveProperty('lateEvidence');
-      expect(Number((await runOf(rowId)).providerMicros)).toBe(TOP);
+      // That it worked is written down at once (the receipt can say so); the cost is still the estimate, and the run is looked for again
+      const first = await runOf(rowId);
+      expect(first.detail).toMatchObject({ lateEvidence: { status: 'success', chargeMicros: null } });
+      expect(first.detail).not.toHaveProperty('adjustment');
+      expect(Number(first.providerMicros)).toBe(TOP);
+      expect(first.providerBasis).toBe('estimated');
+      // Looked at again with still no charge: nothing is rewritten (the first reading keeps its time)
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 90 * MIN) });
+      expect(((await runOf(rowId)).detail as { lateEvidence: { at: string } }).lateEvidence.at).toBe(((first.detail as { lateEvidence: { at: string } }).lateEvidence.at));
       // The charge is posted
       p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', TOP - 1_000)]);
       await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 120 * MIN) });
       const after = await runOf(rowId);
       expect(Number(after.providerMicros)).toBe(TOP - 1_000);
       expect(after.providerBasis).toBe('measured');
+      expect(after.detail).toMatchObject({ lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 }, adjustment: { estimatedMicros: TOP, verifiedMicros: TOP - 1_000 } });
+      expect(f.left()).toBe(1_000_000);
     });
 
     it('a late failure changes nothing for the person and keeps the estimate when the line has no charge; it is written down once', async () => {
@@ -3299,6 +3574,210 @@ run('the bounded Instant executor, in a real database', () => {
       p.script.byUser.set((await runOf(rowId)).providerUserId, [p.line((await runOf(rowId)).providerUserId, 'success', 1_000)]);
       await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 40 * 24 * 60 * MIN) });
       expect(await runOf(rowId)).toMatchObject({ providerBasis: 'estimated' });
+    });
+
+    describe.each([['noLog' as const], ['unreadableLog' as const]])('a run let go after the wait with %s (O7b): late evidence is looked for here too', (route) => {
+      /** Asked about once the wait is over, with Composio reachable: no line of it at all (noLog), or a line whose status nobody can read (unreadableLog). */
+      async function letGo(p: ReturnType<typeof fakeProvider>, f: ReturnType<typeof fakeFunds>) {
+        await setLimits({ unclearWaitMinutes: 30 });
+        const id = callId();
+        p.script.runs.push({ kind: 'unclear', why: 'server', status: 500 });
+        await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+        const rowId = await runIdOf(id);
+        const row = await runOf(rowId);
+        if (route === 'unreadableLog') p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'unknown', null, 'log-odd')]);
+        const at = new Date(Date.now() + 31 * MIN);
+        await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: at });
+        return { rowId, at, row: await runOf(rowId) };
+      }
+
+      it('is let go the way the route says, estimated, and the person is not charged', async () => {
+        const p = fakeProvider();
+        const f = fakeFunds(1_000_000);
+        const { rowId, row } = await letGo(p, f);
+        expect(row).toMatchObject({ state: 'failed', reason: 'unclear', customerState: 'released', providerBasis: 'estimated' });
+        expect(row.detail).toMatchObject({ [route]: true });
+        expect(f.left()).toBe(1_000_000);
+        expect(await eventOf(rowId)).toMatchObject({ basis: 'estimated' });
+      });
+
+      it('a late success corrects the vendor figure and says it worked, and never charges the person: the sweep finds it', async () => {
+        const p = fakeProvider();
+        const f = fakeFunds(1_000_000);
+        const { rowId, at, row } = await letGo(p, f);
+        p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', TOP - 1_000, 'log-late')]);
+        // Said twice (a second sweep): it is applied once
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 120 * MIN) });
+        const after = await runOf(rowId);
+        expect(after).toMatchObject({ state: 'failed', reason: 'unclear', customerState: 'released', providerBasis: 'measured' });
+        expect(Number(after.providerMicros)).toBe(TOP - 1_000);
+        expect(Number(after.customerMicros ?? 0)).toBe(0);
+        expect(after.detail).toMatchObject({ [route]: true, lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 }, adjustment: { estimatedMicros: TOP, verifiedMicros: TOP - 1_000 } });
+        expect(await eventOf(rowId)).toMatchObject({ basis: 'measured', costMicros: BigInt(TOP - 1_000) });
+        expect(await prisma.meterEvent.count({ where: { eventId: `instant:${rowId}` } })).toBe(1);
+        // Nothing was charged and nothing was run again
+        expect(f.left()).toBe(1_000_000);
+        expect(p.sent).toHaveLength(1);
+        expect(f.funds.settle).not.toHaveBeenCalled();
+      });
+
+      it('a late success that arrives while the hold is still being released never charges either: the hold goes back, once', async () => {
+        const p = fakeProvider();
+        const f = fakeFunds(1_000_000);
+        f.state.releaseOk = false;
+        const { rowId, at, row } = await letGo(p, f);
+        expect((await runOf(rowId)).customerState).not.toBe('released');
+        p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', TOP - 1_000, 'log-late')]);
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
+        expect(await runOf(rowId)).toMatchObject({ state: 'failed', reason: 'unclear', providerBasis: 'measured' });
+        expect(f.funds.settle).not.toHaveBeenCalled();
+        f.state.releaseOk = true;
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 120 * MIN) });
+        expect(await runOf(rowId)).toMatchObject({ customerState: 'released' });
+        expect(f.left()).toBe(1_000_000);
+        expect(f.funds.settle).not.toHaveBeenCalled();
+      });
+
+      it('a late line with no word yet is not written down and is asked again; a late failure is written down once and changes nothing for the person', async () => {
+        const p = fakeProvider();
+        const f = fakeFunds(1_000_000);
+        const { rowId, at, row } = await letGo(p, f);
+        p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'unknown', null, 'log-odd')]);
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
+        expect((await runOf(rowId)).detail).not.toHaveProperty('lateEvidence');
+        p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'failed', null, 'log-odd')]);
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 120 * MIN) });
+        const after = await runOf(rowId);
+        expect(after).toMatchObject({ state: 'failed', reason: 'unclear', customerState: 'released', providerBasis: 'estimated' });
+        expect(Number(after.providerMicros)).toBe(TOP);
+        expect(after.detail).toMatchObject({ [route]: true, lateEvidence: { status: 'failed', chargeMicros: null } });
+        expect(f.left()).toBe(1_000_000);
+      });
+
+      it('a run whose log has no line yet is asked again only when its spacing has passed (15 minutes the first day, 2 hours to the seventh, 12 hours after), counted from the last look, and a line that turns up later is still applied', async () => {
+        const p = fakeProvider();
+        const f = fakeFunds(1_000_000);
+        const { rowId, at, row } = await letGo(p, f);
+        if (route === 'noLog') p.script.byUser.set(row.providerUserId, []);
+        p.instant.findLogs.mockClear();
+        const sweepAt = async (minutes: number) => {
+          await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + minutes * MIN) });
+          return p.instant.findLogs.mock.calls.length;
+        };
+        // The first day: the run was just looked at (at 0), so nothing inside 15 minutes asks Composio again, however often the sweep runs
+        expect(await sweepAt(1)).toBe(0);
+        expect(await sweepAt(5)).toBe(0);
+        expect(await sweepAt(14)).toBe(0);
+        expect(await sweepAt(16)).toBe(1);
+        expect(await sweepAt(17)).toBe(1);
+        expect(await sweepAt(30)).toBe(1);
+        expect(await sweepAt(32)).toBe(2);
+        // Past the first day it is 2 hours from the last look
+        expect(await sweepAt(25 * 60)).toBe(3);
+        expect(await sweepAt(26 * 60)).toBe(3);
+        expect(await sweepAt(27 * 60 + 1)).toBe(4);
+        // Past the seventh day it is 12 hours
+        expect(await sweepAt(8 * 24 * 60)).toBe(5);
+        expect(await sweepAt(8 * 24 * 60 + 11 * 60)).toBe(5);
+        expect(await sweepAt(8 * 24 * 60 + 12 * 60 + 1)).toBe(6);
+        // A run still without a line is not written down as an answer
+        expect((await runOf(rowId)).detail).not.toHaveProperty('lateEvidence');
+        // The line arrives: the next look after the spacing applies it, once, and the person is charged nothing
+        p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', TOP - 1_000, 'log-late')]);
+        expect(await sweepAt(8 * 24 * 60 + 13 * 60)).toBe(6);
+        expect(await sweepAt(8 * 24 * 60 + 25 * 60)).toBe(7);
+        expect(await runOf(rowId)).toMatchObject({ providerBasis: 'measured' });
+        expect((await runOf(rowId)).detail).toMatchObject({ lateEvidence: { status: 'success', chargeMicros: TOP - 1_000 } });
+        // The answer is final: it is not asked again
+        expect(await sweepAt(10 * 24 * 60)).toBe(7);
+        expect(f.left()).toBe(1_000_000);
+        expect(f.funds.settle).not.toHaveBeenCalled();
+      });
+
+      it('every run that is due is asked, once, in one sweep (the oldest look goes first), and none is asked again inside its spacing', async () => {
+        const p = fakeProvider();
+        const f = fakeFunds(1_000_000);
+        const ids: string[] = [];
+        let at = new Date();
+        for (let index = 0; index < 3; index++) {
+          const made = await letGo(p, f);
+          ids.push(made.rowId);
+          at = made.at;
+        }
+        if (route === 'noLog') for (const id of ids) p.script.byUser.set((await runOf(id)).providerUserId, []);
+        p.instant.findLogs.mockClear();
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 20 * MIN) });
+        // All three were due, all three were asked, once
+        expect(p.instant.findLogs.mock.calls.length).toBe(3);
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 21 * MIN) });
+        expect(p.instant.findLogs.mock.calls.length).toBe(3);
+      });
+
+      it('a late success with no charge yet keeps being looked for within the days (spaced), and a final answer (a failure, or a success with its charge) is never looked for again', async () => {
+        const p = fakeProvider();
+        const f = fakeFunds(1_000_000);
+        const { rowId, at, row } = await letGo(p, f);
+        p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', null, 'log-nocharge')]);
+        p.instant.findLogs.mockClear();
+        const sweepAt = async (minutes: number) => {
+          await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + minutes * MIN) });
+          return p.instant.findLogs.mock.calls.length;
+        };
+        expect(await sweepAt(16)).toBe(1);
+        expect((await runOf(rowId)).detail).toMatchObject({ lateEvidence: { status: 'success', chargeMicros: null } });
+        // Inside the spacing the charge that is posted now waits; after it, it is applied
+        p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', TOP - 1_000, 'log-nocharge')]);
+        expect(await sweepAt(20)).toBe(1);
+        expect(await runOf(rowId)).toMatchObject({ providerBasis: 'estimated' });
+        expect(await sweepAt(32)).toBe(2);
+        expect(await runOf(rowId)).toMatchObject({ providerBasis: 'measured' });
+        expect(await sweepAt(24 * 60)).toBe(2);
+        // A failure is final too
+        const second = await letGo(p, f);
+        p.script.byUser.set(second.row.providerUserId, [p.line(second.row.providerUserId, 'failed', null, 'log-failed')]);
+        p.instant.findLogs.mockClear();
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(second.at.getTime() + 16 * MIN) });
+        expect((await runOf(second.rowId)).detail).toMatchObject({ lateEvidence: { status: 'failed' } });
+        const asked = p.instant.findLogs.mock.calls.length;
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(second.at.getTime() + 2 * 24 * 60 * MIN) });
+        expect(p.instant.findLogs.mock.calls.length).toBe(asked);
+      });
+
+      it('past the days late evidence is looked for, it is no longer asked about', async () => {
+        const p = fakeProvider();
+        const f = fakeFunds(1_000_000);
+        const { rowId, at, row } = await letGo(p, f);
+        p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', 1_000, 'log-late')]);
+        await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 40 * 24 * 60 * MIN) });
+        expect(await runOf(rowId)).toMatchObject({ providerBasis: 'estimated' });
+        expect((await runOf(rowId)).detail).not.toHaveProperty('lateEvidence');
+      });
+    });
+
+    it.each([['noLog'], ['unreadableLog']])('O7b end to end (%s): the receipt says it could not be confirmed, then, when the log later says it went out, the same receipt says it worked, and the person is still charged nothing', async (route) => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      await setLimits({ unclearWaitMinutes: 30 });
+      await openReceipt({ botId: brick, personId: sara, taskKey: `o7b-${route}`, title: `Late ${route}`, category: 'apps' });
+      p.script.runs.push({ kind: 'unclear', why: 'server', status: 500 });
+      await runInstant(ask({ callId: callId(), taskKey: `o7b-${route}`, arguments: { query: route } }), { adapter: p.adapter, funds: f.funds });
+      const run = await prisma.instantRun.findFirstOrThrow({ where: { taskKey: `o7b-${route}` } });
+      if (route === 'unreadableLog') p.script.byUser.set(run.providerUserId, [p.line(run.providerUserId, 'unknown', null, 'log-odd')]);
+      const at = new Date(Date.now() + 31 * MIN);
+      await closeReceipt({ botId: brick, taskKey: `o7b-${route}`, personId: sara, state: 'refunded' });
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: at });
+      const before = await prisma.taskReceipt.findFirstOrThrow({ where: { personId: sara, taskKey: `o7b-${route}` } });
+      expect(before).toMatchObject({ state: 'refunded', outcome: 'unconfirmed' });
+      expect((await activityFor(sara)).find((item) => item.title === `Late ${route}`)).toMatchObject({ outcome: 'unconfirmed', state: 'refunded' });
+      p.script.byUser.set(run.providerUserId, [p.line(run.providerUserId, 'success', TOP - 1_000, 'log-late')]);
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(at.getTime() + 60 * MIN) });
+      const after = await prisma.taskReceipt.findFirstOrThrow({ where: { personId: sara, taskKey: `o7b-${route}` } });
+      // The same row, now done; what the person was charged stays nothing
+      expect(after).toMatchObject({ id: before.id, state: 'done', outcome: 'done', chargedMicros: BigInt(0) });
+      expect((await activityFor(sara)).find((item) => item.title === `Late ${route}`)).toMatchObject({ outcome: 'done' });
+      expect(f.left()).toBe(1_000_000);
+      expect(f.funds.settle).not.toHaveBeenCalled();
     });
 
     it('a task with one run that worked and one let go unconfirmed ends done, charged only for the one that worked', async () => {

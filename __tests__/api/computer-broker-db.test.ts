@@ -5,7 +5,9 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/computer-broker-db.test.ts --runInBand
  */
 import { randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import { promisify } from 'node:util';
+import http from 'node:http';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,12 +32,15 @@ import { FakeComputerProvider, setComputerProviderForTests, type TurnEvent } fro
 import { Agent37Error, Agent37Unreached } from '@/lib/agent37/client';
 import { fenceMachine, finishJob, settleTurnHold, underTurnHold, wakeIfStopped, setLeaderStopTimesForTests, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { verifyJobToken } from '@/lib/computer-token';
+import { readFaultRows, recordFaults } from '@/lib/computer-faults';
 import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
 const tag = randomUUID().slice(0, 8);
-const NOW = new Date('2026-11-15T12:00:00Z');
+// The real clock, not a fixed day: a failed start ends its job at the real now (the broker reads its own clock there), and a job that began on a fixed day is settled for every minute since, at the pretend price, so
+// each day that passed took more of the pool's room and the third job of a test eventually found none (the 504/502/503 test failed from 21 Nov: its job was queued for the pool). computer-db does the same
+const NOW = new Date();
 const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
 const people: string[] = [];
 let made = 0;
@@ -65,6 +70,8 @@ async function running(name = 'sara') {
   await giveComputer(sara.brickId, sara.id);
   const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, NOW);
   if (!started.ok) throw new Error('the job did not start');
+  // A job that waits in line (the pool has no room, the person's allowance is used) is not what these tests are about: say so at once instead of failing later with a misleading answer
+  if (started.job.status !== 'running') throw new Error(`the job did not start running: ${started.job.status}, queued for ${started.job.queuedFor}`);
   return { sara, jobId: started.job.id };
 }
 
@@ -107,6 +114,209 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       // written whole and moved into place, readable by the machine's own user only
       expect(command).toMatch(/umask 077/);
       expect(command).toMatch(/mv .*relay\.json\.new.*relay\.json/);
+    });
+
+    describe('the computer asks the relay for its model list with the key it was given', () => {
+      const probeCommands = () => fake.commands.filter((one) => one.command.includes('/v1/models'));
+      const faultsOf = (jobId: string) => prisma.computerJobFault.findMany({ where: { jobId }, orderBy: { callId: 'asc' } });
+
+      it('a computer that cannot get it is a confirmed fault of ours: kept once per run, the runner is told, and nothing is kept for one that can or for a check that could not be made', async () => {
+        const { jobId } = await running();
+        // The relay answers (or the check says nothing: no curl, a command that did not say): prepared, and no fault
+        fake.execAnswer = (command) => (command.includes('/v1/models') ? { stdout: 'reach=ok\n' } : {});
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toMatchObject({ ok: true });
+        fake.execAnswer = (command) => (command.includes('/v1/models') ? { stdout: 'reach=nocurl\n' } : {});
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toMatchObject({ ok: true });
+        fake.execAnswer = (command) => (command.includes('/v1/models') ? { exitCode: 1, stdout: 'reach=down\n' } : {});
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toMatchObject({ ok: true });
+        fake.execAnswer = () => ({});
+        expect(await prepareJob(jobId, RELAY, NOW)).toMatchObject({ ok: true });
+        expect(await faultsOf(jobId)).toEqual([]);
+        // It cannot (a page that is not the relay's answered): told, and one confirmed fault of ours is kept, saying it twice changes nothing
+        fake.execAnswer = (command) => (command.includes('/v1/models') ? { stdout: 'reach=down\n' } : {});
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toEqual({ ok: false, reason: 'relay_unreachable' });
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toEqual({ ok: false, reason: 'relay_unreachable' });
+        expect(await faultsOf(jobId)).toMatchObject([{ jobId, turn: null, run: 'r-1', kind: 'fault', reason: 'relay_unreachable', source: 'universe-ai', route: null }]);
+        // A computer that cannot is never given a key it could not use: none is written and the one made is ended
+        const writesBefore = fake.commands.filter((one) => one.command.includes('relay.json')).length;
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toEqual({ ok: false, reason: 'relay_unreachable' });
+        expect(fake.commands.filter((one) => one.command.includes('relay.json'))).toHaveLength(writesBefore);
+        expect(await prisma.computerJobToken.count({ where: { jobId, scope: 'model', revokedAt: null } })).toBe(0);
+        // Another run says it for itself
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-2' })).toEqual({ ok: false, reason: 'relay_unreachable' });
+        expect((await faultsOf(jobId)).map((row) => row.run)).toEqual(['r-1', 'r-2']);
+        // Read as it is: a confirmed fault of ours, never the person's and never unresolved
+        expect(await readFaultRows(prisma, jobId, [], 'r-1', { turnlessOnly: true })).toMatchObject([{ cls: 'ours', reason: 'relay_unreachable', route: null }]);
+      });
+
+      it('a prepare that lost its claim while its probe ran says nothing: its key was ended by the newer prepare, so the probe failed on a key that was refused, and only the holder of the claim keeps a fault', async () => {
+        const { jobId } = await running();
+        let letGo: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => (letGo = resolve));
+        let reached: () => void = () => undefined;
+        const atTheProbe = new Promise<void>((resolve) => (reached = resolve));
+        let probes = 0;
+        fake.execAnswer = async (command: string) => {
+          if (!command.includes('/v1/models')) return {};
+          probes += 1;
+          if (probes === 1) {
+            reached();
+            await gate;
+            return { stdout: 'reach=down\n' };
+          }
+          return { stdout: 'reach=ok\n' };
+        };
+        const slow = prepareJob(jobId, RELAY, NOW, { run: 'r-1' });
+        await atTheProbe;
+        // Its claim lapsed meanwhile and a newer prepare took it, ended the first key, made and wrote its own
+        await prisma.computerJob.update({ where: { id: jobId }, data: { prepareClaimedAt: new Date(Date.now() - 50_000) } });
+        expect(await prepareJob(jobId, RELAY, minutes(1), { run: 'r-1' })).toMatchObject({ ok: true });
+        const written = fake.commands.filter((one) => one.command.includes('relay.json'));
+        expect(written).toHaveLength(1);
+        const goodToken = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(written[0].command)?.[1] ?? '';
+        // The first probe now answers "down" (its own key was refused): it holds no claim, so it keeps no fault and is told to ask again
+        letGo();
+        expect(await slow).toEqual({ ok: false, reason: 'preparing' });
+        expect(await faultsOf(jobId)).toEqual([]);
+        const live = await prisma.computerJobToken.findMany({ where: { jobId, revokedAt: null } });
+        expect(live).toHaveLength(1);
+        expect((await verifyJobToken(goodToken, 'model', minutes(2))).ok).toBe(true);
+      });
+
+      it('the bot server’s own finding that the relay address answers something that is not the relay (relayReached false) is the same fault, kept once per run with its status, told at once with no key made', async () => {
+        const { sara, jobId } = await running();
+        const tokens = () => prisma.computerJobToken.count({ where: { jobId, scope: 'model' } });
+        const sent = fake.commands.length;
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1', relayReached: false, relayStatus: 404 })).toEqual({ ok: false, reason: 'relay_unreachable' });
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1', relayReached: false, relayStatus: 404 })).toEqual({ ok: false, reason: 'relay_unreachable' });
+        expect(fake.commands.length).toBe(sent);
+        expect(await tokens()).toBe(0);
+        expect(await faultsOf(jobId)).toMatchObject([{ turn: null, run: 'r-1', kind: 'fault', reason: 'relay_unreachable', source: 'universe-ai', route: null, providerStatus: 404 }]);
+        // True, or nothing said: as always
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1', relayReached: true })).toMatchObject({ ok: true });
+        expect(await faultsOf(jobId)).toHaveLength(1);
+        // The relay's own row of the same name (the game's: turn 1, route "unknown") is another row, never the one Orbit keeps
+        await recordFaults(sara.brickId, jobId, [{ turn: 1, run: 'r-1', callId: 'relay_unreachable', kind: 'fault', reason: 'relay_unreachable', source: 'universe-ai', route: 'unknown', at: NOW }]);
+        expect((await faultsOf(jobId)).map((row) => [row.callId, row.turn, row.route])).toEqual([['orbit:r-1:relay_unreachable', null, null], ['relay_unreachable', 1, 'unknown']]);
+      });
+
+      it('asks with the job’s own key, before the key is written (the write stays the last command), and the ask itself reads a 200 with a model list as reached and anything else as not (run in a real shell against a real server)', async () => {
+        const { jobId } = await running();
+        expect(await prepareJob(jobId, RELAY, NOW)).toMatchObject({ ok: true });
+        const writes = fake.commands.findIndex((one) => one.command.includes('relay.json'));
+        const asks = probeCommands();
+        expect(asks).toHaveLength(1);
+        expect(fake.commands.indexOf(asks[0])).toBeLessThan(writes);
+        expect(fake.commands.at(-1)?.command).toContain('relay.json');
+        const written = fake.commands[writes].command;
+        const token = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(written)?.[1] ?? '';
+        expect(asks[0].command).toContain(`Authorization: Bearer ${token}`);
+        expect(asks[0].command).toContain(`'${RELAY}/v1/models'`);
+        // The very command, against servers that answer as a relay, as a page that is not one, with a model list missing, and not at all
+        const server = http.createServer((request, response) => {
+          if (request.url === '/ok/v1/models' && request.headers.authorization === `Bearer ${token}`) response.end('{"object":"list","data":[{"id":"m"}]}');
+          else if (request.url === '/nolist/v1/models') response.end('{"object":"list"}');
+          else {
+            response.statusCode = 404;
+            response.setHeader('content-type', 'text/html');
+            response.end('<html>"data" 404</html>');
+          }
+        });
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const port = (server.address() as { port: number }).port;
+        try {
+          // (not spawnSync: this process answers the server, and must not be blocked while the shell waits)
+          const ask = async (base: string) => (await promisify(execFile)('sh', ['-c', asks[0].command.replace(`'${RELAY}/v1/models'`, `'${base}/v1/models'`).replace(/sleep \d+/, 'sleep 0')])).stdout.trim();
+          expect(await ask(`http://127.0.0.1:${port}/ok`)).toBe('reach=ok');
+          expect(await ask(`http://127.0.0.1:${port}/nolist`)).toBe('reach=down');
+          expect(await ask(`http://127.0.0.1:${port}/wrong`)).toBe('reach=down');
+          expect(await ask('http://127.0.0.1:9')).toBe('reach=down');
+        } finally {
+          await new Promise((resolve) => server.close(resolve));
+        }
+      });
+    });
+
+    describe('the ask says down only for a definite wrong address, and asks once more before it is believed (Sentry: a redirect, a slow answer, a 429/5xx blip or a transient DNS failure wrote a confirmed fault)', () => {
+      const probeCommand = async () => {
+        const { jobId } = await running();
+        fake.commands.length = 0;
+        expect(await prepareJob(jobId, RELAY, NOW)).toMatchObject({ ok: true });
+        const ask = fake.commands.find((one) => one.command.includes('/v1/models'))?.command ?? '';
+        expect(ask).not.toBe('');
+        return ask;
+      };
+      const asked: string[] = [];
+
+      it('each class of answer, run in a real shell against a real server: the list is ok; a wrong address (refused, 404/410, 401/403, a 200 with no list, a page that is not JSON) is down; a redirect, 429, 5xx, a slow answer and a JSON error are not learned from', async () => {
+        const command = await probeCommand();
+        const server = http.createServer((request, response) => {
+          const path = (request.url ?? '').replace('/v1/models', '');
+          asked.push(path);
+          const send = (status: number, type: string, body: string, headers: Record<string, string> = {}) => {
+            response.writeHead(status, { 'content-type': type, ...headers });
+            response.end(body);
+          };
+          if (path === '/ok') send(200, 'application/json', '{"object":"list","data":[{"id":"m"}]}');
+          else if (path === '/nolist') send(200, 'application/json', '{"object":"list"}');
+          else if (path === '/html200') send(200, 'text/html', '<html>hello</html>');
+          else if (path === '/404' || path === '/410') send(Number(path.slice(1)), 'text/html', '<html>nope</html>');
+          else if (path === '/401' || path === '/403') send(Number(path.slice(1)), 'application/json', '{"error":"key"}');
+          else if (path === '/redirect') send(302, 'text/html', '', { location: '/ok/v1/models' });
+          else if (path === '/429' || path === '/500' || path === '/503') send(Number(path.slice(1)), 'application/json', '{"error":"busy"}');
+          else if (path === '/502html') send(502, 'text/html', '<html>bad gateway</html>');
+          else if (path === '/400json') send(400, 'application/json', '{"error":"what"}');
+          else if (path === '/400html') send(400, 'text/html', '<html>what</html>');
+          else if (path === '/slow') setTimeout(() => send(200, 'application/json', '{"data":[]}'), 3000);
+          else send(404, 'text/html', 'x');
+        });
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const port = (server.address() as { port: number }).port;
+        try {
+          // (the real wait before a second ask is kept short here; a slow answer is cut at one second instead of ten)
+          const ask = async (base: string) =>
+            (await promisify(execFile)('sh', ['-c', command.replace(`'${RELAY}/v1/models'`, `'${base}/v1/models'`).replace('-m 10', '-m 1').replace(/sleep \d+/, 'sleep 0')])).stdout.trim();
+          const at = (path: string) => ask(`http://127.0.0.1:${port}${path}`);
+          expect(await at('/ok')).toBe('reach=ok');
+          for (const down of ['/nolist', '/html200', '/404', '/410', '/401', '/403', '/400html']) expect({ down, said: await at(down) }).toEqual({ down, said: 'reach=down' });
+          for (const unsure of ['/redirect', '/429', '/500', '/503', '/502html', '/400json', '/slow']) expect({ unsure, said: await at(unsure) }).toEqual({ unsure, said: 'reach=unknown' });
+          // Nothing listens there: refused, a definite wrong address
+          expect(await ask('http://127.0.0.1:9')).toBe('reach=down');
+          // A definite "down" is asked a second time (and only that): the 404 was asked twice, the redirect once
+          expect(asked.filter((path) => path === '/404')).toHaveLength(2);
+          expect(asked.filter((path) => path === '/redirect')).toHaveLength(1);
+          expect(asked.filter((path) => path === '/503')).toHaveLength(1);
+          expect(asked.filter((path) => path === '/ok')).toHaveLength(1);
+        } finally {
+          await new Promise((resolve) => server.close(resolve));
+        }
+      });
+
+      it('down, then fine on the second ask, is fine: it keeps no fault and the job is prepared', async () => {
+        const command = await probeCommand();
+        let hits = 0;
+        const server = http.createServer((request, response) => {
+          hits += 1;
+          if (hits === 1) {
+            response.statusCode = 404;
+            response.end('<html>starting</html>');
+          } else response.end('{"object":"list","data":[{"id":"m"}]}');
+        });
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const port = (server.address() as { port: number }).port;
+        try {
+          const said = (await promisify(execFile)('sh', ['-c', command.replace(`'${RELAY}/v1/models'`, `'http://127.0.0.1:${port}/v1/models'`).replace(/sleep \d+/, 'sleep 0')])).stdout.trim();
+          expect(said).toBe('reach=ok');
+          expect(hits).toBe(2);
+        } finally {
+          await new Promise((resolve) => server.close(resolve));
+        }
+        // And the answers the prepare is given: only `down` writes a fault, `unknown` (and ok) never do
+        const { jobId } = await running();
+        fake.execAnswer = (cmd) => (cmd.includes('/v1/models') ? { stdout: 'reach=unknown\n' } : {});
+        expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toMatchObject({ ok: true });
+        expect(await prisma.computerJobFault.count({ where: { jobId } })).toBe(0);
+      });
     });
 
     it('leaves a newer key of the same job alone when a delayed write of an older one arrives, and never blocks another job’s', async () => {

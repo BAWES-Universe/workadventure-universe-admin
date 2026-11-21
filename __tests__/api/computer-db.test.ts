@@ -13,6 +13,7 @@ jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
+import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { memoryStore } from '../helpers/archive-store';
 import { setArchiveStoreForTests } from '@/lib/computer-archives';
 import { createBrick } from '@/lib/brick-create';
@@ -33,6 +34,7 @@ import { diskRoomKey, envelopeIn, releaseRoom, reserveDiskRoom } from '@/lib/met
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { activityFor } from '@/lib/task-receipts';
 import { recordGrant } from '@/lib/meter-grants';
+import { STEP_LABEL_FALLBACK } from '@/lib/computer-redact';
 import { mintJobToken, TOKEN_LIFE_MS, TOKEN_RENEW_EVERY_SECONDS, verifyJobToken } from '@/lib/computer-token';
 import { CLAIM_MS, dbImageStore } from '@/lib/agent37/image';
 import { checkScreen, openScreen, screenTicket } from '@/lib/computer-screen';
@@ -51,10 +53,14 @@ import {
   liftWindDown,
   planEffect,
   renewJob,
+  getJob,
   reportProgress,
   requestHandover,
   settleEffect,
   startJob,
+  startedJobFor,
+  startFenceOf,
+  START_MARK_MS,
   startWindDown,
   stopJobFor,
   sweepComputers,
@@ -93,6 +99,7 @@ const setUp = (over: Record<string, number | null> = {}) =>
   saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10, ...over }, 'admin');
 
 const wipe = async () => {
+  await prisma.computerStartMark.deleteMany({});
   await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
   await prisma.meterEvent.deleteMany({});
   await prisma.meterReservation.deleteMany({});
@@ -118,6 +125,7 @@ run('a Brick’s computer, in a real database', () => {
   });
   beforeEach(async () => {
     await wipe();
+    await seedGiveBackLimits();
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
     provider = new FakeComputerProvider();
     setComputerProviderForTests(provider);
@@ -126,6 +134,7 @@ run('a Brick’s computer, in a real database', () => {
   });
   afterAll(async () => {
     await wipe();
+    await clearGiveBackLimits();
     setArchiveStoreForTests(null);
     setComputerProviderForTests(null);
     process.env.COMPUTER_PROVIDER = env;
@@ -345,6 +354,38 @@ run('a Brick’s computer, in a real database', () => {
       expect(await reportProgress(job.job.id, { stepDone: 2, stepTotal: 5, label: 'Your visa form' })).toMatchObject({ stepDone: 2, stepTotal: 5, stepLabel: 'Your visa form' });
       await finishJob(job.job.id, 'done', minutes(1));
       expect(await reportProgress(job.job.id, { stepDone: 4 })).toMatchObject({ stepDone: 2, status: 'done' });
+    });
+  });
+
+  describe('a step label never keeps or shows a secret', () => {
+    const KEY = `cjt_${'Qw3Er5Ty7Ui9Op1As3Df5Gh7Jk9Lz1Xc3Vb5Nm7Aq9'.slice(0, 43)}`;
+    const SHAPES = [`T=${KEY} + 7 commands`, `curl -H "Authorization: Bearer ${KEY}" https://relay.example.test/v1/models`, 'git clone https://someone:pw@example.test/o/r.git', 'export OPENAI_API_KEY=sk-proj-abcdefghijkl1234 && run', 'Checking service\nPASSWORD=hunter2 curl https://example.test', 'Checking service\tPASSWORD=hunter2 curl https://example.test'];
+
+    it('is replaced by a plain phrase when written, in what is stored and in everything that is told back (the job, the Brick’s computer view)', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      for (const label of SHAPES) {
+        expect((await reportProgress(job.job.id, { stepDone: 1, stepTotal: 3, label }))?.stepLabel).toBe(STEP_LABEL_FALLBACK);
+        expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: job.job.id } })).stepLabel).toBe(STEP_LABEL_FALLBACK);
+        expect(JSON.stringify(await computerView(sara.brickId, sara.id))).not.toMatch(/cjt_|Bearer|pw@|sk-proj|OPENAI|hunter2/);
+      }
+      // An honest label is kept as it was said, and a label taken away is taken away
+      expect((await reportProgress(job.job.id, { stepDone: 2, label: 'Filling in your visa form' }))?.stepLabel).toBe('Filling in your visa form');
+      expect((await reportProgress(job.job.id, { stepDone: 2, label: null }))?.stepLabel).toBeNull();
+    });
+
+    it('is cleaned again when read: a label stored before the rule (written straight into the row) never shows', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      await prisma.computerJob.update({ where: { id: job.job.id }, data: { stepLabel: SHAPES[0], stepDone: 1 } });
+      const view = await computerView(sara.brickId, sara.id);
+      expect(JSON.stringify(view)).not.toContain('cjt_');
+      expect(JSON.stringify(view)).toContain(STEP_LABEL_FALLBACK);
+      expect((await getJob(job.job.id))?.stepLabel).toBe(STEP_LABEL_FALLBACK);
     });
   });
 
@@ -1522,6 +1563,262 @@ run('a Brick’s computer, in a real database', () => {
       const { jobId } = await waitingJob();
       await finishJob(jobId, 'done', minutes(1));
       expect(await planEffect(jobId, { key: 'k', kind: 'send' })).toEqual({ ok: false, reason: 'job_over' });
+    });
+  });
+
+  describe('whether a start that timed out on the caller’s side reached Orbit: by the start’s own key (game #2114)', () => {
+    const keyOf = () => randomUUID();
+    const ref = (name: string) => `dm-${name}-${tag}`;
+    async function started(name: string, title: string, startKey: string | null = keyOf()) {
+      const sara = await person(name);
+      await giveComputer(sara.brickId, sara.id);
+      const made = await startJob({ botId: sara.brickId, personId: sara.id, title, startKey, origin: { kind: 'dm', ref: ref(name) } }, NOW);
+      if (!made.ok) throw new Error('no');
+      return { sara, jobId: made.job.id, startKey };
+    }
+    /** Holds the start at its first read of the Brick's computer (before its job exists) until `go` is called; `there` settles when it is there, or fails with the start's own answer if it ended first. */
+    const holdStartAtItsReads = (start: () => Promise<unknown>) => {
+      let reached: () => void = () => undefined;
+      const at = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      let go: () => void = () => undefined;
+      const goOn = new Promise<void>((resolve) => {
+        go = resolve;
+      });
+      const real = prisma.brickComputer.findUnique.bind(prisma.brickComputer);
+      const spy = jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementationOnce(((args: never) => {
+        reached();
+        return goOn.then(() => real(args));
+      }) as never);
+      const running = start();
+      const there = Promise.race([at, running.then((answer) => Promise.reject(new Error(`the start ended before its reads: ${JSON.stringify(answer)}`)))]);
+      return { there, go, running, spy };
+    };
+
+    it('answers the job that start made, with its status: the key alone says which start', async () => {
+      const { sara, jobId, startKey } = await started('sam', 'Visa form');
+      expect(await startedJobFor(sara.brickId, sara.id, startKey!)).toEqual({ id: jobId, status: 'running' });
+      // A key nobody started with is a miss
+      expect(await startedJobFor(sara.brickId, sara.id, keyOf())).toBeNull();
+    });
+
+    it('never answers an OLDER job of the same chat and title for a start that made none: only the job the key made counts', async () => {
+      const first = await started('sol', 'Visa form');
+      // A second start of the same chat and title, just now, with its own key, that made no job (it never arrived, or was refused): the first start's job is not its answer
+      const secondKey = keyOf();
+      expect(await startedJobFor(first.sara.brickId, first.sara.id, secondKey)).toBeNull();
+      expect(await startedJobFor(first.sara.brickId, first.sara.id, first.startKey!)).toEqual({ id: first.jobId, status: 'running' });
+      // And when the second start made its job, its key answers that one, and the first key still answers the first
+      const second = await startJob({ botId: first.sara.brickId, personId: first.sara.id, title: 'Visa form', startKey: secondKey, origin: { kind: 'dm', ref: ref('sol') } }, NOW);
+      if (!second.ok) throw new Error('no');
+      expect(await startedJobFor(first.sara.brickId, first.sara.id, secondKey)).toMatchObject({ id: second.job.id });
+      expect(second.job.id).not.toBe(first.jobId);
+      expect(await startedJobFor(first.sara.brickId, first.sara.id, first.startKey!)).toMatchObject({ id: first.jobId });
+    });
+
+    it('never answers another person’s or another Brick’s job, and the same key from two people is two starts', async () => {
+      const a = await started('sia', 'Visa form');
+      const b = await started('sib', 'Visa form', a.startKey);
+      expect(b.jobId).not.toBe(a.jobId);
+      expect(await startedJobFor(a.sara.brickId, b.sara.id, a.startKey!)).toBeNull();
+      expect(await startedJobFor(b.sara.brickId, a.sara.id, a.startKey!)).toBeNull();
+      expect(await startedJobFor(a.sara.brickId, a.sara.id, a.startKey!)).toEqual({ id: a.jobId, status: 'running' });
+      expect(await startedJobFor(b.sara.brickId, b.sara.id, a.startKey!)).toEqual({ id: b.jobId, status: 'running' });
+    });
+
+    it('a start repeated with the same key answers the job it already made: never a second job, nor a second room', async () => {
+      const { sara, jobId, startKey } = await started('sid', 'Visa form');
+      // The repeat does not even try to save a job: it finds the one that key made first
+      const create = jest.spyOn(prisma.computerJob, 'create');
+      let again;
+      try {
+        again = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey, origin: { kind: 'dm', ref: ref('sid') } }, NOW);
+        expect(create).not.toHaveBeenCalled();
+      } finally {
+        create.mockRestore();
+      }
+      expect(again).toMatchObject({ ok: true, job: { id: jobId } });
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(1);
+      // A start with ANOTHER key for the same chat and title is another start: it is its own job (or waits in line behind this one)
+      const other = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey: keyOf(), origin: { kind: 'dm', ref: ref('sid') } }, NOW);
+      expect(other).toMatchObject({ ok: true });
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(2);
+    });
+
+    it('two starts with the same key at the same moment make ONE job and both answer it', async () => {
+      const sara = await person('sie');
+      await giveComputer(sara.brickId, sara.id);
+      const startKey = keyOf();
+      const ask = () => startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey, origin: { kind: 'dm', ref: ref('sie') } }, NOW);
+      const [one, two, three] = await Promise.all([ask(), ask(), ask()]);
+      for (const answer of [one, two, three]) expect(answer).toMatchObject({ ok: true });
+      const ids = new Set([one, two, three].map((answer) => (answer as { job: { id: string } }).job.id));
+      expect(ids.size).toBe(1);
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(1);
+    });
+
+    it('a start that is about to save its job when another start with the same key saves it first answers that job: the key is unique, and the loser finds the winner', async () => {
+      const sara = await person('sig');
+      await giveComputer(sara.brickId, sara.id);
+      const startKey = keyOf();
+      const ask = () => startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey, origin: { kind: 'dm', ref: ref('sig') } }, NOW);
+      // The first start is held after it found no job of this key and before it saves its own (its read of whether computers are paused is the second read of that setting)
+      let reads = 0;
+      let reached: () => void = () => undefined;
+      const at = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      let go: () => void = () => undefined;
+      const goOn = new Promise<void>((resolve) => {
+        go = resolve;
+      });
+      const real = prisma.appSetting.findUnique.bind(prisma.appSetting);
+      const spy = jest.spyOn(prisma.appSetting, 'findUnique').mockImplementation(((args: never) => {
+        reads += 1;
+        if (reads !== 2) return real(args);
+        reached();
+        return goOn.then(() => real(args));
+      }) as never);
+      let first: Promise<unknown> = Promise.resolve();
+      try {
+        first = ask();
+        await Promise.race([at, first.then((answer) => Promise.reject(new Error(`the first start ended early: ${JSON.stringify(answer)}`)))]);
+        // The second start with the same key runs through and saves the job while the first waits
+        const second = await ask();
+        expect(second).toMatchObject({ ok: true });
+        go();
+        const answer = await first;
+        expect(answer).toMatchObject({ ok: true, job: { id: (second as { job: { id: string } }).job.id } });
+        expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(1);
+      } finally {
+        go();
+        spy.mockRestore();
+        await Promise.allSettled([first]);
+      }
+    });
+
+    it('answers "in progress" while a start with the key is still reading, and the job once it is saved: a retry can never make a second job', async () => {
+      const sara = await person('sev');
+      await giveComputer(sara.brickId, sara.id);
+      const startKey = keyOf();
+      const held = holdStartAtItsReads(() => startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey, origin: { kind: 'dm', ref: ref('sev') } }, NOW));
+      try {
+        await held.there;
+        // The start has made no job yet: this is NOT a miss
+        expect(await startedJobFor(sara.brickId, sara.id, startKey)).toEqual({ inProgress: true });
+        expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+        // Another key is not held back by it
+        expect(await startedJobFor(sara.brickId, sara.id, keyOf())).toBeNull();
+        expect(await prisma.computerStartMark.count()).toBe(1);
+        held.go();
+        const made = await held.running;
+        if (!(made as { ok: boolean }).ok) throw new Error('the start did not run');
+        expect(await startedJobFor(sara.brickId, sara.id, startKey)).toMatchObject({ id: (made as { job: { id: string } }).job.id });
+        // Nothing is left behind once the job is saved
+        expect(await prisma.computerStartMark.count()).toBe(0);
+      } finally {
+        held.go();
+        held.spy.mockRestore();
+        await Promise.allSettled([held.running]);
+      }
+    });
+
+    it('an older job of the same chat and title is not the answer while a second start of it is going on: "in progress", and then the second start’s own job', async () => {
+      const first = await started('sez', 'Visa form');
+      const secondKey = keyOf();
+      const held = holdStartAtItsReads(() => startJob({ botId: first.sara.brickId, personId: first.sara.id, title: 'Visa form', startKey: secondKey, origin: { kind: 'dm', ref: ref('sez') } }, NOW));
+      try {
+        await held.there;
+        expect(await startedJobFor(first.sara.brickId, first.sara.id, secondKey)).toEqual({ inProgress: true });
+        held.go();
+        const second = await held.running;
+        if (!(second as { ok: boolean }).ok) throw new Error('the second start did not run');
+        expect(await startedJobFor(first.sara.brickId, first.sara.id, secondKey)).toMatchObject({ id: (second as { job: { id: string } }).job.id });
+        expect((second as { job: { id: string } }).job.id).not.toBe(first.jobId);
+      } finally {
+        held.go();
+        held.spy.mockRestore();
+        await Promise.allSettled([held.running]);
+      }
+    });
+
+    it('is a miss again once the start ended without a job (refused, or failed): nothing is held for ever, and a start that fails leaves no mark', async () => {
+      const sara = await person('sew');
+      await giveComputer(sara.brickId, sara.id);
+      const startKey = keyOf();
+      const spy = jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementationOnce((() => Promise.reject(new Error('the database went away'))) as never);
+      try {
+        await expect(startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey, origin: { kind: 'dm', ref: ref('sew') } }, NOW)).rejects.toThrow('the database went away');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await startedJobFor(sara.brickId, sara.id, startKey)).toBeNull();
+      expect(await prisma.computerStartMark.count()).toBe(0);
+      // The same key sent again makes the job (the first start made none)
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey, origin: { kind: 'dm', ref: ref('sew') } }, NOW)).toMatchObject({ ok: true });
+      // A start that is refused (the computer is off): the same
+      const off = await person('sex');
+      const offKey = keyOf();
+      expect(await startJob({ botId: off.brickId, personId: off.id, title: 'Visa form', startKey: offKey, origin: { kind: 'dm', ref: ref('sex') } }, NOW)).toMatchObject({ ok: false, reason: 'off' });
+      expect(await startedJobFor(off.brickId, off.id, offKey)).toBeNull();
+      expect(await prisma.computerStartMark.count()).toBe(0);
+    });
+
+    it('a start with no key keeps no mark and takes no key: it is never asked about', async () => {
+      const sara = await person('sey');
+      await giveComputer(sara.brickId, sara.id);
+      const held = holdStartAtItsReads(() => startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', origin: { kind: 'dm', ref: ref('sey') } }, NOW));
+      try {
+        await held.there;
+        expect(await prisma.computerStartMark.count()).toBe(0);
+        held.go();
+        await held.running;
+      } finally {
+        held.go();
+        held.spy.mockRestore();
+        await Promise.allSettled([held.running]);
+      }
+      // Two starts with no key are two jobs (they did not say they were one): this is what the old callers did
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId, startKey: null } })).toBe(1);
+    });
+
+    it('a mark whose start died stops counting after its life, and the sweep deletes the old ones: a dead start is a miss, never "in progress" for ever', async () => {
+      const sara = await person('sfa');
+      await giveComputer(sara.brickId, sara.id);
+      const startKey = keyOf();
+      const fence = startFenceOf(sara.brickId, sara.id, startKey);
+      const mark = await prisma.computerStartMark.create({ data: { fence } });
+      expect(await startedJobFor(sara.brickId, sara.id, startKey)).toEqual({ inProgress: true });
+      // Past its life: it no longer says anything
+      await prisma.computerStartMark.update({ where: { id: mark.id }, data: { startedAt: new Date(Date.now() - START_MARK_MS - 1_000) } });
+      expect(await startedJobFor(sara.brickId, sara.id, startKey)).toBeNull();
+      // Deleted by the sweep once it is old, never while it is young
+      const young = await prisma.computerStartMark.create({ data: { fence } });
+      await sweepComputers(new Date());
+      expect(await prisma.computerStartMark.count({ where: { id: mark.id } })).toBe(1);
+      await prisma.computerStartMark.update({ where: { id: mark.id }, data: { startedAt: new Date(Date.now() - 2 * 3_600_000) } });
+      await sweepComputers(new Date());
+      expect(await prisma.computerStartMark.count({ where: { id: mark.id } })).toBe(0);
+      expect(await prisma.computerStartMark.count({ where: { id: young.id } })).toBe(1);
+    });
+
+    it('a start in progress holds no transaction and no lock while it reads: nothing under a connection waits for another connection', async () => {
+      const sara = await person('seb');
+      await giveComputer(sara.brickId, sara.id);
+      const transaction = jest.spyOn(prisma, '$transaction');
+      const held = holdStartAtItsReads(() => startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey: keyOf(), origin: { kind: 'dm', ref: ref('seb') } }, NOW));
+      try {
+        await held.there;
+        expect(transaction).not.toHaveBeenCalled();
+        held.go();
+        await held.running;
+      } finally {
+        held.go();
+        held.spy.mockRestore();
+        transaction.mockRestore();
+        await Promise.allSettled([held.running]);
+      }
     });
   });
 

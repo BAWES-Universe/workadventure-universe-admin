@@ -3,8 +3,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getAdapter } from '@/lib/app-adapter';
 import type { InstantAdapter, InstantCall, InstantLog, ReadyMadeAdapter } from '@/lib/app-adapter/types';
-import { recordMeterEvent } from '@/lib/meter';
-import { instantEventOf, reportInstantRunIn } from '@/lib/instant/report';
+import { reportInstantRunIn } from '@/lib/instant/report';
 import { monthOf } from '@/lib/meter-values';
 import { brickHasApp } from '@/lib/instant/asker';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
@@ -398,8 +397,9 @@ async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<I
       case 'rejected': {
         // Refused before anything ran: nothing is charged to anyone
         const reason = reasonOfRejection(call.code, call.status);
-        await settleProvider({ ...run, state: 'failed' }, tx, 0, 'measured', ctx.now);
+        // The run says it failed first: the event is written from the run as it now stands
         await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason, finishedAt: ctx.now, detail: { status: call.status, code: call.code } } });
+        await settleProvider({ ...run, state: 'failed' }, tx, 0, 'measured', ctx.now);
         // Composio's balance is empty: every run would fail the same way, so Instant stops until a super admin has looked
         if (reason === 'provider_empty') await pauseInstant('provider_empty', null, tx);
         return { status: 'failed', runId: run.id, reason, message: REASON_WORDS[reason] };
@@ -532,13 +532,13 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
   const finishedAt = run.finishedAt ?? now;
   await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt } });
   // The meter event is a copy for the books: if it cannot be written, the settlement still stands (the sweep mends it from the run's own rows, see
-  // `repairInstantReporting`). It is written inside a savepoint, because a failed statement otherwise leaves the whole transaction aborted, and the
-  // settlement above would fail with it. What the person was charged is whatever the credit books have confirmed by now (pending until they have): the
-  // amount the hold would be settled at is a calculation, never written as a charge
+  // `repairInstantReporting`). It is written by the same writer as every later correction (`reportInstantRunIn`: one place decides what the event says, from the run
+  // as it now stands in this transaction, never from a copy made here), inside a savepoint, because a failed statement otherwise leaves the whole transaction
+  // aborted, and the settlement above would fail with it. What the person was charged is whatever the credit books have confirmed by now (pending until they
+  // have, and pending for a run whose hold is still being given back): the amount the hold would be settled at is a calculation, never written as a charge
   await tx.$executeRaw`SAVEPOINT instant_meter_event`;
   try {
-    const event = instantEventOf({ ...run, providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt });
-    if (event) await recordMeterEvent(event, tx);
+    await reportInstantRunIn(tx, run.id, now, { insertIsBestEffort: true });
     await tx.$executeRaw`RELEASE SAVEPOINT instant_meter_event`;
   } catch (error) {
     await tx.$executeRaw`ROLLBACK TO SAVEPOINT instant_meter_event`;
@@ -641,11 +641,67 @@ async function lookUp(run: Row, instant: InstantAdapter, now: Date): Promise<{ l
 const LATE_EVIDENCE_DAYS = 35;
 
 /**
- * A run let go unconfirmed whose vendor cost is still the estimate and whose late evidence has not been read yet. Only its own log is asked,
- * for a bounded time: what it finds changes the vendor side only (see `applyLateEvidence`).
+ * How far apart two looks at the same run's log are, by how long ago the run was let go: often while a log line is likely to turn up, then less and less.
+ * Counted from the run's last look (`checkedAt`, which every look stamps), so a run whose log has no line yet (or a line nobody can read) is asked again
+ * only when its spacing has passed, never on every sweep. Every run is due again after its spacing, so none is skipped for ever, and the 35 days are the limit.
+ */
+const LATE_LOOK_BANDS: ReadonlyArray<{ fromHours: number; everyMinutes: number }> = [
+  { fromHours: 0, everyMinutes: 15 },
+  { fromHours: 24, everyMinutes: 2 * 60 },
+  { fromHours: 7 * 24, everyMinutes: 12 * 60 },
+];
+
+/** The spacing, in minutes, between two looks at a run let go `ageMs` ago. */
+export function lateLookSpacingMinutes(ageMs: number): number {
+  const hours = ageMs / (60 * MINUTE);
+  let every = LATE_LOOK_BANDS[0].everyMinutes;
+  for (const band of LATE_LOOK_BANDS) if (hours >= band.fromHours) every = band.everyMinutes;
+  return every;
+}
+
+/**
+ * The runs that are due a look at their log now: let go unconfirmed, vendor cost still the estimate, late evidence not all in (none written yet, or a success whose
+ * charge is not posted yet: the same question `awaitsLateEvidence` asks of one run), let go within the 35 days, and not looked at since their spacing began.
+ */
+export function lateRunsDueWhere(now: Date): Prisma.InstantRunWhereInput {
+  const ago = (hours: number) => new Date(now.getTime() - hours * 60 * MINUTE);
+  const bands = LATE_LOOK_BANDS.map((band, index) => {
+    const older = LATE_LOOK_BANDS[index + 1];
+    return {
+      finishedAt: { ...(older ? { gt: ago(older.fromHours) } : { gte: ago(LATE_EVIDENCE_DAYS * 24) }), lte: ago(band.fromHours) },
+      OR: [{ checkedAt: null }, { checkedAt: { lte: new Date(now.getTime() - band.everyMinutes * MINUTE) } }],
+    };
+  });
+  return {
+    state: 'failed',
+    providerBasis: 'estimated',
+    AND: [
+      { OR: [{ detail: { path: ['releasedUnconfirmed'], equals: true } }, { detail: { path: ['noLog'], equals: true } }, { detail: { path: ['unreadableLog'], equals: true } }] },
+      { OR: [{ detail: { path: ['lateEvidence'], equals: Prisma.DbNull } }, { AND: [{ detail: { path: ['lateEvidence', 'status'], equals: 'success' } }, { detail: { path: ['lateEvidence', 'chargeMicros'], equals: Prisma.JsonNull } }] }] },
+      { OR: bands },
+    ],
+  };
+}
+
+/**
+ * A run nobody could vouch for: let go after Composio could not be asked (`releasedUnconfirmed`), or let go after the wait with no log line of it
+ * (`noLog`) or a line nobody could read (`unreadableLog`). All three end the same way for the person (nothing taken, hold given back) and all three
+ * are looked for in Composio's log a while longer.
+ */
+function isLetGoUnconfirmed(detail: unknown): boolean {
+  return isObject(detail) && (detail.releasedUnconfirmed === true || detail.noLog === true || detail.unreadableLog === true);
+}
+
+/**
+ * A run let go unconfirmed whose vendor cost is still the estimate and whose late evidence is not all in: not read yet, or a success was read whose charge
+ * is not posted yet. Only its own log is asked, for a bounded time: what it finds changes the vendor side and what the receipt says, never what the person pays
+ * (see `applyLateEvidence`).
  */
 function awaitsLateEvidence(run: Row, now: Date): boolean {
-  if (run.state !== 'failed' || run.providerBasis !== 'estimated' || !isObject(run.detail) || run.detail.releasedUnconfirmed !== true || run.detail.lateEvidence !== undefined) return false;
+  if (run.state !== 'failed' || run.providerBasis !== 'estimated' || !isLetGoUnconfirmed(run.detail)) return false;
+  const seen = isObject(run.detail) ? run.detail.lateEvidence : undefined;
+  // A success that is written down but has no charge yet is looked for again until the charge turns up (or the days run out); any other answer is final
+  if (seen !== undefined && !(isObject(seen) && seen.status === 'success' && (seen.chargeMicros === null || seen.chargeMicros === undefined))) return false;
   return !run.finishedAt || now.getTime() - run.finishedAt.getTime() <= LATE_EVIDENCE_DAYS * 24 * 60 * MINUTE;
 }
 
@@ -660,9 +716,16 @@ async function applyLateEvidence(run: Row, line: InstantLog, tx: Prisma.Transact
   const detail = isObject(run.detail) ? run.detail : {};
   const estimated = asNumber(run.providerMicros);
   const verified = line.chargeMicros;
-  // A line that says the tool worked but carries no charge yet (it may be posted later) is not the evidence: nothing is written, so the run is looked for again
-  // until a charge turns up or the days run out. A failed or unknown line is the answer as it is, and is written down once.
-  if (verified === null && line.status === 'success') return;
+  // A line that says the tool worked but carries no charge yet (it may be posted later): that it worked is written down at once (so the receipt can say so, and it never
+  // waits on a charge that may not come), and the run is looked for again until the charge turns up or the days run out. A failed or unknown line is the answer as it is,
+  // and is written down once.
+  // A line Composio has no word on yet (still running, or a word we cannot read) says nothing new: it is not written down, and the run is looked for again
+  if (line.status === 'unknown') return;
+  if (verified === null && line.status === 'success') {
+    if (isObject(detail.lateEvidence)) return;
+    await tx.instantRun.update({ where: { id: run.id }, data: { detail: { ...detail, lateEvidence: { status: line.status, chargeMicros: null, at: now.toISOString() } } as Prisma.InputJsonValue } });
+    return;
+  }
   const next = { ...detail, lateEvidence: { status: line.status, chargeMicros: verified, at: now.toISOString() }, ...(verified !== null ? { adjustment: { estimatedMicros: estimated, verifiedMicros: verified } } : {}) };
   await tx.instantRun.update({
     where: { id: run.id },
@@ -691,7 +754,7 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
   const seen = await prisma.instantRun.findUnique({ where: { id: runId } });
   if (!seen) return;
   // Tried now: the sweep goes oldest attempt first, so runs that cannot be settled never keep the rest from being tried
-  await prisma.instantRun.updateMany({ where: { id: runId }, data: { checkedAt: new Date() } });
+  await prisma.instantRun.updateMany({ where: { id: runId }, data: { checkedAt: ctx.now } });
   const late = awaitsLateEvidence(seen, ctx.now);
   const looked = instant && (late || needsLookup(seen, ctx.now, limits)) ? await lookUp(seen, instant, ctx.now) : null;
   await withRun(runId, async (run, tx) => {

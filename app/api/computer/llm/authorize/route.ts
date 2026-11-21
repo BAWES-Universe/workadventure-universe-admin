@@ -12,14 +12,19 @@ const bodySchema = z
     callId: z.string().min(1).max(80),
     estimateMicros: z.number().int().min(0).max(2_000_000_000),
     payer: z.enum(['universe', 'own-key']),
+    /** The provider and route the call will go to ("universe-ai:<providerId>"): a route failing for many people is paused for new work. Required for a call we fund (it is what the pause is checked by); optional for a person's own key. */
+    route: z.string().min(1).max(120).nullable().optional(),
   })
-  .strict();
+  .strict()
+  // A call we pay for that names no route would reach the room unchecked while its provider's route is paused (a missing route matches no pause key): it is refused as malformed
+  .refine((body) => body.payer !== 'universe' || (typeof body.route === 'string' && body.route.length > 0), { message: 'A route is required for a call the platform funds', path: ['route'] });
 
 /**
- * POST /api/computer/llm/authorize { token, callId, estimateMicros, payer } - before a model call a Brick's computer makes: the
+ * POST /api/computer/llm/authorize { token, callId, estimateMicros, payer, route } - before a model call a Brick's computer makes: the
  * computer's key is checked against Orbit's records and room for this one call is reserved from the person's computer allowance.
- * Answers { ok: true, jobId, botId, reservedMicros } or { ok: false, reason: refused | allowance | pool | rule }: nothing is sent to an AI
- * provider unless it says ok. Whose AI it runs on is the bot server's to say (it reads the Brick's own AI policy); Orbit records who
+ * Answers { ok: true, jobId, botId, reservedMicros } or { ok: false, reason: refused | allowance | pool | rule, full? }: nothing is sent to an AI
+ * provider unless it says ok. `full` comes with reason `pool` only: true when the pool has no room even for the smallest call, or new work on the call's
+ * route is paused (our decision), so the relay records it as a confirmed fault of ours (pool_busy); false when the call was refused for its own size. Whose AI it runs on is the bot server's to say (it reads the Brick's own AI policy); Orbit records who
  * paid when the call is settled. Asked again with the same callId it is the same call. Auth: service token only (the computer never calls this).
  */
 export async function POST(request: NextRequest) {

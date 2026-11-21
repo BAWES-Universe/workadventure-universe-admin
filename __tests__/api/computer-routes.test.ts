@@ -44,11 +44,11 @@ const params = { params: Promise.resolve({ id: BRICK }) };
 const jobParams = { params: Promise.resolve({ id: BRICK, jobId: JOB }) };
 const tokenBefore = process.env.BOT_SERVICE_TOKEN;
 
-const call = (path: string, init: { method?: string; body?: unknown; token?: string | null } = {}) => {
+const call = (path: string, init: { method?: string; body?: unknown; token?: string | null; headers?: Record<string, string> } = {}) => {
   const token = init.token === undefined ? null : init.token;
-  return new NextRequest(`http://localhost:3333${path}`, { method: init.method ?? 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {}, ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }) });
+  return new NextRequest(`http://localhost:3333${path}`, { method: init.method ?? 'POST', headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers }, ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }) });
 };
-const asBot = (path: string, init: { method?: string; body?: unknown } = {}) => call(path, { ...init, token: SERVICE_TOKEN });
+const asBot = (path: string, init: { method?: string; body?: unknown; headers?: Record<string, string> } = {}) => call(path, { ...init, token: SERVICE_TOKEN });
 const job = { id: JOB, botId: BRICK, personId: 'u-sara', status: 'running', title: 'Visa form', detailsToFill: [] };
 
 beforeEach(() => {
@@ -257,6 +257,116 @@ describe('the bot server’s calls', () => {
     });
   });
 
+  describe('whether a start that timed out reached Orbit: by the start’s own key (game #2114)', () => {
+    const KEY = '3f2b8c1e-5d4a-4e7b-9a60-1c2d3e4f5a6b';
+    const asked = `/x?userId=wa-sara&attempt=${KEY}`;
+    const answer = async (path: string) => (await stateRoute(asBot(path, { method: 'GET' }), params)).json();
+
+    it('carries `started` only when the caller asked for it with its key: an old caller gets the same answer as before', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
+      lib.startedJobFor.mockResolvedValue({ id: JOB, status: 'running' });
+      expect(await answer('/x?userId=wa-sara')).toEqual({ available: true, on: true, busy: false });
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
+      expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: { id: JOB, status: 'running', attempt: KEY } });
+      expect(lib.startedJobFor).toHaveBeenCalledWith(BRICK, 'u-sara', KEY);
+      lib.startedJobFor.mockResolvedValue(null);
+      expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: null });
+    });
+
+    it('looks by the key alone: the chat, the title and the age a caller may still send are not what it looks for', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
+      lib.startedJobFor.mockResolvedValue(null);
+      await answer(`${asked}&originRef=dm-1&title=Visa%20form&sinceSeconds=45`);
+      expect(lib.startedJobFor).toHaveBeenCalledTimes(1);
+      expect(lib.startedJobFor).toHaveBeenCalledWith(BRICK, 'u-sara', KEY);
+      // Without the key, a title and an age alone ask nothing
+      lib.startedJobFor.mockClear();
+      expect(await answer('/x?userId=wa-sara&originRef=dm-1&title=Visa%20form&sinceSeconds=45')).toEqual({ available: true, on: true, busy: false });
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
+    });
+
+    it('says `started: null` for a guest and for a Brick that is not theirs, and never looks for a job for either', async () => {
+      resolve.mockResolvedValue({ personId: null, guest: true });
+      lib.computerView.mockResolvedValue(null);
+      expect(await answer(`${asked}&isGuest=true`)).toEqual({ available: false, on: false, busy: false, started: null });
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
+      // Someone who is signed in, on a Brick that is not theirs: only the owner starts work on it, so no job of theirs can be there to find, and the lookup is not made (the mocked job would be found if it were)
+      resolve.mockResolvedValue({ personId: 'u-omar', guest: false });
+      lib.startedJobFor.mockResolvedValue({ id: JOB, status: 'running' });
+      expect(await answer(asked)).toEqual({ available: false, on: false, busy: false, started: null });
+      expect(lib.computerView).toHaveBeenLastCalledWith(BRICK, 'u-omar');
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
+    });
+
+    it('does not answer "no job reached Orbit" when who this was for could not be looked up: it answers retry (503), and reads nothing', async () => {
+      resolve.mockResolvedValue({ personId: null, guest: false, lookupFailed: true });
+      lib.startedJobFor.mockResolvedValue(null);
+      const response = await stateRoute(asBot(asked, { method: 'GET' }), params);
+      expect(response.status).toBe(503);
+      const body = await response.json();
+      expect(body.retry).toBe(true);
+      expect(body).not.toHaveProperty('started');
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
+      expect(lib.computerView).not.toHaveBeenCalled();
+      // A caller that did not ask whether a start reached Orbit keeps the answer it always had
+      const old = await stateRoute(asBot('/x?userId=wa-sara', { method: 'GET' }), params);
+      expect(old.status).toBe(200);
+      expect(await old.json()).toEqual({ available: false, on: false, busy: false });
+    });
+
+    it('answers retry (503, inProgress) while a start with that key is still going on: not `started: null`, which says no job was made', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
+      lib.startedJobFor.mockResolvedValue({ inProgress: true });
+      const response = await stateRoute(asBot(asked, { method: 'GET' }), params);
+      expect(response.status).toBe(503);
+      const body = await response.json();
+      expect(body).toMatchObject({ retry: true, inProgress: true });
+      expect(body).not.toHaveProperty('started');
+      lib.startedJobFor.mockResolvedValue(null);
+      expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: null });
+    });
+
+    it('refuses a key that is not one (too short, too long, other characters), and reads nothing', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      for (const key of ['', 'short', 'a'.repeat(65), 'has space in it', 'semi;colon-in-it', '..%2F..%2Fetc']) {
+        expect((await stateRoute(asBot(`/x?userId=u&attempt=${key}`, { method: 'GET' }), params)).status).toBe(400);
+      }
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
+    });
+
+    it('the start takes the key from the header `X-Computer-Start-Attempt`, passes it on, and refuses one that is not a key; a start without one is as before', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      lib.startJob.mockResolvedValue({ ok: false, reason: 'off' } as never);
+      const body = { userId: 'wa-sara', title: 'x', origin: { kind: 'dm', ref: 'dm-1' } };
+      expect((await startRoute(asBot('/x', { body, headers: { 'X-Computer-Start-Attempt': KEY } }), params)).status).toBe(200);
+      expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ botId: BRICK, personId: 'u-sara', startKey: KEY }));
+      lib.startJob.mockClear();
+      for (const bad of ['no', 'has space in it', 'a'.repeat(65), '']) {
+        expect((await startRoute(asBot('/x', { body, headers: { 'X-Computer-Start-Attempt': bad } }), params)).status).toBe(400);
+      }
+      expect(lib.startJob).not.toHaveBeenCalled();
+      await startRoute(asBot('/x', { body }), params);
+      expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ startKey: undefined }));
+    });
+
+    it('the key is never a body field: the body stays strict, so a start that carries it there is refused', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x', startKey: KEY } }), params)).status).toBe(400);
+      expect(lib.startJob).not.toHaveBeenCalled();
+    });
+
+    it('one title for the start: trimmed before its length is read, never empty, never past 200 (the start stores it exactly so)', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      lib.startJob.mockResolvedValue({ ok: false, reason: 'off' } as never);
+      expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: `${'a'.repeat(200)} ` } }), params)).status).toBe(200);
+      expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: '   ' } }), params)).status).toBe(400);
+      expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'a'.repeat(201) } }), params)).status).toBe(400);
+    });
+  });
+
   it('says whether the computer is on for its owner, read only, and "off" for anyone else', async () => {
     resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
     lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
@@ -321,13 +431,23 @@ describe('the bot server’s calls', () => {
     await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'details', ready: { what: 'Your details', where: 'visa-portal.example' } } }), jobParams);
     expect(lib.requestHandover).toHaveBeenCalledWith(JOB, 'details', expect.any(Date), { what: 'Your details', where: 'visa-portal.example' });
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done' } }), jobParams);
-    expect(lib.finishJob).toHaveBeenCalledWith(JOB, 'done', expect.any(Date), undefined, undefined);
+    expect(lib.finishJob).toHaveBeenCalledWith(JOB, 'done', expect.any(Date), undefined, undefined, undefined, undefined);
     // A failure carries the computer's own sentence about why, kept cleaned for the message that tells the person
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', why: 'The site kept showing an error' } }), jobParams);
-    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), 'The site kept showing an error', undefined);
+    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), 'The site kept showing an error', undefined, undefined, undefined);
     // Who a failure is down to travels with it (only `ours` is given back); a word it does not know is refused
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours' } }), jobParams);
-    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), undefined, 'ours');
+    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), undefined, 'ours', undefined, undefined);
+    // ...with the turns the runner judged failed: Orbit decides from the relay's rows for them (the cause is only a hint)
+    await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', turns: [3, 4, 5] } }), jobParams);
+    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), undefined, 'ours', [3, 4, 5], undefined);
+    // ...and the run those turns were numbered in (a restart makes a new run that numbers turns again), up to 40 characters
+    await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', turns: [1, 2, 3], run: 'mi8x3k2a1b2c3d4e' } }), jobParams);
+    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), undefined, 'ours', [1, 2, 3], 'mi8x3k2a1b2c3d4e');
+    for (const run of ['x'.repeat(41), '', 'has space', 5]) {
+      expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', turns: [1], run } }), jobParams)).status).toBe(400);
+    }
+    expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', turns: [-1] } }), jobParams)).status).toBe(400);
     expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'theirs' } }), jobParams)).status).toBe(400);
     expect(await (await jobAction(asBot('/x', { body: { action: 'plan-effect', key: 'pr-1', kind: 'publish' } }), jobParams)).json()).toEqual({ ok: false, reason: 'look_up', evidence: 'draft pull request' });
     expect(await (await jobAction(asBot('/x', { body: { action: 'settle-effect', key: 'pr-1', state: 'done', evidence: 'pull request 12' } }), jobParams)).json()).toEqual({ ok: true });

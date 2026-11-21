@@ -265,6 +265,26 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await memberUsage(sara.id, NOW)).computer).toBeNull();
     });
 
+    it('Activity carries a task nobody could confirm as state refunded WITH outcome unconfirmed, its words, its note and its steps (the game reads the outcome first and keeps the refund as the money line)', async () => {
+      const sara = await person('sara');
+      const key = `unc-${tag}`;
+      const run = await prisma.instantRun.create({ data: { runKey: `k-${randomUUID()}`, botId: sara.brickId, personId: sara.id, taskKey: key, toolSlug: 'EXA_SEARCH', toolkit: 'exa', argsHash: 'h-unc', priceVersion: 'v', topMicros: BigInt(10_000), holdMicros: BigInt(10_000), state: 'failed', reason: 'unclear', customerState: 'released', customerMicros: BigInt(0), providerUserId: `u-${randomUUID().slice(0, 6)}`, detail: { releasedUnconfirmed: true } } as never });
+      const receipt = await prisma.taskReceipt.create({ data: { botId: sara.brickId, personId: sara.id, taskKey: key, title: 'Look it up', category: 'apps', state: 'refunded', outcome: 'unconfirmed', startedAt: hours(-2), endedAt: hours(-1), payerKind: 'person', payerPersonId: sara.id, actions: [{ run: run.id, label: 'exa', outcome: 'unknown' }] } as never });
+      try {
+        session.mockResolvedValue({ id: sara.id, email: 'sara@example.test' });
+        const json = await (await usageGet(adminCall('/api/me/usage'))).json();
+        const item = (json.activity as Array<Record<string, unknown>>).find((candidate) => candidate.title === 'Look it up');
+        expect(item).toMatchObject({ state: 'refunded', outcome: 'unconfirmed' });
+        expect(typeof item?.outcomeText).toBe('string');
+        expect(item?.outcomeText).not.toBe('');
+        expect(String(item?.outcomeNote)).toContain('couldn’t confirm');
+        expect(item?.actions).toEqual([expect.objectContaining({ label: 'exa', outcome: 'unknown' })]);
+      } finally {
+        await prisma.instantRun.deleteMany({ where: { id: run.id } });
+        await prisma.taskReceipt.deleteMany({ where: { id: receipt.id } });
+      }
+    });
+
     it('answers the person asking only, and a person who is not signed in gets nothing', async () => {
       expect((await usageGet(adminCall('/api/me/usage'))).status).toBe(401);
       const sara = await person('sara');

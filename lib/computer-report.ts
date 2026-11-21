@@ -1,5 +1,8 @@
 import { prisma } from '@/lib/db';
+import { RELAY_UNREACHABLE } from '@/lib/computer-faults';
+import { UNREACHABLE_WORDS } from '@/lib/task-receipt-words';
 import { readFilesList } from '@/lib/computer-files';
+import { refundStatesFor } from '@/lib/computer-refunds';
 import { silentEnding, type UndeliverableWhy, type WaitingFor } from '@/lib/computer-values';
 import { cardsOfJobs, handedPathsOf, HAND_OVER_ALIVE_MS, HAND_OVER_LATEST_MS, madeInJob, type Card } from '@/lib/computer-file-cards';
 
@@ -56,6 +59,11 @@ export interface Report {
   handed: Card[];
   /** The minutes of this try do not count against the person's month (proved in the books, or none were used). */
   givenBack: boolean;
+  /**
+   * Credit this failed try drew that is owed back to the person and not yet acknowledged by the books, in whole micros (0 when none): a report never promises a refund as made while this is above 0.
+   * Optional for older readers; Activity says the same amount ("$0.03 refund pending").
+   */
+  refundPendingMicros?: number;
 }
 
 /**
@@ -256,6 +264,12 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
   // Every file a job handed over is not "left on the computer": the ones the chat already took, and the ones the person has deleted since, as much as the ones still to send
   const handedPaths = await handedPathsOf(ended.filter((job) => job.status === 'done').map((job) => job.id));
 
+  // What a failed try drew from credit and is still owed back (one read for the page): said with the report, never promised as made while the books have not acknowledged it
+  // Every job told as `failed` (a failed try, and one our own pool cut off, which stays `stopped` but is reported as failed too and can owe a refund as well)
+  const failedIds = ended.filter((job) => kindOfEnding(job.status, job.endedBy) === 'failed').map((job) => job.id);
+  const owedBack = await refundStatesFor(failedIds);
+  // A job Orbit gave back because its computer could not reach our own model service says that, in the words a receipt uses, rather than the computer's own sentence about a model that never answered
+  const unreachable = new Set(failedIds.length === 0 ? [] : (await prisma.computerGiveBackDecision.findMany({ where: { jobId: { in: failedIds }, state: 'given', reason: RELAY_UNREACHABLE }, select: { jobId: true } })).map((one) => one.jobId));
   const reports: Report[] = [];
   for (const job of ended) {
     const kind = kindOfEnding(job.status, job.endedBy);
@@ -264,6 +278,9 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
       await prisma.computerJob.updateMany({ where: { id: job.id, endToldAt: null }, data: { endToldAt: new Date() } });
       continue;
     }
+    const givenBack = kind === 'failed' ? await givenBackIn(job.id, job.secondsRun) : false;
+    // A credit still owed back is said only for a job that IS being given back: one that was refused (the person's, or over the bound) keeps its credit, so nothing is owed to it
+    const pendingRefund = kind === 'failed' && givenBack ? (owedBack.get(job.id)?.pendingMicros ?? 0) : 0;
     reports.push({
       key: `computer-told:${job.id}:${kind}`,
       jobId: job.id,
@@ -278,11 +295,12 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
       waitingFor: null,
       ready: null,
       waitedFor: kind === 'unanswered' ? (job.endWaitingFor as WaitingFor | null) : null,
-      why: kind === 'failed' || kind === 'rule' ? job.endNote : null,
+      why: kind === 'failed' && givenBack && pendingRefund === 0 && unreachable.has(job.id) ? UNREACHABLE_WORDS : kind === 'failed' || kind === 'rule' ? job.endNote : null,
       effects: effectsOf(job),
       files: kind === 'done' && job.writes ? filesMadeBy(job.endFiles, job.startFiles, new Set(handedPaths.get(job.id) ?? [])) : [],
       handed: kind === 'done' ? (cardsOf.get(job.id) ?? []).map((card) => ({ id: card.id, name: card.name, bytes: card.bytes, mime: card.mime })) : [],
-      givenBack: kind === 'failed' ? await givenBackIn(job.id, job.secondsRun) : false,
+      givenBack,
+      ...(pendingRefund > 0 ? { refundPendingMicros: pendingRefund } : {}),
     });
   }
   for (const job of waiting) {

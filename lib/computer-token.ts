@@ -1,7 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { isOver } from '@/lib/computer-values';
 import { agentMayAct } from '@/lib/computer-control';
+import { cutoffLockKey, hasPoolCutoff } from '@/lib/computer-faults';
 
 /**
  * The key a job's computer holds (build handoff v2, section 5). It is the computer's only credential, and it grants nothing by
@@ -45,6 +47,24 @@ export async function mintJobToken(jobId: string, scope: TokenScope, now: Date =
   const expiresAt = new Date(now.getTime() + TOKEN_LIFE_MS);
   const digest = digestOf(token);
   await prisma.computerJobToken.create({ data: { jobId, scope, generation: job.controlGeneration, digest, expiresAt } });
+  if (scope === 'model') {
+    // A job Orbit decided to end for its own capacity never gets a model key again. The decision (and the end of every key) is made under the job's cutoff lock, so the key just made is looked at under that lock too:
+    // a decision that came before it is found here (the key is ended at once, and never given to anyone), and one that comes after it ends this key with the others. Database steps only
+    const cut = await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
+        if (!(await hasPoolCutoff(tx, jobId))) return false;
+        await tx.computerJobToken.updateMany({ where: { digest, revokedAt: null }, data: { revokedAt: now } });
+        return true;
+      },
+      { timeout: 15_000, maxWait: 15_000 },
+    ).catch(async (error) => {
+      // A key that cannot be looked at is not given out
+      await prisma.computerJobToken.updateMany({ where: { digest, revokedAt: null }, data: { revokedAt: now } }).catch(() => undefined);
+      throw error;
+    });
+    if (cut) return { ok: false, reason: 'not_running' };
+  }
   if (under) {
     // A take-over that came between the look and the key ends this key too: the fence only revokes the keys that existed when it ran
     const again = await read();
@@ -63,23 +83,23 @@ export type Verified =
 
 /**
  * Whether a key may act now: it exists, is for this scope, was not revoked, has not run out, belongs to a job that still holds the
- * machine, and was made under the job's CURRENT control generation.
+ * machine, and was made under the job's CURRENT control generation. `db` is the caller's transaction when it asks while holding one, so the look never waits for a second connection.
  */
-export async function verifyJobToken(token: string, scope: TokenScope, now: Date = new Date()): Promise<Verified> {
+export async function verifyJobToken(token: string, scope: TokenScope, now: Date = new Date(), db: Pick<Prisma.TransactionClient, 'computerJobToken' | 'brickComputer'> = prisma): Promise<Verified> {
   if (typeof token !== 'string' || !token.startsWith(PREFIX) || token.length > 200) return { ok: false, reason: 'refused' };
-  const row = await prisma.computerJobToken.findUnique({ where: { digest: digestOf(token) }, include: { job: { select: { id: true, botId: true, personId: true, status: true, controlGeneration: true } } } });
+  const row = await db.computerJobToken.findUnique({ where: { digest: digestOf(token) }, include: { job: { select: { id: true, botId: true, personId: true, status: true, controlGeneration: true } } } });
   if (!row || row.scope !== scope || row.revokedAt !== null || row.expiresAt <= now) return { ok: false, reason: 'refused' };
   if (isOver(row.job.status) || !live(row.job.status) || row.generation !== row.job.controlGeneration) return { ok: false, reason: 'refused' };
   // Control is not Brick's while it changes hands (or while the person holds it): a key made earlier does nothing then
-  if (!(await agentMayAct(row.job.botId))) return { ok: false, reason: 'refused' };
+  if (!(await agentMayAct(row.job.botId, db))) return { ok: false, reason: 'refused' };
   return { ok: true, jobId: row.job.id, botId: row.job.botId, personId: row.job.personId, tokenId: row.id, generation: row.generation };
 }
 
 /** Every key of a job ends: the job is over, or the person took the machine. Safe to say twice. */
-export async function revokeJobTokens(jobId: string, now: Date = new Date(), onlyWhile?: { prepareClaim: Date }): Promise<number> {
+export async function revokeJobTokens(jobId: string, now: Date = new Date(), onlyWhile?: { prepareClaim: Date }, db: Pick<Prisma.TransactionClient, 'computerJobToken'> = prisma): Promise<number> {
   // `onlyWhile`: a prepare that holds the job's claim ends the keys only while it still holds it, in the same statement as the check, so one that
   // paused past its claim (another took it and made a key) never ends the key that was made since
-  const { count } = await prisma.computerJobToken.updateMany({ where: { jobId, revokedAt: null, ...(onlyWhile ? { job: { prepareClaimedAt: onlyWhile.prepareClaim } } : {}) }, data: { revokedAt: now } });
+  const { count } = await db.computerJobToken.updateMany({ where: { jobId, revokedAt: null, ...(onlyWhile ? { job: { prepareClaimedAt: onlyWhile.prepareClaim } } : {}) }, data: { revokedAt: now } });
   return count;
 }
 

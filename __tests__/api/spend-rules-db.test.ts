@@ -14,28 +14,41 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn() }));
 
 import { prisma } from '@/lib/db';
+import * as meter from '@/lib/meter';
 import { createBrick } from '@/lib/brick-create';
 import { getSessionUser } from '@/lib/auth-session';
 import { saveMeterSettings } from '@/lib/meter';
-import { releaseRoom, renewRoom, reserveRoom } from '@/lib/meter-allowance';
+import { releaseRoom, renewRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
 import { memberUsage } from '@/lib/meter-usage';
 import { changeRule, checkSpend, chatRuleKey, endRule, listRules, ownerSpendAllowed, proposeRule } from '@/lib/spend-rules';
 import { activityFor, closeReceipt, openReceipt } from '@/lib/task-receipts';
+import { OUTCOME_WORDS, STOPPED_AT_RULE } from '@/lib/task-receipt-words';
 import { POST as postRule, GET as getRules } from '@/app/api/bots/[id]/spend-rules/route';
 import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
 import { GET as getPaidBy } from '@/app/api/bots/[id]/paid-by/route';
 import { POST as postJob } from '@/app/api/bots/[id]/computer-jobs/route';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { finishJob, giveComputer, renewJob, startJob } from '@/lib/computer';
+import { finishJob, giveComputer, renewJob, startJob, sweepComputers } from '@/lib/computer';
+import { recordFaults } from '@/lib/computer-faults';
+import { reportsToTell } from '@/lib/computer-report';
+import { HAND_OVER_ALIVE_MS, HAND_OVER_LATEST_MS } from '@/lib/computer-file-cards';
 import { mintJobToken } from '@/lib/computer-token';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { createInstantFunds } from '@/lib/funding/instant-funds';
+import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { PATCH as patchRule, DELETE as deleteRule } from '@/app/api/me/spend-rules/[ruleId]/route';
+
+// The books' own writer, wrapped so a test can make its writes fail (the reporting outage) and every other one run as it always does
+const actualRecord = jest.requireActual('@/lib/meter').recordMeterEvent as typeof meter.recordMeterEvent;
+jest.mock('@/lib/meter', () => {
+  const actual = jest.requireActual('@/lib/meter');
+  return { ...actual, recordMeterEvent: jest.fn(actual.recordMeterEvent) };
+});
 
 // Delegates to the real room-taking; one test makes it hold up a moment to let another try claim the job (see "a try refused by a rule")
 jest.mock('@/lib/meter-allowance', () => {
   const actual = jest.requireActual('@/lib/meter-allowance');
-  return { ...actual, reserveRoom: jest.fn(actual.reserveRoom) };
+  return { ...actual, reserveRoom: jest.fn(actual.reserveRoom), settleRoom: jest.fn(actual.settleRoom) };
 });
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -127,9 +140,12 @@ run('rules said in chat and task receipts, in a real database', () => {
   beforeEach(async () => {
     await wipe();
     await saveMeterSettings({ memberAllowanceMicros: 100_000_000, poolCeilingMicros: 1_000_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+    // A failed job the runner calls ours is decided by the give-back Limits (as production has them), never left to a missing setting
+    await seedGiveBackLimits();
   });
   afterAll(async () => {
     await wipe();
+    await clearGiveBackLimits();
     await prisma.universe.deleteMany({ where: { id: { in: universes } } });
     await prisma.user.deleteMany({ where: { id: { in: people.map((one) => one.id) } } });
     await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
@@ -1094,6 +1110,89 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(ended).toMatchObject({ status: 'stopped', endedBy: 'rule' });
     });
 
+    describe('what the payer reads on the receipt of a job stopped at their spending rule (GPT observation 2)', () => {
+      /** A job that ran, then stopped at a rule the person said, with its receipt closed the way the bot server closes it ("done"). */
+      async function stoppedAtRule(title: string) {
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 100_000 });
+        if (!made.ok) throw new Error('not made');
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title }, NOW);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: started.job.id, title, category: 'computer' }, NOW);
+        await prisma.meterReservation.updateMany({ where: { jobId: started.job.id }, data: { createdAt: NOW } });
+        expect(await renewJob(started.job.id, new Date(NOW.getTime() + 60_000))).toMatchObject({ ok: true });
+        expect(await renewJob(started.job.id, new Date(NOW.getTime() + 600_000))).toMatchObject({ ok: false, reason: 'rule' });
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'rule', startedAt: expect.any(Date) });
+        await closeReceipt({ botId: sara.brickId, taskKey: started.job.id, personId: sara.id, state: 'done' }, new Date(NOW.getTime() + 601_000));
+        return { sara, jobId: started.job.id };
+      }
+
+      it('says "Stopped at your spending rule" and never Done: starting a computer is not proof that it finished', async () => {
+        const { sara, jobId } = await stoppedAtRule('Make the report');
+        // The stored receipt does not say done either
+        expect((await prisma.taskReceipt.findFirstOrThrow({ where: { taskKey: jobId } })).outcome).not.toBe('done');
+        const [item, ...rest] = (await activityFor(sara.id)).filter((one) => one.title === 'Make the report');
+        expect(rest).toEqual([]);
+        expect(item).toMatchObject({ state: 'done', outcome: 'stopped', outcomeText: STOPPED_AT_RULE, actions: [] });
+        expect(item.outcomeText).not.toBe(OUTCOME_WORDS.done);
+        expect(item.outcomeNote).toMatch(/^It stopped before it finished, and nothing was confirmed as done\./);
+        // Without a receipt of its own (the job alone) it reads the same
+        await prisma.taskReceipt.deleteMany({ where: { taskKey: jobId } });
+        expect((await activityFor(sara.id)).find((one) => one.title === 'Make the report')).toMatchObject({ outcome: 'stopped', outcomeText: STOPPED_AT_RULE });
+      });
+
+      it('verified work and the computer’s usage are shown apart: a Gmail that went out is partly done with its own charge, and the rule stop is still said', async () => {
+        const { sara, jobId } = await stoppedAtRule('Mail then stopped');
+        const run = await prisma.instantRun.create({
+          data: { runKey: `k-${randomUUID()}`, botId: sara.brickId, personId: sara.id, taskKey: jobId, toolSlug: 'GMAIL_SEND_EMAIL', toolkit: 'gmail', argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v', topMicros: BigInt(10_000), holdMicros: BigInt(10_000), state: 'succeeded', customerState: 'charged', customerMicros: BigInt(9_000), providerUserId: `u-${randomUUID().slice(0, 6)}` } as never,
+        });
+        await prisma.meterEvent.create({
+          data: { eventId: `instant:${run.id}`, kind: 'app_use', pool: 'chat', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(7_000), basis: 'measured', detail: { instant: true, taskKey: jobId, runId: run.id, app: 'gmail', customerMicros: 9_000 } } as never,
+        });
+        const { settleReceipt } = await import('@/lib/task-receipts');
+        await settleReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId }, new Date(NOW.getTime() + 700_000));
+        const item = (await activityFor(sara.id)).find((one) => one.title === 'Mail then stopped');
+        expect(item).toMatchObject({ outcome: 'partial', outcomeText: OUTCOME_WORDS.partial });
+        expect(item?.actions).toEqual([{ label: 'gmail', outcome: 'worked', text: 'Gmail · worked', takenText: null, amountMicros: 9_000 }]);
+        expect(item?.outcomeNote).toContain('The computer stopped at your spending rule.');
+        expect(item?.outcomeNote).toContain('Gmail charged $0.009.');
+      });
+    });
+
+    describe('whatever stopped a job before it finished, the receipt and the Brick’s report never say done (Opus R1b)', () => {
+      const LATER = new Date(NOW.getTime() + 86_400_000);
+      /** A job that ran and was then ended as `stopped` by `endedBy`, its receipt closed the way the bot server closes it ("done"). */
+      async function stoppedBy(endedBy: string, title: string) {
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title }, NOW);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: started.job.id, title, category: 'computer' }, NOW);
+        await prisma.computerJob.update({ where: { id: started.job.id }, data: { status: 'stopped', endedBy, startedAt: NOW, endedAt: new Date(NOW.getTime() + 60_000) } });
+        await closeReceipt({ botId: sara.brickId, taskKey: started.job.id, personId: sara.id, state: 'done' }, new Date(NOW.getTime() + 61_000));
+        return { sara, jobId: started.job.id };
+      }
+
+      it.each([
+        // Our own capacity cut-off is given back (the #1024 rule), so its receipt is refunded and says so; the others are the person's and stay as they were
+        ['rule', 'done', STOPPED_AT_RULE, 'rule'],
+        ['allowance', 'done', 'Stopped: your computer time ran out', 'month'],
+        ['person', 'done', 'Stopped by you', null],
+        ['pool', 'refunded', 'Stopped: our computers were busy, and its time was given back', 'failed'],
+      ])('stopped by %s: the receipt is %s and says "%s", and the report kind is %s, never done', async (endedBy, state, words, kind) => {
+        const { sara, jobId } = await stoppedBy(endedBy, `Stopped by ${endedBy}`);
+        const item = (await activityFor(sara.id)).find((one) => one.title === `Stopped by ${endedBy}`);
+        expect(item).toMatchObject({ state, outcome: 'stopped', outcomeText: words });
+        expect(item?.outcomeText).not.toBe(OUTCOME_WORDS.done);
+        // A job we cut off ourselves is given back, so it ran nothing for the person: its stored word stays the bot server's, and what Activity and the report say is put right at read time (refunded, above). The others ran, so their stored outcome is already not done
+        if (endedBy !== 'pool') expect((await prisma.taskReceipt.findFirstOrThrow({ where: { taskKey: jobId } })).outcome).not.toBe('done');
+        const reports = (await reportsToTell(50, LATER)).filter((report) => report.jobId === jobId);
+        expect(reports.map((report) => report.kind)).toEqual(kind === null ? [] : [kind]);
+        expect(reports.map((report) => report.kind)).not.toContain('done');
+      });
+    });
+
     it('a model call a rule refuses ends the job right there as "rule", so a later "failed, ours" from the runner changes nothing and nothing is given back', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
@@ -1111,6 +1210,250 @@ run('rules said in chat and task receipts, in a real database', () => {
       await finishJob(started.job.id, 'failed', NOW, 'Three turns failed', 'ours');
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'rule' });
       expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${started.job.id}:call:c1` } })).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
+    });
+  });
+
+  describe('a job whose time the books could not take (the $1 rule)', () => {
+    const env = process.env.COMPUTER_PROVIDER;
+    const record = meter.recordMeterEvent as jest.Mock;
+    beforeAll(() => {
+      process.env.COMPUTER_PROVIDER = 'fake';
+      setComputerProviderForTests(new FakeComputerProvider());
+    });
+    afterAll(() => {
+      setComputerProviderForTests(null);
+      process.env.COMPUTER_PROVIDER = env;
+    });
+    afterEach(() => record.mockImplementation(actualRecord));
+    const ask = (sara: { id: string; brickId: string }, micros: number, at: Date) => checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: micros }, at);
+    const minutes = (count: number) => new Date(NOW.getTime() + count * 60_000);
+
+    it('a five-minute job of $0.03 whose event is missing is counted by the next paid step all through settlement and repair: $0.97 passes and one millionth more is refused, before and after', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      // The books refuse the write of its time (the reporting outage): the room still settles
+      record.mockRejectedValue(new Error('books down'));
+      await finishJob(started.job.id, 'done', minutes(5));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      // During settlement: the $0.03 is seen although its event is not in the books
+      expect(await ask(sara, 970_000, minutes(6))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, minutes(6))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      // A sweep while the books are still down changes nothing
+      await sweepComputers(minutes(10));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      expect(await ask(sara, 970_000, minutes(10))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, minutes(10))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      // The books come back and the sweep writes the event: the same answers, and the $0.03 is counted once (never as the room and as the event)
+      record.mockImplementation(actualRecord);
+      await sweepComputers(minutes(11));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(1);
+      expect(await ask(sara, 970_000, minutes(12))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, minutes(12))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      // Another sweep writes nothing twice
+      await sweepComputers(minutes(13));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(1);
+      expect(await ask(sara, 970_001, minutes(14))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+    });
+
+    it('a room left held when its job ended is settled at what the job ran when it lapses, never given back: the time is counted between the room and the books', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      // Neither the time nor the closing of its room gets through when it ends
+      record.mockRejectedValue(new Error('books down'));
+      (settleRoom as jest.Mock).mockRejectedValueOnce(new Error('books down'));
+      await finishJob(started.job.id, 'done', minutes(5));
+      expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'held' });
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      // The room lapses (ten minutes) and the sweep closes it while the books are still down: at the $0.03 it ran, not given back
+      await sweepComputers(minutes(11));
+      expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      expect(await ask(sara, 970_000, minutes(12))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, minutes(12))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      // The books come back: its time is written once, at the same $0.03, and the answers do not move
+      record.mockImplementation(actualRecord);
+      await sweepComputers(minutes(13));
+      expect(await prisma.meterEvent.findMany({ where: { eventId: `computer:${started.job.id}:time` }, select: { costMicros: true } })).toEqual([{ costMicros: BigInt(30_000) }]);
+      expect(await ask(sara, 970_000, minutes(14))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, minutes(14))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+    });
+
+    describe('a lapsed room of an ended job is not settled while its files are still being handed over', () => {
+      // The job ran 5 minutes ($0.03) and ended, its room left held with the books down; the hand-over adds its seconds to the job's time and settles the room itself
+      const endedWithRoomHeld = async () => {
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        record.mockRejectedValue(new Error('books down'));
+        (settleRoom as jest.Mock).mockRejectedValueOnce(new Error('books down'));
+        await finishJob(started.job.id, 'done', minutes(5));
+        expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'held' });
+        return { sara, jobId: started.job.id };
+      };
+      const room = (jobId: string) => prisma.meterReservation.findFirstOrThrow({ where: { jobId } });
+
+      it('a hand-over beating for this job keeps the room held; once the beat is stale the room is settled at what the job ran', async () => {
+        const { jobId } = await endedWithRoomHeld();
+        await prisma.computerJob.update({ where: { id: jobId }, data: { handOverAliveAt: new Date(minutes(11).getTime() - 5_000) } });
+        await sweepComputers(minutes(11));
+        expect(await room(jobId)).toMatchObject({ state: 'held' });
+        // The beat is older than HAND_OVER_ALIVE_MS: the hand-over was abandoned, so the room is settled at what it ran
+        await sweepComputers(new Date(minutes(11).getTime() + HAND_OVER_ALIVE_MS + 1_000));
+        expect(await room(jobId)).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      });
+
+      it('the machine’s files being claimed keeps the room held; once the claim is stale the room is settled at what the job ran', async () => {
+        const { sara, jobId } = await endedWithRoomHeld();
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { filesClaimedAt: minutes(10) } });
+        await sweepComputers(minutes(11));
+        expect(await room(jobId)).toMatchObject({ state: 'held' });
+        await sweepComputers(new Date(minutes(10).getTime() + HAND_OVER_LATEST_MS + 1_000));
+        expect(await room(jobId)).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      });
+
+      it('a job with no hand-over under way is settled at once, as before', async () => {
+        const { jobId } = await endedWithRoomHeld();
+        await sweepComputers(minutes(11));
+        expect(await room(jobId)).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      });
+    });
+
+    it('the sweep that writes a job’s missing time closes its room at the same time, so the room is never left held beside an event', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      // Renewed at minute 4, so its room does not lapse before the sweep that repairs it
+      expect(await renewJob(started.job.id, minutes(4))).toMatchObject({ ok: true });
+      record.mockRejectedValue(new Error('books down'));
+      (settleRoom as jest.Mock).mockRejectedValueOnce(new Error('books down'));
+      await finishJob(started.job.id, 'done', minutes(5));
+      expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'held' });
+      record.mockImplementation(actualRecord);
+      await sweepComputers(minutes(11));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(1);
+      expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      expect(await ask(sara, 970_000, minutes(12))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, minutes(12))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+    });
+
+    it('a job that crossed the end of a month and whose time is unwritten counts in the new month only by the part that ran in it, before and after repair', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      // 23:55 to 00:05: 5 minutes in each month, $0.006 a minute
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, new Date('2026-10-31T23:55:00Z'));
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      record.mockRejectedValue(new Error('books down'));
+      await finishJob(started.job.id, 'done', new Date('2026-11-01T00:05:00Z'));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      const later = new Date('2026-11-01T00:20:00Z');
+      expect(await ask(sara, 970_000, later)).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, later)).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      record.mockImplementation(actualRecord);
+      await sweepComputers(new Date('2026-11-01T00:30:00Z'));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(1);
+      expect(await ask(sara, 970_000, later)).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, later)).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+    });
+
+    it('a room the sweep settles after midnight for a job that ended before it counts in the old month only: the event it becomes is written at the job’s end', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      // 23:53 to 23:58 on the last day of November: $0.03
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, new Date('2026-11-30T23:53:00Z'));
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      record.mockRejectedValue(new Error('books down'));
+      (settleRoom as jest.Mock).mockRejectedValueOnce(new Error('books down'));
+      await finishJob(started.job.id, 'done', new Date('2026-11-30T23:58:00Z'));
+      // Its room lapses at 00:03 and the sweep settles it at 00:20 in December, the books still down
+      await sweepComputers(new Date('2026-12-01T00:20:00Z'));
+      expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      // December's cap sees none of it (it ran in November), and November's cap sees all of it
+      const december = new Date('2026-12-01T00:30:00Z');
+      expect(await ask(sara, 1_000_000, december)).toEqual({ ok: true });
+      expect(await ask(sara, 970_000, new Date('2026-11-30T23:59:00Z'))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, new Date('2026-11-30T23:59:00Z'))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      // Written later it is the same: the event is November's
+      record.mockImplementation(actualRecord);
+      await sweepComputers(new Date('2026-12-01T00:40:00Z'));
+      expect((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${started.job.id}:time` } })).occurredAt).toEqual(new Date('2026-11-30T23:58:00Z'));
+      expect(await ask(sara, 1_000_000, december)).toEqual({ ok: true });
+    });
+
+    it('a renewal taken while the provider’s rate was not known (1 micro of room) does not pull the job’s price down: that stretch is priced by its neighbour', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const provider = new FakeComputerProvider();
+      setComputerProviderForTests(provider);
+      const rate = jest.spyOn(provider, 'microsPerMinute').mockReturnValue(6000);
+      try {
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        // The rate is not known at the renewal at minute 4 (it holds 1 micro), and known again when the job ends at minute 8
+        rate.mockReturnValue(null);
+        expect(await renewJob(started.job.id, minutes(4))).toMatchObject({ ok: true });
+        expect((await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).terms).toEqual([expect.objectContaining({ micros: 60_000 }), expect.objectContaining({ micros: 1 })]);
+        rate.mockReturnValue(6000);
+        await finishJob(started.job.id, 'done', minutes(8));
+        // 8 minutes at 6,000: 48,000 (counting the 1 micro as a price would say about 24,000)
+        expect((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${started.job.id}:time` } })).costMicros).toBe(BigInt(48_000));
+      } finally {
+        rate.mockRestore();
+      }
+    });
+
+    it('a job that failed on our side is not counted while its time is unwritten: it takes nothing from the person', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      record.mockRejectedValue(new Error('books down'));
+      // "Ours" is judged from what the relay recorded (a confirmed fault of ours), not from the runner's word alone
+      await recordFaults(sara.brickId, started.job.id, [{ turn: 1, callId: 'c-ours-1', kind: 'fault', reason: 'relay_down', source: 'universe-ai', route: 'universe-ai/model-a', at: minutes(4) }]);
+      await finishJob(started.job.id, 'failed', minutes(5), 'The machine broke', 'ours', [1]);
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      expect(await ask(sara, 1_000_000, minutes(6))).toEqual({ ok: true });
+    });
+
+    it('a job is priced at what its lease was priced at, not at the provider’s rate when it closed, and a month boundary splits it by those prices', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      const provider = new FakeComputerProvider();
+      setComputerProviderForTests(provider);
+      const rate = jest.spyOn(provider, 'microsPerMinute').mockReturnValue(6000);
+      try {
+        // 23:55 on the last day of October at $0.006 a minute; the price doubles at 00:03; it ends at 00:10 (15 minutes: 8 at the old price, 7 at the new)
+        const start = new Date('2026-10-31T23:55:00Z');
+        const doubled = new Date('2026-11-01T00:03:00Z');
+        const end = new Date('2026-11-01T00:10:00Z');
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, start);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        rate.mockReturnValue(12_000);
+        expect(await renewJob(started.job.id, doubled)).toMatchObject({ ok: true });
+        await finishJob(started.job.id, 'done', end);
+        // 8 minutes at 6,000 and 7 at 12,000: 132,000, not the 180,000 the closing rate would give
+        const event = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${started.job.id}:time` } });
+        expect(event.costMicros).toBe(BigInt(132_000));
+        // November's part is what ran from 00:00: 3 minutes at 6,000 and 7 at 12,000 = 102,000 (a split by duration alone would say 88,000)
+        expect(await ask(sara, 898_000, new Date('2026-11-01T00:20:00Z'))).toEqual({ ok: true });
+        expect(await ask(sara, 898_001, new Date('2026-11-01T00:20:00Z'))).toMatchObject({ ok: false, why: 'cap', leftMicros: 898_000 });
+      } finally {
+        rate.mockRestore();
+      }
     });
   });
 
