@@ -434,6 +434,8 @@ describe('a paying page on the public share link', () => {
     const view = describeLine(restored.lines.at(-1)!, { copied: false });
     expect(view).toMatchObject({ title: 'We could not confirm your earlier payment.', closable: false, actions: [{ kind: 'check' }] });
     expect(view?.sub).toContain('contact the page’s owner with the time of the payment');
+    // The page stops refreshing on this line, so the buyer is told how to get a later update: the Check payment button on it
+    expect(view?.sub).toContain('press Check payment to see a later update');
     expect(JSON.stringify(view)).not.toMatch(/still checking|Not paid yet/);
     restored.host.destroy();
     const checked = setup((call) => (call.body.check ? { body: checkedOver } : 'lost'));

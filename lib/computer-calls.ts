@@ -7,7 +7,7 @@ import { givenBackJob } from '@/lib/computer-values';
 import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
 import { routeIsPaused } from '@/lib/computer-route-pause';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
-import { recordOwnKeyCall, recordPoolRefusal } from '@/lib/computer-faults';
+import { hasOwnKeyCall, hasPoolRefusals, recordOwnKeyCall, recordPoolRefusal, retirePoolRefusals } from '@/lib/computer-faults';
 
 /**
  * A model call a Brick's computer makes (build handoff v2, section 5): room is taken BEFORE the call, and what it really cost is
@@ -61,6 +61,8 @@ export async function authorizeModelCall(
     // A call on the person's own key leaves no room and no price: Orbit keeps one marker per job that one was authorized, so "authorized, its report not here yet" is never read as "no call at all" (which is ours, and
     // an own key is never given back as ours). Never limits the call: the answer is the same whatever this does
     await recordOwnKeyCall(prisma, base.jobId, now).catch((error) => console.error('[Computer] Could not note an own-key call:', error instanceof Error ? error.message : 'unknown'));
+    // A cutoff for our own capacity that was deciding at the same moment either saw this call (and did not stop the job) or won (and this call is refused): never both
+    if (!(await authorizedPastCutoff(base.jobId, input.token, verified.generation, now))) return { ok: false, reason: 'refused' };
     return { ok: true, ...base, reservedMicros: null };
   }
   if (!Number.isSafeInteger(input.estimateMicros) || input.estimateMicros <= 0 || input.estimateMicros > MAX_MICROS) return { ok: false, reason: 'refused' };
@@ -80,6 +82,13 @@ export async function authorizeModelCall(
       await releaseRoom({ key: callRoomKey(base.jobId, input.callId) }, now);
       return { ok: false, reason: 'refused' };
     }
+    // A cutoff for our own capacity that was deciding at the same moment either counted this room (and did not stop the job) or won (the key is no longer good): the room goes back, never both
+    if (!(await authorizedPastCutoff(base.jobId, input.token, verified.generation, now))) {
+      await releaseRoom({ key: callRoomKey(base.jobId, input.callId) }, now);
+      return { ok: false, reason: 'refused' };
+    }
+    // Capacity is back: what was refused before it stops deciding the turns that come after
+    await retirePoolRefusals(prisma, base.jobId).catch((error) => console.error('[Computer] Could not retire a recovered pool refusal:', error instanceof Error ? error.message : 'unknown'));
     return { ok: true, ...base, reservedMicros: room.reservation.amountMicros };
   }
   // A call refused for the person's own allowance or a rule they said ends the job right here, as a refused renewal does (stopped, by `allowance` or `rule`,
@@ -94,7 +103,8 @@ export async function authorizeModelCall(
   }
   // Asked again for a call whose room was settled or lapsed: the first try is the call, and a second one is not another
   if (room.reason === 'closed' || room.reason === 'key_reused') return { ok: false, reason: 'refused' };
-  await refusedForPool(base.jobId, input.callId, input.route ?? null, now);
+  // A call refused for its own SIZE (the room left is smaller than what it asked, `full: false`) says nothing about our capacity: only a pool with no room even for the smallest call is ours
+  if (!(room.reason === 'pool' && room.full !== true)) await refusedForPool(base.jobId, input.callId, input.route ?? null, now);
   return { ok: false, reason: 'pool', full: room.reason === 'pool' && room.full === true };
 }
 
@@ -109,18 +119,40 @@ export const POOL_REFUSALS_BEFORE_STOP = 2;
  */
 async function refusedForPool(jobId: string, callId: string, route: string | null, now: Date): Promise<void> {
   try {
-    // Only a job whose calls have ALL been refused so far: one that had a call authorized before is left to the relay's own words
-    const [authorized, priced] = await Promise.all([
-      prisma.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') } } }),
-      prisma.meterEvent.count({ where: { jobId, kind: 'model_call' } }),
-    ]);
-    if (authorized > 0 || priced > 0) return;
-    const refused = await recordPoolRefusal(prisma, jobId, callId, { route, at: now });
-    if (refused < POOL_REFUSALS_BEFORE_STOP) return;
-    await endForRefusal(jobId, { reason: 'pool', words: POOL_BUSY_WORDS }, now);
+    // One lock per job, held from the count to the end of the job: an authorization that is deciding at the same moment waits for it (`authorizedPastCutoff`), so the job is never stopped for a count of
+    // zero authorized calls that a call authorized meanwhile made wrong, and a call authorized after the stop is refused
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
+        // Only a job whose calls have ALL been refused so far: one that had a call authorized before (a room held or priced, or one on the person's own key, which leaves only its marker) is left to the relay's own words
+        const authorized = await tx.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') } } });
+        const priced = authorized > 0 ? 0 : await tx.meterEvent.count({ where: { jobId, kind: 'model_call' } });
+        if (authorized > 0 || priced > 0 || (await hasOwnKeyCall(tx, jobId))) return;
+        const refused = await recordPoolRefusal(tx, jobId, callId, { route, at: now });
+        if (refused < POOL_REFUSALS_BEFORE_STOP) return;
+        await endForRefusal(jobId, { reason: 'pool', words: POOL_BUSY_WORDS }, now);
+      },
+      { timeout: 120_000, maxWait: 30_000 },
+    );
   } catch (error) {
     console.error('[Computer] Could not note a model call refused for our capacity:', error instanceof Error ? error.message : 'unknown');
   }
+}
+
+const cutoffLockKey = (jobId: string): string => `computer-call-cutoff:${jobId}`;
+
+/**
+ * Whether a call that was just authorized (its room held, or its marker kept) stands against a cutoff for our own capacity that may be deciding at the same moment. A job with no refusal of ours kept has none
+ * (the common case: one count, nothing waited for). Otherwise this waits for the job's cutoff lock, which the cutoff holds until the job has ended, and then asks again whether the key is still good: a cutoff that
+ * counted this call stopped nothing, and one that won ended the job (the key is gone), so the call is refused and its room goes back.
+ */
+async function authorizedPastCutoff(jobId: string, token: string, generation: number, now: Date): Promise<boolean> {
+  if (!(await hasPoolRefusals(prisma, jobId))) return true;
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
+  });
+  const after = await verifyJobToken(token, 'model', now);
+  return after.ok && after.generation === generation;
 }
 
 /** True when this call id already holds room for this job and person: room held and not lapsed (what reserving it again would answer with its own reservation). */

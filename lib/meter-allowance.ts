@@ -138,6 +138,8 @@ export interface Envelope {
   chatMicros: number;
   /** Jobs going now, everyone together. */
   jobsRunning: number;
+  /** The reservations that ran out and were never settled or released, read from the very rows `unsettledMicros` counts them from (so the two can never disagree, whatever settles or releases meanwhile). */
+  lapsed: { count: number; micros: number; oldestLapsedAt: Date | null };
 }
 
 /**
@@ -176,9 +178,15 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
   ]);
   let reserved = 0;
   let lapsed = 0;
+  let lapsedCount = 0;
+  let oldestLapsedAt: Date | null = null;
   for (const row of held) {
     if (row.expiresAt > now) reserved += Number(row.amountMicros);
-    else lapsed += Number(row.amountMicros);
+    else {
+      lapsed += Number(row.amountMicros);
+      lapsedCount += 1;
+      if (!oldestLapsedAt || row.expiresAt < oldestLapsedAt) oldestLapsedAt = row.expiresAt;
+    }
   }
   // A gigabyte is 10^9 bytes; rounded up in whole millionths of a dollar, and in BigInt so a very large disk cannot lose a digit
   const keptStorageMicros = storageMonthMicros(kept[0]?.bytes ?? BigInt(0), settings);
@@ -196,6 +204,7 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
     chatMicros: asNumber(chat._sum.costMicros),
     // The room held for one model call inside a job is not another job running
     jobsRunning: held.filter((row) => row.expiresAt > now && !isNoJob(row.reservationKey)).length,
+    lapsed: { count: lapsedCount, micros: lapsed, oldestLapsedAt },
   };
 }
 
@@ -225,10 +234,9 @@ export interface PoolStatus {
 export async function poolStatusNow(now: Date = new Date()): Promise<PoolStatus | null> {
   const settings = await getMeterSettings();
   if (missingSettings(settings).length > 0) return null;
-  const [envelope, lapsed] = await Promise.all([
-    envelopeIn(prisma, now, settings),
-    prisma.meterReservation.aggregate({ where: { ...stillCounts(now), expiresAt: { lte: now } }, _count: { _all: true }, _sum: { amountMicros: true }, _min: { expiresAt: true } }),
-  ]);
+  // One read of the reservations, the envelope's own: the lapsed holds are counted from the same rows its unsettled spend counts them from, so a settlement or release in between can never leave
+  // `lapsed` larger than `unsettled` (a negative "recorded and not settled" in the check)
+  const envelope = await envelopeIn(prisma, now, settings);
   const ceilingMicros = settings.poolCeilingMicros ?? 0;
   return {
     ceilingMicros,
@@ -239,7 +247,7 @@ export async function poolStatusNow(now: Date = new Date()): Promise<PoolStatus 
     keptStorageMicros: envelope.keptStorageMicros,
     reserveMicros: envelope.reserveMicros,
     chatMicros: envelope.chatMicros,
-    lapsed: { count: lapsed._count._all, micros: asNumber(lapsed._sum.amountMicros), oldestLapsedAt: lapsed._min.expiresAt ?? null },
+    lapsed: envelope.lapsed,
     leftMicros: Math.max(0, ceilingMicros - envelope.totalMicros),
     // The same comparison `fits` makes for a call of the usual size
     refusing: envelope.totalMicros + USUAL_CALL_ROOM_MICROS > ceilingMicros,

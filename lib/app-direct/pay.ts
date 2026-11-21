@@ -728,7 +728,7 @@ const stateOf = (status: string): OrderState => (status === 'paid' ? 'paid' : st
  * Asks the service about one order and moves it on. Safe to call as often as anyone likes (the visitor's page, the return page, the
  * service's notice): the service itself is asked at most once in `paymentCheckSeconds` (more for an order that has waited long) for an order, and "paid" is written once.
  */
-export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?: { contacted: boolean }, how: { background?: boolean; explicit?: boolean } = {}): Promise<OrderView | null> {
+export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?: { contacted: boolean; noRoom?: 'owner' | 'platform' }, how: { background?: boolean; explicit?: boolean } = {}): Promise<OrderView | null> {
   const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, include: { connection: true, job: { select: { artifact: { select: { title: true } } } } } });
   if (!order) return null;
   const view = (status: string, mode: string | null = order.mode): OrderView => ({ status: stateOf(status), checkoutUrl: status === 'pending' ? order.checkoutUrl : null, testPayment: mode === 'test', orderId: order.id, pollAfterMs: pollAfterMs(order.createdAt) });
@@ -760,9 +760,22 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // What the order may still become: a pending one anything, a closed one only paid (or cannot-confirm for a payment that does not match)
   const open = { in: ['pending', 'not_paid', 'cant_confirm'] };
   const sinceWindow = Math.max(0, now.getTime() - windowEndsAt);
-  // A look that cannot be made now (no app, no key) is put off by the order's own schedule, so a sweep does not come back to it every pass
+  // A look that is not read once is tried again soon; one that keeps not being read backs off (twice the time since the look before it, which was not read either) up to the order's own cadence
+  // (monthly after 90 days), and never stops. A look before it that WAS read makes this the first failure of a streak
+  const lastLookWasRead = !!order.lastReadAt && !!order.checkedAt && order.lastReadAt.getTime() >= order.checkedAt.getTime() - 1000;
+  const streakGap = order.checkedAt && !lastLookWasRead ? Math.max(0, now.getTime() - order.checkedAt.getTime()) : 0;
+  const unreadWait = (): number => Math.min(reconcileEveryMs(sinceWindow), Math.max(UNREAD_RETRY_MS, 2 * streakGap));
+  // Only the look that claimed the order schedules its retry: an older look that fails after a newer one was taken (and read, and scheduled the order by its age) must not overwrite that schedule
+  const retrySoon = async (): Promise<void> => {
+    if (reconciling) await prisma.appPageOrder.updateMany({ where: { id: order.id, reconciled: false, checkedAt: now }, data: { nextLookAt: new Date(now.getTime() + unreadWait()) } }).catch(() => undefined);
+  };
+  // A look that cannot be made now (no app, no key to ask with) is a failed look that needs a person to connect the app again: it is counted as one (the claim is taken here, so `unreadLooks` and the
+  // warning to Sentry see it, with the same backoff as any look that was not read), and the order's own schedule moves on so a sweep does not come back to it every pass. Never a budget denial: that one is
+  // given back whole, because it recovers without anyone doing anything. Only from the state it was read in, so a look that came in meanwhile is never overwritten
   const putOff = async () => {
-    await prisma.appPageOrder.updateMany({ where: { id: order.id, reconciled: false }, data: { nextLookAt: new Date(now.getTime() + reconcileEveryMs(sinceWindow)) } }).catch(() => undefined);
+    await prisma.appPageOrder
+      .updateMany({ where: { id: order.id, reconciled: false, checkedAt: order.checkedAt, checks: order.checks }, data: { checkedAt: now, checks: { increment: 1 }, nextLookAt: new Date(now.getTime() + unreadWait()) } })
+      .catch(() => undefined);
     return later(view(order.status));
   };
 
@@ -788,14 +801,6 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // page stops waiting, and a payment that turns out to be real is still found by the later looks (a closed order is asked about for a while).
   // The look that was taken moved the order's own schedule on by its age-based interval (up to a week) BEFORE the service was asked: a look that is not read is tried again soon instead,
   // never a week later. The age-based interval stays for a look that was read
-  // A look that is not read once is tried again soon; one that keeps not being read backs off (twice the time since the look before it, which was not read either) up to the order's own cadence
-  // (monthly after 90 days), and never stops. A look before it that WAS read makes this the first failure of a streak
-  const lastLookWasRead = !!order.lastReadAt && !!order.checkedAt && order.lastReadAt.getTime() >= order.checkedAt.getTime() - 1000;
-  const streakGap = order.checkedAt && !lastLookWasRead ? Math.max(0, now.getTime() - order.checkedAt.getTime()) : 0;
-  const retrySoon = async (): Promise<void> => {
-    const wait = Math.min(reconcileEveryMs(sinceWindow), Math.max(UNREAD_RETRY_MS, 2 * streakGap));
-    if (reconciling) await prisma.appPageOrder.updateMany({ where: { id: order.id, reconciled: false }, data: { nextLookAt: new Date(now.getTime() + wait) } }).catch(() => undefined);
-  };
   // An order past its open time ends, whatever stopped it being looked at
   const endIfOutOfTime = async (): Promise<OrderView | null> => {
     if (!wasClosed && now.getTime() - order.createdAt.getTime() > limits.checkoutOpenHours * HOUR) {
@@ -823,8 +828,10 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // ordinary spacing allows; every other asker (the done page that refreshes, the poll, the service's notice) keeps the age-grown spacing, so a tab left open on an order
   // that stays unpaid never spends the owner's looks at the short interval for ever
   const due = reconciling && how.background ? { OR: [{ nextLookAt: null }, { nextLookAt: { lte: now } }] } : { OR: [{ checkedAt: null }, { checkedAt: { lt: new Date(now.getTime() - (reconciling && how.explicit ? limits.paymentCheckSeconds : spacing) * 1000) } }] };
+  // The claim is made on the state the order was read in (its last look, its count of looks and, in the long wait, its schedule): when a look came in between the read and now, this one is not taken, so
+  // what is given back on a budget denial is always exactly what stood immediately before THIS claim, never something older that would undo the look in between
   const taken = await prisma.appPageOrder.updateMany({
-    where: { id: order.id, status: open, ...(reconciling ? { reconciled: false } : {}), ...due },
+    where: { id: order.id, status: open, ...(reconciling ? { reconciled: false, nextLookAt: order.nextLookAt } : {}), checkedAt: order.checkedAt, checks: order.checks, ...due },
     data: { checkedAt: now, checks: { increment: 1 }, ...(reconciling ? { nextLookAt: new Date(now.getTime() + reconcileEveryMs(sinceWindow)) } : {}) },
   });
   if (taken.count === 0) {
@@ -857,15 +864,18 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
         tx.appKeyCall.count({ where: { ownerId: LOOKUP_ROWS, createdAt: { gte: since } } }),
         tx.appKeyCall.count({ where: { ownerId: LOOKUP_ROWS, callId: { startsWith: `look:${order.ownerId}:` }, createdAt: { gte: since } } }),
       ]);
-      if (everyone >= limits.keyCallsPlatform || owners >= limits.paymentLooksPerOwner) return false;
+      // Whose room is spent: the platform's (nobody has any) or this owner's alone (other owners may have room), so a sweep can go on to them
+      if (everyone >= limits.keyCallsPlatform) return 'platform' as const;
+      if (owners >= limits.paymentLooksPerOwner) return 'owner' as const;
       // Not counted for the owner's own hourly allowance (a buyer's page asks, not the owner)
       await tx.appKeyCall.create({ data: { connectionId: connection.id, ownerId: LOOKUP_ROWS, botId: LOOKUP_ROWS, callId: `look:${order.ownerId}:${order.id}:${order.checks + 1}`, operation: lookup.operation.slice(0, 60), state: 'done', outcome: 'ok' } });
-      return true;
+      return 'room' as const;
     })
-    .catch(() => false);
+    .catch(() => 'error' as const);
   // No room for looks: it waits, but an order past its open time still ends (it is not left "checking" because looks ran short)
-  if (!budget) {
+  if (budget !== 'room') {
     lookStats.noRoom += 1;
+    if (trace && (budget === 'owner' || budget === 'platform')) trace.noRoom = budget;
     // The claim above moved the order's own schedule on by its age-based interval, but nothing was asked of the service: the whole claim is given back, so an order in the long wait is due at the next sweep
     // (when the hourly room is back it is looked at), never a week later and never backed off as if the service could not be read. The age-based interval stays for a look that was really made
     await giveBackClaim();
@@ -943,7 +953,9 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
       return view('not_paid');
     }
     if (!expired) return (await moveOrder(order.id, { from: 'cant_confirm', to: 'pending', reason: 'readable_again' })) ? view('pending') : view(order.status);
-    return (await moveOrder(order.id, { from: 'cant_confirm', to: 'not_paid', reason: 'open_time_ran_out', data: { closedAt: now } })) ? view('not_paid') : view(order.status);
+    // It closes as of when its time ran out (or when it was closed, if it already was): a readable answer that is not final must not start the late window, and the buyer's 90 days, over again
+    const closedAt = order.closedAt ?? new Date(order.createdAt.getTime() + limits.checkoutOpenHours * HOUR);
+    return (await moveOrder(order.id, { from: 'cant_confirm', to: 'not_paid', reason: 'open_time_ran_out', data: { closedAt } })) ? view('not_paid') : view(order.status);
   }
   // A closed order that the service still does not call completed stays closed. When the service names a final failed state nothing more is asked
   // after the late window: that is its last word. Anything else (started, authorised only) is not, and stays in the long wait.
@@ -1111,15 +1123,19 @@ export async function restorePurchase(input: { artifactId: string; buyerKeys: st
   const limits = await getBrickLimits();
   const now = new Date();
   const due = new Date(now.getTime() - limits.paymentCheckSeconds * 1000);
-  const open = await prisma.appPageOrder.findMany({
-    where: { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, AND: [askable(now, limits, true), { OR: [{ checkedAt: null }, { checkedAt: { lt: due } }] }] },
-    orderBy: [{ checkedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'desc' }],
-    take: RESTORE_LOOKS,
-    select: { id: true },
-  });
-  for (const order of open) await verifyOrder(order.id, deps, undefined, { explicit: true }).catch(() => null);
   const offer = await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, select: { amountMinor: true, currency: true } });
   const forOffer = offer ? { amountMinor: offer.amountMinor, currency: offer.currency } : {};
+  // The orders for what this page sells NOW are asked about first (the ones asked about longest ago first), so older orders at an old price, however many are still unresolved, can never use up every look
+  // of a restore and leave the current offer's order handed back unchecked. What is left of the restore's looks goes to the older ones, which are also asked about in the background and by Check payment
+  const ofBuyer = { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys } };
+  const spaced = [askable(now, limits, true), { OR: [{ checkedAt: null }, { checkedAt: { lt: due } }] }];
+  const lookOrder = [{ checkedAt: { sort: 'asc' as const, nulls: 'first' as const } }, { createdAt: 'desc' as const }];
+  const current = await prisma.appPageOrder.findMany({ where: { ...ofBuyer, ...forOffer, AND: spaced }, orderBy: lookOrder, take: RESTORE_LOOKS, select: { id: true } });
+  const older =
+    offer && current.length < RESTORE_LOOKS
+      ? await prisma.appPageOrder.findMany({ where: { ...ofBuyer, NOT: forOffer, AND: spaced }, orderBy: lookOrder, take: RESTORE_LOOKS - current.length, select: { id: true } })
+      : [];
+  for (const order of [...current, ...older]) await verifyOrder(order.id, deps, undefined, { explicit: true }).catch(() => null);
   const mine = { artifactId: input.artifactId, buyerKey: { in: input.buyerKeys }, ...forOffer };
   // A live purchase is asked for first, so test ones however many and however new can never push it out
   const live = await prisma.appPageOrder.findFirst({ where: { ...mine, status: 'paid', OR: [{ mode: null }, { mode: { not: 'test' } }] }, orderBy: { paidAt: 'desc' }, select: { id: true, mode: true, paidAt: true, buyerKey: true } });
@@ -1159,6 +1175,63 @@ const SWEEP_BATCH = 50;
 /** An order is left alone by a sweep this long after anyone asked about it: the buyer's own page and the service's notices do the quick part. */
 const SWEEP_QUIET_MS = 5 * 60_000;
 
+/** The most pages of candidates one pass reads when owners without room are being skipped: a bound, so a pass can never scan the table. */
+const SWEEP_ROUNDS = 20;
+
+/**
+ * One pass of a sweep: up to SWEEP_BATCH orders are asked about, the next due first. An order that finds no room in its OWNER's hourly allowance stays due exactly as it was (its claim is given back),
+ * and the pass goes on with the orders of every other owner (never the same first fifty over and over while one owner's room is spent); no room in the PLATFORM's allowance ends the pass, since
+ * nobody has any. At most SWEEP_ROUNDS pages are read.
+ */
+async function sweepPass(
+  sweep: OrderSweep,
+  where: () => Prisma.AppPageOrderWhereInput,
+  orderBy: Prisma.AppPageOrderOrderByWithRelationInput[],
+  how: { background?: boolean },
+  moved: (view: OrderView, before: string) => boolean,
+  failure: string,
+  deps: GuardDeps,
+): Promise<void> {
+  const noRoomOwners: string[] = [];
+  let asked = 0;
+  for (let round = 0; round < SWEEP_ROUNDS && asked < SWEEP_BATCH; round += 1) {
+    const page = await prisma.appPageOrder.findMany({
+      where: noRoomOwners.length > 0 ? { AND: [where(), { ownerId: { notIn: noRoomOwners } }] } : where(),
+      orderBy,
+      take: SWEEP_BATCH - asked,
+      select: { id: true, status: true, ownerId: true },
+    });
+    if (page.length === 0) return;
+    let skipped = false;
+    for (const order of page) {
+      if (noRoomOwners.includes(order.ownerId)) {
+        skipped = true;
+        continue;
+      }
+      asked += 1;
+      const before = order.status;
+      const trace: { contacted: boolean; noRoom?: 'owner' | 'platform' } = { contacted: false };
+      const view = await verifyOrder(order.id, deps, trace, how).catch((error) => {
+        console.error(`[PagePayments] ${failure}`, error instanceof Error ? error.message : 'unknown');
+        return null;
+      });
+      if (trace.noRoom === 'platform') return;
+      if (trace.noRoom === 'owner') {
+        noRoomOwners.push(order.ownerId);
+        // This one asked nothing: it does not use up the pass's share
+        asked -= 1;
+        skipped = true;
+        continue;
+      }
+      if (!view) continue;
+      if (trace.contacted) sweep.looked += 1;
+      if (moved(view, before)) sweep.moved += 1;
+    }
+    // A page with nothing skipped and fewer orders than asked for has reached the end of what is due
+    if (!skipped) return;
+  }
+}
+
 /**
  * Safe to run any time, twice at once: orders nobody is watching (the buyer closed the page, the browser never came back, the service's
  * notice never arrived) are asked about at the service by this, and ones whose start never finished are ended when their open time is up. Never
@@ -1174,41 +1247,25 @@ export async function sweepPageOrders(now: Date = new Date(), deps: GuardDeps = 
   }
   const quiet = new Date(now.getTime() - SWEEP_QUIET_MS);
   // The long wait is a pass of its own, by each order's own schedule, so orders that are due never wait behind ones that are not
-  const waiting = await prisma.appPageOrder.findMany({
-    where: { AND: [longWaitWhere(now, limits), { OR: [{ nextLookAt: null }, { nextLookAt: { lte: now } }] }] },
-    orderBy: [{ nextLookAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
-    take: SWEEP_BATCH,
-    select: { id: true, status: true },
-  });
-  for (const order of waiting) {
-    const before = order.status;
-    const trace = { contacted: false };
-    const view = await verifyOrder(order.id, deps, trace, { background: true }).catch((error) => {
-      console.error('[PagePayments] A reconciliation look failed:', error instanceof Error ? error.message : 'unknown');
-      return null;
-    });
-    if (!view) continue;
-    if (trace.contacted) sweep.looked += 1;
-    if (stateOf(before) !== view.status) sweep.moved += 1;
-  }
-  const open = await prisma.appPageOrder.findMany({
-    where: { AND: [askable(now, limits), { OR: [{ checkedAt: null }, { checkedAt: { lt: quiet } }] }] },
-    orderBy: [{ checkedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
-    take: SWEEP_BATCH,
-    select: { id: true, status: true },
-  });
-  for (const order of open) {
-    const before = order.status;
-    const trace = { contacted: false };
-    const view = await verifyOrder(order.id, deps, trace).catch((error) => {
-      console.error('[PagePayments] A sweep look failed:', error instanceof Error ? error.message : 'unknown');
-      return null;
-    });
-    if (!view) continue;
+  await sweepPass(
+    sweep,
+    () => ({ AND: [longWaitWhere(now, limits), { OR: [{ nextLookAt: null }, { nextLookAt: { lte: now } }] }] }),
+    [{ nextLookAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
+    { background: true },
+    (view, before) => stateOf(before) !== view.status,
+    'A reconciliation look failed:',
+    deps,
+  );
+  await sweepPass(
+    sweep,
+    () => ({ AND: [askable(now, limits), { OR: [{ checkedAt: null }, { checkedAt: { lt: quiet } }] }] }),
+    [{ checkedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
+    {},
     // Only a call that asked the service is a look: one that was spaced, or had no room, is not counted
-    if (trace.contacted) sweep.looked += 1;
-    if (stateOf(before) !== view.status && !(before === 'pending' && view.status === 'checking')) sweep.moved += 1;
-  }
+    (view, before) => stateOf(before) !== view.status && !(before === 'pending' && view.status === 'checking'),
+    'A sweep look failed:',
+    deps,
+  );
   return sweep;
 }
 

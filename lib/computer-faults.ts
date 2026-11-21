@@ -245,6 +245,21 @@ export async function recordPoolRefusal(db: Pick<Prisma.TransactionClient, 'comp
   return db.computerJobFault.count({ where: { jobId, callId: { startsWith: ORBIT_POOL_CALL_PREFIX } } });
 }
 
+/** Whether the job has a pool refusal of Orbit's own that still counts (one that no later authorized call has recovered). Reads only. */
+export async function hasPoolRefusals(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string): Promise<boolean> {
+  return (await db.computerJobFault.count({ where: { jobId, callId: { startsWith: ORBIT_POOL_CALL_PREFIX }, kind: 'fault' } })) > 0;
+}
+
+/**
+ * A call of the job was authorized after capacity was refused: the refusal is recovered, and stops deciding anything. Its rows are turnless (Orbit knows no turn at the moment it refuses a call), so
+ * left as they were they would apply to EVERY turn the runner judges later, and a turn that failed for the agent's own reason would read as a fault of ours. The refused call's own turn is still
+ * covered by the relay's own turn-scoped row for that call. The rows stay as evidence (kind `answered`, which no ruling reads); safe to say twice.
+ */
+export async function retirePoolRefusals(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string): Promise<number> {
+  const retired = await db.computerJobFault.updateMany({ where: { jobId, callId: { startsWith: ORBIT_POOL_CALL_PREFIX }, kind: 'fault' }, data: { kind: 'answered', reason: 'pool_recovered' } });
+  return retired.count;
+}
+
 /** The call id of Orbit's one marker per job that a call on the person's own key was authorized. */
 export const OWN_KEY_CALL_MARK = 'orbit:own-key-call';
 
@@ -258,4 +273,9 @@ export async function recordOwnKeyCall(db: Pick<Prisma.TransactionClient, 'compu
     data: [{ jobId, turn: null, run: null, callId: OWN_KEY_CALL_MARK, kind: 'answered', reason: 'own_key_call', source: 'own-key', route: null, providerStatus: null, at }],
     skipDuplicates: true,
   });
+}
+
+/** Whether a call on the person's own key was authorized for this job (the marker above). Reads only. */
+export async function hasOwnKeyCall(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string): Promise<boolean> {
+  return (await db.computerJobFault.count({ where: { jobId, callId: OWN_KEY_CALL_MARK } })) > 0;
 }

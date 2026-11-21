@@ -2082,6 +2082,121 @@ run('payments for pages, in a real database', () => {
           expect((await pagePaymentLoad()).unconfirmed.stalled).toEqual(['unreadable']);
         });
 
+        it('an order whose app was disconnected after a good read is a failed look that needs a person: counted, backed off and alerted as unreadable, never a quiet future schedule (CodeRabbit)', async () => {
+          const made = await pending();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
+          const lastLook = new Date(Date.now() - 3 * DAY);
+          const order = await longOrder(made.artifactId, word(), 'chg_LW50', 60, { checks: 5, checkedAt: lastLook, lastReadAt: lastLook, nextLookAt: new Date(Date.now() - 60_000) });
+          // The app is disconnected: the order's connection and the page's are gone
+          await prisma.appPageOrder.update({ where: { id: order.id }, data: { connectionId: null } });
+          await prisma.appPageJob.deleteMany({ where: { artifactId: made.artifactId } });
+          await prisma.appConnection.delete({ where: { id: made.connectionId } });
+          await sweepPageOrders();
+          const kept = await row(order.id);
+          expect(kept.checks).toBe(6);
+          expect(kept.checkedAt!.getTime()).toBeGreaterThan(lastLook.getTime());
+          expect(kept.lastReadAt!.getTime()).toBe(lastLook.getTime());
+          expect(await nextIn(order.id)).toBeGreaterThan(0);
+          expect(await nextIn(order.id)).toBeLessThanOrEqual(15 * 60_000 + 5_000);
+          expect((await pagePaymentLoad()).unconfirmed).toMatchObject({ unreadLooks: 1, stalled: ['unreadable'] });
+          // Still not back an hour later: the wait doubles, and the alert stays
+          await prisma.appPageOrder.update({ where: { id: order.id }, data: { checkedAt: new Date(Date.now() - 2 * 3_600_000), nextLookAt: new Date(Date.now() - 1_000) } });
+          await sweepPageOrders();
+          expect(await nextIn(order.id)).toBeGreaterThan(3.5 * 3_600_000);
+          expect((await pagePaymentLoad()).unconfirmed.stalled).toEqual(['unreadable']);
+        });
+
+        it('an older look that fails after a newer one was taken never overwrites the newer look’s schedule (CodeRabbit)', async () => {
+          const { artifactId } = await setUp();
+          const order = await longOrder(artifactId, word(), 'chg_LW60', 60, { checks: 3, checkedAt: new Date(Date.now() - 3 * DAY), lastReadAt: new Date(Date.now() - 3 * DAY), nextLookAt: new Date(Date.now() - 60_000) });
+          const newer = new Date(Date.now() + 5_000);
+          const scheduled = new Date(Date.now() + 9 * DAY);
+          // The first look is still in flight when a newer look takes the order, reads the service and sets the age-based schedule; then the first one fails
+          mockSend.current = async () => {
+            await prisma.appPageOrder.update({ where: { id: order.id }, data: { checkedAt: newer, checks: { increment: 1 }, lastReadAt: newer, nextLookAt: scheduled } });
+            return { status: 503, body: { error: 'down' } };
+          };
+          await verifyOrder(order.id, undefined, undefined, { background: true });
+          expect((await row(order.id)).nextLookAt!.getTime()).toBe(scheduled.getTime());
+        });
+
+        it('a budget denial restores the state immediately before ITS claim: a look that came in between the read and the claim is never undone (CodeRabbit)', async () => {
+          const { artifactId } = await setUp();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, paymentLooksPerOwner: 1 } }, sara);
+          const first = new Date(Date.now() - 3 * DAY);
+          const mid = new Date(Date.now() - 2 * 3_600_000);
+          const scheduled = new Date(Date.now() + 9 * DAY);
+          const order = await longOrder(artifactId, word(), 'chg_LW70', 60, { checks: 3, checkedAt: first, lastReadAt: first, nextLookAt: new Date(Date.now() - 60_000) });
+          // The owner's hourly room is spent
+          await prisma.appKeyCall.create({ data: { connectionId: (await row(order.id)).connectionId!, ownerId: 'page-payments', botId: 'page-payments', callId: `look:${sara}:spent:1`, operation: 'x', state: 'done', outcome: 'ok' } });
+          // Another look reads the order and finishes between this check's read of the order and its claim
+          const real = prisma.appPageOrder.updateMany.bind(prisma.appPageOrder);
+          const spy = jest.spyOn(prisma.appPageOrder, 'updateMany').mockImplementationOnce(((args: never) =>
+            prisma.appPageOrder.update({ where: { id: order.id }, data: { checkedAt: mid, checks: { increment: 1 }, lastReadAt: mid, nextLookAt: scheduled } }).then(() => real(args))) as never);
+          await verifyOrder(order.id, undefined, undefined, { explicit: true });
+          spy.mockRestore();
+          const kept = await row(order.id);
+          expect({ checks: kept.checks, checkedAt: kept.checkedAt?.getTime(), lastReadAt: kept.lastReadAt?.getTime(), nextLookAt: kept.nextLookAt?.getTime() }).toEqual({ checks: 4, checkedAt: mid.getTime(), lastReadAt: mid.getTime(), nextLookAt: scheduled.getTime() });
+        });
+
+        it('one owner’s spent room never keeps the sweep from other owners: the denied orders stay due as they were, the pass goes on to the others, and the platform’s spent room ends it (CodeRabbit)', async () => {
+          const { artifactId } = await setUp();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, paymentLooksPerOwner: 1 } }, sara);
+          // Sara's room for looks is spent; she has 52 orders due (more than one pass takes), the oldest first; Omar has one, due later
+          const first = await longOrder(artifactId, word(), 'chg_LW80', 60, { nextLookAt: new Date(Date.now() - 600 * 60_000) });
+          await prisma.appKeyCall.create({ data: { connectionId: first.connectionId!, ownerId: 'page-payments', botId: 'page-payments', callId: `look:${sara}:spent:1`, operation: 'x', state: 'done', outcome: 'ok' } });
+          const hers: string[] = [first.id];
+          for (let i = 1; i < 52; i += 1) hers.push((await longOrder(artifactId, word(), `chg_LW8${i}`, 60, { nextLookAt: new Date(Date.now() - (600 - i) * 60_000) })).id);
+          const his = await longOrder(artifactId, word(), 'chg_LW90', 60, { ownerId: omar, nextLookAt: new Date(Date.now() - 60_000) });
+          const sent = gateway({ record: () => paidRecord('x', { status: 'INITIATED' }) });
+          await sweepPageOrders();
+          // Omar's was asked about (his room is his own); not one of Sara's was, and every one of hers is exactly as due as it was
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(1);
+          expect((await row(his.id)).checks).toBe(1);
+          for (const id of hers) expect(await row(id)).toMatchObject({ checks: 0, checkedAt: null });
+          expect(await prisma.appPageOrder.count({ where: { id: { in: hers }, nextLookAt: { lte: new Date() } } })).toBe(52);
+        });
+
+        it('the platform’s own spent room ends the pass at once: nobody has any, so no further order is tried', async () => {
+          const { artifactId } = await setUp();
+          await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48, keyCallsPlatform: 1 } }, sara);
+          const a = await longOrder(artifactId, word(), 'chg_LW95', 60, { nextLookAt: new Date(Date.now() - 600 * 60_000) });
+          await prisma.appKeyCall.create({ data: { connectionId: a.connectionId!, ownerId: 'page-payments', botId: 'page-payments', callId: `look:${sara}:spent:1`, operation: 'x', state: 'done', outcome: 'ok' } });
+          for (let i = 0; i < 5; i += 1) await longOrder(artifactId, word(), `chg_LW96${i}`, 60, { ownerId: omar, nextLookAt: new Date(Date.now() - (500 - i) * 60_000) });
+          const before = lookStats.noRoom;
+          const sent = gateway({ record: () => paidRecord('x', { status: 'INITIATED' }) });
+          await sweepPageOrders();
+          expect(lookStats.noRoom - before).toBe(1);
+          expect(sent.filter((target) => target.method === 'GET')).toHaveLength(0);
+        });
+
+        it('Restore asks about the orders of the page’s current offer first: five older orders at an old price never use up every look and leave the current one unchecked (CodeRabbit)', async () => {
+          const { artifactId } = await setUp();
+          const code = word();
+          const keys = [buyerOf(code)];
+          const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+          for (let i = 0; i < 5; i += 1) await longOrder(artifactId, code, `chg_OLD${i}`, 60, { amountMinor: jobRow.amountMinor + 1000, checkedAt: null });
+          // The order at the current price is still open, and was captured at the service
+          const current = await lostOrder(artifactId, code, wish(), { status: 'pending', providerRef: 'chg_CUR', reconciled: false, createdAt: new Date(Date.now() - 20 * 60_000), checkedAt: new Date(Date.now() - 3_600_000), checkoutUrl: 'https://checkout.examplepay.com/?mode=page&token=abc' });
+          mockSend.current = (target) => (target.path.includes('chg_CUR') ? { status: 200, body: paidRecord(current.id, { id: 'chg_CUR' }) } : { status: 200, body: { id: 'old', status: 'INITIATED', amount: 5.5, currency: 'KWD', live_mode: false, reference: { order: 'x' } } });
+          expect(await restorePurchase({ artifactId, buyerKeys: keys, ownKeys: keys })).toMatchObject({ status: 'paid', orderId: current.id });
+        });
+
+        it('a cannot-confirm order that reads as still started keeps the time it closed at: the buyer’s 90 days do not start over (CodeRabbit)', async () => {
+          const { artifactId } = await setUp();
+          const code = word();
+          const keys = [buyerOf(code)];
+          const created = new Date(Date.now() - 200 * DAY);
+          const order = await lostOrder(artifactId, code, wish(), { status: 'cant_confirm', providerRef: 'chg_CC1', reconciled: false, createdAt: created, closedAt: null, nextLookAt: null });
+          gateway({ record: () => paidRecord(order.id, { status: 'INITIATED' }) });
+          await verifyOrder(order.id, undefined, undefined, { background: true });
+          const kept = await row(order.id);
+          expect(kept.status).toBe('not_paid');
+          // Closed as of when its open time ran out (an hour after it began), not now
+          expect(kept.closedAt!.getTime()).toBe(created.getTime() + 3_600_000);
+          expect(await restorePurchase({ artifactId, buyerKeys: keys, ownKeys: keys })).toMatchObject({ status: 'checking', longWait: true, longWaitOver: true, orderId: order.id });
+        });
+
         it('the long-wait pass takes a fixed batch per sweep, the oldest look first', async () => {
           const { artifactId } = await setUp();
           const ids: string[] = [];
