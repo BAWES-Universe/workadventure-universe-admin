@@ -619,6 +619,54 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await prisma.computerJob.count({ where: { personId: sara.id, endedBy: 'error' } })).toBe(2);
     });
 
+    describe('a refusal for our capacity that capacity recovered from (Opus: the refused turn is still ours, with the relay’s own row, on time or late)', () => {
+      /** A job whose first call (turn 1) was refused with the pool full, whose later call was authorized (capacity back), and which then failed naming turn 1. `relayRow`: the relay's own fault row for the refused call. */
+      const refusedThenRecovered = async (relayRow: 'before' | 'after' | 'never') => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+        const sara = await person('sara');
+        // The bound is spent: only a confirmed fault of ours can give this job back (so goodwill can never be what gives it)
+        await job(sara, ours);
+        let jobId = '';
+        const ended = await job(sara, { ...ours, turns: [1] }, async (id) => {
+          jobId = id;
+          const { token } = (await mintJobToken(id, 'model', NOW)) as { token: string };
+          await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 60_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+          expect(await authorizeModelCall({ token, callId: 'c1', estimateMicros: 1_000, payer: 'universe' }, NOW)).toEqual({ ok: false, reason: 'pool', full: true });
+          if (relayRow === 'before') await recordFaults(sara.brickId, id, [fault(1, 'pool_busy', { callId: 'c1' })]);
+          // Capacity is back: a later call is authorized, and Orbit's own turnless refusal row is retired
+          await setUp();
+          expect((await authorizeModelCall({ token, callId: 'c2', estimateMicros: 1_000, payer: 'universe' }, NOW)).ok).toBe(true);
+          expect(await prisma.computerJobFault.findMany({ where: { jobId: id, callId: { startsWith: 'orbit:pool:' } }, select: { kind: true, reason: true } })).toEqual([{ kind: 'answered', reason: 'pool_recovered' }]);
+        });
+        if (relayRow === 'after') {
+          expect(await decisionOf(jobId)).toMatchObject({ state: 'refused', basis: 'cap' });
+          await recordFaults(sara.brickId, jobId, [fault(1, 'pool_busy', { callId: 'c1' })]);
+          await afterLateEvidence(jobId);
+        }
+        return ended;
+      };
+
+      it('a failed finish naming the refused turn is given back as ours, uncounted, when the relay’s row for that turn came first', async () => {
+        const ended = await refusedThenRecovered('before');
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'pool_busy' });
+        expect(await givenBack(ended.id)).toBe(true);
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: ended.id } })).toMatchObject({ endedBy: 'error', runnerFault: false });
+      });
+
+      it('the same result when the relay’s row arrives AFTER the finish (the late sweep)', async () => {
+        const ended = await refusedThenRecovered('after');
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'pool_busy' });
+        expect(await givenBack(ended.id)).toBe(true);
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: ended.id } })).toMatchObject({ endedBy: 'error', runnerFault: false });
+      });
+
+      it('with no relay row for the refused turn at all, the retired refusal decides nothing: the finish is judged as a turn with no row (here refused at the spent bound), never a flat give-back as ours', async () => {
+        const ended = await refusedThenRecovered('never');
+        expect(await decisionOf(ended.id)).toMatchObject({ state: 'refused', basis: 'cap' });
+        expect(await givenBack(ended.id)).toBe(false);
+      });
+    });
+
     it('a confirmed fault stored while the finish was being committed is not lost: the sweep looks again at every decision it is newer than, and marks what it looked at', async () => {
       await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
       const sara = await person('sara');
