@@ -3608,7 +3608,7 @@ model ComputerJob {
   /// result stays with the person in Files; it is never offered again.
   endUndeliverableAt  DateTime? @map("end_undeliverable_at")
   endUndeliverableWhy String?   @map("end_undeliverable_why") @db.VarChar(20)
-  /// The latest confirmation the follow-up that says an App let go unconfirmed went out after all has covered (told, or never to be told): only a confirmation after it is a new follow-up. Empty until the first.
+  /// When the first follow-up that says an App let go unconfirmed went out after all was dealt with (told, or never to be told). For support only: each run carries its own mark (instant_runs.detail.lateToldAt).
   lateToldAt     DateTime? @map("late_told_at")
   handoverSeq    Int       @default(0) @map("handover_seq")
   handoverUntold Boolean   @default(false) @map("handover_untold")

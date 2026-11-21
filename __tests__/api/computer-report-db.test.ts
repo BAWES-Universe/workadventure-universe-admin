@@ -429,7 +429,7 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       expect((await reportsToTell(200, NOW, { accepts: ['other'] })).filter((report) => report.jobId === id)).toEqual([]);
       const [late, ...rest] = await lateMine([id]);
       expect(rest).toEqual([]);
-      expect(late).toMatchObject({ key: `computer-told:${id}:late:${LATER.getTime()}`, through: LATER.toISOString(), kind: 'late', jobId: id, botId: who.brickId, matrixUserId: expect.stringContaining('sara-'), apps: ['Gmail'], lateApps: ['Gmail'], holdReleased: true, givenBack: true, seq: null, effects: [], files: [] });
+      expect(late).toMatchObject({ key: `computer-told:${id}:late:1`, seq: 1, kind: 'late', jobId: id, botId: who.brickId, matrixUserId: expect.stringContaining('sara-'), apps: ['Gmail'], lateApps: ['Gmail'], holdReleased: true, givenBack: true, effects: [], files: [] });
       // Told (said twice: the same), it is never offered again, and the ending's own mark is untouched
       const told = await prisma.computerJob.findUniqueOrThrow({ where: { id }, select: { endToldAt: true, lateToldAt: true } });
       expect(told.lateToldAt).toBeNull();
@@ -453,28 +453,44 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       expect(found[0].apps).toEqual(['Gmail', 'Slack']);
     });
 
-    it('Opus: staggered confirmations of two Apps are BOTH told, each once: the second is a new follow-up with its own key, naming only itself; a confirmation that came between the offer and the confirmation is not lost', async () => {
+    it('Opus: staggered confirmations of two Apps are BOTH told, each once, per batch: B is offered alone with its own key and number, A is never repeated; a run confirmed between the offer and the ack is the NEXT batch; an ack retry changes nothing', async () => {
       const { who, id } = await lateJob();
       const [first] = await lateMine([id]);
-      expect(first).toMatchObject({ apps: ['Gmail'], through: LATER.toISOString() });
-      // B is confirmed after A was offered but BEFORE the reader confirms it: the reader says back what it was told (`through`), so B is not marked told
-      const bAt = new Date(LATER.getTime() + 3_600_000);
-      await letGo(id, who, 'slack', { at: bAt });
-      expect(await keepReportTold(id, 'late', undefined, { delivered: true }, undefined, { through: new Date(first.through as string) })).toBe(true);
-      // Said twice: the same
-      expect(await keepReportTold(id, 'late', undefined, { delivered: true }, undefined, { through: new Date(first.through as string) })).toBe(true);
+      expect(first).toMatchObject({ apps: ['Gmail'], seq: 1, key: `computer-told:${id}:late:1` });
+      // The same batch is offered again as it was until it is confirmed, and B (confirmed after the offer, before the ack) waits for the next one
+      await letGo(id, who, 'slack', { at: new Date(LATER.getTime() + 3_600_000) });
+      expect((await lateMine([id])).map((report) => [report.seq, report.apps])).toEqual([[1, ['Gmail']]]);
+      // Confirmed with the number it was given: exactly its runs are marked; said twice, the same
+      expect(await keepReportTold(id, 'late', 1)).toBe(true);
+      expect(await keepReportTold(id, 'late', 1)).toBe(true);
       const [second, ...rest] = await lateMine([id]);
       expect(rest).toEqual([]);
-      expect(second).toMatchObject({ apps: ['Slack'], lateApps: ['Slack'], through: bAt.toISOString(), key: `computer-told:${id}:late:${bAt.getTime()}` });
+      expect(second).toMatchObject({ apps: ['Slack'], lateApps: ['Slack'], seq: 2, key: `computer-told:${id}:late:2` });
       expect(second.key).not.toBe(first.key);
-      expect(await keepReportTold(id, 'late', undefined, { delivered: true }, undefined, { through: new Date(second.through as string) })).toBe(true);
+      // A confirmation that is moved later (a charge that turns up rewrites the confirmation time) never makes a told App new again
+      await prisma.$executeRaw`UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateEvidence,at}', to_jsonb(${new Date(LATER.getTime() + 9 * 3_600_000).toISOString()}::text)) WHERE "task_key" = ${id} AND "toolkit" = 'gmail'`;
+      expect((await lateMine([id])).map((report) => report.apps)).toEqual([['Slack']]);
+      expect(await keepReportTold(id, 'late', 2)).toBe(true);
       expect(await lateMine([id])).toEqual([]);
-      // A third, much later (day 3): its own follow-up, once
+      // A third, much later (day 3): its own follow-up, number 3, once
       await letGo(id, who, 'notion', { at: new Date(LATER.getTime() + 3 * 86_400_000) });
-      expect((await lateMine([id])).map((report) => report.apps)).toEqual([['Notion']]);
-      // An older reader that confirms without saying `through` covers everything confirmed up to now (never offered twice)
-      expect(await keepReportTold(id, 'late', undefined, { delivered: true }, new Date(LATER.getTime() + 4 * 86_400_000))).toBe(true);
+      expect((await lateMine([id])).map((report) => [report.seq, report.apps])).toEqual([[3, ['Notion']]]);
+      // The number of ANOTHER batch (or one that was never offered) marks nothing of this one
+      expect(await keepReportTold(id, 'late', 1)).toBe(true);
+      expect(await keepReportTold(id, 'late', 9)).toBe(true);
+      expect((await lateMine([id])).map((report) => report.seq)).toEqual([3]);
+      // An older reader confirms without a number: every confirmed run is marked (never offered twice)
+      expect(await keepReportTold(id, 'late')).toBe(true);
       expect(await lateMine([id])).toEqual([]);
+    });
+
+    it('a follow-up that can never be delivered ends its batch for good, and the next batch still comes', async () => {
+      const { who, id } = await lateJob();
+      const [first] = await lateMine([id]);
+      expect(await keepReportTold(id, 'late', first.seq, { delivered: false, why: 'no_chat' })).toBe(true);
+      expect(await lateMine([id])).toEqual([]);
+      await letGo(id, who, 'slack', { at: new Date(LATER.getTime() + 60_000) });
+      expect((await lateMine([id])).map((report) => [report.seq, report.apps])).toEqual([[2, ['Slack']]]);
     });
 
     it('Opus: a malformed confirmation time on one let-go run never stops the others, nor a pending ending report; and a follow-up that cannot be read at all is isolated (Sentry told once, the ending still listed)', async () => {

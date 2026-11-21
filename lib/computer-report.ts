@@ -74,8 +74,6 @@ export interface Report {
   apps?: string[];
   /** `late` only: the same names under the name the game reads them by (kept equal to `apps`) */
   lateApps?: string[];
-  /** `late` only: the latest confirmation this report covers (ISO). The reader says it back when it confirms the report, so only what it was told is marked told. */
-  through?: string;
   /** `late` only: those Apps' holds were released and nothing was charged for them, then or later. */
   holdReleased?: true;
 }
@@ -234,7 +232,10 @@ const LATE_MAX_PAGES = 25;
  */
 const CONFIRMED_RUNS = (lookBack: Date): Prisma.Sql => Prisma.sql`
   SELECT i."id", i."task_key", i."person_id", i."bot_id", i."toolkit",
-         CASE WHEN i."detail"->'lateEvidence'->>'at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$' THEN (i."detail"->'lateEvidence'->>'at')::timestamptz END AS "at"
+         CASE WHEN i."detail"->'lateEvidence'->>'at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$' THEN (i."detail"->'lateEvidence'->>'at')::timestamptz END AS "at",
+         -- What was said about this run to the person: the batch of the follow-up that named it (set when it was offered) and when that follow-up was told (set when the reader confirmed it)
+         CASE WHEN i."detail"->>'lateBatch' ~ '^[0-9]+$' THEN (i."detail"->>'lateBatch')::int END AS "batch",
+         i."detail"->>'lateToldAt' AS "told_at"
   FROM "instant_runs" i
   WHERE i."state" = 'failed' AND i."reason" = 'unclear' AND i."created_at" >= ${lookBack}
     AND i."detail"->'lateEvidence'->>'status' = 'success'
@@ -260,20 +261,17 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
   const since = await lateReportSince(now);
   const lookBack = new Date(now.getTime() - LATE_LOOK_DAYS * 24 * 60 * 60 * 1000);
   const out: Report[] = [];
-  // Jobs are read a page at a time, oldest confirmation first, until `size` reports are found or there are none left: a job that is dropped below (a refund still pending, books not yet given back) is never
-  // marked, so a fixed window would let enough of them crowd out every newer job for good. What can never change (the decision is not a give-back, a call on the person's own key, a deleted Brick) is dropped in the
-  // query, so such a job is never read at all; only what may still change is checked below
+  // Jobs are read a page at a time, oldest confirmation first, until `size` reports are found or there are none left: a job that is dropped below (a refund still pending) is never marked, so a fixed window
+  // would let enough of them crowd out every newer job for good. What can never change (a call on the person's own key, a deleted Brick) is dropped in the query, so such a job is never read at all
   let after: { at: Date; id: string } = { at: new Date(0), id: '' };
   for (let page = 0; page < LATE_MAX_PAGES && out.length < size; page++) {
-    const found = await prisma.$queryRaw<Array<{ job_id: string; first_at: Date; last_at: Date; toolkits: string[] }>>(Prisma.sql`
+    const found = await prisma.$queryRaw<Array<{ job_id: string; first_at: Date }>>(Prisma.sql`
       WITH confirmed AS (${CONFIRMED_RUNS(lookBack)})
-      SELECT c."task_key" AS job_id, MIN(c."at") AS first_at, MAX(c."at") AS last_at, array_agg(c."toolkit" ORDER BY c."at" ASC, c."id" ASC) AS toolkits
+      SELECT c."task_key" AS job_id, MIN(c."at") AS first_at
       FROM confirmed c
         JOIN "computer_jobs" j ON j."id" = c."task_key" AND j."person_id" = c."person_id" AND j."bot_id" = c."bot_id"
         JOIN "bots" b ON b."id" = j."bot_id" AND b."deleted_at" IS NULL
-      WHERE c."at" >= ${since}
-        -- Only what was confirmed after the last time the person was told about this job (the job's own watermark: the latest confirmation its last follow-up covered)
-        AND (j."late_told_at" IS NULL OR (c."at" AT TIME ZONE 'UTC') > j."late_told_at")
+      WHERE c."at" >= ${since} AND c."told_at" IS NULL
         AND j."status" IN ('done', 'stopped', 'failed') AND j."ended_told_at" IS NOT NULL AND j."end_undeliverable_at" IS NULL
         AND NOT EXISTS (SELECT 1 FROM "computer_job_faults" f WHERE f."job_id" = j."id" AND f."call_id" = ${OWN_KEY_CALL_MARK} AND f."source" = ${ORBIT_SOURCE})
       GROUP BY c."task_key"
@@ -283,22 +281,23 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
     if (found.length === 0) break;
     const last = found[found.length - 1];
     after = { at: last.first_at, id: last.job_id };
-    const appsOf = new Map<string, string[]>();
-    const throughOf = new Map(found.map((row) => [row.job_id, row.last_at] as const));
-    for (const row of found) {
-      const names: string[] = [];
-      for (const toolkit of row.toolkits) {
-        const label = appLabel(toolkit);
-        if (!names.includes(label)) names.push(label);
-      }
-      appsOf.set(row.job_id, names);
-    }
-    const jobs = await prisma.computerJob.findMany({ where: { id: { in: [...appsOf.keys()] }, bot: { deletedAt: null } } });
+    const ids = found.map((row) => row.job_id);
+    // Every run of these jobs not yet told, and the highest batch number ever given on each job (told or not)
+    const runs = await prisma.$queryRaw<Array<{ id: string; job_id: string; toolkit: string; batch: number | null }>>(Prisma.sql`
+      WITH confirmed AS (${CONFIRMED_RUNS(lookBack)})
+      SELECT c."id", c."task_key" AS job_id, c."toolkit", c."batch" FROM confirmed c
+      WHERE c."task_key" IN (${Prisma.join(ids)}) AND c."at" >= ${since} AND c."told_at" IS NULL
+      ORDER BY c."at" ASC, c."id" ASC`);
+    const highest = await prisma.$queryRaw<Array<{ job_id: string; top: number | null }>>(Prisma.sql`
+      SELECT i."task_key" AS job_id, MAX(CASE WHEN i."detail"->>'lateBatch' ~ '^[0-9]+$' THEN (i."detail"->>'lateBatch')::int END) AS top
+      FROM "instant_runs" i WHERE i."task_key" IN (${Prisma.join(ids)}) GROUP BY i."task_key"`);
+    const topOf = new Map(highest.map((row) => [row.job_id, row.top ?? 0] as const));
+    const jobs = await prisma.computerJob.findMany({ where: { id: { in: ids }, bot: { deletedAt: null } } });
     const jobOf = new Map(jobs.map((job) => [job.id, job]));
     const people = await prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.personId))] } }, select: { id: true, matrixChatId: true } });
     const chatOf = new Map(people.map((person) => [person.id, person.matrixChatId ?? null]));
     const owed = await refundStatesFor(jobs.map((job) => job.id));
-    const decisions = await prisma.computerGiveBackDecision.findMany({ where: { jobId: { in: jobs.map((job) => job.id) } }, select: { jobId: true, state: true } });
+    const decisions = await prisma.computerGiveBackDecision.findMany({ where: { jobId: { in: ids } }, select: { jobId: true, state: true } });
     const decisionOf = new Map(decisions.map((one) => [one.jobId, one.state]));
     // In the order the query found them (the oldest confirmation first)
     for (const row of found) {
@@ -309,10 +308,24 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
       // was ever made (their own bill is not ours to speak of). Any job qualifies, whatever became of its computer: the follow-up is about the App
       if ((owed.get(job.id)?.pendingMicros ?? 0) > 0) continue;
       if (await hasOwnKeyCall(prisma, job.id)) continue;
-      // Said as it is: whether the computer part was given back too (never decides whether the App's follow-up is told)
-      const givenBack = decisionOf.get(job.id) === 'given' && (await givenBackIn(job.id, job.secondsRun));
+      // The batch: a follow-up that was offered and not confirmed yet is offered again as it was (its runs stay together, and a run confirmed since waits for the next one); otherwise every run not told
+      // yet is one new batch, numbered after the highest the job has had (a number only goes up), and its runs are tagged so a confirmation of that number marks exactly them
+      const untold = runs.filter((one) => one.job_id === job.id);
+      if (untold.length === 0) continue;
+      const offered = untold.filter((one) => one.batch !== null);
+      const batch = offered.length > 0 ? Math.min(...offered.map((one) => one.batch as number)) : (topOf.get(job.id) ?? 0) + 1;
+      const inBatch = offered.length > 0 ? offered.filter((one) => one.batch === batch) : untold;
+      if (offered.length === 0) {
+        await prisma.$executeRaw(Prisma.sql`
+          UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateBatch}', to_jsonb(${batch}::int)) WHERE "id" IN (${Prisma.join(inBatch.map((one) => one.id))}) AND "detail"->'lateBatch' IS NULL`);
+      }
+      const names: string[] = [];
+      for (const one of inBatch) {
+        const label = appLabel(one.toolkit);
+        if (!names.includes(label)) names.push(label);
+      }
       out.push({
-        key: `computer-told:${job.id}:late:${(throughOf.get(job.id) as Date).getTime()}`,
+        key: `computer-told:${job.id}:late:${batch}`,
         jobId: job.id,
         botId: job.botId,
         matrixUserId: chatOf.get(job.personId) ?? null,
@@ -321,7 +334,7 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
         title: job.title,
         writes: job.writes,
         seconds: job.secondsRun,
-        seq: null,
+        seq: batch,
         waitingFor: null,
         ready: null,
         waitedFor: null,
@@ -329,10 +342,10 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
         effects: [],
         files: [],
         handed: [],
-        givenBack,
-        apps: appsOf.get(job.id) ?? [],
-        lateApps: appsOf.get(job.id) ?? [],
-        through: (throughOf.get(job.id) as Date).toISOString(),
+        // Said as it is: whether the computer part was given back too (never decides whether the App's follow-up is told)
+        givenBack: decisionOf.get(job.id) === 'given' && (await givenBackIn(job.id, job.secondsRun)),
+        apps: names,
+        lateApps: names,
         holdReleased: true,
       });
     }
@@ -484,7 +497,7 @@ export type ReportOutcome = { delivered: true } | { delivered: false; why: Undel
  * report that has not been confirmed either way is still to be tried. The files a job made stay the person's in Files whichever it was. Safe to say
  * twice. False when there is no such job.
  */
-export async function keepReportTold(jobId: string, kind: ReportKind, seq?: number | null, outcome: ReportOutcome = { delivered: true }, now: Date = new Date(), options: { through?: Date } = {}): Promise<boolean> {
+export async function keepReportTold(jobId: string, kind: ReportKind, seq?: number | null, outcome: ReportOutcome = { delivered: true }, now: Date = new Date()): Promise<boolean> {
   if (kind === 'needs') {
     if (typeof seq !== 'number') return false;
     const found = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } });
@@ -494,18 +507,18 @@ export async function keepReportTold(jobId: string, kind: ReportKind, seq?: numb
     return true;
   }
   if (kind === 'late') {
-    const there = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, lateToldAt: true } });
+    const there = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } });
     if (!there) return false;
-    // Told, or never to be told (it can never reach them): either way what it covered is never offered again. The mark is a WATERMARK, the latest confirmation the report covered (the reader says it back
-    // with `through`); a confirmation that came after is a new follow-up. A reader that does not say it (an older confirmation) covers what is confirmed up to now. It never touches the ending's own marks
-    let through = options.through ?? null;
-    if (!through) {
-      const latest = await prisma.$queryRaw<Array<{ at: Date | null }>>(Prisma.sql`
-        WITH confirmed AS (${CONFIRMED_RUNS(new Date(now.getTime() - LATE_LOOK_DAYS * 24 * 60 * 60 * 1000))})
-        SELECT MAX(c."at") AS at FROM confirmed c WHERE c."task_key" = ${jobId} AND c."at" <= ${now}`);
-      through = latest[0]?.at ?? now;
-    }
-    await prisma.$executeRaw`UPDATE "computer_jobs" SET "late_told_at" = GREATEST(COALESCE("late_told_at", ${through}), ${through}) WHERE "id" = ${jobId}`;
+    // Told, or never to be told (it can never reach them): either way the runs it named are never offered again. The runs are marked one by one, so a confirmation of a run that came after the report was
+    // offered is the next follow-up, never lost and never said twice. `seq` is the batch the reader was given: exactly its runs are marked. A reader that says none (an older game) marks every run confirmed
+    // up to now. It never touches the ending's own marks
+    const told = JSON.stringify(now.toISOString());
+    const batchOnly = typeof seq === 'number' ? Prisma.sql`AND i."detail"->>'lateBatch' = ${String(seq)}` : Prisma.sql`AND (i."detail"->'lateEvidence'->>'at') IS NOT NULL`;
+    await prisma.$executeRaw(Prisma.sql`
+      UPDATE "instant_runs" i SET "detail" = jsonb_set(i."detail", '{lateToldAt}', ${told}::jsonb)
+      WHERE i."task_key" = ${jobId} AND i."detail"->'lateEvidence'->>'status' = 'success' AND i."detail"->'lateToldAt' IS NULL ${batchOnly}`);
+    // The job's own record of when its first follow-up was dealt with (for support; nothing reads it to decide: each run carries its own mark)
+    await prisma.$executeRaw`UPDATE "computer_jobs" SET "late_told_at" = COALESCE("late_told_at", ${now}) WHERE "id" = ${jobId}`;
     return true;
   }
   const found = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } });
