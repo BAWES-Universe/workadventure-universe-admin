@@ -459,16 +459,35 @@ export async function reviewAppSteps(botId: string, personId: string, input: { a
  * trimmed, at most 200 characters), made no longer ago than `sinceSeconds` by Orbit's OWN clock (an elapsed time, so the two servers never compare clocks). Another person's or another Brick's job never matches.
  * Read only. Answers its id and status, or null.
  */
-export async function startedJobFor(botId: string, personId: string, input: { originRef: string; title: string; sinceSeconds: number }, now: Date = new Date()): Promise<{ id: string; status: string } | null> {
+export async function startedJobFor(botId: string, personId: string, input: { originRef: string; title: string; sinceSeconds: number }, now: Date = new Date()): Promise<{ id: string; status: string } | { inProgress: true } | null> {
   const title = input.title.trim().slice(0, 200);
   if (!title) return null;
-  const found = await prisma.computerJob.findFirst({
-    where: { botId, personId, originKind: 'dm', originRef: input.originRef.slice(0, 255), title, createdAt: { gte: new Date(now.getTime() - input.sinceSeconds * 1000) } },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    select: { id: true, status: true },
-  });
-  return found;
+  const originRef = input.originRef.slice(0, 255);
+  const find = (db: Pick<Prisma.TransactionClient, 'computerJob'>) =>
+    db.computerJob.findFirst({
+      where: { botId, personId, originKind: 'dm', originRef, title, createdAt: { gte: new Date(now.getTime() - input.sinceSeconds * 1000) } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { id: true, status: true },
+    });
+  const found = await find(prisma);
+  if (found) return found;
+  // Nothing found is only "no job reached Orbit" when no start of this job can still make it: a start (`startJob`) holds the job's start lock from before its first read until its job is saved, so a lock that cannot
+  // be taken means one is still going on, and the answer is "in progress", never null. When it can be taken, the look is made again under it (a start that finished in between has saved its job by now)
+  return prisma.$transaction(
+    async (tx) => {
+      const got = await tx.$queryRaw<{ got: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtextextended(${startFenceKey(botId, personId, originRef, title)}, 0)) AS got`;
+      if (!got[0]?.got) return { inProgress: true as const };
+      return find(tx);
+    },
+    { timeout: 15_000, maxWait: 15_000 },
+  );
 }
+
+/**
+ * The lock a start of a job in a direct chat holds from before its first read until its job is saved, and that the look for "did this start reach Orbit" (`startedJobFor`) tries. Per Brick, person, chat and title (the
+ * title as it is stored: trimmed, at most 200 characters). Only a start without a run takes it: a start with a run is asked again safely (the run's own job), and a start with no direct chat is never asked about.
+ */
+export const startFenceKey = (botId: string, personId: string, originRef: string, title: string): string => `computer-start:${botId}:${personId}:${originRef.slice(0, 255)}:${title.trim().slice(0, 200)}`;
 
 /** The conversation a job began in: only a direct chat, by its id. A job always goes back to where it began; one with no conversation (a goal's run) goes to the person's own direct chat. */
 export interface JobOrigin {
@@ -476,44 +495,70 @@ export interface JobOrigin {
   ref: string;
 }
 
-export async function startJob(input: { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; plan?: RoutePlan | null; origin?: JobOrigin | null }, now: Date = new Date()): Promise<Started> {
+type StartInput = { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; plan?: RoutePlan | null; origin?: JobOrigin | null };
+type Begun = { done: Started } | { created: { id: string } };
+
+export async function startJob(input: StartInput, now: Date = new Date()): Promise<Started> {
+  // A start in a direct chat that can be asked about (`startedJobFor`) holds its start lock from before its first read until its job is saved (or it ends without one): database steps only, nothing is started under it. The lock
+  // is the transaction's, so a request that dies lets it go. A GET that finds the lock taken answers "in progress", never "no job reached Orbit"
+  const fenced = input.origin?.kind === 'dm' && !input.runId;
+  const begun: Begun = fenced
+    ? await prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${startFenceKey(input.botId, input.personId, input.origin!.ref, input.title)}, 0))`;
+          return beginJob(input, now, tx);
+        },
+        { timeout: 30_000, maxWait: 15_000 },
+      )
+    : await beginJob(input, now, prisma);
+  if ('done' in begun) return begun.done;
+  return tryNewJob(input, now, begun.created);
+}
+
+/** Everything a start does before its job exists, and the saving of the job: the part the start lock covers. */
+async function beginJob(input: StartInput, now: Date, db: Pick<Prisma.TransactionClient, 'computerJob'>): Promise<Begun> {
   const bot = await brickOf(input.botId, input.personId);
-  if (!bot) return { ok: false, reason: 'not_owner' };
+  if (!bot) return { done: { ok: false, reason: 'not_owner' } };
   const row = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
-  if (!row || !row.enabled) return { ok: false, reason: 'off' };
-  if (!providerFor(row)) return { ok: false, reason: 'not_open' };
+  if (!row || !row.enabled) return { done: { ok: false, reason: 'off' } };
+  if (!providerFor(row)) return { done: { ok: false, reason: 'not_open' } };
   // A wind-down is on (the team's command): computers take no new work
-  if (await isWindingDown()) return { ok: false, reason: 'not_open' };
+  if (await isWindingDown()) return { done: { ok: false, reason: 'not_open' } };
   // A run of a goal or task (game #2002) starts one job, ever: the same run again (it was handed out again) finds that job, whatever it
   // came to, and takes no second room. The run must be this person's, on this Brick.
   if (input.runId) {
-    if (!(await runIsTheirs(input.botId, input.personId, input.runId))) return { ok: false, reason: 'no_run' };
+    if (!(await runIsTheirs(input.botId, input.personId, input.runId))) return { done: { ok: false, reason: 'no_run' } };
     const again = await reuseRunJob(input.botId, input.runId, now);
-    if (again) return again;
+    if (again) return { done: again };
   }
   // The way: a connected app that would do this for less is used instead, before anything is made, woken or reserved
   const routed = await routeJob({ botId: input.botId, personId: input.personId, plan: input.plan, awakeMicrosPerMinute: providerFor(row)?.microsPerMinute() ?? null, hasMachine: !!row.providerRef }, now);
-  if (!routed.ok) return { ok: false, reason: 'cheaper_route', app: routed.app };
+  if (!routed.ok) return { done: { ok: false, reason: 'cheaper_route', app: routed.app } };
   // The team paused computers: no new job starts (one already going finishes, and a job already in line waits with its work saved).
   // A retry of a run that already has its job was answered above, so a pause never hides the job a run already made
-  if (await computersArePaused()) return { ok: false, reason: 'paused' };
+  if (await computersArePaused()) return { done: { ok: false, reason: 'paused' } };
   let created;
   try {
-    created = await prisma.computerJob.create({
+    created = await db.computerJob.create({
       data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null, route: routed.route, expectedMicros: BigInt(routed.expectedMicros), originKind: input.origin?.kind ?? null, originRef: input.origin?.ref.slice(0, 255) ?? null },
     });
   } catch (error) {
     // Two asks for the same run at once: the first made the job, the second finds it
     if (input.runId && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       const winner = await reuseRunJob(input.botId, input.runId, now);
-      if (winner) return winner;
+      if (winner) return { done: winner };
       // The first ask made the job and took it away again before this one could look: that is "controls not set up" or a rule the person
       // said (both leave no job behind). Whichever it was, this ask gets the same answer, not an error
       const words = await ruleWordsOf(input.botId, input.personId, now);
-      return words !== null ? { ok: false, reason: 'rule', words } : { ok: false, reason: 'not_set' };
+      return { done: words !== null ? { ok: false, reason: 'rule', words } : { ok: false, reason: 'not_set' } };
     }
     throw error;
   }
+  return { created: { id: created.id } };
+}
+
+/** What a start does once its job is saved: the first try, and the answer. */
+async function tryNewJob(input: StartInput, now: Date, created: { id: string }): Promise<Started> {
   const outcome = await tryStart(created.id, now);
   if (typeof outcome === 'object') {
     // Refused by a rule the person said in chat: no job was ever going to run, so none is left behind, and the answer carries the rule's words

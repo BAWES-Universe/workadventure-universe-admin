@@ -50,8 +50,11 @@ export type Authorized =
 
 export async function authorizeModelCall(
   input: { token: string; callId: string; estimateMicros: number; payer: 'universe' | 'own-key'; /** The provider and route the call goes to, when the relay names it: new platform-funded work on a route that is failing for many people waits. */ route?: string | null },
-  now: Date = new Date(),
+  asked?: Date,
 ): Promise<Authorized> {
+  // The time of this request, and (for what is decided after waiting for a lock) the time read again once the wait is over; a caller that fixes the time (the tests) fixes both
+  const now = asked ?? new Date();
+  const clock = (): Date => asked ?? new Date();
   if (!CALL_ID.test(input.callId)) return { ok: false, reason: 'refused' };
   const verified = await verifyJobToken(input.token, 'model', now);
   if (!verified.ok) return { ok: false, reason: 'refused' };
@@ -97,12 +100,12 @@ export async function authorizeModelCall(
     if (!stands) {
       // Only the room THIS request took goes back (asked again for a call that already holds its room, the hold is the first request's), and not even that one when another request was answered with this call's
       // authorization meanwhile: its call goes on with the room, and the room is released only when no request used it
-      if (room.created) await giveBackUnusedRoom(base.jobId, input.callId, now);
+      if (room.created) await giveBackUnusedRoom(base.jobId, input.callId, clock);
       return { ok: false, reason: 'refused' };
     }
     // Asked again for a call whose room an earlier request took: that request may still be deciding whether the call stands, and would give the room back. This answer is kept under the call's lock before it is
     // given (and only while the room is still held), so the room is never released from under a call that was authorized; a room already given back is not authorized again
-    if (!room.created && !(await admitAgain(base.jobId, input.callId, base.personId, now))) return { ok: false, reason: 'refused' };
+    if (!room.created && !(await admitAgain(base.jobId, input.callId, base.personId, input.token, verified.generation, clock))) return { ok: false, reason: 'refused' };
     // Capacity is back: what was refused before it stops deciding the turns that come after
     await retirePoolRefusals(prisma, base.jobId).catch((error) => console.error('[Computer] Could not retire a recovered pool refusal:', error instanceof Error ? error.message : 'unknown'));
     return { ok: true, ...base, reservedMicros: room.reservation.amountMicros };
@@ -135,32 +138,45 @@ export async function authorizeModelCall(
  * The creator of a call's room gives it back because the call does not stand, unless another request was answered with the call's authorization (see `admitAgain`): the look for that answer and the release are ONE step
  * under the call's lock, so a request cannot be answered between them. Never throws: a room that could not be given back is left to lapse, as before.
  */
-async function giveBackUnusedRoom(jobId: string, callId: string, now: Date): Promise<void> {
-  try {
-    await prisma.$transaction(
-      async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${admitLockKey(jobId, callId)}, 0))`;
-        if (await hasCallAdmission(tx, jobId, callId)) return;
-        await releaseRoomIn(tx, { key: callRoomKey(jobId, callId) }, now);
-      },
-      { timeout: 15_000, maxWait: 15_000 },
-    );
-  } catch (error) {
-    console.error('[Computer] Could not give back room:', error instanceof Error ? error.message : 'unknown');
+async function giveBackUnusedRoom(jobId: string, callId: string, clock: () => Date): Promise<void> {
+  // A look that fails once is tried again (the marker is looked for again each time: a request that was answered meanwhile keeps the room), so a call that was refused never leaves its room counted against the pool
+  for (let attempt = 1; attempt <= GIVE_BACK_ATTEMPTS; attempt += 1) {
+    try {
+      await prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${admitLockKey(jobId, callId)}, 0))`;
+          if (await hasCallAdmission(tx, jobId, callId)) return;
+          await releaseRoomIn(tx, { key: callRoomKey(jobId, callId) }, clock());
+        },
+        { timeout: 15_000, maxWait: 15_000 },
+      );
+      return;
+    } catch (error) {
+      console.error('[Computer] Could not give back room:', error instanceof Error ? error.message : 'unknown');
+      if (attempt < GIVE_BACK_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+    }
   }
 }
 
+/** How many times the release of an unused room is tried before it is left to lapse. */
+const GIVE_BACK_ATTEMPTS = 3;
+
 /**
- * Answers a request that asks again for a call whose room is already held: under the call's lock, the room must still be held (the request that took it may have given it back), and the answer is kept before it is
- * given, so that request's rollback leaves the room alone. False (refused, nothing changed) when the room is gone or this could not be kept.
+ * Answers a request that asks again for a call whose room is already held: under the call's lock, the key must still be good (a takeover while this request waited for the lock ends it) and the room must still be held and
+ * unexpired by the clock AFTER the wait (the request that took it may have given it back, or it may have lapsed), and the answer is kept before it is given, so that request's rollback leaves the room alone. False
+ * (refused, nothing changed) when any of them fails or this could not be kept.
  */
-async function admitAgain(jobId: string, callId: string, personId: string, now: Date): Promise<boolean> {
+async function admitAgain(jobId: string, callId: string, personId: string, token: string, generation: number, clock: () => Date): Promise<boolean> {
   try {
     return await prisma.$transaction(
       async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${admitLockKey(jobId, callId)}, 0))`;
-        if (!(await holdsItsRoom(jobId, callId, personId, now, tx))) return false;
-        await recordCallAdmission(tx, jobId, callId, now);
+        const at = clock();
+        // The key and the control generation are looked at again now that the lock is held: the check made before the wait says nothing about what happened during it
+        const still = await verifyJobToken(token, 'model', at);
+        if (!still.ok || still.generation !== generation) return false;
+        if (!(await holdsItsRoom(jobId, callId, personId, at, tx))) return false;
+        await recordCallAdmission(tx, jobId, callId, at);
         return true;
       },
       { timeout: 15_000, maxWait: 15_000 },

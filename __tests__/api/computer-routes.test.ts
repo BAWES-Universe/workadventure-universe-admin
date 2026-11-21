@@ -311,6 +311,37 @@ describe('the bot server’s calls', () => {
       expect(await old.json()).toEqual({ available: false, on: false, busy: false });
     });
 
+    it('answers retry (503, inProgress) while a start of that very job is still going on: not `started: null`, which says no job reached Orbit and lets the caller start it again', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
+      lib.startedJobFor.mockResolvedValue({ inProgress: true });
+      const response = await stateRoute(asBot(asked, { method: 'GET' }), params);
+      expect(response.status).toBe(503);
+      const body = await response.json();
+      expect(body).toMatchObject({ retry: true, inProgress: true });
+      expect(body).not.toHaveProperty('started');
+      lib.startedJobFor.mockResolvedValue(null);
+      expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: null });
+    });
+
+    it('one title for the start and the look for it: trimmed before its length is read, never empty, never past 200 (the start made it exactly so)', async () => {
+      resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+      lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
+      lib.startedJobFor.mockResolvedValue(null);
+      // 200 characters and a space is a title the start accepts (it trims first), so the look accepts it too, and looks for the trimmed one
+      const padded = `${'a'.repeat(200)}%20`;
+      expect((await stateRoute(asBot(`/x?userId=u&originRef=dm-1&title=${padded}&sinceSeconds=5`, { method: 'GET' }), params)).status).toBe(200);
+      expect(lib.startedJobFor).toHaveBeenLastCalledWith(BRICK, 'u-sara', { originRef: 'dm-1', title: 'a'.repeat(200), sinceSeconds: 5 });
+      lib.startJob.mockResolvedValue({ ok: false, reason: 'off' } as never);
+      expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: `${'a'.repeat(200)} ` } }), params)).status).toBe(200);
+      // A title of only spaces is no title for either: the start refuses it, and the look is refused before it looks for anything
+      lib.startedJobFor.mockClear();
+      expect((await stateRoute(asBot('/x?userId=u&originRef=dm-1&title=%20%20%20&sinceSeconds=5', { method: 'GET' }), params)).status).toBe(400);
+      expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: '   ' } }), params)).status).toBe(400);
+      expect((await stateRoute(asBot(`/x?userId=u&originRef=dm-1&title=${'a'.repeat(201)}&sinceSeconds=5`, { method: 'GET' }), params)).status).toBe(400);
+      expect(lib.startedJobFor).not.toHaveBeenCalled();
+    });
+
     it('asks for all three when any of them is sent: a title or an age without the chat is refused, never answered without `started`', async () => {
       resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
       lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);

@@ -8,10 +8,13 @@ import { ownerSpendAllowed } from '@/lib/spend-rules';
 
 export const runtime = 'nodejs';
 
+// ONE title for the start (POST) and the look for it (GET): trimmed first, then at least one character and at most 200 (the title as a start stores it), so the look finds exactly what the start made
+const titleSchema = z.string().trim().min(1).max(200);
+
 // Whether a start that timed out on the bot server's side reached Orbit: the chat it began in, its title and how long ago at most (an elapsed time, so no two clocks are compared)
 const startedSchema = z.object({
   originRef: z.string().min(1).max(255),
-  title: z.string().min(1).max(200),
+  title: titleSchema,
   sinceSeconds: z.coerce.number().int().min(1).max(600),
 });
 
@@ -19,7 +22,7 @@ const bodySchema = z
   .object({
     userId: z.string().min(1).max(255),
     isGuest: z.boolean().optional(),
-    title: z.string().trim().min(1).max(200),
+    title: titleSchema,
     // The task in the person's words, for the agent on the computer only (never shown)
     brief: z.string().max(4000).optional(),
     writes: z.boolean().optional(),
@@ -41,7 +44,7 @@ const bodySchema = z
  * offers the computer when it is on. Read only: it never makes or wakes anything. Someone else's Brick, or a guest: `{ on: false }`.
  * Answers { available, on, busy } (busy: a job holds it or waits in line). With `originRef` (and `title`, `sinceSeconds`) it also answers `started: { id, status } | null`: the newest job of this Brick for this
  * person that began in that direct chat with that title, made within `sinceSeconds` by Orbit's own clock, so a start that timed out on the caller's side can be told from one that did not reach Orbit. A caller that
- * sends none of them gets no `started`; one that sends some of them is refused (400). When who it was for could not be looked up just now the answer is 503 `{ retry: true }`, never `started: null`: the caller treats that as "not known" and asks again. Auth: service token only.
+ * sends none of them gets no `started`; one that sends some of them is refused (400). When who it was for could not be looked up just now, or a start of that very job is still going on (its job is not saved yet), the answer is 503 `{ retry: true }` (`inProgress: true` for the second), never `started: null`: the caller treats that as "not known" and asks again. Auth: service token only.
  */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -65,6 +68,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const view = person.personId ? await computerView(id, person.personId) : null;
     // Only when asked: a guest, someone else's Brick or one that is not this person's has no job of theirs to find (only the owner starts work on a computer), so nothing is looked for there
     const started = asked?.success ? (person.personId && view ? await startedJobFor(id, person.personId, asked.data) : null) : undefined;
+    // A start of this very job is still being made (it holds its start lock until its job is saved): no job has reached Orbit YET and one still can, so this is not a miss either. The same word as a failed lookup: ask again
+    if (started && 'inProgress' in started) return NextResponse.json({ error: 'A start of this job is still going on, ask again', retry: true, inProgress: true }, { status: 503 });
     const extra = started === undefined ? {} : { started };
     if (!view) return NextResponse.json({ available: false, on: false, busy: false, ...extra });
     return NextResponse.json({ available: view.available, on: view.on, busy: view.job !== null || view.queued.length > 0, ...extra });

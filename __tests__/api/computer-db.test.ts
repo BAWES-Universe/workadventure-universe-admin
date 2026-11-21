@@ -1608,6 +1608,86 @@ run('a Brick’s computer, in a real database', () => {
     });
   });
 
+  describe('a look for a start that is still going on is never "no job reached Orbit" (CodeRabbit)', () => {
+    const ref = (name: string) => `dm-${name}-${tag}`;
+    const ask = (sara: { id: string; brickId: string }, name: string, title = 'Visa form') => startedJobFor(sara.brickId, sara.id, { originRef: ref(name), title, sinceSeconds: 60 });
+    /** Holds the start at its first read of the Brick's computer (before its job exists) until `go` is called; `at` settles when it is there, or fails with the start's own answer if it ended first. */
+    const holdStartAtItsReads = (start: () => Promise<unknown>) => {
+      let reached: () => void = () => undefined;
+      const at = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      let go: () => void = () => undefined;
+      const goOn = new Promise<void>((resolve) => {
+        go = resolve;
+      });
+      const real = prisma.brickComputer.findUnique.bind(prisma.brickComputer);
+      const spy = jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementationOnce(((args: never) => {
+        reached();
+        return goOn.then(() => real(args));
+      }) as never);
+      const running = start();
+      const there = Promise.race([at, running.then((answer) => Promise.reject(new Error(`the start ended before its reads: ${JSON.stringify(answer)}`)))]);
+      return { there, go, running, spy };
+    };
+
+    it('answers "in progress" while a start of the same job is still reading, and the job once it is saved: a retry can never create a second job', async () => {
+      const sara = await person('sev');
+      await giveComputer(sara.brickId, sara.id);
+      const held = holdStartAtItsReads(() => startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', origin: { kind: 'dm', ref: ref('sev') } }, NOW));
+      try {
+        await held.there;
+        // The start has made no job yet: this is NOT a miss
+        expect(await ask(sara, 'sev')).toEqual({ inProgress: true });
+        expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+        // A look for another title, or another chat, is not held back by it
+        expect(await ask(sara, 'sev', 'Another form')).toBeNull();
+        expect(await ask(sara, 'other')).toBeNull();
+        held.go();
+        const made = await held.running;
+        if (!(made as { ok: boolean }).ok) throw new Error('the start did not run');
+        expect(await ask(sara, 'sev')).toMatchObject({ id: (made as { job: { id: string } }).job.id });
+      } finally {
+        held.go();
+        held.spy.mockRestore();
+        await Promise.allSettled([held.running]);
+      }
+    });
+
+    it('is a miss again once the start ended without a job (refused, or failed): nothing is held for ever', async () => {
+      const sara = await person('sew');
+      await giveComputer(sara.brickId, sara.id);
+      // A start that fails at its reads: its transaction ends with it, and the lock with the transaction
+      const spy = jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementationOnce((() => Promise.reject(new Error('the database went away'))) as never);
+      try {
+        await expect(startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', origin: { kind: 'dm', ref: ref('sew') } }, NOW)).rejects.toThrow('the database went away');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await ask(sara, 'sew')).toBeNull();
+      // A start that is refused (the computer is off): the same
+      const off = await person('sex');
+      expect(await startJob({ botId: off.brickId, personId: off.id, title: 'Visa form', origin: { kind: 'dm', ref: ref('sex') } }, NOW)).toMatchObject({ ok: false, reason: 'off' });
+      expect(await ask(off, 'sex')).toBeNull();
+    });
+
+    it('a start with no direct chat takes no lock: it is never asked about (a start with a run takes none either: its run makes a second ask safe)', async () => {
+      const sara = await person('sey');
+      await giveComputer(sara.brickId, sara.id);
+      const held = holdStartAtItsReads(() => startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', origin: null }, NOW));
+      try {
+        await held.there;
+        expect(await ask(sara, 'sey')).toBeNull();
+        held.go();
+        await held.running;
+      } finally {
+        held.go();
+        held.spy.mockRestore();
+        await Promise.allSettled([held.running]);
+      }
+    });
+  });
+
   describe('telling the person how a job ended', () => {
     // A job that waited for a person who never came, and one that stopped when the month ran out: only these two are told
     async function unansweredJob(sara: { id: string; brickId: string }) {
