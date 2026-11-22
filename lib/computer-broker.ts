@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { agentCannotRun, providerFor, fenceMachine, finishJob, settleTurnHold, underTurnHold, wakeIfStopped } from '@/lib/computer';
-import { recordRelayUnreachable } from '@/lib/computer-faults';
+import { hasFinishIntent, recordRelayUnreachable } from '@/lib/computer-faults';
 import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
 import { agentMayAct } from '@/lib/computer-control';
 import { jobTagOf } from '@/lib/computer-values';
@@ -21,7 +21,7 @@ import { gitLoginCommand, jobGitAccess, NO_GIT_COMMAND, relayBase } from '@/lib/
 
 type Live = { jobId: string; botId: string; generation: number; ref: string; sessionId: string | null; responseId: string | null; firstTurnSentAt: Date | null };
 
-export type NotLive = { ok: false; reason: 'not_found' | 'not_running' | 'person_has_it' | 'no_machine' };
+export type NotLive = { ok: false; reason: 'not_found' | 'not_running' | 'person_has_it' | 'no_machine' | 'finish_pending' };
 
 /** The job as it stands, when Brick may act on it. */
 async function liveJob(jobId: string): Promise<{ ok: true; job: Live; provider: NonNullable<ReturnType<typeof providerFor>> } | NotLive> {
@@ -29,6 +29,8 @@ async function liveJob(jobId: string): Promise<{ ok: true; job: Live; provider: 
   if (!job) return { ok: false, reason: 'not_found' };
   if (job.status === 'waiting' && job.control === 'person') return { ok: false, reason: 'person_has_it' };
   if (job.status !== 'running' || job.control !== 'brick') return { ok: false, reason: 'not_running' };
+  // The runner committed to ending this job (its finish intent): nothing is prepared and no turn is started for it any more; the finish is what is still to be completed
+  if (await hasFinishIntent(prisma, jobId)) return { ok: false, reason: 'finish_pending' };
   // Control is Brick's only once a change of hands is over: a hand back is still being completed, or a take over is being fenced, until then
   if (!(await agentMayAct(job.botId))) return { ok: false, reason: 'person_has_it' };
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });

@@ -3620,6 +3620,7 @@ model ComputerJob {
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
   faults  ComputerJobFault[]
+  finishIntent ComputerFinishIntent?
   tokens  ComputerJobToken[]
   visits  ComputerJobVisit[]
   files   ComputerJobFile[]
@@ -4111,4 +4112,23 @@ model OwnedResult {
   @@index([ownerId, createdAt])
   @@index([sourceKind, sourceId])
   @@map("owned_results")
+}
+
+// The runner's committed word that a computer job is to end: written BEFORE the runner gives up (its finish may be lost or the runner may die), so a replacement runner sees `finishPending` and completes the finish, no
+// key or prepare is made for the job from then on, and the sweep completes it after a grace period with what is kept here (outcome, cause hint, turns, run, the control generation it was said under). One row per job:
+// the first is kept. `turns` is empty when the runner named none. Removed with the job. Never any content of the job: words about how it ended.
+model ComputerFinishIntent {
+  jobId      String   @id @map("job_id")
+  outcome    String   @db.VarChar(6)
+  cause      String?  @db.VarChar(8)
+  why        String?  @db.VarChar(2000)
+  turns      Int[]
+  run        String?  @db.VarChar(40)
+  generation Int?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@map("computer_finish_intents")
 }

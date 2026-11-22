@@ -1,4 +1,5 @@
 import type { ActionOutcome, ActivityOutcome } from '@/lib/task-receipts-values';
+import { isSearchToolkit } from '@/lib/search-apps';
 
 /**
  * The words for how a task came to end, as mock M2 (approved 19 Nov 2026) has them, and for the two endings that mock did not have: a task
@@ -64,7 +65,7 @@ export const appLabel = (toolkit: string): string => {
 };
 
 /** One action's line on a receipt: "Gmail · worked", "Gmail · didn't work", "Gmail · couldn’t confirm delivery". */
-export const actionWords = (toolkit: string, outcome: ActionOutcome): string => `${appLabel(toolkit)} · ${ACTION_OUTCOME_WORDS[outcome]}`;
+export const actionWords = (toolkit: string, outcome: ActionOutcome): string => `${appLabel(toolkit)} · ${outcome === 'unknown' && isSearchToolkit(toolkit) ? 'couldn’t confirm it finished' : ACTION_OUTCOME_WORDS[outcome]}`;
 
 /**
  * Whole micros as a reader says them: "$0", "$0.03", "$0.009" (a charge under a cent shows its thousandths, so a $0.009 Gmail charge is not
@@ -196,22 +197,27 @@ export function outcomeNote(outcome: ActivityOutcome, actions: readonly { outcom
       // per-delivery flags the receipt's aggregate decides for all
       const heldFlags = facts.deliveredHeld !== undefined && facts.deliveredHeld.length === late.length ? facts.deliveredHeld : null;
       const heldOf = (index: number): boolean => (heldFlags === null ? facts.holdPending === true : heldFlags[index] === true);
-      const allHeld = late.every((_label, index) => heldOf(index));
-      const noneHeld = late.every((_label, index) => !heldOf(index));
-      const holdsSaid = (): string => {
-        if (allHeld) return late.length === 1 ? 'Its hold is being released.' : 'Their holds are being released.';
-        if (noneHeld) return late.length === 1 ? 'Its hold was released.' : 'Their holds were released.';
+      // A search App (Exa, Tavily) sent nothing anywhere: it confirmed a step completed, and nothing was charged for that step (never "delivered", never a hold said for it)
+      const searchIndexes = (facts.deliveredAfterRelease ?? []).map((toolkit, index) => (isSearchToolkit(toolkit) ? index : -1)).filter((index) => index >= 0);
+      const sentIndexes = late.map((_label, index) => index).filter((index) => !searchIndexes.includes(index));
+      const holdsSaid = (indexes: readonly number[]): string => {
+        const allHeld = indexes.every((index) => heldOf(index));
+        const noneHeld = indexes.every((index) => !heldOf(index));
+        if (allHeld) return indexes.length === 1 ? 'Its hold is being released.' : 'Their holds are being released.';
+        if (noneHeld) return indexes.length === 1 ? 'Its hold was released.' : 'Their holds were released.';
         // Mixed: said per App, the runs of one App with the same hold counted together ("Gmail’s holds were released")
         const said = (held: boolean): string[] => {
           const counts = new Map<string, number>();
-          late.forEach((label, index) => {
-            if (heldOf(index) === held) counts.set(label, (counts.get(label) ?? 0) + 1);
+          indexes.forEach((index) => {
+            if (heldOf(index) === held) counts.set(late[index], (counts.get(late[index]) ?? 0) + 1);
           });
           return [...counts].map(([label, count]) => (held ? `${label}’s ${count > 1 ? 'holds are' : 'hold is'} being released` : `${label}’s ${count > 1 ? 'holds were' : 'hold was'} released`));
         };
         return `${listOf(said(false))} and ${listOf(said(true))}.`;
       };
-      const lateSaid = late.length === 0 ? [] : [`${listOf(late)} ${late.length === 1 ? 'was' : 'were'} delivered.`, holdsSaid()];
+      const searchSaid = searchIndexes.length === 0 ? [] : [`${listOf(searchIndexes.map((index) => late[index]))} confirmed ${searchIndexes.length === 1 ? 'the step' : 'the steps'} completed.`, `You weren’t charged for ${searchIndexes.length === 1 ? 'that step' : 'those steps'}.`];
+      const sentSaid = sentIndexes.length === 0 ? [] : [`${listOf(sentIndexes.map((index) => late[index]))} ${sentIndexes.length === 1 ? 'was' : 'were'} delivered.`, holdsSaid(sentIndexes)];
+      const lateSaid = [...searchSaid, ...sentSaid];
       const computerSaid = lateSaid.length > 0 && !facts.unreachable ? `The computer part didn’t finish and its cost ${pending ? 'is being returned' : 'was returned'}.` : lead;
       return [...lateSaid, computerSaid, ...apps, ...taken, ...net].join(' ');
     }

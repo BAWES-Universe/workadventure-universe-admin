@@ -36,6 +36,7 @@ import { activityFor } from '@/lib/task-receipts';
 import { recordGrant } from '@/lib/meter-grants';
 import { STEP_LABEL_FALLBACK } from '@/lib/computer-redact';
 import { mintJobToken, TOKEN_LIFE_MS, TOKEN_RENEW_EVERY_SECONDS, verifyJobToken } from '@/lib/computer-token';
+import { startStateOf } from '@/lib/computer-values';
 import { CLAIM_MS, dbImageStore } from '@/lib/agent37/image';
 import { checkScreen, openScreen, screenTicket } from '@/lib/computer-screen';
 import { CONTROL_TIMING } from '@/lib/computer-control';
@@ -1624,6 +1625,66 @@ run('a Brick’s computer, in a real database', () => {
       expect(await startedJobFor(sara.brickId, sara.id, startKey!)).toEqual({ id: jobId, status: 'running' });
       // A key nobody started with is a miss
       expect(await startedJobFor(sara.brickId, sara.id, keyOf())).toBeNull();
+    });
+
+    it('GPT round 4 R1: a start that committed and whose answer was lost is recovered by its key at ANY later time, in any state: the lookup and a replay both give the original job, never a second job or a second room', async () => {
+      const first = await started('rox', 'Visa form');
+      const key = first.startKey!;
+      const rooms = () => prisma.meterReservation.count({ where: { jobId: first.jobId } });
+      expect(await rooms()).toBe(1);
+      const read = async (at: Date) => {
+        const found = await startedJobFor(first.sara.brickId, first.sara.id, key, at);
+        return found && !('inProgress' in found) ? { ...found, state: startStateOf(found.status) } : found;
+      };
+      const replay = async (at: Date, title = 'Visa form') => startJob({ botId: first.sara.brickId, personId: first.sara.id, title, startKey: key, origin: { kind: 'dm', ref: ref('rox') } }, at);
+      // The caller gave up after ten minutes and later asks again: the job is still the one that key made, live
+      const later = [minutes(11), minutes(60), minutes(3 * 24 * 60), minutes(40 * 24 * 60)];
+      for (const at of later) {
+        expect(await read(at)).toEqual({ id: first.jobId, status: 'running', state: 'live' });
+        // The replay is the original answer, even with the title reworded (the key says which start, not the words)
+        expect(await replay(at, 'A reworded visa form')).toMatchObject({ ok: true, job: { id: first.jobId, title: 'Visa form' } });
+      }
+      expect(await prisma.computerJob.count({ where: { botId: first.sara.brickId } })).toBe(1);
+      expect(await rooms()).toBe(1);
+      // The job ends (done): the same key still says so, and a replay still answers that job, with no new room and nothing written
+      await finishJob(first.jobId, 'done', minutes(5));
+      const settled = await prisma.meterEvent.count({ where: { jobId: first.jobId } });
+      for (const at of later) {
+        expect(await read(at)).toEqual({ id: first.jobId, status: 'done', state: 'done' });
+        expect(await replay(at)).toMatchObject({ ok: true, job: { id: first.jobId, status: 'done' } });
+      }
+      expect(await prisma.computerJob.count({ where: { botId: first.sara.brickId } })).toBe(1);
+      expect(await rooms()).toBe(1);
+      expect(await prisma.meterEvent.count({ where: { jobId: first.jobId } })).toBe(settled);
+      // An ended (stopped or failed) job reads as ended
+      const second = await started('ray', 'Visa form');
+      await finishJob(second.jobId, 'failed', minutes(5), 'It gave up', 'agent');
+      const found = await startedJobFor(second.sara.brickId, second.sara.id, second.startKey!, minutes(3 * 24 * 60));
+      expect(found).toMatchObject({ id: second.jobId });
+      expect(['stopped', 'failed']).toContain((found as { status: string }).status);
+      expect(startStateOf((found as { status: string }).status)).toBe('ended');
+      // A second deliberate ask, even with the very same title, has its own key and is its own job
+      const deliberate = await startJob({ botId: first.sara.brickId, personId: first.sara.id, title: 'Visa form', startKey: keyOf(), origin: { kind: 'dm', ref: ref('rox') } }, minutes(12));
+      expect(deliberate).toMatchObject({ ok: true });
+      expect(await prisma.computerJob.count({ where: { botId: first.sara.brickId } })).toBe(2);
+    });
+
+    it('GPT round 4 R1: a start that was refused made no job, so its key finds none, and the same key asked again gets the same refusal at any later time (never a job)', async () => {
+      const sara = await person('rix');
+      // The computer is not given: the start is refused
+      const key = keyOf();
+      const ask = (at: Date) => startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey: key, origin: { kind: 'dm', ref: ref('rix') } }, at);
+      expect(await ask(NOW)).toEqual({ ok: false, reason: 'off' });
+      expect(await startedJobFor(sara.brickId, sara.id, key, minutes(11))).toBeNull();
+      expect(await ask(minutes(3 * 24 * 60))).toEqual({ ok: false, reason: 'off' });
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+      // It is given afterwards: the same key now makes the one job, and keeps answering it
+      await giveComputer(sara.brickId, sara.id);
+      const made = await ask(minutes(3 * 24 * 60 + 1));
+      expect(made).toMatchObject({ ok: true });
+      const again = await ask(minutes(3 * 24 * 60 + 2));
+      expect(again).toMatchObject({ ok: true, job: { id: (made as { job: { id: string } }).job.id } });
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(1);
     });
 
     it('never answers an OLDER job of the same chat and title for a start that made none: only the job the key made counts', async () => {

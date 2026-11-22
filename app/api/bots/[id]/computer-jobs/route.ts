@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import { computerView, startJob, startedJobFor } from '@/lib/computer';
+import { startStateOf } from '@/lib/computer-values';
 import { ownerSpendAllowed } from '@/lib/spend-rules';
 
 export const runtime = 'nodejs';
@@ -40,7 +41,7 @@ const bodySchema = z
 /**
  * GET /api/bots/:id/computer-jobs?userId=&isGuest= - whether this Brick's computer is there for its owner to use, so the bot server only
  * offers the computer when it is on. Read only: it never makes or wakes anything. Someone else's Brick, or a guest: `{ on: false }`.
- * Answers { available, on, busy } (busy: a job holds it or waits in line). With `attempt` (the key the game sent with a start, as the header `X-Computer-Start-Attempt`) it also answers `started: { id, status, attempt } | null` (`attempt` is the one asked, echoed): the job THAT start made, or null when that start made none. The key alone says
+ * Answers { available, on, busy } (busy: a job holds it or waits in line). With `attempt` (the key the game sent with a start, as the header `X-Computer-Start-Attempt`) it also answers `started: { id, status, state, attempt } | null` (`attempt` is the one asked, echoed; `state` is the one shared reading of `status`: live, done or ended): the job THAT start made, for as long as the job exists (the key is kept on the job itself: there is no time after which it is forgotten), or null when that start made none. The key alone says
  * which start, so a job of the same chat or title is never answered for it. While a start with that key is still going on (its job is not saved yet) the answer is 503 `{ retry: true, inProgress: true }`, and so when who it was for could not be
  * looked up just now (503 `{ retry: true }`): never `started: null`, which says no job was made. The caller treats both as "not known" and asks again (a start repeated with the same key never makes a second job). A caller that sends no `attempt` gets no `started`.
  * Auth: service token only.
@@ -66,7 +67,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const view = person.personId ? await computerView(id, person.personId) : null;
     // Only when asked: a guest, someone else's Brick or one that is not this person's has no job of theirs to find (only the owner starts work on a computer), so nothing is looked for there
     const found = asked?.success ? (person.personId && view ? await startedJobFor(id, person.personId, asked.data) : null) : undefined;
-    const started = found && !('inProgress' in found) && asked?.success ? { ...found, attempt: asked.data } : found;
+    const started = found && !('inProgress' in found) && asked?.success ? { ...found, attempt: asked.data, state: startStateOf(found.status) } : found;
     // A start with this key is still going on (it holds its mark until its job is saved): no job has reached Orbit YET and one still can, so this is not a miss either. The same word as a failed lookup: ask again
     if (started && 'inProgress' in started) return NextResponse.json({ error: 'A start of this job is still going on, ask again', retry: true, inProgress: true }, { status: 503 });
     const extra = started === undefined ? {} : { started };
@@ -90,6 +91,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  * answers with the job that key made (or the same refusal), never a second job.
  * With a `plan` (the connected app the Brick weighed, about how many steps, and why it cannot) Orbit works out which way costs least: when the app does,
  * it answers `{ ok: false, reason: 'cheaper_route', app }` and starts nothing.
+ *
+ * Every refusal is HTTP 200 `{ ok: false, reason }` with a reason from `START_REFUSALS` (lib/computer-values): Orbit never answers a start with 429 or another error status for a refusal, so a 429 is an intermediary's and the outcome of the start is not known (look it up by its key).
  *
  * Auth: service token only.
  */

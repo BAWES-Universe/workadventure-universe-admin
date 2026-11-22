@@ -11,6 +11,10 @@ describe('the words for how a task came to end (mock M2)', () => {
     expect(actionWords('gmail', 'worked')).toBe('Gmail · worked');
     expect(actionWords('gmail', 'failed')).toBe("Gmail · didn't work");
     expect(actionWords('gmail', 'unknown')).toBe('Gmail · couldn’t confirm delivery');
+    // A search App sent nothing anywhere: it never says delivery
+    expect(actionWords('exa', 'unknown')).toBe('Exa · couldn’t confirm it finished');
+    expect(actionWords('tavily', 'unknown')).toBe('Tavily · couldn’t confirm it finished');
+    expect(actionWords('exa', 'worked')).toBe('Exa · worked');
     expect(appLabel('google_sheets')).toBe('Google sheets');
     expect(appLabel('')).toBe('App');
   });
@@ -85,6 +89,17 @@ describe('the words for how a task came to end (mock M2)', () => {
       expect(outcomeNote('refunded', [], { job: 'returned' })).toBeNull();
     });
 
+    it('a search App that was confirmed later says the step completed and that nothing was charged, never sent or delivered; an App that sends keeps its words', () => {
+      const late = { job: 'returned' as const, returnedMicros: 30_000 };
+      expect(outcomeNote('partial', [gmail], { ...late, deliveredAfterRelease: ['exa'] })).toBe('Exa confirmed the step completed. You weren’t charged for that step. The computer part didn’t finish and its cost was returned.');
+      expect(outcomeNote('partial', [gmail], { ...late, deliveredAfterRelease: ['exa', 'tavily'], holdPending: true })).toBe('Exa and Tavily confirmed the steps completed. You weren’t charged for those steps. The computer part didn’t finish and its cost was returned.');
+      // Beside an App that sends: each its own words, the hold said only for the one that sent
+      expect(outcomeNote('partial', [gmail], { ...late, deliveredAfterRelease: ['exa', 'gmail'], deliveredHeld: [true, false], holdPending: true })).toBe('Exa confirmed the step completed. You weren’t charged for that step. Gmail was delivered. Its hold was released. The computer part didn’t finish and its cost was returned.');
+      for (const words of [outcomeNote('partial', [gmail], { ...late, deliveredAfterRelease: ['exa', 'tavily'] }), outcomeNote('partial', [gmail], { ...late, deliveredAfterRelease: ['tavily'], holdPending: true })]) {
+        expect(words).not.toMatch(/sent|deliver|hold/i);
+      }
+    });
+
     it('GPT round 3, finding 2: an App let go unconfirmed that was delivered after all is said first, in the approved words, beside a computer given back', () => {
       const late = { job: 'returned' as const, returnedMicros: 30_000, deliveredAfterRelease: ['gmail'] };
       expect(outcomeNote('partial', [gmail], late)).toBe('Gmail was delivered. Its hold was released. The computer part didn’t finish and its cost was returned.');
@@ -152,5 +167,22 @@ describe('the words for how a task came to end (mock M2)', () => {
       // Only a job given back says it
       expect(outcomeNote('failed', [], { job: 'failed', unreachable: true, computerMicros: 30_000 })).toBe('It didn’t finish. Computer time used $0.03.');
     });
+  });
+});
+
+describe('the search Apps', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { isSearchToolkit, SEARCH_TOOLKITS } = require('@/lib/search-apps');
+  it('are Exa and Tavily, however written, and Gmail is not one', () => {
+    expect(isSearchToolkit('Exa')).toBe(true);
+    expect(isSearchToolkit(' tavily ')).toBe(true);
+    expect(isSearchToolkit('gmail')).toBe(false);
+    expect(SEARCH_TOOLKITS).toEqual(['exa', 'tavily']);
+  });
+  it('cover every App of the Instant table: one that sends something is decided on purpose, never by leaving it out', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { instantCatalog } = require('@/lib/instant/values');
+    expect(instantCatalog().length).toBeGreaterThan(0);
+    for (const { toolkit } of instantCatalog()) expect(isSearchToolkit(toolkit)).toBe(true);
   });
 });

@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { isOver } from '@/lib/computer-values';
 import { agentMayAct } from '@/lib/computer-control';
-import { cutoffLockKey, hasPoolCutoff } from '@/lib/computer-faults';
+import { cutoffLockKey, hasFinishIntent, hasPoolCutoff } from '@/lib/computer-faults';
 
 /**
  * The key a job's computer holds (build handoff v2, section 5). It is the computer's only credential, and it grants nothing by
@@ -30,7 +30,7 @@ const digestOf = (token: string) => createHash('sha256').update(token).digest('h
 /** A job that holds the machine, whoever has the keyboard: only these may have a key. */
 const live = (status: string) => status === 'running' || status === 'waiting';
 
-export type Minted = { ok: true; token: string; expiresAt: Date } | { ok: false; reason: 'not_found' | 'not_running' };
+export type Minted = { ok: true; token: string; expiresAt: Date } | { ok: false; reason: 'not_found' | 'not_running' | 'finish_pending' };
 
 /**
  * Makes a key for a running job. The key is shown once, here; only its digest is kept. With `under`, the key is only made for the job as
@@ -47,24 +47,23 @@ export async function mintJobToken(jobId: string, scope: TokenScope, now: Date =
   const expiresAt = new Date(now.getTime() + TOKEN_LIFE_MS);
   const digest = digestOf(token);
   await prisma.computerJobToken.create({ data: { jobId, scope, generation: job.controlGeneration, digest, expiresAt } });
-  if (scope === 'model') {
-    // A job Orbit decided to end for its own capacity never gets a model key again. The decision (and the end of every key) is made under the job's cutoff lock, so the key just made is looked at under that lock too:
-    // a decision that came before it is found here (the key is ended at once, and never given to anyone), and one that comes after it ends this key with the others. Database steps only
-    const cut = await prisma.$transaction(
-      async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
-        if (!(await hasPoolCutoff(tx, jobId))) return false;
-        await tx.computerJobToken.updateMany({ where: { digest, revokedAt: null }, data: { revokedAt: now } });
-        return true;
-      },
-      { timeout: 15_000, maxWait: 15_000 },
-    ).catch(async (error) => {
-      // A key that cannot be looked at is not given out
-      await prisma.computerJobToken.updateMany({ where: { digest, revokedAt: null }, data: { revokedAt: now } }).catch(() => undefined);
-      throw error;
-    });
-    if (cut) return { ok: false, reason: 'not_running' };
-  }
+  // A job Orbit decided to end for its own capacity never gets a key again, and neither does one whose runner committed to ending it (its finish intent). Both are decided under the job's cutoff lock, so the key just made is
+  // looked at under that lock too: a decision that came before it is found here (the key is ended at once, and never given to anyone), and one that comes after it ends this key with the others. Database steps only.
+  // A pool cutoff refuses a model key only (the other scopes are not ours to refuse for it); an intent refuses a key of every scope (a git key is a way to act outside too)
+  const refused = await prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
+      const reason = scope === 'model' && (await hasPoolCutoff(tx, jobId)) ? ('not_running' as const) : (await hasFinishIntent(tx, jobId)) ? ('finish_pending' as const) : null;
+      if (reason !== null) await tx.computerJobToken.updateMany({ where: { digest, revokedAt: null }, data: { revokedAt: now } });
+      return reason;
+    },
+    { timeout: 15_000, maxWait: 15_000 },
+  ).catch(async (error) => {
+    // A key that cannot be looked at is not given out
+    await prisma.computerJobToken.updateMany({ where: { digest, revokedAt: null }, data: { revokedAt: now } }).catch(() => undefined);
+    throw error;
+  });
+  if (refused !== null) return { ok: false, reason: refused };
   if (under) {
     // A take-over that came between the look and the key ends this key too: the fence only revokes the keys that existed when it ran
     const again = await read();

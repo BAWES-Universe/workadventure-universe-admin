@@ -436,6 +436,22 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       await prisma.appSetting.upsert({ where: { key: 'computer_late_report_since' }, update: { value: SINCE.toISOString() }, create: { key: 'computer_late_report_since', value: SINCE.toISOString() } });
     });
 
+    it('names the search Apps of a late follow-up apart (Exa, Tavily sent nothing anywhere), and no other App', async () => {
+      const { id } = await lateJob('sara', 'exa');
+      const { who } = await lateJob('mia', 'gmail');
+      const [search] = await lateMine([id]);
+      expect(search).toMatchObject({ apps: ['Exa'], lateApps: ['Exa'], searchApps: ['Exa'] });
+      // A batch of both names every App, and marks only the search one as a search App
+      const other = await started(who);
+      await finishJob(other, 'failed', minutes(6), 'The relay was not there', 'ours');
+      await keepReportTold(other, 'failed');
+      await letGo(other, who, 'tavily');
+      await letGo(other, who, 'gmail');
+      const [mixed] = await lateMine([other]);
+      expect(mixed.apps).toEqual(expect.arrayContaining(['Tavily', 'Gmail']));
+      expect(mixed.searchApps).toEqual(['Tavily']);
+    });
+
     it('offers it once, with the Apps that went out, after the first report was delivered, and never to a reader that did not ask for it', async () => {
       const { who, id } = await lateJob();
       // An older game (no accepts) is never sent the kind; neither is one that asks for something else

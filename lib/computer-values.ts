@@ -65,6 +65,14 @@ export const HOLDS_MACHINE: readonly JobStatus[] = ['running', 'waiting'];
 /** A job is over. */
 export const isOver = (status: string): boolean => status === 'done' || status === 'stopped' || status === 'failed';
 
+/**
+ * The one reading of a job's status that the bot server and Orbit share for a start it looked up by its key: `live` (in line, running or waiting for its person: it can still do work), `done` (it finished) or `ended`
+ * (it was stopped or failed). Not known (the look could not be made) is never one of these: it is the 503 `{ retry: true }` the lookup answers instead. Any status this does not know reads as `live`, the cautious one:
+ * a caller never takes it for a job that is over.
+ */
+export type StartState = 'live' | 'done' | 'ended';
+export const startStateOf = (status: string): StartState => (status === 'done' ? 'done' : status === 'stopped' || status === 'failed' ? 'ended' : 'live');
+
 /** What an awake machine costs for the seconds it was held, in millionths of a dollar. Null when the provider has not said what a minute costs. */
 export function costOfSeconds(seconds: number, microsPerMinute: number | null): number | null {
   if (microsPerMinute === null) return null;
@@ -101,3 +109,10 @@ export type UndeliverableWhy = (typeof UNDELIVERABLE_WHY)[number];
 export const JOB_TAG_PREFIX = '[universe-job:';
 export const JOB_TAG_NOTE = ' (a tag for the system, there is no need to repeat it)';
 export const jobTagOf = (jobId: string): string => `${JOB_TAG_PREFIX}${jobId}]${JOB_TAG_NOTE}`;
+
+/**
+ * Every reason a start can be refused, and every one of them is answered as an ordinary success of the request (HTTP 200 `{ ok: false, reason }`): a refusal is a business answer, never an error status. Orbit never answers
+ * a start with 429 (or any other non-200 status) for a refusal, so a 429 a caller sees on a start did not come from Orbit: an intermediary (a proxy, a gateway) said it, and the start's outcome is NOT known: look it up by its key.
+ * A start that fails is 400 (the input is not valid), 401 (not the bot server) or 500 (Orbit could not do it): never with an `ok` field.
+ */
+export const START_REFUSALS = ['not_owner', 'off', 'not_open', 'broken_start', 'no_run', 'paused', 'cheaper_route', 'not_set', 'rule'] as const;

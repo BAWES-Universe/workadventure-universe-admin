@@ -21,6 +21,7 @@ import { resolveUsagePerson } from '@/lib/usage-person';
 import * as computer from '@/lib/computer';
 import * as visitsLib from '@/lib/computer-visits';
 import * as spend from '@/lib/spend-rules';
+import { START_REFUSALS, startStateOf } from '@/lib/computer-values';
 
 jest.mock('@/lib/db', () => ({ prisma: { user: { findUnique: jest.fn() } } }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -235,6 +236,45 @@ describe('the bot server’s calls', () => {
     expect(lib.startJob).toHaveBeenCalledTimes(3);
   });
 
+  it('answers every refusal of a start as an ordinary success (HTTP 200, `ok: false` and a reason from the known list), never 429 or another error status: a 429 on a start is an intermediary’s, and its outcome is not known', async () => {
+    resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+    for (const reason of START_REFUSALS) {
+      if (reason === 'cheaper_route') lib.startJob.mockResolvedValue({ ok: false, reason, app: 'Gmail' });
+      else if (reason === 'rule') lib.startJob.mockResolvedValue({ ok: false, reason, words: 'No more than $1.00 a month' });
+      else if (reason === 'not_set') lib.startJob.mockResolvedValue({ ok: false, reason });
+      else lib.startJob.mockResolvedValue({ ok: false, reason });
+      const response = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' } }), params);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { ok: boolean; reason: string };
+      expect(body).toMatchObject({ ok: false, reason });
+      expect(START_REFUSALS).toContain(body.reason);
+    }
+    // The refusals Orbit decides in the route itself are the same: a guest, and a rule held before any job
+    resolve.mockResolvedValue({ personId: null, guest: true });
+    expect((await startRoute(asBot('/x', { body: { userId: 'wa-guest', isGuest: true, title: 'x' } }), params)).status).toBe(200);
+    resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+    rules.ownerSpendAllowed.mockResolvedValue({ ok: false, ruleId: 'r1', why: 'cap', leftMicros: 0, words: 'No more than $1.00 a month' });
+    const ruled = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' } }), params);
+    expect(ruled.status).toBe(200);
+    expect(START_REFUSALS).toContain(((await ruled.json()) as { reason: string }).reason);
+    // What is NOT a refusal is an error without an `ok` field: invalid input, the wrong token, Orbit failing
+    rules.ownerSpendAllowed.mockResolvedValue({ ok: true });
+    expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara' } }), params)).status).toBe(400);
+    expect((await startRoute(call('/x', { body: { userId: 'wa-sara', title: 'x' } }), params)).status).toBe(401);
+    lib.startJob.mockRejectedValue(new Error('db down'));
+    const failed = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' } }), params);
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).not.toHaveProperty('ok');
+  });
+
+  it('says one shared reading of the status of the job a key made: live (in line, running, waiting), done, or ended (stopped, failed)', () => {
+    expect(['queued', 'running', 'waiting'].map(startStateOf)).toEqual(['live', 'live', 'live']);
+    expect(startStateOf('done')).toBe('done');
+    expect(['stopped', 'failed'].map(startStateOf)).toEqual(['ended', 'ended']);
+    // A status it does not know is never read as over
+    expect(startStateOf('something-new')).toBe('live');
+  });
+
   it('says a rule the person said in chat stops it, with the rule’s own words, before any job is started', async () => {
     resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
     rules.ownerSpendAllowed.mockResolvedValue({ ok: false, ruleId: 'r1', why: 'cap', leftMicros: 0, words: 'No more than $1.00 a month from your credit for Brick' });
@@ -268,7 +308,7 @@ describe('the bot server’s calls', () => {
       lib.startedJobFor.mockResolvedValue({ id: JOB, status: 'running' });
       expect(await answer('/x?userId=wa-sara')).toEqual({ available: true, on: true, busy: false });
       expect(lib.startedJobFor).not.toHaveBeenCalled();
-      expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: { id: JOB, status: 'running', attempt: KEY } });
+      expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: { id: JOB, status: 'running', state: 'live', attempt: KEY } });
       expect(lib.startedJobFor).toHaveBeenCalledWith(BRICK, 'u-sara', KEY);
       lib.startedJobFor.mockResolvedValue(null);
       expect(await answer(asked)).toEqual({ available: true, on: true, busy: false, started: null });
@@ -416,7 +456,8 @@ describe('the bot server’s calls', () => {
     lib.getJob.mockResolvedValue({ ...job, botId: 'another-brick' } as never);
     expect((await getJobRoute(asBot('/x', { method: 'GET' }), jobParams)).status).toBe(404);
     expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done' } }), jobParams)).status).toBe(404);
-    expect(lib.finishJob).not.toHaveBeenCalled();
+    expect(lib.finishJobUnder).not.toHaveBeenCalled();
+    expect(lib.recordFinishIntent).not.toHaveBeenCalled();
   });
 
   it('takes what a running job says: steps, renewing, hand-over, finishing, and outside effects before they are tried', async () => {
@@ -424,7 +465,7 @@ describe('the bot server’s calls', () => {
     lib.reportProgress.mockResolvedValue({ id: JOB } as never);
     lib.renewJob.mockResolvedValue({ ok: false, reason: 'allowance' });
     lib.requestHandover.mockResolvedValue({ id: JOB } as never);
-    lib.finishJob.mockResolvedValue({ id: JOB } as never);
+    lib.finishJobUnder.mockResolvedValue({ job: { id: JOB }, stale: false } as never);
     lib.planEffect.mockResolvedValue({ ok: false, reason: 'look_up', evidence: 'draft pull request' });
     lib.settleEffect.mockResolvedValue(true);
     await jobAction(asBot('/x', { body: { action: 'progress', stepDone: 2, stepTotal: 5, label: 'Your visa form' } }), jobParams);
@@ -433,19 +474,19 @@ describe('the bot server’s calls', () => {
     await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'details', ready: { what: 'Your details', where: 'visa-portal.example' } } }), jobParams);
     expect(lib.requestHandover).toHaveBeenCalledWith(JOB, 'details', expect.any(Date), { what: 'Your details', where: 'visa-portal.example' });
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done' } }), jobParams);
-    expect(lib.finishJob).toHaveBeenCalledWith(JOB, 'done', expect.any(Date), undefined, undefined, undefined, undefined);
+    expect(lib.finishJobUnder).toHaveBeenCalledWith(JOB, undefined, 'done', expect.any(Date), undefined, undefined, undefined, undefined);
     // A failure carries the computer's own sentence about why, kept cleaned for the message that tells the person
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', why: 'The site kept showing an error' } }), jobParams);
-    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), 'The site kept showing an error', undefined, undefined, undefined);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), 'The site kept showing an error', undefined, undefined, undefined);
     // Who a failure is down to travels with it (only `ours` is given back); a word it does not know is refused
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours' } }), jobParams);
-    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), undefined, 'ours', undefined, undefined);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', undefined, undefined);
     // ...with the turns the runner judged failed: Orbit decides from the relay's rows for them (the cause is only a hint)
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', turns: [3, 4, 5] } }), jobParams);
-    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), undefined, 'ours', [3, 4, 5], undefined);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', [3, 4, 5], undefined);
     // ...and the run those turns were numbered in (a restart makes a new run that numbers turns again), up to 40 characters
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', turns: [1, 2, 3], run: 'mi8x3k2a1b2c3d4e' } }), jobParams);
-    expect(lib.finishJob).toHaveBeenLastCalledWith(JOB, 'failed', expect.any(Date), undefined, 'ours', [1, 2, 3], 'mi8x3k2a1b2c3d4e');
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', [1, 2, 3], 'mi8x3k2a1b2c3d4e');
     for (const run of ['x'.repeat(41), '', 'has space', 5]) {
       expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', turns: [1], run } }), jobParams)).status).toBe(400);
     }
@@ -453,6 +494,44 @@ describe('the bot server’s calls', () => {
     expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'theirs' } }), jobParams)).status).toBe(400);
     expect(await (await jobAction(asBot('/x', { body: { action: 'plan-effect', key: 'pr-1', kind: 'publish' } }), jobParams)).json()).toEqual({ ok: false, reason: 'look_up', evidence: 'draft pull request' });
     expect(await (await jobAction(asBot('/x', { body: { action: 'settle-effect', key: 'pr-1', state: 'done', evidence: 'pull request 12' } }), jobParams)).json()).toEqual({ ok: true });
+  });
+
+  it('says a finish from an older control generation is stale as business (HTTP 200), and passes the generation it was given', async () => {
+    lib.getJob.mockResolvedValue(job as never);
+    lib.finishJobUnder.mockResolvedValueOnce({ job: { id: JOB }, stale: true } as never);
+    const stale = await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done', generation: 1 } }), jobParams);
+    expect(stale.status).toBe(200);
+    expect(await stale.json()).toEqual({ ok: false, reason: 'stale', job: { id: JOB } });
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, 1, 'done', expect.any(Date), undefined, undefined, undefined, undefined);
+    expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done', generation: -1 } }), jobParams)).status).toBe(400);
+  });
+
+  it('keeps the runner’s committed word that a job is to end, and answers every business outcome as HTTP 200', async () => {
+    lib.getJob.mockResolvedValue(job as never);
+    const pending = { outcome: 'failed', cause: 'ours', run: 'r1', generation: 2, turns: [3], why: 'It stopped', at: '2026-11-22T10:00:00.000Z' };
+    lib.recordFinishIntent.mockResolvedValueOnce({ ok: true, already: false, pending } as never);
+    const kept = await jobAction(asBot('/x', { body: { action: 'finish-intent', outcome: 'failed', cause: 'ours', turns: [3], run: 'r1', why: 'It stopped', generation: 2 } }), jobParams);
+    expect(kept.status).toBe(200);
+    expect(await kept.json()).toEqual({ ok: true, already: false, finishPending: pending });
+    expect(lib.recordFinishIntent).toHaveBeenLastCalledWith(JOB, { outcome: 'failed', cause: 'ours', why: 'It stopped', turns: [3], run: 'r1', generation: 2 });
+    lib.recordFinishIntent.mockResolvedValueOnce({ ok: true, already: true, pending } as never);
+    expect(await (await jobAction(asBot('/x', { body: { action: 'finish-intent', outcome: 'done' } }), jobParams)).json()).toMatchObject({ ok: true, already: true });
+    for (const reason of ['stale', 'cutoff']) {
+      lib.recordFinishIntent.mockResolvedValueOnce({ ok: false, reason } as never);
+      const refused = await jobAction(asBot('/x', { body: { action: 'finish-intent', outcome: 'done' } }), jobParams);
+      expect(refused.status).toBe(200);
+      expect(await refused.json()).toMatchObject({ ok: false, reason, job: { id: JOB } });
+    }
+  });
+
+  it('refuses a finish intent that is not well formed or not from the bot server, and keeps nothing', async () => {
+    lib.getJob.mockResolvedValue(job as never);
+    lib.recordFinishIntent.mockClear();
+    expect((await jobAction(call('/x', { body: { action: 'finish-intent', outcome: 'done' } }), jobParams)).status).toBe(401);
+    for (const body of [{ action: 'finish-intent' }, { action: 'finish-intent', outcome: 'maybe' }, { action: 'finish-intent', outcome: 'failed', cause: 'theirs' }, { action: 'finish-intent', outcome: 'failed', turns: [-1] }, { action: 'finish-intent', outcome: 'failed', run: 'has space' }, { action: 'finish-intent', outcome: 'done', generation: 1.5 }]) {
+      expect((await jobAction(asBot('/x', { body }), jobParams)).status).toBe(400);
+    }
+    expect(lib.recordFinishIntent).not.toHaveBeenCalled();
   });
 
   it('refuses a word it does not know: no action, no kind, no wait', async () => {

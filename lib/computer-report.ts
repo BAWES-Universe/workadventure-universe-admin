@@ -3,6 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { ORBIT_SOURCE, OWN_KEY_CALL_MARK, RELAY_UNREACHABLE, hasOwnKeyCall } from '@/lib/computer-faults';
 import { UNREACHABLE_WORDS, appLabel } from '@/lib/task-receipt-words';
+import { isSearchToolkit } from '@/lib/search-apps';
 import { readFilesList } from '@/lib/computer-files';
 import { refundStatesFor } from '@/lib/computer-refunds';
 import { markLateTold, tagLateBatch } from '@/lib/instant/executor';
@@ -75,6 +76,8 @@ export interface Report {
   apps?: string[];
   /** `late` only: the same names under the name the game reads them by (kept equal to `apps`) */
   lateApps?: string[];
+  /** `late` only: the ones of `apps` that only look something up (Exa, Tavily): nothing was sent anywhere by them, so the line about them says the step completed and nothing was charged, never "went out". Every other name of `apps` sent something. */
+  searchApps?: string[];
   /** `late` only: those Apps' holds were released and nothing was charged for them, then or later. */
   holdReleased?: true;
 }
@@ -399,6 +402,7 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
         givenBack: decisionOf.get(job.id) === 'given' && (await givenBackIn(job.id, job.secondsRun)),
         apps: names,
         lateApps: names,
+        searchApps: [...new Set(made.toolkits.filter((toolkit) => isSearchToolkit(toolkit)).map(appLabel))],
         holdReleased: true,
       });
     }

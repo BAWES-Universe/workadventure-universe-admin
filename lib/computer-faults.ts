@@ -374,6 +374,11 @@ export async function recordOwnKeyCall(db: Pick<Prisma.TransactionClient, 'compu
   });
 }
 
+/** Whether the runner committed to ending this job (its finish intent, kept before it gave up). Reads only. */
+export async function hasFinishIntent(db: Pick<Prisma.TransactionClient, 'computerFinishIntent'>, jobId: string): Promise<boolean> {
+  return (await db.computerFinishIntent.count({ where: { jobId } })) > 0;
+}
+
 /** The lock a cutoff for our own capacity, a finish's terminal write, an authorization that may be deciding at the same moment and the making of a model key take one after the other (taken BEFORE the person's lock and the relay-reach lock, never after). */
 export const lockCutoff = (tx: Pick<Prisma.TransactionClient, '$executeRaw'>, jobId: string) => tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
 
@@ -390,6 +395,8 @@ export async function authorizeOwnKeyCall(jobId: string, at: Date = new Date(), 
       await lockCutoff(tx, jobId);
       await lockRelayReach(tx, jobId);
       if (await hasPoolCutoff(tx, jobId)) return false;
+      // The runner committed to ending this job: no call is authorized from then on, and no marker is kept for one that is refused
+      if (await hasFinishIntent(tx, jobId)) return false;
       const job = await tx.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
       if (!job || (job.status !== 'running' && job.status !== 'waiting')) return false;
       if (stillGood && !(await stillGood(tx))) return false;
