@@ -46,6 +46,7 @@ CREATE TABLE "computer_job_pauses" (
     "started_at" TIMESTAMP(3),
     "at" TIMESTAMP(3) NOT NULL,
     "booked_at" TIMESTAMP(3),
+    "resumed_at" TIMESTAMP(3),
 
     CONSTRAINT "computer_job_pauses_pkey" PRIMARY KEY ("id")
 );

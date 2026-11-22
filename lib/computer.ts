@@ -108,6 +108,8 @@ export interface JobView {
   /** A paused job (status `queued`, queuedFor `paused`): when and why (the person's own Pause, their month used up, or a limit they set). Null for every other job. */
   pausedAt: Date | null;
   pausedWhy: PausedWhy | null;
+  /** The job was paused before and has its work so far (a job "Do this next" put back in line carries on by itself, next). */
+  pausedBefore: boolean;
 }
 
 export interface ComputerView {
@@ -160,6 +162,7 @@ type JobRow = {
   endedAt: Date | null;
   pausedAt?: Date | null;
   pausedWhy?: string | null;
+  pauses?: number;
   effects?: { effectKey: string; kind: string; state: string; evidence: string | null }[];
 };
 
@@ -198,6 +201,7 @@ function jobView(row: JobRow): JobView {
     detailsToFill,
     pausedAt: row.queuedFor === 'paused' ? (row.pausedAt ?? null) : null,
     pausedWhy: row.queuedFor === 'paused' ? ((row.pausedWhy ?? null) as PausedWhy | null) : null,
+    pausedBefore: (row.pauses ?? 0) > 0,
   };
 }
 
@@ -1024,6 +1028,7 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     return 'gone';
   }
   // A job that was paused gets its own browser back (and never the one of a job that ran in between) before its runner takes it up
+  if (job.pauses > 0) await prisma.computerJobPause.updateMany({ where: { jobId: job.id, n: job.pauses, resumedAt: null }, data: { resumedAt: now } }).catch(() => undefined);
   if (job.pauses > 0) await restoreProfile(job.botId, job.id).catch((error) => console.error('[Computer] Could not bring back a resumed job’s browser:', error instanceof Error ? error.message : 'unknown'));
   // What is on the machine before this job works on it: only so the message can name files the job saved outside its own output folder (those are never handed over)
   if (job.writes) await takeBaseline(job.id, job.botId, provider);

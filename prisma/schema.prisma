@@ -3702,6 +3702,8 @@ model ComputerJobPause {
   startedAt DateTime? @map("started_at")
   at        DateTime
   bookedAt  DateTime? @map("booked_at")
+  /// When the job ran again after this pause (its next start on the machine, however it was resumed); null while it has not.
+  resumedAt DateTime? @map("resumed_at")
 
   job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
