@@ -44,6 +44,15 @@ export type FinishCause = (typeof FINISH_CAUSES)[number];
  */
 export const givenBackJob = (status: string, endedBy: string | null | undefined): boolean => (status === 'failed' || status === 'stopped') && (endedBy === 'error' || endedBy === 'pool');
 
+/**
+ * "Try again" of an ended job carries on in that job's agent conversation (piece 8) only after an ending that was not the person's own doing: a failure that was ours (`error`), our pool or envelope
+ * cutting it off (`pool`), nobody answering its question in time (`unanswered`), and the month or a spending limit ending it (`allowance`, `rule`: endings from before those paused instead). The person's
+ * own Stop or Cancel (`person`), a computer turned off (`off`) and a Brick deleted (`deleted`) are a fresh job, and so is a failure the agent itself gave (no ending: `failed` with `ended_by` null),
+ * a job that finished (`done`) and one that never ran. ONE list, read by the start (which re-checks every ask) and by the look the game makes before it asks.
+ */
+export const CONTINUES_AFTER: readonly EndedBy[] = ['error', 'pool', 'unanswered', 'allowance', 'rule'];
+export const continuableEnding = (status: string, endedBy: string | null | undefined): boolean => (status === 'failed' || status === 'stopped') && !!endedBy && (CONTINUES_AFTER as readonly string[]).includes(endedBy);
+
 /** What a job waits for: the person's step. */
 export const WAITING_FOR = ['details', 'signin', 'upload', 'pay', 'submit', 'answer'] as const;
 export type WaitingFor = (typeof WAITING_FOR)[number];

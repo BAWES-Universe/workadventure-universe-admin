@@ -63,6 +63,7 @@ import {
   type PausedWhy,
 } from '@/lib/computer-values';
 import { dropProfile, restoreProfile } from '@/lib/computer-browser-profile';
+import { carryOnFrom } from '@/lib/computer-continue';
 
 /**
  * A Brick's computer, and the jobs on it (game #2000, Brick 9).
@@ -444,7 +445,8 @@ export interface EarlierStart {
 }
 
 export type Started =
-  | { ok: true; job: JobView; restoredFrom: Date | null }
+  /** `continued`: the job carries on in the conversation of the ended job the start named ("try again", piece 8): a new job, its own reservation and receipt. */
+  | { ok: true; job: JobView; restoredFrom: Date | null; continued?: true }
   /** Not the owner's Brick, or not theirs to ask: only the owner starts computer work on their Brick. */
   | { ok: false; reason: 'not_owner' | 'off' | 'not_open' | 'broken_start' | 'no_run' | 'paused' }
   /** A connected app would do this for less than the computer: nothing is started, and the Brick is told which app to use. */
@@ -604,7 +606,7 @@ export interface JobOrigin {
   ref: string;
 }
 
-type StartInput = { botId: string; /** The start says the game acks it (header `X-Computer-Start-Acks`): its job is made unconfirmed, and a start under another key meets an unconfirmed one as `earlier`. Without it the job is confirmed when it is made, as before. */ acks?: boolean; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; /** The caller's key for this one start: a start repeating it answers the job it made. */ startKey?: string | null; plan?: RoutePlan | null; origin?: JobOrigin | null };
+type StartInput = { botId: string; /** The start says the game acks it (header `X-Computer-Start-Acks`): its job is made unconfirmed, and a start under another key meets an unconfirmed one as `earlier`. Without it the job is confirmed when it is made, as before. */ acks?: boolean; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; /** The caller's key for this one start: a start repeating it answers the job it made. */ startKey?: string | null; plan?: RoutePlan | null; origin?: JobOrigin | null; /** "Try again" of an ended job (piece 8): the job to carry on in the conversation of. Orbit decides from its own record whether it does (lib/computer-continue); when it does not, the start is an ordinary fresh job. */ continuesJobId?: string | null };
 type Begun = { done: Started } | { created: { id: string } };
 
 export async function startJob(input: StartInput, now: Date = new Date()): Promise<Started> {
@@ -659,6 +661,17 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
     const again = await reuseJob(input.botId, { botId_personId_startKey: { botId: input.botId, personId: input.personId, startKey: input.startKey } }, now);
     if (again) return { done: again };
   }
+  // "Try again" of an ended job (piece 8): carried on in its conversation only when Orbit's record says so, once per job. The job that already carries it on is the answer, whatever it came to,
+  // as the job a run made is (one that is not confirmed yet is answered `earlier` by the person's lock below, never a second job)
+  const carry = input.continuesJobId ? await carryOnFrom(input.botId, input.personId, input.continuesJobId) : null;
+  if (carry && 'existing' in carry) {
+    const unconfirmed = input.acks && input.startKey ? await prisma.computerJob.count({ where: { id: carry.existing.id, startAckedAt: null } }) : 0;
+    if (unconfirmed === 0) {
+      const again = await reuseJob(input.botId, { id: carry.existing.id }, now);
+      if (again) return { done: again };
+    }
+  }
+  const link = carry && 'link' in carry ? carry.link : null;
   // The way: a connected app that would do this for less is used instead, before anything is made, woken or reserved
   const routed = await routeJob({ botId: input.botId, personId: input.personId, plan: input.plan, awakeMicrosPerMinute: providerFor(row)?.microsPerMinute() ?? null, hasMachine: !!row.providerRef }, now);
   if (!routed.ok) return { done: { ok: false, reason: 'cheaper_route', app: routed.app } };
@@ -667,7 +680,7 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
   if (await computersArePaused()) return { done: { ok: false, reason: 'paused' } };
   let created;
   try {
-    const data = { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null, startKey: input.startKey ?? null, route: routed.route, expectedMicros: BigInt(routed.expectedMicros), originKind: input.origin?.kind ?? null, originRef: input.origin?.ref.slice(0, 255) ?? null };
+    const data = { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null, startKey: input.startKey ?? null, route: routed.route, expectedMicros: BigInt(routed.expectedMicros), originKind: input.origin?.kind ?? null, originRef: input.origin?.ref.slice(0, 255) ?? null, ...(link ? { continuesJobId: link.continuesJobId, agentSessionId: link.agentSessionId } : {}) };
     if (input.acks && input.startKey) {
       // A start that acks: decided under the person's lock in the SAME transaction that makes the job, so two starts at once cannot both pass. An earlier start of this person on this Brick that the game has not confirmed
       // (the oldest is named) makes this one make nothing; a job this very key made (a start of it at the same moment) is the answer instead
@@ -721,11 +734,12 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
       if (input.startKey) await prisma.computerStartAttempt.updateMany({ where: { botId: input.botId, personId: input.personId, startKey: input.startKey, state: 'open' }, data: { state: 'made', jobId: created.id } }).catch(() => undefined);
     }
   } catch (error) {
-    // Two asks for the same run, or with the same key, at once: the first made the job, the second finds it
-    if ((input.runId || input.startKey) && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+    // Two asks for the same run, or with the same key, or carrying on the same ended job, at once: the first made the job, the second finds it
+    if ((input.runId || input.startKey || link) && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       const winner =
         (input.runId ? await reuseJob(input.botId, { botId_runId: { botId: input.botId, runId: input.runId } }, now) : null) ??
-        (input.startKey ? await reuseJob(input.botId, { botId_personId_startKey: { botId: input.botId, personId: input.personId, startKey: input.startKey } }, now) : null);
+        (input.startKey ? await reuseJob(input.botId, { botId_personId_startKey: { botId: input.botId, personId: input.personId, startKey: input.startKey } }, now) : null) ??
+        (link ? await reuseJob(input.botId, { continuesJobId: link.continuesJobId }, now) : null);
       if (winner) return { done: winner };
       // The first ask made the job and took it away again before this one could look: that is "controls not set up" or a rule the person
       // said (both leave no job behind). Whichever it was, this ask gets the same answer, not an error
@@ -765,7 +779,7 @@ async function tryNewJob(input: StartInput, now: Date, created: { id: string }):
   }
   if (job.status === 'failed') return { ok: false, reason: 'broken_start' };
   const after = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
-  return { ok: true, job: jobView(job), restoredFrom: job.status === 'running' ? (after?.restoredFrom ?? null) : null };
+  return { ok: true, job: jobView(job), restoredFrom: job.status === 'running' ? (after?.restoredFrom ?? null) : null, ...(job.continuesJobId ? { continued: true as const } : {}) };
 }
 
 /**
@@ -815,7 +829,7 @@ async function reuseJob(botId: string, where: Prisma.ComputerJobWhereUniqueInput
     return { ok: false, reason: 'rule', words: (await ruleWordsOf(botId, found.personId, now, found.id)) ?? 'A rule you said stopped this job' };
   }
   if (found.status === 'failed') return { ok: false, reason: 'broken_start' };
-  return { ok: true, job: jobView(found), restoredFrom: null };
+  return { ok: true, job: jobView(found), restoredFrom: null, ...(found.continuesJobId ? { continued: true as const } : {}) };
 }
 
 /** Whether the run is one of this person's goals or tasks on this Brick. */
@@ -3020,6 +3034,8 @@ export interface RunnableJob {
   writes: boolean;
   /** The agent has a turn going (the runner reconnects to it instead of starting another). */
   hasTurn: boolean;
+  /** "Try again" (piece 8): the ended job this one carries on from, in the same agent conversation (its first words say so, and where that job kept its files); null for every other job. */
+  continuesJobId: string | null;
 }
 
 /** The most jobs one page of the running list holds. */
@@ -3058,12 +3074,12 @@ export async function runnableJobsPage(limit = 50, cursor?: string | null): Prom
     },
     orderBy: [{ startedAt: 'asc' }, { id: 'asc' }],
     take: size + 1,
-    select: { id: true, botId: true, title: true, brief: true, writes: true, agentResponseId: true, startedAt: true },
+    select: { id: true, botId: true, title: true, brief: true, writes: true, agentResponseId: true, startedAt: true, continuesJobId: true },
   });
   const page = rows.slice(0, size);
   const last = page[page.length - 1];
   return {
-    jobs: page.map((row) => ({ jobId: row.id, botId: row.botId, title: row.title, brief: row.brief, writes: row.writes, hasTurn: row.agentResponseId !== null })),
+    jobs: page.map((row) => ({ jobId: row.id, botId: row.botId, title: row.title, brief: row.brief, writes: row.writes, hasTurn: row.agentResponseId !== null, continuesJobId: row.continuesJobId })),
     nextCursor: rows.length > size && last?.startedAt ? cursorOf(last.startedAt, last.id) : null,
   };
 }
