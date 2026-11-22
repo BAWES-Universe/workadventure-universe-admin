@@ -20,6 +20,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import * as computer from '@/lib/computer';
 import * as visitsLib from '@/lib/computer-visits';
+import * as notesLib from '@/lib/computer-job-notes';
 import * as spend from '@/lib/spend-rules';
 import { START_REFUSALS, startStateOf } from '@/lib/computer-values';
 
@@ -28,6 +29,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/usage-person', () => ({ resolveUsagePerson: jest.fn() }));
 jest.mock('@/lib/computer');
 jest.mock('@/lib/computer-visits');
+jest.mock('@/lib/computer-job-notes');
 jest.mock('@/lib/spend-rules');
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
@@ -36,6 +38,7 @@ const session = getSessionUser as jest.Mock;
 const resolve = resolveUsagePerson as jest.Mock;
 const lib = computer as jest.Mocked<typeof computer>;
 const visits = visitsLib as jest.Mocked<typeof visitsLib>;
+const notes = notesLib as jest.Mocked<typeof notesLib>;
 const rules = spend as jest.Mocked<typeof spend>;
 
 const SERVICE_TOKEN = 'bot-server-secret';
@@ -625,6 +628,19 @@ describe('the bot server’s calls', () => {
     lib.getJob.mockResolvedValue({ ...job, ownerEpoch: 5, ownerRun: 'rB' } as never);
     const read = await getJobRoute(asBot('/x', { method: 'GET' }), jobParams);
     expect(await read.json()).toMatchObject({ job: { id: JOB, ownerEpoch: 5, ownerRun: 'rB' } });
+  });
+
+  it('gives the runner the person’s pending notes with the job, and takes `notes-sent` from the owner (the epoch it names)', async () => {
+    lib.getJob.mockResolvedValue({ ...job, ownerEpoch: 5 } as never);
+    notes.pendingNotes.mockResolvedValue([{ seq: 1, text: 'use 12 March' }]);
+    const read = await getJobRoute(asBot('/x', { method: 'GET' }), jobParams);
+    expect(await read.json()).toMatchObject({ job: { id: JOB, notes: [{ seq: 1, text: 'use 12 March' }] } });
+    notes.notesSent.mockResolvedValue({ ok: true, sent: 1 });
+    expect(await (await jobAction(asBot('/x', { body: { action: 'notes-sent', epoch: 5, through: 1 } }), jobParams)).json()).toEqual({ ok: true, sent: 1 });
+    expect(notes.notesSent).toHaveBeenLastCalledWith(JOB, { through: 1, epoch: 5 });
+    notes.notesSent.mockResolvedValue({ ok: false, reason: 'stale', run: 'superseded' });
+    expect(await (await jobAction(asBot('/x', { body: { action: 'notes-sent', epoch: 4, through: 1 } }), jobParams)).json()).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+    for (const through of [0, -1, 1.5, '1']) expect((await jobAction(asBot('/x', { body: { action: 'notes-sent', epoch: 5, through } }), jobParams)).status).toBe(400);
   });
 
   it('takes what a running job says: steps, renewing, hand-over, finishing, and outside effects before they are tried', async () => {

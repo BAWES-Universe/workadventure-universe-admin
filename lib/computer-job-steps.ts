@@ -65,14 +65,50 @@ export async function stepsOf(jobId: string): Promise<JobStep[]> {
   return rows.map((row) => ({ seq: row.seq, label: cleanStepLabel(row.label) ?? '', at: row.at })).filter((step) => step.label !== '');
 }
 
-export type Activity = { ok: true; job: { id: string; title: string; status: string }; steps: JobStep[] } | { ok: false; reason: 'not_found' };
+/** One line of Activity. `key` is stable across reads (`step:<n>`, `note:<n>`, `pause:<n>`, `resume:<n>`, `paused:now`); `seq` is the line's place in this answer. */
+export interface ActivityItem {
+  key: string;
+  seq: number;
+  kind: 'step' | 'note' | 'pause' | 'resume';
+  label: string;
+  detail: string | null;
+  at: Date;
+}
+
+export type Activity = { ok: true; job: { id: string; title: string; status: string }; steps: ActivityItem[] } | { ok: false; reason: 'not_found' };
+
+/** The words of a pause line, by who or what paused it (decisions 23 Nov, section 2). Never a number or a price. */
+const PAUSED_WORDS: Record<string, string> = {
+  person: 'Paused by you',
+  allowance: "Paused: this month's computer time is used up",
+  rule: 'Paused: it reached the spending limit you set',
+};
+const pausedWords = (why: string | null | undefined): string => PAUSED_WORDS[why ?? 'person'] ?? PAUSED_WORDS.person;
+const ORDER: Record<ActivityItem['kind'], number> = { pause: 0, resume: 1, note: 2, step: 3 };
 
 /**
- * A job's Activity for its Brick's owner: the job (id, title, status) and its steps, oldest first. Only the Brick's owner, and only a job of that Brick:
- * a job id alone is never enough. Read only.
+ * A job's Activity for its Brick's owner (the approved mock, picture 22): what it has done so far, oldest first, with the person's own notes to it and its
+ * pauses between the steps. `steps` holds every line: `kind` says which (step, note, pause, resume). Notes are the person's own words, shown to them alone.
+ * Only the Brick's owner, and only a job of that Brick: a job id alone is never enough. Read only.
  */
 export async function jobActivity(botId: string, ownerId: string, jobId: string): Promise<Activity> {
   const job = await ownersJob(botId, ownerId, jobId);
   if (!job) return { ok: false, reason: 'not_found' };
-  return { ok: true, job: { id: job.id, title: job.title, status: job.status }, steps: await stepsOf(job.id) };
+  const [steps, notes, pauses, now] = await Promise.all([
+    stepsOf(job.id),
+    prisma.computerJobNote.findMany({ where: { jobId }, orderBy: { seq: 'asc' }, select: { seq: true, text: true, createdAt: true } }),
+    prisma.computerJobPause.findMany({ where: { jobId }, orderBy: { n: 'asc' }, select: { n: true, why: true, at: true } }),
+    prisma.computerJob.findUnique({ where: { id: jobId }, select: { queuedFor: true, pausedAt: true, pausedWhy: true } }),
+  ]);
+  const lines: Omit<ActivityItem, 'seq'>[] = [
+    ...steps.map((step) => ({ key: `step:${step.seq}`, kind: 'step' as const, label: step.label, detail: null, at: step.at })),
+    ...notes.map((note) => ({ key: `note:${note.seq}`, kind: 'note' as const, label: note.text, detail: null, at: note.createdAt })),
+    ...pauses.map((pause) => ({ key: `pause:${pause.n}`, kind: 'pause' as const, label: pausedWords(pause.why), detail: null, at: pause.at })),
+  ];
+  // A job paused while it was only in line has no pause row (nothing ran): its pause is the job's own mark, while it lasts
+  if (now?.queuedFor === 'paused' && now.pausedAt && !pauses.some((pause) => pause.at.getTime() === now.pausedAt!.getTime())) {
+    lines.push({ key: 'paused:now', kind: 'pause', label: pausedWords(now.pausedWhy), detail: null, at: now.pausedAt });
+  }
+  lines.sort((a, b) => a.at.getTime() - b.at.getTime() || ORDER[a.kind] - ORDER[b.kind] || a.key.localeCompare(b.key));
+  return { ok: true, job: { id: job.id, title: job.title, status: job.status }, steps: lines.map((line, index) => ({ ...line, seq: index + 1 })) };
 }

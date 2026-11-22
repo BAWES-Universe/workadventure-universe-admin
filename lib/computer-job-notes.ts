@@ -26,7 +26,7 @@ import { isOver } from '@/lib/computer-values';
  *  - in line or paused: the note is kept, and given with the job's first turn (or its first turn after resume).
  *  - over: nothing is kept (`over`). Ending (a finish intent kept or a pool cutoff decided): nothing is kept (`ending`), the finaliser owns it.
  *
- * Notes are the person's own words for the agent only: never shown to anyone else, and forgotten once the job is over (the sweep).
+ * Notes are the person's own words: given to the agent of that job only, shown back to the person alone in the job's Activity, and gone with the job.
  */
 
 /** Where a kept note goes next, so Brick (or the panel) can say it plainly. */
@@ -132,12 +132,4 @@ export async function notesSent(jobId: string, input: { through: number; epoch?:
   if (!job || isOver(job.status)) return { ok: false, reason: 'over' };
   if (!epochMatches(job.ownerEpoch, input.epoch)) return SUPERSEDED;
   return { ok: true, sent: 0 };
-}
-
-/** Notes of jobs that are over are forgotten (the person's words were for the agent of that job only). Run by the sweep; answers how many went. */
-export async function forgetEndedJobNotes(batch = 500): Promise<number> {
-  return prisma.$executeRaw`
-    DELETE FROM "computer_job_notes" WHERE "id" IN (
-      SELECT n."id" FROM "computer_job_notes" n JOIN "computer_jobs" j ON j."id" = n."job_id"
-      WHERE j."status" IN ('done', 'stopped', 'failed') LIMIT ${batch})`;
 }

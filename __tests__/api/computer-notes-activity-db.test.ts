@@ -26,7 +26,7 @@ import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { claimJob, giveComputer, recordFinishIntent, renewJob, reportProgressAs, requestHandoverAs, startJob, sweepComputers } from '@/lib/computer';
 import { cutoffLockKey } from '@/lib/computer-calls';
-import { addJobNote, forgetEndedJobNotes, notesSent, pendingNotes } from '@/lib/computer-job-notes';
+import { addJobNote, notesSent, pendingNotes } from '@/lib/computer-job-notes';
 import { appendStep, jobActivity, stepsOf } from '@/lib/computer-job-steps';
 import { cancelJob, moveJobFirst, pauseJob } from '@/lib/computer-job-controls';
 import { POST as control } from '@/app/api/bots/[id]/computer-jobs/control/route';
@@ -289,17 +289,6 @@ run('notes to a running job, Activity, and Brick’s door (computers full plan, 
       expect(await pendingNotes(jobId)).toHaveLength(1);
       expect(await notesSent(jobId, { through: 1, epoch: newer })).toEqual({ ok: true, sent: 1 });
     });
-
-    it('the notes of a job that is over are forgotten by the sweep; CONTROL: a live job’s stay', async () => {
-      const over = await running('n-forget');
-      const live = await running('n-forget-live');
-      await addJobNote(over.sara.brickId, over.sara.id, over.jobId, 'private words', minutes(1));
-      await addJobNote(live.sara.brickId, live.sara.id, live.jobId, 'still needed', minutes(1));
-      await prisma.computerJob.update({ where: { id: over.jobId }, data: { status: 'stopped', endedBy: 'person', endedAt: minutes(2) } });
-      expect(await forgetEndedJobNotes()).toBeGreaterThanOrEqual(1);
-      expect(await notesOf(over.jobId)).toEqual([]);
-      expect(await notesOf(live.jobId)).toHaveLength(1);
-    });
   });
 
   describe('Activity: the steps so far', () => {
@@ -316,6 +305,31 @@ run('notes to a running job, Activity, and Brick’s door (computers full plan, 
       const activity = await jobActivity(sara.brickId, sara.id, jobId);
       expect(activity).toMatchObject({ ok: true, job: { id: jobId, title: 'Visa form', status: 'running' } });
       if (activity.ok) expect(activity.steps).toHaveLength(3);
+    });
+
+    it('shows the person’s own notes and the pauses between the steps, in time order, each with a stable key; a job paused while in line shows its pause', async () => {
+      const { sara, jobId, epoch } = await running('a-mixed');
+      await reportProgressAs(jobId, { stepDone: 1, label: 'Opening the visa site' }, { epoch });
+      await prisma.computerJobStep.updateMany({ where: { jobId }, data: { at: minutes(1) } });
+      await addJobNote(sara.brickId, sara.id, jobId, 'use 12 March', minutes(2));
+      await prisma.computerJobPause.create({ data: { jobId, n: 1, why: 'person', at: minutes(3), seconds: 120 } });
+      await prisma.computerJobPause.create({ data: { jobId, n: 2, why: 'allowance', at: minutes(5), seconds: 60 } });
+      const activity = await jobActivity(sara.brickId, sara.id, jobId);
+      if (!activity.ok) throw new Error('no activity');
+      expect(activity.steps.map((line) => [line.seq, line.key, line.kind, line.label])).toEqual([
+        [1, 'step:1', 'step', 'Opening the visa site'],
+        [2, 'note:1', 'note', 'use 12 March'],
+        [3, 'pause:1', 'pause', 'Paused by you'],
+        [4, 'pause:2', 'pause', "Paused: this month's computer time is used up"],
+      ]);
+      const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Clock' }, minutes(6));
+      if (!second.ok) throw new Error('no second job');
+      await prisma.computerJob.update({ where: { id: second.job.id }, data: { queuedFor: 'paused', pausedAt: minutes(7), pausedWhy: 'rule' } });
+      const queued = await jobActivity(sara.brickId, sara.id, second.job.id);
+      expect(queued).toMatchObject({ ok: true, steps: [{ seq: 1, key: 'paused:now', kind: 'pause', label: 'Paused: it reached the spending limit you set' }] });
+      // Another person never sees these words
+      const other = await person('a-mixed-other');
+      expect(await jobActivity(sara.brickId, other.id, jobId)).toEqual({ ok: false, reason: 'not_found' });
     });
 
     it('a worker that was replaced adds no step to its successor’s list; CONTROL: the owner’s step is added', async () => {
@@ -366,6 +380,9 @@ run('notes to a running job, Activity, and Brick’s door (computers full plan, 
       const b = await running('d-own-b');
       expect(await door(a.sara.brickId, { action: 'list', personId: b.sara.uuid })).toEqual({ ok: false, reason: 'not_owner' });
       expect(await door(a.sara.brickId, { action: 'pause', personId: 'guest-1', isGuest: true, jobId: a.jobId })).toEqual({ ok: false, reason: 'not_owner' });
+      expect(await door(a.sara.brickId, { action: 'pause', personId: b.sara.uuid, jobId: a.jobId })).toEqual({ ok: false, reason: 'not_owner' });
+      expect(await door(a.sara.brickId, { action: 'cancel', personId: b.sara.uuid, jobId: a.jobId })).toEqual({ ok: false, reason: 'not_owner' });
+      expect(cancelJob).not.toHaveBeenCalled();
       expect(pauseJob).not.toHaveBeenCalled();
       const listed = await door(a.sara.brickId, { action: 'list', personId: a.sara.uuid });
       expect(listed.ok).toBe(true);
@@ -379,7 +396,7 @@ run('notes to a running job, Activity, and Brick’s door (computers full plan, 
       expect(noted).toMatchObject({ ok: true, note: { seq: 1, delivery: 'now' } });
       expect(await pendingNotes(jobId)).toEqual([{ seq: 1, text: 'use 12 March' }]);
       const activity = await door(sara.brickId, { action: 'activity', personId: sara.uuid, jobId });
-      expect(activity).toMatchObject({ ok: true, job: { id: jobId }, steps: [{ seq: 1, label: 'Opening the visa site' }] });
+      expect(activity).toMatchObject({ ok: true, job: { id: jobId }, steps: [{ seq: 1, kind: 'step', key: 'step:1', label: 'Opening the visa site' }, { seq: 2, kind: 'note', key: 'note:1', label: 'use 12 March' }] });
       expect(await door(sara.brickId, { action: 'pause', personId: sara.uuid, jobId })).toEqual({ ok: false, reason: 'taken_over' });
       expect(pauseJob).toHaveBeenCalledWith(sara.brickId, sara.id, jobId);
       await door(sara.brickId, { action: 'first', personId: sara.uuid, jobId, pauseRunning: true });
