@@ -28,7 +28,7 @@ import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
 import { GET as getPaidBy } from '@/app/api/bots/[id]/paid-by/route';
 import { POST as postJob } from '@/app/api/bots/[id]/computer-jobs/route';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { finishJob, giveComputer, renewJob, startJob, sweepComputers } from '@/lib/computer';
+import { finishJob, giveComputer, renewJob, startJob, sweepComputers, takeOver } from '@/lib/computer';
 import { recordFaults } from '@/lib/computer-faults';
 import { reportsToTell } from '@/lib/computer-report';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_LATEST_MS } from '@/lib/computer-file-cards';
@@ -1056,9 +1056,9 @@ run('rules said in chat and task receipts, in a real database', () => {
       if (!minted.ok) throw new Error('no key');
       const refused = await authorizeModelCall({ token: minted.token, callId: 'call-1', estimateMicros: 50_000, payer: 'universe' }, NOW);
       expect(refused).toEqual({ ok: false, reason: 'rule', ruleId: expect.any(String), why: 'cap', leftMicros: 40_000, words: expect.stringContaining('No more than $0.10 a month') });
-      // Nothing was held for it, and the job is over as "rule" (as a refused renewal ends it): its key is no longer good, so no call goes after it
+      // Nothing was held for it, and the job pauses as "rule" (as a refused renewal pauses it): its key is no longer good, so no call goes after it
       expect(await prisma.meterReservation.count({ where: { jobId: started.job.id, reservationKey: { contains: 'call' } } })).toBe(0);
-      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'rule' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule', endedBy: null });
       expect(await authorizeModelCall({ token: minted.token, callId: 'call-2', estimateMicros: 30_000, payer: 'universe' }, NOW)).toEqual({ ok: false, reason: 'refused' });
     });
 
@@ -1111,7 +1111,7 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: 40_001 }, NOW)).toMatchObject({ ok: false, leftMicros: 40_000 });
     });
 
-    it('a job that is running when a rule stops more room ends as "rule", saying so, not as "our room is used up"', async () => {
+    it('a job that is running when a rule stops more room pauses as "rule", saying so, not as "our room is used up"', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
       const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 100_000 });
@@ -1124,13 +1124,13 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await renewJob(started.job.id, new Date(NOW.getTime() + 60_000))).toMatchObject({ ok: true });
       // Ten minutes in it could cost 120,000, which is over 100,000
       const renewed = await renewJob(started.job.id, new Date(NOW.getTime() + 600_000));
-      expect(renewed).toEqual({ ok: false, reason: 'rule', words: expect.stringContaining('No more than $0.10 a month') });
-      const ended = await prisma.computerJob.findUnique({ where: { id: started.job.id } });
-      expect(ended).toMatchObject({ status: 'stopped', endedBy: 'rule' });
+      expect(renewed).toEqual({ ok: false, reason: 'paused', why: 'rule' });
+      const paused = await prisma.computerJob.findUnique({ where: { id: started.job.id } });
+      expect(paused).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule', endedBy: null });
     });
 
     describe('what the payer reads on the receipt of a job stopped at their spending rule (GPT observation 2)', () => {
-      /** A job that ran, then stopped at a rule the person said, with its receipt closed the way the bot server closes it ("done"). */
+      /** A job that ran, then stopped at a rule the person said, with its receipt closed the way the bot server closes it ("done"). A rule ENDS a job only while the person holds the screen (no pause is offered then); otherwise it pauses. */
       async function stoppedAtRule(title: string) {
         const sara = await person('sara');
         await giveComputer(sara.brickId, sara.id);
@@ -1141,6 +1141,7 @@ run('rules said in chat and task receipts, in a real database', () => {
         await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: started.job.id, title, category: 'computer' }, NOW);
         await prisma.meterReservation.updateMany({ where: { jobId: started.job.id }, data: { createdAt: NOW } });
         expect(await renewJob(started.job.id, new Date(NOW.getTime() + 60_000))).toMatchObject({ ok: true });
+        expect((await takeOver(sara.brickId, sara.id, new Date(NOW.getTime() + 120_000))).ok).toBe(true);
         expect(await renewJob(started.job.id, new Date(NOW.getTime() + 600_000))).toMatchObject({ ok: false, reason: 'rule' });
         expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'rule', startedAt: expect.any(Date) });
         await closeReceipt({ botId: sara.brickId, taskKey: started.job.id, personId: sara.id, state: 'done' }, new Date(NOW.getTime() + 601_000));
@@ -1212,7 +1213,7 @@ run('rules said in chat and task receipts, in a real database', () => {
       });
     });
 
-    it('a model call a rule refuses ends the job right there as "rule", so a later "failed, ours" from the runner changes nothing and nothing is given back', async () => {
+    it('a model call a rule refuses pauses the job right there as "rule", so a later "failed, ours" from the runner changes nothing and nothing is given back', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
       const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 100_000 });
@@ -1225,9 +1226,9 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await authorizeModelCall({ token: minted.token, callId: 'c1', estimateMicros: 30_000, payer: 'universe' }, NOW)).toMatchObject({ ok: true });
       await settleModelCall(started.job.id, 'c1', { costMicros: 30_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW);
       expect(await authorizeModelCall({ token: minted.token, callId: 'c2', estimateMicros: 30_000, payer: 'universe' }, NOW)).toMatchObject({ ok: false, reason: 'rule' });
-      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'rule', endNote: expect.stringContaining('No more than $0.10 a month') });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule', endedBy: null });
       await finishJob(started.job.id, 'failed', NOW, 'Three turns failed', 'ours');
-      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'rule' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule', endedBy: null });
       expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${started.job.id}:call:c1` } })).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
     });
   });
