@@ -6,6 +6,7 @@ import { releaseRoom, releaseRoomIn, reserveRoom, settleRoom } from '@/lib/meter
 import { revokeJobTokens, verifyJobToken } from '@/lib/computer-token';
 import { givenBackJob } from '@/lib/computer-values';
 import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
+import { CALL_IN_LAST_STRETCH, callInLastStretch } from '@/lib/computer-stretch';
 import { routeIsPaused } from '@/lib/computer-route-pause';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { tellSentry } from '@/lib/computer-alerts';
@@ -387,9 +388,18 @@ async function holdsItsRoom(jobId: string, callId: string, personId: string, now
   return !!held && held.state === 'held' && held.expiresAt > now && held.jobId === jobId && held.personKey === `person:${personId}`;
 }
 
-/** Ends the job a call was refused for (computer.ts owns how a job ends; it is loaded when asked, as it reads this file). A refusal is answered whatever this does: never throws; says whether the job was ended. */
+/**
+ * Ends the job a call was refused for (computer.ts owns how a job ends; it is loaded when asked, as it reads this file). A refusal is answered whatever this does: never throws; says whether the job was ended (or paused).
+ * The person's month or a limit they set PAUSES the job instead (piece 3, lib/computer-limit-pause), decided under the same conditions an ending was: the call's own key still good and the owner's, no kept intent, no
+ * cutoff. Only while the person holds the screen does it end as before. Our own pool's cutoff ends it as before, always.
+ */
 async function endForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule' | 'pool'; words: string }, now: Date, from?: { epoch: number; tokenId: string }): Promise<boolean> {
   try {
+    if (why.reason !== 'pool') {
+      const { pauseForLimit } = await import('@/lib/computer-limit-pause');
+      const paused = await pauseForLimit(jobId, why.reason, now, from);
+      if (paused !== 'person_holds') return paused === 'paused';
+    }
     const { stopJobForRefusal } = await import('@/lib/computer');
     await stopJobForRefusal(jobId, why, now, from);
     return true;
@@ -426,11 +436,14 @@ export async function giveBackModelCalls(jobId: string, personId: string, now: D
     SET "person_key" = 'unknown', "person_id" = NULL,
         "detail" = COALESCE("detail", '{}'::jsonb) || jsonb_build_object('givenBack', true, 'forPersonId', ${personId}::text)
     WHERE "event_id" = ${`computer:${jobId}:time`} AND "person_key" = ${`person:${personId}`}`);
+  // Only the calls of the job's last stretch: a job that was paused and carried on keeps every earlier stretch charged, with its calls (lib/computer-stretch)
   await prisma.$executeRaw(Prisma.sql`
-    UPDATE meter_events
+    UPDATE meter_events e
     SET "person_key" = 'unknown', "person_id" = NULL,
-        "detail" = COALESCE("detail", '{}'::jsonb) || jsonb_build_object('givenBack', true, 'forPersonId', ${personId}::text)
-    WHERE "job_id" = ${jobId} AND "kind" = 'model_call' AND "pool" = 'computer' AND "payer_kind" = 'universe' AND "person_key" = ${`person:${personId}`}`);
+        "detail" = COALESCE(e."detail", '{}'::jsonb) || jsonb_build_object('givenBack', true, 'forPersonId', ${personId}::text)
+    FROM "computer_jobs" j
+    WHERE j."id" = ${jobId} AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = ${`person:${personId}`}
+      AND ${CALL_IN_LAST_STRETCH}`);
   // What the job drew from credit given for computers goes back into the lots it came from (each draw once: asked again it gives nothing more)
   await giveBackComputerCredit(jobId, now);
 }
@@ -452,7 +465,8 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
   const overrun = reservation && !paidByOther && cost !== null && cost > Number(reservation.amountMicros) ? cost - Number(reservation.amountMicros) : 0;
   if (overrun > 0) console.warn(`[Computer] A model call cost ${overrun} millionths of a dollar more than the room held for it`);
   // A call that reports after its job failed on our side is written against nobody from the start (a call on the owner's own key is not the person's to give back)
-  const givenBack = !paidByOther && givenBackJob(job.status, job.endedBy);
+  // ...and only a call of the job's last stretch: one authorized before the job was paused stays the person's, whenever it reports
+  const givenBack = !paidByOther && givenBackJob(job.status, job.endedBy) && (await callInLastStretch(job.id, callId));
   const givenBackDetail = givenBack ? { givenBack: true, forPersonId: job.personId } : {};
   const reportedDetail = { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}), ...(overrun > 0 ? { overrunMicros: overrun } : {}), ...givenBackDetail };
   // Credit given on purpose (a gift for computers) is drawn first, before the event is written, so the allowance never counts what credit paid:

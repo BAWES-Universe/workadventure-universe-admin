@@ -294,6 +294,26 @@ const wholeMicros = (value: number, what: string): void => {
 };
 
 /**
+ * Would `reserveRoom` give this new job room now? The same checks in the same order (a rule the person said, then their allowance, then jobs at once and the pool), read under the pool's lock, and NOTHING is
+ * taken: for a job paused by its month or a limit, to know whether more arrived before it is carried on (lib/computer-limit-pause), so a job is not put back in line only to be paused again. Credit that is
+ * due to the person and not issued yet is issued first, as `reserveRoom` does. Null when it would fit; otherwise why not.
+ */
+export async function roomWouldFit(input: { personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass }, asked?: Date): Promise<NoRoom | null> {
+  wholeMicros(input.amountMicros, 'amountMicros');
+  const look = () =>
+    prisma.$transaction(async (tx): Promise<NoRoom | null> => {
+      await lockPool(tx);
+      const now = asked ?? new Date();
+      const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.jobId ?? null, chargeClass: input.chargeClass ?? 'computer', amountMicros: input.amountMicros }, now, tx);
+      if (!ruled.ok) return { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
+      return fits(tx, input.personId, input.amountMicros, now, await getMeterSettings(tx), { newJob: true });
+    });
+  const first = await look();
+  if (first?.reason === 'allowance' && (await issueComputerCredit(input.personId, asked ?? new Date())) > 0) return look();
+  return first;
+}
+
+/**
  * Takes room for a paid step, once per key: asking again for the same step finds the same reservation and takes nothing more.
  * The room is held for `renewMinutes`; a job that is still running renews it (below), and one that is not lets it lapse, which
  * the envelope keeps counting until it is settled or released. Never throws for "no room": that is an answer.

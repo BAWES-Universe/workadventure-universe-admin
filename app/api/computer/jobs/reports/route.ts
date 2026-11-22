@@ -10,7 +10,7 @@ export const dynamic = 'force-dynamic';
 
 const toldSchema = z.object({
   jobId: z.string().min(1).max(64),
-  kind: z.enum(['done', 'failed', 'needs', 'unanswered', 'month', 'rule', 'late']),
+  kind: z.enum(['done', 'failed', 'needs', 'unanswered', 'month', 'rule', 'late', 'paused', 'carried_on', 'can_carry_on']),
   seq: z.number().int().min(0).nullable().optional(),
   // Whether it reached the person (the default, as it always was) or can never be delivered (and why): only the first is "told"
   outcome: z.enum(['delivered', 'undeliverable']).optional(),
@@ -29,7 +29,7 @@ function guard(request: NextRequest): NextResponse | null {
 /**
  * GET /api/computer/jobs/reports - what Brick is to tell people about their computer jobs now (the report back): endings and waits for the person
  * that were not told yet, oldest first, each with the facts the job's own record proves. The bot server says each in the person's chat with the Brick
- * and then confirms it below. Auth: service token only. `?accepts=late` (comma list) opts in to the follow-up kinds an older reader does not know.
+ * and then confirms it below. Auth: service token only. `?accepts=late,paused,carried_on,can_carry_on` (comma list) opts in to the kinds an older reader does not know (the follow-up, and what is said about a job the person's month or a limit paused).
  */
 export async function GET(request: NextRequest) {
   const denied = guard(request);
@@ -59,6 +59,8 @@ export async function POST(request: NextRequest) {
     if (parsed.data.outcome === 'undeliverable' && !parsed.data.why) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
     // A follow-up is confirmed by its number: one that names none could mark a batch offered after the one the reader was given
     if (parsed.data.kind === 'late' && typeof parsed.data.seq !== 'number') return NextResponse.json({ error: 'A confirmation of a follow-up names its number (seq)' }, { status: 400 });
+    // So is what is said about a job the month or a limit paused (paused, carried_on, can_carry_on): each is its own numbered message
+    if (['paused', 'carried_on', 'can_carry_on'].includes(parsed.data.kind) && typeof parsed.data.seq !== 'number') return NextResponse.json({ error: 'A confirmation about a paused job names its number (seq)' }, { status: 400 });
     const outcome = parsed.data.outcome === 'undeliverable' && parsed.data.why ? ({ delivered: false, why: parsed.data.why } as const) : ({ delivered: true } as const);
     const kept = await keepReportTold(parsed.data.jobId, parsed.data.kind, parsed.data.seq, outcome);
     return kept ? NextResponse.json({ ok: true }) : NextResponse.json({ error: 'Job not found' }, { status: 404 });

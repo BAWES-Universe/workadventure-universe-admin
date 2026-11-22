@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { refundHold } from '@/lib/credit-spend';
 import { retryWaitMs } from '@/lib/computer-retry';
 import { ALERT_TRANSACTION_OPTIONS, tellSentry } from '@/lib/computer-alerts';
+import { HOLD_IN_LAST_STRETCH } from '@/lib/computer-stretch';
 
 /**
  * The refund of what a failed computer job drew from credit is an OBLIGATION until the funding books acknowledge it (table computer_refund_obligations).
@@ -26,7 +27,11 @@ export const refundKeyOf = (holdKey: string): string => `giveback:${holdKey}`;
  * has an obligation keeps its own). Returns how many were new.
  */
 export async function recordRefundObligations(jobId: string): Promise<number> {
-  const holds = await prisma.creditHold.findMany({ where: { jobKey: jobId, category: 'computers', state: 'settled' }, select: { holdKey: true, personId: true, customerMicros: true, refundedMicros: true } });
+  // Only what the job's LAST stretch drew: a job that was paused and carried on keeps what its earlier stretches drew (a pause is never given back: lib/computer-stretch)
+  const holds = await prisma.$queryRaw<Array<{ holdKey: string; personId: string; customerMicros: bigint | null; refundedMicros: bigint }>>(Prisma.sql`
+    SELECT h."hold_key" AS "holdKey", h."person_id" AS "personId", h."customer_micros" AS "customerMicros", h."refunded_micros" AS "refundedMicros"
+    FROM "credit_holds" h JOIN "computer_jobs" j ON j."id" = h."job_key"
+    WHERE h."job_key" = ${jobId} AND h."category" = 'computers' AND h."state" = 'settled' AND ${HOLD_IN_LAST_STRETCH}`);
   const data = holds
     .map((hold) => ({ hold, left: Number(hold.customerMicros ?? 0) - Number(hold.refundedMicros) }))
     .filter(({ left }) => left > 0)
