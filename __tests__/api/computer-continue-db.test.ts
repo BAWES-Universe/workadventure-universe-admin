@@ -208,7 +208,7 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
     });
   });
 
-  describe('which jobs carry on: only a failure of ours or an ending we made; the person’s own Stop is a fresh job', () => {
+  describe('which jobs carry on: a failure (ours or the agent’s own) or an ending we made; the person’s own Stop, a finished job, a computer turned off or deleted are a fresh job', () => {
     it.each(CONTINUES_AFTER.filter((how) => how !== 'error'))('a job ended by us (%s) carries on', async (how) => {
       const { sara, jobId: old } = await ranOnce(`c-ours-${how}`);
       await stopJobFor(sara.brickId, sara.id, minutes(5));
@@ -216,6 +216,16 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
       const again = await tryAgain(sara, old);
       expect(again).toMatchObject({ ok: true, continued: true });
       if (again.ok) expect((await jobOf(again.job.id)).continuesJobId).toBe(old);
+    });
+
+    it('after a failure the agent itself gave, "try again" carries on too (its report offers to try again with what the computer kept), and the look names it', async () => {
+      const { sara, jobId: old } = await ranOnce('c-agent');
+      await finishJob(old, 'failed', minutes(5), 'It could not find the form', 'agent');
+      expect(await jobOf(old)).toMatchObject({ status: 'failed', endedBy: null });
+      expect(await retryCandidate(sara.brickId, sara.id)).toMatchObject({ id: old, how: 'agent' });
+      const again = await tryAgain(sara, old);
+      expect(again).toMatchObject({ ok: true, continued: true });
+      if (again.ok) expect(await jobOf(again.job.id)).toMatchObject({ continuesJobId: old, agentSessionId: (await jobOf(old)).agentSessionId });
     });
 
     it('after the person’s own Stop, "try again" is a fresh job: no link, no conversation, not said to carry on', async () => {
@@ -230,7 +240,7 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
     });
 
     it.each([
-      ['a failure the agent itself gave (the person’s)', async (jobId: string) => void (await finishJob(jobId, 'failed', minutes(5), 'It could not find the form', 'agent'))],
+      ['a Brick deleted', async (jobId: string) => void (await endedAs(jobId, 'deleted'))],
       ['a job that finished', async (jobId: string) => void (await finishJob(jobId, 'done', minutes(5)))],
       ['a computer turned off', async (jobId: string) => void (await endedAs(jobId, 'off'))],
     ])('after %s, it is a fresh job', async (_what, end) => {
@@ -275,7 +285,10 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
     it('the one list of endings that carry on', () => {
       expect([...CONTINUES_AFTER].sort()).toEqual(['allowance', 'error', 'pool', 'rule', 'unanswered']);
       expect(continuableEnding('stopped', 'person')).toBe(false);
-      expect(continuableEnding('failed', null)).toBe(false);
+      expect(continuableEnding('failed', null)).toBe(true);
+      expect(continuableEnding('stopped', null)).toBe(false);
+      expect(continuableEnding('stopped', 'off')).toBe(false);
+      expect(continuableEnding('stopped', 'deleted')).toBe(false);
       expect(continuableEnding('done', null)).toBe(false);
       expect(continuableEnding('running', 'error')).toBe(false);
       expect(continuableEnding('failed', 'error')).toBe(true);

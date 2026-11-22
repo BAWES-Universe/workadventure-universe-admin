@@ -2,10 +2,10 @@ import { prisma } from '@/lib/db';
 import { continuableEnding, isOver } from '@/lib/computer-values';
 
 /**
- * "Try again" carries on (piece 8 of the computer controls). After a job that failed as ours or that we ended (`CONTINUES_AFTER`), the person's "try again" is a NEW job that carries
+ * "Try again" carries on (piece 8 of the computer controls). After a job that failed (ours or the agent's own) or that we ended (`continuableEnding`), the person's "try again" is a NEW job that carries
  * on in the old job's agent conversation, so the agent knows what it already did. It is a new job in every other way: its own reservation, its own receipt, its own start key and
  * attempt, its own runner claim and keys. Only the conversation (`agent_session_id`) and the link (`continues_job_id`) come from the old job. One continuation per old job, ever (a unique
- * index): asking again finds the job the first ask made. After the person's own Stop or Cancel, a turned-off computer, a job that finished or a failure the agent itself gave, the
+ * index): asking again finds the job the first ask made. After the person's own Stop or Cancel, a computer turned off or deleted, or a job that finished, the
  * ask is an ordinary fresh job. The game asks for a continuation only for words like "try again" (bots/ai/ComputerTryAgain.ts); Orbit decides here, on every ask, from its own record.
  *
  * Nothing here imports lib/computer (the start imports this file).
@@ -42,7 +42,7 @@ export async function carryOnFrom(botId: string, personId: string, fromJobId: st
 export interface RetryCandidate {
   id: string;
   title: string;
-  /** How it ended, in Orbit's words (`error`, `pool`, `unanswered`, `allowance`, `rule`). */
+  /** How it ended, in Orbit's words (`error`, `pool`, `unanswered`, `allowance`, `rule`), or `agent` for a failure the agent itself gave. */
   how: string;
   endedAt: Date | null;
   /** When Brick told the person how it ended (the report back), or null while it has not. */
@@ -60,7 +60,7 @@ export async function retryCandidate(botId: string, personId: string, db: Db = p
     select: { id: true, title: true, status: true, endedBy: true, endedAt: true, endToldAt: true, agentSessionId: true, continuedBy: { select: { id: true } } },
   });
   if (!latest || latest.continuedBy || !latest.agentSessionId || !continuableEnding(latest.status, latest.endedBy)) return null;
-  return { id: latest.id, title: latest.title, how: latest.endedBy as string, endedAt: latest.endedAt, toldAt: latest.endToldAt };
+  return { id: latest.id, title: latest.title, how: latest.endedBy ?? 'agent', endedAt: latest.endedAt, toldAt: latest.endToldAt };
 }
 
 /**

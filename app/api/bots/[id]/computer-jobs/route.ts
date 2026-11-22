@@ -105,7 +105,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  * With a `plan` (the connected app the Brick weighed, about how many steps, and why it cannot) Orbit works out which way costs least: when the app does,
  * it answers `{ ok: false, reason: 'cheaper_route', app }` and starts nothing.
  *
- * With the header `X-Computer-Continues: <job id>` ("try again", piece 8) the new job carries on in that ended job's agent conversation when Orbit's record says it may (it failed as ours or we ended it, it has a
+ * With the header `X-Computer-Continues: <job id>` ("try again", piece 8) the new job carries on in that ended job's agent conversation when Orbit's record says it may (it failed, ours or the agent's own, or we ended it, it has a
  * conversation, and nothing carries it on yet), and the answer says `continued: true`. Otherwise it is an ordinary fresh start. A job that already carries it on is the answer (one per ended job, ever). It is a NEW job
  * either way: its own reservation, receipt, key and attempt, and every guard of a start applies.
  *
