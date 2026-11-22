@@ -18,7 +18,7 @@ import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/compute
 import { FINISH_INTENT_GRACE_MS, completeFinishIntents, finishJob, finishJobUnder, getJob, giveComputer, handBack, recordFinishIntent, startJob, sweepComputers, takeOver } from '@/lib/computer';
 import { prepareJob, startTurn } from '@/lib/computer-broker';
 import { mintJobToken, revokeJobTokens, verifyJobToken } from '@/lib/computer-token';
-import { authorizeModelCall, cutoffEndsFinished, cutoffLockKey, callRoomKey } from '@/lib/computer-calls';
+import { authorizeModelCall, cutoffEndsFinished, cutoffLockKey, callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { POOL_CUTOFF_CALL, hasFinishIntent, hasOwnKeyCall, recordFaults, recordPoolCutoff, type FaultInput } from '@/lib/computer-faults';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 
@@ -290,17 +290,18 @@ run('the runner’s committed word that a job is to end, in a real database', ()
 
   describe('the finish, said again and from another runner', () => {
     it('a finish replayed before and after Orbit committed is the same answer and writes nothing twice: one ending, one settlement, one decision, the ledger unchanged', async () => {
-      for (const [name, outcome, cause] of [['fin-done', 'done', undefined], ['fin-ours', 'failed', 'ours'], ['fin-agent', 'failed', 'agent']] as const) {
+      for (const [name, outcome, cause, expected] of [['fin-done', 'done', undefined, 'done'], ['fin-ours', 'failed', 'ours', 'failed'], ['fin-agent', 'failed', 'agent', 'failed']] as const) {
         const { jobId } = await running(name);
         await recordFinishIntent(jobId, { outcome, cause }, minutes(1));
         // The first finish is lost before it reaches Orbit: the replacement's finish is the first Orbit sees
         const first = await finishJobUnder(jobId, 0, outcome, minutes(2), outcome === 'failed' ? 'It gave up' : null, cause);
         expect(first.stale).toBe(false);
         const ended = await jobOf(jobId);
-        expect(['done', 'stopped', 'failed']).toContain(ended.status);
+        // Each fixture ends the way its intent said, and writes its time exactly once: the replays below are measured against THAT
+        expect(ended.status).toBe(expected);
         const ledger = await ledgerOf(jobId);
         const decision = await decisionOf(jobId);
-        expect(ledger.timeEvents).toBeLessThanOrEqual(1);
+        expect(ledger.timeEvents).toBe(1);
         // The ack of that finish is lost, so the same finish comes again (after Orbit committed), and again from yet another process, at later times
         for (const at of [minutes(3), minutes(30), minutes(60 * 24)]) {
           const again = await finishJobUnder(jobId, 0, outcome, at, outcome === 'failed' ? 'It gave up' : null, cause);
@@ -352,21 +353,270 @@ run('the runner’s committed word that a job is to end, in a real database', ()
     });
   });
 
-  describe('GPT third note, R2 follow-up: a delayed stop for the pool, after the pool recovered and a funded call was admitted', () => {
-    it('REPRO: the intent is not kept for a stop whose pool refusal was recovered by an admitted call (the work stays)', async () => {
-      const { jobId } = await running('s-pool');
-      const key = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
-      // The pool is full: one call is refused for OUR capacity (below the two that decide a cutoff)
+  describe('GPT round 4, third note, R2b: a stop for the pool and the admission of a call are decided under ONE lock, so exactly one of them wins', () => {
+    const POOL_STOP = { outcome: 'failed' as const, cause: 'ours' as const, basis: 'pool' as const, why: 'The pool had no room', turns: [1], run: 'r1' };
+    const ask = (token: string, callId: string, over: Partial<Parameters<typeof authorizeModelCall>[0]> = {}, at: Date = NOW) => authorizeModelCall({ token, callId, estimateMicros: 5_000, payer: 'universe', turn: 1, run: 'r1', ...over }, at);
+    /** One call of the job refused for OUR capacity (below the two that decide a cutoff), then the pool is back. */
+    const refusedOnce = async (jobId: string, token: string) => {
       await setUp({ poolCeilingMicros: 1 });
-      expect(await authorizeModelCall({ token: key.token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' }, NOW)).toMatchObject({ ok: false, reason: 'pool', full: true });
-      // The pool recovers and a funded call is admitted: it reserves 5,000 micros and retires the earlier refusal
+      expect(await ask(token, 'c1')).toMatchObject({ ok: false, reason: 'pool', full: true });
       await setUp();
-      expect(await authorizeModelCall({ token: key.token, callId: 'c2', estimateMicros: 5_000, payer: 'universe' }, minutes(1))).toMatchObject({ ok: true, reservedMicros: 5_000 });
-      // The runner's stop for the pool (decided on the first refusal, delayed) reaches Orbit now
-      const kept = await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', turns: [1], run: 'r1' }, minutes(2));
-      expect(kept).toMatchObject({ ok: false });
+    };
+    const held = (jobId: string) => prisma.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') }, state: 'held' } });
+    const admissions = (jobId: string) => prisma.computerJobFault.findMany({ where: { jobId, reason: 'turn_admitted' }, orderBy: { turn: 'asc' }, select: { turn: true, run: true, kind: true } });
+    const waiters = async (key: string): Promise<number> => (await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(${key}, 0)`)[0].n;
+    const waitForWaiters = async (key: string, n: number): Promise<boolean> => {
+      for (let tries = 0; tries < 250; tries += 1) {
+        if ((await waiters(key)) >= n) return true;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return false;
+    };
+
+    it('ADMISSION FIRST (GPT’s repro): the pool refused, the pool is back, a funded call is admitted (5,000 held); the late stop answers `stale` and writes nothing: keys live, the job goes on, the call settles, the ending is the turn’s own and the wallet is a normal charge', async () => {
+      const { sara, jobId } = await running('s-adm');
+      const key = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await refusedOnce(jobId, key.token);
+      expect(await ask(key.token, 'c2', {}, minutes(1))).toMatchObject({ ok: true, reservedMicros: 5_000 });
+      expect(await held(jobId)).toBe(1);
+      expect(await admissions(jobId)).toEqual([{ turn: 1, run: 'r1', kind: 'answered' }]);
+      // The stop (decided on the refusal, delayed past the game's 8 s) reaches Orbit now
+      expect(await recordFinishIntent(jobId, POOL_STOP, minutes(2))).toEqual({ ok: false, reason: 'stale' });
       expect(await hasFinishIntent(prisma, jobId)).toBe(false);
-      expect((await jobOf(jobId)).status).toBe('running');
+      // Nothing was cancelled: the job is on, its key is good, the room is still held, no cutoff and no ending of any kind
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
+      expect((await verifyJobToken(key.token, 'model', minutes(2))).ok).toBe(true);
+      expect(await prisma.computerJobToken.count({ where: { jobId, revokedAt: null } })).toBe(1);
+      expect(await prisma.computerJobFault.count({ where: { jobId, callId: POOL_CUTOFF_CALL } })).toBe(0);
+      expect(await held(jobId)).toBe(1);
+      // The call settles against the room it was given, and the job ends as the turn did
+      expect(await settleModelCall(jobId, 'c2', { costMicros: 3_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, minutes(3))).toEqual({ ok: true });
+      expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'c2') } })).toMatchObject({ state: 'settled' });
+      await finishJobUnder(jobId, 0, 'done', minutes(4));
+      expect(await jobOf(jobId)).toMatchObject({ status: 'done' });
+      // The wallet: the call is a normal charge on the person, never a give-back
+      expect(await prisma.meterEvent.count({ where: { jobId, kind: 'model_call' } })).toBe(1);
+      expect(await prisma.computerGiveBackDecision.count({ where: { jobId, personId: sara.id } })).toBe(0);
+      expect(await held(jobId)).toBe(0);
+    });
+
+    it('the same after the tentative 30 s fence expired: no intent, no cancel, no failed ending, however late the stop arrives', async () => {
+      const { jobId } = await running('s-fence');
+      const key = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await refusedOnce(jobId, key.token);
+      expect(await ask(key.token, 'c2', {}, new Date(NOW.getTime() + 1_000))).toMatchObject({ ok: true });
+      for (const late of [new Date(NOW.getTime() + 31_000), minutes(5), minutes(30)]) {
+        expect(await recordFinishIntent(jobId, POOL_STOP, late)).toEqual({ ok: false, reason: 'stale' });
+      }
+      expect(await prisma.computerFinishIntent.count({ where: { jobId } })).toBe(0);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+      expect(await prisma.computerJobToken.count({ where: { jobId, revokedAt: null } })).toBe(1);
+      expect(await held(jobId)).toBe(1);
+    });
+
+    it('STOP FIRST: the intent commits, then the relay asks to admit: refused at the key, the room goes back (0 held), no admission is kept; a replacement completes ONE failed ending as ours and the wallet is given back', async () => {
+      const { jobId } = await running('s-stop');
+      const key = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await refusedOnce(jobId, key.token);
+      expect(await recordFinishIntent(jobId, POOL_STOP, minutes(1))).toMatchObject({ ok: true, already: false });
+      expect(await ask(key.token, 'c2', {}, minutes(2))).toEqual({ ok: false, reason: 'refused' });
+      expect(await held(jobId)).toBe(0);
+      expect(await admissions(jobId)).toEqual([]);
+      expect(await prisma.computerJobToken.count({ where: { jobId, revokedAt: null } })).toBe(0);
+      // The replacement (or the sweep) reads finishPending and ends it once, as the intent said
+      expect((await getJob(jobId))?.finishPending).toMatchObject({ outcome: 'failed', cause: 'ours', run: 'r1' });
+      await finishJobUnder(jobId, 0, 'done', minutes(3));
+      expect(await jobOf(jobId)).toMatchObject({ status: expect.stringMatching(/^(failed|stopped)$/) });
+      expect(await prisma.meterEvent.count({ where: { jobId, kind: 'model_call' } })).toBe(0);
+      expect(await held(jobId)).toBe(0);
+    });
+
+    it('the admission’s final check TAKES the cutoff lock, with or without a refusal of ours kept: an admission waits for a stop that is deciding, and a stop that won refuses it', async () => {
+      // No pool refusal anywhere on this job: the lock is still taken
+      const { jobId } = await running('s-lock');
+      const key = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      const holder = holdCutoff(jobId, async (tx) => {
+        await tx.computerFinishIntent.create({ data: { jobId, outcome: 'failed', cause: 'ours', turns: [1], run: 'r1', createdAt: NOW } });
+        await revokeJobTokens(jobId, NOW, undefined, tx);
+      });
+      let admit: Promise<unknown> = Promise.resolve();
+      try {
+        await holder.ready;
+        admit = ask(key.token, 'c1');
+        expect(await waitingOn(cutoffLockKey(jobId))).toBe(true);
+        holder.release();
+        await holder.done;
+        expect(await admit).toEqual({ ok: false, reason: 'refused' });
+        expect(await held(jobId)).toBe(0);
+        expect(await admissions(jobId)).toEqual([]);
+      } finally {
+        holder.release();
+        await Promise.allSettled([holder.done, admit]);
+      }
+    });
+
+    it('a kept intent, or a decided cutoff, refuses an admission on its own, whatever the keys say (the checks inside the lock do not lean on the key revocation)', async () => {
+      const intent = await running('s-raw-i');
+      const k1 = (await mintJobToken(intent.jobId, 'model', NOW)) as { token: string };
+      // An intent row that did NOT revoke anything (a fixture): the admission still refuses and leaves nothing
+      await prisma.computerFinishIntent.create({ data: { jobId: intent.jobId, outcome: 'done', turns: [], createdAt: NOW } });
+      expect((await verifyJobToken(k1.token, 'model', NOW)).ok).toBe(true);
+      expect(await ask(k1.token, 'c1')).toEqual({ ok: false, reason: 'refused' });
+      expect(await held(intent.jobId)).toBe(0);
+      expect(await admissions(intent.jobId)).toEqual([]);
+      const cutoff = await running('s-raw-c');
+      const k2 = (await mintJobToken(cutoff.jobId, 'model', NOW)) as { token: string };
+      await recordPoolCutoff(prisma, cutoff.jobId, NOW);
+      expect((await verifyJobToken(k2.token, 'model', NOW)).ok).toBe(true);
+      expect(await ask(k2.token, 'c1')).toEqual({ ok: false, reason: 'refused' });
+      expect(await held(cutoff.jobId)).toBe(0);
+      expect(await admissions(cutoff.jobId)).toEqual([]);
+    });
+
+    it('the key is looked at INSIDE the lock: a key that was revoked while the admission waited is never admitted', async () => {
+      const { sara, jobId } = await running('s-key');
+      const key = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      // The person takes the machine while the admission waits for the cutoff lock: the key ends and the admission must not stand
+      const holder = holdCutoff(jobId, async () => undefined);
+      let admit: Promise<unknown> = Promise.resolve();
+      try {
+        await holder.ready;
+        admit = ask(key.token, 'c1');
+        expect(await waitingOn(cutoffLockKey(jobId))).toBe(true);
+        await revokeJobTokens(jobId, NOW);
+        holder.release();
+        await holder.done;
+        expect(await admit).toEqual({ ok: false, reason: 'refused' });
+        expect(await admissions(jobId)).toEqual([]);
+        expect(await held(jobId)).toBe(0);
+      } finally {
+        holder.release();
+        await Promise.allSettled([holder.done, admit]);
+      }
+      expect(sara.id).toBeTruthy();
+    });
+
+    it('A REAL RACE, in both queue orders: the admission queued first wins (the stop is stale, work goes on); the stop queued first wins (the call is refused, its room goes back): never both', async () => {
+      for (const order of ['admission-first', 'stop-first'] as const) {
+        const { jobId } = await running(`s-q-${order}`);
+        const key = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+        const holder = holdCutoff(jobId, async () => undefined);
+        let admit: Promise<unknown> = Promise.resolve();
+        let stop: Promise<unknown> = Promise.resolve();
+        try {
+          await holder.ready;
+          if (order === 'admission-first') {
+            admit = ask(key.token, 'c1');
+            expect(await waitForWaiters(cutoffLockKey(jobId), 1)).toBe(true);
+            stop = recordFinishIntent(jobId, POOL_STOP, minutes(1));
+          } else {
+            stop = recordFinishIntent(jobId, POOL_STOP, minutes(1));
+            expect(await waitForWaiters(cutoffLockKey(jobId), 1)).toBe(true);
+            admit = ask(key.token, 'c1');
+          }
+          expect(await waitForWaiters(cutoffLockKey(jobId), 2)).toBe(true);
+          holder.release();
+          await holder.done;
+          const [admitted, stopped] = await Promise.all([admit, stop]);
+          if (order === 'admission-first') {
+            expect(admitted).toMatchObject({ ok: true });
+            expect(stopped).toEqual({ ok: false, reason: 'stale' });
+            expect(await held(jobId)).toBe(1);
+            expect(await hasFinishIntent(prisma, jobId)).toBe(false);
+            expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+          } else {
+            expect(admitted).toEqual({ ok: false, reason: 'refused' });
+            expect(stopped).toMatchObject({ ok: true, already: false });
+            expect(await held(jobId)).toBe(0);
+            expect(await hasFinishIntent(prisma, jobId)).toBe(true);
+          }
+        } finally {
+          holder.release();
+          await Promise.allSettled([holder.done, admit, stop]);
+        }
+      }
+    });
+
+    it('50 rounds of a stop and an admission that start at the same moment: EXACTLY one wins every round (never a kept intent with a room held for the turn, never a refused stop with refused work)', async () => {
+      let admissionWins = 0;
+      let stopWins = 0;
+      for (let round = 0; round < 50; round += 1) {
+        const { jobId } = await running(`s-r${round}`);
+        const key = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+        const go = round % 2 === 0 ? [() => ask(key.token, 'c1'), () => recordFinishIntent(jobId, POOL_STOP, minutes(1))] : [() => recordFinishIntent(jobId, POOL_STOP, minutes(1)), () => ask(key.token, 'c1')];
+        const results = await Promise.all(go.map((start) => start()));
+        const [admitted, stopped] = (round % 2 === 0 ? results : [results[1], results[0]]) as [Awaited<ReturnType<typeof ask>>, Awaited<ReturnType<typeof recordFinishIntent>>];
+        const kept = await hasFinishIntent(prisma, jobId);
+        const roomHeld = await held(jobId);
+        if (admitted.ok) {
+          admissionWins += 1;
+          expect({ round, stopped, kept, roomHeld }).toEqual({ round, stopped: { ok: false, reason: 'stale' }, kept: false, roomHeld: 1 });
+        } else {
+          stopWins += 1;
+          expect({ round, admitted, stopped: stopped.ok, kept, roomHeld }).toEqual({ round, admitted: { ok: false, reason: 'refused' }, stopped: true, kept: true, roomHeld: 0 });
+        }
+      }
+      expect(admissionWins + stopWins).toBe(50);
+    }, 180_000);
+
+    it('SCOPE: an admission on an EARLIER turn never blocks a later stop; the same turn or a later one does; another run does not; no turn (or no run) is the cautious side', async () => {
+      const earlier = await running('s-earlier');
+      const k1 = (await mintJobToken(earlier.jobId, 'model', NOW)) as { token: string };
+      // A call admitted on turn 1 long ago; the pool-only give-up is on turn 3: the intent is kept and the job stops
+      expect(await ask(k1.token, 'c1', { turn: 1 })).toMatchObject({ ok: true });
+      expect(await recordFinishIntent(earlier.jobId, { ...POOL_STOP, turns: [3] }, minutes(1))).toMatchObject({ ok: true, already: false });
+
+      const other = await running('s-other');
+      const k2 = (await mintJobToken(other.jobId, 'model', NOW)) as { token: string };
+      // A call admitted on turn 3 of ANOTHER run does not block a stop on this run
+      expect(await ask(k2.token, 'c1', { turn: 3, run: 'r2' })).toMatchObject({ ok: true });
+      expect(await recordFinishIntent(other.jobId, { ...POOL_STOP, turns: [3] }, minutes(1))).toMatchObject({ ok: true, already: false });
+
+      const same = await running('s-same');
+      const k3 = (await mintJobToken(same.jobId, 'model', NOW)) as { token: string };
+      // The same turn (>=), and a later one, block it
+      expect(await ask(k3.token, 'c1', { turn: 3 })).toMatchObject({ ok: true });
+      expect(await recordFinishIntent(same.jobId, { ...POOL_STOP, turns: [3] }, minutes(1))).toEqual({ ok: false, reason: 'stale' });
+      expect(await ask(k3.token, 'c2', { turn: 4 })).toMatchObject({ ok: true });
+      expect(await recordFinishIntent(same.jobId, { ...POOL_STOP, turns: [3, 4] }, minutes(1))).toEqual({ ok: false, reason: 'stale' });
+      // The earliest turn the stop names decides: turns [4, 5] with an admission on turn 4 is stale, turn 5 alone is past every admission
+      expect(await recordFinishIntent(same.jobId, { ...POOL_STOP, turns: [4, 5] }, minutes(1))).toEqual({ ok: false, reason: 'stale' });
+      expect(await recordFinishIntent(same.jobId, { ...POOL_STOP, turns: [5] }, minutes(1))).toMatchObject({ ok: true });
+
+      // A call whose turn the relay did not name counts for the stop's turn (the work goes on), and so does a call with no run when the stop names one
+      const unnamed = await running('s-unnamed');
+      const k4 = (await mintJobToken(unnamed.jobId, 'model', NOW)) as { token: string };
+      expect(await authorizeModelCall({ token: k4.token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' }, NOW)).toMatchObject({ ok: true });
+      expect(await recordFinishIntent(unnamed.jobId, { ...POOL_STOP, turns: [9] }, minutes(1))).toEqual({ ok: false, reason: 'stale' });
+      expect(await admissions(unnamed.jobId)).toEqual([{ turn: null, run: null, kind: 'answered' }]);
+    });
+
+    it('a call on the person’s OWN key is an admission too; a stop that does not rest on the pool (no basis) never reads admissions', async () => {
+      const own = await running('s-own');
+      const k1 = (await mintJobToken(own.jobId, 'model', NOW)) as { token: string };
+      expect(await authorizeModelCall({ token: k1.token, callId: 'o1', estimateMicros: 1, payer: 'own-key', turn: 2, run: 'r1' }, NOW)).toMatchObject({ ok: true, reservedMicros: null });
+      expect(await recordFinishIntent(own.jobId, { ...POOL_STOP, turns: [2] }, minutes(1))).toEqual({ ok: false, reason: 'stale' });
+      // ...with its own turn and run: a stop on a LATER turn of that run is not blocked by it (the row is not a turnless one)
+      const later = await running('s-own-later');
+      const k3 = (await mintJobToken(later.jobId, 'model', NOW)) as { token: string };
+      expect(await authorizeModelCall({ token: k3.token, callId: 'o1', estimateMicros: 1, payer: 'own-key', turn: 2, run: 'r1' }, NOW)).toMatchObject({ ok: true });
+      expect(await admissions(later.jobId)).toEqual([{ turn: 2, run: 'r1', kind: 'answered' }]);
+      expect(await recordFinishIntent(later.jobId, { ...POOL_STOP, turns: [5] }, minutes(1))).toMatchObject({ ok: true, already: false });
+
+      const plain = await running('s-plain');
+      const k2 = (await mintJobToken(plain.jobId, 'model', NOW)) as { token: string };
+      expect(await ask(k2.token, 'c1', { turn: 2 })).toMatchObject({ ok: true });
+      // Not a pool stop: the runner says the agent itself gave up
+      expect(await recordFinishIntent(plain.jobId, { outcome: 'failed', cause: 'agent', turns: [2], run: 'r1' }, minutes(1))).toMatchObject({ ok: true, already: false });
+    });
+
+    it('one row per run and turn: a replay of an admitted call, and another call of the same turn, write no second', async () => {
+      const { jobId } = await running('s-once');
+      const key = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      expect(await ask(key.token, 'c1')).toMatchObject({ ok: true });
+      expect(await ask(key.token, 'c1')).toMatchObject({ ok: true });
+      expect(await ask(key.token, 'c2')).toMatchObject({ ok: true });
+      expect(await admissions(jobId)).toEqual([{ turn: 1, run: 'r1', kind: 'answered' }]);
     });
   });
 
@@ -469,15 +719,231 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       expect((await jobOf(jobId)).status).toBe('done');
     });
 
-    it('two sweeps at once complete an intent once', async () => {
+    it('two sweeps that BOTH selected the intent complete it once: their counts add up to exactly one, and the job has one time event', async () => {
       const { jobId } = await running();
       await recordFinishIntent(jobId, { outcome: 'done' }, minutes(1));
       const later = minutes(30);
-      const counts = await Promise.all([completeFinishIntents(later, 50), completeFinishIntents(later, 50)]);
-      expect(counts[0] + counts[1]).toBeGreaterThanOrEqual(1);
+      // Both sweeps read the pending intent before either can write: neither can win by having looked second
+      const real = prisma.computerFinishIntent.findMany.bind(prisma.computerFinishIntent);
+      let arrived = 0;
+      let both: () => void = () => undefined;
+      const bothSelected = new Promise<void>((resolve) => (both = resolve));
+      const spy = jest.spyOn(prisma.computerFinishIntent, 'findMany').mockImplementation(((args: never) =>
+        real(args).then(async (rows) => {
+          arrived += 1;
+          if (arrived === 2) both();
+          await bothSelected;
+          return rows;
+        })) as never);
+      let counts: number[];
+      try {
+        counts = await Promise.all([completeFinishIntents(later, 50), completeFinishIntents(later, 50)]);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(arrived).toBe(2);
+      expect(counts[0] + counts[1]).toBe(1);
       expect(await jobOf(jobId)).toMatchObject({ status: 'done' });
       expect((await ledgerOf(jobId)).timeEvents).toBe(1);
       expect(await cutoffEndsFinished()).toBeUndefined();
+    });
+  });
+
+  describe('CodeRabbit round on 6be29335: every ending is decided in the write that lands it', () => {
+    const rowBlocked = async (): Promise<boolean> => {
+      for (let tries = 0; tries < 250; tries += 1) {
+        const rows = await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND wait_event IN ('transactionid', 'tuple') AND query ILIKE '%FOR SHARE%'`;
+        if (rows[0].n > 0) return true;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return false;
+    };
+
+    it('a `done` finish that waits for the cutoff lock while a `failed` intent commits ends as the intent said, never as done (inline 3)', async () => {
+      const { jobId } = await running('cr-i3');
+      const holder = holdCutoff(jobId, async (tx) => {
+        await tx.computerFinishIntent.create({ data: { jobId, outcome: 'failed', cause: 'agent', why: 'It gave up', turns: [1], run: 'r1', createdAt: minutes(1) } });
+        await revokeJobTokens(jobId, minutes(1), undefined, tx);
+      });
+      let finishing: Promise<unknown> = Promise.resolve();
+      try {
+        await holder.ready;
+        finishing = finishJobUnder(jobId, 0, 'done', minutes(2));
+        expect(await waitingOn(cutoffLockKey(jobId))).toBe(true);
+        holder.release();
+        await holder.done;
+        expect(await finishing).toMatchObject({ stale: false });
+      } finally {
+        holder.release();
+        await Promise.allSettled([holder.done, finishing]);
+      }
+      expect((await jobOf(jobId)).status).not.toBe('done');
+      expect(['failed', 'stopped']).toContain((await jobOf(jobId)).status);
+      expect(await decisionOf(jobId)).toMatchObject({ causeHint: 'agent' });
+    });
+
+    it('a FAILED finish judged from the rows (the agent’s own failure) that waits for the lock while a `done` intent commits ends as done too (inline 3, the judged write)', async () => {
+      const { jobId } = await running('cr-i3-judged');
+      const holder = holdCutoff(jobId, async (tx) => {
+        await tx.computerFinishIntent.create({ data: { jobId, outcome: 'done', turns: [], createdAt: minutes(1) } });
+        await revokeJobTokens(jobId, minutes(1), undefined, tx);
+      });
+      let finishing: Promise<unknown> = Promise.resolve();
+      try {
+        await holder.ready;
+        finishing = finishJobUnder(jobId, 0, 'failed', minutes(2), 'It gave up', 'agent', [1], 'r1');
+        expect(await waitingOn(cutoffLockKey(jobId))).toBe(true);
+        holder.release();
+        await holder.done;
+        await finishing;
+      } finally {
+        holder.release();
+        await Promise.allSettled([holder.done, finishing]);
+      }
+      expect(await jobOf(jobId)).toMatchObject({ status: 'done' });
+      expect(await decisionOf(jobId)).toBeNull();
+    });
+
+    it('a pool cutoff that committed stays above a kept intent: the job ends as the pool’s, ours (inline 3)', async () => {
+      const { jobId } = await running('cr-i3-pool');
+      await prisma.computerFinishIntent.create({ data: { jobId, outcome: 'done', turns: [], createdAt: minutes(1) } });
+      await recordPoolCutoff(prisma, jobId, minutes(1));
+      await finishJobUnder(jobId, 0, 'done', minutes(2));
+      expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
+    });
+
+    it('a finish of the generation the runner acts under is stale when a take-over lands between its read and its write: nothing is ended under the new controller (inline 2)', async () => {
+      const { jobId } = await running('cr-i2');
+      const holder = holdCutoff(jobId, async (tx) => {
+        await tx.computerJob.update({ where: { id: jobId }, data: { controlGeneration: 1, control: 'person', status: 'waiting', waitingFor: 'details', stretchStarted: NOW } });
+      });
+      let finishing: Promise<{ stale: boolean }> = Promise.resolve({ stale: false });
+      try {
+        await holder.ready;
+        finishing = finishJobUnder(jobId, 0, 'failed', minutes(2), 'It could not go on', 'agent');
+        expect(await waitingOn(cutoffLockKey(jobId))).toBe(true);
+        holder.release();
+        await holder.done;
+        expect(await finishing).toMatchObject({ stale: true });
+      } finally {
+        holder.release();
+        await Promise.allSettled([holder.done, finishing]);
+      }
+      expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', control: 'person', controlGeneration: 1, endNote: null });
+      // A finish with no generation (an older runner) still ends it as before
+      await finishJobUnder(jobId, null, 'done', minutes(3));
+      expect((await jobOf(jobId)).status).toBe('done');
+    });
+
+    it('the generation is part of the write itself: a take-over and a hand-back that leave the status as it was still make the finish stale', async () => {
+      const { jobId } = await running('cr-i2-gen');
+      const holder = holdCutoff(jobId, async (tx) => {
+        await tx.computerJob.update({ where: { id: jobId }, data: { controlGeneration: 2 } });
+      });
+      let finishing: Promise<{ stale: boolean }> = Promise.resolve({ stale: false });
+      try {
+        await holder.ready;
+        finishing = finishJobUnder(jobId, 0, 'done', minutes(2));
+        expect(await waitingOn(cutoffLockKey(jobId))).toBe(true);
+        holder.release();
+        await holder.done;
+        expect(await finishing).toMatchObject({ stale: true });
+      } finally {
+        holder.release();
+        await Promise.allSettled([holder.done, finishing]);
+      }
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', controlGeneration: 2 });
+    });
+
+    it('the failure note of a finish is written only under the generation the runner acts under (inline 2)', async () => {
+      const { jobId } = await running('cr-i2-note');
+      await prisma.computerJob.update({ where: { id: jobId }, data: { controlGeneration: 1 } });
+      expect(await finishJobUnder(jobId, 0, 'failed', minutes(2), 'A note from the old controller', 'agent')).toMatchObject({ stale: true });
+      expect((await jobOf(jobId)).endNote).toBeNull();
+    });
+
+    it('the unanswered pass leaves a waiting job whose runner committed to ending it: after the grace it ends as the runner said, never as unanswered (inline 4)', async () => {
+      const waiting = await running('cr-i4');
+      await prisma.computerJob.update({ where: { id: waiting.jobId }, data: { status: 'waiting', waitingFor: 'details', stretchStarted: NOW } });
+      // Its room is good for hours: only the unanswered pass could reach it
+      await prisma.meterReservation.update({ where: { reservationKey: (await jobOf(waiting.jobId)).reservationKey as string }, data: { expiresAt: minutes(600) } });
+      // The wait (60 minutes) is over at minute 61, the intent is a minute old: younger than its grace
+      await recordFinishIntent(waiting.jobId, { outcome: 'done' }, minutes(60));
+      await sweepComputers(minutes(61));
+      expect(await jobOf(waiting.jobId)).toMatchObject({ status: 'waiting', endedBy: null });
+      await sweepComputers(minutes(63));
+      expect(await jobOf(waiting.jobId)).toMatchObject({ status: 'done', endedBy: null });
+    });
+
+    it('a lease that ran out does not replace a pending finish: the job ends as the intent said; a job with no intent still ends as an error (inline 5)', async () => {
+      const kept = await running('cr-i5');
+      const plain = await running('cr-i5-plain');
+      for (const job of [kept, plain]) {
+        const row = await jobOf(job.jobId);
+        await prisma.meterReservation.update({ where: { reservationKey: row.reservationKey as string }, data: { expiresAt: minutes(4) } });
+      }
+      // The intent is a minute old at the sweep: inside its grace, so only the lease pass can reach it
+      await recordFinishIntent(kept.jobId, { outcome: 'done' }, minutes(5));
+      await sweepComputers(minutes(6));
+      expect(await jobOf(kept.jobId)).toMatchObject({ status: 'done', endedBy: null });
+      expect(await jobOf(plain.jobId)).toMatchObject({ status: 'stopped', endedBy: 'error' });
+    });
+
+    it('a swept intent needs Brick’s control in the write that ends the job: a take-over that lands first leaves the intent pending, and it is completed after the hand-back (inline 6)', async () => {
+      const { jobId } = await running('cr-i6');
+      await recordFinishIntent(jobId, { outcome: 'done' }, minutes(1));
+      const holder = holdCutoff(jobId, async (tx) => {
+        await tx.computerJob.update({ where: { id: jobId }, data: { controlGeneration: 1, control: 'person', status: 'waiting', waitingFor: 'details', stretchStarted: NOW } });
+      });
+      let sweeping: Promise<number> = Promise.resolve(0);
+      try {
+        await holder.ready;
+        sweeping = completeFinishIntents(minutes(10), 50);
+        expect(await waitingOn(cutoffLockKey(jobId))).toBe(true);
+        holder.release();
+        await holder.done;
+        expect(await sweeping).toBe(0);
+      } finally {
+        holder.release();
+        await Promise.allSettled([holder.done, sweeping]);
+      }
+      expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', control: 'person' });
+      expect(await prisma.computerFinishIntent.count({ where: { jobId } })).toBe(1);
+      // The person hands it back: the next pass completes it
+      await prisma.computerJob.update({ where: { id: jobId }, data: { control: 'brick', status: 'running', waitingFor: null, stretchStarted: minutes(10) } });
+      expect(await completeFinishIntents(minutes(11), 50)).toBe(1);
+      expect((await jobOf(jobId)).status).toBe('done');
+    });
+
+    it('an intent is kept under the generation it was read at: a take-over that bumps it while the intent is being kept waits for it, and a stop from the older generation is stale and writes nothing (CodeRabbit)', async () => {
+      const { jobId } = await running('cr-gen');
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+      // The take-over's own write holds the job's row and bumps the generation when it commits
+      const takeover = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 FROM "computer_jobs" WHERE "id" = ${jobId} FOR UPDATE`;
+          locked();
+          await gate;
+          await tx.computerJob.update({ where: { id: jobId }, data: { controlGeneration: 1 } });
+        },
+        { timeout: 20_000, maxWait: 20_000 },
+      );
+      let stopping: Promise<unknown> = Promise.resolve();
+      try {
+        await lockTaken;
+        stopping = recordFinishIntent(jobId, { outcome: 'failed', cause: 'agent', generation: 0 }, minutes(1));
+        expect(await rowBlocked()).toBe(true);
+        release();
+        await takeover;
+        expect(await stopping).toEqual({ ok: false, reason: 'stale' });
+      } finally {
+        release();
+        await Promise.allSettled([takeover, stopping]);
+      }
+      expect(await hasFinishIntent(prisma, jobId)).toBe(false);
     });
   });
 });

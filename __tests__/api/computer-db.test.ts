@@ -291,8 +291,14 @@ run('a Brick’s computer, in a real database', () => {
       try {
         await Promise.race([lockTaken, holder.then(() => Promise.reject(new Error('the holder ended before it took the lock')))]);
         finishing = finishJob(job.job.id, 'done', minutes(2));
+        // Observed from the moment it starts: a rejection before it reaches the lock fails the poll with its own error, never an unhandled rejection reported first
+        let finishFailure: { error: unknown } | null = null;
+        finishing.catch((error) => {
+          finishFailure = { error };
+        });
         let waiting = false;
         for (let tries = 0; tries < 250 && !waiting; tries += 1) {
+          if (finishFailure) throw (finishFailure as { error: unknown }).error;
           waiting = (await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(${lockKey}, 0)`)[0].n > 0;
           if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
         }

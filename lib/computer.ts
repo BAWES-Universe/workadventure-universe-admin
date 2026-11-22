@@ -37,7 +37,7 @@ import { computersArePaused } from '@/lib/capability-pause';
 import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
-import { hasPoolCutoff, lockCutoff, lockRelayReach } from '@/lib/computer-faults';
+import { hasPoolCutoff, hasTurnAdmitted, lockCutoff, lockRelayReach } from '@/lib/computer-faults';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { recordRefundObligationsForBrick, sweepRefundObligations } from '@/lib/computer-refunds';
 import { decidePendingForPurge, decideRunnerFinish, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, markDeliveredLate, noteEffectSettled, sweepGiveBackDecisions, sweepLateEvidence, type Verdict } from '@/lib/computer-giveback';
@@ -486,8 +486,26 @@ export async function startedJobFor(botId: string, personId: string, startKey: s
  * another person's or Brick's key, changes nothing (never learned apart). Answers whether this key has a job of this person's on this Brick.
  */
 export async function ackStart(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<boolean> {
-  await prisma.computerJob.updateMany({ where: { botId, personId, startKey, startAckedAt: null }, data: { startAckedAt: now } });
-  return (await prisma.computerJob.count({ where: { botId, personId, startKey } })) > 0;
+  // Under the same person lock the keyed start makes its job under, in one transaction: an ack that arrives while that start is still deciding waits for it, then confirms the job it made (never `true` with the job left unconfirmed)
+  return prisma.$transaction(
+    async (tx) => {
+      await lockPerson(tx, personId);
+      await tx.computerJob.updateMany({ where: { botId, personId, startKey, startAckedAt: null }, data: { startAckedAt: now } });
+      return (await tx.computerJob.count({ where: { botId, personId, startKey } })) > 0;
+    },
+    { timeout: 15_000, maxWait: 15_000 },
+  );
+}
+
+/**
+ * The oldest start of this person on this Brick that the game has not confirmed, when a start under ANOTHER key would meet it (`earlier`), or null. Read only: the route asks it BEFORE the spend rule, so a retry under a new key
+ * is answered with the job the game asked for earlier even when that job used what a chat-stated rule leaves (never a false `rule`). The decision that makes or refuses a job stays the one under the person's lock in `beginJob`.
+ */
+export async function earlierUnconfirmedStart(botId: string, personId: string, startKey: string): Promise<{ id: string; status: string; state: ReturnType<typeof startStateOf>; attempt: string | null } | null> {
+  const same = await prisma.computerJob.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select: { id: true } });
+  if (same) return null;
+  const earlier = await prisma.computerJob.findFirst({ where: { botId, personId, startAckedAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true, status: true, startKey: true } });
+  return earlier ? { id: earlier.id, status: earlier.status, state: startStateOf(earlier.status), attempt: earlier.startKey } : null;
 }
 
 /** What a start with a key is for: the sha-256 of the Brick, the person and the key. */
@@ -1153,41 +1171,76 @@ export async function stopJobForRefusal(jobId: string, why: { reason: 'allowance
 
 /** The job finished: its machine is saved and rests, what it cost is counted, and the next job in line starts. Safe to say twice. */
 export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date(), why?: string | null, cause?: FinishCause | null, turns?: number[] | null, run?: string | null): Promise<JobView | null> {
-  // A job that never started (still in line) did not finish: it is stopped by the person or starts, never "done"
-  const current = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
-  if (current && current.status !== 'queued') {
-    // The computer's own sentence about why it could not go on is kept before the job ends, for the message that tells the person
-    const note = outcome === 'failed' ? cleanEndNote(why) : null;
-    if (note) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: note } });
-    // The runner's cause is only a HINT. Every failed finish is judged by Orbit from the relay's durable rows (lib/computer-giveback): a confirmed fault only OURS can cause is given back
-    // under any hint, whichever arrives first, the rows or the finish (a row that comes after is looked at again: afterLateEvidence). Hint `ours` is judged as before; the agent's own, or
-    // nothing, reads the turns the runner named (or the last turn with a row) and gives goodwill only for an unresolved row. A run is never made free by ending it "failed" with nothing recorded
-    const ours = outcome === 'failed' && cause === 'ours';
-    // The run the runner reported is carried whatever else it named: it is where the relay's arrival is looked for (never another run's). Which fault rows are read does not follow it (no turn named: every row of the job)
-    const runner = outcome !== 'failed' ? null : { turns: turns ?? null, run: run ?? null, hint: ours ? ('ours' as const) : cause === 'agent' ? ('agent' as const) : ('none' as const) };
-    // A finish honors a pool cutoff Orbit decided for this job (`finish`): such a job ends as `pool` (ours, given back), never as the outcome the runner reports after its keys were ended for our own capacity
-    await endJob(jobId, outcome, ours ? 'error' : null, now, true, undefined, true, runner, true);
+  return (await finishWith(jobId, { outcome, now, why, cause, turns, run }, {})).job;
+}
+
+/** What a runner said when it finished a job, or committed to doing so. */
+interface Said {
+  outcome: 'done' | 'failed';
+  now: Date;
+  why?: string | null;
+  cause?: FinishCause | null;
+  turns?: number[] | null;
+  run?: string | null;
+}
+
+/** What the runner's kept intent says, as a finish says it. */
+const saidByIntent = (intent: { outcome: string; why: string | null; cause: string | null; turns: number[]; run: string | null }, now: Date): Said => ({
+  outcome: intent.outcome === 'done' ? 'done' : 'failed',
+  now,
+  why: intent.why,
+  cause: intent.cause === 'ours' || intent.cause === 'agent' ? intent.cause : null,
+  turns: intent.turns.length > 0 ? intent.turns : null,
+  run: intent.run,
+});
+
+/**
+ * The one way a runner's finish ends a job. `guard` is what the very write that lands the ending must still find true (the control generation the runner acts under, Brick's control), `intentFirst` that no finish intent was kept
+ * before it (read under the cutoff lock in that write: when one was, the job ends as the intent said, never as this finish says). Answers whether the generation had moved (`stale`), whether THIS call wrote the ending (`ended`), whether
+ * the person had the job (`notBrick`, nothing written), and the job as it stands.
+ */
+async function finishWith(jobId: string, said: Said, guard: { generation?: number | null; brick?: boolean; intentFirst?: boolean }): Promise<{ stale: boolean; ended: boolean; notBrick: boolean; job: JobView | null }> {
+  const report: EndReport = {};
+  // At most one turn of "an intent was kept first": the intent's own words are never judged against another intent
+  for (let round = 0; round < 2; round++) {
+    const mine = round === 0 ? said : saidByIntent(report.intent as NonNullable<EndReport['intent']>, said.now);
+    const current = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, controlGeneration: true } });
+    report.intent = null;
+    // A job that never started (still in line) did not finish: it is stopped by the person or starts, never "done"
+    if (current && current.status !== 'queued') {
+      // The computer's own sentence about why it could not go on is kept with the ending itself (the same write: a take-over that wins leaves no note under the new controller)
+      const note = mine.outcome === 'failed' ? cleanEndNote(mine.why) : null;
+      // The runner's cause is only a HINT. Every failed finish is judged by Orbit from the relay's durable rows (lib/computer-giveback): a confirmed fault only OURS can cause is given back
+      // under any hint, whichever arrives first, the rows or the finish (a row that comes after is looked at again: afterLateEvidence). Hint `ours` is judged as before; the agent's own, or
+      // nothing, reads the turns the runner named (or the last turn with a row) and gives goodwill only for an unresolved row. A run is never made free by ending it "failed" with nothing recorded
+      const ours = mine.outcome === 'failed' && mine.cause === 'ours';
+      // The run the runner reported is carried whatever else it named: it is where the relay's arrival is looked for (never another run's). Which fault rows are read does not follow it (no turn named: every row of the job)
+      const runner = mine.outcome !== 'failed' ? null : { turns: mine.turns ?? null, run: mine.run ?? null, hint: ours ? ('ours' as const) : mine.cause === 'agent' ? ('agent' as const) : ('none' as const) };
+      // A finish honors a pool cutoff Orbit decided for this job (`finish`): such a job ends as `pool` (ours, given back), never as the outcome the runner reports after its keys were ended for our own capacity
+      await endJob(jobId, mine.outcome, ours ? 'error' : null, mine.now, true, undefined, true, runner, true, { generation: guard.generation, brick: guard.brick, intentFirst: guard.intentFirst && round === 0, note }, report);
+    }
+    if (!report.intent) break;
   }
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
-  return job ? jobView(job) : null;
+  return { stale: report.stale === true, ended: report.ended === true, notBrick: report.notBrick === true, job: job ? jobView(job) : null };
 }
 
 /**
  * `finishJob` for a runner that says the control generation it acts under: a finish from an older generation than the job's is `stale` and does nothing (the person took the machine since, and a newer controller owns the job). Without a
- * generation it is `finishJob` exactly as before (a runner that does not say one, such as 0.4.3's). Answers the job as it stands either way.
+ * generation it is `finishJob` exactly as before (a runner that does not say one, such as 0.4.3's). Answers the job as it stands either way. The generation is looked at again in the write that ends the job (a take-over
+ * between the two moves it: nothing is written and the answer is `stale`), and so is a finish intent kept meanwhile: a job whose runner committed to ending it ends as the intent said, whatever this finish says (the committed
+ * word is first, and a replacement runner or a replayed finish with other values changes nothing).
  */
 export async function finishJobUnder(jobId: string, generation: number | null | undefined, ...args: Parameters<typeof finishJob> extends [string, ...infer Rest] ? Rest : never): Promise<{ stale: boolean; job: JobView | null }> {
   if (generation !== undefined && generation !== null) {
     const current = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { controlGeneration: true } });
     if (current && current.controlGeneration !== generation) return { stale: true, job: (await getJob(jobId)) ?? null };
   }
-  // A job whose runner committed to ending it (its finish intent) ends as the intent said, whatever this finish says: the committed word is first, and a replacement runner or a replayed finish with other values changes nothing
+  const [outcome, now, why, cause, turns, run] = args;
   const intent = await prisma.computerFinishIntent.findUnique({ where: { jobId } });
-  if (intent) {
-    const [, now] = args;
-    return { stale: false, job: await finishJob(jobId, intent.outcome === 'done' ? 'done' : 'failed', now, intent.why, intent.cause === 'ours' || intent.cause === 'agent' ? intent.cause : null, intent.turns.length > 0 ? intent.turns : null, intent.run) };
-  }
-  return { stale: false, job: await finishJob(jobId, ...args) };
+  const said: Said = intent ? saidByIntent(intent, now ?? new Date()) : { outcome, now: now ?? new Date(), why, cause, turns, run };
+  const done = await finishWith(jobId, said, { generation, intentFirst: !intent });
+  return { stale: done.stale, job: done.job };
 }
 
 /** Stop: from the person's tap. The work so far is kept. Null when it is not their Brick. */
@@ -1291,6 +1344,26 @@ async function untilCleaned(botId: string): Promise<void> {
   }
 }
 
+/**
+ * What an ending must still find true in the very write that lands it (not only when it was decided): the control generation the caller acts under (a person's take-over since makes it stale and nothing is written), Brick's
+ * control (a take-over since leaves the job to them), and, for a runner's finish, that no finish intent was kept first (read under the cutoff lock, in the transaction that writes the ending).
+ */
+interface EndGuard {
+  generation?: number | null;
+  brick?: boolean;
+  intentFirst?: boolean;
+  /** The runner's sentence about why it could not go on: written in the very write that ends the job, so a take-over that wins leaves no note behind. */
+  note?: string | null;
+}
+
+/** What an ending found: it wrote the end (`ended`), found the generation moved (`stale`), found the person in control (`notBrick`), or found a finish intent kept first (`intent`: the caller ends it with the intent's own words). */
+interface EndReport {
+  ended?: boolean;
+  stale?: boolean;
+  notBrick?: boolean;
+  intent?: Prisma.ComputerFinishIntentGetPayload<Record<string, never>> | null;
+}
+
 /** How many times an end is tried again when the job's state moved between reading it and writing the end. */
 const END_TRIES = 4;
 
@@ -1303,10 +1376,11 @@ const END_TRIES = 4;
  * `outside` false writes only our own tables (the Brick's purge ends its jobs this way, so a slow provider or backup never holds the purge):
  * the machine, its browser and the agent's turn are left to the purge's own removal of the machine.
  */
-async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, runner: { turns: number[] | null; run?: string | null; /** What the runner said the cause was: `ours` is judged from the rows and bounded; any other is a hint read against the rows of the named turns. */ hint?: 'ours' | 'agent' | 'none' } | null = null, finish = false): Promise<void> {
+async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, runner: { turns: number[] | null; run?: string | null; /** What the runner said the cause was: `ours` is judged from the rows and bounded; any other is a hint read against the rows of the named turns. */ hint?: 'ours' | 'agent' | 'none' } | null = null, finish = false, guard: EndGuard = {}, report: EndReport = {}): Promise<void> {
   // A finish reported by the runner honors a committed pool cutoff (Orbit decided to end this job for its own capacity: its keys were ended and the runner's own failure, or "done", follows from that). It is ended as
   // `pool` instead (stopped, ours: its time given back, never counted, with the words the person is told). The decision is read first; and again under the cutoff lock in the very transaction that writes the ending,
   // because a cutoff that commits between the two would otherwise lose to a finish that has already read "not decided". A cutoff takes the same lock and only decides for a job that is still on
+  let note = guard.note ?? null;
   const endForPool = async (): Promise<void> => {
     const kept = cleanEndNote(POOL_BUSY_WORDS);
     if (kept) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: kept } });
@@ -1314,6 +1388,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     endedBy = 'pool';
     runner = null;
     finish = false;
+    // The words the person is told are ours (the pool's), not the runner's
+    note = null;
   };
   if (finish && (await hasPoolCutoff(prisma, jobId))) await endForPool();
   // The job can change under this (a person's answer moves it between running and waiting): the end is tried again on what it is now, and
@@ -1326,6 +1402,15 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     if (!job || isOver(job.status)) return;
     // A caller that saw the job in line ends it only while it still is: another try may have put it on the machine in between
     if (only !== undefined && job.status !== only) return;
+    // The caller's generation and Brick's control are looked at on every try, and they are part of the write below: a take-over between this read and that write moves them, the write lands on nothing, and the next try says so
+    if (guard.generation !== undefined && guard.generation !== null && job.controlGeneration !== guard.generation) {
+      report.stale = true;
+      return;
+    }
+    if (guard.brick && job.control !== 'brick') {
+      report.notBrick = true;
+      return;
+    }
     const held = job.status === 'running' || job.status === 'waiting';
     const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
     seconds = job.secondsRun + stretch;
@@ -1349,6 +1434,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       handoverUntold: false,
       // The person's own Stop, a computer turned off and a Brick deleted are never told: they just did it
       endToldAt: silentEnding(endedBy) ? now : null,
+      ...(note ? { endNote: note } : {}),
       // A job that finished well and writes files hands them over next: it says so in the SAME write that ends it, so there is no moment when it is over and nothing says its time is
       // still to be added (a sweep that settled its room in that gap would settle too little, and a room's first settlement is the one kept). The hand-over clears it when it is
       // done; one that never runs (the server stopped) leaves a mark that ages out after HAND_OVER_ALIVE_MS, and the sweep settles the job then, once
@@ -1363,7 +1449,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // An ending Orbit saw itself is always given back; it is kept in the same record
     const orbitSeen = runner === null && (endedBy === 'error' || endedBy === 'pool') && job.startedAt !== null;
     const turnHold = held && !!job.firstTurnSentAt && !job.agentResponseId;
-    const where = { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted };
+    const where = { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted, ...(guard.generation !== undefined && guard.generation !== null ? { controlGeneration: guard.generation } : {}), ...(guard.brick ? { control: 'brick' as const } : {}) };
     if (runnerJudged || hintJudged || orbitSeen || turnHold) {
       // The job's first turn was sent and never named: it may still run on the machine with nothing to cancel it by. The machine carries a hold from the
       // moment the job is over (one commit with the end), so no other job or turn starts beside that turn until the machine is proved asleep
@@ -1376,7 +1462,12 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         let verdict: Verdict | null = null;
         if (finish) {
           await lockCutoff(tx, jobId);
-          if (await hasPoolCutoff(tx, jobId)) return { done: { count: 0 }, verdict, cutoffDecided: true };
+          if (await hasPoolCutoff(tx, jobId)) return { done: { count: 0 }, verdict, cutoffDecided: true, intent: null };
+          // A finish intent that committed while this finish waited is the word that stands (a cutoff for our capacity stays above it): read under the lock that protects the ending, before anything is written
+          if (guard.intentFirst) {
+            const kept = await tx.computerFinishIntent.findUnique({ where: { jobId } });
+            if (kept) return { done: { count: 0 }, verdict, cutoffDecided: false, intent: kept };
+          }
         }
         if (judging && (runnerJudged || hintJudged)) {
           await lockPerson(tx, ref.personId);
@@ -1392,8 +1483,12 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
           if (verdict) await writeDecision(tx, ref, verdict, runner?.hint ?? 'ours', verdict.judgedTurns ?? runner?.turns ?? null, now, runner?.run ?? null);
           else if (orbitSeen) await writeOrbitDecision(tx, ref, endedBy === 'pool' ? 'pool_cut_off' : null);
         }
-        return { done, verdict, cutoffDecided: false };
+        return { done, verdict, cutoffDecided: false, intent: null };
       });
+      if (result.intent) {
+        report.intent = result.intent;
+        return;
+      }
       if (result.cutoffDecided) {
         await endForPool();
         continue;
@@ -1413,11 +1508,19 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       const written = await prisma.$transaction(async (tx) => {
         await lockCutoff(tx, jobId);
         if (await hasPoolCutoff(tx, jobId)) return null;
+        if (guard.intentFirst) {
+          const kept = await tx.computerFinishIntent.findUnique({ where: { jobId } });
+          if (kept) return kept;
+        }
         return tx.computerJob.updateMany({ where, data: endData });
       });
       if (written === null) {
         await endForPool();
         continue;
+      }
+      if ('jobId' in written) {
+        report.intent = written;
+        return;
       }
       ended = written;
     } else {
@@ -1426,6 +1529,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   }
   // Someone else ended it between the read and the write: that one counts and settles
   if (!job || ended.count === 0) return;
+  report.ended = true;
   const held = job.status === 'running' || job.status === 'waiting';
   // The job's computer holds no key from here on: a call it makes after this is refused
   await revokeJobTokens(jobId, now).catch((error) => console.error('[Computer] Could not revoke a job’s keys:', error instanceof Error ? error.message : 'unknown'));
@@ -1756,7 +1860,8 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
     return 0;
   });
   const { computerWait } = await getBrickLimits();
-  const unanswered = await prisma.computerJob.findMany({ where: { status: 'waiting', control: 'brick', stretchStarted: { lte: new Date(now.getTime() - computerWait * 60 * 1000) } }, select: { id: true }, orderBy: { stretchStarted: 'asc' }, take: batch });
+  // A job whose runner committed to ending it is not one that went quiet: it is left to `completeFinishIntents` (which ends it as the runner said, after its grace), never ended here as unanswered
+  const unanswered = await prisma.computerJob.findMany({ where: { status: 'waiting', control: 'brick', finishIntent: { is: null }, stretchStarted: { lte: new Date(now.getTime() - computerWait * 60 * 1000) } }, select: { id: true }, orderBy: { stretchStarted: 'asc' }, take: batch });
   for (const job of unanswered) {
     // A job Orbit already decided to end for its own capacity (its keys ended, whatever the request that decided it did after) is ended as THAT, ours, before the wait for its person is read against it: it is not one that
     // went quiet, and a cutoff still in its grace period is not left for this pass to end as the person's. A job whose cutoff could not end it is ended by the pass below
@@ -1787,6 +1892,13 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   for (const reservation of lapsed) {
     const job = reservation.jobId ? await prisma.computerJob.findUnique({ where: { id: reservation.jobId } }) : null;
     if (job && !isOver(job.status) && HOLDS_MACHINE.includes(job.status as never)) {
+      // A runner that committed to ending this job (its intent) has the last word: the lease running out does not replace it. It is ended as the intent said (while Brick has the job: a take-over that wins keeps the
+      // old ending below, as a lease that ran out always had), and a job with no intent is ended as before
+      const kept = await prisma.computerFinishIntent.findUnique({ where: { jobId: job.id } });
+      if (kept && job.control === 'brick') {
+        if (await completeIntent(kept, kept.createdAt).catch(() => false)) stopped++;
+        continue;
+      }
       await endJob(job.id, 'stopped', 'error', now);
       stopped++;
     } else if (job && isOver(job.status) && job.startedAt && job.reservationKey === reservation.reservationKey) {
@@ -2740,6 +2852,8 @@ export interface FinishIntentInput {
   run?: string | null;
   /** The control generation the runner is acting under: an intent from an older one is stale (the person took the machine since). */
   generation?: number | null;
+  /** What the stop rests on: `pool` = the runner gives up only because the pool refused its calls. Then a call admitted for its turn (or a later one) of the run answers it stale. */
+  basis?: 'pool' | null;
 }
 
 /**
@@ -2758,6 +2872,8 @@ export async function recordFinishIntent(jobId: string, input: FinishIntentInput
       await lockCutoff(tx, jobId);
       await lockPerson(tx, first.personId);
       await lockRelayReach(tx, jobId);
+      // The job's row is locked (shared) from here to the commit: a take-over's bump of the control generation waits for this transaction, so the generation read below is the one the intent is kept under
+      await tx.$queryRaw`SELECT 1 FROM "computer_jobs" WHERE "id" = ${jobId} FOR SHARE`;
       const job = await tx.computerJob.findUnique({ where: { id: jobId }, select: { status: true, controlGeneration: true } });
       if (!job) return { ok: false as const, reason: 'not_found' as const };
       // Only a job that is on can be committed to ending: one that is over was finished (or ended) already, one in line never started
@@ -2766,6 +2882,8 @@ export async function recordFinishIntent(jobId: string, input: FinishIntentInput
       if (await hasPoolCutoff(tx, jobId)) return { ok: false as const, reason: 'cutoff' as const };
       const kept = await tx.computerFinishIntent.findUnique({ where: { jobId } });
       if (kept) return { ok: true as const, pending: pendingOf(kept), already: true };
+      // A stop that rests on the pool alone, decided under the same lock as the admission of a call: if a call was admitted for this turn (or a later one) of the run, capacity came back and the work goes on. Nothing is written
+      if (input.basis === 'pool' && (await hasTurnAdmitted(tx, jobId, { fromTurn: input.turns && input.turns.length > 0 ? Math.min(...input.turns) : null, run: input.run }))) return { ok: false as const, reason: 'stale' as const };
       const made = await tx.computerFinishIntent.create({
         data: { jobId, outcome: input.outcome, cause: input.outcome === 'failed' ? (input.cause ?? null) : null, why: input.outcome === 'failed' ? (input.why ?? null)?.slice(0, 2000) ?? null : null, turns: input.turns ?? [], run: input.run ?? null, generation: input.generation ?? null, createdAt: now },
       });
@@ -2776,6 +2894,15 @@ export async function recordFinishIntent(jobId: string, input: FinishIntentInput
     { timeout: 15_000, maxWait: 15_000 },
   );
   return outcome;
+}
+
+/**
+ * Ends a job as its kept intent said, only while Brick has it (checked in the very write that lands the ending: a take-over that wins leaves the intent pending, for a later pass after the hand-back), as of the moment the
+ * runner committed (`at`: the wait for this pass is not the person's time). True only when THIS call wrote the ending (two passes that select the same intent never both count it). Safe to say twice.
+ */
+async function completeIntent(intent: { jobId: string; outcome: string; why: string | null; cause: string | null; turns: number[]; run: string | null }, at: Date): Promise<boolean> {
+  const done = await finishWith(intent.jobId, saidByIntent(intent, at), { brick: true });
+  return done.ended;
 }
 
 /** How long a finish intent is left for the runner (or a replacement) to send its finish before the sweep completes it. */
@@ -2796,9 +2923,7 @@ export async function completeFinishIntents(now: Date, batch: number): Promise<n
   let finished = 0;
   for (const intent of due) {
     try {
-      await finishJob(intent.jobId, intent.outcome === 'done' ? 'done' : 'failed', intent.createdAt, intent.why, intent.cause === 'ours' || intent.cause === 'agent' ? intent.cause : null, intent.turns.length > 0 ? intent.turns : null, intent.run);
-      const after = await prisma.computerJob.findUnique({ where: { id: intent.jobId }, select: { status: true } });
-      if (after && isOver(after.status)) finished += 1;
+      if (await completeIntent(intent, intent.createdAt)) finished += 1;
     } catch (error) {
       console.error('[Computer] Could not complete a finish the runner committed to:', error instanceof Error ? error.message : 'unknown');
     }

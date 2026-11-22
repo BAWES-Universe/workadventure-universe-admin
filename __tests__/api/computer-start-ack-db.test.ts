@@ -1,8 +1,8 @@
 /**
- * The runner's committed word that a computer job is to end (GPT round 4, R2): kept before the runner gives up, so a replacement runner or the sweep completes the finish and nothing else runs on the job meanwhile.
+ * A start the game never confirmed (GPT round 4, R1/R1b): the job is made unconfirmed, a new key meets it as `earlier` until the game's own `start-ack` confirms it, and a keyed look-up never confirms.
  * Against a real database. Runs only with ROLES_DB_TEST=yes and a DATABASE_URL to a migrated THROWAWAY database:
  *
- *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/computer-finish-intent-db.test.ts
+ *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/computer-start-ack-db.test.ts
  */
 import { randomUUID } from 'node:crypto';
 
@@ -19,7 +19,7 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { ackStart, giveComputer, startJob, startedJobFor } from '@/lib/computer';
+import { ackStart, earlierUnconfirmedStart, giveComputer, startJob, startedJobFor } from '@/lib/computer';
 import { lockPerson } from '@/lib/computer-giveback';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -205,37 +205,93 @@ run('a start whose answer the game never confirmed, in a real database', () => {
     expect(await jobsOf(bob.id)).toBe(1);
   });
 
-  it('is decided under the person’s lock in the transaction that makes the job: a start waiting for the lock sees the unconfirmed job another start committed while it waited', async () => {
-    const sara = await owner();
-    const lockKey = `computer:giveback:${sara.id}`;
+  /** A barrier, not a delay: waits (bounded) until a session is blocked on this advisory lock. */
+  const blockedOn = async (lockKey: string): Promise<boolean> => {
+    for (let tries = 0; tries < 250; tries += 1) {
+      const rows = await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objid::bigint = (hashtext(${lockKey})::bigint & 4294967295)`;
+      if (rows[0].n > 0) return true;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return false;
+  };
+
+  /** Another start, in the middle of making its job, holds the person's lock and has made its (unconfirmed) job: the test's waiter runs while it holds. Readiness is raced against the holder failing, and the gate is released and both operations drained on every exit. */
+  const withStartHoldingTheLock = async (sara: Awaited<ReturnType<typeof owner>>, key: string, waiter: () => Promise<unknown>, check: (answer: unknown) => Promise<void> | void) => {
     let release: () => void = () => undefined;
     const held = new Promise<void>((resolve) => (release = resolve));
     let rowMade: () => void = () => undefined;
     const holderRan = new Promise<void>((resolve) => (rowMade = resolve));
-    // Another start, in the middle of making its job, holds the person's lock
     const holder = prisma.$transaction(
       async (tx) => {
         await lockPerson(tx, sara.id);
-        await tx.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Held', writes: false, startKey: keyOf(), startAckedAt: null, route: 'computer', expectedMicros: BigInt(0) } });
+        await tx.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Held', writes: false, startKey: key, startAckedAt: null, route: 'computer', expectedMicros: BigInt(0) } });
         rowMade();
         await held;
       },
       { timeout: 20_000, maxWait: 20_000 },
     );
-    await holderRan;
-    const waiting = start(sara, 'Visa form', keyOf());
-    // A barrier, not a delay: wait (bounded) until a session is blocked on that lock
-    let blocked = false;
-    for (let tries = 0; tries < 250 && !blocked; tries += 1) {
-      const rows = await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objid::bigint = (hashtext(${lockKey})::bigint & 4294967295)`;
-      blocked = rows[0].n > 0;
-      if (!blocked) await new Promise((resolve) => setTimeout(resolve, 20));
+    let waiting: Promise<unknown> = Promise.resolve();
+    try {
+      // A holder that fails before it made its row is reported, never waited for
+      await Promise.race([holderRan, holder.then(() => Promise.reject(new Error('the holder ended without making its job')))]);
+      waiting = waiter();
+      // Observe the waiter's own failure at once: it is reported here, not left unhandled until the join
+      const settled = waiting.then(
+        () => 'done' as const,
+        (error) => Promise.reject(error),
+      );
+      settled.catch(() => undefined);
+      expect(await blockedOn(`computer:giveback:${sara.id}`)).toBe(true);
+      release();
+      await holder;
+      await check(await waiting);
+    } finally {
+      release();
+      await Promise.allSettled([holder, waiting]);
     }
-    expect(blocked).toBe(true);
-    release();
-    await holder;
-    expect(await waiting).toMatchObject({ ok: false, reason: 'earlier' });
-    expect(await jobsOf(sara.id)).toBe(1);
+  };
+
+  it('is decided under the person’s lock in the transaction that makes the job: a start waiting for the lock sees the unconfirmed job another start committed while it waited', async () => {
+    const sara = await owner();
+    await withStartHoldingTheLock(
+      sara,
+      keyOf(),
+      () => start(sara, 'Visa form', keyOf()),
+      async (answer) => {
+        expect(answer).toMatchObject({ ok: false, reason: 'earlier' });
+        expect(await jobsOf(sara.id)).toBe(1);
+      },
+    );
+  });
+
+  it('an ack waits for the start that is still deciding under the person’s lock, then confirms the job it made: `true` is never answered with the job left unconfirmed (CodeRabbit)', async () => {
+    const sara = await owner();
+    const key = keyOf();
+    await withStartHoldingTheLock(
+      sara,
+      key,
+      () => ackStart(sara.brickId, sara.id, key),
+      async (answer) => {
+        expect(answer).toBe(true);
+        expect((await prisma.computerJob.findFirstOrThrow({ where: { personId: sara.id, startKey: key } })).startAckedAt).not.toBeNull();
+      },
+    );
+  });
+
+  it('names the earlier unconfirmed start for a new key, read only: none for the same key, none once confirmed, none on another Brick (the route asks it before the spend rule)', async () => {
+    const sara = await owner();
+    const key = keyOf();
+    expect(await earlierUnconfirmedStart(sara.brickId, sara.id, keyOf())).toBeNull();
+    const a = await start(sara, 'Visa form', key);
+    if (!a.ok) throw new Error('no');
+    expect(await earlierUnconfirmedStart(sara.brickId, sara.id, keyOf())).toMatchObject({ id: a.job.id, attempt: key });
+    expect(await earlierUnconfirmedStart(sara.brickId, sara.id, key)).toBeNull();
+    const omar = await owner('omar');
+    expect(await earlierUnconfirmedStart(omar.brickId, sara.id, keyOf())).toBeNull();
+    // Reading it confirmed nothing
+    expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).startAckedAt).toBeNull();
+    await ackStart(sara.brickId, sara.id, key);
+    expect(await earlierUnconfirmedStart(sara.brickId, sara.id, keyOf())).toBeNull();
   });
 
   it('an old game is unchanged: a start without the capability is never blocked, makes a confirmed job, and never an unconfirmed one; rows from before the column never block', async () => {

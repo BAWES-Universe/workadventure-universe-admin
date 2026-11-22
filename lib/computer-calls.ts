@@ -9,7 +9,7 @@ import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credi
 import { routeIsPaused } from '@/lib/computer-route-pause';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { tellSentry } from '@/lib/computer-alerts';
-import { ORBIT_SOURCE, POOL_CUTOFF_CALL, admitLockKey, cutoffLockKey, hasCallAdmission, hasOwnKeyCall, hasPoolCutoff, hasPoolRefusals, recordCallAdmission, authorizeOwnKeyCall, recordPoolCutoff, recordPoolRefusal, retirePoolRefusals } from '@/lib/computer-faults';
+import { ORBIT_SOURCE, POOL_CUTOFF_CALL, admitLockKey, cutoffLockKey, hasCallAdmission, hasFinishIntent, hasOwnKeyCall, hasPoolCutoff, recordCallAdmission, recordTurnAdmitted, authorizeOwnKeyCall, recordPoolCutoff, recordPoolRefusal, retirePoolRefusals } from '@/lib/computer-faults';
 
 /**
  * A model call a Brick's computer makes (build handoff v2, section 5): room is taken BEFORE the call, and what it really cost is
@@ -49,7 +49,7 @@ export type Authorized =
   | { ok: false; reason: 'rule'; ruleId: string; why: 'own_accounts' | 'cap'; leftMicros: number | null; words: string };
 
 export async function authorizeModelCall(
-  input: { token: string; callId: string; estimateMicros: number; payer: 'universe' | 'own-key'; /** The provider and route the call goes to, when the relay names it: new platform-funded work on a route that is failing for many people waits. */ route?: string | null },
+  input: { token: string; callId: string; estimateMicros: number; payer: 'universe' | 'own-key'; /** The turn and the run of it the call is made for, when the relay knows them: a stop for our capacity that rests on this turn or an earlier one of the run is stale once a call is admitted for it. */ turn?: number | null; run?: string | null; /** The provider and route the call goes to, when the relay names it: new platform-funded work on a route that is failing for many people waits. */ route?: string | null },
   asked?: Date,
   /** How the end of a decided cutoff is run once the refusal is answered. The route hands over Next's `after` (it runs when the response has been sent, so the relay gets the refusal first); without it (a test, a caller with no response to wait for) the end is started in the background at once. */
   afterAnswer?: (task: () => Promise<void>) => void,
@@ -69,19 +69,23 @@ export async function authorizeModelCall(
     // an own key is never given back as ours). A call is not authorized unless the marker is kept: one that could not be kept is refused (the relay asks again), as a call that is authorized and then forgotten would let
     // a cutoff for our own capacity read the job as one that never had a call
     try {
-      // Kept under the job's cutoff lock and the lock a finish's inference takes, and only while the job is still on, no cutoff for our capacity is decided and the key is still good (looked at with the time read
-      // after the waits): a call refused for any of these leaves no marker, and a job that was ended meanwhile does not authorize the call
-      const kept = await authorizeOwnKeyCall(base.jobId, now, async (tx) => {
-        const still = await verifyJobToken(input.token, 'model', clock(), tx);
-        return still.ok && still.generation === verified.generation;
-      });
+      // The whole decision is ONE transaction under the job's cutoff lock and the lock a finish's inference takes: the job is still on, no cutoff for our capacity is decided, no finish intent is kept, the key is still good
+      // (looked at with the time read after the waits), and only then are the marker and the admission for the call's turn written. A call refused for any of these leaves no marker (there is no second look after the commit,
+      // so nothing can refuse it after its marker was kept), and a job that was ended meanwhile does not authorize the call. A stop that is deciding at the same moment either finds the admission (and answers stale) or won (and this is refused)
+      const kept = await authorizeOwnKeyCall(
+        base.jobId,
+        now,
+        async (tx) => {
+          const still = await verifyJobToken(input.token, 'model', clock(), tx);
+          return still.ok && still.generation === verified.generation;
+        },
+        { turn: input.turn, run: input.run },
+      );
       if (!kept) return { ok: false, reason: 'refused' };
     } catch (error) {
       console.error('[Computer] Could not note an own-key call, so it is not authorized:', error instanceof Error ? error.message : 'unknown');
       return { ok: false, reason: 'refused' };
     }
-    // A cutoff for our own capacity that was deciding at the same moment either saw this call (and did not stop the job) or won (and this call is refused): never both
-    if (!(await standsAgainstCutoff(base.jobId, input.token, verified.generation, clock))) return { ok: false, reason: 'refused' };
     return { ok: true, ...base, reservedMicros: null };
   }
   if (!Number.isSafeInteger(input.estimateMicros) || input.estimateMicros <= 0 || input.estimateMicros > MAX_MICROS) return { ok: false, reason: 'refused' };
@@ -99,7 +103,7 @@ export async function authorizeModelCall(
     // moment either counted this room (and did not stop the job) or won (the key is no longer good): the room goes back, never both. A look that FAILS is the same answer as one that says no: the call is refused and
     // the room goes back, never held for a call that was not authorized
     // The key is looked at again by `authorizedPastCutoff`, with the time read after the room's wait for the pool's lock (and after the cutoff's, when there is one): a key that ran out meanwhile is no longer good
-    const stands = await authorizedPastCutoff(base.jobId, input.token, verified.generation, clock).catch((error) => {
+    const stands = await authorizedPastCutoff(base.jobId, input.token, verified.generation, clock, { turn: input.turn, run: input.run }).catch((error) => {
       console.error('[Computer] Could not look again at a call that was authorized:', error instanceof Error ? error.message : 'unknown');
       return false;
     });
@@ -351,41 +355,27 @@ export async function endIfCutoffDecided(jobId: string, now: Date): Promise<{ de
 export { cutoffLockKey };
 
 /**
- * Whether a call that was just authorized (its room held, or its marker kept) stands against a cutoff for our own capacity that may be deciding at the same moment; a look that fails is a no (`stands` below). A job with no
- * refusal of ours kept has none (the common case: one count, nothing waited for). Otherwise this waits for the job's cutoff lock, which the cutoff holds only while it counts, decides and ends the job's keys (database
- * steps, no provider call), and then looks for the decision itself and asks again whether the key is still good: a cutoff that counted this call decided nothing, and one that won decided it, so the call is refused.
+ * Whether a call that was just authorized (its room held, or its marker kept) stands, decided under the job's cutoff lock: the one lock a cutoff for our own capacity, a finish intent and the making of a model key all
+ * take, so exactly one of "stop" and "admit" wins. In ONE transaction (database steps only, no provider call): no cutoff is decided, no finish intent is kept, the key is still good (looked at with the time read AFTER the
+ * waits: a key that ran out meanwhile, or one a stop revoked, is not good), and only then is the admission written (`turn_admitted`, with the turn and run when the relay names them). A stop that is deciding at the same
+ * moment is waited for: if it won, the call is refused (its keys ended with it) and its room goes back; if this won, the stop finds the admission and answers stale. A wait that fails is a failed check (a no), never a
+ * call authorized past a stop that may have won.
  */
-async function authorizedPastCutoff(jobId: string, token: string, generation: number, clock: () => Date): Promise<boolean> {
-  // The key is looked at with the time read AFTER whatever this call waited for (a lock, the pool): a key that ran out meanwhile is not good, whether or not a cutoff was ever near
-  const keyIsGood = async (): Promise<boolean> => {
-    const after = await verifyJobToken(token, 'model', clock());
-    return after.ok && after.generation === generation;
-  };
-  if (!(await hasPoolRefusals(prisma, jobId))) return keyIsGood();
-  let decided: boolean;
-  try {
-    decided = await prisma.$transaction(
-      async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
-        return hasPoolCutoff(tx, jobId);
-      },
-      { timeout: 15_000, maxWait: 15_000 },
-    );
-  } catch (error) {
-    // The wait failed (no connection, or a lock held too long): nothing says whether a cutoff has won, so this is a failed check and the funded caller gives its room back, never a call authorized past one that may have won
-    console.error('[Computer] Could not wait for a cutoff that was deciding:', error instanceof Error ? error.message : 'unknown');
-    return false;
-  }
-  if (decided) return false;
-  return keyIsGood();
+async function authorizedPastCutoff(jobId: string, token: string, generation: number, clock: () => Date, admitted: { turn?: number | null; run?: string | null } = {}): Promise<boolean> {
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
+      if (await hasPoolCutoff(tx, jobId)) return false;
+      if (await hasFinishIntent(tx, jobId)) return false;
+      // The key is looked at with the time read AFTER whatever this call waited for (a lock, the pool), inside the lock a stop revokes the keys under
+      const after = await verifyJobToken(token, 'model', clock(), tx);
+      if (!after.ok || after.generation !== generation) return false;
+      await recordTurnAdmitted(tx, jobId, { turn: admitted.turn, run: admitted.run, at: clock() });
+      return true;
+    },
+    { timeout: 15_000, maxWait: 15_000 },
+  );
 }
-
-/** `authorizedPastCutoff` for a call with no room to give back: a look that fails is a no. */
-const standsAgainstCutoff = (jobId: string, token: string, generation: number, clock: () => Date): Promise<boolean> =>
-  authorizedPastCutoff(jobId, token, generation, clock).catch((error) => {
-    console.error('[Computer] Could not look again at a call that was authorized:', error instanceof Error ? error.message : 'unknown');
-    return false;
-  });
 
 /** True when this call id already holds room for this job and person: room held and not lapsed (what reserving it again would answer with its own reservation). */
 async function holdsItsRoom(jobId: string, callId: string, personId: string, now: Date, db: Pick<Prisma.TransactionClient, 'meterReservation'> = prisma): Promise<boolean> {

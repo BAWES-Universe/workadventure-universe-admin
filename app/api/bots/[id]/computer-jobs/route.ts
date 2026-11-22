@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
-import { ackStart, computerView, startJob, startedJobFor } from '@/lib/computer';
+import { ackStart, computerView, earlierUnconfirmedStart, startJob, startedJobFor } from '@/lib/computer';
 import { startStateOf } from '@/lib/computer-values';
 import { ownerSpendAllowed } from '@/lib/spend-rules';
 
@@ -132,6 +132,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const person = await resolveUsagePerson(parsed.data.userId, parsed.data.isGuest);
     // A guest never has a Brick computer: a Brick belongs to an account
     if (!person.personId) return NextResponse.json({ ok: false, reason: 'not_owner' });
+    // A start that says the game confirms its answers, retried under a NEW key while an earlier start of this person on this Brick is still unconfirmed, is answered with that job BEFORE the spend rule is asked: the earlier job may
+    // have used what a chat-stated rule leaves, and the answer the game is owed is the job it asked for, never a false `rule`. (The decision that makes or refuses a job is still the one under the person's lock in `startJob`.)
+    const acking = attempt?.success === true && request.headers.get(START_ACKS_HEADER) === '1';
+    if (acking && attempt?.success) {
+      const earlier = await earlierUnconfirmedStart(id, person.personId, attempt.data);
+      if (earlier) return NextResponse.json({ ok: false, reason: 'earlier', job: earlier });
+    }
     // A rule the person said in chat ("no more than $1 a month", "only my own accounts") is held before a job exists, so Brick can say so at once
     const ruled = await ownerSpendAllowed(id, person.personId, 'computer', new Date(), parsed.data.runId ?? null, attempt?.success ? attempt.data : null);
     if (!ruled.ok) return NextResponse.json({ ok: false, reason: 'rule', rule: { id: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words } });

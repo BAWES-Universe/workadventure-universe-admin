@@ -14,6 +14,9 @@ const bodySchema = z
     payer: z.enum(['universe', 'own-key']),
     /** The provider and route the call will go to ("universe-ai:<providerId>"): a route failing for many people is paused for new work. Required for a call we fund (it is what the pause is checked by); optional for a person's own key. */
     route: z.string().min(1).max(120).nullable().optional(),
+    /** The turn of the run the call is made for, and the run (a restart makes a new run that numbers turns again): kept with the admission, so a stop for our capacity that rests on this turn or an earlier one answers stale. */
+    turn: z.number().int().min(0).max(100_000).nullable().optional(),
+    run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional(),
   })
   .strict()
   // A call we pay for that names no route would reach the room unchecked while its provider's route is paused (a missing route matches no pause key): it is refused as malformed

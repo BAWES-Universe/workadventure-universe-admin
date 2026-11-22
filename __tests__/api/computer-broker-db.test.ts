@@ -30,7 +30,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests, type TurnEvent } from '@/lib/computer-provider';
 import { Agent37Error, Agent37Unreached } from '@/lib/agent37/client';
-import { fenceMachine, finishJob, settleTurnHold, underTurnHold, wakeIfStopped, setLeaderStopTimesForTests, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { fenceMachine, finishJob, recordFinishIntent, settleTurnHold, underTurnHold, wakeIfStopped, setLeaderStopTimesForTests, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { verifyJobToken } from '@/lib/computer-token';
 import { readFaultRows, recordFaults } from '@/lib/computer-faults';
 import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
@@ -114,6 +114,20 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       // written whole and moved into place, readable by the machine's own user only
       expect(command).toMatch(/umask 077/);
       expect(command).toMatch(/mv .*relay\.json\.new.*relay\.json/);
+    });
+
+    it('a reported-unreachable relay is a fault only for a job that is running under Brick’s control: a job that is over, or the person’s, keeps no such row (CodeRabbit)', async () => {
+      const over = await running('unreach-over');
+      await finishJob(over.jobId, 'done');
+      expect(await prepareJob(over.jobId, RELAY, NOW, { run: 'r-1', relayReached: false, relayStatus: 404 })).toEqual({ ok: false, reason: 'not_running' });
+      expect(await prisma.computerJobFault.count({ where: { jobId: over.jobId } })).toBe(0);
+      const taken = await running('unreach-person');
+      await takeOver(taken.sara.brickId, taken.sara.id, NOW);
+      expect(await prepareJob(taken.jobId, RELAY, NOW, { run: 'r-1', relayReached: false, relayStatus: 404 })).toEqual({ ok: false, reason: 'person_has_it' });
+      expect(await prisma.computerJobFault.count({ where: { jobId: taken.jobId } })).toBe(0);
+      const live = await running('unreach-live');
+      expect(await prepareJob(live.jobId, RELAY, NOW, { run: 'r-1', relayReached: false, relayStatus: 404 })).toEqual({ ok: false, reason: 'relay_unreachable' });
+      expect(await prisma.computerJobFault.count({ where: { jobId: live.jobId, reason: 'relay_unreachable' } })).toBe(1);
     });
 
     describe('the computer asks the relay for its model list with the key it was given', () => {
@@ -660,6 +674,48 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       } finally {
         reattach.mockRestore();
       }
+    });
+
+    describe('no turn after the runner committed to ending the job (its finish intent), even in the instant between the last look and the dispatch (CodeRabbit)', () => {
+      it('an intent that commits after the last look and before the dispatch: no turn is opened, the first-turn mark goes, the claim is let go, and the answer is `finish_pending`', async () => {
+        const { jobId } = await running('fence-a');
+        // The first turn is marked in the job's row right before it is sent: the intent commits in that very instant
+        const real = prisma.computerJob.updateMany.bind(prisma.computerJob);
+        const spy = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation(((args: { data?: { firstTurnSentAt?: Date | null } }) =>
+          real(args as never).then(async (result) => {
+            if (args.data?.firstTurnSentAt instanceof Date) await recordFinishIntent(jobId, { outcome: 'done' }, new Date());
+            return result;
+          })) as never);
+        const sent = jest.spyOn(fake, 'openTurn');
+        try {
+          expect(await startTurn(jobId, 'carry on')).toEqual({ ok: false, reason: 'finish_pending' });
+        } finally {
+          spy.mockRestore();
+        }
+        expect(sent).not.toHaveBeenCalled();
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ firstTurnSentAt: null, turnClaimedAt: null, agentResponseId: null });
+        sent.mockRestore();
+      });
+
+      it('an intent that commits while the agent accepts the turn: the turn’s id is NOT kept for the job, the turn is cancelled, and the runner is told the job is ending', async () => {
+        const { jobId } = await running('fence-b');
+        fake.turns = [[{ type: 'created', id: 'resp-late', sessionId: 'sess-late' }, { type: 'text', text: 'Working' }, { type: 'completed', outputText: 'Working', usage: null }]];
+        const original = FakeComputerProvider.prototype.openTurn.bind(fake);
+        const open = jest.spyOn(fake, 'openTurn').mockImplementation((async (ref: string, input: { text: string; sessionId: string | null }, signal?: AbortSignal) => {
+          await recordFinishIntent(jobId, { outcome: 'failed', cause: 'agent', turns: [1], run: 'r1' }, new Date());
+          return original(ref, input, signal);
+        }) as never);
+        try {
+          const started = await startTurn(jobId, 'carry on');
+          if (!started.ok) throw new Error('the dispatch is the only fence this test crosses');
+          const seen = await drain(started.events);
+          expect(seen[0]).toMatchObject({ type: 'failed', code: 'fenced', message: 'The turn was stopped because the job is ending' });
+        } finally {
+          open.mockRestore();
+        }
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ agentResponseId: null });
+        expect(fake.calls.filter((call) => call.name === 'cancelTurn').length).toBeGreaterThanOrEqual(1);
+      });
     });
 
     it('is sent to the job’s machine, its ids are kept while it runs, and cleared when it ends', async () => {

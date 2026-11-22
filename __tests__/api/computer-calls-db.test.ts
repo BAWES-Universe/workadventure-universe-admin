@@ -175,6 +175,19 @@ run('what a computer may ask of Orbit, in a real database', () => {
   });
 
   describe('a model call', () => {
+    /** The first look at the cutoff of the next request (the first of the 15 s transactions it makes): `onLook` runs before that look starts, and may hold it, or make it fail by throwing. */
+    const atNextLook = (onLook: () => Promise<void>) => {
+      const real = prisma.$transaction.bind(prisma) as (fn: unknown, options?: { maxWait?: number }) => Promise<unknown>;
+      let taken = false;
+      return jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options?: { maxWait?: number }) => {
+        if (options?.maxWait === 15_000 && !taken) {
+          taken = true;
+          return onLook().then(() => real(fn, options));
+        }
+        return real(fn, options);
+      }) as never);
+    };
+    const lookFails = () => atNextLook(() => Promise.reject(new Error('the database went away')));
     const call = (token: string, callId: string, estimateMicros = 5_000) => authorizeSettled({ token, callId, estimateMicros, payer: 'universe' }, NOW);
 
     it('takes room before it is sent, and settles to what it cost: the books and the room agree', async () => {
@@ -358,8 +371,18 @@ run('what a computer may ask of Orbit, in a real database', () => {
       const jobOf = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
       const timeOf = (jobId: string) => prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:time` } });
       /** A barrier, not a delay: waits (bounded) until some session is blocked on THIS job's cutoff lock, so a test goes on only once the thing under test is really waiting for it. */
+      // A request that is started and then waited for at a lock is observed from the moment it starts: if it rejects before it reaches the lock, the poll fails with ITS error (never an unhandled rejection reported first, and never "the lock was not reached")
+      let requestFailure: { error: unknown } | null = null;
+      const observe = <T>(request: Promise<T>): Promise<T> => {
+        requestFailure = null;
+        request.catch((error) => {
+          requestFailure = requestFailure ?? { error };
+        });
+        return request;
+      };
       const waitingOnLock = async (key: string): Promise<boolean> => {
         for (let tries = 0; tries < 250; tries += 1) {
+          if (requestFailure) throw (requestFailure as { error: unknown }).error;
           const rows = await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(${key}, 0)`;
           if (rows[0].n > 0) return true;
           await new Promise((resolve) => setTimeout(resolve, 20));
@@ -600,6 +623,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
         ]);
         const waiting = async (): Promise<boolean> => {
           for (let tries = 0; tries < 250; tries += 1) {
+            if (requestFailure) throw (requestFailure as { error: unknown }).error;
             const rows = await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND ((classid::bigint << 32) | objid::bigint) = hashtext(${name})::bigint`;
             if (rows[0].n > 0) return true;
             await new Promise((resolve) => setTimeout(resolve, 20));
@@ -621,7 +645,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
         let own: Promise<unknown> = Promise.resolve();
         try {
           await cutoff.ready;
-          own = authorizeModelCall({ token, callId: 'own-1', estimateMicros: 1, payer: 'own-key' }, NOW);
+          own = observe(authorizeModelCall({ token, callId: 'own-1', estimateMicros: 1, payer: 'own-key' }, NOW));
           expect(await waitingOnCutoffLock(jobId)).toBe(true);
           cutoff.release();
           await cutoff.done;
@@ -645,19 +669,22 @@ run('what a computer may ask of Orbit, in a real database', () => {
         expect(await hasOwnKeyCall(prisma, third.jobId)).toBe(true);
       });
 
-      const expireSoon = (jobId: string) => prisma.computerJobToken.updateMany({ where: { jobId }, data: { expiresAt: new Date(Date.now() + 1_500) } });
+      // The key stays good through the fixture and the request's first look; only once the request is seen waiting at its lock does it run out (after the request began, and before the time it reads after the lock is let go)
+      const expireWhileWaiting = async (jobId: string) => {
+        await prisma.computerJobToken.updateMany({ where: { jobId }, data: { expiresAt: new Date(Date.now() + 150) } });
+        await sleep(300);
+      };
 
       it('CodeRabbit B (own key): the key is looked at again with the time read AFTER the wait for the cutoff’s lock: a key that ran out while the call waited is refused, and no marker is kept', async () => {
         const own = await running('lee');
         const ownKey = (await mintJobToken(own.jobId, 'model')) as { token: string };
-        await expireSoon(own.jobId);
         const cutoff = holdCutoffLock(own.jobId, async () => undefined);
         let ownCall: Promise<unknown> = Promise.resolve();
         try {
           await cutoff.ready;
-          ownCall = authorizeModelCall({ token: ownKey.token, callId: 'own-1', estimateMicros: 1, payer: 'own-key' });
+          ownCall = observe(authorizeModelCall({ token: ownKey.token, callId: 'own-1', estimateMicros: 1, payer: 'own-key' }));
           expect(await waitingOnCutoffLock(own.jobId)).toBe(true);
-          await sleep(1_700);
+          await expireWhileWaiting(own.jobId);
           cutoff.release();
           await cutoff.done;
           expect(await ownCall).toEqual({ ok: false, reason: 'refused' });
@@ -671,14 +698,13 @@ run('what a computer may ask of Orbit, in a real database', () => {
       it('CodeRabbit B (funded, no refusal on record): the key ran out while the room waited for the pool’s lock: refused, and the room is not left held', async () => {
         const funded = await running('mia');
         const fundedKey = (await mintJobToken(funded.jobId, 'model')) as { token: string };
-        await expireSoon(funded.jobId);
         const pool = holdHashLock('meter:pool');
         let fundedCall: Promise<unknown> = Promise.resolve();
         try {
           await pool.ready;
-          fundedCall = authorizeModelCall({ token: fundedKey.token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' });
+          fundedCall = observe(authorizeModelCall({ token: fundedKey.token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' }));
           expect(await pool.waiting()).toBe(true);
-          await sleep(1_700);
+          await expireWhileWaiting(funded.jobId);
           pool.release();
           await pool.done;
           expect(await fundedCall).toEqual({ ok: false, reason: 'refused' });
@@ -693,14 +719,13 @@ run('what a computer may ask of Orbit, in a real database', () => {
         const refused = await running('ned');
         const refusedKey = (await mintJobToken(refused.jobId, 'model')) as { token: string };
         await prisma.computerJobFault.create({ data: { jobId: refused.jobId, turn: null, run: null, callId: 'orbit:pool:c0', kind: 'fault', reason: 'pool_busy', source: 'orbit', route: null, providerStatus: 503, at: NOW } });
-        await expireSoon(refused.jobId);
         const wait = holdCutoffLock(refused.jobId, async () => undefined);
         let refusedCall: Promise<unknown> = Promise.resolve();
         try {
           await wait.ready;
-          refusedCall = authorizeModelCall({ token: refusedKey.token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' });
+          refusedCall = observe(authorizeModelCall({ token: refusedKey.token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' }));
           expect(await waitingOnCutoffLock(refused.jobId)).toBe(true);
-          await sleep(1_700);
+          await expireWhileWaiting(refused.jobId);
           wait.release();
           await wait.done;
           expect(await refusedCall).toEqual({ ok: false, reason: 'refused' });
@@ -745,7 +770,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
         let finishing: Promise<unknown> = Promise.resolve();
         try {
           await cutoff.ready;
-          finishing = finishJob(jobId, 'done', NOW);
+          finishing = observe(finishJob(jobId, 'done', NOW));
           expect(await waitingOnCutoffLock(jobId)).toBe(true);
           cutoff.release();
           await cutoff.done;
@@ -781,7 +806,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
         let finishing: Promise<unknown> = Promise.resolve();
         try {
           await cutoff.ready;
-          finishing = finishJob(jobId, 'failed', NOW, 'Three turns failed', cause);
+          finishing = observe(finishJob(jobId, 'failed', NOW, 'Three turns failed', cause));
           expect(await waitingOnCutoffLock(jobId)).toBe(true);
           cutoff.release();
           await cutoff.done;
@@ -807,7 +832,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
         let second: Promise<unknown> = Promise.resolve();
         try {
           await finish.ready;
-          second = authorizeModelCall({ token, callId: 'c2', estimateMicros: 1_000, payer: 'universe' }, NOW);
+          second = observe(authorizeModelCall({ token, callId: 'c2', estimateMicros: 1_000, payer: 'universe' }, NOW));
           expect(await waitingOnCutoffLock(jobId)).toBe(true);
           finish.release();
           await finish.done;
@@ -1116,7 +1141,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
           const { jobId } = await running();
           const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
           // A new call: its look at the cutoff is rejected (the database did not answer)
-          let spy = jest.spyOn(prisma.computerJobFault, 'count').mockRejectedValueOnce(new Error('the database went away') as never);
+          let spy = lookFails();
           let answer: unknown;
           try {
             answer = await call(token, 'c1');
@@ -1127,7 +1152,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
           expect(await prisma.meterReservation.findUnique({ where: { reservationKey: callRoomKey(jobId, 'c1') } })).toMatchObject({ state: 'released' });
           // A call that holds its room is asked again, and the look is rejected: the first request's hold is left to it
           expect((await call(token, 'c2')).ok).toBe(true);
-          spy = jest.spyOn(prisma.computerJobFault, 'count').mockRejectedValueOnce(new Error('the database went away') as never);
+          spy = lookFails();
           try {
             answer = await call(token, 'c2');
           } finally {
@@ -1158,11 +1183,10 @@ run('what a computer may ask of Orbit, in a real database', () => {
             const goOn = new Promise<boolean>((resolve) => {
               go = resolve;
             });
-            const real = prisma.computerJobFault.count.bind(prisma.computerJobFault);
-            const spy = jest.spyOn(prisma.computerJobFault, 'count').mockImplementationOnce(((args: never) => {
+            const spy = atNextLook(() => {
               reached();
-              return goOn.then((fails) => (fails ? Promise.reject(new Error('the database went away')) : real(args)));
-            }) as never);
+              return goOn.then((fails) => (fails ? Promise.reject(new Error('the database went away')) : undefined));
+            });
             return { atLook, go, spy };
           };
 
@@ -1216,8 +1240,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
             const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
             expect((await call(token, 'c1')).ok).toBe(true);
             // The room is given back between the asking-again request's reserve and its admission (its own look at the cutoff is where the first request's give-back lands)
-            const real = prisma.computerJobFault.count.bind(prisma.computerJobFault);
-            const spy = jest.spyOn(prisma.computerJobFault, 'count').mockImplementationOnce(((args: never) => releaseModelCall(jobId, 'c1', NOW).then(() => real(args))) as never);
+            const spy = atNextLook(() => releaseModelCall(jobId, 'c1', NOW).then(() => undefined));
             let answer: unknown;
             try {
               answer = await call(token, 'c1');
@@ -1238,7 +1261,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
             let again: Promise<unknown> = Promise.resolve();
             try {
               await lock.ready;
-              again = call(token, 'c1');
+              again = observe(call(token, 'c1'));
               expect(await waitingOnLock(admitLockKey(jobId, 'c1'))).toBe(true);
               // While it waits, the person takes the machine: the control generation moves and the key ends. The room is still held
               await takeOver(sara.brickId, sara.id, NOW);
@@ -1265,7 +1288,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
             let again: Promise<unknown> = Promise.resolve();
             try {
               await lock.ready;
-              again = ask();
+              again = observe(ask());
               // It started while the room was good, and is now really waiting for the lock (had it been refused at once it would never wait)
               expect(await waitingOnLock(admitLockKey(jobId, 'c1'))).toBe(true);
               // Only now does the room run out: at a moment after the request began and before the lock is let go
@@ -1299,7 +1322,8 @@ run('what a computer may ask of Orbit, in a real database', () => {
                         findUnique: async (args: never) => {
                           const row = await (target as { computerJobToken: { findUnique: (a: never) => Promise<unknown> } }).computerJobToken.findUnique(args);
                           looks += 1;
-                          await prisma.meterReservation.update({ where: { reservationKey: callRoomKey(jobId, 'c1') }, data: { expiresAt: new Date() } });
+                          // The first look is the admission's final check (under the cutoff lock); the second is the replay's own, under the call's lock: that is where the room runs out
+                          if (looks === 2) await prisma.meterReservation.update({ where: { reservationKey: callRoomKey(jobId, 'c1') }, data: { expiresAt: new Date() } });
                           return row;
                         },
                       };
@@ -1314,7 +1338,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
             } finally {
               spy.mockRestore();
             }
-            expect(looks).toBe(1);
+            expect(looks).toBe(2);
             expect(answer).toEqual({ ok: false, reason: 'refused' });
             expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(0);
           });
@@ -1327,9 +1351,9 @@ run('what a computer may ask of Orbit, in a real database', () => {
             const brick = jest.spyOn(prisma.brickComputer, 'findUnique');
             try {
               expect((await call(token, 'c1')).ok).toBe(true);
-              // Through the pool: the check on entry and the one after its room. The third, under the lock, is the transaction's own
-              expect(pooled).toHaveBeenCalledTimes(2);
-              expect(brick).toHaveBeenCalledTimes(2);
+              // Through the pool: only the check on entry. The two that follow (the admission's final check under the cutoff lock, and the one under the call's lock) are each the transaction's own
+              expect(pooled).toHaveBeenCalledTimes(1);
+              expect(brick).toHaveBeenCalledTimes(1);
             } finally {
               pooled.mockRestore();
               brick.mockRestore();
@@ -1439,7 +1463,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
           const { jobId } = await running();
           const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
           // Its first call takes a room, then the look at the cutoff is rejected: the call is refused and the room goes back (a `released` row stays)
-          const spy = jest.spyOn(prisma.computerJobFault, 'count').mockRejectedValueOnce(new Error('the database went away') as never);
+          const spy = lookFails();
           try {
             expect(await call(token, 'c0')).toEqual({ ok: false, reason: 'refused' });
           } finally {
@@ -1498,7 +1522,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
           let minted: Promise<unknown> = Promise.resolve();
           try {
             await cutoff.ready;
-            minted = mintJobToken(jobId, 'model', NOW);
+            minted = observe(mintJobToken(jobId, 'model', NOW));
             expect(await waitingOnCutoffLock(jobId)).toBe(true);
             cutoff.release();
             await cutoff.done;
@@ -1552,7 +1576,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
           let sweeping: Promise<unknown> = Promise.resolve();
           try {
             await cutoff.ready;
-            sweeping = sweepComputers(minutes(62));
+            sweeping = observe(sweepComputers(minutes(62)));
             expect(await waitingOnCutoffLock(jobId)).toBe(true);
             cutoff.release();
             await cutoff.done;

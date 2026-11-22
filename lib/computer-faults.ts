@@ -387,9 +387,10 @@ export const lockCutoff = (tx: Pick<Prisma.TransactionClient, '$executeRaw'>, jo
  * BEFORE any marker is written (a refused call leaves no trace: a marker would read the job as one that had an own-key call), the job must still be on (running or waiting), and `stillGood` (the key, looked at
  * with the time read after the waits) must say yes. Only then is the marker kept, so a finish and the marker can never both succeed on a stale view of each other: a finish that took the lock first has ended
  * the job (refused); a marker kept first is seen by the finish, which then reads "a call was made" and never gives the job back as ours, and by a cutoff, which then never decides. Returns whether the call may
- * go on; throws when it could not be kept (a call is not authorized without it).
+ * go on; throws when it could not be kept (a call is not authorized without it). The admission for the call's turn is written in the same transaction as the marker, and nothing is looked at after it commits: a call is
+ * refused with no trace, or authorized with both.
  */
-export async function authorizeOwnKeyCall(jobId: string, at: Date = new Date(), stillGood?: (tx: Prisma.TransactionClient) => Promise<boolean>): Promise<boolean> {
+export async function authorizeOwnKeyCall(jobId: string, at: Date = new Date(), stillGood?: (tx: Prisma.TransactionClient) => Promise<boolean>, admitted?: { turn?: number | null; run?: string | null }): Promise<boolean> {
   return prisma.$transaction(
     async (tx) => {
       await lockCutoff(tx, jobId);
@@ -401,6 +402,8 @@ export async function authorizeOwnKeyCall(jobId: string, at: Date = new Date(), 
       if (!job || (job.status !== 'running' && job.status !== 'waiting')) return false;
       if (stillGood && !(await stillGood(tx))) return false;
       await recordOwnKeyCall(tx, jobId, at);
+      // The admission for its turn, in the same transaction and under the same lock: the marker, the turn and the decision never part, so a call refused after the marker is impossible (there is no look after this commit)
+      await recordTurnAdmitted(tx, jobId, { turn: admitted?.turn, run: admitted?.run, at });
       return true;
     },
     { timeout: 15_000, maxWait: 15_000 },
@@ -427,6 +430,35 @@ export async function recordCallAdmission(db: Pick<Prisma.TransactionClient, 'co
     data: [{ jobId, turn: null, run: null, callId: `${ORBIT_ADMIT_PREFIX}${callId}`.slice(0, 120), kind: 'answered', reason: 'call_admitted', source: ORBIT_SOURCE, route: null, providerStatus: null, at }],
     skipDuplicates: true,
   });
+}
+
+/** The prefix of the call ids of Orbit's markers that a call was ADMITTED for a turn of a run (never the relay's): one row per run and turn. */
+export const ORBIT_TURN_ADMIT_PREFIX = 'orbit:turn-admit:';
+
+/**
+ * Keeps that a model call was admitted (authorized, its room held or its own-key marker kept) for this turn of this run (kind `answered`: no ruling reads it). Written inside the admission's final check, under the job's
+ * cutoff lock, so a stop for our capacity that is deciding at the same moment either sees it (and answers stale) or won (and this call was refused at its key): never both. One row per (run, turn): a call whose turn
+ * the relay did not name leaves one row per run that names none (`turn` null), which the stop reads as an admission for ANY turn (the cautious side: the work goes on). Safe to say twice.
+ */
+export async function recordTurnAdmitted(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, input: { turn?: number | null; run?: string | null; at?: Date }): Promise<void> {
+  const turn = input.turn ?? null;
+  const run = input.run ?? null;
+  await db.computerJobFault.createMany({
+    data: [{ jobId, turn, run, callId: `${ORBIT_TURN_ADMIT_PREFIX}${run ?? '-'}:${turn ?? 'none'}`.slice(0, 120), kind: 'answered', reason: 'turn_admitted', source: ORBIT_SOURCE, route: null, providerStatus: null, at: input.at ?? new Date() }],
+    skipDuplicates: true,
+  });
+}
+
+/**
+ * Whether a call was admitted for the turn a stop for our capacity rests on, or a LATER one, in the same run: then capacity came back and the work is going on, and the stop is stale. `fromTurn` is the earliest turn the stop
+ * names (none named: any admission of the run counts). A run named on both sides must be the same one; a side that names none matches any (the cautious side). A row that names no turn counts as an admission for the stop's
+ * turn. An admission on an EARLIER turn never counts: a call that went well long ago does not disable a later stop. Reads only; call it under the job's cutoff lock.
+ */
+export async function hasTurnAdmitted(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, input: { fromTurn?: number | null; run?: string | null }): Promise<boolean> {
+  const and: Prisma.ComputerJobFaultWhereInput[] = [];
+  if (input.run) and.push({ OR: [{ run: null }, { run: input.run }] });
+  if (input.fromTurn !== undefined && input.fromTurn !== null) and.push({ OR: [{ turn: null }, { turn: { gte: input.fromTurn } }] });
+  return (await db.computerJobFault.count({ where: { jobId, source: ORBIT_SOURCE, reason: 'turn_admitted', callId: { startsWith: ORBIT_TURN_ADMIT_PREFIX }, AND: and } })) > 0;
 }
 
 /** Whether another request was answered with the authorization of this call (the marker above). Reads only. */

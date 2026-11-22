@@ -251,12 +251,14 @@ describe('the bot server’s calls', () => {
     }
     // The refusals Orbit decides in the route itself are the same: a guest, and a rule held before any job
     resolve.mockResolvedValue({ personId: null, guest: true });
-    expect((await startRoute(asBot('/x', { body: { userId: 'wa-guest', isGuest: true, title: 'x' } }), params)).status).toBe(200);
+    const guest = await startRoute(asBot('/x', { body: { userId: 'wa-guest', isGuest: true, title: 'x' } }), params);
+    expect(guest.status).toBe(200);
+    expect(await guest.json()).toEqual({ ok: false, reason: 'not_owner' });
     resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
     rules.ownerSpendAllowed.mockResolvedValue({ ok: false, ruleId: 'r1', why: 'cap', leftMicros: 0, words: 'No more than $1.00 a month' });
     const ruled = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' } }), params);
     expect(ruled.status).toBe(200);
-    expect(START_REFUSALS).toContain(((await ruled.json()) as { reason: string }).reason);
+    expect(await ruled.json()).toMatchObject({ ok: false, reason: 'rule' });
     // What is NOT a refusal is an error without an `ok` field: invalid input, the wrong token, Orbit failing
     rules.ownerSpendAllowed.mockResolvedValue({ ok: true });
     expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara' } }), params)).status).toBe(400);
@@ -300,6 +302,29 @@ describe('the bot server’s calls', () => {
   describe('a start the game confirms it has the answer of (GPT round 4, second note, R1)', () => {
     const KEY = '3f2b8c1e-5d4a-4e7b-9a60-1c2d3e4f5a6b';
     const own = () => resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+
+    it('meets an earlier unconfirmed start BEFORE the spend rule: a chat-stated rule the earlier job used up is never a false `rule` (CodeRabbit)', async () => {
+      own();
+      const earlier = { id: 'job-0', status: 'running', state: 'live', attempt: 'older-key-0001' };
+      lib.earlierUnconfirmedStart.mockResolvedValueOnce(earlier as never);
+      rules.ownerSpendAllowed.mockClear();
+      rules.ownerSpendAllowed.mockResolvedValue({ ok: false, ruleId: 'r1', why: 'cap', leftMicros: 0, words: 'No more than $1.00 a month' });
+      lib.startJob.mockClear();
+      const response = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'another' }, headers: { 'X-Computer-Start-Attempt': KEY, 'X-Computer-Start-Acks': '1' } }), params);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: false, reason: 'earlier', job: earlier });
+      expect(lib.earlierUnconfirmedStart).toHaveBeenLastCalledWith(BRICK, 'u-sara', KEY);
+      expect(rules.ownerSpendAllowed).not.toHaveBeenCalled();
+      expect(lib.startJob).not.toHaveBeenCalled();
+      // Nothing earlier: the spend rule is asked as before, and a start that does not ack never looks for one
+      lib.earlierUnconfirmedStart.mockResolvedValue(null as never);
+      const ruled = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'another' }, headers: { 'X-Computer-Start-Attempt': KEY, 'X-Computer-Start-Acks': '1' } }), params);
+      expect(await ruled.json()).toMatchObject({ ok: false, reason: 'rule' });
+      lib.earlierUnconfirmedStart.mockClear();
+      await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'another' }, headers: { 'X-Computer-Start-Attempt': KEY } }), params);
+      expect(lib.earlierUnconfirmedStart).not.toHaveBeenCalled();
+      rules.ownerSpendAllowed.mockResolvedValue({ ok: true });
+    });
 
     it('says the start acks only with the header AND a key: without either the job is made as before', async () => {
       own();
@@ -577,6 +602,10 @@ describe('the bot server’s calls', () => {
     expect(kept.status).toBe(200);
     expect(await kept.json()).toEqual({ ok: true, already: false, finishPending: pending });
     expect(lib.recordFinishIntent).toHaveBeenLastCalledWith(JOB, { outcome: 'failed', cause: 'ours', why: 'It stopped', turns: [3], run: 'r1', generation: 2 });
+    // A stop that rests on the pool alone says so (`basis`): that is what lets Orbit answer it stale once a call was admitted for its turn
+    lib.recordFinishIntent.mockResolvedValueOnce({ ok: false, reason: 'stale' } as never);
+    await jobAction(asBot('/x', { body: { action: 'finish-intent', outcome: 'failed', cause: 'ours', turns: [3], run: 'r1', basis: 'pool' } }), jobParams);
+    expect(lib.recordFinishIntent).toHaveBeenLastCalledWith(JOB, expect.objectContaining({ turns: [3], run: 'r1', basis: 'pool' }));
     lib.recordFinishIntent.mockResolvedValueOnce({ ok: true, already: true, pending } as never);
     expect(await (await jobAction(asBot('/x', { body: { action: 'finish-intent', outcome: 'done' } }), jobParams)).json()).toMatchObject({ ok: true, already: true });
     for (const reason of ['stale', 'cutoff']) {
@@ -587,11 +616,19 @@ describe('the bot server’s calls', () => {
     }
   });
 
+  it('a finish intent for a job that disappeared meanwhile is a 404, as everywhere on this route; `stale` and `cutoff` stay HTTP 200 (CodeRabbit)', async () => {
+    lib.getJob.mockResolvedValue(job as never);
+    lib.recordFinishIntent.mockResolvedValueOnce({ ok: false, reason: 'not_found' } as never);
+    const gone = await jobAction(asBot('/x', { body: { action: 'finish-intent', outcome: 'done' } }), jobParams);
+    expect(gone.status).toBe(404);
+    expect(await gone.json()).toEqual({ error: 'Job not found' });
+  });
+
   it('refuses a finish intent that is not well formed or not from the bot server, and keeps nothing', async () => {
     lib.getJob.mockResolvedValue(job as never);
     lib.recordFinishIntent.mockClear();
     expect((await jobAction(call('/x', { body: { action: 'finish-intent', outcome: 'done' } }), jobParams)).status).toBe(401);
-    for (const body of [{ action: 'finish-intent' }, { action: 'finish-intent', outcome: 'maybe' }, { action: 'finish-intent', outcome: 'failed', cause: 'theirs' }, { action: 'finish-intent', outcome: 'failed', turns: [-1] }, { action: 'finish-intent', outcome: 'failed', run: 'has space' }, { action: 'finish-intent', outcome: 'done', generation: 1.5 }]) {
+    for (const body of [{ action: 'finish-intent' }, { action: 'finish-intent', outcome: 'maybe' }, { action: 'finish-intent', outcome: 'failed', cause: 'theirs' }, { action: 'finish-intent', outcome: 'failed', turns: [-1] }, { action: 'finish-intent', outcome: 'failed', run: 'has space' }, { action: 'finish-intent', outcome: 'done', generation: 1.5 }, { action: 'finish-intent', outcome: 'failed', basis: 'agent' }]) {
       expect((await jobAction(asBot('/x', { body }), jobParams)).status).toBe(400);
     }
     expect(lib.recordFinishIntent).not.toHaveBeenCalled();

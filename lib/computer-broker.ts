@@ -121,6 +121,11 @@ export async function prepareJob(jobId: string, relay: unknown, now: Date = new 
   try {
     // The bot server itself found that the address answers something that is not the relay: a confirmed fault of ours, kept (once per run) and told at once, with no key made for a relay that is not there
     if (options.relayReached === false) {
+      // Only for a job that is running under Brick's control: a job in line (no machine yet), over, or the person's keeps no such fault (a row with no run named would apply to every later run of the job)
+      const now_ = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, control: true } });
+      if (!now_) return { ok: false, reason: 'not_found' };
+      if (now_.status === 'waiting' && now_.control === 'person') return { ok: false, reason: 'person_has_it' };
+      if (now_.status !== 'running' || now_.control !== 'brick') return { ok: false, reason: 'not_running' };
       await recordRelayUnreachable(prisma, jobId, { run: options.run ?? null, status: options.relayStatus ?? null, at: now });
       return { ok: false, reason: 'relay_unreachable' };
     }
@@ -387,6 +392,13 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       return { ok: false, reason: 'failed' };
     }
+    // The runner may have committed to ending the job since the last look (its finish intent): no turn is opened then. A turn that is opened in the instant after this look finds the intent when its id is kept (below) and is cancelled
+    if (await hasFinishIntent(prisma, job.jobId)) {
+      clearTimeout(timer);
+      if (!sessionId) await prisma.computerJob.updateMany({ where: { id: job.jobId }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+      await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+      return { ok: false, reason: 'finish_pending' };
+    }
     events = await provider.openTurn(ready.job.ref, { text: `${jobTagOf(job.jobId)}\n${text}`, sessionId }, own.signal);
     // The agent has answered, so the turn is accepted: the limit was for that answer. Its id follows on the stream, however long that takes.
     clearTimeout(timer);
@@ -543,6 +555,8 @@ async function* keeping(
             status: 'running',
             control: 'brick',
             controlGeneration: job.generation,
+            // A finish intent kept since the turn was opened: the turn is not the job's, it is cancelled below (nothing starts after the runner committed to ending)
+            finishIntent: { is: null },
             OR: [{ agentResponseId: null }, { agentResponseId: event.id }],
           },
           data: { agentSessionId: event.sessionId ?? job.sessionId, agentResponseId: event.id, firstTurnSentAt: null },
@@ -560,7 +574,7 @@ async function* keeping(
           }
           responseId = null;
           over = true;
-          yield { type: 'failed', code: 'fenced', message: 'The turn was stopped because the person took over' };
+          yield { type: 'failed', code: 'fenced', message: (await hasFinishIntent(prisma, job.jobId)) ? 'The turn was stopped because the job is ending' : 'The turn was stopped because the person took over' };
           return;
         }
       }
