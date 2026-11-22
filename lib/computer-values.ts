@@ -16,7 +16,10 @@ export const JOB_STATUSES = ['queued', 'running', 'waiting', 'done', 'stopped', 
 export type JobStatus = (typeof JOB_STATUSES)[number];
 
 /** Why a job that is not running yet is queued. `allowance` is the one that leads to "Ask for more"; the others are "wait in line". */
-export const QUEUED_FOR = ['turn', 'allowance', 'busy', 'pool'] as const;
+export const QUEUED_FOR = ['turn', 'allowance', 'busy', 'pool', 'paused'] as const;
+/** Why a job is paused: the owner's own Pause, or the month's computer time ran out (it carries on by itself when more arrives). */
+export const PAUSED_WHY = ['person', 'allowance'] as const;
+export type PausedWhy = (typeof PAUSED_WHY)[number];
 export type QueuedFor = (typeof QUEUED_FOR)[number];
 
 /** Why a job stopped before it finished. `unanswered`: it waited for a person to take over and nobody did within the wait a super admin set. `rule`: a rule the person said in chat (no more than $1 a month, only my own accounts) did not let it take more room. */

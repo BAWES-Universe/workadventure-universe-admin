@@ -3625,6 +3625,19 @@ model ComputerJob {
   // when nobody answered: the one thing the ending message needs that is gone once the job is over
   endNote       String? @map("end_note") @db.VarChar(200)
   endWaitingFor String? @map("end_waiting_for") @db.VarChar(10)
+  /// Job controls (migration 192). Where the job stands in its Brick's line: the line is taken highest rank first, then oldest first. "Do this next" and "Resume" put a job at the top (the highest rank + 1).
+  queueRank      Int       @default(0) @map("queue_rank")
+  /// A paused job is a job in line that is skipped until it is resumed (status `queued`, queued_for `paused`): it holds no room and costs nothing. When it was paused and why (person: the owner's own Pause; allowance: the month ran out). Cleared on resume.
+  pausedAt       DateTime? @map("paused_at")
+  pausedWhy      String?   @map("paused_why") @db.VarChar(10)
+  /// How many times the job was paused: a job with one or more continues its agent conversation when it runs again (GET job answers `resumed`).
+  pauses         Int       @default(0) @map("pauses")
+  /// Of `secondsRun`, the seconds already written to the books by the job's pauses (one event per pause, computer_job_pauses). The job's own ending writes only the rest, so no second is written twice.
+  secondsBilled  Int       @default(0) @map("seconds_billed")
+  /// "Try again" of an ended job: the job this one carries on from (its conversation). Null for every other job.
+  continuesJobId String?   @map("continues_job_id")
+  /// The last sequence number given to a note the person sent to this job (computer_job_notes): notes are numbered 1, 2, 3 per job.
+  noteSeq        Int       @default(0) @map("note_seq")
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
@@ -3633,13 +3646,68 @@ model ComputerJob {
   tokens  ComputerJobToken[]
   visits  ComputerJobVisit[]
   files   ComputerJobFile[]
+  notes   ComputerJobNote[]
+  steps   ComputerJobStep[]
+  pauseRows ComputerJobPause[]
 
   @@unique([botId, runId])
   @@unique([botId, personId, startKey])
   @@index([botId, status])
   @@index([personId, status])
   @@index([status, endToldAt])
+  @@index([botId, status, queueRank])
   @@map("computer_jobs")
+}
+
+/// What the person told a job after it began ("use 12 March instead"), in order. A note is `pending` until the runner has given it to the agent, then `sent`. Numbered per job (computer_jobs.note_seq), so a retry never sends one twice and a lost answer never drops one.
+model ComputerJobNote {
+  id        String    @id @default(uuid())
+  jobId     String    @map("job_id")
+  seq       Int
+  text      String    @db.VarChar(4000)
+  state     String    @default("pending") @db.VarChar(10)
+  createdAt DateTime  @default(now()) @map("created_at")
+  sentAt    DateTime? @map("sent_at")
+
+  job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, seq])
+  @@map("computer_job_notes")
+}
+
+/// The steps a job reported, in order (its Activity list). How many are kept is a Limits value.
+model ComputerJobStep {
+  id    String   @id @default(uuid())
+  jobId String   @map("job_id")
+  seq   Int
+  label String   @db.VarChar(200)
+  at    DateTime @default(now())
+
+  job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, seq])
+  @@map("computer_job_steps")
+}
+
+/// One pause of a running job: the time it ran since it last started (`seconds`, from `startedAt` to `at`), priced on the room it held (`roomKey`, settled in the same transaction that paused it) and written
+/// to the books as its own event (`computer:<job>:time:<n>`), the person's like a Stop and never given back. `bookedAt` is set once that event is written; a pause whose event was not written (a server that
+/// stopped in between) is written by the sweep.
+model ComputerJobPause {
+  id        String    @id @default(uuid())
+  jobId     String    @map("job_id")
+  n         Int
+  why       String    @db.VarChar(10)
+  roomKey   String?   @map("room_key") @db.VarChar(255)
+  seconds   Int       @default(0)
+  startedAt DateTime? @map("started_at")
+  at        DateTime
+  bookedAt  DateTime? @map("booked_at")
+
+  job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, n])
+  @@index([bookedAt, at])
+  @@map("computer_job_pauses")
 }
 
 // Where a job's computer browsed, for the owner to look at later (R06, handoff v2 section 4: "every navigation and form post is recorded"). Taken
