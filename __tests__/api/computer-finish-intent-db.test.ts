@@ -19,7 +19,7 @@ import { FINISH_INTENT_GRACE_MS, completeFinishIntents, finishJob, finishJobUnde
 import { prepareJob, startTurn } from '@/lib/computer-broker';
 import { mintJobToken, revokeJobTokens, verifyJobToken } from '@/lib/computer-token';
 import { authorizeModelCall, cutoffEndsFinished, cutoffLockKey, callRoomKey } from '@/lib/computer-calls';
-import { POOL_CUTOFF_CALL, hasFinishIntent, hasOwnKeyCall, recordPoolCutoff } from '@/lib/computer-faults';
+import { POOL_CUTOFF_CALL, hasFinishIntent, hasOwnKeyCall, recordFaults, recordPoolCutoff, type FaultInput } from '@/lib/computer-faults';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -57,6 +57,17 @@ async function running(name = 'sara') {
   const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, NOW);
   if (!started.ok) throw new Error('the job did not start');
   return { sara, jobId: started.job.id };
+}
+
+let callNo = 0;
+/** A fault row of the relay as the game sends it: `relay_down` is ours (confirmed), `field_job_set` is the person's own doing. */
+const fault = (turn: number, reason: 'relay_down' | 'field_job_set', run: string): FaultInput => ({ turn, callId: `turn:${turn}~${++callNo}`, kind: reason === 'relay_down' ? 'fault' : 'not_ours', reason, source: 'universe-ai', route: 'universe-ai/model-a', at: new Date(), run });
+
+/** A running job whose run `runa` had the person's own doing in its turn 1 and whose run `runb` had OUR relay down in its turn 1: the give-back follows the run and the turns the runner names, and nothing else. */
+async function twoRuns(name: string) {
+  const made = await running(name);
+  await recordFaults(made.sara.brickId, made.jobId, [fault(1, 'field_job_set', 'runa'), fault(1, 'relay_down', 'runb')]);
+  return made;
 }
 
 const jobOf = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
@@ -410,6 +421,34 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       await sweepComputers(minutes(3));
       expect(await jobOf(theirs.jobId)).toMatchObject({ status: 'waiting', control: 'person' });
       expect(await ledgerOf(over.jobId)).toEqual(overLedger);
+    });
+
+    it('judges the give-back by the intent’s own run, turns and cause, as the runner finish does: its rows for that run decide (the money rule)', async () => {
+      const { jobId } = await twoRuns('s-money');
+      await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', turns: [1], run: 'runb', why: 'The relay was not there' }, minutes(1));
+      expect(await completeFinishIntents(minutes(1 + 3), 50)).toBe(1);
+      // The decision carries what the intent kept and follows the rows of THAT run (ours), never the other run's (the person's)
+      expect(await decisionOf(jobId)).toMatchObject({ state: 'given', basis: 'universe_fault', causeHint: 'ours', judgedTurns: [1], judgedRun: 'runb' });
+    });
+
+    it('a finish under a kept intent writes the decision with the intent’s cause, turns and run, whatever the finish says', async () => {
+      const { jobId } = await twoRuns('s-money2');
+      await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', turns: [1], run: 'runb' }, minutes(1));
+      // A replacement that says `done`, no cause, other turns and another run changes nothing about how it ends or what is given back
+      await finishJobUnder(jobId, 0, 'done', minutes(3), null, null, [7], 'runa');
+      expect((await jobOf(jobId)).status).not.toBe('done');
+      expect(await decisionOf(jobId)).toMatchObject({ state: 'given', basis: 'universe_fault', causeHint: 'ours', judgedTurns: [1], judgedRun: 'runb' });
+    });
+
+    it('waits exactly two minutes: an intent younger than that is left alone to the second, one of that age is completed', async () => {
+      expect(FINISH_INTENT_GRACE_MS).toBe(120_000);
+      const { jobId } = await running('s-grace');
+      const at = minutes(1);
+      await recordFinishIntent(jobId, { outcome: 'done' }, at);
+      expect(await completeFinishIntents(new Date(at.getTime() + 119_999), 50)).toBe(0);
+      expect((await jobOf(jobId)).status).toBe('running');
+      expect(await completeFinishIntents(new Date(at.getTime() + 120_000), 50)).toBe(1);
+      expect((await jobOf(jobId)).status).toBe('done');
     });
 
     it('two sweeps at once complete an intent once', async () => {
