@@ -3561,6 +3561,9 @@ model ComputerJob {
   // The caller's own key for ONE start the person asked for (the bot server makes a uuid per start and sends it with the start and with every look for it): a start repeating a key finds the job that key made and never
   // makes a second one, and "did my start reach Orbit" is read by this key alone. Null for a start that sent none. Unique per Brick and person (Postgres lets many rows have none).
   startKey       String?   @map("start_key") @db.VarChar(64)
+  /// When the game confirmed it has this start's answer (an ack, or a keyed look that found the job). A start that says it acks is made with this null: a new start under another key for the same person and Brick
+  /// then makes no job (it answers `earlier`, naming this one) until it is set. Every other job is acked when it is made (the database default, so a job made by a version that does not know this column is acked too), and every job that was there before this column was acked at its creation.
+  startAckedAt   DateTime? @default(now()) @map("start_acked_at")
   // Goes up each time the person takes the machine and each time it is handed back (the take-over fence): a token and an agent
   // callback made under an older number are refused, so nothing the agent had in flight can act after the person took over
   controlGeneration Int    @default(0) @map("control_generation")

@@ -51,6 +51,8 @@ import {
   isOver,
   roomFor,
   silentEnding,
+  startStateOf,
+  type StartState,
   type EffectKind,
   type EndedBy,
   type MachineState,
@@ -416,6 +418,14 @@ async function withinMs<T>(promise: Promise<T>, ms: number, fallback: T): Promis
 
 // ---------- Jobs ----------
 
+/** The earlier start an `earlier` answer names: the job, how it stands now, and the key it was made under (so the game adopts it as its open start). */
+export interface EarlierStart {
+  id: string;
+  status: string;
+  state: StartState;
+  attempt: string | null;
+}
+
 export type Started =
   | { ok: true; job: JobView; restoredFrom: Date | null }
   /** Not the owner's Brick, or not theirs to ask: only the owner starts computer work on their Brick. */
@@ -424,6 +434,8 @@ export type Started =
   | { ok: false; reason: 'cheaper_route'; app: string }
   /** The meter's controls are not set up yet: a computer does not open before they do. */
   | { ok: false; reason: 'not_set' }
+  /** The start says it acks, and an earlier start of this person on this Brick has not been confirmed by the game yet: nothing was made, and the OLDEST such job is named with the key it was made under. Not a refusal of the ask: the game reads it as the earlier job it asked for. Returning it acks nothing. */
+  | { ok: false; reason: 'earlier'; job: EarlierStart }
   /** A rule the person said in chat does not let this job take room: nothing is left behind, and the rule's own words come with it. */
   | { ok: false; reason: 'rule'; words: string };
 
@@ -469,6 +481,15 @@ export async function startedJobFor(botId: string, personId: string, startKey: s
   return prisma.computerJob.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select: { id: true, status: true } });
 }
 
+/**
+ * The game confirms it has the answer of the start it made under `startKey` (an ack, or a keyed look that found the job): the job's start is confirmed, once, by this person on this Brick. Idempotent. A key that made no job, or
+ * another person's or Brick's key, changes nothing (never learned apart). Answers whether this key has a job of this person's on this Brick.
+ */
+export async function ackStart(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<boolean> {
+  await prisma.computerJob.updateMany({ where: { botId, personId, startKey, startAckedAt: null }, data: { startAckedAt: now } });
+  return (await prisma.computerJob.count({ where: { botId, personId, startKey } })) > 0;
+}
+
 /** What a start with a key is for: the sha-256 of the Brick, the person and the key. */
 export const startFenceOf = (botId: string, personId: string, startKey: string): string => createHash('sha256').update(`${botId}\n${personId}\n${startKey}`).digest('hex');
 
@@ -511,7 +532,7 @@ export interface JobOrigin {
   ref: string;
 }
 
-type StartInput = { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; /** The caller's key for this one start: a start repeating it answers the job it made. */ startKey?: string | null; plan?: RoutePlan | null; origin?: JobOrigin | null };
+type StartInput = { botId: string; /** The start says the game acks it (header `X-Computer-Start-Acks`): its job is made unconfirmed, and a start under another key meets an unconfirmed one as `earlier`. Without it the job is confirmed when it is made, as before. */ acks?: boolean; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; /** The caller's key for this one start: a start repeating it answers the job it made. */ startKey?: string | null; plan?: RoutePlan | null; origin?: JobOrigin | null };
 type Begun = { done: Started } | { created: { id: string } };
 
 export async function startJob(input: StartInput, now: Date = new Date()): Promise<Started> {
@@ -561,9 +582,32 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
   if (await computersArePaused()) return { done: { ok: false, reason: 'paused' } };
   let created;
   try {
-    created = await prisma.computerJob.create({
-      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null, startKey: input.startKey ?? null, route: routed.route, expectedMicros: BigInt(routed.expectedMicros), originKind: input.origin?.kind ?? null, originRef: input.origin?.ref.slice(0, 255) ?? null },
-    });
+    const data = { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null, startKey: input.startKey ?? null, route: routed.route, expectedMicros: BigInt(routed.expectedMicros), originKind: input.origin?.kind ?? null, originRef: input.origin?.ref.slice(0, 255) ?? null };
+    if (input.acks && input.startKey) {
+      // A start that acks: decided under the person's lock in the SAME transaction that makes the job, so two starts at once cannot both pass. An earlier start of this person on this Brick that the game has not confirmed
+      // (the oldest is named) makes this one make nothing; a job this very key made (a start of it at the same moment) is the answer instead
+      const decided = await prisma.$transaction(
+        async (tx) => {
+          await lockPerson(tx, input.personId);
+          const same = await tx.computerJob.findUnique({ where: { botId_personId_startKey: { botId: input.botId, personId: input.personId, startKey: input.startKey as string } }, select: { id: true } });
+          if (same) return { same: true as const };
+          const earlier = await tx.computerJob.findFirst({ where: { botId: input.botId, personId: input.personId, startAckedAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true, status: true, startKey: true } });
+          if (earlier) return { earlier: { id: earlier.id, status: earlier.status, state: startStateOf(earlier.status), attempt: earlier.startKey } };
+          return { made: await tx.computerJob.create({ data: { ...data, startAckedAt: null } }) };
+        },
+        { timeout: 15_000, maxWait: 15_000 },
+      );
+      if ('earlier' in decided && decided.earlier) return { done: { ok: false, reason: 'earlier', job: decided.earlier } };
+      if ('same' in decided) {
+        const winner = await reuseJob(input.botId, { botId_personId_startKey: { botId: input.botId, personId: input.personId, startKey: input.startKey } }, now);
+        if (winner) return { done: winner };
+        // The same key made a job and took it away again before this one could look (controls not set up, or a rule the person said): the same answer as the first ask
+        const words = await ruleWordsOf(input.botId, input.personId, now);
+        return { done: words !== null ? { ok: false, reason: 'rule', words } : { ok: false, reason: 'not_set' } };
+      } else created = decided.made;
+    } else {
+      created = await prisma.computerJob.create({ data: { ...data, startAckedAt: now } });
+    }
   } catch (error) {
     // Two asks for the same run, or with the same key, at once: the first made the job, the second finds it
     if ((input.runId || input.startKey) && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
@@ -578,6 +622,7 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
     }
     throw error;
   }
+  if (!created) throw new Error('A start made no job and found none');
   return { created: { id: created.id } };
 }
 

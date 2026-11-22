@@ -277,4 +277,5 @@ the statements it sends keep working against the new columns, which are all null
 187. `20261121150000_computer_start_key`
 188. `20261121200000_computer_late_told`
 189. `20261122120000_computer_finish_intent`
+190. `20261122140000_computer_start_ack`
 <!-- migrations:end -->

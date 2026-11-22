@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
-import { computerView, startJob, startedJobFor } from '@/lib/computer';
+import { ackStart, computerView, startJob, startedJobFor } from '@/lib/computer';
 import { startStateOf } from '@/lib/computer-values';
 import { ownerSpendAllowed } from '@/lib/spend-rules';
 
@@ -15,7 +15,12 @@ const titleSchema = z.string().trim().min(1).max(200);
 // The game's own key for ONE start attempt (a uuid): sent with the start as the REQUEST HEADER `X-Computer-Start-Attempt` (never a body field: the body is strict, so a new field would refuse every start on an Orbit
 // that lacks it) and with every look for it as the query `attempt`. Letters, digits, `_` and `-`, so it is the same text everywhere it is written
 const START_ATTEMPT_HEADER = 'x-computer-start-attempt';
+// The game says it acks the start (a second header, so the body stays strict): `X-Computer-Start-Acks: 1`. Only with it, and with a key, is the job made unconfirmed (see `earlier`)
+const START_ACKS_HEADER = 'x-computer-start-acks';
 const startKeySchema = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/);
+
+// The game confirms it has the answer of a start (an `action` of the same URL, so the start's own body stays strict): `{ action: 'start-ack', userId, isGuest?, attempt }`
+const ackSchema = z.object({ action: z.literal('start-ack'), userId: z.string().min(1).max(255), isGuest: z.boolean().optional(), attempt: startKeySchema }).strict();
 
 const bodySchema = z
   .object({
@@ -67,6 +72,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const view = person.personId ? await computerView(id, person.personId) : null;
     // Only when asked: a guest, someone else's Brick or one that is not this person's has no job of theirs to find (only the owner starts work on a computer), so nothing is looked for there
     const found = asked?.success ? (person.personId && view ? await startedJobFor(id, person.personId, asked.data) : null) : undefined;
+    // A look that finds the job is the game having its answer: the start is confirmed (idempotent; a key that made no job, or another person's, changes nothing)
+    if (found && !('inProgress' in found) && asked?.success && person.personId) await ackStart(id, person.personId, asked.data);
     const started = found && !('inProgress' in found) && asked?.success ? { ...found, attempt: asked.data, state: startStateOf(found.status) } : found;
     // A start with this key is still going on (it holds its mark until its job is saved): no job has reached Orbit YET and one still can, so this is not a miss either. The same word as a failed lookup: ask again
     if (started && 'inProgress' in started) return NextResponse.json({ error: 'A start of this job is still going on, ask again', retry: true, inProgress: true }, { status: 503 });
@@ -92,6 +99,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  * With a `plan` (the connected app the Brick weighed, about how many steps, and why it cannot) Orbit works out which way costs least: when the app does,
  * it answers `{ ok: false, reason: 'cheaper_route', app }` and starts nothing.
  *
+ * With the header `X-Computer-Start-Acks: 1` (and a key) the start says the game confirms it got the answer: the job is made unconfirmed, and until the game confirms it (`POST /api/bots/:id/computer-jobs` { action: 'start-ack', userId, isGuest?, attempt } -> 200 { ok: true, acked }, `acked` = that key has a job of this person on this Brick, now confirmed; idempotent; an unknown key, another person's or another Brick's changes nothing; or a keyed look that finds the job) a start under ANOTHER key for this person on this Brick makes nothing and answers HTTP 200 `{ ok: false, reason: 'earlier', job: { id, status, state, attempt } }` naming the OLDEST such job and the key it was made under (decided under the person's lock in the transaction that makes the job). `earlier` is not in `START_REFUSALS`: it is the job the game asked for earlier, not a refusal of this ask, and it confirms nothing. A start without the header is confirmed when it is made, as before.
+ *
  * Every refusal is HTTP 200 `{ ok: false, reason }` with a reason from `START_REFUSALS` (lib/computer-values): Orbit never answers a start with 429 or another error status for a refusal, so a 429 is an intermediary's and the outcome of the start is not known (look it up by its key).
  *
  * Auth: service token only.
@@ -104,7 +113,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
   try {
     const { id } = await params;
-    const parsed = bodySchema.safeParse(await request.json().catch(() => null));
+    const raw = await request.json().catch(() => null);
+    // The game confirms it has the answer of a start it made: told apart by its `action`
+    if (raw !== null && typeof raw === 'object' && (raw as { action?: unknown }).action !== undefined) {
+      const acked = ackSchema.safeParse(raw);
+      if (!acked.success) return NextResponse.json({ error: 'Invalid input data', details: acked.error.issues }, { status: 400 });
+      const who = await resolveUsagePerson(acked.data.userId, acked.data.isGuest);
+      // Who this was for could not be looked up just now: nothing is confirmed, and the caller asks again
+      if (who.lookupFailed) return NextResponse.json({ error: 'Could not tell who this was for, ask again', retry: true }, { status: 503 });
+      if (!who.personId) return NextResponse.json({ ok: true, acked: false });
+      return NextResponse.json({ ok: true, acked: await ackStart(id, who.personId, acked.data.attempt) });
+    }
+    const parsed = bodySchema.safeParse(raw);
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data', details: parsed.error.issues }, { status: 400 });
     // The key of this one start, from its header: one that is not a key is refused (a start that cannot be looked up again must not begin), none is a start as before
     const sentKey = request.headers.get(START_ATTEMPT_HEADER);
@@ -116,12 +136,14 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // A rule the person said in chat ("no more than $1 a month", "only my own accounts") is held before a job exists, so Brick can say so at once
     const ruled = await ownerSpendAllowed(id, person.personId, 'computer', new Date(), parsed.data.runId ?? null, attempt?.success ? attempt.data : null);
     if (!ruled.ok) return NextResponse.json({ ok: false, reason: 'rule', rule: { id: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words } });
-    const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, brief: parsed.data.brief, writes: parsed.data.writes, runId: parsed.data.runId, startKey: attempt?.success ? attempt.data : undefined, plan: parsed.data.plan, origin: parsed.data.origin ?? null });
+    const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, brief: parsed.data.brief, writes: parsed.data.writes, runId: parsed.data.runId, startKey: attempt?.success ? attempt.data : undefined, acks: attempt?.success === true && request.headers.get(START_ACKS_HEADER) === '1', plan: parsed.data.plan, origin: parsed.data.origin ?? null });
     if (started.ok) return NextResponse.json({ ok: true, job: started.job, restoredFrom: started.restoredFrom });
     // A rule that stopped it on the try itself (the pre-check only asks for a first millionth): the same shape as above, with the rule's words
     if (started.reason === 'rule') return NextResponse.json({ ok: false, reason: 'rule', rule: { id: null, why: null, leftMicros: null, words: started.words } });
     // A connected app would do it for less: nothing was started, and the Brick is told which one to use
     if (started.reason === 'cheaper_route') return NextResponse.json({ ok: false, reason: 'cheaper_route', app: started.app });
+    // An earlier start of this person on this Brick that the game has not confirmed: nothing was made. It is not a refusal of the ask (it is the job the game asked for earlier): the oldest such job and the key it was made under. It acks nothing
+    if (started.reason === 'earlier') return NextResponse.json({ ok: false, reason: 'earlier', job: started.job });
     return NextResponse.json({ ok: false, reason: started.reason });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });

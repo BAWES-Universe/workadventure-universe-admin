@@ -297,6 +297,70 @@ describe('the bot server’s calls', () => {
     });
   });
 
+  describe('a start the game confirms it has the answer of (GPT round 4, second note, R1)', () => {
+    const KEY = '3f2b8c1e-5d4a-4e7b-9a60-1c2d3e4f5a6b';
+    const own = () => resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+
+    it('says the start acks only with the header AND a key: without either the job is made as before', async () => {
+      own();
+      lib.startJob.mockResolvedValue({ ok: true, job: { id: JOB } as never, restoredFrom: null });
+      await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': KEY, 'X-Computer-Start-Acks': '1' } }), params);
+      expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ startKey: KEY, acks: true }));
+      await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': KEY } }), params);
+      expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ startKey: KEY, acks: false }));
+      await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Acks': '1' } }), params);
+      expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ acks: false }));
+      await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' } }), params);
+      expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ acks: false }));
+    });
+
+    it('answers an earlier unconfirmed start as HTTP 200 `earlier` with that job and the key it was made under, and it is not one of the known refusals', async () => {
+      own();
+      const earlier = { id: 'job-0', status: 'running', state: 'live', attempt: 'older-key-0001' };
+      lib.startJob.mockResolvedValue({ ok: false, reason: 'earlier', job: earlier } as never);
+      const response = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'another' }, headers: { 'X-Computer-Start-Attempt': KEY, 'X-Computer-Start-Acks': '1' } }), params);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: false, reason: 'earlier', job: earlier });
+      expect(START_REFUSALS).not.toContain('earlier');
+    });
+
+    it('confirms a start by a look that found its job, and only then: a look that found nothing, or is still going on, confirms nothing', async () => {
+      own();
+      lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
+      lib.startedJobFor.mockResolvedValue({ id: JOB, status: 'running' });
+      await stateRoute(asBot(`/x?userId=wa-sara&attempt=${KEY}`, { method: 'GET' }), params);
+      expect(lib.ackStart).toHaveBeenCalledWith(BRICK, 'u-sara', KEY);
+      lib.ackStart.mockClear();
+      lib.startedJobFor.mockResolvedValue(null);
+      await stateRoute(asBot(`/x?userId=wa-sara&attempt=${KEY}`, { method: 'GET' }), params);
+      lib.startedJobFor.mockResolvedValue({ inProgress: true });
+      await stateRoute(asBot(`/x?userId=wa-sara&attempt=${KEY}`, { method: 'GET' }), params);
+      await stateRoute(asBot('/x?userId=wa-sara', { method: 'GET' }), params);
+      expect(lib.ackStart).not.toHaveBeenCalled();
+    });
+
+    it('takes the ack from the bot server only, for a key, and answers whether it has a job; a guest, a bad key or an unknown person change nothing', async () => {
+      own();
+      lib.ackStart.mockResolvedValue(true);
+      const ack = (body: unknown, token: boolean = true) => startRoute(token ? asBot('/x', { body }) : call('/x', { body }), params);
+      expect((await ack({ action: 'start-ack', userId: 'wa-sara', attempt: KEY }, false)).status).toBe(401);
+      const done = await ack({ action: 'start-ack', userId: 'wa-sara', attempt: KEY });
+      expect(done.status).toBe(200);
+      expect(await done.json()).toEqual({ ok: true, acked: true });
+      expect(lib.startJob).not.toHaveBeenCalled();
+      expect(lib.ackStart).toHaveBeenCalledWith(BRICK, 'u-sara', KEY);
+      lib.ackStart.mockClear();
+      for (const body of [{ action: 'start-ack', userId: 'wa-sara' }, { action: 'start-ack', userId: 'wa-sara', attempt: 'short' }, { action: 'start-ack', userId: 'wa-sara', attempt: 'has space in it!' }, { action: 'start-ack', userId: 'wa-sara', attempt: KEY, extra: 1 }, { action: 'something-else', userId: 'wa-sara', attempt: KEY }]) {
+        expect((await ack(body)).status).toBe(400);
+      }
+      resolve.mockResolvedValue({ personId: null, guest: true });
+      expect(await (await ack({ action: 'start-ack', userId: 'wa-guest', isGuest: true, attempt: KEY })).json()).toEqual({ ok: true, acked: false });
+      resolve.mockResolvedValue({ personId: null, guest: false, lookupFailed: true });
+      expect((await ack({ action: 'start-ack', userId: 'wa-sara', attempt: KEY })).status).toBe(503);
+      expect(lib.ackStart).not.toHaveBeenCalled();
+    });
+  });
+
   describe('whether a start that timed out reached Orbit: by the start’s own key (game #2114)', () => {
     const KEY = '3f2b8c1e-5d4a-4e7b-9a60-1c2d3e4f5a6b';
     const asked = `/x?userId=wa-sara&attempt=${KEY}`;
