@@ -582,7 +582,7 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     for (let tries = 0; tries < 200 && !(await prisma.brickComputer.findUnique({ where: { botId: sara.brickId } }))?.filesClaimedAt; tries++) await new Promise((resolve) => setTimeout(resolve, 20));
     expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).filesClaimedAt).not.toBeNull();
     // The machine looks idle to the sweep: nothing was written to its row for more than two minutes
-    await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = now() - interval '10 minutes' WHERE "bot_id" = ${sara.brickId}`;
+    await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = (now() AT TIME ZONE 'UTC') - interval '10 minutes' WHERE "bot_id" = ${sara.brickId}`;
     await sweepComputers(new Date());
     expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
     expect(provider.calls.filter((call) => call.name === 'rest')).toEqual([]);
@@ -881,7 +881,7 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     const id = await started(sara);
     await finishJob(id, 'stopped' as never, minutes(1)).catch(() => undefined);
     await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { machine: 'working', filesClaimedAt: new Date(Date.now() - 60 * 60 * 1000) } });
-    await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = now() - interval '10 minutes' WHERE "bot_id" = ${sara.brickId}`;
+    await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = (now() AT TIME ZONE 'UTC') - interval '10 minutes' WHERE "bot_id" = ${sara.brickId}`;
     await sweepComputers(new Date());
     expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
   });
