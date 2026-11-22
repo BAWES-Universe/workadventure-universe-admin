@@ -318,7 +318,8 @@ export async function recordPoolRefusal(db: Pick<Prisma.TransactionClient, 'comp
     data: [{ jobId, turn: null, run: null, callId: `${ORBIT_POOL_CALL_PREFIX}${callId}`.slice(0, 120), kind: 'fault', reason: 'pool_busy', source: ORBIT_SOURCE, route: input.route ? input.route.slice(0, 120) : null, providerStatus: 503, at: input.at ?? new Date() }],
     skipDuplicates: true,
   });
-  return db.computerJobFault.count({ where: poolRefusalRows(jobId) });
+  // Only the refusals that still count: one that a later authorized call recovered (kind `answered`, `pool_recovered`) is evidence only, and must not add to the number the cutoff stands on
+  return db.computerJobFault.count({ where: { ...poolRefusalRows(jobId), kind: 'fault' } });
 }
 
 /** Whether the job has a pool refusal of Orbit's own that still counts (one that no later authorized call has recovered). Reads only. */

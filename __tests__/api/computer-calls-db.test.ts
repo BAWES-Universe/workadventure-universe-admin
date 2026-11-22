@@ -29,7 +29,7 @@ import { recordMeterEvent } from '@/lib/meter';
 import { reportsToTell } from '@/lib/computer-report';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { authorizeModelCall, callRoomKey, cutoffEndsFinished, cutoffLockKey, endStuckCutoffs, forgetMeterNotSetAlert, giveBackModelCalls, releaseModelCall, settleModelCall } from '@/lib/computer-calls';
-import { POOL_CUTOFF_CALL, admitLockKey, hasOwnKeyCall, hasPoolRefusals, readFaultRows, recordCallAdmission, recordFaults, recordOwnKeyCall, recordPoolCutoff } from '@/lib/computer-faults';
+import { POOL_CUTOFF_CALL, admitLockKey, hasOwnKeyCall, hasPoolRefusals, readFaultRows, recordCallAdmission, recordFaults, recordOwnKeyCall, recordPoolCutoff, recordPoolRefusal } from '@/lib/computer-faults';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -1475,6 +1475,39 @@ run('what a computer may ask of Orbit, in a real database', () => {
           expect(await call(token, 'c1', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
           expect(await call(token, 'c2', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
           expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'stopped', endedBy: 'pool' });
+        });
+
+        it('a refusal that a later authorized call recovered does not count toward the cutoff: refuse, recover, give the room back, then ONE new refusal leaves the job running; two live refusals still end it (Sentry)', async () => {
+          const { jobId } = await running();
+          const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+          // One refusal for our capacity
+          await setUp({ poolCeilingMicros: 60_000 });
+          expect(await call(token, 'c1', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
+          // Capacity returns and a call is authorized: the refusal is retired. Its room is then given back with no priced call, so the job has no authorized call on record
+          await setUp({ poolCeilingMicros: 100_000_000 });
+          expect((await call(token, 'c2')).ok).toBe(true);
+          expect(await poolRows(jobId)).toMatchObject([{ callId: 'orbit:pool:c1', kind: 'answered', reason: 'pool_recovered' }]);
+          await releaseModelCall(jobId, 'c2', NOW);
+          expect(await prisma.meterReservation.findUnique({ where: { reservationKey: callRoomKey(jobId, 'c2') } })).toMatchObject({ state: 'released' });
+          // ONE new refusal: one live refusal only, so no cutoff (the retired row is not counted)
+          await setUp({ poolCeilingMicros: 60_000 });
+          expect(await call(token, 'c3', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
+          expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:pool:c3', kind: 'fault' } })).toBe(1);
+          expect(await prisma.computerJobFault.count({ where: { jobId, callId: POOL_CUTOFF_CALL } })).toBe(0);
+          expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+          expect(await recordPoolRefusal(prisma, jobId, 'c3')).toBe(1);
+          // The second live refusal still ends it, as before
+          expect(await call(token, 'c4', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
+          await cutoffEndsFinished();
+          expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
+        });
+
+        it('recordPoolRefusal answers how many refusals still count: a retired one is not among them', async () => {
+          const { jobId } = await running();
+          await prisma.computerJobFault.create({ data: { jobId, turn: null, run: null, callId: 'orbit:pool:old', kind: 'answered', reason: 'pool_recovered', source: 'orbit', route: null, providerStatus: 503, at: NOW } });
+          expect(await recordPoolRefusal(prisma, jobId, 'c1')).toBe(1);
+          expect(await recordPoolRefusal(prisma, jobId, 'c1')).toBe(1);
+          expect(await recordPoolRefusal(prisma, jobId, 'c2')).toBe(2);
         });
 
         it('controls that were never set up are OUR misconfiguration: answered as ours (the pool, full), told to Sentry once, and never a capacity refusal: no marker is kept and it never counts toward a cutoff', async () => {
