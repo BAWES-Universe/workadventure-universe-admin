@@ -632,6 +632,27 @@ describe('the bot server’s calls', () => {
     }
   });
 
+  it('a finish intent from a REPLACED run is answered `stale` WITH `run: superseded` and the job (so the old run exits); a stale control generation, a job that is over and a cutoff carry NO run key', async () => {
+    lib.getJob.mockResolvedValue(job as never);
+    lib.recordFinishIntent.mockResolvedValueOnce({ ok: false, reason: 'stale', run: 'superseded' } as never);
+    const superseded = await jobAction(asBot('/x', { body: { action: 'finish-intent', outcome: 'failed', cause: 'ours', turns: [1], run: 'r1', basis: 'pool' } }), jobParams);
+    expect(superseded.status).toBe(200);
+    expect(await superseded.json()).toEqual({ ok: false, reason: 'stale', run: 'superseded', job: expect.objectContaining({ id: JOB }) });
+    for (const reason of ['stale', 'cutoff']) {
+      lib.recordFinishIntent.mockResolvedValueOnce({ ok: false, reason } as never);
+      const plain = await jobAction(asBot('/x', { body: { action: 'finish-intent', outcome: 'done', generation: 1, run: 'r1' } }), jobParams);
+      expect(plain.status).toBe(200);
+      const body = await plain.json();
+      expect(body).toMatchObject({ ok: false, reason, job: { id: JOB } });
+      expect(body).not.toHaveProperty('run');
+    }
+    // The same for a finish: only a replaced run says `superseded`
+    lib.finishJobUnder.mockResolvedValue({ job: { id: JOB }, stale: true } as never);
+    const generation = await (await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done', generation: 0, run: 'r1' } }), jobParams)).json();
+    expect(generation).toMatchObject({ ok: false, reason: 'stale' });
+    expect(generation).not.toHaveProperty('run');
+  });
+
   it('a finish intent for a job that disappeared meanwhile is a 404, as everywhere on this route; `stale` and `cutoff` stay HTTP 200 (CodeRabbit)', async () => {
     lib.getJob.mockResolvedValue(job as never);
     lib.recordFinishIntent.mockResolvedValueOnce({ ok: false, reason: 'not_found' } as never);
