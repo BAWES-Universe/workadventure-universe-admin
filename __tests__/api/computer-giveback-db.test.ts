@@ -5,7 +5,6 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/computer-giveback-db.test.ts
  */
 import { randomUUID } from 'node:crypto';
-import { Client } from 'pg';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
@@ -18,6 +17,7 @@ jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException
 
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
+import { databaseTimezone } from '../helpers/db-timezone';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { saveInstantLimits } from '@/lib/instant/state';
@@ -1883,7 +1883,11 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await givenBack(early.id)).toBe(false);
       // No fault of ours was written for it, and the one marker says nothing about any failure
       const rows = await prisma.computerJobFault.findMany({ where: { jobId: early.id } });
-      expect(rows).toMatchObject([{ kind: 'answered', reason: 'own_key_call', source: 'orbit', turn: null, route: null }]);
+      // The marker and the admission for the call's turn (the relay named none): both answered rows of Orbit's own, neither says anything about a failure
+      expect(rows.map((row) => ({ kind: row.kind, reason: row.reason, source: row.source, turn: row.turn, route: row.route })).sort((a, b) => a.reason.localeCompare(b.reason))).toEqual([
+        { kind: 'answered', reason: 'own_key_call', source: 'orbit', turn: null, route: null },
+        { kind: 'answered', reason: 'turn_admitted', source: 'orbit', turn: null, route: null },
+      ]);
       expect(await readFaultRows(prisma, early.id, null, 'r1')).toEqual([]);
       // The call's own report arrives late and says it was their provider refusing their key: theirs, as ever (never given back as ours)
       await recordFaults(sara.brickId, early.id, [fault(1, 'own_provider', { source: 'own-key', route: 'own-key', run: 'r1' })]);
@@ -2240,64 +2244,9 @@ run('a computer job that failed on our side, and the bound on giving it back', (
 
       // The sweep marks a decision as looked at with the database's clock: the mark must be the UTC time the columns hold in any session time zone, or an arrival that comes after the look looks older than the mark and is never looked at
       describe.each(['UTC', 'Asia/Kuwait'])('the late look sweep in a database set to %s', (zone) => {
-        // The database's own setting for its sessions, kept exactly as it was (an explicit override or none at all) and put back exactly: never reset to the server's default, which may differ from it
-        let original: string | null | undefined;
-        const databaseOverride = async (): Promise<string | null> => {
-          const rows = await prisma.$queryRaw<Array<{ setconfig: string[] | null }>>`SELECT s.setconfig FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = current_database() AND s.setrole = 0`;
-          const entry = (rows[0]?.setconfig ?? []).find((line) => line.toLowerCase().startsWith('timezone='));
-          return entry ? entry.slice('timezone='.length) : null;
-        };
-        // Every session the pool can hand out, observed: a batch of statements that overlap (so no two share a connection) each says the zone it runs in
-        const zonesOfSessions = async (): Promise<string[]> => {
-          const seen = await Promise.all(Array.from({ length: 6 }, () => prisma.$queryRaw<Array<{ z: string }>>`SELECT current_setting('TimeZone') AS z, pg_sleep(0.3)::text AS s`));
-          return seen.map((rows) => rows[0].z);
-        };
-        const inZone = (name: string, shown: string) => (name === 'UTC' ? /UTC$/.test(shown) : shown === name);
-        /**
-         * Sets the database's zone and waits until it is OBSERVED to hold for every session the pool can hand out. The pool's connections keep the zone they opened with and close when idle, so readiness is watched from a connection of its own
-         * (which the pool never uses): once the pool has no session left open, whatever it opens next is in the new zone, and a batch of overlapping statements each says the zone it runs in. No fixed delay.
-         */
-        const settle = async (name: string, alter: string) => {
-          await prisma.$executeRawUnsafe(alter);
-          const watcher = new Client({ connectionString: process.env.DATABASE_URL });
-          await watcher.connect();
-          try {
-            let ready = false;
-            for (let tries = 0; tries < 200 && !ready; tries += 1) {
-              const open = await watcher.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'`);
-              if (open.rows[0].n === 0) ready = true;
-              else await new Promise((resolve) => setTimeout(resolve, 250));
-            }
-            expect(ready).toBe(true);
-          } finally {
-            await watcher.end();
-          }
-          expect((await zonesOfSessions()).every((shown) => inZone(name, shown))).toBe(true);
-        };
-        const settleBack = async (back: string) => {
-          await prisma.$executeRawUnsafe(back);
-          const watcher = new Client({ connectionString: process.env.DATABASE_URL });
-          await watcher.connect();
-          try {
-            for (let tries = 0; tries < 200; tries += 1) {
-              const open = await watcher.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'`);
-              if (open.rows[0].n === 0) return;
-              await new Promise((resolve) => setTimeout(resolve, 250));
-            }
-          } finally {
-            await watcher.end();
-          }
-        };
-        beforeAll(async () => {
-          original = await databaseOverride();
-          await settle(zone, `DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET timezone TO %L', current_database(), '${zone}'); END $$`);
-        }, 60_000);
-        afterAll(async () => {
-          if (original === undefined) return;
-          const back = original === null ? `DO $$ BEGIN EXECUTE format('ALTER DATABASE %I RESET timezone', current_database()); END $$` : `DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET timezone TO %L', current_database(), '${original.replace(/'/g, "''")}'); END $$`;
-          await settleBack(back);
-          expect(await databaseOverride()).toBe(original);
-        }, 60_000);
+        const zoneSetting = databaseTimezone(prisma, zone);
+        beforeAll(zoneSetting.set, 120_000);
+        afterAll(zoneSetting.restore, 120_000);
 
         it('an arrival that comes after an earlier sweep looked at the decision is still found by the next sweep, and re-labels the reason', async () => {
           await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });

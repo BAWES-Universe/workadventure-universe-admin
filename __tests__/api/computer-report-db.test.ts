@@ -18,6 +18,7 @@ jest.mock('@/lib/task-receipt-words', () => {
 });
 
 import { prisma } from '@/lib/db';
+import { databaseTimezone } from '../helpers/db-timezone';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
 import { deleteBrick } from '@/lib/brick-delete';
@@ -394,17 +395,9 @@ run('Brick tells the person how a computer job went, in a real database', () => 
   // The follow-up compares what the database holds as a moment (timestamptz) with moments the code binds: it must say the same in any session time zone (Opus: a Date goes over the wire as a zone-less
   // text, so a database set to Asia/Kuwait read the cutoff three hours early). Run in UTC and in a zone ahead of it, both set on the DATABASE so every new connection has it
   describe.each(['UTC', 'Asia/Kuwait'])('GPT round 3 (database time zone %s): the one follow-up when an App went out after all', (zone) => {
-    // The pool closes a connection that has sat idle for 10 s, and a new one has the database's setting: so the zone is set on the database and the pool is left alone until every old connection is gone
-    const zoneNow = async () => ((await prisma.$queryRaw<Array<{ TimeZone: string }>>`SHOW timezone`)[0] as { TimeZone: string }).TimeZone;
-    const inZone = (name: string, shown: string) => (name === 'UTC' ? /UTC$/.test(shown) : shown === name);
-    const settle = async (name: string, alter: string) => {
-      if (inZone(name, await zoneNow())) return;
-      await prisma.$executeRawUnsafe(alter);
-      await new Promise((resolve) => setTimeout(resolve, 11_500));
-      expect(inZone(name, await zoneNow())).toBe(true);
-    };
-    beforeAll(() => settle(zone, `DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET timezone TO %L', current_database(), '${zone}'); END $$`), 30_000);
-    afterAll(() => settle('UTC', `DO $$ BEGIN EXECUTE format('ALTER DATABASE %I RESET timezone', current_database()); END $$`), 30_000);
+    const zoneSetting = databaseTimezone(prisma, zone);
+    beforeAll(zoneSetting.set, 120_000);
+    afterAll(zoneSetting.restore, 120_000);
 
     // The deploy of this change, then the provider's log (a minute later, so after it)
     const SINCE = new Date('2026-11-21T10:00:00Z');
