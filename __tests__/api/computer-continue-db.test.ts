@@ -364,6 +364,18 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
       expect(await carryOnFrom(sara.brickId, sara.id, old)).toEqual({ link: { continuesJobId: old, agentSessionId: 'sess-Visa form' } });
       expect(await carryOnFrom(sara.brickId, sara.id, randomUUID())).toEqual({ fresh: 'not_found' });
       expect(await carryOnFrom(sara.brickId, randomUUID(), old)).toEqual({ fresh: 'not_theirs' });
+      // A job still going on is never carried on, even one whose record already names an ending of ours and a conversation
+      const live = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Shop' }, minutes(6));
+      if (!live.ok) throw new Error('no job');
+      await prisma.computerJob.update({ where: { id: live.job.id }, data: { endedBy: 'error', agentSessionId: 'sess-Shop' } });
+      expect(await carryOnFrom(sara.brickId, sara.id, live.job.id)).toEqual({ fresh: 'live' });
+    });
+
+    it('names none, and carries none on, when the job never reached its agent (no conversation)', async () => {
+      const { sara, jobId: old } = await failedAsOurs('c-look-nosession');
+      await prisma.computerJob.update({ where: { id: old }, data: { agentSessionId: null } });
+      expect(await retryCandidate(sara.brickId, sara.id)).toBeNull();
+      expect(await carryOnFrom(sara.brickId, sara.id, old)).toEqual({ fresh: 'no_conversation' });
     });
   });
 
