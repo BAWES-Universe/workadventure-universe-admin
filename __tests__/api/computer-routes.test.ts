@@ -324,13 +324,12 @@ describe('the bot server’s calls', () => {
       expect(START_REFUSALS).not.toContain('earlier');
     });
 
-    it('confirms a start by a look that found its job, and only then: a look that found nothing, or is still going on, confirms nothing', async () => {
+    it('a look confirms nothing: found, not found, still going on or without a key, it only reads (GPT round 4, third note)', async () => {
       own();
       lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
       lib.startedJobFor.mockResolvedValue({ id: JOB, status: 'running' });
       await stateRoute(asBot(`/x?userId=wa-sara&attempt=${KEY}`, { method: 'GET' }), params);
-      expect(lib.ackStart).toHaveBeenCalledWith(BRICK, 'u-sara', KEY);
-      lib.ackStart.mockClear();
+      await stateRoute(asBot(`/x?userId=wa-sara&attempt=${KEY}`, { method: 'GET' }), params);
       lib.startedJobFor.mockResolvedValue(null);
       await stateRoute(asBot(`/x?userId=wa-sara&attempt=${KEY}`, { method: 'GET' }), params);
       lib.startedJobFor.mockResolvedValue({ inProgress: true });

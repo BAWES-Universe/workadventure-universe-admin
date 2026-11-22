@@ -7,9 +7,13 @@
 import { randomUUID } from 'node:crypto';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
+jest.mock('@/lib/usage-person', () => ({ resolveUsagePerson: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn(), getClient: jest.fn(() => undefined), flush: jest.fn(async () => true) }));
 
+import { NextRequest } from 'next/server';
+import { GET as lookRoute } from '@/app/api/bots/[id]/computer-jobs/route';
+import { resolveUsagePerson } from '@/lib/usage-person';
 import { prisma } from '@/lib/db';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
@@ -108,6 +112,29 @@ run('a start whose answer the game never confirmed, in a real database', () => {
     expect(await reservationsOf(b.job.id)).toBe(1);
   });
 
+  it('REPRO (GPT third note): the start reply AND the keyed look reply are both lost, the game has no record of the key: a new key is `earlier`, one job, one reservation', async () => {
+    const sara = await owner();
+    (resolveUsagePerson as jest.Mock).mockResolvedValue({ personId: sara.id, guest: false });
+    const first = keyOf();
+    const a = await start(sara, 'Visa form', first);
+    if (!a.ok) throw new Error('no');
+    // The game looks for the job by its key; the real handler answers, and that answer is lost on the way back
+    const looked = await lookRoute(new NextRequest(`http://localhost:3333/api/bots/${sara.brickId}/computer-jobs?userId=wa-sara&attempt=${first}`, { method: 'GET' }), { params: Promise.resolve({ id: sara.brickId }) });
+    expect(looked.status).toBe(200);
+    expect(((await looked.json()) as { started?: { id?: string } }).started?.id).toBe(a.job.id);
+    // Reading it, once or twice, confirmed nothing
+    await lookRoute(new NextRequest(`http://localhost:3333/api/bots/${sara.brickId}/computer-jobs?userId=wa-sara&attempt=${first}`, { method: 'GET' }), { params: Promise.resolve({ id: sara.brickId }) });
+    expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id }, select: { startAckedAt: true, createdAt: true } })).startAckedAt).toBeNull();
+    // A fresh process with no record of the key mints a new one: it must meet the first job, not make another
+    expect(await start(sara, 'Fill in my visa application', keyOf())).toMatchObject({ ok: false, reason: 'earlier', job: { id: a.job.id, attempt: first } });
+    expect(await jobsOf(sara.id)).toBe(1);
+    expect(await reservationsOf(a.job.id)).toBe(1);
+    // Only the game's own word confirms: after it a deliberate second ask is a second job
+    expect(await ackStart(sara.brickId, sara.id, first)).toBe(true);
+    expect(await start(sara, 'Fill in my visa application', keyOf())).toMatchObject({ ok: true });
+    expect(await jobsOf(sara.id)).toBe(2);
+  });
+
   it('the start’s own key still answers its own job, unconfirmed or not, and its replay is never `earlier`', async () => {
     const sara = await owner();
     const key = keyOf();
@@ -118,7 +145,7 @@ run('a start whose answer the game never confirmed, in a real database', () => {
     expect(await jobsOf(sara.id)).toBe(1);
   });
 
-  it('a lost ack: the next new start meets `earlier` once, the keyed look (which the game makes after it) confirms, and the following ask starts', async () => {
+  it('a lost ack: the next new start meets `earlier` once, the ack confirms, and the following ask starts', async () => {
     const sara = await owner();
     const key = keyOf();
     const a = await start(sara, 'Visa form', key);

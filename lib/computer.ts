@@ -482,7 +482,7 @@ export async function startedJobFor(botId: string, personId: string, startKey: s
 }
 
 /**
- * The game confirms it has the answer of the start it made under `startKey` (an ack, or a keyed look that found the job): the job's start is confirmed, once, by this person on this Brick. Idempotent. A key that made no job, or
+ * The game confirms it has the answer of the start it made under `startKey` (its own word, sent only once it holds the answer: a look-up never confirms, it is read only): the job's start is confirmed, once, by this person on this Brick. Idempotent. A key that made no job, or
  * another person's or Brick's key, changes nothing (never learned apart). Answers whether this key has a job of this person's on this Brick.
  */
 export async function ackStart(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<boolean> {

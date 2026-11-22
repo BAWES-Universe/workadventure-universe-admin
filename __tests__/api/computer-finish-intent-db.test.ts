@@ -352,6 +352,24 @@ run('the runner’s committed word that a job is to end, in a real database', ()
     });
   });
 
+  describe('GPT third note, R2 follow-up: a delayed stop for the pool, after the pool recovered and a funded call was admitted', () => {
+    it('REPRO: the intent is not kept for a stop whose pool refusal was recovered by an admitted call (the work stays)', async () => {
+      const { jobId } = await running('s-pool');
+      const key = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      // The pool is full: one call is refused for OUR capacity (below the two that decide a cutoff)
+      await setUp({ poolCeilingMicros: 1 });
+      expect(await authorizeModelCall({ token: key.token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' }, NOW)).toMatchObject({ ok: false, reason: 'pool', full: true });
+      // The pool recovers and a funded call is admitted: it reserves 5,000 micros and retires the earlier refusal
+      await setUp();
+      expect(await authorizeModelCall({ token: key.token, callId: 'c2', estimateMicros: 5_000, payer: 'universe' }, minutes(1))).toMatchObject({ ok: true, reservedMicros: 5_000 });
+      // The runner's stop for the pool (decided on the first refusal, delayed) reaches Orbit now
+      const kept = await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', turns: [1], run: 'r1' }, minutes(2));
+      expect(kept).toMatchObject({ ok: false });
+      expect(await hasFinishIntent(prisma, jobId)).toBe(false);
+      expect((await jobOf(jobId)).status).toBe('running');
+    });
+  });
+
   describe('a finish while an intent is kept', () => {
     it('ends the job as the intent said, whatever the finish says (the committed word is first); finishPending carries every value a replacement sends', async () => {
       const { jobId } = await running();
