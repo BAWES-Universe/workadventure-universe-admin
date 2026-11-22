@@ -1870,7 +1870,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       // never part of what the owner is shown
       expect(JSON.stringify(started.job)).not.toContain('Kuwait visa');
       const mine = (await runnableJobs()).filter((job) => job.botId === sara.brickId);
-      expect(mine).toEqual([{ jobId: started.job.id, botId: sara.brickId, title: 'Visa form', brief: 'Fill the Kuwait visa form for two people', writes: true, hasTurn: false }]);
+      expect(mine).toEqual([{ jobId: started.job.id, botId: sara.brickId, title: 'Visa form', brief: 'Fill the Kuwait visa form for two people', writes: true, hasTurn: false, continuesJobId: null }]);
       await stopJobFor(sara.brickId, sara.id, NOW);
       expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).brief).toBeNull();
       expect((await runnableJobs()).filter((job) => job.botId === sara.brickId)).toEqual([]);
