@@ -1655,7 +1655,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(item.outcomeNote).toBe('We couldn’t confirm whether Exa finished. We’re releasing your hold.');
       expect(item.outcomeText + (item.outcomeNote ?? '')).not.toMatch(/Refunded|nothing taken/i);
       expect(item).not.toHaveProperty('releasedMicros');
-      expect(item.actions[0]).toMatchObject({ label: 'exa', outcome: 'unknown', text: 'Exa · couldn’t confirm delivery', takenText: 'Hold being released' });
+      expect(item.actions[0]).toMatchObject({ label: 'exa', outcome: 'unknown', text: 'Exa · couldn’t confirm it finished', takenText: 'Hold being released' });
       expect(item.actions[0]).not.toHaveProperty('releasedMicros');
       expect(item.actions[0].text).not.toMatch(/didn.t work/);
       // The Instant line is not a price of zero and not "nothing": the credit is being released
@@ -1679,7 +1679,7 @@ run('the bounded Instant executor, in a real database', () => {
       const item = await itemTitled('O2a released later');
       expect(item.outcomeText).toBe('Couldn’t confirm');
       expect(item.outcomeNote).toBe(`We couldn’t confirm whether Exa finished. Your hold of ${dollars(hold)} was released.`);
-      expect(item.actions[0]).toMatchObject({ outcome: 'unknown', releasedMicros: hold, text: 'Exa · couldn’t confirm delivery', takenText: 'Hold released' });
+      expect(item.actions[0]).toMatchObject({ outcome: 'unknown', releasedMicros: hold, text: 'Exa · couldn’t confirm it finished', takenText: 'Hold released' });
       expect(item.outcomeText + (item.outcomeNote ?? '')).not.toMatch(/Refunded|nothing taken/i);
       expect(item.lines[0]).toMatchObject({ amountMicros: 0 });
     });
