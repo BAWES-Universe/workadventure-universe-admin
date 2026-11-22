@@ -360,6 +360,48 @@ export async function hasPoolCutoff(db: Pick<Prisma.TransactionClient, 'computer
 /** The lock a cutoff for our own capacity, an authorization that may be deciding at the same moment and the making of a model key take one after the other. */
 export const cutoffLockKey = (jobId: string): string => `computer-call-cutoff:${jobId}`;
 
+/** The call id of Orbit's one marker per job that says which runner run holds the job NOW (its `run` column): Orbit's own, never the relay's, and no ruling reads it (kind `answered`). */
+export const RUNNER_RUN_CALL = 'orbit:runner-run';
+
+/** The call id prefix of Orbit's one row per run that PREPARED for the job (`<prefix><run>`): what says a run held the job once, so a run that was replaced can be told from one that never got as far as a prepare. */
+export const RUNNER_RAN_PREFIX = 'orbit:runner-ran:';
+export const ranCallOf = (run: string): string => `${RUNNER_RAN_PREFIX}${run}`;
+
+/** The run the job's runner is in now, as the last prepare said it (a restart makes a new run, and every run prepares before it can make a call), or null when none was ever said. Reads only. */
+export async function currentRunnerRun(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string): Promise<string | null> {
+  const row = await db.computerJobFault.findUnique({ where: { jobId_callId: { jobId, callId: RUNNER_RUN_CALL } }, select: { run: true, source: true } });
+  return row && row.source === ORBIT_SOURCE ? row.run : null;
+}
+
+/**
+ * Whether a request that names a run is from a run that was REPLACED: it prepared for the job once (its own row), and another run holds the job now. A request that names none, a job whose runner never said a run, and a run
+ * that never prepared (its prepare was refused or failed before the key, or it ended before any prepare) are never stale by this: such a run replaced nobody and was replaced by nobody. Reads only.
+ */
+export async function runnerRunIsStale(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, run: string | null | undefined): Promise<boolean> {
+  if (!run) return false;
+  const current = await currentRunnerRun(db, jobId);
+  if (current === null || current === run) return false;
+  return (await db.computerJobFault.count({ where: { jobId, callId: ranCallOf(run), source: ORBIT_SOURCE } })) > 0;
+}
+
+/**
+ * Makes `run` the job's current run, and says whether it was a change. Call it under the job's cutoff lock, in the transaction that makes the run's model key, so the order between runs is decided by the same lock as the
+ * admission of a call and the stop of a run: a stop, a finish or a renewal of a replaced run that comes after it is stale. One pointer row per job (moved, never added to) and one row per run that ever prepared; safe to say twice.
+ */
+export async function setRunnerRun(db: Pick<Prisma.TransactionClient, 'computerJobFault'>, jobId: string, run: string, at: Date = new Date()): Promise<boolean> {
+  if ((await currentRunnerRun(db, jobId)) === run) return false;
+  await db.computerJobFault.createMany({
+    data: [{ jobId, turn: null, run, callId: ranCallOf(run), kind: 'answered', reason: 'runner_ran', source: ORBIT_SOURCE, route: null, providerStatus: null, at }],
+    skipDuplicates: true,
+  });
+  await db.computerJobFault.upsert({
+    where: { jobId_callId: { jobId, callId: RUNNER_RUN_CALL } },
+    create: { jobId, turn: null, run, callId: RUNNER_RUN_CALL, kind: 'answered', reason: 'runner_run', source: ORBIT_SOURCE, route: null, providerStatus: null, at },
+    update: { run, at, source: ORBIT_SOURCE },
+  });
+  return true;
+}
+
 /** The call id of Orbit's one marker per job that a call on the person's OWN key was authorized. */
 export const OWN_KEY_CALL_MARK = 'orbit:own-key-call';
 

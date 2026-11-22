@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { isOver } from '@/lib/computer-values';
 import { agentMayAct } from '@/lib/computer-control';
-import { cutoffLockKey, hasFinishIntent, hasPoolCutoff } from '@/lib/computer-faults';
+import { cutoffLockKey, hasFinishIntent, hasPoolCutoff, setRunnerRun } from '@/lib/computer-faults';
 
 /**
  * The key a job's computer holds (build handoff v2, section 5). It is the computer's only credential, and it grants nothing by
@@ -35,9 +35,10 @@ export type Minted = { ok: true; token: string; expiresAt: Date } | { ok: false;
 /**
  * Makes a key for a running job. The key is shown once, here; only its digest is kept. With `under`, the key is only made for the job as
  * it stood when the caller looked (running, the same control generation): a job the person took over meanwhile gets none, and one that
- * was made just before the take-over is ended again.
+ * was made just before the take-over is ended again. A model key made for a RUN (the prepare of a runner's run) makes that run the job's current one, in the same transaction and under the same lock that decides
+ * the refusals below: every older model key of the job ends with it, and a stop, a finish or a renewal that a replaced run sends afterwards is stale (`setRunnerRun`).
  */
-export async function mintJobToken(jobId: string, scope: TokenScope, now: Date = new Date(), under?: { generation: number }): Promise<Minted> {
+export async function mintJobToken(jobId: string, scope: TokenScope, now: Date = new Date(), under?: { generation: number }, run?: string | null): Promise<Minted> {
   const read = () => prisma.computerJob.findUnique({ where: { id: jobId }, select: { botId: true, status: true, controlGeneration: true } });
   const fits = (job: { status: string; controlGeneration: number }) => (under ? job.status === 'running' && job.controlGeneration === under.generation : live(job.status));
   const job = await read();
@@ -55,6 +56,10 @@ export async function mintJobToken(jobId: string, scope: TokenScope, now: Date =
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
       const reason = scope === 'model' && (await hasPoolCutoff(tx, jobId)) ? ('not_running' as const) : (await hasFinishIntent(tx, jobId)) ? ('finish_pending' as const) : null;
       if (reason !== null) await tx.computerJobToken.updateMany({ where: { digest, revokedAt: null }, data: { revokedAt: now } });
+      else if (scope === 'model' && run && (await setRunnerRun(tx, jobId, run, now))) {
+        // A new run holds the job: the keys of the run it replaced end here, in the same commit as the change of run (a call of the old run is refused at its key, never admitted after the new run took the job)
+        await tx.computerJobToken.updateMany({ where: { jobId, scope: 'model', revokedAt: null, digest: { not: digest } }, data: { revokedAt: now } });
+      }
       return reason;
     },
     { timeout: 15_000, maxWait: 15_000 },

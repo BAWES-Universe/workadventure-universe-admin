@@ -548,6 +548,22 @@ describe('the bot server’s calls', () => {
     expect(lib.recordFinishIntent).not.toHaveBeenCalled();
   });
 
+  it('names the run on every renew, finish and stop (R2b-2): the run is passed on whole, a renewal from a replaced run is answered as the library answers it, and a run that is not a run is refused', async () => {
+    lib.getJob.mockResolvedValue(job as never);
+    lib.renewJob.mockResolvedValue({ ok: false, reason: 'stale', run: 'superseded' });
+    expect(await (await jobAction(asBot('/x', { body: { action: 'renew', run: 'mi8x3k2a1b2c3d4e' } }), jobParams)).json()).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+    expect(lib.renewJob).toHaveBeenLastCalledWith(JOB, expect.any(Date), 'mi8x3k2a1b2c3d4e');
+    await jobAction(asBot('/x', { body: { action: 'renew' } }), jobParams);
+    expect(lib.renewJob).toHaveBeenLastCalledWith(JOB, expect.any(Date), undefined);
+    for (const run of ['x'.repeat(41), '', 'has space', 5]) expect((await jobAction(asBot('/x', { body: { action: 'renew', run } }), jobParams)).status).toBe(400);
+    // A finish names its run with no turns at all, and a stale one is answered HTTP 200 with the job
+    lib.finishJobUnder.mockResolvedValue({ job: { id: JOB }, stale: true, superseded: true } as never);
+    const late = await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done', run: 'r1' } }), jobParams);
+    expect(late.status).toBe(200);
+    expect(await late.json()).toMatchObject({ ok: false, reason: 'stale', run: 'superseded' });
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'done', expect.any(Date), undefined, undefined, undefined, 'r1');
+  });
+
   it('takes what a running job says: steps, renewing, hand-over, finishing, and outside effects before they are tried', async () => {
     lib.getJob.mockResolvedValue(job as never);
     lib.reportProgress.mockResolvedValue({ id: JOB } as never);

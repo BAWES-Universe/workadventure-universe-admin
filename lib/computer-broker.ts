@@ -157,7 +157,7 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
   await revokeJobTokens(jobId, now, { prepareClaim: claim });
   if (!(await holdsPrepareClaim(jobId, claim))) return { ok: false, reason: 'preparing' };
   // Only for the job as it stands now: a take-over after the look above gets no key
-  const minted = await mintJobToken(jobId, 'model', now, { generation: live.job.generation });
+  const minted = await mintJobToken(jobId, 'model', now, { generation: live.job.generation }, run);
   if (!minted.ok) return { ok: false, reason: minted.reason };
   // Not written when the claim went to another while the key was made: that one makes and writes its own, and this key is ended
   if (!(await holdsPrepareClaim(jobId, claim))) {

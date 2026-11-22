@@ -6,7 +6,7 @@ import { getInstantLimitsStrict } from '@/lib/instant/state';
 import { INSTANT_LIMITS_RECOMMENDED, type InstantLimits } from '@/lib/instant/values';
 import { monthOf } from '@/lib/meter-values';
 import { callRoomKey, giveBackModelCalls } from '@/lib/computer-calls';
-import { OURS_REASONS, RELAY_REACHED, lockRelayReach, RELAY_UNREACHABLE, isInferredUnreachableRow, isRunnerNoRelayRow, readFaultRows, recordRelayUnreachable, relayReachedInRun, rowsOfRun, type FaultRow } from '@/lib/computer-faults';
+import { OURS_REASONS, RELAY_REACHED, lockRelayReach, RELAY_UNREACHABLE, isInferredUnreachableRow, isRunnerNoRelayRow, ORBIT_SOURCE, RUNNER_RAN_PREFIX, RUNNER_RUN_CALL, readFaultRows, recordRelayUnreachable, relayReachedInRun, rowsOfRun, type FaultRow } from '@/lib/computer-faults';
 import { incidentFaultMatch } from '@/lib/computer-route-pause';
 import { retryWaitMs } from '@/lib/computer-retry';
 
@@ -121,7 +121,7 @@ export async function neverReachedRelay(db: Pick<Prisma.TransactionClient, 'comp
   const [faults, events, rooms] = await Promise.all([
     // The run's own rows (and the rows that name no run): another run's call, answered or not, is not a trace of this run's. Calls priced or held a room are the job's (they carry no run)
     // The arrival rows are not counted here: they are the rule above, and only the run's own (a row of another run is not read here at all)
-    db.computerJobFault.count({ where: { jobId, ...rowsOfRun(run), NOT: { kind: 'answered', reason: RELAY_REACHED, source: 'universe-ai' } } }),
+    db.computerJobFault.count({ where: { jobId, ...rowsOfRun(run), NOT: [{ kind: 'answered', reason: RELAY_REACHED, source: 'universe-ai' }, { callId: RUNNER_RUN_CALL, source: ORBIT_SOURCE }, { callId: { startsWith: RUNNER_RAN_PREFIX }, source: ORBIT_SOURCE }] } }),
     db.meterEvent.count({ where: { jobId, kind: 'model_call' } }),
     db.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') } } }),
   ]);

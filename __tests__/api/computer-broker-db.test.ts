@@ -132,7 +132,8 @@ run('the broker, the fence and keep-awake, in a real database', () => {
 
     describe('the computer asks the relay for its model list with the key it was given', () => {
       const probeCommands = () => fake.commands.filter((one) => one.command.includes('/v1/models'));
-      const faultsOf = (jobId: string) => prisma.computerJobFault.findMany({ where: { jobId }, orderBy: { callId: 'asc' } });
+      // The marker of which run holds the job (made by a prepare that names its run) is not a fault
+      const faultsOf = (jobId: string) => prisma.computerJobFault.findMany({ where: { jobId, NOT: { callId: { startsWith: 'orbit:runner-' } } }, orderBy: { callId: 'asc' } });
 
       it('a computer that cannot get it is a confirmed fault of ours: kept once per run, the runner is told, and nothing is kept for one that can or for a check that could not be made', async () => {
         const { jobId } = await running();
@@ -329,7 +330,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         const { jobId } = await running();
         fake.execAnswer = (cmd) => (cmd.includes('/v1/models') ? { stdout: 'reach=unknown\n' } : {});
         expect(await prepareJob(jobId, RELAY, NOW, { run: 'r-1' })).toMatchObject({ ok: true });
-        expect(await prisma.computerJobFault.count({ where: { jobId } })).toBe(0);
+        expect(await prisma.computerJobFault.count({ where: { jobId, NOT: { callId: { startsWith: 'orbit:runner-' } } } })).toBe(0);
       });
     });
 
