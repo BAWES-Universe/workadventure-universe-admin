@@ -16,7 +16,7 @@ const REFUSAL_WORDS: Record<Exclude<ControlRefusal, 'not_found'>, string> = {
 
 /** The answer of a job control: the computer as the page shows it, 404 for a Brick or job that is not the owner's, 409 with a `reason` the game reads for every other refusal. */
 export function controlAnswer(request: NextRequest, result: Controlled): NextResponse {
-  if (result.ok) return brickJson(request, { computer: result.view });
+  if (result.ok) return brickJson(request, { computer: result.view, ...(result.signInsKept === undefined ? {} : { signInsKept: result.signInsKept }) });
   if (result.reason === 'not_found') return notFound(request);
   return brickJson(request, { error: REFUSAL_WORDS[result.reason], reason: result.reason }, 409);
 }

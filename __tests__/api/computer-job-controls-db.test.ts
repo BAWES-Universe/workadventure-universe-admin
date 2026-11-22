@@ -9,7 +9,10 @@ import { randomUUID } from 'node:crypto';
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn(), getClient: jest.fn(() => undefined), flush: jest.fn(async () => true) }));
-jest.mock('@/lib/computer-browser-profile', () => ({ parkProfile: jest.fn(async () => undefined), restoreProfile: jest.fn(async () => undefined), dropProfile: jest.fn(async () => undefined) }));
+jest.mock('@/lib/computer-browser-profile', () => {
+  const actual = jest.requireActual('@/lib/computer-browser-profile');
+  return { ...actual, parkProfile: jest.fn(async () => ({ state: 'parked', reason: null })), restoreProfile: jest.fn(async () => ({ state: 'restored', reason: null })), dropProfile: jest.fn(async () => ({ state: 'dropped', reason: null })) };
+});
 jest.mock('@/lib/meter', () => {
   const actual = jest.requireActual('@/lib/meter');
   return { ...actual, recordMeterEvent: jest.fn((...args: unknown[]) => actual.recordMeterEvent(...args)) };
@@ -22,7 +25,7 @@ import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import * as meterModule from '@/lib/meter';
 import { memberAllowance } from '@/lib/meter-allowance';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { claimJob, computerView, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { claimJob, computerTimeInBooks, computerView, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { recordPoolCutoff } from '@/lib/computer-faults';
 import * as profile from '@/lib/computer-browser-profile';
 import { checkSpend, proposeRule } from '@/lib/spend-rules';
@@ -447,14 +450,14 @@ run('computer job controls: pause, resume, do this next, cancel one job (piece 1
       expect(profile.parkProfile).not.toHaveBeenCalled();
       await pauseJob(sara.brickId, sara.id, jobId, minutes(2));
       expect(profile.parkProfile).toHaveBeenCalledTimes(1);
-      expect(profile.parkProfile).toHaveBeenCalledWith(sara.brickId, jobId);
+      expect(profile.parkProfile).toHaveBeenCalledWith(sara.brickId, jobId, minutes(2));
       expect(profile.restoreProfile).not.toHaveBeenCalled();
       await resumeJob(sara.brickId, sara.id, jobId, minutes(9));
-      expect(profile.restoreProfile).toHaveBeenCalledWith(sara.brickId, jobId);
+      expect(profile.restoreProfile).toHaveBeenCalledWith(sara.brickId, jobId, minutes(9));
       expect((await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId, n: 1 } } })).resumedAt).toEqual(minutes(9));
       expect(profile.dropProfile).not.toHaveBeenCalled();
       await stopJobFor(sara.brickId, sara.id, minutes(10));
-      expect(profile.dropProfile).toHaveBeenCalledWith(sara.brickId, jobId);
+      expect(profile.dropProfile).toHaveBeenCalledWith(sara.brickId, jobId, minutes(10));
     });
   });
 
@@ -487,6 +490,40 @@ run('computer job controls: pause, resume, do this next, cancel one job (piece 1
       await resumeJob(b.sara.brickId, b.sara.id, b.jobId, minutes(9));
       const heldNow = Number((await prisma.meterReservation.findFirstOrThrow({ where: { jobId: b.jobId, state: 'held', reservationKey: { startsWith: 'computer:job:' } } })).amountMicros);
       expect(await leftB(minutes(9))).toBe(1_000_000 - 5 * PER_MINUTE - heldNow);
+    });
+  });
+
+  describe('what the pause answer says about sign-ins, and a purge', () => {
+    it('signInsKept is true when the job’s browser was put away, false when it could not be (or there was nothing it could keep); a job paused in line says nothing about it', async () => {
+      const a = await running('k-kept');
+      const kept = await pauseJob(a.sara.brickId, a.sara.id, a.jobId, minutes(2));
+      expect(kept).toMatchObject({ ok: true, signInsKept: true });
+      const b = await running('k-lost');
+      jest.mocked(profile.parkProfile).mockResolvedValueOnce({ state: 'failed', reason: 'exec' } as never);
+      expect(await pauseJob(b.sara.brickId, b.sara.id, b.jobId, minutes(2))).toMatchObject({ ok: true, signInsKept: false });
+      const c = await running('k-cleared');
+      jest.mocked(profile.parkProfile).mockResolvedValueOnce({ state: 'cleared', reason: 'shared' } as never);
+      expect(await pauseJob(c.sara.brickId, c.sara.id, c.jobId, minutes(2))).toMatchObject({ ok: true, signInsKept: false });
+      const d = await running('k-line');
+      const inLine = await another(d.sara, 'In line', minutes(3));
+      expect(await jobOf(inLine)).toMatchObject({ status: 'queued' });
+      const quiet = await pauseJob(d.sara.brickId, d.sara.id, inLine, minutes(3));
+      expect(quiet.ok && 'signInsKept' in quiet).toBe(false);
+    });
+
+    it('a Brick is not purged while a pause’s time is not in the books; once it is written, it is', async () => {
+      const { sara, jobId } = await running('k-purge');
+      recordMeterEvent.mockImplementation(async () => {
+        throw new Error('the books did not answer');
+      });
+      try {
+        await pauseJob(sara.brickId, sara.id, jobId, minutes(5));
+        expect(await computerTimeInBooks(sara.brickId, minutes(6))).toBe(false);
+      } finally {
+        recordMeterEvent.mockImplementation((...args: unknown[]) => jest.requireActual('@/lib/meter').recordMeterEvent(...args));
+      }
+      expect(await computerTimeInBooks(sara.brickId, minutes(7))).toBe(true);
+      expect((await eventsOf(jobId)).map((event) => event.eventId)).toEqual([pauseEventId(jobId, 1)]);
     });
   });
 });

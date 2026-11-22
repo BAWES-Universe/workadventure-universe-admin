@@ -24,11 +24,12 @@ import { revokeJobTokens } from '@/lib/computer-token';
 import { settleRoomIn } from '@/lib/meter-allowance';
 import { pinnedMicrosPerMinute } from '@/lib/spend-rules-values';
 import { costOfSeconds, isOver, type PausedWhy } from '@/lib/computer-values';
-import { dropProfile, parkProfile } from '@/lib/computer-browser-profile';
+import { dropProfile, parkProfile, signInsKept } from '@/lib/computer-browser-profile';
 
 /** Why a control was not done. `not_found`: not the owner's Brick, or no such job on it. `over`: the job already ended. `taken_over`: the person has the screen. `ending`: its ending is already decided. `not_paused` / `not_queued`: the job is not in the state the tap was for. `allowance` / `rule`: a resume the person's month, or a limit they set, does not let start (the job stays paused). */
 export type ControlRefusal = 'not_found' | 'over' | 'taken_over' | 'ending' | 'not_paused' | 'not_queued' | 'allowance' | 'rule';
-export type Controlled = { ok: true; view: ComputerView } | { ok: false; reason: ControlRefusal };
+/** `signInsKept` is said only when a job that held the machine was paused: false when its sign-ins could not be put away (it will need them again when it carries on). */
+export type Controlled = { ok: true; view: ComputerView; signInsKept?: boolean } | { ok: false; reason: ControlRefusal };
 
 const SECOND = 1000;
 const TX = { timeout: 15_000, maxWait: 15_000 } as const;
@@ -53,7 +54,7 @@ async function viewOf(botId: string, ownerId: string, now: Date): Promise<Contro
 }
 
 export type PauseResult =
-  | { ok: true; kind: 'held'; n: number }
+  | { ok: true; kind: 'held'; n: number; signInsKept: boolean }
   | { ok: true; kind: 'queued' | 'already' }
   | { ok: false; reason: 'not_found' | 'over' | 'taken_over' | 'ending' | 'superseded' };
 
@@ -151,11 +152,14 @@ export async function pauseJobAs(jobId: string, why: PausedWhy, now: Date = new 
   // Where its browser went so far is kept before anything can clear it
   await controlInternals.recordJobVisits({ id: jobId, botId, startedAt: (await prisma.computerJobPause.findUnique({ where: { jobId_n: { jobId, n } }, select: { startedAt: true } }))?.startedAt ?? null }, now);
   // Its sign-ins are put away for it alone, before anything else can run on the machine or it rests
-  await parkProfile(botId, jobId).catch((error) => console.error('[Computer] Could not put away a paused job’s browser:', error instanceof Error ? error.message : 'unknown'));
+  const parked = await parkProfile(botId, jobId, now).catch((error) => {
+    console.error('[Computer] Could not put away a paused job’s browser:', error instanceof Error ? error.message : 'unknown');
+    return null;
+  });
   if (decided.turnHold) await settleTurnHold(botId);
   else await controlInternals.restIfUnheld(botId, now);
   if (options.advance !== false) await controlInternals.startNext(botId, now);
-  return { ok: true, kind: 'held', n };
+  return { ok: true, kind: 'held', n, signInsKept: parked ? signInsKept(parked) : false };
 }
 
 /**
@@ -206,7 +210,10 @@ export async function pauseJob(botId: string, ownerId: string, jobId: string, no
   const job = await jobOnBrick(botId, jobId);
   if (!job) return { ok: false, reason: 'not_found' };
   const result = await pauseJobAs(jobId, 'person', now);
-  return refusalOf(result) ?? viewOf(botId, ownerId, now);
+  const refused = refusalOf(result);
+  if (refused) return refused;
+  const view = await viewOf(botId, ownerId, now);
+  return view.ok && result.ok && result.kind === 'held' ? { ...view, signInsKept: result.signInsKept } : view;
 }
 
 /**
@@ -257,12 +264,16 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
     const now2 = await jobOnBrick(botId, jobId);
     return { ok: false, reason: now2 && isOver(now2.status) ? 'over' : 'not_queued' };
   }
+  let kept: boolean | undefined;
   for (const held of holding) {
-    const refused = refusalOf(await pauseJobAs(held.id, 'person', now, { backInLine: { rank: top + 1 }, advance: false }));
+    const paused = await pauseJobAs(held.id, 'person', now, { backInLine: { rank: top + 1 }, advance: false });
+    const refused = refusalOf(paused);
     if (refused) return refused;
+    if (paused.ok && paused.kind === 'held') kept = (kept ?? true) && paused.signInsKept;
   }
   await controlInternals.startNext(botId, now);
-  return viewOf(botId, ownerId, now);
+  const view = await viewOf(botId, ownerId, now);
+  return view.ok && kept !== undefined ? { ...view, signInsKept: kept } : view;
 }
 
 /**
@@ -282,6 +293,6 @@ export async function cancelJob(botId: string, ownerId: string, jobId: string, n
     else await controlInternals.endByPerson(jobId, now, { advance: true });
   }
   const after = await jobOnBrick(botId, jobId);
-  if (after && after.pauses > 0) await dropProfile(botId, jobId).catch((error) => console.error('[Computer] Could not drop a cancelled job’s browser:', error instanceof Error ? error.message : 'unknown'));
+  if (after && after.pauses > 0) await dropProfile(botId, jobId, now).catch((error) => console.error('[Computer] Could not drop a cancelled job’s browser:', error instanceof Error ? error.message : 'unknown'));
   return viewOf(botId, ownerId, now);
 }

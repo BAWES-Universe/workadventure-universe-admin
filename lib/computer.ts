@@ -63,7 +63,6 @@ import {
   type PausedWhy,
 } from '@/lib/computer-values';
 import { dropProfile, restoreProfile } from '@/lib/computer-browser-profile';
-import { bookMissingPauses } from '@/lib/computer-job-controls';
 
 /**
  * A Brick's computer, and the jobs on it (game #2000, Brick 9).
@@ -1029,7 +1028,7 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
   }
   // A job that was paused gets its own browser back (and never the one of a job that ran in between) before its runner takes it up
   if (job.pauses > 0) await prisma.computerJobPause.updateMany({ where: { jobId: job.id, n: job.pauses, resumedAt: null }, data: { resumedAt: now } }).catch(() => undefined);
-  if (job.pauses > 0) await restoreProfile(job.botId, job.id).catch((error) => console.error('[Computer] Could not bring back a resumed job’s browser:', error instanceof Error ? error.message : 'unknown'));
+  if (job.pauses > 0) await restoreProfile(job.botId, job.id, now).catch((error) => console.error('[Computer] Could not bring back a resumed job’s browser:', error instanceof Error ? error.message : 'unknown'));
   // What is on the machine before this job works on it: only so the message can name files the job saved outside its own output folder (those are never handed over)
   if (job.writes) await takeBaseline(job.id, job.botId, provider);
   return 'running';
@@ -1758,7 +1757,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   // A turn the agent was still running is cancelled, so it does not go on working (and spending) for a job that is over
   if (outside && held && job.agentResponseId) await cancelAgentTurn(job.botId, job.agentResponseId);
   // A job that was ever paused may have its sign-ins put away: they go with its ending, whatever the ending
-  if (outside && job.pauses > 0) await dropProfile(job.botId, jobId).catch((error) => console.error('[Computer] Could not drop an ended job’s browser:', error instanceof Error ? error.message : 'unknown'));
+  if (outside && job.pauses > 0) await dropProfile(job.botId, jobId, now).catch((error) => console.error('[Computer] Could not drop an ended job’s browser:', error instanceof Error ? error.message : 'unknown'));
 
   // A job that finished well hands over the files it made while its machine is still awake for it (the file card). The time that takes is the machine held for the
   // job, so it is counted with the job's; one that cannot be handed over is only named in the message. It never holds up the end of the job for long: it is limited by time.
@@ -2224,7 +2223,7 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   await keepWorkingMachinesAwake(now, batch).catch((error) => console.error('[Computer] Keep-awake failed:', error instanceof Error ? error.message : 'unknown'));
   // What a job ran whose write to the books failed is written again (same event id, so never twice), and the same for a pause's time
   await recordMissingComputerTime(now, batch);
-  await bookMissingPauses(now, batch);
+  await (await import('@/lib/computer-job-controls')).bookMissingPauses(now, batch);
   // One try per Brick: the oldest job in line has the turn. Bricks tried and blocked are skipped by the next page, so a long run of
   // blocked Bricks never keeps the ones behind them from their turn.
   const tried: string[] = [];
@@ -3228,7 +3227,8 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
   for (const job of active) await endJob(job.id, 'stopped', 'deleted', now, false, undefined, false).catch((error) => console.error('[Computer] Could not end a job of a Brick being purged:', error instanceof Error ? error.message : 'unknown'));
   if (active.length > 0 && (await prisma.computerJob.count({ where: { botId, status: { in: ['queued', 'running', 'waiting'] } } })) > 0) return false;
   await recordMissingComputerTime(now, SWEEP_BATCH, botId);
-  await bookMissingPauses(now, SWEEP_BATCH, botId);
+  // Read when called: lib/computer-job-controls builds on this module
+  await (await import('@/lib/computer-job-controls')).bookMissingPauses(now, SWEEP_BATCH, botId);
   // A pause whose time is not written yet goes with the jobs: the Brick waits for it like for a job's own time
   if ((await prisma.computerJobPause.count({ where: { bookedAt: null, job: { botId } } })) > 0) return false;
   const unwritten = await prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
