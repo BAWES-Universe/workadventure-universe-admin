@@ -74,3 +74,11 @@ ALTER TABLE "computer_job_steps" ADD CONSTRAINT "computer_job_steps_job_id_fkey"
 -- AddForeignKey
 ALTER TABLE "computer_job_pauses" ADD CONSTRAINT "computer_job_pauses_job_id_fkey" FOREIGN KEY ("job_id") REFERENCES "computer_jobs"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
+
+-- A paused job is a job in line with queued_for 'paused': the check from 20261112120000_brick_computer is widened to let it (a server of before this never writes it).
+ALTER TABLE "computer_jobs" DROP CONSTRAINT "computer_jobs_queued_for_check";
+ALTER TABLE "computer_jobs" ADD CONSTRAINT "computer_jobs_queued_for_check" CHECK ("queued_for" IS NULL OR "queued_for" IN ('turn', 'allowance', 'busy', 'pool', 'paused'));
+ALTER TABLE "computer_jobs" ADD CONSTRAINT "computer_jobs_paused_why_check" CHECK ("paused_why" IS NULL OR "paused_why" IN ('person', 'allowance', 'rule'));
+ALTER TABLE "computer_jobs" ADD CONSTRAINT "computer_jobs_billed_check" CHECK ("seconds_billed" >= 0 AND "pauses" >= 0 AND "note_seq" >= 0);
+ALTER TABLE "computer_job_notes" ADD CONSTRAINT "computer_job_notes_state_check" CHECK ("state" IN ('pending', 'sent') AND "seq" >= 1);
+ALTER TABLE "computer_job_pauses" ADD CONSTRAINT "computer_job_pauses_check" CHECK ("why" IN ('person', 'allowance', 'rule') AND "n" >= 1 AND "seconds" >= 0);
