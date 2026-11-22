@@ -768,6 +768,33 @@ run('what a computer may ask of Orbit, in a real database', () => {
         expect(await jobOf(done.jobId)).toMatchObject({ status: 'done' });
       });
 
+      it.each([
+        ['agent'],
+        ['ours'],
+      ] as const)('CodeRabbit C (Opus): a cutoff that commits between a FAILED finish’s look and its write wins on the judged branch too (runner hint %s): the job ends as stopped/pool with Orbit’s own orbit_fault decision, never charged and never judged by the runner’s word', async (cause) => {
+        const { jobId } = await running(`jud-${cause}`);
+        // The finish found nothing decided; the cutoff commits (its record and the end of the keys) while the finish waits for the cutoff's lock in the transaction that decides and writes its ending
+        const cutoff = holdCutoffLock(jobId, async (tx) => {
+          await revokeJobTokens(jobId, NOW, undefined, tx);
+          await recordPoolCutoff(tx, jobId, NOW);
+        });
+        let finishing: Promise<unknown> = Promise.resolve();
+        try {
+          await cutoff.ready;
+          finishing = finishJob(jobId, 'failed', NOW, 'Three turns failed', cause);
+          expect(await waitingOnCutoffLock(jobId)).toBe(true);
+          cutoff.release();
+          await cutoff.done;
+          await finishing;
+        } finally {
+          cutoff.release();
+          await Promise.allSettled([cutoff.done, finishing]);
+        }
+        expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool', runnerFault: false, endNote: POOL_BUSY_WORDS });
+        expect(await prisma.computerGiveBackDecision.findUnique({ where: { jobId } })).toMatchObject({ state: 'given', basis: 'orbit_fault', reason: 'pool_cut_off' });
+        expect((await timeOf(jobId)).personKey).toBe('unknown');
+      });
+
       it('CodeRabbit C: a cutoff that was waiting for its lock while the job ended decides nothing for it: the ending that came first stands, and no decision is kept for a job that is over', async () => {
         const { jobId } = await running('tom');
         const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
