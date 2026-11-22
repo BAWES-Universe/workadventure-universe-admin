@@ -552,45 +552,108 @@ describe('the bot server’s calls', () => {
     lib.getJob.mockResolvedValue(job as never);
     lib.renewJob.mockResolvedValue({ ok: false, reason: 'stale', run: 'superseded' });
     expect(await (await jobAction(asBot('/x', { body: { action: 'renew', run: 'mi8x3k2a1b2c3d4e' } }), jobParams)).json()).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
-    expect(lib.renewJob).toHaveBeenLastCalledWith(JOB, expect.any(Date), 'mi8x3k2a1b2c3d4e');
+    expect(lib.renewJob).toHaveBeenLastCalledWith(JOB, expect.any(Date), { epoch: undefined });
     await jobAction(asBot('/x', { body: { action: 'renew' } }), jobParams);
-    expect(lib.renewJob).toHaveBeenLastCalledWith(JOB, expect.any(Date), undefined);
+    expect(lib.renewJob).toHaveBeenLastCalledWith(JOB, expect.any(Date), { epoch: undefined });
     for (const run of ['x'.repeat(41), '', 'has space', 5]) expect((await jobAction(asBot('/x', { body: { action: 'renew', run } }), jobParams)).status).toBe(400);
     // A finish names its run with no turns at all, and a stale one is answered HTTP 200 with the job
     lib.finishJobUnder.mockResolvedValue({ job: { id: JOB }, stale: true, superseded: true } as never);
     const late = await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done', run: 'r1' } }), jobParams);
     expect(late.status).toBe(200);
     expect(await late.json()).toMatchObject({ ok: false, reason: 'stale', run: 'superseded' });
-    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'done', expect.any(Date), undefined, undefined, undefined, 'r1');
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'done', expect.any(Date), undefined, undefined, undefined, 'r1', undefined);
+  });
+
+  it('claims a job by the epoch it last saw (GPT round 5): an owner gets its epoch, a worker that saw an older one is told `superseded` with the epoch to claim again from; a kept intent, a cutoff or an over job take no ownership; a claim names a number', async () => {
+    lib.getJob.mockResolvedValue({ ...job, finishPending: null } as never);
+    lib.claimJob.mockResolvedValueOnce({ ok: true, epoch: 3 } as never);
+    const won = await jobAction(asBot('/x', { body: { action: 'claim', run: 'rB', seen: 2 } }), jobParams);
+    expect(won.status).toBe(200);
+    expect(await won.json()).toEqual({ ok: true, epoch: 3, job: expect.objectContaining({ id: JOB }) });
+    expect(lib.claimJob).toHaveBeenLastCalledWith(JOB, { run: 'rB', seen: 2 });
+    lib.claimJob.mockResolvedValueOnce({ ok: false, reason: 'superseded', ownerEpoch: 4 } as never);
+    const lost = await jobAction(asBot('/x', { body: { action: 'claim', seen: 2 } }), jobParams);
+    expect(lost.status).toBe(200);
+    expect(await lost.json()).toEqual({ ok: false, reason: 'stale', run: 'superseded', ownerEpoch: 4, job: expect.objectContaining({ id: JOB }) });
+    expect(lib.claimJob).toHaveBeenLastCalledWith(JOB, { run: null, seen: 2 });
+    for (const reason of ['cutoff', 'over', 'not_running']) {
+      lib.claimJob.mockResolvedValueOnce({ ok: false, reason } as never);
+      const refused = await jobAction(asBot('/x', { body: { action: 'claim', seen: 0 } }), jobParams);
+      expect(refused.status).toBe(200);
+      expect(await refused.json()).toMatchObject({ ok: false, reason, job: expect.objectContaining({ id: JOB }) });
+    }
+    const pending = { outcome: 'done', run: 'r1', at: '2026-11-22T10:00:00.000Z' };
+    lib.getJob.mockResolvedValue({ ...job, finishPending: pending } as never);
+    lib.claimJob.mockResolvedValueOnce({ ok: false, reason: 'finish_pending' } as never);
+    expect(await (await jobAction(asBot('/x', { body: { action: 'claim', seen: 0 } }), jobParams)).json()).toMatchObject({ ok: false, reason: 'finish_pending', finishPending: pending });
+    lib.claimJob.mockResolvedValueOnce({ ok: false, reason: 'not_found' } as never);
+    expect((await jobAction(asBot('/x', { body: { action: 'claim', seen: 0 } }), jobParams)).status).toBe(404);
+    const calls = lib.claimJob.mock.calls.length;
+    for (const seen of [-1, 1.5, '2', null, undefined]) expect((await jobAction(asBot('/x', { body: { action: 'claim', seen } }), jobParams)).status).toBe(400);
+    expect(lib.claimJob.mock.calls.length).toBe(calls);
+  });
+
+  it('names its epoch on every request after the claim, and answers an old worker the game’s `superseded` shape: renew, progress, hand-over, finish and finish-intent', async () => {
+    lib.getJob.mockResolvedValue(job as never);
+    lib.renewJob.mockResolvedValue({ ok: false, reason: 'stale', run: 'superseded' });
+    await jobAction(asBot('/x', { body: { action: 'renew', epoch: 3 } }), jobParams);
+    expect(lib.renewJob).toHaveBeenLastCalledWith(JOB, expect.any(Date), { epoch: 3 });
+    lib.reportProgressAs.mockResolvedValue({ job: { id: JOB }, applied: false, superseded: true } as never);
+    expect(await (await jobAction(asBot('/x', { body: { action: 'progress', stepDone: 1, stepTotal: 2, label: 'x', epoch: 2 } }), jobParams)).json()).toEqual({ ok: false, reason: 'stale', run: 'superseded', job: { id: JOB } });
+    expect(lib.reportProgressAs).toHaveBeenLastCalledWith(JOB, { stepDone: 1, stepTotal: 2, label: 'x' }, { epoch: 2 });
+    lib.reportProgressAs.mockResolvedValue({ job: { id: JOB }, applied: true, superseded: false } as never);
+    expect(await (await jobAction(asBot('/x', { body: { action: 'progress', stepDone: 1, stepTotal: 2, label: 'x', epoch: 3 } }), jobParams)).json()).toEqual({ job: { id: JOB } });
+    lib.requestHandoverAs.mockResolvedValueOnce({ job: { id: JOB }, refused: 'superseded' } as never);
+    expect(await (await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'signin', epoch: 2, generation: 0, responseId: 'resp-1' } }), jobParams)).json()).toEqual({ ok: false, reason: 'stale', run: 'superseded', job: { id: JOB } });
+    expect(lib.requestHandoverAs).toHaveBeenLastCalledWith(JOB, 'signin', expect.any(Date), undefined, { epoch: 2, generation: 0, responseId: 'resp-1' });
+    for (const refused of ['stale', 'not_current'] as const) {
+      lib.requestHandoverAs.mockResolvedValueOnce({ job: { id: JOB }, refused } as never);
+      expect(await (await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'signin', epoch: 3 } }), jobParams)).json()).toEqual({ ok: false, reason: refused, job: { id: JOB } });
+    }
+    lib.requestHandoverAs.mockResolvedValueOnce({ job: { id: JOB }, refused: null } as never);
+    expect(await (await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'signin', epoch: 3 } }), jobParams)).json()).toEqual({ job: { id: JOB } });
+    lib.finishJobUnder.mockResolvedValue({ job: { id: JOB }, stale: false } as never);
+    await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done', run: 'r1', epoch: 3 } }), jobParams);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'done', expect.any(Date), undefined, undefined, undefined, 'r1', 3);
+    lib.recordFinishIntent.mockResolvedValue({ ok: false, reason: 'stale', run: 'superseded' } as never);
+    await jobAction(asBot('/x', { body: { action: 'finish-intent', outcome: 'done', epoch: 3 } }), jobParams);
+    expect(lib.recordFinishIntent).toHaveBeenLastCalledWith(JOB, expect.objectContaining({ epoch: 3 }));
+    for (const epoch of [-1, 1.5, '3']) expect((await jobAction(asBot('/x', { body: { action: 'renew', epoch } }), jobParams)).status).toBe(400);
+  });
+
+  it('shows the job’s owner epoch and run when the bot server reads it (the epoch a runner claims from)', async () => {
+    lib.getJob.mockResolvedValue({ ...job, ownerEpoch: 5, ownerRun: 'rB' } as never);
+    const read = await getJobRoute(asBot('/x', { method: 'GET' }), jobParams);
+    expect(await read.json()).toMatchObject({ job: { id: JOB, ownerEpoch: 5, ownerRun: 'rB' } });
   });
 
   it('takes what a running job says: steps, renewing, hand-over, finishing, and outside effects before they are tried', async () => {
     lib.getJob.mockResolvedValue(job as never);
-    lib.reportProgress.mockResolvedValue({ id: JOB } as never);
+    lib.reportProgressAs.mockResolvedValue({ job: { id: JOB }, applied: true, superseded: false } as never);
     lib.renewJob.mockResolvedValue({ ok: false, reason: 'allowance' });
-    lib.requestHandover.mockResolvedValue({ id: JOB } as never);
+    lib.requestHandoverAs.mockResolvedValue({ job: { id: JOB }, refused: null } as never);
     lib.finishJobUnder.mockResolvedValue({ job: { id: JOB }, stale: false } as never);
     lib.planEffect.mockResolvedValue({ ok: false, reason: 'look_up', evidence: 'draft pull request' });
     lib.settleEffect.mockResolvedValue(true);
     await jobAction(asBot('/x', { body: { action: 'progress', stepDone: 2, stepTotal: 5, label: 'Your visa form' } }), jobParams);
-    expect(lib.reportProgress).toHaveBeenCalledWith(JOB, { stepDone: 2, stepTotal: 5, label: 'Your visa form' });
+    expect(lib.reportProgressAs).toHaveBeenCalledWith(JOB, { stepDone: 2, stepTotal: 5, label: 'Your visa form' }, { epoch: undefined });
     expect(await (await jobAction(asBot('/x', { body: { action: 'renew' } }), jobParams)).json()).toEqual({ ok: false, reason: 'allowance' });
     await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'details', ready: { what: 'Your details', where: 'visa-portal.example' } } }), jobParams);
-    expect(lib.requestHandover).toHaveBeenCalledWith(JOB, 'details', expect.any(Date), { what: 'Your details', where: 'visa-portal.example' });
+    expect(lib.requestHandoverAs).toHaveBeenCalledWith(JOB, 'details', expect.any(Date), { what: 'Your details', where: 'visa-portal.example' }, { epoch: undefined, generation: undefined, responseId: undefined });
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done' } }), jobParams);
-    expect(lib.finishJobUnder).toHaveBeenCalledWith(JOB, undefined, 'done', expect.any(Date), undefined, undefined, undefined, undefined);
+    expect(lib.finishJobUnder).toHaveBeenCalledWith(JOB, undefined, 'done', expect.any(Date), undefined, undefined, undefined, undefined, undefined);
     // A failure carries the computer's own sentence about why, kept cleaned for the message that tells the person
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', why: 'The site kept showing an error' } }), jobParams);
-    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), 'The site kept showing an error', undefined, undefined, undefined);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), 'The site kept showing an error', undefined, undefined, undefined, undefined);
     // Who a failure is down to travels with it (only `ours` is given back); a word it does not know is refused
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours' } }), jobParams);
-    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', undefined, undefined);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', undefined, undefined, undefined);
     // ...with the turns the runner judged failed: Orbit decides from the relay's rows for them (the cause is only a hint)
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', turns: [3, 4, 5] } }), jobParams);
-    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', [3, 4, 5], undefined);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', [3, 4, 5], undefined, undefined);
     // ...and the run those turns were numbered in (a restart makes a new run that numbers turns again), up to 40 characters
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', turns: [1, 2, 3], run: 'mi8x3k2a1b2c3d4e' } }), jobParams);
-    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', [1, 2, 3], 'mi8x3k2a1b2c3d4e');
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, undefined, 'failed', expect.any(Date), undefined, 'ours', [1, 2, 3], 'mi8x3k2a1b2c3d4e', undefined);
     for (const run of ['x'.repeat(41), '', 'has space', 5]) {
       expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'ours', turns: [1], run } }), jobParams)).status).toBe(400);
     }
@@ -606,7 +669,7 @@ describe('the bot server’s calls', () => {
     const stale = await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done', generation: 1 } }), jobParams);
     expect(stale.status).toBe(200);
     expect(await stale.json()).toEqual({ ok: false, reason: 'stale', job: { id: JOB } });
-    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, 1, 'done', expect.any(Date), undefined, undefined, undefined, undefined);
+    expect(lib.finishJobUnder).toHaveBeenLastCalledWith(JOB, 1, 'done', expect.any(Date), undefined, undefined, undefined, undefined, undefined);
     expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done', generation: -1 } }), jobParams)).status).toBe(400);
   });
 
@@ -617,7 +680,7 @@ describe('the bot server’s calls', () => {
     const kept = await jobAction(asBot('/x', { body: { action: 'finish-intent', outcome: 'failed', cause: 'ours', turns: [3], run: 'r1', why: 'It stopped', generation: 2 } }), jobParams);
     expect(kept.status).toBe(200);
     expect(await kept.json()).toEqual({ ok: true, already: false, finishPending: pending });
-    expect(lib.recordFinishIntent).toHaveBeenLastCalledWith(JOB, { outcome: 'failed', cause: 'ours', why: 'It stopped', turns: [3], run: 'r1', generation: 2 });
+    expect(lib.recordFinishIntent).toHaveBeenLastCalledWith(JOB, { outcome: 'failed', cause: 'ours', why: 'It stopped', turns: [3], run: 'r1', generation: 2, basis: undefined, epoch: undefined });
     // A stop that rests on the pool alone says so (`basis`): that is what lets Orbit answer it stale once a call was admitted for its turn
     lib.recordFinishIntent.mockResolvedValueOnce({ ok: false, reason: 'stale' } as never);
     await jobAction(asBot('/x', { body: { action: 'finish-intent', outcome: 'failed', cause: 'ours', turns: [3], run: 'r1', basis: 'pool' } }), jobParams);

@@ -31,6 +31,19 @@ import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { authorizeModelCall, callRoomKey, cutoffEndsFinished, cutoffLockKey, endStuckCutoffs, forgetMeterNotSetAlert, giveBackModelCalls, releaseModelCall, settleModelCall } from '@/lib/computer-calls';
 import { POOL_CUTOFF_CALL, admitLockKey, hasOwnKeyCall, hasPoolRefusals, readFaultRows, recordCallAdmission, recordFaults, recordOwnKeyCall, recordPoolCutoff, recordPoolRefusal } from '@/lib/computer-faults';
 
+/** Holds (or fails) the slow end of a job at its first look at the job's whole row (the first read `endJob` makes: no `select`, no `include`), before it writes anything: the end of a job that is slow, or whose database went away. Put back with `mockRestore`. */
+const atTheEnd = (handler: (read: () => Promise<unknown>) => Promise<unknown>) => {
+  const real = prisma.computerJob.findUnique.bind(prisma.computerJob) as (args: unknown) => Promise<unknown>;
+  let used = false;
+  return jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: { select?: unknown; include?: unknown }) => {
+    if (!used && !args.select && !args.include) {
+      used = true;
+      return handler(() => real(args));
+    }
+    return real(args);
+  }) as never);
+};
+
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
 /** A refusal that decides a cutoff is ANSWERED first and the job is ended after (Sentry, lib/computer-calls): this asks, then waits for that end, so a test reads the job as it is once everything has run. */
@@ -542,8 +555,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
         const gate = new Promise<void>((resolve) => {
           open = resolve;
         });
-        const real = prisma.computerJob.updateMany.bind(prisma.computerJob);
-        const hold = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementationOnce(((args: never) => gate.then(() => real(args))) as never);
+        const hold = atTheEnd((read) => gate.then(read));
         try {
           // The second refusal decides the cutoff, and the end of the job waits at its first write: the answer must still come
           const answer = await Promise.race([authorizeModelCall({ token, callId: 'c2', estimateMicros: 1_000, payer: 'universe' }, NOW), new Promise<string>((resolve) => setTimeout(() => resolve('waited for the end of the job'), 4_000))]);
@@ -852,7 +864,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
         await setUp({ poolCeilingMicros: 60_000 });
         expect(await authorizeModelCall({ token, callId: 'c1', estimateMicros: 1_000, payer: 'universe' }, NOW)).toMatchObject({ ok: false, reason: 'pool', full: true });
         (Sentry.captureMessage as jest.Mock).mockClear();
-        const hold = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementationOnce((() => Promise.reject(new Error('the database went away'))) as never);
+        const hold = atTheEnd(() => Promise.reject(new Error('the database went away')));
         try {
           expect(await authorizeModelCall({ token, callId: 'c2', estimateMicros: 1_000, payer: 'universe' }, NOW)).toEqual({ ok: false, reason: 'pool', full: true });
           await cutoffEndsFinished();
@@ -878,8 +890,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
         const gate = new Promise<void>((resolve) => {
           open = resolve;
         });
-        const real = prisma.computerJob.updateMany.bind(prisma.computerJob);
-        const hold = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementationOnce(((args: never) => gate.then(() => real(args))) as never);
+        const hold = atTheEnd((read) => gate.then(read));
         let cutoff: Promise<unknown> = Promise.resolve();
         try {
           cutoff = on('universe-ai/slow', 'c2');
@@ -973,7 +984,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
           expect(await call(token, 'c1', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
           // The second refusal decides the cutoff (the keys end), and the end of the job fails once, at its first write
           (Sentry.captureMessage as jest.Mock).mockClear();
-          const hold = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementationOnce((() => Promise.reject(new Error('the database went away'))) as never);
+          const hold = atTheEnd(() => Promise.reject(new Error('the database went away')));
           expect(await call(token, 'c2', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
           hold.mockRestore();
           expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
@@ -1531,7 +1542,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
           const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
           await setUp({ poolCeilingMicros: 60_000 });
           expect(await call(token, 'c1', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
-          const hold = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementationOnce((() => Promise.reject(new Error('the database went away'))) as never);
+          const hold = atTheEnd(() => Promise.reject(new Error('the database went away')));
           try {
             expect(await call(token, 'c2', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
           } finally {

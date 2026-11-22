@@ -3587,6 +3587,12 @@ model ComputerJob {
   visitsState       String? @map("visits_state") @db.VarChar(8)
   /// True when the job ended as ours on the computer runner's own word and was given back inside the bound (lib/computer-giveback): only those count towards a person's monthly bound.
   runnerFault       Boolean @default(false) @map("runner_fault")
+  /// Which worker (runner) owns the job: moved up by each CLAIM (a runner that takes the job up says the epoch it last saw, and only the one that saw the current one wins). 0 = never claimed (a job from before claims, or one whose worker is an older version): such a worker's requests are accepted while this is 0 and by none after it moves. Every write that extends, ends, hands over, cancels, starts a turn or mints a key for a job is conditional on it.
+  ownerEpoch        Int     @default(0) @map("owner_epoch")
+  /// The run of the owning worker, for logs and for the numbering of its turns only; nothing decides by it.
+  ownerRun          String? @map("owner_run") @db.VarChar(40)
+  /// Moves up on every claim, every renewal, every change of control and every start or end of a wait: a sweep that picked a job from a list compares it again under the job's lock, so a job that moved since is never ended on the strength of an older look.
+  leaseVersion      Int     @default(0) @map("lease_version")
 
   // Brick tells the person how a job went, in their chat with it (the report back). Each ending is said once: `endToldAt` is empty until it was
   // said, and set at once for the endings that are never said (the person's own Stop, turned off, deleted). Each time the job waits for its person
@@ -4016,11 +4022,31 @@ model ComputerJobToken {
   expiresAt  DateTime  @map("expires_at")
   revokedAt  DateTime? @map("revoked_at")
   createdAt  DateTime  @default(now()) @map("created_at")
+  /// The ownership epoch of the job this key was made under (null: made for a job nobody had claimed, i.e. epoch 0). A call is admitted only when it equals the job's own now.
+  ownerEpoch Int?      @map("owner_epoch")
 
   job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
   @@index([jobId, revokedAt])
   @@map("computer_job_tokens")
+}
+
+/// One start the person asked for, kept BEFORE its job row exists (GPT round 5, S2): a delayed writer whose attempt was settled (made, expired or superseded) can never make a second job, and a reworded retry
+/// under another key finds the attempt that is still open and is answered `earlier`. open: being made (its beat is fresh); made: it made `jobId`; expired: nothing was made and its beat ran out (or it was refused);
+/// superseded: a newer attempt of the same person and Brick settled the question while it was open and stale.
+model ComputerStartAttempt {
+  id        String   @id @default(uuid())
+  botId     String   @map("bot_id")
+  personId  String   @map("person_id")
+  startKey  String   @map("start_key") @db.VarChar(64)
+  state     String   @default("open") @db.VarChar(10)
+  jobId     String?  @map("job_id")
+  beatAt    DateTime @default(now()) @map("beat_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([botId, personId, startKey])
+  @@index([botId, personId, state])
+  @@map("computer_start_attempts")
 }
 
 // A code job for an App (the bounded "Workbench"): a short Python script run in its OWN temporary workspace at the provider, never in

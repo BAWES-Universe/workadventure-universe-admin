@@ -1,0 +1,932 @@
+/**
+ * ONE owner per computer job (GPT round 5, E3-E6 and S2): every write that extends, ends, cancels, hands over or sweeps a job is decided in the write that lands it, for the worker that still owns the job, and a start exists
+ * durably before its job. Each case is written with its CONTROL (the genuine one still works). Against a real database. Runs only with ROLES_DB_TEST=yes and a DATABASE_URL to a migrated THROWAWAY database:
+ *
+ *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/computer-ownership-db.test.ts --runInBand
+ */
+import { randomUUID } from 'node:crypto';
+
+jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
+jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
+// The two seams a test needs between a read and the write that follows it are module functions: wrapped here (the real one by default) so a test can hold one for a moment
+jest.mock('@/lib/meter-allowance', () => {
+  const actual = jest.requireActual('@/lib/meter-allowance');
+  return { ...actual, reserveRoom: jest.fn((...args: unknown[]) => actual.reserveRoom(...args)) };
+});
+jest.mock('@/lib/computer-calls', () => {
+  const actual = jest.requireActual('@/lib/computer-calls');
+  return { ...actual, endIfCutoffDecided: jest.fn((...args: unknown[]) => actual.endIfCutoffDecided(...args)) };
+});
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn(), getClient: jest.fn(() => undefined), flush: jest.fn(async () => true) }));
+
+import { prisma } from '@/lib/db';
+import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
+import { createBrick } from '@/lib/brick-create';
+import { saveMeterSettings } from '@/lib/meter';
+import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
+import { FINISH_INTENT_GRACE_MS, ackStart, claimJob, completeFinishIntents, finishJobUnder, giveComputer, recordFinishIntent, renewJob, reportProgressAs, requestHandoverAs, startJob, startedJobFor, sweepComputers } from '@/lib/computer';
+import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
+import { Agent37Error } from '@/lib/agent37/client';
+import * as calls from '@/lib/computer-calls';
+import { mintJobToken, verifyJobToken } from '@/lib/computer-token';
+import { authorizeModelCall, cutoffEndsFinished, cutoffLockKey, callRoomKey } from '@/lib/computer-calls';
+import { hasFinishIntent, hasPoolCutoff, recordPoolCutoff } from '@/lib/computer-faults';
+import * as meter from '@/lib/meter-allowance';
+
+const actualMeter = jest.requireActual<typeof meter>('@/lib/meter-allowance');
+const actualCalls = jest.requireActual<typeof calls>('@/lib/computer-calls');
+const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
+
+const tag = randomUUID().slice(0, 8);
+const NOW = new Date('2026-11-15T12:00:00Z');
+const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
+const people: string[] = [];
+let made = 0;
+const env = process.env.COMPUTER_PROVIDER;
+const RELAY = 'https://bot-server.example.test';
+
+async function person(name: string) {
+  const unique = `${name}-${tag}-${++made}`;
+  const user = await prisma.user.create({ data: { uuid: unique, email: `${unique}@example.test`, name } });
+  people.push(user.id);
+  const brick = await createBrick({ ownerId: user.id, name: `${name}'s Brick` });
+  return { id: user.id, brickId: brick.id };
+}
+
+const setUp = (over: Record<string, number | null> = {}) =>
+  saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10, ...over }, 'admin');
+
+const wipe = async () => {
+  await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
+  await prisma.meterEvent.deleteMany({});
+  await prisma.meterReservation.deleteMany({});
+  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
+};
+
+/** A person with a Brick that has a job running on the pretend machine. */
+async function running(name = 'sara') {
+  const sara = await person(name);
+  await giveComputer(sara.brickId, sara.id);
+  const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, NOW);
+  if (!started.ok) throw new Error('the job did not start');
+  return { sara, jobId: started.job.id };
+}
+
+const jobOf = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
+const decisionOf = (jobId: string) => prisma.computerGiveBackDecision.findUnique({ where: { jobId } });
+const roomOf = async (jobId: string) => (await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: (await jobOf(jobId)).reservationKey! } })).amountMicros;
+const heldCalls = (jobId: string) => prisma.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') }, state: 'held' } });
+const liveKeys = (jobId: string) => prisma.computerJobToken.count({ where: { jobId, revokedAt: null } });
+
+/** A runner takes up the job as the game does: GET for the epoch it saw, then claim with it. Answers the epoch it owns by. */
+const claimed = async (jobId: string, runName: string, at: Date = NOW): Promise<number> => {
+  const won = await claimJob(jobId, { run: runName, seen: (await jobOf(jobId)).ownerEpoch }, at);
+  if (!won.ok) throw new Error(`the claim was refused: ${won.reason}`);
+  return won.epoch;
+};
+const keyFor = async (jobId: string, epoch: number, at: Date = NOW) => ((await mintJobToken(jobId, 'model', at, { generation: 0 }, { epoch })) as { ok: true; token: string }).token;
+const ask = (token: string, callId: string, over: Partial<Parameters<typeof authorizeModelCall>[0]> = {}, at: Date = NOW) => authorizeModelCall({ token, callId, estimateMicros: 5_000, payer: 'universe', turn: 1, run: 'rA', ...over }, at);
+
+run('one owner per computer job: every write is decided in the write that lands it (GPT round 5), in a real database', () => {
+  beforeAll(() => {
+    process.env.COMPUTER_PROVIDER = 'fake';
+  });
+  let fake: FakeComputerProvider;
+  beforeEach(async () => {
+    await wipe();
+    await seedGiveBackLimits();
+    await prisma.computerStartAttempt.deleteMany({ where: { personId: { in: people } } });
+    await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
+    fake = new FakeComputerProvider();
+    setComputerProviderForTests(fake);
+    await setUp();
+  });
+  afterAll(async () => {
+    await wipe();
+    await clearGiveBackLimits();
+    setComputerProviderForTests(null);
+    process.env.COMPUTER_PROVIDER = env;
+    await prisma.computerStartAttempt.deleteMany({ where: { personId: { in: people } } });
+    await prisma.user.deleteMany({ where: { id: { in: people } } });
+    await prisma.$disconnect();
+  });
+
+  const waiters = async (key: string): Promise<number> => (await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(${key}, 0)`)[0].n;
+  const waitForWaiters = async (key: string, n: number): Promise<boolean> => {
+    for (let tries = 0; tries < 250; tries += 1) {
+      if ((await waiters(key)) >= n) return true;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return false;
+  };
+  /** The job's cutoff lock held by a transaction, as another request would hold it while it decides. */
+  const holdCutoff = (jobId: string, work: (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]) => Promise<unknown>) => {
+    let release: () => void = () => undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked: () => void = () => undefined;
+    const lockTaken = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const done = prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
+        locked();
+        await released;
+        await work(tx);
+      },
+      { timeout: 15_000, maxWait: 15_000 },
+    );
+    const ready = Promise.race([
+      lockTaken,
+      done.then(() => {
+        throw new Error('the fixture transaction ended without holding the lock');
+      }),
+    ]);
+    return { ready, release, done };
+  };
+  /** B claims while A's request waits behind the lock: the claim queues FIRST, then A's request, so B owns the job by the time A's request is decided (A's request was in flight when B claimed). */
+  const claimBefore = async <T>(jobId: string, fromEpoch: number, request: () => Promise<T>): Promise<{ answer: T; epoch: number }> => {
+    const holder = holdCutoff(jobId, async () => undefined);
+    let claim: ReturnType<typeof claimJob> = Promise.resolve({ ok: false, reason: 'not_found' } as never);
+    let asked: Promise<T> = Promise.resolve(undefined as T);
+    try {
+      await holder.ready;
+      claim = claimJob(jobId, { run: 'rB', seen: fromEpoch }, minutes(1));
+      expect(await waitForWaiters(cutoffLockKey(jobId), 1)).toBe(true);
+      asked = request();
+      expect(await waitForWaiters(cutoffLockKey(jobId), 2)).toBe(true);
+      holder.release();
+      await holder.done;
+      const won = await claim;
+      if (!won.ok) throw new Error(`B's claim was refused: ${won.reason}`);
+      return { answer: await asked, epoch: won.epoch };
+    } finally {
+      holder.release();
+      await Promise.allSettled([holder.done, claim, asked]);
+    }
+  };
+
+  describe('E3: a renewal is decided in one transaction for the worker that still owns the job', () => {
+    it('A’s renewal that was in flight when B claimed and admitted 5,000 adds ZERO room and writes no ending, even when the allowance is used up and even when the pool declines it; B’s key, room and job are intact', async () => {
+      for (const limit of ['none', 'allowance', 'pool'] as const) {
+        const { jobId } = await running(`s-e3-${limit}`);
+        const ea = await claimed(jobId, 'rA');
+        // The state of the world when A's request reaches Orbit: nothing yet says A is not the owner
+        const before = await roomOf(jobId);
+        if (limit === 'allowance') await setUp({ memberAllowanceMicros: 1_000 });
+        if (limit === 'pool') await setUp({ poolCeilingMicros: 1 });
+        const { answer: renewal, epoch: eb } = await claimBefore(jobId, ea, () => renewJob(jobId, minutes(2), { epoch: ea }));
+        await setUp();
+        const b = await keyFor(jobId, eb, minutes(2));
+        expect(await ask(b, 'c2', { run: 'rB' }, minutes(2))).toMatchObject({ ok: true, reservedMicros: 5_000 });
+        expect(renewal).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+        expect(await roomOf(jobId)).toEqual(before);
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null, endedAt: null });
+        expect((await verifyJobToken(b, 'model', minutes(3))).ok).toBe(true);
+        expect(await heldCalls(jobId)).toBe(1);
+      }
+    });
+
+    it('CONTROL: the OWNER’s renewal at a real limit still stops the job (allowance, then pool), ending it as the limit says', async () => {
+      const own = await running('s-e3-ctl-a');
+      const ea = await claimed(own.jobId, 'rA');
+      await setUp({ memberAllowanceMicros: 1_000 });
+      expect(await renewJob(own.jobId, minutes(2), { epoch: ea })).toEqual({ ok: false, reason: 'allowance' });
+      expect(await jobOf(own.jobId)).toMatchObject({ status: 'stopped', endedBy: 'allowance' });
+      await setUp();
+      const pool = await running('s-e3-ctl-p');
+      const ep = await claimed(pool.jobId, 'rA');
+      await setUp({ poolCeilingMicros: 1 });
+      expect(await renewJob(pool.jobId, minutes(2), { epoch: ep })).toEqual({ ok: false, reason: 'pool' });
+      expect(await jobOf(pool.jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
+    });
+
+    it('a rule the person said: A’s delayed renewal never ends B’s job as `rule`; the owner’s renewal still does (words kept in the same write)', async () => {
+      const { sara, jobId } = await running('s-e3-rule');
+      const ea = await claimed(jobId, 'rA');
+      await prisma.spendRule.create({ data: { ruleKey: `r-${randomUUID()}`, ownerPersonId: sara.id, scope: 'bot', botId: sara.brickId, period: 'day', capMicros: BigInt(10), words: 'Never more than ten millionths a day', createdById: sara.id } });
+      const { answer } = await claimBefore(jobId, ea, () => renewJob(jobId, minutes(2), { epoch: ea }));
+      expect(answer).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null, endNote: null });
+      const eb = (await jobOf(jobId)).ownerEpoch;
+      expect(await renewJob(jobId, minutes(3), { epoch: eb })).toMatchObject({ ok: false, reason: 'rule', words: 'Never more than ten millionths a day' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'rule', endNote: expect.stringContaining('ten millionths') });
+    });
+  });
+
+  describe('E3: a refused CALL ends the job only as the owner it was made for', () => {
+    /** The call of A passes its key, is refused for the allowance (the pool's room is fine), and B claims between the refusal and the ending the refusal asks for. */
+    const refusedAfterClaim = async (jobId: string, token: string, ea: number, over: Partial<Parameters<typeof authorizeModelCall>[0]>) => {
+      const real = actualMeter.reserveRoom;
+      const spy = jest.mocked(meter.reserveRoom).mockImplementationOnce((async (...args: Parameters<typeof real>) => {
+        const room = await real(...args);
+        const won = await claimJob(jobId, { run: 'rB', seen: ea }, minutes(1));
+        if (!won.ok) throw new Error(`B's claim was refused: ${won.reason}`);
+        return room;
+      }) as never);
+      try {
+        return await ask(token, 'c-big', over);
+      } finally {
+        spy.mockClear();
+      }
+    };
+
+    it('A’s delayed expensive call is refused for the allowance after B claimed: only that call is refused, B’s job runs on (key, room and state intact)', async () => {
+      const { jobId } = await running('s-e3-call-allow');
+      const ea = await claimed(jobId, 'rA');
+      const a = await keyFor(jobId, ea);
+      const before = await roomOf(jobId);
+      expect(await refusedAfterClaim(jobId, a, ea, { estimateMicros: 5_000_000 })).toEqual({ ok: false, reason: 'allowance' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null, ownerEpoch: ea + 1 });
+      expect(await roomOf(jobId)).toEqual(before);
+      // B runs on: its own call is admitted
+      const b = await keyFor(jobId, ea + 1, minutes(2));
+      expect(await ask(b, 'c2', { run: 'rB' }, minutes(2))).toMatchObject({ ok: true });
+    });
+
+    it('the same for a spend rule: A’s delayed call refused by the rule after B claimed ends nothing; B’s job runs on', async () => {
+      const { sara, jobId } = await running('s-e3-call-rule');
+      const ea = await claimed(jobId, 'rA');
+      const a = await keyFor(jobId, ea);
+      await prisma.spendRule.create({ data: { ruleKey: `r-${randomUUID()}`, ownerPersonId: sara.id, scope: 'bot', botId: sara.brickId, period: 'day', capMicros: BigInt(100), words: 'Never more than a hundred millionths a day', createdById: sara.id } });
+      expect(await refusedAfterClaim(jobId, a, ea, { estimateMicros: 5_000_000 })).toMatchObject({ ok: false, reason: 'rule' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
+    });
+
+    it('CONTROL: a genuine limit on the OWNER’s own call still stops the job (allowance, and a rule), ending it as theirs', async () => {
+      const own = await running('s-e3-call-ctl');
+      const eo = await claimed(own.jobId, 'rA');
+      const k = await keyFor(own.jobId, eo);
+      expect(await ask(k, 'c-big', { estimateMicros: 5_000_000 })).toEqual({ ok: false, reason: 'allowance' });
+      expect(await jobOf(own.jobId)).toMatchObject({ status: 'stopped', endedBy: 'allowance' });
+      const ruled = await running('s-e3-call-ctl-rule');
+      const er = await claimed(ruled.jobId, 'rA');
+      const kr = await keyFor(ruled.jobId, er);
+      await prisma.spendRule.create({ data: { ruleKey: `r-${randomUUID()}`, ownerPersonId: ruled.sara.id, scope: 'bot', botId: ruled.sara.brickId, period: 'day', capMicros: BigInt(100), words: 'Never more than a hundred millionths a day', createdById: ruled.sara.id } });
+      expect(await ask(kr, 'c-big', { estimateMicros: 5_000_000 })).toMatchObject({ ok: false, reason: 'rule' });
+      expect(await jobOf(ruled.jobId)).toMatchObject({ status: 'stopped', endedBy: 'rule' });
+    });
+
+    it('a call whose key ended (revoked) before its refusal reached the ending decides nothing about the job, even for the same owner; two refusals of a worker that no longer owns the job never decide a pool cutoff', async () => {
+      const { jobId } = await running('s-e3-call-key');
+      const ea = await claimed(jobId, 'rA');
+      const a = await keyFor(jobId, ea);
+      const real = actualMeter.reserveRoom;
+      const spy = jest.mocked(meter.reserveRoom).mockImplementationOnce((async (...args: Parameters<typeof real>) => {
+        const room = await real(...args);
+        await prisma.computerJobToken.updateMany({ where: { jobId }, data: { revokedAt: new Date() } });
+        return room;
+      }) as never);
+      try {
+        expect(await ask(a, 'c-big', { estimateMicros: 5_000_000 })).toEqual({ ok: false, reason: 'allowance' });
+      } finally {
+        spy.mockClear();
+      }
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
+      // The pool declines a worker that is not the owner twice: the job is not decided about (no cutoff, no refusal counted)
+      const other = await running('s-e3-call-pool');
+      const eb = await claimed(other.jobId, 'rA');
+      const kb = await keyFor(other.jobId, eb);
+      await prisma.computerJobToken.updateMany({ where: { jobId: other.jobId }, data: { ownerEpoch: eb - 1 } });
+      await setUp({ poolCeilingMicros: 1 });
+      expect(await ask(kb, 'c1', { estimateMicros: 1_000 })).toEqual({ ok: false, reason: 'refused' });
+      await setUp();
+    });
+  });
+
+  describe('E4: a hand-over and a cancel are the owner’s, for the turn they name', () => {
+    it('an old worker’s hand-over after B claimed is superseded: the job stays running and B’s turn is untouched; CONTROL: the owner’s hand-over goes through, with its lease version moved', async () => {
+      const { jobId } = await running('s-e4-hand');
+      const ea = await claimed(jobId, 'rA');
+      const eb = await claimed(jobId, 'rB', minutes(1));
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-B' } });
+      const late = await requestHandoverAs(jobId, 'details', minutes(2), null, { epoch: ea, generation: 0, responseId: 'resp-B' });
+      expect(late.refused).toBe('superseded');
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', waitingFor: null, agentResponseId: 'resp-B', handoverSeq: 0 });
+      // A worker that names none is no owner of a claimed job either
+      expect((await requestHandoverAs(jobId, 'details', minutes(2), null, {})).refused).toBe('superseded');
+      const before = (await jobOf(jobId)).leaseVersion;
+      const mine = await requestHandoverAs(jobId, 'details', minutes(3), null, { epoch: eb, generation: 0, responseId: 'resp-B' });
+      expect(mine.refused).toBeNull();
+      expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', waitingFor: 'details', handoverSeq: 1 });
+      expect((await jobOf(jobId)).leaseVersion).toBe(before + 1);
+    });
+
+    it('a hand-over of the owner for a turn that is not the job’s (`not_current`), for an older control generation (`stale`) or while an ending is decided (a kept intent, a pool cutoff) writes nothing; the waiting branch is fenced the same way', async () => {
+      const { jobId } = await running('s-e4-hand-2');
+      const ea = await claimed(jobId, 'rA');
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-1' } });
+      expect((await requestHandoverAs(jobId, 'details', minutes(1), null, { epoch: ea, generation: 0, responseId: 'resp-OLD' })).refused).toBe('not_current');
+      expect((await requestHandoverAs(jobId, 'details', minutes(1), null, { epoch: ea, generation: 3, responseId: 'resp-1' })).refused).toBe('stale');
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', waitingFor: null });
+      expect((await requestHandoverAs(jobId, 'details', minutes(1), null, { epoch: ea, generation: 0, responseId: 'resp-1' })).refused).toBeNull();
+      // Waiting: another worker's change of what it waits for is refused; the owner's lands
+      const eb = await claimed(jobId, 'rB', minutes(2));
+      expect((await requestHandoverAs(jobId, 'signin', minutes(3), null, { epoch: ea, generation: 0 })).refused).toBe('superseded');
+      expect((await jobOf(jobId)).waitingFor).toBe('details');
+      expect((await requestHandoverAs(jobId, 'signin', minutes(3), null, { epoch: eb, generation: 0 })).refused).toBeNull();
+      expect((await jobOf(jobId)).waitingFor).toBe('signin');
+      // An ending decided (the finalizer owns it): the hand-over writes nothing
+      const ending = await running('s-e4-hand-end');
+      const ee = await claimed(ending.jobId, 'rA');
+      await recordFinishIntent(ending.jobId, { outcome: 'done', epoch: ee }, minutes(1));
+      await requestHandoverAs(ending.jobId, 'details', minutes(2), null, { epoch: ee, generation: 0 });
+      expect(await jobOf(ending.jobId)).toMatchObject({ status: 'running', waitingFor: null });
+      const cut = await running('s-e4-hand-cut');
+      const ec = await claimed(cut.jobId, 'rA');
+      await recordPoolCutoff(prisma, cut.jobId, minutes(1));
+      await requestHandoverAs(cut.jobId, 'details', minutes(2), null, { epoch: ec, generation: 0 });
+      expect(await jobOf(cut.jobId)).toMatchObject({ status: 'running', waitingFor: null });
+    });
+
+    it('an old worker’s cancel never cancels B’s response: superseded, nothing cancelled; a cancel that names another turn is `not_current`; CONTROL: the owner’s cancel of the turn it names is made, once, for that response only', async () => {
+      const { jobId } = await running('s-e4-cancel');
+      const ea = await claimed(jobId, 'rA');
+      // The machine must exist for a cancel: the running job holds it
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-A' } });
+      const eb = await claimed(jobId, 'rB', minutes(1));
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-B' } });
+      expect(await cancelJobTurn(jobId, { epoch: ea, responseId: 'resp-A' })).toEqual({ ok: false, reason: 'superseded' });
+      expect(await cancelJobTurn(jobId, { epoch: ea, responseId: 'resp-B' })).toEqual({ ok: false, reason: 'superseded' });
+      expect(await cancelJobTurn(jobId, { epoch: undefined })).toEqual({ ok: false, reason: 'superseded' });
+      expect(fake.cancelledTurns).toEqual([]);
+      expect(await cancelJobTurn(jobId, { epoch: eb, responseId: 'resp-A' })).toEqual({ ok: true, cancelled: false, reason: 'not_current' });
+      expect(await cancelJobTurn(jobId, { epoch: eb })).toEqual({ ok: true, cancelled: false, reason: 'not_current' });
+      expect(fake.cancelledTurns).toEqual([]);
+      expect(await cancelJobTurn(jobId, { epoch: eb, responseId: 'resp-B' })).toEqual({ ok: true, cancelled: true });
+      expect(fake.cancelledTurns).toEqual(['resp-B']);
+    });
+
+    it('MIXED VERSIONS: a legacy job (no owner) lets a legacy runner cancel the job’s current turn and hand over without an epoch, as before', async () => {
+      const { jobId } = await running('s-e4-legacy');
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-L' } });
+      expect(await cancelJobTurn(jobId)).toEqual({ ok: true, cancelled: true });
+      expect(fake.cancelledTurns).toEqual(['resp-L']);
+      expect((await requestHandoverAs(jobId, 'details', minutes(1), null, {})).refused).toBeNull();
+      expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', waitingFor: 'details' });
+    });
+
+    it('progress is the owner’s: an old worker’s step never overwrites B’s; the owner’s lands', async () => {
+      const { jobId } = await running('s-e4-progress');
+      const ea = await claimed(jobId, 'rA');
+      const eb = await claimed(jobId, 'rB', minutes(1));
+      expect((await reportProgressAs(jobId, { stepDone: 2, stepTotal: 5, label: 'B’s step' }, { epoch: eb })).applied).toBe(true);
+      const late = await reportProgressAs(jobId, { stepDone: 9, stepTotal: 9, label: 'A’s old step' }, { epoch: ea });
+      expect(late).toMatchObject({ applied: false, superseded: true });
+      expect(await jobOf(jobId)).toMatchObject({ stepDone: 2, stepTotal: 5, stepLabel: 'B’s step' });
+    });
+  });
+
+  describe('Rule C: a provider call comes only after the conditional terminal write, for the response the write read', () => {
+    it('a finish cancels the turn AFTER the job is over (never under the job’s lock), and cancels the response the write read; a finish that loses (superseded) cancels nothing', async () => {
+      const { jobId } = await running('s-c-order');
+      const ea = await claimed(jobId, 'rA');
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-1' } });
+      // The first look at the job has read resp-1; the response changes while the finish waits for the lock: the write finds another response, reads again and cancels THAT one
+      const statusAtCancel: string[] = [];
+      const real = fake.cancelTurn.bind(fake);
+      const spy = jest.spyOn(fake, 'cancelTurn').mockImplementation(async (ref: string, responseId: string) => {
+        statusAtCancel.push((await jobOf(jobId)).status);
+        expect(await waiters(cutoffLockKey(jobId))).toBe(0);
+        return real(ref, responseId);
+      });
+      const holder = holdCutoff(jobId, (tx) => tx.$executeRaw`UPDATE "computer_jobs" SET "agent_response_id" = 'resp-2' WHERE "id" = ${jobId}`);
+      let finish: Promise<unknown> = Promise.resolve();
+      try {
+        await holder.ready;
+        finish = finishJobUnder(jobId, 0, 'done', minutes(2), null, null, null, 'rA', ea);
+        expect(await waitForWaiters(cutoffLockKey(jobId), 1)).toBe(true);
+        holder.release();
+        await holder.done;
+        await finish;
+      } finally {
+        holder.release();
+        await Promise.allSettled([holder.done, finish]);
+        spy.mockClear();
+      }
+      expect(await jobOf(jobId)).toMatchObject({ status: 'done' });
+      expect(fake.cancelledTurns).toEqual(['resp-2']);
+      expect(statusAtCancel).toEqual(['done']);
+      // A finish of a worker that lost cancels nothing
+      const other = await running('s-c-order-lost');
+      const eo = await claimed(other.jobId, 'rA');
+      await prisma.computerJob.update({ where: { id: other.jobId }, data: { agentResponseId: 'resp-9' } });
+      await claimed(other.jobId, 'rB', minutes(1));
+      fake.cancelledTurns.length = 0;
+      expect(await finishJobUnder(other.jobId, 0, 'done', minutes(2), null, null, null, 'rA', eo)).toMatchObject({ stale: true, superseded: true });
+      expect(fake.cancelledTurns).toEqual([]);
+    });
+  });
+
+  describe('E5: a sweep ends a job only as it was selected, judged again under the job’s lock', () => {
+    const waitingPastLimit = async (name: string) => {
+      const made = await running(name);
+      const ea = await claimed(made.jobId, 'rA');
+      await requestHandoverAs(made.jobId, 'details', NOW, null, { epoch: ea, generation: 0 });
+      // Its room is held for hours yet: only the wait is past its limit (the lapsed-lease pass has nothing to say about it)
+      await prisma.meterReservation.update({ where: { reservationKey: (await jobOf(made.jobId)).reservationKey! }, data: { expiresAt: minutes(1000) } });
+      return { ...made, ea };
+    };
+    /** Runs `between` at the moment the sweep has selected the job and is about to end it (the first look it makes at the job's cutoff decision). */
+    const betweenSelectAndEnd = (between: () => Promise<unknown>) => {
+      const real = actualCalls.endIfCutoffDecided;
+      return jest.mocked(calls.endIfCutoffDecided).mockImplementationOnce((async (...args: Parameters<typeof real>) => {
+        await between();
+        return real(...args);
+      }) as never);
+    };
+
+    it('the sweep selects a waiting job past the wait and the owner takes control meanwhile: not ended as unanswered; CONTROL: a real unanswered wait still ends as `unanswered`', async () => {
+      const { jobId } = await waitingPastLimit('s-e5-wait');
+      const spy = betweenSelectAndEnd(() => prisma.computerJob.update({ where: { id: jobId }, data: { control: 'person', controlGeneration: { increment: 1 }, leaseVersion: { increment: 1 } } }));
+      try {
+        await sweepComputers(minutes(120));
+      } finally {
+        spy.mockClear();
+      }
+      expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', control: 'person', endedBy: null });
+      const real = await waitingPastLimit('s-e5-wait-real');
+      await sweepComputers(minutes(120));
+      expect(await jobOf(real.jobId)).toMatchObject({ status: 'stopped', endedBy: 'unanswered' });
+    });
+
+    it('the sweep selects a waiting job and the worker answers it (a renewal, a claim, a new wait) meanwhile: not ended; the same selected job that did NOT move is ended', async () => {
+      for (const move of ['claim', 'handover', 'lease'] as const) {
+        const { jobId, ea } = await waitingPastLimit(`s-e5-move-${move}`);
+        const spy = betweenSelectAndEnd(async () => {
+          if (move === 'claim') await claimed(jobId, 'rB', minutes(100));
+          if (move === 'handover') await prisma.computerJob.update({ where: { id: jobId }, data: { handoverSeq: { increment: 1 } } }); // a new wait of the same job (the count is all that moves)
+          if (move === 'lease') await prisma.computerJob.update({ where: { id: jobId }, data: { leaseVersion: { increment: 1 } } });
+        });
+        try {
+          await sweepComputers(minutes(120));
+        } finally {
+          spy.mockClear();
+        }
+        expect([move, (await jobOf(jobId)).status, (await jobOf(jobId)).endedBy]).toEqual([move, 'waiting', null]);
+      }
+      // CONTROL: the wait is no longer past its limit when the job is judged again (it began a new wait): not ended; one that is past it ends
+      const fresh = await waitingPastLimit('s-e5-fresh');
+      const spy = betweenSelectAndEnd(() => prisma.computerJob.update({ where: { id: fresh.jobId }, data: { stretchStarted: minutes(119) } }));
+      try {
+        await sweepComputers(minutes(120));
+      } finally {
+        spy.mockClear();
+      }
+      expect(await jobOf(fresh.jobId)).toMatchObject({ status: 'waiting', endedBy: null });
+    });
+
+    it('the sweep selects an expired lease and a renewal extends it, then B admits: not ended; CONTROL: a real lapsed lease still ends the job as an error', async () => {
+      const made = await running('s-e5-lease');
+      const ea = await claimed(made.jobId, 'rA');
+      const key = (await jobOf(made.jobId)).reservationKey!;
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { expiresAt: minutes(5) } });
+      // The sweep reads the lapsed reservation, then a renewal (the owner’s) extends it before the ending is judged
+      const real = prisma.computerFinishIntent.findUnique.bind(prisma.computerFinishIntent) as (args: unknown) => Promise<unknown>;
+      let renewed = false;
+      const spy = jest.spyOn(prisma.computerFinishIntent, 'findUnique').mockImplementation(((args: unknown) => {
+        if (!renewed) {
+          renewed = true;
+          return renewJob(made.jobId, minutes(4), { epoch: ea }).then(() => real(args));
+        }
+        return real(args);
+      }) as never);
+      try {
+        await sweepComputers(minutes(7));
+      } finally {
+        spy.mockClear();
+      }
+      expect(renewed).toBe(true);
+      expect(await jobOf(made.jobId)).toMatchObject({ status: 'running', endedBy: null });
+      // CONTROL
+      const lapsed = await running('s-e5-lease-real');
+      await claimed(lapsed.jobId, 'rA');
+      await prisma.meterReservation.update({ where: { reservationKey: (await jobOf(lapsed.jobId)).reservationKey! }, data: { expiresAt: minutes(5) } });
+      await sweepComputers(minutes(7));
+      expect(await jobOf(lapsed.jobId)).toMatchObject({ status: 'stopped', endedBy: 'error' });
+    });
+
+    it('a job with an intent or a decided cutoff is the finalizer’s: the unanswered and lapsed-lease passes skip it (the finalizer ends it as the intent or the pool says)', async () => {
+      const { jobId, ea } = await waitingPastLimit('s-e5-fin');
+      await recordFinishIntent(jobId, { outcome: 'done', epoch: ea }, minutes(1));
+      const spy = betweenSelectAndEnd(async () => undefined);
+      try {
+        await sweepComputers(minutes(120));
+      } finally {
+        spy.mockClear();
+      }
+      // Ended by the finalizer, as the intent said (done), never as unanswered
+      expect(await jobOf(jobId)).toMatchObject({ status: 'done' });
+    });
+  });
+
+  describe('E6: once an intent or a cutoff is decided, the finalizer owns the ending', () => {
+    it('intent kept, then the owner’s renewal: ZERO room and `ending`; the outcome is unchanged', async () => {
+      const { jobId } = await running('s-e6-intent');
+      const ea = await claimed(jobId, 'rA');
+      expect(await recordFinishIntent(jobId, { outcome: 'done', epoch: ea }, minutes(1))).toMatchObject({ ok: true, already: false });
+      const before = await roomOf(jobId);
+      expect(await renewJob(jobId, minutes(2), { epoch: ea })).toEqual({ ok: false, reason: 'ending' });
+      expect(await roomOf(jobId)).toEqual(before);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+      expect(await completeFinishIntents(minutes(5), 10)).toBe(1);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'done' });
+    });
+
+    it('intent kept, then a renewal that WOULD hit the allowance: it is `ending`, the job ends as the INTENT says (failed, ours: given back with its decision row), never as the allowance', async () => {
+      const { jobId } = await running('s-e6-allow');
+      const ea = await claimed(jobId, 'rA');
+      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay could not be reached', turns: [1], epoch: ea }, minutes(1))).toMatchObject({ ok: true, already: false });
+      await setUp({ memberAllowanceMicros: 1_000 });
+      expect(await renewJob(jobId, minutes(2), { epoch: ea })).toEqual({ ok: false, reason: 'ending' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
+      await setUp();
+      expect(await completeFinishIntents(minutes(5), 10)).toBe(1);
+      const ended = await jobOf(jobId);
+      expect(ended.status).toMatch(/^(failed|stopped)$/);
+      expect(ended.endedBy).not.toBe('allowance');
+      expect(await decisionOf(jobId)).not.toBeNull();
+    });
+
+    it('a real pool cutoff with a delayed finalizer, then the owner’s renewal hits the allowance: `ending`; the job ends as `pool` with its give-back decision (never as the allowance)', async () => {
+      const { jobId } = await running('s-e6-pool');
+      const ea = await claimed(jobId, 'rA');
+      await recordPoolCutoff(prisma, jobId, minutes(1));
+      await setUp({ memberAllowanceMicros: 1_000 });
+      expect(await renewJob(jobId, minutes(2), { epoch: ea })).toEqual({ ok: false, reason: 'ending' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
+      await setUp();
+      await sweepComputers(minutes(10));
+      expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
+      expect(await decisionOf(jobId)).not.toBeNull();
+      await cutoffEndsFinished();
+    });
+
+    it('a refusal never writes its own ending once an intent is kept: A’s call refused for the allowance after the intent changes nothing (the finalizer owns the ending)', async () => {
+      const { jobId } = await running('s-e6-call');
+      const ea = await claimed(jobId, 'rA');
+      const a = await keyFor(jobId, ea);
+      const real = actualMeter.reserveRoom;
+      const spy = jest.mocked(meter.reserveRoom).mockImplementationOnce((async (...args: Parameters<typeof real>) => {
+        const room = await real(...args);
+        await recordFinishIntent(jobId, { outcome: 'done', epoch: ea }, minutes(1));
+        return room;
+      }) as never);
+      try {
+        expect(await ask(a, 'c-big', { estimateMicros: 5_000_000 })).toEqual({ ok: false, reason: 'allowance' });
+      } finally {
+        spy.mockClear();
+      }
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
+      expect(await completeFinishIntents(minutes(5), 10)).toBe(1);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'done' });
+    });
+  });
+
+  describe('S2: a start exists durably before its job row', () => {
+    const KEY_A = 'mx:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const KEY_B = 'mx:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const start = (sara: { id: string; brickId: string }, startKey: string, title = 'Visa form') => startJob({ botId: sara.brickId, personId: sara.id, title, startKey, acks: true }, NOW);
+    const jobsOf = (sara: { id: string }) => prisma.computerJob.count({ where: { personId: sara.id } });
+    const roomsOf = (sara: { id: string }) => prisma.meterReservation.count({ where: { personId: sara.id } });
+    /** Request A reached Orbit and was held before its job: its attempt is open, beating `agoMs` ago. */
+    const pausedA = (sara: { id: string; brickId: string }, agoMs: number) => prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: KEY_A, state: 'open', beatAt: new Date(Date.now() - agoMs) } });
+    const setUpBrick = async (name: string) => {
+      const sara = await person(name);
+      await giveComputer(sara.brickId, sara.id);
+      return sara;
+    };
+
+    it('A paused after it reached Orbit and still beating, B reworded under a new key: B gets `earlier` naming A’s key (state `starting`), and no job; when A goes on, ONE job and ONE reservation', async () => {
+      const sara = await setUpBrick('s-s2-fresh');
+      await pausedA(sara, 1_000);
+      const b = await start(sara, KEY_B, 'Fill the visa form');
+      expect(b).toEqual({ ok: false, reason: 'earlier', job: { id: null, status: null, state: 'starting', attempt: KEY_A } });
+      expect(await jobsOf(sara)).toBe(0);
+      expect(await startedJobFor(sara.brickId, sara.id, KEY_A, new Date())).toEqual({ inProgress: true });
+      const a = await start(sara, KEY_A);
+      expect(a).toMatchObject({ ok: true });
+      expect(await jobsOf(sara)).toBe(1);
+      expect(await roomsOf(sara)).toBe(1);
+      expect((await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: KEY_B } })).state).toBe('expired');
+    });
+
+    it('A paused and EXPIRED (it stopped beating), B reworded: B creates the one job; A then refuses, naming B’s job (`earlier`), and makes none. Postgres ends with ONE job and ONE reservation', async () => {
+      const sara = await setUpBrick('s-s2-expired');
+      await pausedA(sara, 10 * 60_000);
+      const b = await start(sara, KEY_B, 'Fill the visa form');
+      expect(b).toMatchObject({ ok: true });
+      const jobB = (b as { ok: true; job: { id: string } }).job.id;
+      expect((await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: KEY_A } })).state).toBe('superseded');
+      const a = await start(sara, KEY_A);
+      expect(a).toMatchObject({ ok: false, reason: 'earlier', job: { id: jobB, attempt: KEY_B, state: 'live' } });
+      expect(await jobsOf(sara)).toBe(1);
+      expect(await roomsOf(sara)).toBe(1);
+    });
+
+    it('a start whose own attempt stopped beating answers `expired` and makes nothing (the game starts afresh); one that ends with no job (refused) lets its attempt go', async () => {
+      const sara = await setUpBrick('s-s2-expired-own');
+      await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: KEY_A, state: 'expired', beatAt: new Date() } });
+      expect(await start(sara, KEY_A)).toEqual({ ok: false, reason: 'expired' });
+      expect(await jobsOf(sara)).toBe(0);
+      const off = await person('s-s2-off');
+      expect(await start(off, KEY_B)).toMatchObject({ ok: false, reason: 'off' });
+      expect((await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: off.id, startKey: KEY_B } })).state).toBe('expired');
+    });
+
+    it('B first, A later (both arrival orders): one job, one reservation; the same event delivered to two router instances at once, and again after a restart with empty Redis (the derived key is the same): one job, one reservation', async () => {
+      const sara = await setUpBrick('s-s2-order');
+      const b = await start(sara, KEY_B, 'Fill the visa form');
+      expect(b).toMatchObject({ ok: true });
+      expect(await start(sara, KEY_A)).toMatchObject({ ok: false, reason: 'earlier', job: { attempt: KEY_B } });
+      expect(await jobsOf(sara)).toBe(1);
+      const twice = await setUpBrick('s-s2-twice');
+      const [one, two] = await Promise.all([start(twice, KEY_A), start(twice, KEY_A)]);
+      expect([one, two].every((answer) => answer.ok)).toBe(true);
+      expect((one as { job: { id: string } }).job.id).toBe((two as { job: { id: string } }).job.id);
+      expect(await jobsOf(twice)).toBe(1);
+      expect(await roomsOf(twice)).toBe(1);
+      // After a restart: the same key again answers the job it made
+      const again = await start(twice, KEY_A);
+      expect((again as { job: { id: string } }).job.id).toBe((one as { job: { id: string } }).job.id);
+      expect(await jobsOf(twice)).toBe(1);
+      expect(await roomsOf(twice)).toBe(1);
+    });
+
+    it('CONTROL: a deliberate later request after the first was acked creates a distinct job and reservation; the keyed look-up answers a made start’s job', async () => {
+      const sara = await setUpBrick('s-s2-later');
+      const first = (await start(sara, KEY_A)) as { ok: true; job: { id: string } };
+      expect(first.ok).toBe(true);
+      expect(await ackStart(sara.brickId, sara.id, KEY_A)).toBe(true);
+      const second = (await start(sara, KEY_B, 'Another job')) as { ok: true; job: { id: string } };
+      expect(second.ok).toBe(true);
+      expect(second.job.id).not.toBe(first.job.id);
+      expect(await jobsOf(sara)).toBe(2);
+      // the second waits in line for the machine (queued) and takes its room only when it runs: its own, distinct one then; the first keeps its one
+      expect(await roomsOf(sara)).toBe(1);
+      expect(await prisma.computerJob.findUnique({ where: { id: second.job.id }, select: { status: true, reservationKey: true } })).toEqual({ status: 'queued', reservationKey: null });
+      expect(await startedJobFor(sara.brickId, sara.id, KEY_A, new Date())).toMatchObject({ id: first.job.id });
+    });
+  });
+
+  describe('the claim itself, the keys of an owner and the seams between a read and the write that follows it', () => {
+    /** Runs `between` right after the first whole-row read of the job that `endJob` makes (the write that follows must still find the job as that read saw it). */
+    const afterEndJobRead = (jobId: string, between: () => Promise<unknown>) => {
+      const real = prisma.computerJob.findUnique.bind(prisma.computerJob) as unknown as (args: { where?: { id?: string }; select?: unknown; include?: unknown }) => Promise<unknown>;
+      let fired = false;
+      return jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: { where?: { id?: string }; select?: unknown; include?: unknown }) => {
+        const mine = !fired && args?.where?.id === jobId && !args.select && !args.include;
+        return real(args).then(async (row) => {
+          if (mine) {
+            fired = true;
+            await between();
+          }
+          return row;
+        });
+      }) as never);
+    };
+
+    it('a claim is a compare-and-set on the epoch the runner saw: a stale `seen` (older or newer) is `superseded` naming the job’s epoch and changes nothing; two claims on the same `seen` at once: ONE wins', async () => {
+      const { jobId } = await running('s-claim-cas');
+      const e1 = await claimed(jobId, 'rA');
+      expect(await claimJob(jobId, { run: 'rB', seen: 0 }, minutes(1))).toEqual({ ok: false, reason: 'superseded', ownerEpoch: e1 });
+      expect(await claimJob(jobId, { run: 'rB', seen: e1 + 5 }, minutes(1))).toEqual({ ok: false, reason: 'superseded', ownerEpoch: e1 });
+      expect(await jobOf(jobId)).toMatchObject({ ownerEpoch: e1, ownerRun: 'rA' });
+      const both = await Promise.all([claimJob(jobId, { run: 'rB', seen: e1 }, minutes(2)), claimJob(jobId, { run: 'rC', seen: e1 }, minutes(2))]);
+      expect(both.filter((one) => one.ok)).toHaveLength(1);
+      expect(both.filter((one) => !one.ok)).toEqual([{ ok: false, reason: 'superseded', ownerEpoch: e1 + 1 }]);
+      expect((await jobOf(jobId)).ownerEpoch).toBe(e1 + 1);
+    });
+
+    it('a claim ends every key of the owner it replaces (their rows are revoked), and a key of the older epoch is refused even if its row were live', async () => {
+      const { jobId } = await running('s-claim-keys');
+      const ea = await claimed(jobId, 'rA');
+      const a = await keyFor(jobId, ea);
+      expect(await liveKeys(jobId)).toBe(1);
+      const eb = await claimed(jobId, 'rB', minutes(1));
+      expect(await liveKeys(jobId)).toBe(0);
+      expect(await prisma.computerJobToken.count({ where: { jobId, ownerEpoch: ea, revokedAt: { not: null } } })).toBe(1);
+      expect((await verifyJobToken(a, 'model', minutes(1))).ok).toBe(false);
+      // A key row of the older epoch that is somehow live is still not the owner's
+      const row = await prisma.computerJobToken.findFirstOrThrow({ where: { jobId, ownerEpoch: ea } });
+      await prisma.computerJobToken.update({ where: { id: row.id }, data: { revokedAt: null } });
+      expect((await verifyJobToken(a, 'model', minutes(1))).ok).toBe(false);
+      expect(eb).toBe(ea + 1);
+    });
+
+    it('a mint names the epoch it is for: a worker that claimed earlier is `superseded` and gets no key; a prepare’s mint ends only the keys of ITS epoch', async () => {
+      const { jobId } = await running('s-mint-epoch');
+      const ea = await claimed(jobId, 'rA');
+      const eb = await claimed(jobId, 'rB', minutes(1));
+      const before = await prisma.computerJobToken.count({ where: { jobId } });
+      expect(await mintJobToken(jobId, 'model', minutes(1), { generation: 0 }, { epoch: ea })).toEqual({ ok: false, reason: 'superseded' });
+      expect(await prisma.computerJobToken.count({ where: { jobId } })).toBe(before);
+      // A live key of another epoch is not touched by this owner's prepare (it is not this owner's to end)
+      const other = await prisma.computerJobToken.create({ data: { jobId, scope: 'model', generation: 0, digest: `other-${randomUUID()}`, expiresAt: minutes(60), ownerEpoch: ea } });
+      const claim = new Date();
+      await prisma.computerJob.update({ where: { id: jobId }, data: { prepareClaimedAt: claim } });
+      const minted = await mintJobToken(jobId, 'model', minutes(2), { generation: 0 }, { epoch: eb, prepareClaim: claim });
+      expect(minted.ok).toBe(true);
+      expect((await prisma.computerJobToken.findUniqueOrThrow({ where: { id: other.id } })).revokedAt).toBeNull();
+    });
+
+    it('a lease renewal bumps the lease version once and renews only the keys of the owner’s epoch', async () => {
+      const { jobId } = await running('s-renew-keys');
+      const ea = await claimed(jobId, 'rA');
+      const a = await keyFor(jobId, ea);
+      const other = await prisma.computerJobToken.create({ data: { jobId, scope: 'model', generation: 0, digest: `other-${randomUUID()}`, expiresAt: minutes(2), ownerEpoch: ea + 1 } });
+      const mine = await prisma.computerJobToken.findFirstOrThrow({ where: { jobId, ownerEpoch: ea, revokedAt: null } });
+      const before = (await jobOf(jobId)).leaseVersion;
+      expect(await renewJob(jobId, minutes(1), { epoch: ea })).toMatchObject({ ok: true });
+      expect((await jobOf(jobId)).leaseVersion).toBe(before + 1);
+      expect((await prisma.computerJobToken.findUniqueOrThrow({ where: { id: other.id } })).expiresAt.getTime()).toBe(minutes(2).getTime());
+      expect((await prisma.computerJobToken.findUniqueOrThrow({ where: { id: mine.id } })).expiresAt.getTime()).toBeGreaterThan(mine.expiresAt.getTime());
+      expect((await verifyJobToken(a, 'model', minutes(2))).ok).toBe(true);
+    });
+
+    it('a pool cutoff alone (no intent) is the finalizer’s too: the owner’s renewal with plenty of allowance is `ending` and adds ZERO room', async () => {
+      const { jobId } = await running('s-renew-cutoff');
+      const ea = await claimed(jobId, 'rA');
+      const before = await roomOf(jobId);
+      await recordPoolCutoff(prisma, jobId, minutes(1));
+      expect(await renewJob(jobId, minutes(2), { epoch: ea })).toEqual({ ok: false, reason: 'ending' });
+      expect(await roomOf(jobId)).toEqual(before);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
+    });
+
+    it('a renewal that is refused ends the job only as the owner it was decided for, in the write that ends it: B claims between the refusal and the ending, and nothing is ended (allowance, and a rule)', async () => {
+      for (const kind of ['allowance', 'rule'] as const) {
+        const { sara, jobId } = await running(`s-renew-end-${kind}`);
+        const ea = await claimed(jobId, 'rA');
+        if (kind === 'allowance') await setUp({ memberAllowanceMicros: 1_000 });
+        else await prisma.spendRule.create({ data: { ruleKey: `r-${randomUUID()}`, ownerPersonId: sara.id, scope: 'bot', botId: sara.brickId, period: 'day', capMicros: BigInt(10), words: 'Never more than ten millionths a day', createdById: sara.id } });
+        const real = prisma.$transaction.bind(prisma) as (fn: unknown, options?: unknown) => Promise<unknown>;
+        const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((fn: unknown, options?: unknown) =>
+          real(fn, options).then(async (decided) => {
+            await claimed(jobId, 'rB', minutes(1));
+            return decided;
+          })) as never);
+        let answer: unknown;
+        try {
+          answer = await renewJob(jobId, minutes(2), { epoch: ea });
+        } finally {
+          spy.mockRestore();
+        }
+        await setUp();
+        expect(answer).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null, endNote: null, ownerEpoch: ea + 1 });
+      }
+    });
+
+    it('the sweep renews the room of a WAITING job that was claimed (it names the epoch it read): the lease about to lapse is extended', async () => {
+      const { jobId } = await running('s-sweep-renew');
+      const ea = await claimed(jobId, 'rA');
+      await requestHandoverAs(jobId, 'details', NOW, null, { epoch: ea, generation: 0 });
+      const key = (await jobOf(jobId)).reservationKey!;
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { expiresAt: minutes(11) } });
+      await sweepComputers(minutes(10));
+      const job = await jobOf(jobId);
+      expect(job).toMatchObject({ status: 'waiting', endedBy: null });
+      expect(job.reservationKey).not.toBe(key);
+      expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: job.reservationKey! } })).expiresAt.getTime()).toBeGreaterThan(minutes(11).getTime());
+    });
+
+    it('a sweep’s ending lands only on the job as it was read: after the ending’s own read the owner changes (a claim, a lease version, a new wait, a take-over) and NOTHING is ended; CONTROL: the same job unmoved is ended', async () => {
+      const moves: Array<[string, (jobId: string) => Promise<unknown>]> = [
+        ['claim', (jobId) => claimed(jobId, 'rB', minutes(100))],
+        ['lease', (jobId) => prisma.computerJob.update({ where: { id: jobId }, data: { leaseVersion: { increment: 1 } } })],
+        ['wait', (jobId) => prisma.computerJob.update({ where: { id: jobId }, data: { handoverSeq: { increment: 1 } } })],
+        ['control', (jobId) => prisma.computerJob.update({ where: { id: jobId }, data: { control: 'person', controlGeneration: { increment: 1 } } })],
+      ];
+      for (const [name, move] of moves) {
+        const { jobId } = await running(`s-after-read-${name}`);
+        const ea = await claimed(jobId, 'rA');
+        await requestHandoverAs(jobId, 'details', NOW, null, { epoch: ea, generation: 0 });
+        await prisma.meterReservation.update({ where: { reservationKey: (await jobOf(jobId)).reservationKey! }, data: { expiresAt: minutes(1000) } });
+        const spy = afterEndJobRead(jobId, () => move(jobId));
+        try {
+          await sweepComputers(minutes(120));
+        } finally {
+          spy.mockRestore();
+        }
+        expect([name, (await jobOf(jobId)).endedBy]).toEqual([name, null]);
+      }
+      const still = await running('s-after-read-none');
+      const es = await claimed(still.jobId, 'rA');
+      await requestHandoverAs(still.jobId, 'details', NOW, null, { epoch: es, generation: 0 });
+      await prisma.meterReservation.update({ where: { reservationKey: (await jobOf(still.jobId)).reservationKey! }, data: { expiresAt: minutes(1000) } });
+      await sweepComputers(minutes(120));
+      expect(await jobOf(still.jobId)).toMatchObject({ status: 'stopped', endedBy: 'unanswered' });
+    });
+
+    it('a lapsed-lease ending lands only while the reservation is still the one seen: it is extended after the ending’s own read (no lease version moved) and NOTHING is ended; CONTROL: unmoved, it ends as an error', async () => {
+      const { jobId } = await running('s-after-read-lease');
+      await claimed(jobId, 'rA');
+      const key = (await jobOf(jobId)).reservationKey!;
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { expiresAt: minutes(5) } });
+      const spy = afterEndJobRead(jobId, () => prisma.meterReservation.update({ where: { reservationKey: key }, data: { expiresAt: minutes(60) } }));
+      try {
+        await sweepComputers(minutes(7));
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { expiresAt: minutes(5) } });
+      await sweepComputers(minutes(7));
+      expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'error' });
+    });
+
+    it('a refusal’s ending decides under the cutoff lock: an intent kept, or a pool cutoff decided, AFTER the ending’s own read leaves the ending to the finalizer (nothing written by the refusal)', async () => {
+      for (const kind of ['intent', 'cutoff'] as const) {
+        const { jobId } = await running(`s-after-read-${kind}`);
+        const ea = await claimed(jobId, 'rA');
+        const a = await keyFor(jobId, ea);
+        const spy = afterEndJobRead(jobId, () => (kind === 'intent' ? recordFinishIntent(jobId, { outcome: 'done', epoch: ea }, minutes(1)) : recordPoolCutoff(prisma, jobId, minutes(1))));
+        try {
+          expect(await ask(a, 'c-big', { estimateMicros: 5_000_000 })).toEqual({ ok: false, reason: 'allowance' });
+        } finally {
+          spy.mockRestore();
+        }
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
+      }
+    });
+
+    it('a pool refusal of a worker that no longer owns the job decides nothing, even when it reaches the cutoff decision after B claimed', async () => {
+      const { jobId } = await running('s-pool-from');
+      const ea = await claimed(jobId, 'rA');
+      const a = await keyFor(jobId, ea);
+      await setUp({ poolCeilingMicros: 1 });
+      const spy = jest.mocked(meter.reserveRoom).mockImplementationOnce((async (...args: Parameters<typeof actualMeter.reserveRoom>) => {
+        const room = await actualMeter.reserveRoom(...args);
+        const won = await claimJob(jobId, { run: 'rB', seen: ea }, minutes(1));
+        if (!won.ok) throw new Error('B’s claim was refused');
+        return room;
+      }) as never);
+      try {
+        expect(await ask(a, 'c1', { estimateMicros: 5_000 })).toMatchObject({ ok: false });
+        expect(await ask(a, 'c2', { estimateMicros: 5_000 })).toMatchObject({ ok: false });
+      } finally {
+        spy.mockClear();
+        await setUp();
+      }
+      expect(await hasPoolCutoff(prisma, jobId)).toBe(false);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
+    });
+  });
+
+  describe('the broker routes’ library: the owner’s epoch on prepare, turn, reconnect', () => {
+    it('a worker that is not the owner is `superseded` on prepare, turn and reconnect: no key is made, no turn is sent, no machine is touched; the owner’s own go through', async () => {
+      const { jobId } = await running('s-broker-epoch');
+      const ea = await claimed(jobId, 'rA');
+      const eb = await claimed(jobId, 'rB', minutes(1));
+      const keys = await prisma.computerJobToken.count({ where: { jobId } });
+      expect(await prepareJob(jobId, RELAY, minutes(2), { run: 'rA', epoch: ea })).toEqual({ ok: false, reason: 'superseded' });
+      expect(await startTurn(jobId, 'Do it', new AbortController().signal, { epoch: ea })).toEqual({ ok: false, reason: 'superseded' });
+      expect(await reattachJobTurn(jobId, new AbortController().signal, { epoch: ea })).toEqual({ ok: false, reason: 'superseded' });
+      expect(await prisma.computerJobToken.count({ where: { jobId } })).toBe(keys);
+      expect(await prepareJob(jobId, RELAY, minutes(2), { run: 'rB', epoch: eb })).toMatchObject({ ok: true });
+    });
+
+    it('a prepare that is overtaken by a claim after its key was made is `superseded` and its key is ended: only the owner’s key stands', async () => {
+      const { jobId } = await running('s-broker-after');
+      const ea = await claimed(jobId, 'rA');
+      let overtaken = false;
+      // After the key was written on the machine (the prepare reads the job once more), B claims
+      const execSpy = jest.spyOn(fake, 'exec').mockImplementation(async (...args: Parameters<FakeComputerProvider['exec']>) => {
+        if (!overtaken) {
+          overtaken = true;
+          await claimed(jobId, 'rB', minutes(2));
+        }
+        return FakeComputerProvider.prototype.exec.apply(fake, args);
+      });
+      let answer: unknown;
+      try {
+        answer = await prepareJob(jobId, RELAY, minutes(2), { run: 'rA', epoch: ea });
+      } finally {
+        execSpy.mockRestore();
+      }
+      expect(overtaken).toBe(true);
+      expect(answer).toEqual({ ok: false, reason: 'superseded' });
+      expect(await liveKeys(jobId)).toBe(0);
+    });
+
+    it('a reconnect that finds its turn gone clears the turn it read, never another worker’s: B takes the job and sets its own turn meanwhile; B’s turn stays', async () => {
+      const { jobId } = await running('s-broker-reattach');
+      const ea = await claimed(jobId, 'rA');
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-A' } });
+      const spy = jest.spyOn(fake, 'reattachTurn').mockImplementation(async () => {
+        await claimed(jobId, 'rB', minutes(2));
+        await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-B' } });
+        throw new Agent37Error(404, 'gone', 'gone');
+      });
+      try {
+        expect(await reattachJobTurn(jobId, new AbortController().signal, { epoch: ea })).toMatchObject({ ok: false });
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await jobOf(jobId)).agentResponseId).toBe('resp-B');
+    });
+  });
+});

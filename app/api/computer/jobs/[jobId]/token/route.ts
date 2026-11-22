@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 import { requireServiceToken } from '@/lib/service-tokens';
+import { z } from 'zod';
 import { mintJobToken } from '@/lib/computer-token';
+import { refusalBody } from '@/lib/computer-owner';
 
 export const runtime = 'nodejs';
+
+const bodySchema = z.object({ epoch: z.number().int().min(0).max(2_000_000_000).nullable().optional() }).strict();
 
 /**
  * POST /api/computer/jobs/:jobId/token - the bot server's runner asks for the key a job's computer will hold (build handoff v2, 5).
@@ -19,8 +23,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
   try {
     const { jobId } = await params;
-    const minted = await mintJobToken(jobId, 'model');
-    if (!minted.ok) return NextResponse.json({ error: minted.reason }, { status: minted.reason === 'not_found' ? 404 : 409 });
+    const parsed = bodySchema.safeParse(await request.json().catch(() => ({})));
+    if (!parsed.success) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
+    const minted = await mintJobToken(jobId, 'model', new Date(), undefined, { epoch: parsed.data.epoch ?? null });
+    if (!minted.ok) return minted.reason === 'superseded' ? NextResponse.json(refusalBody('superseded'), { status: 409 }) : NextResponse.json({ error: minted.reason }, { status: minted.reason === 'not_found' ? 404 : 409 });
     return NextResponse.json({ token: minted.token, expiresAt: minted.expiresAt.toISOString() }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });

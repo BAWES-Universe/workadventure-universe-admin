@@ -3,24 +3,35 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { WAITING_FOR, EFFECT_KINDS, FINISH_CAUSES } from '@/lib/computer-values';
-import { finishJobUnder, getJob, planEffect, recordFinishIntent, renewJob, reportProgress, requestHandover, settleEffect } from '@/lib/computer';
+import { claimJob, finishJobUnder, getJob, planEffect, recordFinishIntent, renewJob, reportProgressAs, requestHandoverAs, settleEffect } from '@/lib/computer';
+import { SUPERSEDED } from '@/lib/computer-owner';
 
 export const runtime = 'nodejs';
 // Finishing a job hands its files over before it answers (limited by time: a few minutes), so a host that limits how long a request may run is told how long this one may
 export const maxDuration = 300;
 
+/** The run a runner is in, and the ownership epoch it won by claiming the job (every request after the claim names it; one that names none is a worker that knows none: good only while the job has none). */
+const runSchema = z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/);
+const epochSchema = z.number().int().min(0).max(2_000_000_000).nullable().optional();
+
 const actionSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('progress'), stepDone: z.number().int().min(0), stepTotal: z.number().int().min(1).nullable().optional(), label: z.string().max(200).nullable().optional() }),
-  z.object({ action: z.literal('renew'), /** The run the runner is in (the one it prepares with): a renewal from a run that was replaced answers `stale` and holds nothing. Left out, as before. */ run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional() }),
+  // The runner takes up a job: it names the owner epoch it last saw (`GET`'s `ownerEpoch`) and wins only if that is still the job's
+  z.object({ action: z.literal('claim'), run: runSchema.nullable().optional(), seen: z.number().int().min(0).max(2_000_000_000) }),
+  z.object({ action: z.literal('progress'), epoch: epochSchema, stepDone: z.number().int().min(0), stepTotal: z.number().int().min(1).nullable().optional(), label: z.string().max(200).nullable().optional() }),
+  z.object({ action: z.literal('renew'), epoch: epochSchema, /** The run the runner is in (the one it prepares with): a renewal from a run that was replaced answers `stale` and holds nothing. Left out, as before. */ run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional() }),
   z.object({
     action: z.literal('handover'),
+    epoch: epochSchema,
+    /** The control generation the worker acts under, and the turn it was on: the wait lands only while they are the job's. */
+    generation: z.number().int().min(0).nullable().optional(),
+    responseId: z.string().min(1).max(200).nullable().optional(),
     waitingFor: z.enum(WAITING_FOR),
     /** For "details": what Brick is ready to put in and where, named before the person is asked. */
     ready: z.object({ what: z.string().trim().min(1).max(150), where: z.string().trim().min(1).max(150) }).nullable().optional(),
   }),
-  z.object({ action: z.literal('finish'), outcome: z.enum(['done', 'failed']), /** Who a failure is down to (`ours` is given back, `agent` is the person's); left out, it is the person's. */ cause: z.enum(FINISH_CAUSES).nullable().optional(), /** The turns the runner judged failed: Orbit decides a give-back from the relay's rows for them (the cause is only a hint). */ turns: z.array(z.number().int().min(0).max(100_000)).max(200).nullable().optional(), /** The runner's run (a restart makes a new run that numbers turns again): where the failure's turns were numbered, and which run is finishing. A finish from a run that was replaced (another run prepared since) answers `stale` and ends nothing. Send it with EVERY finish. */ run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional(), /** The computer's one sentence about why it could not go on; cleaned before it is kept. */ why: z.string().max(2000).nullable().optional(), /** The control generation the runner acts under (from `GET`): a finish from an older one is `stale` and does nothing. Left out, as before. */ generation: z.number().int().min(0).nullable().optional() }),
+  z.object({ action: z.literal('finish'), epoch: epochSchema, outcome: z.enum(['done', 'failed']), /** Who a failure is down to (`ours` is given back, `agent` is the person's); left out, it is the person's. */ cause: z.enum(FINISH_CAUSES).nullable().optional(), /** The turns the runner judged failed: Orbit decides a give-back from the relay's rows for them (the cause is only a hint). */ turns: z.array(z.number().int().min(0).max(100_000)).max(200).nullable().optional(), /** The runner's run (a restart makes a new run that numbers turns again): where the failure's turns were numbered, and which run is finishing. A finish from a run that was replaced (another run prepared since) answers `stale` and ends nothing. Send it with EVERY finish. */ run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional(), /** The computer's one sentence about why it could not go on; cleaned before it is kept. */ why: z.string().max(2000).nullable().optional(), /** The control generation the runner acts under (from `GET`): a finish from an older one is `stale` and does nothing. Left out, as before. */ generation: z.number().int().min(0).nullable().optional() }),
   // The runner's committed word that this job is to end, kept BEFORE it gives up (what the finish will say, as the finish says it)
-  z.object({ action: z.literal('finish-intent'), outcome: z.enum(['done', 'failed']), cause: z.enum(FINISH_CAUSES).nullable().optional(), turns: z.array(z.number().int().min(0).max(100_000)).max(200).nullable().optional(), run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional(), why: z.string().max(2000).nullable().optional(), generation: z.number().int().min(0).nullable().optional(), /** What the stop rests on: `pool` = the runner gives up only because the pool refused its calls. A stop on that basis is stale once a call was admitted for its turn (or a later one) of the run. */ basis: z.enum(['pool']).nullable().optional() }),
+  z.object({ action: z.literal('finish-intent'), epoch: epochSchema, outcome: z.enum(['done', 'failed']), cause: z.enum(FINISH_CAUSES).nullable().optional(), turns: z.array(z.number().int().min(0).max(100_000)).max(200).nullable().optional(), run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional(), why: z.string().max(2000).nullable().optional(), generation: z.number().int().min(0).nullable().optional(), /** What the stop rests on: `pool` = the runner gives up only because the pool refused its calls. A stop on that basis is stale once a call was admitted for its turn (or a later one) of the run. */ basis: z.enum(['pool']).nullable().optional() }),
   z.object({ action: z.literal('plan-effect'), key: z.string().min(1).max(255), kind: z.enum(EFFECT_KINDS), evidence: z.string().max(500).nullable().optional() }),
   z.object({ action: z.literal('settle-effect'), key: z.string().min(1).max(255), state: z.enum(['done', 'failed']), evidence: z.string().max(500).nullable().optional() }),
 ]);
@@ -71,19 +82,36 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data', details: parsed.error.issues }, { status: 400 });
     const body = parsed.data;
     switch (body.action) {
-      case 'progress':
-        return NextResponse.json({ job: await reportProgress(jobId, { stepDone: body.stepDone, stepTotal: body.stepTotal, label: body.label }) });
+      case 'claim': {
+        // Every answer is HTTP 200: `{ ok: true, epoch, job }` (the job is this runner's now: name `epoch` on every request), `{ ok: false, reason: 'stale', run: 'superseded', ownerEpoch, job }` (someone claimed since `seen`: read `ownerEpoch` and claim again),
+        // `{ ok: false, reason: 'finish_pending', finishPending, job }` (complete the kept intent, no ownership is taken), `cutoff`, `over`, `not_running`
+        const claimed = await claimJob(jobId, { run: body.run ?? null, seen: body.seen });
+        const job = await getJob(jobId);
+        if (claimed.ok) return NextResponse.json({ ok: true, epoch: claimed.epoch, job });
+        if (claimed.reason === 'superseded') return NextResponse.json({ ...SUPERSEDED, ownerEpoch: claimed.ownerEpoch, job });
+        if (claimed.reason === 'not_found') return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+        return NextResponse.json({ ok: false, reason: claimed.reason, ...(claimed.reason === 'finish_pending' ? { finishPending: job?.finishPending ?? null } : {}), job });
+      }
+      case 'progress': {
+        const done = await reportProgressAs(jobId, { stepDone: body.stepDone, stepTotal: body.stepTotal, label: body.label }, { epoch: body.epoch });
+        return NextResponse.json(done.superseded ? { ...SUPERSEDED, job: done.job } : { job: done.job });
+      }
       case 'renew':
-        return NextResponse.json(await renewJob(jobId, new Date(), body.run));
-      case 'handover':
-        return NextResponse.json({ job: await requestHandover(jobId, body.waitingFor, new Date(), body.ready) });
+        // `{ ok: true, renewInSeconds }`, or `{ ok: false, reason }`: allowance, pool, closed, over, unanswered, rule (the job has saved and stopped), `ending` (a finish intent is kept or a pool cutoff is decided: no room was added, the finalizer ends the job: abort the turn, read the job, complete the finish), or `stale` with `run: 'superseded'` (not the owner: exit)
+        return NextResponse.json(await renewJob(jobId, new Date(), { epoch: body.epoch }));
+      case 'handover': {
+        const done = await requestHandoverAs(jobId, body.waitingFor, new Date(), body.ready, { epoch: body.epoch, generation: body.generation, responseId: body.responseId });
+        if (done.refused === 'superseded') return NextResponse.json({ ...SUPERSEDED, job: done.job });
+        if (done.refused) return NextResponse.json({ ok: false, reason: done.refused, job: done.job });
+        return NextResponse.json({ job: done.job });
+      }
       case 'finish': {
-        const finished = await finishJobUnder(jobId, body.generation, body.outcome, new Date(), body.why, body.cause, body.turns, body.run);
+        const finished = await finishJobUnder(jobId, body.generation, body.outcome, new Date(), body.why, body.cause, body.turns, body.run, body.epoch);
         // A finish from an older control generation is business, not an error: HTTP 200 `{ ok: false, reason: 'stale', job }` and nothing changed
         return NextResponse.json(finished.stale ? { ok: false, reason: 'stale', ...(finished.superseded ? { run: 'superseded' } : {}), job: finished.job } : { job: finished.job });
       }
       case 'finish-intent': {
-        const kept = await recordFinishIntent(jobId, { outcome: body.outcome, cause: body.cause, why: body.why, turns: body.turns, run: body.run, generation: body.generation, basis: body.basis });
+        const kept = await recordFinishIntent(jobId, { outcome: body.outcome, cause: body.cause, why: body.why, turns: body.turns, run: body.run, generation: body.generation, basis: body.basis, epoch: body.epoch });
         // Every answer is HTTP 200: `{ ok: true, finishPending, already }` (kept; `already` when an earlier intent was kept first), or `{ ok: false, reason: 'stale' | 'cutoff', job }`
         if (kept.ok) return NextResponse.json({ ok: true, already: kept.already, finishPending: kept.pending });
         // A job that was taken away after the Brick check above is not found, as everywhere else on this route (HTTP 404); `stale` and `cutoff` stay HTTP 200

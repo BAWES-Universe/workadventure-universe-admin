@@ -456,9 +456,10 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       const atTheLook = new Promise<void>((resolve) => (reached = resolve));
       const real = prisma.computerJob.findUnique.bind(prisma.computerJob) as (args: unknown) => Promise<unknown>;
       let held = false;
-      const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: unknown) =>
+      // The prepare's own look at the job (the whole row; its earlier look at the owner names a `select`) is where it is held, with its claim taken
+      const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: { select?: unknown }) =>
         real(args).then(async (row) => {
-          if (!held) {
+          if (!held && !args.select) {
             held = true;
             reached();
             await gate;
@@ -522,10 +523,11 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       const gate = new Promise<void>((resolve) => (letGo = resolve));
       let reached: () => void = () => undefined;
       const atTheMint = new Promise<void>((resolve) => (reached = resolve));
-      const real = prisma.computerJobToken.create.bind(prisma.computerJobToken) as (args: unknown) => Promise<unknown>;
+      // The prepare is held at the key's own look at the job (the one with a `select` of the control generation), just before its transaction decides whether the key is made
+      const real = prisma.computerJob.findUnique.bind(prisma.computerJob) as (args: unknown) => Promise<unknown>;
       let held = false;
-      const spy = jest.spyOn(prisma.computerJobToken, 'create').mockImplementation(((args: unknown) => {
-        if (!held) {
+      const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: { select?: { controlGeneration?: boolean } }) => {
+        if (!held && args.select?.controlGeneration) {
           held = true;
           reached();
           return gate.then(() => real(args));
@@ -542,10 +544,10 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         const written = fake.commands.filter((entry) => entry.command.includes('relay.json'));
         expect(written).toHaveLength(1);
         const goodToken = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(written[0].command)?.[1] ?? '';
-        // The slow one makes its key only now, after the other's keys were ended: it is made good for a moment
+        // The slow one decides whether to make its key only now, in a transaction that finds the claim is the other's: it makes none
         letGo();
         expect(await slow).toEqual({ ok: false, reason: 'preparing' });
-        // ...and ended before it was ever written anywhere: the keys of the job that are good are the other's alone
+        // ...and none was made for it: the keys of the job that are good are the other's alone
         const live = await prisma.computerJobToken.findMany({ where: { jobId, revokedAt: null } });
         expect(live).toHaveLength(1);
         expect((await verifyJobToken(goodToken, 'model', minutes(2))).ok).toBe(true);

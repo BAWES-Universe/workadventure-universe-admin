@@ -389,7 +389,17 @@ export async function reserveDiskRoom(input: { botId: string; jobId: string; byt
 export async function renewRoom(input: { key: string; moreMicros?: number }, asked?: Date): Promise<Room> {
   const more = input.moreMicros ?? 0;
   if (more !== 0) wholeMicros(more, 'moreMicros');
-  return prisma.$transaction(async (tx): Promise<Room> => {
+  return prisma.$transaction((tx) => renewRoomIn(tx, input, asked));
+}
+
+/**
+ * `renewRoom` inside a transaction the caller already holds (it takes the pool's lock first, like every step): for a caller that must decide to renew and renew as ONE step under a lock of its own (a computer job's renewal,
+ * under the job's cutoff lock with its row locked, so a renewal never adds room for a worker that no longer owns the job).
+ */
+export async function renewRoomIn(tx: Tx, input: { key: string; moreMicros?: number }, asked?: Date): Promise<Room> {
+  const more = input.moreMicros ?? 0;
+  if (more !== 0) wholeMicros(more, 'moreMicros');
+  {
     await lockPool(tx);
     // The time is read once the lock is held (a renewal that waited for the lock past the end of its lease is a lapsed hold), unless the caller fixed it
     const now = asked ?? new Date();
@@ -428,7 +438,7 @@ export async function renewRoom(input: { key: string; moreMicros?: number }, ask
       data: { amountMicros: row.amountMicros + BigInt(more), expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE), renewals: { increment: 1 }, ...(nextTerms ? { terms: nextTerms.map((term) => ({ at: term.at, micros: term.micros, stretchMs: term.stretchMs })) } : {}) },
     });
     return { ok: true, reservation: viewOf(next), created: false };
-  });
+  }
 }
 
 /** The step happened: its room is given back, and what it really cost is in the books as events. Safe to say twice. */

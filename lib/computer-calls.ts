@@ -61,6 +61,8 @@ export async function authorizeModelCall(
   const verified = await verifyJobToken(input.token, 'model', now);
   if (!verified.ok) return { ok: false, reason: 'refused' };
   const base = { jobId: verified.jobId, botId: verified.botId, personId: verified.personId };
+  // The key this call was made with and the owner epoch it was made under: a refusal ends the job only while that key is still good and still the owner's (a delayed call of a worker that was replaced is refused alone)
+  const from = { epoch: verified.epoch, tokenId: verified.tokenId };
   if (input.payer === 'own-key') {
     // No room is taken, but a call after the fence is refused all the same
     const still = await verifyJobToken(input.token, 'model', now);
@@ -94,7 +96,7 @@ export async function authorizeModelCall(
   // The pause gates only NEW call ids: a call that already holds its room (the same job, the same person, still held) is asked again by a retry, and is answered
   // with its own authorization whatever the route's state is now: it was authorized before the pause, and refusing its retry would make the relay record a fault of ours for a call that is going on
   if (input.route && !(await holdsItsRoom(base.jobId, input.callId, base.personId, now)) && (await routeIsPaused(input.route, now).catch(() => false))) {
-    await refusedForPool(base.jobId, input.callId, input.route, now, afterAnswer);
+    await refusedForPool(base.jobId, input.callId, input.route, now, afterAnswer, from);
     return { ok: false, reason: 'pool', full: true };
   }
   const room = await reserveRoom({ key: callRoomKey(base.jobId, input.callId), personId: base.personId, amountMicros: input.estimateMicros, botId: base.botId, jobId: base.jobId, newJob: false }, now);
@@ -123,11 +125,11 @@ export async function authorizeModelCall(
   // A call refused for the person's own allowance or a rule they said ends the job right here, as a refused renewal does (stopped, by `allowance` or `rule`,
   // which is theirs): the agent's turns that fail on the refusal can then never end the job as ours and give back everything it ran before the limit
   if (room.reason === 'allowance') {
-    await endForRefusal(base.jobId, { reason: 'allowance' }, now);
+    await endForRefusal(base.jobId, { reason: 'allowance' }, now, from);
     return { ok: false, reason: 'allowance' };
   }
   if (room.reason === 'rule') {
-    await endForRefusal(base.jobId, { reason: 'rule', words: room.words }, now);
+    await endForRefusal(base.jobId, { reason: 'rule', words: room.words }, now, from);
     return { ok: false, reason: 'rule', ruleId: room.ruleId, why: room.why, leftMicros: room.leftMicros, words: room.words };
   }
   // Asked again for a call whose room was settled or lapsed: the first try is the call, and a second one is not another
@@ -140,7 +142,7 @@ export async function authorizeModelCall(
   }
   // Only a pool with no room even for the smallest call (`full`) is OUR capacity. A call refused for its own SIZE (`full: false`), or for a setting that is missing, says nothing about it
   const ours = room.reason === 'pool' && room.full === true;
-  if (ours) await refusedForPool(base.jobId, input.callId, input.route ?? null, now, afterAnswer);
+  if (ours) await refusedForPool(base.jobId, input.callId, input.route ?? null, now, afterAnswer, from);
   return { ok: false, reason: 'pool', full: ours };
 }
 
@@ -227,7 +229,7 @@ export const POOL_REFUSALS_BEFORE_STOP = 2;
  * is refused, and left alone it would spin on its person's allowance of time. It is stopped as `pool` (ours: its time given back, never counted, with the words the person is told). A job that had a
  * call authorized before is never stopped here: a refusal in the middle of its work is the relay's to tell, and the job's own renewal ends it if the pool stays full. Never throws: a refusal is answered whatever this does.
  */
-async function refusedForPool(jobId: string, callId: string, route: string | null, now: Date, afterAnswer?: (task: () => Promise<void>) => void): Promise<void> {
+async function refusedForPool(jobId: string, callId: string, route: string | null, now: Date, afterAnswer?: (task: () => Promise<void>) => void, from?: { epoch: number; tokenId: string }): Promise<void> {
   let cutoff = false;
   try {
     // One lock per job, held from the count to the moment the job's keys end, and DATABASE STEPS ONLY: no provider call and no other transaction is made while it is held (the end of the job is slow: it
@@ -237,8 +239,10 @@ async function refusedForPool(jobId: string, callId: string, route: string | nul
       async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
         // A job that is over (or not on the machine) is not decided about: a finish that ended it first stands, and a cutoff for a job nothing is running for would only end its keys again
-        const job = await tx.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
+        const job = await tx.computerJob.findUnique({ where: { id: jobId }, select: { status: true, ownerEpoch: true } });
         if (!job || (job.status !== 'running' && job.status !== 'waiting')) return false;
+        // A refusal for a call of a worker that no longer owns the job (another claimed it since: the call's key ended, or was made under an older epoch) is the CALL's alone: it counts for nothing and decides nothing about the job
+        if (from && (job.ownerEpoch !== from.epoch || (await tx.computerJobToken.count({ where: { id: from.tokenId, jobId, revokedAt: null } })) === 0)) return false;
         // Only a job whose calls have ALL been refused so far: one that had a call authorized before (a room held or priced, or one on the person's own key, which leaves only its marker) is left to the relay's own words
         if (await hadAuthorizedCall(tx, jobId)) return false;
         // Decided already (by a refusal that committed before this one): nothing to decide twice
@@ -384,10 +388,10 @@ async function holdsItsRoom(jobId: string, callId: string, personId: string, now
 }
 
 /** Ends the job a call was refused for (computer.ts owns how a job ends; it is loaded when asked, as it reads this file). A refusal is answered whatever this does: never throws; says whether the job was ended. */
-async function endForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule' | 'pool'; words: string }, now: Date): Promise<boolean> {
+async function endForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule' | 'pool'; words: string }, now: Date, from?: { epoch: number; tokenId: string }): Promise<boolean> {
   try {
     const { stopJobForRefusal } = await import('@/lib/computer');
-    await stopJobForRefusal(jobId, why, now);
+    await stopJobForRefusal(jobId, why, now, from);
     return true;
   } catch (error) {
     console.error('[Computer] Could not end a job whose model call was refused:', error instanceof Error ? error.message : 'unknown');

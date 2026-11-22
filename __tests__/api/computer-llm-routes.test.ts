@@ -54,13 +54,13 @@ describe.each([
 
 describe('identify', () => {
   it('says whose job a good key is for, and gives the same answer for every key that is not good', async () => {
-    lib.token.verifyJobToken.mockResolvedValueOnce({ ok: true, jobId: 'j1', botId: 'b1', personId: 'p1', tokenId: 't1', generation: 0 });
+    lib.token.verifyJobToken.mockResolvedValueOnce({ ok: true, jobId: 'j1', botId: 'b1', personId: 'p1', tokenId: 't1', generation: 0, epoch: 0 });
     expect(await (await identify(post({ token: 'cjt_x' }))).json()).toEqual({ ok: true, jobId: 'j1', botId: 'b1' });
     lib.token.verifyJobToken.mockResolvedValueOnce({ ok: false, reason: 'refused' });
     expect(await (await identify(post({ token: 'cjt_old' }))).json()).toEqual({ ok: false, reason: 'refused' });
   });
   it('never says who pays', async () => {
-    lib.token.verifyJobToken.mockResolvedValueOnce({ ok: true, jobId: 'j1', botId: 'b1', personId: 'p-secret', tokenId: 't1', generation: 0 });
+    lib.token.verifyJobToken.mockResolvedValueOnce({ ok: true, jobId: 'j1', botId: 'b1', personId: 'p-secret', tokenId: 't1', generation: 0, epoch: 0 });
     expect(JSON.stringify(await (await identify(post({ token: 'cjt_x' }))).json())).not.toContain('p-secret');
   });
 });

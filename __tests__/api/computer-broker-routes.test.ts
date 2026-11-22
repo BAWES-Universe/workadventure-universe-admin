@@ -62,7 +62,7 @@ describe('prepare', () => {
     lib.prepareJob.mockResolvedValueOnce({ ok: true, expiresAt: new Date('2026-11-15T12:15:00Z'), git: true });
     const answer = await prepare(req('POST', { relay: 'https://bot.example.test' }), params);
     expect(await answer.json()).toEqual({ ok: true, expiresAt: '2026-11-15T12:15:00.000Z', git: true });
-    expect(lib.prepareJob).toHaveBeenCalledWith('job-1', 'https://bot.example.test', expect.any(Date), { run: null, relayReached: undefined, relayStatus: null });
+    expect(lib.prepareJob).toHaveBeenCalledWith('job-1', 'https://bot.example.test', expect.any(Date), { run: null, epoch: null, relayReached: undefined, relayStatus: null });
     expect(giveback.afterLateEvidence).not.toHaveBeenCalled();
   });
   it('says 409 relay_unreachable when the computer could not get the relay’s model list, names the run it was told, and judges a late row; no other refusal does', async () => {
@@ -71,7 +71,7 @@ describe('prepare', () => {
     const answer = await prepare(req('POST', { relay: 'https://bot.example.test', run: 'r-1' }), params);
     expect(answer.status).toBe(409);
     expect(await answer.json()).toEqual({ ok: false, reason: 'relay_unreachable' });
-    expect(lib.prepareJob).toHaveBeenLastCalledWith('job-1', 'https://bot.example.test', expect.any(Date), { run: 'r-1', relayReached: undefined, relayStatus: null });
+    expect(lib.prepareJob).toHaveBeenLastCalledWith('job-1', 'https://bot.example.test', expect.any(Date), { run: 'r-1', epoch: null, relayReached: undefined, relayStatus: null });
     expect(giveback.afterLateEvidence).toHaveBeenCalledWith('job-1');
     (giveback.afterLateEvidence as jest.Mock).mockClear();
     lib.prepareJob.mockResolvedValueOnce({ ok: false, reason: 'failed' });
@@ -80,7 +80,7 @@ describe('prepare', () => {
     // What the bot server's own look at the relay saw is passed on as it is
     lib.prepareJob.mockResolvedValueOnce({ ok: false, reason: 'relay_unreachable' });
     expect((await prepare(req('POST', { relay: 'https://bot.example.test', run: 'r-1', relayReached: false, relayStatus: 404 }), params)).status).toBe(409);
-    expect(lib.prepareJob).toHaveBeenLastCalledWith('job-1', 'https://bot.example.test', expect.any(Date), { run: 'r-1', relayReached: false, relayStatus: 404 });
+    expect(lib.prepareJob).toHaveBeenLastCalledWith('job-1', 'https://bot.example.test', expect.any(Date), { run: 'r-1', epoch: null, relayReached: false, relayStatus: 404 });
     // Not a run word, a status or a flag: refused before anything is done
     lib.prepareJob.mockClear();
     for (const bad of [{ run: 'bad run!' }, { relayStatus: 700 }, { relayStatus: 1.5 }, { relayReached: 'no' }]) expect((await prepare(req('POST', { relay: 'https://bot.example.test', ...bad }), params)).status).toBe(400);
@@ -113,7 +113,7 @@ describe('turn', () => {
     expect(text).toContain(': keepalive\n\n');
     expect(text).toContain('event: tool\n');
     expect(text.trimEnd().endsWith('}')).toBe(true);
-    expect(lib.startTurn).toHaveBeenCalledWith('job-1', 'Fill the form', expect.any(AbortSignal));
+    expect(lib.startTurn).toHaveBeenCalledWith('job-1', 'Fill the form', expect.any(AbortSignal), { epoch: null });
   });
 
   it('says a turn that broke on the way, never leaves it looking alive', async () => {
@@ -154,7 +154,7 @@ describe('cancel and stream', () => {
   it('cancels the job’s own turn, naming none', async () => {
     lib.cancelJobTurn.mockResolvedValueOnce({ ok: true, cancelled: true });
     expect(await (await cancel(req('POST', {}), params)).json()).toEqual({ ok: true, cancelled: true });
-    expect(lib.cancelJobTurn).toHaveBeenCalledWith('job-1');
+    expect(lib.cancelJobTurn).toHaveBeenCalledWith('job-1', { epoch: null, responseId: null });
     lib.cancelJobTurn.mockResolvedValueOnce({ ok: false, reason: 'not_found' });
     expect((await cancel(req('POST', {}), params)).status).toBe(404);
   });
@@ -195,5 +195,51 @@ describe('the running jobs', () => {
     expect(list).toHaveBeenLastCalledWith(50, '2026-01-01T00:00:00.000Z_abc');
     await running(req('GET', undefined, undefined, `?cursor=${'x'.repeat(500)}`));
     expect(list).toHaveBeenLastCalledWith(50, null);
+  });
+});
+
+describe('the owner’s epoch on every broker route (GPT round 5)', () => {
+  it('passes the epoch the runner won by claiming on to every route, and an old worker gets the game’s `superseded` shape with HTTP 409 on each: nothing else is said', async () => {
+    const SUPERSEDED = { ok: false, reason: 'stale', run: 'superseded' };
+    lib.prepareJob.mockResolvedValueOnce({ ok: false, reason: 'superseded' });
+    const prepared = await prepare(req('POST', { relay: 'https://bot.example.test', epoch: 2 }), params);
+    expect(prepared.status).toBe(409);
+    expect(await prepared.json()).toEqual(SUPERSEDED);
+    expect(lib.prepareJob).toHaveBeenLastCalledWith('job-1', 'https://bot.example.test', expect.any(Date), expect.objectContaining({ epoch: 2 }));
+    lib.startTurn.mockResolvedValueOnce({ ok: false, reason: 'superseded' });
+    const turned = await turn(req('POST', { input: 'x', epoch: 2 }), params);
+    expect(turned.status).toBe(409);
+    expect(await turned.json()).toEqual(SUPERSEDED);
+    expect(lib.startTurn).toHaveBeenLastCalledWith('job-1', 'x', expect.any(AbortSignal), { epoch: 2 });
+    lib.cancelJobTurn.mockResolvedValueOnce({ ok: false, reason: 'superseded' });
+    const cancelled = await cancel(req('POST', { epoch: 2, responseId: 'resp-1' }), params);
+    expect(cancelled.status).toBe(409);
+    expect(await cancelled.json()).toEqual(SUPERSEDED);
+    expect(lib.cancelJobTurn).toHaveBeenLastCalledWith('job-1', { epoch: 2, responseId: 'resp-1' });
+    lib.reattachJobTurn.mockResolvedValueOnce({ ok: false, reason: 'superseded' });
+    const streamed = await stream(req('GET', undefined, SERVICE_TOKEN, '?epoch=2'), params);
+    expect(streamed.status).toBe(409);
+    expect(await streamed.json()).toEqual(SUPERSEDED);
+    expect(lib.reattachJobTurn).toHaveBeenLastCalledWith('job-1', expect.any(AbortSignal), { epoch: 2 });
+    // A stream that names no epoch (or a bad one) names none
+    lib.reattachJobTurn.mockResolvedValue({ ok: false, reason: 'no_turn' });
+    for (const query of ['', '?epoch=', '?epoch=-1', '?epoch=1.5', '?epoch=abc', '?epoch=99999999999']) {
+      await stream(req('GET', undefined, SERVICE_TOKEN, query), params);
+      expect(lib.reattachJobTurn).toHaveBeenLastCalledWith('job-1', expect.any(AbortSignal), { epoch: null });
+    }
+  });
+
+  it('a cancel that names another turn is answered 200 `not_current` (nothing cancelled); a bad epoch or response is refused before anything is asked', async () => {
+    lib.cancelJobTurn.mockResolvedValueOnce({ ok: true, cancelled: false, reason: 'not_current' });
+    const answer = await cancel(req('POST', { epoch: 3, responseId: 'resp-old' }), params);
+    expect(answer.status).toBe(200);
+    expect(await answer.json()).toEqual({ ok: true, cancelled: false, reason: 'not_current' });
+    lib.cancelJobTurn.mockClear();
+    for (const bad of [{ epoch: -1 }, { epoch: 1.5 }, { epoch: '2' }, { responseId: '' }, { other: 1 }]) expect((await cancel(req('POST', bad), params)).status).toBe(400);
+    for (const bad of [{ input: 'x', epoch: -1 }, { input: 'x', epoch: 'a' }]) expect((await turn(req('POST', bad), params)).status).toBe(400);
+    expect((await prepare(req('POST', { relay: 'https://bot.example.test', epoch: 1.5 }), params)).status).toBe(400);
+    expect(lib.cancelJobTurn).not.toHaveBeenCalled();
+    expect(lib.startTurn).not.toHaveBeenCalled();
+    expect(lib.prepareJob).not.toHaveBeenCalled();
   });
 });
