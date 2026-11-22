@@ -244,11 +244,26 @@ async function refusedForPool(jobId: string, callId: string, route: string | nul
     console.error('[Computer] Could not note a model call refused for our capacity:', error instanceof Error ? error.message : 'unknown');
     return;
   }
-  // The slow end of the job, with no lock and no transaction held. Its keys already ended; the job is ended as ours (given back, never counted). Never throws
-  if (cutoff && !(await endForRefusal(jobId, { reason: 'pool', words: POOL_BUSY_WORDS }, now))) {
+  // The slow end of the job (it cancels the agent's turn, hands files over with timeouts of up to 20 s, rests the machine) is NOT part of the answer: the refusal is answered first, so the relay never sees an authorize
+  // that outlasts its own timeout for a call that was already refused (it could read that as something other than our pool being full, which is the fault the give-back stands on). The decision is durable
+  // already (its record and the end of the job's keys are committed), every call the job makes is refused at its key, and `endStuckCutoffs` ends a decided job nothing else ended
+  if (cutoff) endCutoffAfterAnswer(jobId, now);
+}
+
+/** The ends of decided cutoffs that were started after their refusal was answered, so a test (or a shutdown) can wait for them. */
+const cutoffEnds = new Set<Promise<void>>();
+export const cutoffEndsFinished = (): Promise<void> => Promise.allSettled([...cutoffEnds]).then(() => undefined);
+
+/** Ends the job of a decided cutoff for our own capacity (as ours: given back, never counted), after the refusal was answered. Never throws and is never awaited by the request. */
+function endCutoffAfterAnswer(jobId: string, now: Date): void {
+  const work: Promise<void> = (async () => {
+    if (await endForRefusal(jobId, { reason: 'pool', words: POOL_BUSY_WORDS }, now)) return;
     // The decision is made and the keys are ended, but the job could not be: nothing retries it from a call (every call is refused at its key now), so the sweep ends it (`endStuckCutoffs`), and Sentry is told
     await tellSentry(() => Sentry.captureMessage('A computer job’s cutoff for our own capacity was decided but the job could not be ended: its keys are ended and the sweep ends it', { level: 'error', tags: { area: 'computer', step: 'pool_cutoff_end' }, extra: { jobId } })).catch(() => undefined);
-  }
+  })()
+    .catch(() => undefined)
+    .finally(() => cutoffEnds.delete(work));
+  cutoffEnds.add(work);
 }
 
 /** Whether a call of the job was ever authorized: a room held or settled for it (not one given back), a model call priced, or the marker of one on the person's own key. The three reads the cutoff and its sweep both stand on. */

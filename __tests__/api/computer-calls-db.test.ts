@@ -28,10 +28,16 @@ import { TOKEN_LIFE_MS, forgetOldTokens, mintJobToken, verifyJobToken } from '@/
 import { recordMeterEvent } from '@/lib/meter';
 import { reportsToTell } from '@/lib/computer-report';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
-import { authorizeModelCall, callRoomKey, cutoffLockKey, endStuckCutoffs, forgetMeterNotSetAlert, giveBackModelCalls, releaseModelCall, settleModelCall } from '@/lib/computer-calls';
+import { authorizeModelCall, callRoomKey, cutoffEndsFinished, cutoffLockKey, endStuckCutoffs, forgetMeterNotSetAlert, giveBackModelCalls, releaseModelCall, settleModelCall } from '@/lib/computer-calls';
 import { POOL_CUTOFF_CALL, admitLockKey, hasOwnKeyCall, hasPoolRefusals, readFaultRows, recordCallAdmission, recordFaults, recordOwnKeyCall, recordPoolCutoff } from '@/lib/computer-faults';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
+
+/** A refusal that decides a cutoff is ANSWERED first and the job is ended after (Sentry, lib/computer-calls): this asks, then waits for that end, so a test reads the job as it is once everything has run. */
+const authorizeSettled = (...args: Parameters<typeof authorizeModelCall>) => authorizeModelCall(...args).then(async (answer) => {
+  await cutoffEndsFinished();
+  return answer;
+});
 
 const tag = randomUUID().slice(0, 8);
 const NOW = new Date('2026-11-15T12:00:00Z');
@@ -169,7 +175,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
   });
 
   describe('a model call', () => {
-    const call = (token: string, callId: string, estimateMicros = 5_000) => authorizeModelCall({ token, callId, estimateMicros, payer: 'universe' }, NOW);
+    const call = (token: string, callId: string, estimateMicros = 5_000) => authorizeSettled({ token, callId, estimateMicros, payer: 'universe' }, NOW);
 
     it('takes room before it is sent, and settles to what it cost: the books and the room agree', async () => {
       const { sara, jobId } = await running();
@@ -282,12 +288,12 @@ run('what a computer may ask of Orbit, in a real database', () => {
         expect(red).toMatchObject({ name: 'pool', ok: false });
         expect(red?.detail).toContain('would be refused for the pool');
         expect(red?.detail).toMatch(/held for steps \$0\.06/);
-        expect(await authorizeModelCall({ token, callId: 'big', estimateMicros: USUAL_CALL_ROOM_MICROS, payer: 'universe' }, NOW)).toMatchObject({ ok: false, reason: 'pool' });
+        expect(await authorizeSettled({ token, callId: 'big', estimateMicros: USUAL_CALL_ROOM_MICROS, payer: 'universe' }, NOW)).toMatchObject({ ok: false, reason: 'pool' });
         // One millionth more room and the same call fits, and the check is green again
         await setUp({ poolCeilingMicros: 60_000 + USUAL_CALL_ROOM_MICROS, reserveMicros: 0 });
         expect((await poolStatusNow(NOW))?.refusing).toBe(false);
         expect(await poolCheckNow()).toMatchObject({ ok: true });
-        expect((await authorizeModelCall({ token, callId: 'fits', estimateMicros: USUAL_CALL_ROOM_MICROS, payer: 'universe' }, NOW)).ok).toBe(true);
+        expect((await authorizeSettled({ token, callId: 'fits', estimateMicros: USUAL_CALL_ROOM_MICROS, payer: 'universe' }, NOW)).ok).toBe(true);
       });
 
       it('says the kept storage, the recorded-and-not-settled spend and the chat apart, and counts the holds that ran out and were never settled (how many, how much, how long ago the oldest ran out): a leak shows here', async () => {
@@ -471,7 +477,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
         const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
         // One person's job had a provider failure on the route in the window: with a bound of one person, new work on it waits
         await prisma.computerJobFault.create({ data: { jobId: other.jobId, turn: 1, callId: 'p1', kind: 'uncertain', reason: 'provider_5xx', source: 'universe-ai', route: 'universe-ai/slow', at: NOW } });
-        const paused = (id: string) => authorizeModelCall({ token, callId: id, estimateMicros: 5_000, payer: 'universe', route: 'universe-ai/slow' }, NOW);
+        const paused = (id: string) => authorizeSettled({ token, callId: id, estimateMicros: 5_000, payer: 'universe', route: 'universe-ai/slow' }, NOW);
         expect(await paused('c1')).toEqual({ ok: false, reason: 'pool', full: true });
         expect(await poolRows(jobId)).toMatchObject([{ callId: 'orbit:pool:c1', route: 'universe-ai/slow' }]);
         expect(await paused('c2')).toEqual({ ok: false, reason: 'pool', full: true });
@@ -497,10 +503,57 @@ run('what a computer may ask of Orbit, in a real database', () => {
         const { jobId } = await running();
         const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
         // Authorized, its report not here yet: it left only the marker
-        expect(await authorizeModelCall({ token, callId: 'own-1', estimateMicros: 5_000, payer: 'own-key' }, NOW)).toMatchObject({ ok: true, reservedMicros: null });
+        expect(await authorizeSettled({ token, callId: 'own-1', estimateMicros: 5_000, payer: 'own-key' }, NOW)).toMatchObject({ ok: true, reservedMicros: null });
         await setUp({ poolCeilingMicros: 60_000 });
         for (const id of ['c1', 'c2', 'c3']) expect(await call(token, id, 1_000)).toMatchObject({ ok: false, reason: 'pool' });
         expect(await poolRows(jobId)).toEqual([]);
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+      });
+
+      it('Sentry: the refusal that decides the cutoff is ANSWERED while the slow end of the job is still pending (the relay never waits for the cleanup); the job is ended after, as ours', async () => {
+        const { jobId } = await running('eve');
+        const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+        await setUp({ poolCeilingMicros: 60_000 });
+        expect(await authorizeModelCall({ token, callId: 'c1', estimateMicros: 1_000, payer: 'universe' }, NOW)).toMatchObject({ ok: false, reason: 'pool', full: true });
+        let open: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+          open = resolve;
+        });
+        const real = prisma.computerJob.updateMany.bind(prisma.computerJob);
+        const hold = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementationOnce(((args: never) => gate.then(() => real(args))) as never);
+        try {
+          // The second refusal decides the cutoff, and the end of the job waits at its first write: the answer must still come
+          const answer = await Promise.race([authorizeModelCall({ token, callId: 'c2', estimateMicros: 1_000, payer: 'universe' }, NOW), new Promise<string>((resolve) => setTimeout(() => resolve('waited for the end of the job'), 4_000))]);
+          expect(answer).toEqual({ ok: false, reason: 'pool', full: true });
+          // The decision stands (keys ended) while the job is not ended yet...
+          expect(await prisma.computerJobToken.count({ where: { jobId, revokedAt: null } })).toBe(0);
+          expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+          // ...and when the cleanup goes on it is ended as ours, once
+          open();
+          await cutoffEndsFinished();
+          expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
+        } finally {
+          open();
+          await cutoffEndsFinished();
+          hold.mockRestore();
+        }
+      });
+
+      it('Sentry: when the end that follows the answer fails, Sentry is still told once (pool_cutoff_end) and the answer was the same', async () => {
+        const { jobId } = await running('fay');
+        const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+        await setUp({ poolCeilingMicros: 60_000 });
+        expect(await authorizeModelCall({ token, callId: 'c1', estimateMicros: 1_000, payer: 'universe' }, NOW)).toMatchObject({ ok: false, reason: 'pool', full: true });
+        (Sentry.captureMessage as jest.Mock).mockClear();
+        const hold = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementationOnce((() => Promise.reject(new Error('the database went away'))) as never);
+        try {
+          expect(await authorizeModelCall({ token, callId: 'c2', estimateMicros: 1_000, payer: 'universe' }, NOW)).toEqual({ ok: false, reason: 'pool', full: true });
+          await cutoffEndsFinished();
+        } finally {
+          hold.mockRestore();
+        }
+        expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+        expect((Sentry.captureMessage as jest.Mock).mock.calls[0][1]).toMatchObject({ level: 'error', tags: { area: 'computer', step: 'pool_cutoff_end' }, extra: { jobId } });
         expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
       });
 
@@ -530,6 +583,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
           expect(await prisma.meterReservation.findUnique({ where: { reservationKey: callRoomKey(jobId, 'c3') } })).toBeNull();
           open();
           expect(await cutoff).toEqual({ ok: false, reason: 'pool', full: true });
+          await cutoffEndsFinished();
           expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
         } finally {
           // Always: the gate is opened, the started work is joined and the spy is put back, even when an assertion above failed (and a failure here never hides that one)
@@ -560,7 +614,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
           },
         });
         setComputerProviderForTests(watching);
-        const on = (id: string) => authorizeModelCall({ token, callId: id, estimateMicros: 5_000, payer: 'universe', route: 'universe-ai/slow' }, NOW);
+        const on = (id: string) => authorizeSettled({ token, callId: id, estimateMicros: 5_000, payer: 'universe', route: 'universe-ai/slow' }, NOW);
         expect(await on('c1')).toEqual({ ok: false, reason: 'pool', full: true });
         expect(await on('c2')).toEqual({ ok: false, reason: 'pool', full: true });
         expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
@@ -737,7 +791,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
         it('a call on the person’s own key is not authorized unless its marker is kept: a marker that could not be written is a refusal, and asked again it is authorized', async () => {
           const { jobId } = await running();
           const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
-          const own = () => authorizeModelCall({ token, callId: 'own-1', estimateMicros: 5_000, payer: 'own-key' }, NOW);
+          const own = () => authorizeSettled({ token, callId: 'own-1', estimateMicros: 5_000, payer: 'own-key' }, NOW);
           const spy = jest.spyOn(prisma.computerJobFault, 'createMany').mockRejectedValueOnce(new Error('the database went away') as never);
           let refused: unknown;
           try {
@@ -922,7 +976,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
             const { jobId } = await running();
             // The real clock (nothing fixed): the key is made now, and the room is good for an hour
             const { token } = (await mintJobToken(jobId, 'model')) as { token: string };
-            const ask = () => authorizeModelCall({ token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' });
+            const ask = () => authorizeSettled({ token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' });
             expect((await ask()).ok).toBe(true);
             const lock = holdLock(admitLockKey(jobId, 'c1'), async () => undefined);
             let again: Promise<unknown> = Promise.resolve();
@@ -946,7 +1000,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
           it('a room that runs out while the key is being looked at under the lock is not admitted: the time is read again after that look (CodeRabbit)', async () => {
             const { jobId } = await running();
             const { token } = (await mintJobToken(jobId, 'model')) as { token: string };
-            const ask = () => authorizeModelCall({ token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' });
+            const ask = () => authorizeSettled({ token, callId: 'c1', estimateMicros: 5_000, payer: 'universe' });
             expect((await ask()).ok).toBe(true);
             // The room runs out while the replay is looking at the key under the call's lock (its own transaction's look is where that is made to happen)
             const real = prisma.$transaction.bind(prisma) as (fn: (tx: unknown) => Promise<unknown>, options?: { maxWait?: number }) => Promise<unknown>;
@@ -1128,7 +1182,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
           expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
           expect((Sentry.captureMessage as jest.Mock).mock.calls[0][1]).toMatchObject({ level: 'error', tags: { area: 'computer', step: 'meter_not_set' } });
           const later = (await mintJobToken(jobId, 'model', minutes(20))) as { token: string };
-          expect(await authorizeModelCall({ token: later.token, callId: 'c4', estimateMicros: 5_000, payer: 'universe' }, minutes(20))).toEqual({ ok: false, reason: 'pool', full: true });
+          expect(await authorizeSettled({ token: later.token, callId: 'c4', estimateMicros: 5_000, payer: 'universe' }, minutes(20))).toEqual({ ok: false, reason: 'pool', full: true });
           expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
         });
 
@@ -1244,7 +1298,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
         const { jobId } = await running('dee');
         const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
         await prisma.computerJobFault.create({ data: { jobId: other.jobId, turn: 1, callId: 'p1', kind: 'uncertain', reason: 'provider_5xx', source: 'universe-ai', route: 'universe-ai/slow', at: NOW } });
-        const on = (route: string, id: string) => authorizeModelCall({ token, callId: id, estimateMicros: 5_000, payer: 'universe', route }, NOW);
+        const on = (route: string, id: string) => authorizeSettled({ token, callId: id, estimateMicros: 5_000, payer: 'universe', route }, NOW);
         expect(await on('universe-ai/slow', 'c1')).toEqual({ ok: false, reason: 'pool', full: true });
         // A call on the route with room is authorized (and the first refusal recovers); the second refusal then finds an authorized call
         expect((await on('universe-ai/fast', 'c2')).ok).toBe(true);
@@ -1324,7 +1378,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
       const { sara, jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
       const before = (await currentEnvelope(NOW)).reservedMicros;
-      const authorized = await authorizeModelCall({ token, callId: 'k1', estimateMicros: 1, payer: 'own-key' }, NOW);
+      const authorized = await authorizeSettled({ token, callId: 'k1', estimateMicros: 1, payer: 'own-key' }, NOW);
       expect(authorized).toMatchObject({ ok: true, reservedMicros: null });
       expect((await currentEnvelope(NOW)).reservedMicros).toBe(before);
       await settleModelCall(jobId, 'k1', { costMicros: 900, basis: 'measured', payer: { kind: 'person', personId: sara.id }, route: 'own-key' }, NOW);
@@ -1428,7 +1482,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
     /** A call that was sent and settled while the job ran. */
     const settledCall = async (jobId: string, callId: string, cost: number) => {
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
-      await authorizeModelCall({ token, callId, estimateMicros: 5_000, payer: 'universe' }, NOW);
+      await authorizeSettled({ token, callId, estimateMicros: 5_000, payer: 'universe' }, NOW);
       await settleModelCall(jobId, callId, facts(cost), NOW);
     };
 
@@ -1469,7 +1523,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
     it('are written against nobody when the report comes after the job failed (a call that finished late)', async () => {
       const { sara, jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
-      await authorizeModelCall({ token, callId: 'late', estimateMicros: 5_000, payer: 'universe' }, NOW);
+      await authorizeSettled({ token, callId: 'late', estimateMicros: 5_000, payer: 'universe' }, NOW);
       await finishJob(jobId, 'failed', minutes(5), null, 'ours');
       expect(await settleModelCall(jobId, 'late', { ...facts(2_500), cutShort: true }, minutes(6))).toEqual({ ok: true });
       const event = await callEvent(jobId, 'late');
@@ -1482,7 +1536,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
       const { sara, jobId } = await running();
       await settledCall(jobId, 'done1', 1_000);
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
-      await authorizeModelCall({ token, callId: 'lost', estimateMicros: 9_000, payer: 'universe' }, NOW);
+      await authorizeSettled({ token, callId: 'lost', estimateMicros: 9_000, payer: 'universe' }, NOW);
       await sweepComputers(minutes(60));
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'stopped', endedBy: 'error' });
       expect(await callEvent(jobId, 'done1')).toMatchObject({ personKey: 'unknown', personId: null });
@@ -1518,7 +1572,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
     it('a report that replaces an unknown figure keeps the call given back', async () => {
       const { jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
-      await authorizeModelCall({ token, callId: 'lost', estimateMicros: 9_000, payer: 'universe' }, NOW);
+      await authorizeSettled({ token, callId: 'lost', estimateMicros: 9_000, payer: 'universe' }, NOW);
       await sweepComputers(minutes(60));
       await settleModelCall(jobId, 'lost', facts(4_000), minutes(61));
       const event = await callEvent(jobId, 'lost');
@@ -1529,7 +1583,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
     it('a report that read the job as still running does not wipe a give-back made in the meantime, and still drops what the sweep guessed', async () => {
       const { sara, jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
-      await authorizeModelCall({ token, callId: 'lost', estimateMicros: 9_000, payer: 'universe' }, NOW);
+      await authorizeSettled({ token, callId: 'lost', estimateMicros: 9_000, payer: 'universe' }, NOW);
       await sweepComputers(minutes(60));
       // The sweep wrote it as unknown, cut short, and given back
       expect((await callEvent(jobId, 'lost')).detail).toMatchObject({ givenBack: true, cutShort: true });
@@ -1568,7 +1622,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
     it('do not touch a call on the owner’s own key (it was never the platform’s cost or the person’s allowance)', async () => {
       const { sara, jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
-      await authorizeModelCall({ token, callId: 'k1', estimateMicros: 1, payer: 'own-key' }, NOW);
+      await authorizeSettled({ token, callId: 'k1', estimateMicros: 1, payer: 'own-key' }, NOW);
       await settleModelCall(jobId, 'k1', { costMicros: 900, basis: 'measured', payer: { kind: 'person', personId: sara.id }, route: 'own-key' }, NOW);
       await finishJob(jobId, 'failed', minutes(5), null, 'ours');
       expect(await callEvent(jobId, 'k1')).toMatchObject({ payerKind: 'person', payerPersonId: sara.id, personKey: `person:${sara.id}` });
