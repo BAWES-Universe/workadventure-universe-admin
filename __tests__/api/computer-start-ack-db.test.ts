@@ -26,7 +26,6 @@ const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
 const people: string[] = [];
 let made = 0;
 const env = process.env.COMPUTER_PROVIDER;
-const RELAY = 'https://bot-server.example.test';
 
 async function person(name: string) {
   const unique = `${name}-${tag}-${++made}`;
