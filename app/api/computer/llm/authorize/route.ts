@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse, after } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
@@ -36,7 +36,8 @@ export async function POST(request: NextRequest) {
   try {
     const parsed = bodySchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
-    const answer = await authorizeModelCall(parsed.data);
+    // The end of a job whose cutoff this call decides runs AFTER the answer has been sent: the relay is never kept waiting on the cleanup (the cutoff's record and the end of its keys are committed before the answer)
+    const answer = await authorizeModelCall(parsed.data, undefined, (task) => after(task));
     return NextResponse.json(answer, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });

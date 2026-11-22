@@ -9,7 +9,7 @@ import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credi
 import { routeIsPaused } from '@/lib/computer-route-pause';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { tellSentry } from '@/lib/computer-alerts';
-import { ORBIT_SOURCE, POOL_CUTOFF_CALL, admitLockKey, cutoffLockKey, hasCallAdmission, hasOwnKeyCall, hasPoolCutoff, hasPoolRefusals, recordCallAdmission, recordOwnKeyCall, recordPoolCutoff, recordPoolRefusal, retirePoolRefusals } from '@/lib/computer-faults';
+import { ORBIT_SOURCE, POOL_CUTOFF_CALL, admitLockKey, cutoffLockKey, hasCallAdmission, hasOwnKeyCall, hasPoolCutoff, hasPoolRefusals, recordCallAdmission, authorizeOwnKeyCall, recordPoolCutoff, recordPoolRefusal, retirePoolRefusals } from '@/lib/computer-faults';
 
 /**
  * A model call a Brick's computer makes (build handoff v2, section 5): room is taken BEFORE the call, and what it really cost is
@@ -51,6 +51,8 @@ export type Authorized =
 export async function authorizeModelCall(
   input: { token: string; callId: string; estimateMicros: number; payer: 'universe' | 'own-key'; /** The provider and route the call goes to, when the relay names it: new platform-funded work on a route that is failing for many people waits. */ route?: string | null },
   asked?: Date,
+  /** How the end of a decided cutoff is run once the refusal is answered. The route hands over Next's `after` (it runs when the response has been sent, so the relay gets the refusal first); without it (a test, a caller with no response to wait for) the end is started in the background at once. */
+  afterAnswer?: (task: () => Promise<void>) => void,
 ): Promise<Authorized> {
   // The time of this request, and (for what is decided after waiting for a lock) the time read again once the wait is over; a caller that fixes the time (the tests) fixes both
   const now = asked ?? new Date();
@@ -67,7 +69,8 @@ export async function authorizeModelCall(
     // an own key is never given back as ours). A call is not authorized unless the marker is kept: one that could not be kept is refused (the relay asks again), as a call that is authorized and then forgotten would let
     // a cutoff for our own capacity read the job as one that never had a call
     try {
-      await recordOwnKeyCall(prisma, base.jobId, now);
+      // Kept under the lock a finish's inference takes, and only while the job is still on: a job that was ended meanwhile does not authorize the call
+      if (!(await authorizeOwnKeyCall(base.jobId, now))) return { ok: false, reason: 'refused' };
     } catch (error) {
       console.error('[Computer] Could not note an own-key call, so it is not authorized:', error instanceof Error ? error.message : 'unknown');
       return { ok: false, reason: 'refused' };
@@ -82,7 +85,7 @@ export async function authorizeModelCall(
   // The pause gates only NEW call ids: a call that already holds its room (the same job, the same person, still held) is asked again by a retry, and is answered
   // with its own authorization whatever the route's state is now: it was authorized before the pause, and refusing its retry would make the relay record a fault of ours for a call that is going on
   if (input.route && !(await holdsItsRoom(base.jobId, input.callId, base.personId, now)) && (await routeIsPaused(input.route, now).catch(() => false))) {
-    await refusedForPool(base.jobId, input.callId, input.route, now);
+    await refusedForPool(base.jobId, input.callId, input.route, now, afterAnswer);
     return { ok: false, reason: 'pool', full: true };
   }
   const room = await reserveRoom({ key: callRoomKey(base.jobId, input.callId), personId: base.personId, amountMicros: input.estimateMicros, botId: base.botId, jobId: base.jobId, newJob: false }, now);
@@ -130,7 +133,7 @@ export async function authorizeModelCall(
   }
   // Only a pool with no room even for the smallest call (`full`) is OUR capacity. A call refused for its own SIZE (`full: false`), or for a setting that is missing, says nothing about it
   const ours = room.reason === 'pool' && room.full === true;
-  if (ours) await refusedForPool(base.jobId, input.callId, input.route ?? null, now);
+  if (ours) await refusedForPool(base.jobId, input.callId, input.route ?? null, now, afterAnswer);
   return { ok: false, reason: 'pool', full: ours };
 }
 
@@ -217,7 +220,7 @@ export const POOL_REFUSALS_BEFORE_STOP = 2;
  * is refused, and left alone it would spin on its person's allowance of time. It is stopped as `pool` (ours: its time given back, never counted, with the words the person is told). A job that had a
  * call authorized before is never stopped here: a refusal in the middle of its work is the relay's to tell, and the job's own renewal ends it if the pool stays full. Never throws: a refusal is answered whatever this does.
  */
-async function refusedForPool(jobId: string, callId: string, route: string | null, now: Date): Promise<void> {
+async function refusedForPool(jobId: string, callId: string, route: string | null, now: Date, afterAnswer?: (task: () => Promise<void>) => void): Promise<void> {
   let cutoff = false;
   try {
     // One lock per job, held from the count to the moment the job's keys end, and DATABASE STEPS ONLY: no provider call and no other transaction is made while it is held (the end of the job is slow: it
@@ -247,23 +250,43 @@ async function refusedForPool(jobId: string, callId: string, route: string | nul
   // The slow end of the job (it cancels the agent's turn, hands files over with timeouts of up to 20 s, rests the machine) is NOT part of the answer: the refusal is answered first, so the relay never sees an authorize
   // that outlasts its own timeout for a call that was already refused (it could read that as something other than our pool being full, which is the fault the give-back stands on). The decision is durable
   // already (its record and the end of the job's keys are committed), every call the job makes is refused at its key, and `endStuckCutoffs` ends a decided job nothing else ended
-  if (cutoff) endCutoffAfterAnswer(jobId, now);
+  if (cutoff) endCutoffAfterAnswer(jobId, now, afterAnswer);
 }
 
 /** The ends of decided cutoffs that were started after their refusal was answered, so a test (or a shutdown) can wait for them. */
 const cutoffEnds = new Set<Promise<void>>();
 export const cutoffEndsFinished = (): Promise<void> => Promise.allSettled([...cutoffEnds]).then(() => undefined);
 
-/** Ends the job of a decided cutoff for our own capacity (as ours: given back, never counted), after the refusal was answered. Never throws and is never awaited by the request. */
-function endCutoffAfterAnswer(jobId: string, now: Date): void {
-  const work: Promise<void> = (async () => {
-    if (await endForRefusal(jobId, { reason: 'pool', words: POOL_BUSY_WORDS }, now)) return;
-    // The decision is made and the keys are ended, but the job could not be: nothing retries it from a call (every call is refused at its key now), so the sweep ends it (`endStuckCutoffs`), and Sentry is told
-    await tellSentry(() => Sentry.captureMessage('A computer job’s cutoff for our own capacity was decided but the job could not be ended: its keys are ended and the sweep ends it', { level: 'error', tags: { area: 'computer', step: 'pool_cutoff_end' }, extra: { jobId } })).catch(() => undefined);
-  })()
-    .catch(() => undefined)
-    .finally(() => cutoffEnds.delete(work));
+/**
+ * Ends the job of a decided cutoff for our own capacity (as ours: given back, never counted), after the refusal was answered. Never throws and is never awaited by the request. When the caller says how to run
+ * work after its response (`afterAnswer`: the route gives Next's `after`), the end waits for the response to be SENT, so the relay always gets the refusal first; otherwise it is started in the background at once.
+ */
+function endCutoffAfterAnswer(jobId: string, now: Date, afterAnswer?: (task: () => Promise<void>) => void): void {
+  let finished: () => void = () => undefined;
+  const work: Promise<void> = new Promise<void>((resolve) => {
+    finished = resolve;
+  });
+  const run = async (): Promise<void> => {
+    try {
+      if (await endForRefusal(jobId, { reason: 'pool', words: POOL_BUSY_WORDS }, now)) return;
+      // The decision is made and the keys are ended, but the job could not be: nothing retries it from a call (every call is refused at its key now), so the sweep ends it (`endStuckCutoffs`), and Sentry is told
+      await tellSentry(() => Sentry.captureMessage('A computer job’s cutoff for our own capacity was decided but the job could not be ended: its keys are ended and the sweep ends it', { level: 'error', tags: { area: 'computer', step: 'pool_cutoff_end' }, extra: { jobId } })).catch(() => undefined);
+    } catch {
+      // Never throws: the sweep ends a decided job nothing ended
+    } finally {
+      cutoffEnds.delete(work);
+      finished();
+    }
+  };
   cutoffEnds.add(work);
+  if (afterAnswer) {
+    try {
+      afterAnswer(run);
+    } catch {
+      // `after` could not be set up (no request to follow): the end is started at once instead of being lost
+      void run();
+    }
+  } else void run();
 }
 
 /** Whether a call of the job was ever authorized: a room held or settled for it (not one given back), a model call priced, or the marker of one on the person's own key. The three reads the cutoff and its sweep both stand on. */

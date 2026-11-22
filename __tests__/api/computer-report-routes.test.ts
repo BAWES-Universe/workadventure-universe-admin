@@ -91,17 +91,20 @@ describe('POST /api/computer/jobs/reports', () => {
     expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'done', undefined, { delivered: true });
   });
 
-  it('keeps the follow-up as told, and as never to be told when it can never be delivered', async () => {
+  it('keeps the follow-up as told, and as never to be told when it can never be delivered: always by its number', async () => {
     lib.keepReportTold.mockResolvedValue(true);
-    expect((await POST(call({ body: { jobId: 'j', kind: 'late' } }))).status).toBe(200);
-    expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'late', undefined, { delivered: true });
-    expect((await POST(call({ body: { jobId: 'j', kind: 'late', outcome: 'undeliverable', why: 'no_chat' } }))).status).toBe(200);
-    expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'late', undefined, { delivered: false, why: 'no_chat' });
+    // CodeRabbit 1: a confirmation that names no number is refused (400), never passed on: it could mark a batch offered after the one the reader was given
+    expect((await POST(call({ body: { jobId: 'j', kind: 'late' } }))).status).toBe(400);
+    expect((await POST(call({ body: { jobId: 'j', kind: 'late', seq: null } }))).status).toBe(400);
+    expect((await POST(call({ body: { jobId: 'j', kind: 'late', outcome: 'undeliverable', why: 'no_chat' } }))).status).toBe(400);
+    expect(lib.keepReportTold).not.toHaveBeenCalled();
     // The follow-up's ack says the batch number it was given (seq), as a wait does: exactly that batch is marked
     expect((await POST(call({ body: { jobId: 'j', kind: 'late', seq: 2 } }))).status).toBe(200);
     expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'late', 2, { delivered: true });
+    expect((await POST(call({ body: { jobId: 'j', kind: 'late', seq: 2, outcome: 'undeliverable', why: 'no_chat' } }))).status).toBe(200);
+    expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'late', 2, { delivered: false, why: 'no_chat' });
     lib.keepReportTold.mockResolvedValue(false);
-    expect((await POST(call({ body: { jobId: 'gone', kind: 'late' } }))).status).toBe(404);
+    expect((await POST(call({ body: { jobId: 'gone', kind: 'late', seq: 1 } }))).status).toBe(404);
   });
 
   it('refuses what it does not understand, and says not found for a job that is not there', async () => {

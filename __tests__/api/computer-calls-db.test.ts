@@ -539,6 +539,36 @@ run('what a computer may ask of Orbit, in a real database', () => {
         }
       });
 
+      it('CodeRabbit 12: when the caller says how to run work after its response (the route gives Next’s `after`), the end of the job waits for it: nothing ends the job until that callback runs, and then it ends as ours; if the callback cannot be set up the end is started at once, never lost', async () => {
+        const decide = async (name: string) => {
+          const { jobId } = await running(name);
+          const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+          return { jobId, token };
+        };
+        await setUp({ poolCeilingMicros: 60_000 });
+        const first = await decide('gus');
+        expect(await authorizeModelCall({ token: first.token, callId: 'c1', estimateMicros: 1_000, payer: 'universe' }, NOW)).toMatchObject({ ok: false, reason: 'pool', full: true });
+        const queued: Array<() => Promise<void>> = [];
+        expect(await authorizeModelCall({ token: first.token, callId: 'c2', estimateMicros: 1_000, payer: 'universe' }, NOW, (task) => queued.push(task))).toEqual({ ok: false, reason: 'pool', full: true });
+        // The decision stands and the end is handed over, not run: the job is still on until the response has gone out
+        expect(await prisma.computerJobToken.count({ where: { jobId: first.jobId, revokedAt: null } })).toBe(0);
+        expect(queued).toHaveLength(1);
+        expect(await jobOf(first.jobId)).toMatchObject({ status: 'running' });
+        await queued[0]();
+        expect(await jobOf(first.jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
+        await cutoffEndsFinished();
+        // `after` that cannot be set up (no request to follow): the end is started at once
+        const second = await decide('hal');
+        expect(await authorizeModelCall({ token: second.token, callId: 'c1', estimateMicros: 1_000, payer: 'universe' }, NOW)).toMatchObject({ ok: false, reason: 'pool', full: true });
+        expect(
+          await authorizeModelCall({ token: second.token, callId: 'c2', estimateMicros: 1_000, payer: 'universe' }, NOW, () => {
+            throw new Error('no request scope');
+          }),
+        ).toEqual({ ok: false, reason: 'pool', full: true });
+        await cutoffEndsFinished();
+        expect(await jobOf(second.jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
+      });
+
       it('Sentry: when the end that follows the answer fails, Sentry is still told once (pool_cutoff_end) and the answer was the same', async () => {
         const { jobId } = await running('fay');
         const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
@@ -792,7 +822,8 @@ run('what a computer may ask of Orbit, in a real database', () => {
           const { jobId } = await running();
           const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
           const own = () => authorizeSettled({ token, callId: 'own-1', estimateMicros: 5_000, payer: 'own-key' }, NOW);
-          const spy = jest.spyOn(prisma.computerJobFault, 'createMany').mockRejectedValueOnce(new Error('the database went away') as never);
+          // The marker is kept in a transaction of its own (under the lock a finish takes): that transaction fails once
+          const spy = jest.spyOn(prisma, '$transaction').mockRejectedValueOnce(new Error('the database went away') as never);
           let refused: unknown;
           try {
             refused = await own();

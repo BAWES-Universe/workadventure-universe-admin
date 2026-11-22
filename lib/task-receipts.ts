@@ -635,8 +635,8 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
   const appCharges = header.job === null ? [] : header.actions.filter((action) => action.outcome === 'worked' && !header.letGoRuns.has(action.run)).map((action) => ({ label: action.label, micros: takenForRun(events, action.run), ...(settlingForRun(events, action.run) ? { settling: true } : {}) }));
   const lateActions = header.actions.filter((action) => action.outcome === 'worked' && header.letGoRuns.has(action.run));
   const lateDelivered = lateActions.map((action) => action.label);
-  // Which of them still have their hold on: each App says its own
-  const lateHeld = lateActions.filter((action) => header.heldRuns.has(action.run)).map((action) => action.label);
+  // Which of them still have their hold on: each delivery says its own (the same order as `lateDelivered`)
+  const lateHeld = lateActions.map((action) => header.heldRuns.has(action.run));
   const facts: NoteFacts = {
     ...(header.job === null ? {} : { job: header.job, ...(computerMicros === undefined ? {} : { computerMicros }) }),
     holdPending,

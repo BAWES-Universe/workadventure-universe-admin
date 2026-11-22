@@ -113,8 +113,8 @@ export interface NoteFacts {
   reached?: boolean;
   /** Apps let go unconfirmed (their hold released, nothing charged) that the provider's log confirmed later: delivered. Said first, in its own words, beside a computer that was given back. */
   deliveredAfterRelease?: readonly string[];
-  /** Of those, the Apps whose hold is still on (not yet acknowledged by the books). When given it decides each App's hold wording; when absent the whole receipt's `holdPending` decides for all of them. */
-  deliveredHeld?: readonly string[];
+  /** Per delivery, in the same order as `deliveredAfterRelease`: whether THAT run's hold is still on (not yet acknowledged by the books). When given (one flag for each delivery) it decides each delivery's hold wording, so two runs of one App with different holds are never said as one; when absent the whole receipt's `holdPending` decides for all of them. */
+  deliveredHeld?: readonly boolean[];
   /** Why a charge is only provisional: Orbit is still deciding whether the computer cost is given back. */
   deciding?: 'effect' | 'limits';
   /** What each action that worked took, for a task with a computer (the receipt's lines say it for any other): null while its price is not known yet. */
@@ -192,15 +192,24 @@ export function outcomeNote(outcome: ActivityOutcome, actions: readonly { outcom
       const apps = (facts.appCharges ?? []).map((charge) => (charge.micros === null ? (charge.settling ? `${appLabel(charge.label)} worked. Its charge is ${SETTLEMENT_PENDING.toLowerCase()}.` : `${appLabel(charge.label)} worked. Its price is not known yet.`) : `${appLabel(charge.label)} worked and was charged ${dollars(charge.micros)}.`));
       // An App that was let go unconfirmed and was delivered after all (nothing charged, its hold released): said first, then what became of the computer, in the approved words
       const late = (facts.deliveredAfterRelease ?? []).map(appLabel);
-      // Each late App says its own hold: still on ("is being released") or acknowledged ("was released"), so one App's release is never said for another's. Without the per-App list the receipt's aggregate decides for all
-      const heldSet = facts.deliveredHeld === undefined ? null : new Set(facts.deliveredHeld.map(appLabel));
-      const heldOf = (label: string): boolean => (heldSet === null ? facts.holdPending === true : heldSet.has(label));
-      const allHeld = late.every(heldOf);
-      const noneHeld = late.every((label) => !heldOf(label));
+      // Each delivery says its own hold: still on ("is being released") or acknowledged ("was released"), so one run's release is never said for another's, not even for another run of the same App. Without the
+      // per-delivery flags the receipt's aggregate decides for all
+      const heldFlags = facts.deliveredHeld !== undefined && facts.deliveredHeld.length === late.length ? facts.deliveredHeld : null;
+      const heldOf = (index: number): boolean => (heldFlags === null ? facts.holdPending === true : heldFlags[index] === true);
+      const allHeld = late.every((_label, index) => heldOf(index));
+      const noneHeld = late.every((_label, index) => !heldOf(index));
       const holdsSaid = (): string => {
         if (allHeld) return late.length === 1 ? 'Its hold is being released.' : 'Their holds are being released.';
         if (noneHeld) return late.length === 1 ? 'Its hold was released.' : 'Their holds were released.';
-        return `${listOf(late.filter((label) => !heldOf(label)).map((label) => `${label}’s hold was released`))} and ${listOf(late.filter(heldOf).map((label) => `${label}’s hold is being released`))}.`;
+        // Mixed: said per App, the runs of one App with the same hold counted together ("Gmail’s holds were released")
+        const said = (held: boolean): string[] => {
+          const counts = new Map<string, number>();
+          late.forEach((label, index) => {
+            if (heldOf(index) === held) counts.set(label, (counts.get(label) ?? 0) + 1);
+          });
+          return [...counts].map(([label, count]) => (held ? `${label}’s ${count > 1 ? 'holds are' : 'hold is'} being released` : `${label}’s ${count > 1 ? 'holds were' : 'hold was'} released`));
+        };
+        return `${listOf(said(false))} and ${listOf(said(true))}.`;
       };
       const lateSaid = late.length === 0 ? [] : [`${listOf(late)} ${late.length === 1 ? 'was' : 'were'} delivered.`, holdsSaid()];
       const computerSaid = lateSaid.length > 0 && !facts.unreachable ? `The computer part didn’t finish and its cost ${pending ? 'is being returned' : 'was returned'}.` : lead;

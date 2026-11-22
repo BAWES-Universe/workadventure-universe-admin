@@ -23,7 +23,7 @@ import { saveInstantLimits } from '@/lib/instant/state';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { computerView, finishJob, giveComputer, planEffect, renewJob, settleEffect, startJob, sweepComputers } from '@/lib/computer';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
-import { lockRelayReach, readFaultRows, recordFaults, recordRelayUnreachable, type FaultInput } from '@/lib/computer-faults';
+import { OWN_KEY_CALL_MARK, authorizeOwnKeyCall, hasOwnKeyCall, lockRelayReach, readFaultRows, recordFaults, recordRelayUnreachable, type FaultInput } from '@/lib/computer-faults';
 import { afterArrival, afterLateEvidence, decidePendingForPurge, decideRunnerFinish, lockPerson, resolveDecision, sweepGiveBackDecisions, sweepLateEvidence } from '@/lib/computer-giveback';
 import { correctRouteTogether, giveBackOverview, giveBackReadiness, routeIsPaused } from '@/lib/computer-fault-ops';
 import { mintJobToken, revokeJobTokens } from '@/lib/computer-token';
@@ -33,6 +33,9 @@ import { OUTCOME_WORDS, REACHED_WORDS, UNREACHABLE_WORDS } from '@/lib/task-rece
 import { reportsToTell } from '@/lib/computer-report';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
+
+/** A transaction that holds a lock while the test looks at who is waiting for it: its own timeout is longer than the wait the test allows (5 s), so it never ends before the thing it holds a lock for. */
+const HOLDER = { timeout: 15_000, maxWait: 15_000 };
 
 const tag = randomUUID().slice(0, 8);
 const NOW = new Date();
@@ -983,7 +986,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
           expect((await tx.computerEffect.findFirstOrThrow({ where: { jobId: held.id } })).state).toBe('planned');
         };
         try {
-          await prisma.$transaction(fixture);
+          await prisma.$transaction(fixture, HOLDER);
         } catch (error) {
           fixtureError = { error };
         }
@@ -1093,7 +1096,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
           expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 0 });
           expect(captured).not.toHaveBeenCalled();
           throw new WorkerDied();
-        }),
+        }, HOLDER),
       );
       expect((await decisionOf(ended.id))?.alertedAt).toBeNull();
       expect(await sweepGiveBackDecisions(minutes(1))).toMatchObject({ alerted: 1 });
@@ -1178,7 +1181,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
                   release = resolve;
                 });
                 throw new WorkerDied();
-              }),
+              }, HOLDER),
             );
             await Promise.race([holding, holderDone]);
           }
@@ -1675,7 +1678,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(finished).toBe(false);
       };
       try {
-        await prisma.$transaction(fixture);
+        await prisma.$transaction(fixture, HOLDER);
       } catch (error) {
         fixtureError = { error };
       }
@@ -1986,6 +1989,8 @@ run('a computer job that failed on our side, and the bound on giving it back', (
           // r2 reached it: only the reason moves
           await recordFaults(sara.brickId, outage.id, [arrival('r2', 1)]);
           await look();
+          // The look itself moved the reason (checked BEFORE afterArrival runs, which could do it too and hide a look that did not); afterArrival then changes nothing (CodeRabbit 13)
+          expect(await decisionOf(outage.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_reached' });
           await afterArrival(outage.id);
           expect(await decisionOf(outage.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_reached' });
           expect(await givenBack(outage.id)).toBe(true);
@@ -2087,7 +2092,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
               }
               expect(finished).toBe(false);
               await inside(tx, jobId);
-            });
+            }, HOLDER);
           } catch (error) {
             fixtureError = { error };
           }
@@ -2130,13 +2135,118 @@ run('a computer job that failed on our side, and the bound on giving it back', (
               await new Promise((resolve) => setImmediate(resolve));
             }
             expect(wroteDone).toBe(false);
-          });
+          }, HOLDER);
         } catch (error) {
           writeError = { error };
         }
         await wrote;
         if (writeError) throw (writeError as { error: unknown }).error;
         expect(await prisma.computerJobFault.count({ where: { jobId: sample.id, reason: 'relay_reached' } })).toBe(1);
+      });
+
+      /** Holds the relay-reach lock of a job in a transaction (with a timeout longer than the wait below), starts `start`, proves it is WAITING for that lock (a barrier on the lock table, no timer), then runs `inside` and commits. */
+      const whileHoldingRelayReach = async <T,>(jobId: string, start: () => Promise<T>, inside: (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]) => Promise<void> = async () => undefined): Promise<T> => {
+        let started: Promise<T> | null = null;
+        let finished = false;
+        let fixtureError: { error: unknown } | null = null;
+        try {
+          await prisma.$transaction(async (tx) => {
+            await lockRelayReach(tx, jobId);
+            const mine = (await tx.$queryRaw<Array<{ pid: number; classid: number; objid: number; objsubid: number }>>`
+              SELECT pg_backend_pid() AS pid, classid::int AS classid, objid::int AS objid, objsubid::int AS objsubid FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid()`)[0];
+            started = start().finally(() => {
+              finished = true;
+            });
+            started.catch(() => undefined);
+            const deadline = Date.now() + 5_000;
+            for (;;) {
+              const n = (await prisma.$queryRaw<Array<{ n: number }>>`
+                SELECT COUNT(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid::int = ${mine.classid} AND objid::int = ${mine.objid} AND objsubid::int = ${mine.objsubid} AND pid <> ${mine.pid}`)[0].n;
+              if (finished || n > 0) break;
+              if (Date.now() > deadline) throw new Error('the writer never waited for the relay-reach lock');
+              await new Promise((resolve) => setImmediate(resolve));
+            }
+            expect(finished).toBe(false);
+            await inside(tx);
+          }, HOLDER);
+        } catch (error) {
+          fixtureError = { error };
+        }
+        // Always joined, whatever went wrong above (and a failure here never hides that one)
+        const result = started ? await (started as Promise<T>).then((value) => ({ value }), (error) => ({ error })) : null;
+        if (fixtureError) throw (fixtureError as { error: unknown }).error;
+        if (!result) throw new Error('the writer was never started');
+        if ('error' in result) throw result.error;
+        return result.value;
+      };
+
+      it('CodeRabbit 9: a runless arrival under a turn-only call id ("turn:1") takes the same lock as every arrival, and shares the unnamed-turn slots with the faults of unnamed runs: neither is lost', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
+        const sara = await person('sara');
+        const runless = (): FaultInput => ({ ...arrival(null, 1), callId: 'turn:1' });
+        const sample = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, readied);
+        // It waits for a holder of the lock, and is kept once the lock is free
+        expect(await whileHoldingRelayReach(sample.id, () => recordFaults(sara.brickId, sample.id, [runless()]))).toEqual({ stored: 1, conflicts: 0 });
+        expect(await prisma.computerJobFault.count({ where: { jobId: sample.id, reason: 'relay_reached', callId: 'turn:1' } })).toBe(1);
+        // Said again: the same slot, nothing more
+        expect(await recordFaults(sara.brickId, sample.id, [runless()])).toEqual({ stored: 0, conflicts: 0 });
+        // The key `turn:1` is already held by the fault of an unnamed run: the arrival takes the next slot instead of being dropped
+        const other = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, readied);
+        expect(await recordFaults(sara.brickId, other.id, [{ turn: 1, callId: 'turn:1', kind: 'uncertain', reason: 'provider_5xx', source: 'universe-ai', route: 'universe-ai/model-a', at: new Date() }, runless()])).toEqual({ stored: 2, conflicts: 0 });
+        expect((await prisma.computerJobFault.findMany({ where: { jobId: other.id, callId: { startsWith: 'turn:' } }, select: { callId: true, kind: true }, orderBy: { callId: 'asc' } })).map((row) => `${row.callId}:${row.kind}`)).toEqual(['turn:1:uncertain', 'turn:1~2:answered']);
+      });
+
+      it('CodeRabbit 10: a valid arrival for a call that is kept as an UNCERTAIN row of the same run and turn settles that row under the lock and counts as stored; another run’s or another turn’s row under that call id is a conflict and is never touched', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
+        const sara = await person('sara');
+        const sample = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, readied);
+        await recordFaults(sara.brickId, sample.id, [fault(1, 'provider_5xx', { run: 'r1', callId: 'arrival_r1_1' })]);
+        expect(await prisma.computerJobFault.findUniqueOrThrow({ where: { jobId_callId: { jobId: sample.id, callId: 'arrival_r1_1' } } })).toMatchObject({ kind: 'uncertain', reason: 'provider_5xx' });
+        // The settling waits for the lock like every arrival write
+        expect(await whileHoldingRelayReach(sample.id, () => recordFaults(sara.brickId, sample.id, [arrival('r1', 1)]))).toEqual({ stored: 1, conflicts: 0 });
+        expect(await prisma.computerJobFault.findUniqueOrThrow({ where: { jobId_callId: { jobId: sample.id, callId: 'arrival_r1_1' } } })).toMatchObject({ kind: 'answered', reason: 'relay_reached' });
+        // Said again: nothing more
+        expect(await recordFaults(sara.brickId, sample.id, [arrival('r1', 1)])).toEqual({ stored: 0, conflicts: 0 });
+        // Another run's uncertain row under the same call id is not this arrival's: counted as a conflict, left as it is
+        const other = await job(sara, { outcome: 'failed', cause: 'agent', run: 'r1' }, readied);
+        await recordFaults(sara.brickId, other.id, [fault(1, 'provider_5xx', { run: 'r2', callId: 'arrival_r1_1' })]);
+        expect(await recordFaults(sara.brickId, other.id, [arrival('r1', 1)])).toEqual({ stored: 0, conflicts: 1 });
+        expect(await prisma.computerJobFault.findUniqueOrThrow({ where: { jobId_callId: { jobId: other.id, callId: 'arrival_r1_1' } } })).toMatchObject({ kind: 'uncertain', run: 'r2' });
+      });
+
+      it('CodeRabbit 11: a call on the person’s own key is authorized under the same lock as the finish’s inference, and only while the job is on: a finish that wins the lock ends the job and the call is refused, one that waits sees the marker', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
+        const sara = await person('sara');
+        // The marker waits for the lock, and the job ended while it waited (the finish committed first): refused, no marker
+        const ended = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job' }, minutes(clock));
+        if (!ended.ok) throw new Error('the job did not start');
+        const authorized = await whileHoldingRelayReach(ended.job.id, () => authorizeOwnKeyCall(ended.job.id, minutes(clock)), async (tx) => {
+          await tx.computerJob.update({ where: { id: ended.job.id }, data: { status: 'failed', endedAt: new Date() } });
+        });
+        expect(authorized).toBe(false);
+        expect(await hasOwnKeyCall(prisma, ended.job.id)).toBe(false);
+        // A job that is still on: kept (after waiting for the lock), and the finish that comes after reads it
+        const on = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second' }, minutes(clock + 1));
+        if (!on.ok) throw new Error('the job did not start');
+        expect(await whileHoldingRelayReach(on.job.id, () => authorizeOwnKeyCall(on.job.id, minutes(clock + 1)))).toBe(true);
+        expect(await hasOwnKeyCall(prisma, on.job.id)).toBe(true);
+        expect(await authorizeOwnKeyCall(on.job.id, minutes(clock + 2))).toBe(true);
+        expect(await prisma.computerJobFault.count({ where: { jobId: on.job.id, callId: OWN_KEY_CALL_MARK } })).toBe(1);
+        // A job that does not exist, or one over before the call: refused
+        expect(await authorizeOwnKeyCall(randomUUID(), minutes(clock))).toBe(false);
+        clock += 10;
+      });
+
+      it('CodeRabbit 13: an arrival marks the decision’s reason only through afterArrival when no look ran: the reason is still the outage’s until it is called, and then it is relay_reached, once', async () => {
+        await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
+        const sara = await person('sara');
+        const outage = await job(sara, { outcome: 'failed', cause: 'ours', run: 'r2' }, readied);
+        expect(await decisionOf(outage.id)).toMatchObject({ reason: 'relay_unreachable' });
+        await recordFaults(sara.brickId, outage.id, [arrival('r2', 1)]);
+        expect(await decisionOf(outage.id)).toMatchObject({ reason: 'relay_unreachable' });
+        await afterArrival(outage.id);
+        expect(await decisionOf(outage.id)).toMatchObject({ state: 'given', reason: 'relay_reached' });
+        expect(await givenBack(outage.id)).toBe(true);
       });
 
       it('the runner’s own marker, and Orbit’s own observation at prepare, are positive evidence: an arrival of the same run never overrides them', async () => {
@@ -3007,7 +3117,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
                   : (target as never)[key as never],
             }) as typeof tx;
             return decideRunnerFinish(wrapped, await readLimits(), { id: jobId, personId: sara.id, startedAt: new Date() }, [1], new Date(), { effectsClosed });
-          });
+          }, HOLDER);
         const readLimits = async () => (await import('@/lib/computer-giveback')).readGiveBackLimits();
         expect(await verdict()).toMatchObject({ state: 'given', basis: 'goodwill' });
         await planEffect(jobId, { key: 'a', kind: 'send' });
@@ -3052,7 +3162,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
           // The retry has read the decision as pending; only then does the correction commit
           await barrier.read;
           await tx.computerGiveBackDecision.update({ where: { jobId: held.id }, data: { state: 'given', basis: 'incident', route: 'r', nextAttemptAt: null } });
-        });
+        }, HOLDER);
         expect(await retry).toBe('none');
         barrier.restore();
         expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'incident' });
@@ -3071,7 +3181,7 @@ run('a computer job that failed on our side, and the bound on giving it back', (
           // The retry has read the decision as pending; only then does the correction commit
           await barrier.read;
           await tx.computerGiveBackDecision.update({ where: { jobId: held.id }, data: { state: 'given', basis: 'incident', route: 'r', nextAttemptAt: null } });
-        });
+        }, HOLDER);
         expect(await retry).toBe('none');
         barrier.restore();
         expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'incident' });

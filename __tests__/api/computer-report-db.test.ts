@@ -447,11 +447,14 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       // Told (said twice: the same), it is never offered again, and the ending's own mark is untouched
       const told = await prisma.computerJob.findUniqueOrThrow({ where: { id }, select: { endToldAt: true, lateToldAt: true } });
       expect(told.lateToldAt).toBeNull();
-      expect(await keepReportTold(id, 'late')).toBe(true);
+      // CodeRabbit 1: a confirmation that names no number marks nothing (it could belong to a batch offered after the one the reader was given)
+      expect(await keepReportTold(id, 'late')).toBe(false);
+      expect(await lateMine([id])).toHaveLength(1);
+      expect(await keepReportTold(id, 'late', late.seq)).toBe(true);
       const once = await prisma.computerJob.findUniqueOrThrow({ where: { id }, select: { endToldAt: true, lateToldAt: true } });
       expect(once.lateToldAt).toBeInstanceOf(Date);
       expect(once.endToldAt).toEqual(told.endToldAt);
-      expect(await keepReportTold(id, 'late')).toBe(true);
+      expect(await keepReportTold(id, 'late', late.seq)).toBe(true);
       expect((await prisma.computerJob.findUniqueOrThrow({ where: { id }, select: { lateToldAt: true } })).lateToldAt).toEqual(once.lateToldAt);
       expect(await lateMine([id])).toEqual([]);
       // Nothing about it comes back as an ending either
@@ -493,66 +496,74 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       expect(await keepReportTold(id, 'late', 1)).toBe(true);
       expect(await keepReportTold(id, 'late', 9)).toBe(true);
       expect((await lateMine([id])).map((report) => report.seq)).toEqual([3]);
-      // An older reader confirms without a number: every run that was OFFERED is marked (never offered twice); one that was never named in a follow-up is not
+      // CodeRabbit 1: a confirmation with no number marks NOTHING: a lost confirmation of batch 3 and a batch 4 offered since must never be settled by it (the run confirmed after the offer stays untold)
       await letGo(id, who, 'zoom', { at: new Date(LATER.getTime() + 4 * 86_400_000) });
-      expect(await keepReportTold(id, 'late')).toBe(true);
+      expect(await keepReportTold(id, 'late')).toBe(false);
+      expect((await lateMine([id])).map((report) => [report.seq, report.apps])).toEqual([[3, ['Notion']]]);
+      expect(await keepReportTold(id, 'late', 3)).toBe(true);
       expect((await lateMine([id])).map((report) => [report.seq, report.apps])).toEqual([[4, ['Zoom']]]);
+      expect(await keepReportTold(id, 'late')).toBe(false);
+      expect((await lateMine([id])).map((report) => report.seq)).toEqual([4]);
       expect(await keepReportTold(id, 'late', 4)).toBe(true);
       expect(await lateMine([id])).toEqual([]);
     });
 
     it('Dev desk: two readers at once never give one batch number to different runs: a reader waits for the job’s lock, then reads again, and the report names exactly the runs its number marks', async () => {
       const { who, id } = await lateJob();
+      type Held = { pid: number; classid: number; objid: number; objsubid: number };
       let release: () => void = () => undefined;
       const hold = new Promise<void>((resolve) => {
         release = resolve;
       });
-      let locked: () => void = () => undefined;
-      const isLocked = new Promise<void>((resolve) => {
+      let locked: (held: Held) => void = () => undefined;
+      const lockInfo = new Promise<Held>((resolve) => {
         locked = resolve;
       });
-      // Reader 1, in the middle of its work: it holds the job's lock, tags run A with batch 1, and run X is confirmed before it lets go
-      const reader1 = prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`computer:late-batch:${id}`}, 0))`;
-        locked();
-        await hold;
-        await tx.$executeRaw`UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateBatch}', '1'::jsonb) WHERE "task_key" = ${id} AND "toolkit" = 'gmail'`;
-      });
-      await isLocked;
-      // Reader 2 looks at the job meanwhile: it must wait for the lock
-      let settled = false;
-      const reader2 = lateMine([id]).then((found) => {
-        settled = true;
-        return found;
-      });
-      await new Promise((resolve) => setTimeout(resolve, 600));
-      expect(settled).toBe(false);
-      await letGo(id, who, 'slack', { at: new Date(LATER.getTime() + 60_000) });
-      release();
-      await reader1;
-      const found = await reader2;
-      // It read again under the lock: batch 1 is A alone (as reader 1 wrote it), and X is not in it
-      expect(found.map((report) => [report.seq, report.apps])).toEqual([[1, ['Gmail']]]);
-      expect((await prisma.instantRun.findFirstOrThrow({ where: { taskKey: id, toolkit: 'slack' } })).detail).not.toHaveProperty('lateBatch');
-      // Its confirmation marks A and only A; X is then offered as batch 2, never lost and never named twice
-      expect(await keepReportTold(id, 'late', 1)).toBe(true);
-      expect((await lateMine([id])).map((report) => [report.seq, report.apps])).toEqual([[2, ['Slack']]]);
-    });
-
-    it('Opus: jobs are read a page at a time, each once and oldest first, in every database time zone (the page marker is bound as a moment, never as a zone-less text)', async () => {
-      const ids: string[] = [];
-      for (let index = 0; index < 5; index++) {
-        const { who, id } = await lateJob(`pg${index}`);
-        // Confirmed a minute apart: all inside the 3 hours a zone-less marker would be wrong by
-        await prisma.$executeRaw`UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateEvidence,at}', to_jsonb(${new Date(LATER.getTime() + index * 60_000).toISOString()}::text)) WHERE "task_key" = ${id}`;
-        ids.push(id);
-        expect(who.id).toBeTruthy();
-      }
-      lateLimits.page = 2;
+      // Reader 1, in the middle of its work: it holds the job's lock, tags run A with batch 1, and run X is confirmed before it lets go. Its transaction outlives the wait below
+      const reader1 = prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`computer:late-batch:${id}`}, 0))`;
+          const mine = (await tx.$queryRaw<Held[]>`SELECT pg_backend_pid() AS pid, classid::int AS classid, objid::int AS objid, objsubid::int AS objsubid FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid()`)[0];
+          locked(mine);
+          await hold;
+          await tx.$executeRaw`UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateBatch}', '1'::jsonb) WHERE "task_key" = ${id} AND "toolkit" = 'gmail'`;
+        },
+        { timeout: 15_000, maxWait: 15_000 },
+      );
+      let reader2: Promise<Awaited<ReturnType<typeof lateMine>>> | null = null;
       try {
-        expect((await lateMine(ids)).map((report) => report.jobId)).toEqual(ids);
+        // If the holder fails before it has the lock, THIS fails with its error (never a wait that does not end)
+        const mine = await Promise.race([lockInfo, reader1.then(() => Promise.reject(new Error('the holder ended before it took the lock')))]);
+        let settled = false;
+        reader2 = lateMine([id]).then((found) => {
+          settled = true;
+          return found;
+        });
+        // Reader 2 is proven to be WAITING for that very lock (a backend that is not granted the advisory lock the holder has): no timer; it fails if reader 2 finishes first, or if nobody ever waits
+        const deadline = Date.now() + 5_000;
+        for (;;) {
+          const waiting = (await prisma.$queryRaw<Array<{ n: number }>>`
+            SELECT COUNT(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid::int = ${mine.classid} AND objid::int = ${mine.objid} AND objsubid::int = ${mine.objsubid} AND pid <> ${mine.pid}`)[0].n;
+          if (waiting > 0) break;
+          if (settled) throw new Error('reader 2 finished without waiting for the job’s lock');
+          if (Date.now() > deadline) throw new Error('reader 2 never waited for the job’s lock');
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        expect(settled).toBe(false);
+        await letGo(id, who, 'slack', { at: new Date(LATER.getTime() + 60_000) });
+        release();
+        await reader1;
+        const found = await reader2;
+        // It read again under the lock: batch 1 is A alone (as reader 1 wrote it), and X is not in it
+        expect(found.map((report) => [report.seq, report.apps])).toEqual([[1, ['Gmail']]]);
+        expect((await prisma.instantRun.findFirstOrThrow({ where: { taskKey: id, toolkit: 'slack' } })).detail).not.toHaveProperty('lateBatch');
+        // Its confirmation marks A and only A; X is then offered as batch 2, never lost and never named twice
+        expect(await keepReportTold(id, 'late', 1)).toBe(true);
+        expect((await lateMine([id])).map((report) => [report.seq, report.apps])).toEqual([[2, ['Slack']]]);
       } finally {
-        lateLimits.page = 200;
+        // Always: the holder is let go, and everything that was started is joined, without hiding the failure above
+        release();
+        await Promise.allSettled([reader1, reader2 ?? Promise.resolve()]);
       }
     });
 
@@ -616,8 +627,9 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       expect(await lateMine([id])).toEqual([]);
       // Told as undeliverable: the follow-up is also over (never offered again)
       const { id: other } = await lateJob('omar');
-      expect(await lateMine([other])).toHaveLength(1);
-      expect(await keepReportTold(other, 'late', undefined, { delivered: false, why: 'no_chat' })).toBe(true);
+      const [offered] = await lateMine([other]);
+      expect(offered).toBeDefined();
+      expect(await keepReportTold(other, 'late', offered.seq, { delivered: false, why: 'no_chat' })).toBe(true);
       expect(await lateMine([other])).toEqual([]);
     });
 
@@ -680,7 +692,7 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       ]);
       // The same rules for all of them: told once (ack), never twice; the ending's own marks are untouched
       for (const report of found) {
-        expect(await keepReportTold(report.jobId, 'late')).toBe(true);
+        expect(await keepReportTold(report.jobId, 'late', report.seq)).toBe(true);
       }
       expect(await lateMine([doneId, gaveUpId, quickId, given.id])).toEqual([]);
       // A done job whose App was charged, or whose first report was never delivered, is not told either
@@ -735,6 +747,103 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       const own = await make('ownkey', new Date(LATER.getTime() - 60_000));
       await prisma.computerJobFault.create({ data: { jobId: own.id, turn: null, run: null, callId: OWN_KEY_CALL_MARK, kind: 'answered', reason: 'own_key', source: ORBIT_SOURCE, route: null, providerStatus: null, at: NOW } });
       expect((await reportsToTell(200, NOW, { accepts: ['late'] })).filter((report) => report.jobId === own.id)).toEqual([]);
+    });
+
+    it('CodeRabbit 2: a time that LOOKS right but is not a real moment (31 February, 29 February of a year that has none, a 25th hour, month 13, year 0) is left out, never an error: every other follow-up is still listed, and a real leap day is kept', async () => {
+      const bad: Array<[string, string]> = [['b1', '2026-02-31T12:00:00Z'], ['b2', '2027-02-29T12:00:00Z'], ['b3', '2026-04-31T12:00:00Z'], ['b4', '2026-13-01T12:00:00Z'], ['b5', '2026-11-22T25:00:00Z'], ['b6', '2026-11-22T12:60:00Z'], ['b7', '0000-11-22T12:00:00Z'], ['b8', '2100-02-29T12:00:00Z']];
+      const badIds: string[] = [];
+      for (const [name, at] of bad) {
+        const one = await lateJob(name);
+        await prisma.$executeRaw`UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateEvidence,at}', to_jsonb(${at}::text)) WHERE "task_key" = ${one.id}`;
+        badIds.push(one.id);
+      }
+      const good = await lateJob('okay');
+      const leap = await lateJob('leap');
+      await prisma.$executeRaw`UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateEvidence,at}', to_jsonb(${'2028-02-29T10:00:00Z'}::text)) WHERE "task_key" = ${leap.id}`;
+      const listed = await lateMine([...badIds, good.id, leap.id]);
+      expect(listed.map((report) => report.jobId)).toEqual([good.id, leap.id]);
+    });
+
+    it('CodeRabbit 3: a deploy record that exists but is not a moment is repaired once, and the value actually stored is the cutoff of every look: a poll never takes its own time', async () => {
+      await prisma.$executeRaw`UPDATE "app_settings" SET "value" = '"not a time"'::jsonb WHERE "key" = 'computer_late_report_since'`;
+      const before = await lateJob('sara');
+      const after = await lateJob('omar');
+      await prisma.instantRun.updateMany({ where: { taskKey: before.id }, data: { detail: { noLog: true, releasedUnconfirmed: true, lateEvidence: { status: 'success', chargeMicros: 0, at: minutes(-30).toISOString() } } } });
+      await prisma.instantRun.updateMany({ where: { taskKey: after.id }, data: { detail: { noLog: true, releasedUnconfirmed: true, lateEvidence: { status: 'success', chargeMicros: 0, at: minutes(30).toISOString() } } } });
+      // The first look repairs it to its own time (NOW): the one confirmed before it is never offered, the one after it is
+      expect((await reportsToTell(200, NOW, { accepts: ['late'] })).filter((report) => report.kind === 'late' && [before.id, after.id].includes(report.jobId)).map((report) => report.jobId)).toEqual([after.id]);
+      expect(await prisma.appSetting.findUnique({ where: { key: 'computer_late_report_since' } })).toMatchObject({ value: NOW.toISOString() });
+      // A later look (an hour on) uses the stored value, not its own time: the same job is still offered, the earlier one still is not
+      expect((await reportsToTell(200, minutes(60), { accepts: ['late'] })).filter((report) => report.kind === 'late' && [before.id, after.id].includes(report.jobId)).map((report) => report.jobId)).toEqual([after.id]);
+      expect(await prisma.appSetting.findUnique({ where: { key: 'computer_late_report_since' } })).toMatchObject({ value: NOW.toISOString() });
+    });
+
+    it('CodeRabbit 4: jobs that are blocked (a refund still owed) never fill the pages a look reads: with pages of 2 and only 2 pages read, six blocked jobs ahead of an eligible one still let it through', async () => {
+      const blocked: string[] = [];
+      for (let index = 0; index < 6; index++) {
+        const one = await lateJob(`blk${index}`);
+        await prisma.instantRun.updateMany({ where: { taskKey: one.id }, data: { detail: { noLog: true, releasedUnconfirmed: true, lateEvidence: { status: 'success', chargeMicros: 0, at: new Date(LATER.getTime() + index * 60_000).toISOString() } } } });
+        await prisma.computerRefundObligation.create({ data: { jobId: one.id, personId: one.who.id, holdKey: `h-${randomUUID()}`, refundKey: `r-${randomUUID()}`, amountMicros: BigInt(30_000), state: 'owed' } });
+        blocked.push(one.id);
+      }
+      const eligible = await lateJob('open');
+      await prisma.instantRun.updateMany({ where: { taskKey: eligible.id }, data: { detail: { noLog: true, releasedUnconfirmed: true, lateEvidence: { status: 'success', chargeMicros: 0, at: new Date(LATER.getTime() + 3_600_000).toISOString() } } } });
+      lateLimits.page = 2;
+      lateLimits.pages = 2;
+      try {
+        expect((await lateMine([...blocked, eligible.id])).map((report) => report.jobId)).toEqual([eligible.id]);
+      } finally {
+        lateLimits.page = 200;
+        lateLimits.pages = 25;
+      }
+    });
+
+    it('CodeRabbit 5: only a REAL debt blocks the follow-up: a paid job whose settled computer hold is kept (no give-back) is told; one that is being given back and still owes is not, until the books acknowledge it', async () => {
+      const hold = (jobId: string, personId: string, over: { customer?: number; refunded?: number } = {}) =>
+        prisma.creditHold.create({ data: { holdKey: `hold-${randomUUID()}`, personId, category: 'computers', chargeClass: 'computer_job', jobKey: jobId, state: 'settled', amountMicros: BigInt(40_000), customerMicros: BigInt(over.customer ?? 30_000), refundedMicros: BigInt(over.refunded ?? 0), expiresAt: new Date('2030-01-01T00:00:00Z') } });
+      // A paid job (the job did not fail on our side, no decision to give back), its hold settled with the charge kept
+      const paid = await lateJob('paid');
+      await prisma.computerGiveBackDecision.deleteMany({ where: { jobId: paid.id } });
+      await hold(paid.id, paid.who.id);
+      // A job refused any give-back keeps its charge too
+      const refused = await lateJob('refused');
+      await hold(refused.id, refused.who.id);
+      await prisma.computerGiveBackDecision.upsert({ where: { jobId: refused.id }, update: { state: 'refused', basis: 'person_caused' }, create: { jobId: refused.id, personId: refused.who.id, state: 'refused', basis: 'person_caused', judgedTurns: [] } });
+      // A job that IS being given back, its hold not refunded yet and no obligation written: owed
+      const owing = await lateJob('owing');
+      await hold(owing.id, owing.who.id);
+      await prisma.computerGiveBackDecision.upsert({ where: { jobId: owing.id }, update: { state: 'given', basis: 'universe_fault' }, create: { jobId: owing.id, personId: owing.who.id, state: 'given', basis: 'universe_fault', judgedTurns: [] } });
+      const listed = (await lateMine([paid.id, refused.id, owing.id])).map((report) => report.jobId).sort();
+      expect(listed).toEqual([paid.id, refused.id].sort());
+      // The books acknowledge the refund (the hold has come back): it is offered
+      await prisma.creditHold.updateMany({ where: { jobKey: owing.id }, data: { refundedMicros: BigInt(30_000) } });
+      expect((await lateMine([owing.id])).map((report) => report.jobId)).toEqual([owing.id]);
+    });
+
+    it('CodeRabbit 6: a run of ANOTHER person or Brick that merely shares the job’s id as its task key never enters the batch, never gives its App a name in the report, and is never marked by the ack', async () => {
+      const { id } = await lateJob('sara');
+      const stranger = await person('mallory');
+      await letGo(id, stranger, 'zoom', { at: new Date(LATER.getTime() + 60_000) });
+      const [report] = await lateMine([id]);
+      expect(report).toMatchObject({ apps: ['Gmail'], seq: 1 });
+      expect(await keepReportTold(id, 'late', 1)).toBe(true);
+      const foreign = await prisma.instantRun.findFirstOrThrow({ where: { taskKey: id, toolkit: 'zoom' } });
+      expect(foreign.detail).not.toHaveProperty('lateBatch');
+      expect(foreign.detail).not.toHaveProperty('lateToldAt');
+      // Told once: nothing of the job is offered again
+      expect(await lateMine([id])).toEqual([]);
+    });
+
+    it('CodeRabbit 7: the Apps are named in the order they were confirmed when the follow-up was offered, and a retry of the same report says the same in the same order even if a confirmation time moves meanwhile', async () => {
+      const { who, id } = await lateJob();
+      await letGo(id, who, 'slack', { at: new Date(LATER.getTime() + 60_000) });
+      await letGo(id, who, 'notion', { at: new Date(LATER.getTime() + 120_000) });
+      const [first] = await lateMine([id]);
+      expect(first.apps).toEqual(['Gmail', 'Slack', 'Notion']);
+      // The executor moves a confirmation time (a charge that turns up later rewrites it): Gmail now looks the newest, and the same report is asked for again
+      await prisma.$executeRaw`UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateEvidence,at}', to_jsonb(${new Date(LATER.getTime() + 9 * 3_600_000).toISOString()}::text)) WHERE "task_key" = ${id} AND "toolkit" = 'gmail'`;
+      const [again] = await lateMine([id]);
+      expect(again).toMatchObject({ key: first.key, seq: first.seq, apps: ['Gmail', 'Slack', 'Notion'], lateApps: ['Gmail', 'Slack', 'Notion'] });
     });
 
     it('says nothing is told for an unknown job, and a confirmation sent before the deploy record exists keeps the time of the first look', async () => {

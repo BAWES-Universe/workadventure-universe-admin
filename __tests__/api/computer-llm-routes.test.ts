@@ -4,6 +4,7 @@
  * is tested against a real database in computer-calls-db.test.ts.
  */
 import { NextRequest } from 'next/server';
+import * as nextServer from 'next/server';
 import { POST as identify } from '@/app/api/computer/llm/identify/route';
 import { POST as authorize } from '@/app/api/computer/llm/authorize/route';
 import { POST as settle } from '@/app/api/computer/llm/settle/route';
@@ -14,6 +15,7 @@ jest.mock('@/lib/db', () => ({ prisma: {} }));
 jest.mock('@/lib/computer-token');
 jest.mock('@/lib/computer-calls');
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
+jest.mock('next/server', () => ({ ...jest.requireActual('next/server'), after: jest.fn() }));
 
 const SERVICE_TOKEN = 'bot-server-secret';
 const before = process.env.BOT_SERVICE_TOKEN;
@@ -81,6 +83,21 @@ describe('settle', () => {
   });
 });
 
+describe('authorize: the end of a decided cutoff runs after the response (CodeRabbit 12)', () => {
+  it('hands the call Next’s `after`, so the end of the job is run when the answer has been sent and never before it', async () => {
+    const after = nextServer.after as jest.Mock;
+    lib.calls.authorizeModelCall.mockResolvedValue({ ok: false, reason: 'pool', full: true });
+    expect((await authorize(post({ token: 'cjt_x', callId: 'c1', estimateMicros: 5, payer: 'universe', route: 'universe-ai:p1' }))).status).toBe(200);
+    const afterAnswer = lib.calls.authorizeModelCall.mock.calls[0][2] as (task: () => Promise<void>) => void;
+    // Until the response is sent nothing was handed to `after` to run; when the call asks for it, the task is exactly what `after` is given
+    expect(after).not.toHaveBeenCalled();
+    const task = jest.fn(async () => undefined);
+    afterAnswer(task);
+    expect(after).toHaveBeenCalledWith(task);
+    expect(task).not.toHaveBeenCalled();
+  });
+});
+
 describe('authorize: the route of a call we fund', () => {
   const ok = { ok: true, jobId: 'j1', botId: 'b1', personId: 'p1', reservedMicros: 5 } as const;
   it('refuses a call we fund that names no route (missing, null or empty) before asking anything: a call without one would reach the room unchecked while its provider’s route is paused', async () => {
@@ -93,7 +110,7 @@ describe('authorize: the route of a call we fund', () => {
   it('passes the route of a call we fund on, and a person’s own key needs none', async () => {
     lib.calls.authorizeModelCall.mockResolvedValue(ok);
     expect((await authorize(post({ token: 'cjt_x', callId: 'c1', estimateMicros: 5, payer: 'universe', route: 'universe-ai:p1' }))).status).toBe(200);
-    expect(lib.calls.authorizeModelCall).toHaveBeenLastCalledWith(expect.objectContaining({ payer: 'universe', route: 'universe-ai:p1' }));
+    expect(lib.calls.authorizeModelCall).toHaveBeenLastCalledWith(expect.objectContaining({ payer: 'universe', route: 'universe-ai:p1' }), undefined, expect.any(Function));
     expect((await authorize(post({ token: 'cjt_x', callId: 'c2', estimateMicros: 0, payer: 'own-key' }))).status).toBe(200);
     expect((await authorize(post({ token: 'cjt_x', callId: 'c3', estimateMicros: 0, payer: 'own-key', route: null }))).status).toBe(200);
   });

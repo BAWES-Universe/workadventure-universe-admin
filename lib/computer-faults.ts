@@ -112,33 +112,44 @@ export async function recordFaults(botId: string, jobId: string, rows: FaultInpu
       providerStatus: row.providerStatus ?? null,
       at: row.at,
     };
+    // An arrival row (the relay says this run reached it) is written under the lock the finish's inference takes, in its own transaction, so the two never interleave, whatever its call id is: that is checked FIRST,
+    // so a runless arrival under a turn-only id (`turn:1`) takes the lock as well. Written with skipDuplicates (a duplicate inside a transaction would abort it)
+    if (isArrivalRow(data)) {
+      const outcome = await prisma.$transaction(async (tx) => {
+        await lockRelayReach(tx, jobId);
+        // A runless arrival under a turn-only id shares its key with the faults of every unnamed run: it takes the same slots they do
+        if (!run && data.callId.startsWith('turn:')) {
+          const slot = await recordUnnamedTurnRow(tx, jobId, data);
+          return { stored: slot.stored, conflict: slot.conflict, unnamedSlots: true };
+        }
+        const made = await tx.computerJobFault.createMany({ data: [data], skipDuplicates: true });
+        if (made.count > 0) return { stored: 1, conflict: false, unnamedSlots: false };
+        // Already kept as an uncertain row of the SAME run and turn (the call was reported unsure and the relay now says the run did reach it): that row is settled, under the same lock and counted as stored. Another
+        // run's or another turn's row under this call id is never touched (that is the conflict below)
+        const settled = await tx.computerJobFault.updateMany({
+          where: { jobId, callId: data.callId, kind: 'uncertain', run: data.run, turn: data.turn },
+          data: { kind: data.kind, reason: data.reason, source: data.source, route: data.route, providerStatus: data.providerStatus, at: data.at, createdAt: new Date() },
+        });
+        if (settled.count > 0) return { stored: settled.count, conflict: false, unnamedSlots: false };
+        const kept = await tx.computerJobFault.findUnique({ where: { jobId_callId: { jobId, callId: data.callId } }, select: { run: true, turn: true } });
+        return { stored: 0, conflict: !!kept && (kept.run !== data.run || kept.turn !== data.turn), unnamedSlots: false };
+      });
+      stored += outcome.stored;
+      if (outcome.conflict) {
+        conflicts++;
+        console.error(outcome.unnamedSlots ? '[Computer] A fault row could not be kept: too many different reports for one turn of unnamed runs. Job' : '[Computer] A fault row could not be kept: its call id is already used by another run or turn of the job. Job', jobId);
+      }
+      continue;
+    }
     // A fault of a turn (no call id of its own: `turn:<n>`) from a runner that names no run: two runs of the job, both unnamed, number their turns from 1 again and would share this key, and the second
     // report of a different fault would be taken for the first said again and dropped. Each DIFFERENT report is kept under its own stable slot (`turn:1`, `turn:1~2`, ...); the same report said again is
     // the same slot, and changes nothing
     if (!run && data.callId.startsWith('turn:')) {
-      const outcome = await recordUnnamedTurnRow(jobId, data);
+      const outcome = await recordUnnamedTurnRow(prisma, jobId, data);
       stored += outcome.stored;
       if (outcome.conflict) {
         conflicts++;
         console.error('[Computer] A fault row could not be kept: too many different reports for one turn of unnamed runs. Job', jobId);
-      }
-      continue;
-    }
-    // An arrival row (the relay says this run reached it) is written under the lock the finish's inference takes, in its own transaction, so the two never interleave. Written with skipDuplicates (a duplicate
-    // inside a transaction would abort it): a row already kept is then treated as below
-    if (isArrivalRow(data)) {
-      const made = await prisma.$transaction(async (tx) => {
-        await lockRelayReach(tx, jobId);
-        return tx.computerJobFault.createMany({ data: [data], skipDuplicates: true });
-      });
-      if (made.count > 0) {
-        stored++;
-        continue;
-      }
-      const kept = await prisma.computerJobFault.findUnique({ where: { jobId_callId: { jobId, callId: data.callId } }, select: { run: true, turn: true } });
-      if (kept && (kept.run !== data.run || kept.turn !== data.turn)) {
-        conflicts++;
-        console.error('[Computer] A fault row could not be kept: its call id is already used by another run or turn of the job. Job', jobId);
       }
       continue;
     }
@@ -183,22 +194,19 @@ const sameReport = (a: { kind: string; reason: string; source: string; route: st
  * wins; a person's row beside an unresolved one reads as unresolved). Returns what was stored, and whether every slot was taken by other reports (a conflict).
  */
 async function recordUnnamedTurnRow(
+  db: Pick<Prisma.TransactionClient, 'computerJobFault'>,
   jobId: string,
   data: { jobId: string; turn: number | null; run: string | null; callId: string; kind: string; reason: string; source: string; route: string | null; providerStatus: number | null; at: Date },
 ): Promise<{ stored: number; conflict: boolean }> {
   for (let slot = 1; slot <= UNNAMED_TURN_SLOTS; slot += 1) {
     const callId = slot === 1 ? data.callId : `${data.callId}~${slot}`.slice(0, 120);
-    const kept = await prisma.computerJobFault.findUnique({ where: { jobId_callId: { jobId, callId } } });
+    const kept = await db.computerJobFault.findUnique({ where: { jobId_callId: { jobId, callId } } });
     if (!kept) {
-      try {
-        await prisma.computerJobFault.create({ data: { ...data, callId } });
-        return { stored: 1, conflict: false };
-      } catch (error) {
-        if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) throw error;
-        // Taken at the same moment by another report: that slot is looked at again
-        slot -= 1;
-        continue;
-      }
+      // Written with skipDuplicates (a duplicate inside a transaction would abort it): nothing written means another report took the slot at the same moment, and that slot is looked at again
+      const made = await db.computerJobFault.createMany({ data: [{ ...data, callId }], skipDuplicates: true });
+      if (made.count > 0) return { stored: 1, conflict: false };
+      slot -= 1;
+      continue;
     }
     // Not the same series (another run or turn under this key): never the one this report belongs to
     if (kept.run !== data.run || kept.turn !== data.turn) continue;
@@ -363,6 +371,21 @@ export async function recordOwnKeyCall(db: Pick<Prisma.TransactionClient, 'compu
   await db.computerJobFault.createMany({
     data: [{ jobId, turn: null, run: null, callId: OWN_KEY_CALL_MARK, kind: 'answered', reason: 'own_key_call', source: ORBIT_SOURCE, route: null, providerStatus: null, at }],
     skipDuplicates: true,
+  });
+}
+
+/**
+ * Authorizes a call on the person's own key: the marker is kept under the lock the finish's inference takes, and only while the job is still on (running or waiting), so a finish and the marker can never both
+ * succeed on a stale view of each other. A finish that took the lock first has ended the job (the marker is refused: the call is not authorized); a marker kept first is seen by the finish, which then reads
+ * "a call was made" and never gives the job back as ours. Returns whether the call may go on; throws when it could not be kept (a call is not authorized without it).
+ */
+export async function authorizeOwnKeyCall(jobId: string, at: Date = new Date()): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    await lockRelayReach(tx, jobId);
+    const job = await tx.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
+    if (!job || (job.status !== 'running' && job.status !== 'waiting')) return false;
+    await recordOwnKeyCall(tx, jobId, at);
+    return true;
   });
 }
 

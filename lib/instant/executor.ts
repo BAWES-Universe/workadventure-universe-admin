@@ -747,17 +747,20 @@ export async function applyLateEvidence(run: Row, line: InstantLog, tx: Prisma.T
  */
 export async function tagLateBatch(tx: Pick<Prisma.TransactionClient, '$executeRaw'>, runIds: string[], batch: number): Promise<void> {
   if (runIds.length === 0) return;
+  // The number the follow-up was offered under, and the place of each run in it (the order the runs were named, which is the order the report names their Apps in, the same on every retry)
   await tx.$executeRaw(Prisma.sql`
-    UPDATE "instant_runs" SET "detail" = jsonb_set("detail", '{lateBatch}', to_jsonb(${batch}::int)) WHERE "id" IN (${Prisma.join(runIds)}) AND "detail"->'lateBatch' IS NULL`);
+    UPDATE "instant_runs" i SET "detail" = jsonb_set(jsonb_set(i."detail", '{lateBatch}', to_jsonb(${batch}::int)), '{lateOrder}', to_jsonb(t."ord"::int))
+    FROM unnest(${runIds}::text[]) WITH ORDINALITY AS t("id", "ord")
+    WHERE i."id" = t."id" AND i."detail"->'lateBatch' IS NULL`);
 }
 
-/** The person was told (or it can never be told): the runs of that follow-up are marked, once. `batch` is the number the reader was given; without it every run that was offered (carries a number) is marked. */
-export async function markLateTold(jobId: string, batch: number | undefined, toldAt: Date): Promise<void> {
+/** The person was told (or it can never be told): the runs of that follow-up (this person's, this Brick's, this job's, carrying that number) are marked, once. */
+export async function markLateTold(jobId: string, personId: string, botId: string, batch: number, toldAt: Date): Promise<void> {
   const told = JSON.stringify(toldAt.toISOString());
-  const only = typeof batch === 'number' ? Prisma.sql`AND i."detail"->>'lateBatch' = ${String(batch)}` : Prisma.sql`AND i."detail"->'lateBatch' IS NOT NULL`;
   await prisma.$executeRaw(Prisma.sql`
     UPDATE "instant_runs" i SET "detail" = jsonb_set(i."detail", '{lateToldAt}', ${told}::jsonb)
-    WHERE i."task_key" = ${jobId} AND i."detail"->'lateEvidence'->>'status' = 'success' AND i."detail"->'lateToldAt' IS NULL ${only}`);
+    WHERE i."task_key" = ${jobId} AND i."person_id" = ${personId} AND i."bot_id" = ${botId} AND i."detail"->>'lateBatch' = ${String(batch)}
+      AND i."detail"->'lateEvidence'->>'status' = 'success' AND i."detail"->'lateToldAt' IS NULL`);
 }
 
 /**

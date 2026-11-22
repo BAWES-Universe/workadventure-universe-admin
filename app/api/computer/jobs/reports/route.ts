@@ -57,6 +57,8 @@ export async function POST(request: NextRequest) {
     const parsed = toldSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
     if (parsed.data.outcome === 'undeliverable' && !parsed.data.why) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
+    // A follow-up is confirmed by its number: one that names none could mark a batch offered after the one the reader was given
+    if (parsed.data.kind === 'late' && typeof parsed.data.seq !== 'number') return NextResponse.json({ error: 'A confirmation of a follow-up names its number (seq)' }, { status: 400 });
     const outcome = parsed.data.outcome === 'undeliverable' && parsed.data.why ? ({ delivered: false, why: parsed.data.why } as const) : ({ delivered: true } as const);
     const kept = await keepReportTold(parsed.data.jobId, parsed.data.kind, parsed.data.seq, outcome);
     return kept ? NextResponse.json({ ok: true }) : NextResponse.json({ error: 'Job not found' }, { status: 404 });
