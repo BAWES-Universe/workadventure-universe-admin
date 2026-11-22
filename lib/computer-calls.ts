@@ -69,14 +69,19 @@ export async function authorizeModelCall(
     // an own key is never given back as ours). A call is not authorized unless the marker is kept: one that could not be kept is refused (the relay asks again), as a call that is authorized and then forgotten would let
     // a cutoff for our own capacity read the job as one that never had a call
     try {
-      // Kept under the lock a finish's inference takes, and only while the job is still on: a job that was ended meanwhile does not authorize the call
-      if (!(await authorizeOwnKeyCall(base.jobId, now))) return { ok: false, reason: 'refused' };
+      // Kept under the job's cutoff lock and the lock a finish's inference takes, and only while the job is still on, no cutoff for our capacity is decided and the key is still good (looked at with the time read
+      // after the waits): a call refused for any of these leaves no marker, and a job that was ended meanwhile does not authorize the call
+      const kept = await authorizeOwnKeyCall(base.jobId, now, async (tx) => {
+        const still = await verifyJobToken(input.token, 'model', clock(), tx);
+        return still.ok && still.generation === verified.generation;
+      });
+      if (!kept) return { ok: false, reason: 'refused' };
     } catch (error) {
       console.error('[Computer] Could not note an own-key call, so it is not authorized:', error instanceof Error ? error.message : 'unknown');
       return { ok: false, reason: 'refused' };
     }
     // A cutoff for our own capacity that was deciding at the same moment either saw this call (and did not stop the job) or won (and this call is refused): never both
-    if (!(await standsAgainstCutoff(base.jobId, input.token, verified.generation, now))) return { ok: false, reason: 'refused' };
+    if (!(await standsAgainstCutoff(base.jobId, input.token, verified.generation, clock))) return { ok: false, reason: 'refused' };
     return { ok: true, ...base, reservedMicros: null };
   }
   if (!Number.isSafeInteger(input.estimateMicros) || input.estimateMicros <= 0 || input.estimateMicros > MAX_MICROS) return { ok: false, reason: 'refused' };
@@ -93,10 +98,8 @@ export async function authorizeModelCall(
     // The room may have waited for the pool's lock while the person took the machine: the key must still be good after it, or the room goes back. And a cutoff for our own capacity that was deciding at the same
     // moment either counted this room (and did not stop the job) or won (the key is no longer good): the room goes back, never both. A look that FAILS is the same answer as one that says no: the call is refused and
     // the room goes back, never held for a call that was not authorized
-    const stands = await (async () => {
-      const still = await verifyJobToken(input.token, 'model', now);
-      return still.ok && still.generation === verified.generation && (await authorizedPastCutoff(base.jobId, input.token, verified.generation, now));
-    })().catch((error) => {
+    // The key is looked at again by `authorizedPastCutoff`, with the time read after the room's wait for the pool's lock (and after the cutoff's, when there is one): a key that ran out meanwhile is no longer good
+    const stands = await authorizedPastCutoff(base.jobId, input.token, verified.generation, clock).catch((error) => {
       console.error('[Computer] Could not look again at a call that was authorized:', error instanceof Error ? error.message : 'unknown');
       return false;
     });
@@ -229,6 +232,9 @@ async function refusedForPool(jobId: string, callId: string, route: string | nul
     cutoff = await prisma.$transaction(
       async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
+        // A job that is over (or not on the machine) is not decided about: a finish that ended it first stands, and a cutoff for a job nothing is running for would only end its keys again
+        const job = await tx.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
+        if (!job || (job.status !== 'running' && job.status !== 'waiting')) return false;
         // Only a job whose calls have ALL been refused so far: one that had a call authorized before (a room held or priced, or one on the person's own key, which leaves only its marker) is left to the relay's own words
         if (await hadAuthorizedCall(tx, jobId)) return false;
         // Decided already (by a refusal that committed before this one): nothing to decide twice
@@ -349,8 +355,13 @@ export { cutoffLockKey };
  * refusal of ours kept has none (the common case: one count, nothing waited for). Otherwise this waits for the job's cutoff lock, which the cutoff holds only while it counts, decides and ends the job's keys (database
  * steps, no provider call), and then looks for the decision itself and asks again whether the key is still good: a cutoff that counted this call decided nothing, and one that won decided it, so the call is refused.
  */
-async function authorizedPastCutoff(jobId: string, token: string, generation: number, now: Date): Promise<boolean> {
-  if (!(await hasPoolRefusals(prisma, jobId))) return true;
+async function authorizedPastCutoff(jobId: string, token: string, generation: number, clock: () => Date): Promise<boolean> {
+  // The key is looked at with the time read AFTER whatever this call waited for (a lock, the pool): a key that ran out meanwhile is not good, whether or not a cutoff was ever near
+  const keyIsGood = async (): Promise<boolean> => {
+    const after = await verifyJobToken(token, 'model', clock());
+    return after.ok && after.generation === generation;
+  };
+  if (!(await hasPoolRefusals(prisma, jobId))) return keyIsGood();
   let decided: boolean;
   try {
     decided = await prisma.$transaction(
@@ -366,13 +377,12 @@ async function authorizedPastCutoff(jobId: string, token: string, generation: nu
     return false;
   }
   if (decided) return false;
-  const after = await verifyJobToken(token, 'model', now);
-  return after.ok && after.generation === generation;
+  return keyIsGood();
 }
 
 /** `authorizedPastCutoff` for a call with no room to give back: a look that fails is a no. */
-const standsAgainstCutoff = (jobId: string, token: string, generation: number, now: Date): Promise<boolean> =>
-  authorizedPastCutoff(jobId, token, generation, now).catch((error) => {
+const standsAgainstCutoff = (jobId: string, token: string, generation: number, clock: () => Date): Promise<boolean> =>
+  authorizedPastCutoff(jobId, token, generation, clock).catch((error) => {
     console.error('[Computer] Could not look again at a call that was authorized:', error instanceof Error ? error.message : 'unknown');
     return false;
   });

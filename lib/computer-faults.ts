@@ -374,19 +374,30 @@ export async function recordOwnKeyCall(db: Pick<Prisma.TransactionClient, 'compu
   });
 }
 
+/** The lock a cutoff for our own capacity, a finish's terminal write, an authorization that may be deciding at the same moment and the making of a model key take one after the other (taken BEFORE the person's lock and the relay-reach lock, never after). */
+export const lockCutoff = (tx: Pick<Prisma.TransactionClient, '$executeRaw'>, jobId: string) => tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
+
 /**
- * Authorizes a call on the person's own key: the marker is kept under the lock the finish's inference takes, and only while the job is still on (running or waiting), so a finish and the marker can never both
- * succeed on a stale view of each other. A finish that took the lock first has ended the job (the marker is refused: the call is not authorized); a marker kept first is seen by the finish, which then reads
- * "a call was made" and never gives the job back as ours. Returns whether the call may go on; throws when it could not be kept (a call is not authorized without it).
+ * Authorizes a call on the person's own key. In ONE transaction, under the job's cutoff lock and then the lock a finish's inference takes: a cutoff for our own capacity that is already decided refuses the call
+ * BEFORE any marker is written (a refused call leaves no trace: a marker would read the job as one that had an own-key call), the job must still be on (running or waiting), and `stillGood` (the key, looked at
+ * with the time read after the waits) must say yes. Only then is the marker kept, so a finish and the marker can never both succeed on a stale view of each other: a finish that took the lock first has ended
+ * the job (refused); a marker kept first is seen by the finish, which then reads "a call was made" and never gives the job back as ours, and by a cutoff, which then never decides. Returns whether the call may
+ * go on; throws when it could not be kept (a call is not authorized without it).
  */
-export async function authorizeOwnKeyCall(jobId: string, at: Date = new Date()): Promise<boolean> {
-  return prisma.$transaction(async (tx) => {
-    await lockRelayReach(tx, jobId);
-    const job = await tx.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
-    if (!job || (job.status !== 'running' && job.status !== 'waiting')) return false;
-    await recordOwnKeyCall(tx, jobId, at);
-    return true;
-  });
+export async function authorizeOwnKeyCall(jobId: string, at: Date = new Date(), stillGood?: (tx: Prisma.TransactionClient) => Promise<boolean>): Promise<boolean> {
+  return prisma.$transaction(
+    async (tx) => {
+      await lockCutoff(tx, jobId);
+      await lockRelayReach(tx, jobId);
+      if (await hasPoolCutoff(tx, jobId)) return false;
+      const job = await tx.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
+      if (!job || (job.status !== 'running' && job.status !== 'waiting')) return false;
+      if (stillGood && !(await stillGood(tx))) return false;
+      await recordOwnKeyCall(tx, jobId, at);
+      return true;
+    },
+    { timeout: 15_000, maxWait: 15_000 },
+  );
 }
 
 /** Whether a call on the person's own key was authorized for this job (the marker above). Reads only. */

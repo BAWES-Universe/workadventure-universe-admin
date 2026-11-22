@@ -266,20 +266,42 @@ run('a Brick’s computer, in a real database', () => {
       const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!job.ok) throw new Error('no');
       await prisma.computerJob.update({ where: { id: job.job.id }, data: { secondsRun: 100 } });
-      const real = prisma.computerJob.updateMany.bind(prisma.computerJob) as (args: { data?: Record<string, unknown> }) => Promise<{ count: number }>;
-      let moved = false;
-      const spy = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation(((args: { data?: Record<string, unknown> }) => {
-        // After the end read the job and before it wrote: a take-over recorded 300 seconds and a hand-back put it running again (the status is as it was)
-        if (!moved && args?.data?.status === 'done') {
-          moved = true;
-          return prisma.computerJob.update({ where: { id: job.job.id }, data: { secondsRun: 300, stretchStarted: minutes(1) } }).then(() => real(args));
-        }
-        return real(args);
-      }) as never);
+      // After the end read the job and before it wrote: a take-over recorded 300 seconds and a hand-back put it running again (the status is as it was). A finish writes its ending under the job's cutoff lock, so the
+      // moment is made by holding that lock: the finish has read the job and waits for it; what the holder writes is what the finish finds when it gets the lock
+      const lockKey = `computer-call-cutoff:${job.job.id}`;
+      let release: () => void = () => undefined;
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+          locked();
+          await released;
+          await tx.computerJob.update({ where: { id: job.job.id }, data: { secondsRun: 300, stretchStarted: minutes(1) } });
+        },
+        { timeout: 15_000, maxWait: 15_000 },
+      );
+      let finishing: Promise<unknown> = Promise.resolve();
       try {
-        await finishJob(job.job.id, 'done', minutes(2));
+        await Promise.race([lockTaken, holder.then(() => Promise.reject(new Error('the holder ended before it took the lock')))]);
+        finishing = finishJob(job.job.id, 'done', minutes(2));
+        let waiting = false;
+        for (let tries = 0; tries < 250 && !waiting; tries += 1) {
+          waiting = (await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(${lockKey}, 0)`)[0].n > 0;
+          if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(waiting).toBe(true);
+        release();
+        await holder;
+        await finishing;
       } finally {
-        spy.mockRestore();
+        release();
+        await Promise.allSettled([holder, finishing]);
       }
       const ended = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.job.id } });
       expect(ended.status).toBe('done');

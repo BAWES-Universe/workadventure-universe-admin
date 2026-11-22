@@ -37,6 +37,8 @@ import { computersArePaused } from '@/lib/capability-pause';
 import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
+import { hasPoolCutoff, lockCutoff } from '@/lib/computer-faults';
+import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { recordRefundObligationsForBrick, sweepRefundObligations } from '@/lib/computer-refunds';
 import { decidePendingForPurge, decideRunnerFinish, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, markDeliveredLate, noteEffectSettled, sweepGiveBackDecisions, sweepLateEvidence, type Verdict } from '@/lib/computer-giveback';
 import {
@@ -1118,7 +1120,8 @@ export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: 
     const ours = outcome === 'failed' && cause === 'ours';
     // The run the runner reported is carried whatever else it named: it is where the relay's arrival is looked for (never another run's). Which fault rows are read does not follow it (no turn named: every row of the job)
     const runner = outcome !== 'failed' ? null : { turns: turns ?? null, run: run ?? null, hint: ours ? ('ours' as const) : cause === 'agent' ? ('agent' as const) : ('none' as const) };
-    await endJob(jobId, outcome, ours ? 'error' : null, now, true, undefined, true, runner);
+    // A finish honors a pool cutoff Orbit decided for this job (`finish`): such a job ends as `pool` (ours, given back), never as the outcome the runner reports after its keys were ended for our own capacity
+    await endJob(jobId, outcome, ours ? 'error' : null, now, true, undefined, true, runner, true);
   }
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return job ? jobView(job) : null;
@@ -1237,7 +1240,19 @@ const END_TRIES = 4;
  * `outside` false writes only our own tables (the Brick's purge ends its jobs this way, so a slow provider or backup never holds the purge):
  * the machine, its browser and the agent's turn are left to the purge's own removal of the machine.
  */
-async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, runner: { turns: number[] | null; run?: string | null; /** What the runner said the cause was: `ours` is judged from the rows and bounded; any other is a hint read against the rows of the named turns. */ hint?: 'ours' | 'agent' | 'none' } | null = null): Promise<void> {
+async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true, runner: { turns: number[] | null; run?: string | null; /** What the runner said the cause was: `ours` is judged from the rows and bounded; any other is a hint read against the rows of the named turns. */ hint?: 'ours' | 'agent' | 'none' } | null = null, finish = false): Promise<void> {
+  // A finish reported by the runner honors a committed pool cutoff (Orbit decided to end this job for its own capacity: its keys were ended and the runner's own failure, or "done", follows from that). It is ended as
+  // `pool` instead (stopped, ours: its time given back, never counted, with the words the person is told). The decision is read first; and again under the cutoff lock in the very transaction that writes the ending,
+  // because a cutoff that commits between the two would otherwise lose to a finish that has already read "not decided". A cutoff takes the same lock and only decides for a job that is still on
+  const endForPool = async (): Promise<void> => {
+    const kept = cleanEndNote(POOL_BUSY_WORDS);
+    if (kept) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: kept } });
+    status = 'stopped';
+    endedBy = 'pool';
+    runner = null;
+    finish = false;
+  };
+  if (finish && (await hasPoolCutoff(prisma, jobId))) await endForPool();
   // The job can change under this (a person's answer moves it between running and waiting): the end is tried again on what it is now, and
   // only a job that is over, or no longer the one the caller meant, is let go
   let job: NonNullable<Awaited<ReturnType<typeof prisma.computerJob.findUnique>>> | null = null;
@@ -1293,11 +1308,16 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       const ref = { id: jobId, personId: job.personId, startedAt: job.startedAt };
       // Read before the transaction opens: a read of Limits that fails inside it would leave the transaction aborted
       const limits = runnerJudged || hintJudged ? await readGiveBackLimits() : null;
+      const judging = runner;
       const result = await prisma.$transaction(async (tx) => {
         let verdict: Verdict | null = null;
-        if (runnerJudged || hintJudged) {
+        if (finish) {
+          await lockCutoff(tx, jobId);
+          if (await hasPoolCutoff(tx, jobId)) return { done: { count: 0 }, verdict, cutoffDecided: true };
+        }
+        if (judging && (runnerJudged || hintJudged)) {
           await lockPerson(tx, ref.personId);
-          verdict = await decideRunnerFinish(tx, limits, ref, runner.turns, now, { run: runner.run ?? null, hint: runner.hint });
+          verdict = await decideRunnerFinish(tx, limits, ref, judging.turns, now, { run: judging.run ?? null, hint: judging.hint });
         }
         const given = !verdict || verdict.state === 'given';
         const counted = verdict?.state === 'given' && verdict.counted;
@@ -1309,8 +1329,12 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
           if (verdict) await writeDecision(tx, ref, verdict, runner?.hint ?? 'ours', verdict.judgedTurns ?? runner?.turns ?? null, now, runner?.run ?? null);
           else if (orbitSeen) await writeOrbitDecision(tx, ref, endedBy === 'pool' ? 'pool_cut_off' : null);
         }
-        return { done, verdict };
+        return { done, verdict, cutoffDecided: false };
       });
+      if (result.cutoffDecided) {
+        await endForPool();
+        continue;
+      }
       ended = result.done;
       // A hinted ending that was given back is ours from here on: its time and calls are given back below like any
       if (ended.count === 1 && hintJudged && result.verdict?.state === 'given') endedBy = 'error';
@@ -1321,6 +1345,18 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         status = 'failed';
         endedBy = null;
       }
+    } else if (finish) {
+      // The ending is written under the cutoff lock, with the decision read under it: a cutoff cannot commit between the two
+      const written = await prisma.$transaction(async (tx) => {
+        await lockCutoff(tx, jobId);
+        if (await hasPoolCutoff(tx, jobId)) return null;
+        return tx.computerJob.updateMany({ where, data: endData });
+      });
+      if (written === null) {
+        await endForPool();
+        continue;
+      }
+      ended = written;
     } else {
       ended = await prisma.computerJob.updateMany({ where, data: endData });
     }

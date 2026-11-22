@@ -533,8 +533,9 @@ const LATE_LOOK_ALERT_MS = 60 * MINUTE;
 export async function sweepLateEvidence(now: Date = new Date(), batch = 50): Promise<{ looked: number }> {
   const result = { looked: 0 };
   try {
+    // The mark is the UTC wall time the columns hold (a database that is not set to UTC would otherwise read it ahead or behind, and a row that arrives after the look would look older than the mark)
     const due = await prisma.$queryRaw<Array<{ job_id: string; mark: Date; attempts: number; last_error: string | null }>>(Prisma.sql`
-      SELECT d."job_id", clock_timestamp() AS mark, d."attempts", d."last_error" FROM "computer_give_back_decisions" d
+      SELECT d."job_id", clock_timestamp() AT TIME ZONE 'UTC' AS mark, d."attempts", d."last_error" FROM "computer_give_back_decisions" d
       WHERE d."cause_hint" IS NOT NULL AND (d."state" = 'refused' OR (d."state" = 'given' AND d."basis" = 'goodwill') OR (d."state" = 'given' AND d."basis" = 'universe_fault' AND d."reason" = 'relay_unreachable'))
         AND (
           -- A look that threw is retried at its own time, however old the decision is: it is never dropped

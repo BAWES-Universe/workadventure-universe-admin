@@ -534,22 +534,30 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       try {
         // If the holder fails before it has the lock, THIS fails with its error (never a wait that does not end)
         const mine = await Promise.race([lockInfo, reader1.then(() => Promise.reject(new Error('the holder ended before it took the lock')))]);
-        let settled = false;
-        reader2 = lateMine([id]).then((found) => {
-          settled = true;
-          return found;
-        });
-        // Reader 2 is proven to be WAITING for that very lock (a backend that is not granted the advisory lock the holder has): no timer; it fails if reader 2 finishes first, or if nobody ever waits
+        // CodeRabbit E: both ways reader 2 can end are observed the moment it starts, so a read that rejects before it reaches the lock fails THIS test with its own error at once (never a poll that times out, never an unhandled rejection)
+        const outcome: { state: 'pending' | 'fulfilled' | 'rejected'; error?: unknown } = { state: 'pending' };
+        reader2 = lateMine([id]);
+        reader2.then(
+          () => {
+            outcome.state = 'fulfilled';
+          },
+          (error: unknown) => {
+            outcome.state = 'rejected';
+            outcome.error = error;
+          },
+        );
+        // Reader 2 is proven to be WAITING for that very lock (a backend that is not granted the advisory lock the holder has): no timer; it fails if reader 2 finishes first, rejects first, or if nobody ever waits
         const deadline = Date.now() + 5_000;
         for (;;) {
           const waiting = (await prisma.$queryRaw<Array<{ n: number }>>`
             SELECT COUNT(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid::int = ${mine.classid} AND objid::int = ${mine.objid} AND objsubid::int = ${mine.objsubid} AND pid <> ${mine.pid}`)[0].n;
           if (waiting > 0) break;
-          if (settled) throw new Error('reader 2 finished without waiting for the job’s lock');
+          if (outcome.state === 'rejected') throw outcome.error;
+          if (outcome.state === 'fulfilled') throw new Error('reader 2 finished without waiting for the job’s lock');
           if (Date.now() > deadline) throw new Error('reader 2 never waited for the job’s lock');
           await new Promise((resolve) => setImmediate(resolve));
         }
-        expect(settled).toBe(false);
+        expect(outcome.state).toBe('pending');
         await letGo(id, who, 'slack', { at: new Date(LATER.getTime() + 60_000) });
         release();
         await reader1;
@@ -821,15 +829,20 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     });
 
     it('CodeRabbit 6: a run of ANOTHER person or Brick that merely shares the job’s id as its task key never enters the batch, never gives its App a name in the report, and is never marked by the ack', async () => {
-      const { id } = await lateJob('sara');
+      const { who, id } = await lateJob('sara');
       const stranger = await person('mallory');
       await letGo(id, stranger, 'zoom', { at: new Date(LATER.getTime() + 60_000) });
+      // CodeRabbit F: and a run of a SECOND Brick of the SAME person (so only the Brick differs: the person filter alone would let it in)
+      const second = await createBrick({ ownerId: who.id, name: 'Second Brick' });
+      await letGo(id, { id: who.id, brickId: second.id }, 'notion', { at: new Date(LATER.getTime() + 120_000) });
       const [report] = await lateMine([id]);
       expect(report).toMatchObject({ apps: ['Gmail'], seq: 1 });
       expect(await keepReportTold(id, 'late', 1)).toBe(true);
-      const foreign = await prisma.instantRun.findFirstOrThrow({ where: { taskKey: id, toolkit: 'zoom' } });
-      expect(foreign.detail).not.toHaveProperty('lateBatch');
-      expect(foreign.detail).not.toHaveProperty('lateToldAt');
+      for (const toolkit of ['zoom', 'notion']) {
+        const foreign = await prisma.instantRun.findFirstOrThrow({ where: { taskKey: id, toolkit } });
+        expect(foreign.detail).not.toHaveProperty('lateBatch');
+        expect(foreign.detail).not.toHaveProperty('lateToldAt');
+      }
       // Told once: nothing of the job is offered again
       expect(await lateMine([id])).toEqual([]);
     });

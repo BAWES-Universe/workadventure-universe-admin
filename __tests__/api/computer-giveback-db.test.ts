@@ -2237,6 +2237,34 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         clock += 10;
       });
 
+      // The sweep marks a decision as looked at with the database's clock: the mark must be the UTC time the columns hold in any session time zone, or an arrival that comes after the look looks older than the mark and is never looked at
+      describe.each(['UTC', 'Asia/Kuwait'])('the late look sweep in a database set to %s', (zone) => {
+        const zoneNow = async () => ((await prisma.$queryRaw<Array<{ TimeZone: string }>>`SHOW timezone`)[0] as { TimeZone: string }).TimeZone;
+        const inZone = (name: string, shown: string) => (name === 'UTC' ? /UTC$/.test(shown) : shown === name);
+        const settle = async (name: string, alter: string) => {
+          if (inZone(name, await zoneNow())) return;
+          await prisma.$executeRawUnsafe(alter);
+          await new Promise((resolve) => setTimeout(resolve, 11_500));
+          expect(inZone(name, await zoneNow())).toBe(true);
+        };
+        beforeAll(() => settle(zone, `DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET timezone TO %L', current_database(), '${zone}'); END $$`), 30_000);
+        afterAll(() => settle('UTC', `DO $$ BEGIN EXECUTE format('ALTER DATABASE %I RESET timezone', current_database()); END $$`), 30_000);
+
+        it('an arrival that comes after an earlier sweep looked at the decision is still found by the next sweep, and re-labels the reason', async () => {
+          await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
+          const sara = await person('sara');
+          const outage = await job(sara, { outcome: 'failed', cause: 'ours', run: 'r2' }, readied);
+          // An arrival of another run says nothing of r2: the sweep looks at the decision and marks it as looked at
+          await recordFaults(sara.brickId, outage.id, [arrival('r1', 1)]);
+          await sweepLateEvidence(new Date());
+          expect((await decisionOf(outage.id))?.reason).toBe('relay_unreachable');
+          // r2 reached the relay after that look: the next sweep finds it
+          await recordFaults(sara.brickId, outage.id, [arrival('r2', 1)]);
+          await sweepLateEvidence(new Date());
+          expect(await decisionOf(outage.id)).toMatchObject({ state: 'given', basis: 'universe_fault', reason: 'relay_reached' });
+        });
+      });
+
       it('CodeRabbit 13: an arrival marks the decision’s reason only through afterArrival when no look ran: the reason is still the outage’s until it is called, and then it is relay_reached, once', async () => {
         await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 5 });
         const sara = await person('sara');
