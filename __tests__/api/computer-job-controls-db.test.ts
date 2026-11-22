@@ -13,6 +13,10 @@ jest.mock('@/lib/computer-browser-profile', () => {
   const actual = jest.requireActual('@/lib/computer-browser-profile');
   return { ...actual, parkProfile: jest.fn(async () => ({ state: 'parked', reason: null })), restoreProfile: jest.fn(async () => ({ state: 'restored', reason: null })), dropProfile: jest.fn(async () => ({ state: 'dropped', reason: null })) };
 });
+jest.mock('@/lib/meter-allowance', () => {
+  const actual = jest.requireActual('@/lib/meter-allowance');
+  return { ...actual, reserveRoom: jest.fn((...args: unknown[]) => actual.reserveRoom(...args)) };
+});
 jest.mock('@/lib/meter', () => {
   const actual = jest.requireActual('@/lib/meter');
   return { ...actual, recordMeterEvent: jest.fn((...args: unknown[]) => actual.recordMeterEvent(...args)) };
@@ -24,8 +28,9 @@ import { createBrick } from '@/lib/brick-create';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import * as meterModule from '@/lib/meter';
 import { memberAllowance } from '@/lib/meter-allowance';
+import * as allowanceModule from '@/lib/meter-allowance';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { claimJob, computerTimeInBooks, computerView, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { claimJob, computerTimeInBooks, computerView, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver, controlInternals } from '@/lib/computer';
 import { recordPoolCutoff } from '@/lib/computer-faults';
 import * as profile from '@/lib/computer-browser-profile';
 import { checkSpend, proposeRule } from '@/lib/spend-rules';
@@ -268,6 +273,8 @@ run('computer job controls: pause, resume, do this next, cancel one job (piece 1
       const hotel = await another(sara, 'Hotel', minutes(2));
       const taxi = await another(sara, 'Taxi', minutes(3));
       expect(await jobOf(hotel)).toMatchObject({ status: 'running' });
+      // Taxi was moved to the front before the resume: the resumed job still goes ahead of it
+      expect(await moveJobFirst(sara.brickId, sara.id, taxi, {}, minutes(3))).toMatchObject({ ok: true });
       await resumeJob(sara.brickId, sara.id, jobId, minutes(4));
       expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'turn' });
       const view = await computerView(sara.brickId, sara.id, minutes(4));
@@ -331,6 +338,45 @@ run('computer job controls: pause, resume, do this next, cancel one job (piece 1
         expect(await jobOf(keyed.job.id)).toMatchObject({ status: 'queued', queuedFor: 'paused' });
       }
       expect(jobId && third).toBeTruthy();
+    });
+  });
+
+  describe('the sweep', () => {
+    it('a paused job at the head of the line does not block the job behind it: the sweep starts that one', async () => {
+      const { sara, jobId } = await running('l-sweep');
+      const paused = await another(sara, 'Paused one', minutes(1));
+      await pauseJob(sara.brickId, sara.id, paused, minutes(1));
+      const next = await another(sara, 'Next one', minutes(2));
+      // The running job ended without the line moving (a crash between the end and the next start): only the sweep moves it now
+      await prisma.computerJob.update({ where: { id: jobId }, data: { status: 'done', endedAt: minutes(3) } });
+      expect(await jobOf(next)).toMatchObject({ status: 'queued' });
+      await sweepComputers(minutes(4));
+      expect(await jobOf(next)).toMatchObject({ status: 'running' });
+      expect(await jobOf(paused)).toMatchObject({ status: 'queued', queuedFor: 'paused' });
+    });
+
+    it('a direct try to start a paused job does nothing: no room is reserved for it, it stays paused, even with its computer free', async () => {
+      const { sara, jobId } = await running('l-try');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(1));
+      const before = await prisma.meterReservation.count({ where: { jobId } });
+      expect(await controlInternals.tryStart(jobId, minutes(2))).toBe('queued');
+      expect(await prisma.meterReservation.count({ where: { jobId } })).toBe(before);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'person' });
+    });
+
+    it('a pause that lands while a try to start the job is reserving its room wins: the job stays paused and the room is given back', async () => {
+      const { sara, jobId } = await running('l-race');
+      const next = await another(sara, 'Next one', minutes(1));
+      await prisma.computerJob.update({ where: { id: jobId }, data: { status: 'done', endedAt: minutes(2) } });
+      const real = jest.requireActual('@/lib/meter-allowance').reserveRoom as typeof allowanceModule.reserveRoom;
+      jest.mocked(allowanceModule.reserveRoom).mockImplementationOnce(async (...args) => {
+        const room = await real(...args);
+        await pauseJob(sara.brickId, sara.id, next, minutes(3));
+        return room;
+      });
+      expect(await controlInternals.tryStart(next, minutes(3))).not.toBe('running');
+      expect(await jobOf(next)).toMatchObject({ status: 'queued', queuedFor: 'paused', reservationKey: null });
+      expect(await prisma.meterReservation.count({ where: { jobId: next, state: 'held' } })).toBe(0);
     });
   });
 
