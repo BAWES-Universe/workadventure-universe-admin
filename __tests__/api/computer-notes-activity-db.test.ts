@@ -12,6 +12,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn(), getClient: jest.fn(() => undefined), flush: jest.fn(async () => true) }));
 // Piece 1's controls are called by the door with the Brick's owner and the job: seen here as they are called
 jest.mock('@/lib/computer-job-controls', () => ({
+  ...jest.requireActual('@/lib/computer-job-controls'),
   pauseJob: jest.fn(async () => ({ ok: false, reason: 'taken_over' })),
   resumeJob: jest.fn(async () => ({ ok: false, reason: 'not_paused' })),
   moveJobFirst: jest.fn(async () => ({ ok: false, reason: 'not_queued' })),
