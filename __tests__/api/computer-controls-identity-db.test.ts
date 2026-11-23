@@ -488,6 +488,26 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       expect((await commandOf(c.id))?.outcome).toEqual({ ok: true });
     });
 
+    it('CodeRabbit on #1025 (52): a job that tries to start while "do this first" is deciding waits on the Brick’s line lock: it cannot become a holder the command did not see, and it starts only after the command committed', async () => {
+      const { sara, jobId } = await running('cr-52');
+      // Nobody holds the machine: the first job is back in line (as if it had been waiting), and a second is the target
+      const target = await another(sara, 'Taxi', minutes(1));
+      await prisma.computerJob.update({ where: { id: jobId }, data: { status: 'queued', queuedFor: 'turn', reservationKey: null, stretchStarted: null, startedAt: null } });
+      const seenDuring: string[] = [];
+      let late: Promise<unknown> = Promise.resolve();
+      // The moment the command has its locks (the holders it will pause were read under the line lock), the first job tries to start
+      beforeLockOf(target, async () => {
+        late = controlInternals.tryStart(jobId, minutes(2));
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        seenDuring.push((await jobOf(jobId)).status);
+      });
+      const answer = await moveJobFirst(sara.brickId, sara.id, target, { pauseRunning: true }, minutes(2), command());
+      expect(answer).toMatchObject({ ok: true });
+      // Held back by the line lock for the whole command
+      expect(seenDuring).toEqual(['queued']);
+      await late;
+    });
+
     it('a Stop’s command id used again on the owner’s OTHER Brick is `command_reused`, and stops nothing there', async () => {
       const { sara, jobId } = await running('f4-stop-two-bricks');
       const second = await createBrick({ ownerId: sara.id, name: 'Second Brick' });
