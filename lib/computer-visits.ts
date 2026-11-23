@@ -251,7 +251,7 @@ export function shapeVisits(input: { back: ReadBack; startedAt: Date; endedAt: D
 /** How far a record falls short, so the record of a job that ran in stretches (it was paused) says the worst of its stretches. */
 const SHORT_BY: Record<VisitsState, number> = { complete: 0, none: 0, partial: 1, unread: 2 };
 
-async function save(jobId: string, rows: VisitRow[], state: VisitsState, since: Date = new Date(0)): Promise<void> {
+async function save(jobId: string, rows: VisitRow[], state: VisitsState, since: Date = new Date(0), until: Date | null = null): Promise<void> {
   // A job that was paused was read once per stretch: what an earlier stretch kept (before this one began) stays, and the record says the worst of the stretches
   if ((await prisma.computerJobPause.count({ where: { jobId } })) > 0) {
     const kept = (await prisma.computerJob.findUnique({ where: { id: jobId }, select: { visitsState: true } }))?.visitsState as VisitsState | null | undefined;
@@ -263,9 +263,11 @@ async function save(jobId: string, rows: VisitRow[], state: VisitsState, since: 
     else if (kept === 'none' && state === 'complete') state = 'partial';
   } else {
     since = new Date(0);
+    until = null;
   }
   await prisma.$transaction([
-    prisma.computerJobVisit.deleteMany({ where: { jobId, kind: { in: ['visit', 'post'] }, at: { gte: since } } }),
+    // A job that was paused replaces only its own stretch's window, from its start to its end: a capture of an earlier stretch that finishes after a later stretch saved never deletes that stretch's rows (CodeRabbit on #1025, C5)
+    prisma.computerJobVisit.deleteMany({ where: { jobId, kind: { in: ['visit', 'post'] }, at: until ? { gte: since, lte: until } : { gte: since } } }),
     prisma.computerJobVisit.createMany({
       data: rows.map((row) => ({ jobId, kind: row.kind, at: row.at, by: row.by, method: row.method, host: row.host, path: row.path, count: row.count, failed: row.failed, form: row.form })),
     }),
@@ -302,7 +304,7 @@ export async function recordVisits(job: { id: string; startedAt: Date | null }, 
     // The program is not on the machine (it was made before this existed): there is no record, and that is said
     if (done.exitCode === 127 || /universe-visits: (command )?not found|No such file or directory/.test(done.stderr)) {
       // A resumed job keeps what its earlier stretches kept: only this stretch's rows are replaced (CodeRabbit N16 on #1025)
-      await save(job.id, [], 'none', job.startedAt);
+      await save(job.id, [], 'none', job.startedAt, endedAt);
       return 'none';
     }
     if (done.exitCode !== 0 && !/(^|\n)end=1\s*$/.test(done.stdout)) {
@@ -316,7 +318,7 @@ export async function recordVisits(job: { id: string; startedAt: Date | null }, 
     const shaped = shapeVisits({ back, startedAt: job.startedAt, endedAt, before, after, hands });
     // The read starts a little before the stretch (padding for a clock that differs by a moment), but the rows replaced are the STRETCH's: a visit of the stretch before, inside the padding, was left out of
     // `shaped` and must not be deleted with it (CodeRabbit N12 on #1025)
-    await save(job.id, shaped.rows, shaped.state, job.startedAt);
+    await save(job.id, shaped.rows, shaped.state, job.startedAt, endedAt);
     return shaped.state;
   } catch (error) {
     console.error('[Computer] Could not read where a job’s computer browsed:', error instanceof Error ? error.message : 'unknown');

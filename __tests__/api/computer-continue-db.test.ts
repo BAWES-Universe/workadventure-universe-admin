@@ -503,6 +503,15 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
         expect(runIt(delayed).status).toBe(0);
         expect(keyIn(`jobs/${old}.json`)).toBe(token);
         expect(keyIn(`jobs/${again.job.id}.json`)).toBe(token);
+        // That command did run: it wrote the file of its own id (so the unchanged alias above was held by the alias's stamp, not by the command doing nothing), and it left the shared file alone
+        expect(keyIn('jobs/delayed-job-id-0001.json')).toBe('cjt_revoked');
+        expect(keyIn('relay.json')).toBe(token);
+        // The same job replayed with an older claim (a delayed write of this very continuation) cannot overwrite the continuation's own file, its alias or the shared file
+        const replay = command.replaceAll(new RegExp(`\\b${mark}\\b`, 'g'), String(mark - 5_000)).replaceAll(token, 'cjt_replayed');
+        expect(runIt(replay).status).toBe(0);
+        expect(keyIn(`jobs/${again.job.id}.json`)).toBe(token);
+        expect(keyIn(`jobs/${old}.json`)).toBe(token);
+        expect(keyIn('relay.json')).toBe(token);
         // A later valid prepare refreshes both
         const later = command.replaceAll(new RegExp(`\\b${mark}\\b`, 'g'), String(mark + 5_000)).replaceAll(token, 'cjt_later');
         expect(runIt(later).status).toBe(0);
