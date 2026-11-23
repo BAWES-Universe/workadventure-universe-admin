@@ -231,6 +231,85 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     expect(await attemptOf(sara, KEY_A)).toMatchObject({ state: 'made', jobId: a.job.id });
   });
 
+  it('6 CodeRabbit on #1025: a start whose attempt INSERT is delayed past another start’s job still sorts before that job (its time is when it began): it is superseded and makes no second job', async () => {
+    const sara = await owner('r6');
+    const KEY_A = key();
+    const KEY_B = key();
+    const original = prisma.computerStartAttempt.create.bind(prisma.computerStartAttempt);
+    let delayed = false;
+    let b: Awaited<ReturnType<typeof viaLib>> | null = null;
+    const spy = jest.spyOn(prisma.computerStartAttempt, 'create').mockImplementation(((args: { data: { startKey: string } }) => {
+      if (args.data.startKey !== KEY_A || delayed) return original(args as never);
+      delayed = true;
+      // A began; before its insert runs, B starts, makes its job and is acknowledged
+      return (async () => {
+        b = await viaLib(sara, KEY_B, 'Please do the visa form');
+        await ackStart(sara.brickId, sara.id, KEY_B);
+        return original(args as never);
+      })();
+    }) as unknown as typeof prisma.computerStartAttempt.create);
+    let a;
+    try {
+      a = await viaLib(sara, KEY_A, 'Fill the visa form');
+    } finally {
+      spy.mockRestore();
+    }
+    if (!b || !(b as { ok: boolean }).ok) throw new Error(JSON.stringify(b));
+    const bJob = (b as { job: { id: string } }).job;
+    expect(a).toMatchObject({ ok: true, job: { id: bJob.id } });
+    expect((await jobsOf(sara)).map((job) => job.id)).toEqual([bJob.id]);
+    expect(await roomsOf(sara)).toHaveLength(1);
+    expect(await attemptOf(sara, KEY_A)).toMatchObject({ state: 'superseded', jobId: bJob.id });
+    // Its time is when it began, not when the insert ran: before B's job
+    expect((await attemptOf(sara, KEY_A)).createdAt.getTime()).toBeLessThanOrEqual((await prisma.computerJob.findUniqueOrThrow({ where: { id: bJob.id } })).createdAt.getTime());
+  });
+
+  it('11 CodeRabbit on #1025: a start with no ack makes its job and links its attempt in ONE commit: a link that fails leaves no job behind', async () => {
+    const sara = await owner('r11');
+    const KEY = key();
+    const original = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+    const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options?: unknown) => {
+      if (typeof fn !== 'function') return original(fn, options);
+      return original(async (tx: Record<string, unknown>) => {
+        const delegate = tx.computerStartAttempt as object;
+        const broken = new Proxy(delegate, {
+          get: (target, name) => (name === 'updateMany' ? async () => { throw new Error('the link could not be written'); } : Reflect.get(target, name)),
+        });
+        return (fn as (client: unknown) => unknown)(new Proxy(tx, { get: (target, name) => (name === 'computerStartAttempt' ? broken : Reflect.get(target, name)) }));
+      }, options);
+    }) as unknown as typeof prisma.$transaction);
+    try {
+      await expect(startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa', startKey: KEY }, NOW)).rejects.toThrow('the link could not be written');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await jobsOf(sara)).toHaveLength(0);
+    expect(await roomsOf(sara)).toHaveLength(0);
+    // The same key again makes its job normally and the attempt points at it
+    const again = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa', startKey: KEY }, NOW);
+    if (!again.ok) throw new Error(JSON.stringify(again));
+    expect(await attemptOf(sara, KEY)).toMatchObject({ state: 'made', jobId: again.job.id });
+  });
+
+  it('12 CodeRabbit on #1025: an alias is kept for as long as the attempt it follows (through any hops) has a job, past the week; one that leads to no job still goes', async () => {
+    const tom = await owner('r12');
+    const [KEY_A, KEY_B, KEY_C] = [key(), key(), key()];
+    const old = new Date(Date.now() - 9 * 24 * 60 * 60_000);
+    const a = await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_A, state: 'open', beatAt: old } });
+    const b = await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_B, state: 'answered', aliasAttemptId: a.id, beatAt: old } });
+    await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_C, state: 'answered', aliasAttemptId: b.id, beatAt: old } });
+    // The answering start then makes its job (as a late start does)
+    const sara = await owner('r12-job');
+    const made = await post(sara, key(), 'Visa');
+    await prisma.computerStartAttempt.update({ where: { id: a.id }, data: { state: 'made', jobId: made.job.id, beatAt: old } });
+    await forgetOldStartMarks(new Date());
+    expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(3);
+    // A chain that ends in no job is let go after the week
+    await prisma.computerStartAttempt.update({ where: { id: a.id }, data: { state: 'expired', jobId: null } });
+    await forgetOldStartMarks(new Date());
+    expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(0);
+  });
+
   it('1c the game’s expired-key retry (its record gone, hours later, after the sweep of old marks): the kept answer survives the sweep and the retry makes no second job', async () => {
     const sara = await owner('r1c');
     const KEY_A = key();

@@ -650,9 +650,10 @@ const attemptLifeMs = (): number => startMarkTiming.beatMs * 3;
  * left as it is (its answer is decided in the transaction that makes the job). Throws when it could not be kept. Answers whether THIS request made the attempt: only the request that made it lets it go when it fails (the same key said
  * twice shares one attempt, and the second request's own trouble must never end the first one's start).
  */
-async function openAttempt(botId: string, personId: string, startKey: string): Promise<boolean> {
+async function openAttempt(botId: string, personId: string, startKey: string, began: Date): Promise<boolean> {
   try {
-    await prisma.computerStartAttempt.create({ data: { botId, personId, startKey, state: 'open', beatAt: new Date() } });
+    // The attempt's time is when the START began, never when this insert ran: an insert that is delayed past another start's job must still sort before that job (CodeRabbit on #1025)
+    await prisma.computerStartAttempt.create({ data: { botId, personId, startKey, state: 'open', beatAt: new Date(), createdAt: began } });
     return true;
   } catch (error) {
     if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) throw error;
@@ -692,7 +693,17 @@ export async function forgetOldStartMarks(now: Date = new Date(), olderThanMs: n
   // A start's attempt is the record that its key was answered (a job, another start's job, or `expired`): a delayed copy of a start that finds no row would make a job of its own (CodeRabbit N15 on #1025, Opus's ruling).
   // So no attempt goes after an hour, whatever its state: the one rule is that one with NO job (let go, superseded, answered, or its job taken away: the foreign key leaves it with none) goes a week after its last
   // beat, and the answers that wait on it keep their state (the foreign key leaves them waiting on nothing, which answers `expired`). A start bound to a job stays as long as the job does
-  await prisma.computerStartAttempt.deleteMany({ where: { beatAt: { lt: new Date(now.getTime() - DEAD_ANSWER_MS) }, jobId: null } });
+  // An alias (a start answered with another start that had no job yet) is kept for as long as the attempt it follows, through any number of hops, leads to a job: it answers that job for the job's whole life, so a
+  // key resubmitted after a week never makes a second paid job (CodeRabbit on #1025). Only attempts that lead to no job are let go
+  await prisma.$executeRaw`
+    DELETE FROM "computer_start_attempts" WHERE "beat_at" < ${new Date(now.getTime() - DEAD_ANSWER_MS)} AND "job_id" IS NULL AND "id" NOT IN (
+      WITH RECURSIVE walk("id", "next", "depth") AS (
+        SELECT "id", "alias_attempt_id", 1 FROM "computer_start_attempts" WHERE "job_id" IS NULL AND "alias_attempt_id" IS NOT NULL
+        UNION ALL
+        SELECT walk."id", t."alias_attempt_id", walk."depth" + 1 FROM walk JOIN "computer_start_attempts" t ON t."id" = walk."next" WHERE t."job_id" IS NULL AND t."alias_attempt_id" IS NOT NULL AND walk."depth" < 8
+      )
+      SELECT walk."id" FROM walk JOIN "computer_start_attempts" t ON t."id" = walk."next" WHERE t."job_id" IS NOT NULL
+    )`;
   return (await prisma.computerStartMark.deleteMany({ where: { startedAt: { lt: new Date(now.getTime() - olderThanMs) } } })).count;
 }
 
@@ -708,7 +719,8 @@ type Begun = { done: Started } | { created: { id: string } };
 export async function startJob(input: StartInput, now: Date = new Date()): Promise<Started> {
   // A start with a key opens its attempt FIRST, in one statement, before anything else is written or read (finding 1, GPT round 6): there is no moment where only its mark is visible, so a reworded retry that
   // decides while this one is held sees it (and waits for it), and a job another start made after this one began supersedes it (decided in the transaction that makes the job). Kept beating with the mark
-  const opened = input.startKey ? await openAttempt(input.botId, input.personId, input.startKey) : false;
+  const began = new Date();
+  const opened = input.startKey ? await openAttempt(input.botId, input.personId, input.startKey, began) : false;
   // ...then its mark, from before its first read until its job is saved, or it ends without one, so the look for it (`startedJobFor`) can say it is still going on. A start with no key is never asked about
   const mark = input.startKey
     ? await markStart(startFenceOf(input.botId, input.personId, input.startKey)).catch(async (error) => {
@@ -870,8 +882,13 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
         const own = await prisma.computerStartAttempt.findUnique({ where: { botId_personId_startKey: { botId: input.botId, personId: input.personId, startKey: input.startKey } }, select: { state: true, jobId: true } });
         if (own && own.state === 'made' && !own.jobId) return { done: { ok: false, reason: 'expired' } };
       }
-      created = await prisma.computerJob.create({ data: { ...data, startAckedAt: now } });
-      if (input.startKey) await prisma.computerStartAttempt.updateMany({ where: { botId: input.botId, personId: input.personId, startKey: input.startKey, state: 'open' }, data: { state: 'made', jobId: created.id } }).catch(() => undefined);
+      // The job and the link from its attempt are ONE commit (as the acknowledgement path does): a link that could not be written leaves no job behind that the key's answers cannot find
+      const key = input.startKey;
+      created = await prisma.$transaction(async (tx) => {
+        const made = await tx.computerJob.create({ data: { ...data, startAckedAt: now } });
+        if (key) await tx.computerStartAttempt.updateMany({ where: { botId: input.botId, personId: input.personId, startKey: key, state: { in: ['open', 'expired'] }, jobId: null }, data: { state: 'made', jobId: made.id } });
+        return made;
+      });
     }
   } catch (error) {
     // Two asks for the same run, or with the same key, or carrying on the same ended job, at once: the first made the job, the second finds it
