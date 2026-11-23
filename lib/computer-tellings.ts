@@ -8,11 +8,13 @@ import { prisma } from '@/lib/db';
  *  - `paused`: "I paused “<title>”: this month's computer time is used up…" (why `allowance`) or "…it reached the spending limit you set…" (why `rule`). Once per pause.
  *  - `carried_on`: "I'm carrying on with “<title>”." Once, when it carries on by itself.
  *  - `can_carry_on`: "“<title>” can carry on now. Want me to?" Once per pause, when more time arrived but something about the job changed while it waited, so it does not carry on by itself.
+ *  - `back_in_line` (GPT round 6, finding 5): "“<title>” is back in line. It carries on by itself when its turn comes." Once per pause, when more arrived and the pause is over but the job is queued behind another
+ *    job or every computer is busy. `carried_on` then comes only in the write that sets the job running (never while it waits in line).
  * The person's own Pause, Resume, Cancel and Stop are never told back to them (they just did it). Orbit never speaks in a chat: the bot server reads these with the reports
  * (it must say it understands the kinds) and says each one; no number and no price is ever in them.
  */
 
-export const TELLING_KINDS = ['paused', 'carried_on', 'can_carry_on'] as const;
+export const TELLING_KINDS = ['paused', 'carried_on', 'can_carry_on', 'back_in_line'] as const;
 export type TellingKind = (typeof TELLING_KINDS)[number];
 
 /** Writes one thing to tell, in the caller's transaction (which holds the job's row lock: the sequence is read and written under it). */
@@ -65,7 +67,9 @@ export async function tellingsToTell(limit: number, now: Date): Promise<Telling[
     const job = one.job;
     const ended = job.status === 'done' || job.status === 'stopped' || job.status === 'failed';
     const limitPaused = job.status === 'queued' && job.queuedFor === 'paused' && (job.pausedWhy === 'allowance' || job.pausedWhy === 'rule');
-    const stillTrue = !ended && newer === 0 && (one.kind === 'carried_on' ? !limitPaused : limitPaused && !!job.pausedAt && job.pausedAt.getTime() <= one.createdAt.getTime());
+    // `back_in_line` is true while the job waits in line (not paused); `carried_on` while it is not paused again; the others while the month or a limit still holds it
+    const inLine = job.status === 'queued' && job.queuedFor !== 'paused';
+    const stillTrue = !ended && newer === 0 && (one.kind === 'carried_on' ? !limitPaused : one.kind === 'back_in_line' ? inLine : limitPaused && !!job.pausedAt && job.pausedAt.getTime() <= one.createdAt.getTime());
     if (!stillTrue) {
       await prisma.computerJobTelling.updateMany({ where: { id: one.id, toldAt: null, undeliverableAt: null, staleAt: null }, data: { staleAt: now } });
       continue;

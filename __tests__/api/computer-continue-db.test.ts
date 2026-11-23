@@ -281,9 +281,9 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
     });
 
     it.each([
-      ['a Brick deleted', 'deleted', async (jobId: string) => void (await endedAs(jobId, 'deleted'))],
-      ['a job that finished', null, async (jobId: string) => void (await finishJob(jobId, 'done', minutes(5)))],
-      ['a computer turned off', 'off', async (jobId: string) => void (await endedAs(jobId, 'off'))],
+      ['a Brick deleted', 'deleted', async (jobId: string): Promise<void> => void (await endedAs(jobId, 'deleted'))],
+      ['a job that finished', null, async (jobId: string): Promise<void> => void (await finishJob(jobId, 'done', minutes(5)))],
+      ['a computer turned off', 'off', async (jobId: string): Promise<void> => void (await endedAs(jobId, 'off'))],
     ])('after %s, "try again" makes nothing (`cannot_continue`, not_continuable, with how it ended)', async (_what, endedBy, end) => {
       const { sara, jobId: old } = await ranOnce(`c-fresh-${++made}`);
       await end(old);

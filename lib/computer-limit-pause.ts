@@ -34,13 +34,13 @@ export type LimitPaused = 'paused' | 'not';
  * (none: a worker that knows no epoch, good only for a job nobody claimed). `not`: nothing changed (another owner, a key that ended, a kept intent or cutoff, a job already paused or over): only the call is
  * refused. It never ends the job (the month and a limit only ever pause). Never throws.
  */
-export async function pauseForLimit(jobId: string, why: 'allowance' | 'rule', now: Date = new Date(), from?: { epoch: number; tokenId: string }): Promise<LimitPaused> {
+export async function pauseForLimit(jobId: string, why: 'allowance' | 'rule', now: Date = new Date(), from?: { epoch: number; tokenId: string }, blocked?: { kind: 'call' | 'renewal'; micros: number }): Promise<LimitPaused> {
   try {
     const first = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { botId: true } });
     if (!first) return 'not';
     // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
     const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId: first.botId } }));
-    const decided = await prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, now, provider, { ownerEpoch: from ? from.epoch : 0, key: from?.tokenId, heldOnly: true, heldScreen: true }), { timeout: 15_000, maxWait: 15_000 });
+    const decided = await prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, now, provider, { ownerEpoch: from ? from.epoch : 0, key: from?.tokenId, heldOnly: true, heldScreen: true, ...(blocked ? { blocked } : {}) }), { timeout: 15_000, maxWait: 15_000 });
     if (decided.kind !== 'held') return 'not';
     await afterPause(jobId, decided, now);
     return 'paused';
@@ -90,8 +90,12 @@ async function carryOnOne(job: { id: string; botId: string; personId: string }, 
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
   if (!row || !row.enabled || !provider) return 'waits';
-  // More arrived? Read the way the start reads it, taking nothing. Only the person's own money keeps it paused: a line that is busy or a pool that is full is the line's to wait for
-  const no = await roomWouldFit({ personId: job.personId, amountMicros: roomFor(renewMinutes, provider.microsPerMinute()), botId: job.botId, jobId: job.id }, now);
+  // More arrived? Read the way the start reads it, taking nothing. Only the person's own money keeps it paused: a line that is busy or a pool that is full is the line's to wait for.
+  // Finding 5 (GPT round 6): enough to START is not enough. The pause remembers what was refused: a model call's estimate (it will be asked again first thing) must fit on top of the room to run, or the job
+  // would start, meet the same refusal, book another stretch of time and pause again, sweep after sweep. With nothing more arrived, nothing is written at all
+  const room = roomFor(renewMinutes, provider.microsPerMinute());
+  const amountMicros = room + (await blockedCallMicros(job.id));
+  const no = await roomWouldFit({ personId: job.personId, amountMicros, botId: job.botId, jobId: job.id }, now);
   if (no && (no.reason === 'allowance' || no.reason === 'rule' || no.reason === 'not_set')) return 'waits';
   const decided = await prisma.$transaction(
     async (tx) => {
@@ -110,19 +114,59 @@ async function carryOnOne(job: { id: string; botId: string; personId: string }, 
       }
       // The flip is conditional: only a job still paused by its month or a limit (never one the person paused) goes back in line, first of its Brick's, as a resume would put it
       const top = await tx.computerJob.aggregate({ where: { botId: job.botId, status: 'queued' }, _max: { queueRank: true } });
+      // Finding 5: the flip writes NO telling. `carried_on` is written by the start in the very write that sets the job running (`carry_on_pending`, once); a job still in line after the try is told `back_in_line`
       const flipped = await tx.computerJob.updateMany({
         where: { id: job.id, status: 'queued', queuedFor: 'paused', pausedWhy: { in: ['allowance', 'rule'] } },
-        data: { queuedFor: 'turn', pausedAt: null, pausedWhy: null, queueRank: (top._max.queueRank ?? 0) + 1, lastTriedAt: null, leaseVersion: { increment: 1 } },
+        data: { queuedFor: 'turn', pausedAt: null, pausedWhy: null, queueRank: (top._max.queueRank ?? 0) + 1, lastTriedAt: null, leaseVersion: { increment: 1 }, carryOnPending: true },
       });
       if (flipped.count !== 1) return 'waits' as const;
-      await tellIn(tx, job.id, 'carried_on', null, now);
       return 'carried' as const;
     },
     { timeout: 15_000, maxWait: 15_000 },
   );
   // Through the normal start: a NEW reservation (its key is new with the moment), a new claim by the runner, its own browser back
-  if (decided === 'carried') await controlInternals.tryStart(job.id, now);
+  if (decided === 'carried') {
+    await controlInternals.tryStart(job.id, now);
+    await afterCarryOn(job.id, now);
+  }
   return decided;
+}
+
+/** The refused model call's estimate the job's last pause remembers (finding 5), or 0: a renewal's own room, a pause of before this, or the person's own pause. */
+async function blockedCallMicros(jobId: string): Promise<number> {
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { pauses: true } });
+  if (!job || job.pauses === 0) return 0;
+  const last = await prisma.computerJobPause.findUnique({ where: { jobId_n: { jobId, n: job.pauses } }, select: { blockedKind: true, blockedMicros: true } });
+  return last?.blockedKind === 'call' && last.blockedMicros !== null ? Number(last.blockedMicros) : 0;
+}
+
+/**
+ * After the start a carry-on made (finding 5): a job that is running was told `carried_on` by that start's own write. A job still in line (another job holds the computer, every computer is busy) is told
+ * `back_in_line`, once per pause (by the pause's number: none since that pause was made). One the start put back as paused (its month or limit refused it again) is not carried on: nothing is told and its
+ * pending mark is cleared. Never throws.
+ */
+async function afterCarryOn(jobId: string, now: Date): Promise<void> {
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        const row = await lockJob(tx, jobId);
+        if (!row) return;
+        const job = await tx.computerJob.findUniqueOrThrow({ where: { id: jobId }, select: { status: true, queuedFor: true, carryOnPending: true, pauses: true } });
+        if (!job.carryOnPending) return;
+        if (job.status !== 'queued' || job.queuedFor === 'paused') {
+          // Over, or paused again: nothing is carried on. (A running job cleared it in its own start)
+          if (job.status !== 'running' && job.status !== 'waiting') await tx.computerJob.update({ where: { id: jobId }, data: { carryOnPending: false } });
+          return;
+        }
+        const pause = job.pauses > 0 ? await tx.computerJobPause.findUnique({ where: { jobId_n: { jobId, n: job.pauses } }, select: { at: true } }) : null;
+        const told = await tx.computerJobTelling.count({ where: { jobId, kind: 'back_in_line', createdAt: { gte: pause?.at ?? new Date(0) } } });
+        if (told === 0) await tellIn(tx, jobId, 'back_in_line', null, now);
+      },
+      { timeout: 15_000, maxWait: 15_000 },
+    );
+  } catch (error) {
+    console.error('[Computer] Could not tell a carried-on job is back in line:', error instanceof Error ? error.message : 'unknown');
+  }
 }
 
 /** What changed about a paused job while it waited (read inside the caller's transaction): a step tried with an outcome not known, the Brick's Apps, or its computer being off. */

@@ -43,3 +43,7 @@ ALTER TABLE "computer_job_pauses" ADD COLUMN "blocked_rule_rev" VARCHAR(64);
 
 -- Finding 5. A job the month or a limit paused that was put back in line by itself and has not run yet: `carried_on` is told only in the write that sets it running, once (cleared there).
 ALTER TABLE "computer_jobs" ADD COLUMN "carry_on_pending" BOOLEAN NOT NULL DEFAULT false;
+
+-- Finding 5. The new thing Brick may say about such a job: `back_in_line` (more arrived and the pause is over, but the job waits in line). Said only to a reader that opts in to the kind.
+ALTER TABLE "computer_job_tellings" DROP CONSTRAINT "computer_job_tellings_check";
+ALTER TABLE "computer_job_tellings" ADD CONSTRAINT "computer_job_tellings_check" CHECK ("kind" IN ('paused', 'carried_on', 'can_carry_on', 'back_in_line') AND ("why" IS NULL OR "why" IN ('allowance', 'rule')) AND "seq" >= 1);

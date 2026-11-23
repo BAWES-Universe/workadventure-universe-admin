@@ -1075,11 +1075,26 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
   };
 
   // Take the writer's place. The database lets only one writing job hold it; a second one arriving at the same moment queues.
+  let carriedOnSeq: number | null = null;
   try {
     const claimed = await prisma.computerJob.updateMany({
       where: { id: job.id, status: 'queued', ...NOT_PAUSED },
       data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: now },
     });
+    // A job its month or a limit paused that was put back in line by itself is told `carried_on` right as it takes the machine, once (finding 5, GPT round 6): never while it still waits in line. The mark is
+    // cleared and the telling written in one conditional write on the job that is now running (UPDATE ... RETURNING), so it is said once however many tries race
+    if (claimed.count === 1 && job.carryOnPending) {
+      // Never throws: the job has its place and its room whatever becomes of the message
+      carriedOnSeq = await prisma
+        .$transaction(async (tx) => {
+          const pending = await tx.$queryRaw<Array<{ id: string }>>`UPDATE "computer_jobs" SET "carry_on_pending" = false WHERE "id" = ${job.id} AND "carry_on_pending" = true AND "status" IN ('running', 'waiting') RETURNING "id"`;
+          return pending.length === 1 ? tellIn(tx, job.id, 'carried_on', null, now) : null;
+        })
+        .catch((error) => {
+          console.error('[Computer] Could not tell a job carried on:', error instanceof Error ? error.message : 'unknown');
+          return null;
+        });
+    }
     if (claimed.count === 0) {
       // Two tries in the same millisecond share one room: it is given back only when the job that won did not take it
       const holder = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { reservationKey: true } });
@@ -1115,8 +1130,10 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
   // running job before it removes anything) goes on; the job is brought a computer from cold storage when its turn comes
   const taken = await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { machine: true } });
   if (taken?.machine === 'packing') {
-    const back = await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running' }, data: { status: 'queued', queuedFor: 'busy', reservationKey: null, startedAt: null, stretchStarted: null } });
+    const back = await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running' }, data: { status: 'queued', queuedFor: 'busy', reservationKey: null, startedAt: null, stretchStarted: null, ...(carriedOnSeq !== null ? { carryOnPending: true } : {}) } });
     if (back.count === 1) {
+      // It did not carry on after all: the `carried_on` this try wrote is not said (it is told again when it really runs)
+      if (carriedOnSeq !== null) await prisma.computerJobTelling.updateMany({ where: { jobId: job.id, seq: carriedOnSeq, toldAt: null }, data: { staleAt: now } });
       await releaseRoom({ key }, now);
       await dropDiskRoom();
       return 'queued';
@@ -1418,7 +1435,7 @@ export async function renewJob(
       // above). Its time so far is charged and the unused room released in this commit; it carries on by itself when more arrives. While the person holds the screen it pauses too: the screen is taken back in
       // the same write and it never carries on by itself (Fable's ruling of 23 Nov, section 7)
       if (room.reason === 'allowance' || room.reason === 'rule') {
-        const paused = await controls.decidePauseIn(tx, jobId, room.reason, now, provider, { ownerEpoch: job.ownerEpoch, heldOnly: true, heldScreen: true });
+        const paused = await controls.decidePauseIn(tx, jobId, room.reason, now, provider, { ownerEpoch: job.ownerEpoch, heldOnly: true, heldScreen: true, blocked: { kind: 'renewal', micros: moreMicros } });
         if (paused.kind === 'held') return { kind: 'paused' as const, paused, why: room.reason };
       }
       return { kind: 'refused' as const, room, epoch: job.ownerEpoch };
