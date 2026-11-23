@@ -3635,7 +3635,7 @@ model ComputerJob {
   /// Of `secondsRun`, the seconds already written to the books by the job's pauses (one event per pause, computer_job_pauses). The job's own ending writes only the rest, so no second is written twice.
   secondsBilled  Int       @default(0) @map("seconds_billed")
   /// "Try again" of an ended job: the job this one carries on from (its conversation). Null for every other job.
-  continuesJobId String?   @map("continues_job_id")
+  continuesJobId String?   @unique @map("continues_job_id")
   /// The last sequence number given to a note the person sent to this job (computer_job_notes): notes are numbered 1, 2, 3 per job.
   noteSeq        Int       @default(0) @map("note_seq")
 
@@ -3650,6 +3650,9 @@ model ComputerJob {
   steps   ComputerJobStep[]
   pauseRows ComputerJobPause[]
   tellings  ComputerJobTelling[]
+  /// "Try again" (piece 8): the ended job this one carries on from, and the one job that carries this one on (one at most: the unique index).
+  continues    ComputerJob? @relation("JobContinues", fields: [continuesJobId], references: [id], onDelete: SetNull)
+  continuedBy  ComputerJob? @relation("JobContinues")
 
   @@unique([botId, runId])
   @@unique([botId, personId, startKey])

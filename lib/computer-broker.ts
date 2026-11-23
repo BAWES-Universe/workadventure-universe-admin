@@ -10,6 +10,7 @@ import { withoutTags } from '@/lib/computer-turn-tags';
 import { Agent37Error, TurnNotSent } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
 import { gitLoginCommand, jobGitAccess, NO_GIT_COMMAND, relayBase } from '@/lib/github/git-login';
+import { carriedOnFrom } from '@/lib/computer-continue';
 
 /**
  * The broker (build handoff v2, section 5): how the bot server's runner reaches a computer without ever holding Agent37's key.
@@ -20,7 +21,7 @@ import { gitLoginCommand, jobGitAccess, NO_GIT_COMMAND, relayBase } from '@/lib/
  * no turn, and a person who has taken over is never talked over.
  */
 
-type Live = { jobId: string; botId: string; generation: number; ownerEpoch: number; ref: string; sessionId: string | null; responseId: string | null; firstTurnSentAt: Date | null };
+type Live = { jobId: string; botId: string; generation: number; ownerEpoch: number; ref: string; sessionId: string | null; responseId: string | null; firstTurnSentAt: Date | null; /** "Try again" (piece 8): the ended job whose conversation this one carries on, or null. */ continuesJobId: string | null };
 
 export type NotLive = { ok: false; reason: 'not_found' | 'not_running' | 'person_has_it' | 'no_machine' | 'finish_pending' | 'superseded' };
 
@@ -38,7 +39,7 @@ async function liveJob(jobId: string, owner?: { epoch: EpochSaid }): Promise<{ o
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
   if (!row?.providerRef || !provider || row.machine !== 'working') return { ok: false, reason: 'no_machine' };
-  return { ok: true, job: { jobId: job.id, botId: job.botId, generation: job.controlGeneration, ownerEpoch: job.ownerEpoch, ref: row.providerRef, sessionId: job.agentSessionId, responseId: job.agentResponseId, firstTurnSentAt: job.firstTurnSentAt }, provider };
+  return { ok: true, job: { jobId: job.id, botId: job.botId, generation: job.controlGeneration, ownerEpoch: job.ownerEpoch, ref: row.providerRef, sessionId: job.agentSessionId, responseId: job.agentResponseId, firstTurnSentAt: job.firstTurnSentAt, continuesJobId: job.continuesJobId }, provider };
 }
 
 /** Where the model relay is: an https address with no login, query or fragment, ending where /v1 begins. */
@@ -187,6 +188,10 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
     return { ok: false, reason: 'relay_unreachable' };
   }
   const file = JSON.stringify({ url: address, token: minted.token });
+  // A job that carries on an ended one ("try again", piece 8) talks in that job's conversation, which holds the OLD jobs' tags too, and the model address reads the first tag it finds: this job's key is
+  // also written under the id of every job it carries on from, so every call of the conversation goes with THIS job's key (theirs ended with them). Ids are Orbit's own (uuid characters only)
+  const aliases = live.job.continuesJobId ? (await carriedOnFrom(jobId)).filter((id) => /^[A-Za-z0-9-]{8,64}$/.test(id)) : [];
+  const aliasPart = aliases.map((id) => `printf '%s' '${file}' > "$d/jobs/${id}.json.new" && mv "$d/jobs/${id}.json.new" "$d/jobs/${id}.json" && `).join('');
   const gitPart = await gitLoginFor(jobId, live.job.generation, now, epoch);
   // Written whole to a new file and moved over the old one, so a call never reads half of it. Only the machine's own user can read it.
   // Under a lock, and only over a key of an older or the same control number: a write that was delayed past a take-over and a hand-back
@@ -207,6 +212,7 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
     // The job's own key goes where the model address looks for the job a call belongs to (its turns carry the job's tag). Another job's key beside it is never
     // touched, so jobs that run at once each call on their own. Files a week old are removed.
     `mkdir -p "$d/jobs" && printf '%s' '${file}' > "$d/jobs/${jobId}.json.new" && mv "$d/jobs/${jobId}.json.new" "$d/jobs/${jobId}.json" && printf '%s %s' ${generation} ${mark} > "$d/jobs/${jobId}.gen" && ` +
+    aliasPart +
     `{ find "$d/jobs" -type f -mtime +7 -delete 2>/dev/null || :; } && ` +
     `{ ${gitPart.command}; } ) 9>"$d/relay.lock"`;
   try {
@@ -425,6 +431,12 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       const notSent = error instanceof TurnNotSent || (error instanceof Agent37Error && (error.status < 500 || error.code === 'try_again'));
       if (notSent) await prisma.computerJob.updateMany({ where: { id: job.jobId, ownerEpoch: job.ownerEpoch }, data: { firstTurnSentAt: null } }).catch(() => undefined);
       else await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
+    }
+    // A job that carries on an ended one's conversation ("try again", piece 8) on a computer that no longer has it (a new machine, an older copy brought back): the agent says it does
+    // not know the conversation. Nothing was sent, so the job starts a conversation of its own at its next turn (its first words already say all of the job); only that job's own copy
+    // of the conversation id is let go, and only while this owner still holds the job
+    if (sessionId && ready.job.continuesJobId && error instanceof Agent37Error && error.status === 404 && error.code !== 'session_busy') {
+      await prisma.computerJob.updateMany({ where: { id: job.jobId, ownerEpoch: job.ownerEpoch, agentSessionId: sessionId, agentResponseId: null }, data: { agentSessionId: null } }).catch(() => undefined);
     }
     await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
     if (error instanceof Agent37Error && error.code === 'session_busy') return { ok: false, reason: 'busy', responseId: error.runningResponseId };
