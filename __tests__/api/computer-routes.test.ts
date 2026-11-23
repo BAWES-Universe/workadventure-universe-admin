@@ -329,8 +329,61 @@ describe('the bot server’s calls', () => {
   });
 
   describe('a start the game confirms it has the answer of (GPT round 4, second note, R1)', () => {
-    const KEY = '3f2b8c1e-5d4a-4e7b-9a60-1c2d3e4f5a6b';
+    // Round 8, A2: a start that acks carries its issue time in its key
+    const KEY = `t${Date.now().toString(36)}-3f2b8c1e5d4a4e7b9a601c2d3e4f5a6b`;
     const own = () => resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+    beforeEach(() => {
+      lib.registerStart.mockResolvedValue({ registration: { opened: true, reopened: false, release: jest.fn(async () => undefined) } } as never);
+    });
+
+    it('round 8, A2: a start that acks with a key that carries no issue time, or one more than 5 minutes in the future, is 400 and nothing is asked or made', async () => {
+      own();
+      lib.startJob.mockClear();
+      lib.registerStart.mockClear();
+      for (const key of ['3f2b8c1e-5d4a-4e7b-9a60-1c2d3e4f5a6b', `t${(Date.now() + 10 * 60_000).toString(36)}-abcdef012345`]) {
+        const response = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': key, 'X-Computer-Start-Acks': '1' } }), params);
+        expect(response.status).toBe(400);
+      }
+      expect(lib.registerStart).not.toHaveBeenCalled();
+      expect(lib.startJob).not.toHaveBeenCalled();
+      // Without acks an untimed key is the legacy start, as before
+      lib.startJob.mockResolvedValue({ ok: true, job: { id: JOB } as never, restoredFrom: null });
+      const legacy = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': '3f2b8c1e-5d4a-4e7b-9a60-1c2d3e4f5a6b' } }), params);
+      expect(legacy.status).toBe(200);
+      expect(lib.registerStart).not.toHaveBeenCalled();
+    });
+
+    it('round 8, A1: the start is registered with the request’s own moment BEFORE the earlier-start look and the spending rule; a key decided for good is answered from there, and nothing else is asked', async () => {
+      own();
+      const order: string[] = [];
+      lib.registerStart.mockImplementationOnce(async () => {
+        order.push('register');
+        return { registration: { opened: true, reopened: false, release: jest.fn(async () => undefined) } } as never;
+      });
+      lib.earlierUnconfirmedStart.mockImplementationOnce(async () => {
+        order.push('earlier');
+        return null;
+      });
+      rules.ownerSpendAllowed.mockImplementationOnce(async () => {
+        order.push('spend');
+        return { ok: true } as never;
+      });
+      lib.startJob.mockResolvedValue({ ok: true, job: { id: JOB } as never, restoredFrom: null });
+      const before = Date.now();
+      await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': KEY, 'X-Computer-Start-Acks': '1' } }), params);
+      expect(order).toEqual(['register', 'earlier', 'spend']);
+      const began = (lib.registerStart.mock.calls.at(-1) as unknown[])[3] as Date;
+      expect(began.getTime()).toBeGreaterThanOrEqual(before);
+      expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ began, registration: expect.objectContaining({ opened: true }) }));
+      // A terminal answer of the key: given as it is, nothing else asked
+      lib.registerStart.mockResolvedValueOnce({ answer: { ok: false, reason: 'stale_consent' } } as never);
+      lib.startJob.mockClear();
+      rules.ownerSpendAllowed.mockClear();
+      const stale = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': KEY, 'X-Computer-Start-Acks': '1' } }), params);
+      expect(await stale.json()).toEqual({ ok: false, reason: 'stale_consent' });
+      expect(rules.ownerSpendAllowed).not.toHaveBeenCalled();
+      expect(lib.startJob).not.toHaveBeenCalled();
+    });
 
     it('meets an earlier unconfirmed start BEFORE the spend rule: a chat-stated rule the earlier job used up is never a false `rule` (CodeRabbit)', async () => {
       own();

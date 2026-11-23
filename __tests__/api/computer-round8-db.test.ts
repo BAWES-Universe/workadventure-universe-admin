@@ -40,7 +40,7 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { ackStart, claimJob, finishJob, finishJobUnder, forgetOldStartMarks, giveComputer, startJob, DEAD_ANSWER_MS } from '@/lib/computer';
+import { ackStart, claimJob, finishJob, finishJobUnder, forgetOldStartMarks, giveComputer, issuedOfKey, registerStart, startJob, DEAD_ANSWER_MS } from '@/lib/computer';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { mintJobToken } from '@/lib/computer-token';
 import { carryOnPaused, resetCarryOnScanForTests } from '@/lib/computer-limit-pause';
@@ -78,7 +78,8 @@ const wipe = async () => {
   await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
 };
 
-const key = () => `k_${randomUUID().replace(/-/g, '')}`;
+// Round 8, A2: a start that acks carries its issue time (the moment of the message) in its key
+const key = () => `t${Date.now().toString(36)}-${randomUUID().replace(/-/g, '')}`;
 const jobsOf = (sara: Owner) => prisma.computerJob.findMany({ where: { personId: sara.id }, orderBy: { createdAt: 'asc' }, select: { id: true, startKey: true, status: true } });
 /** The rooms ever taken, by the job they were for (a released room keeps its row). */
 const roomJobsOf = async (sara: Owner) => [...new Set((await prisma.meterReservation.findMany({ where: { personId: sara.id }, select: { jobId: true } })).map((room) => room.jobId))];
@@ -173,6 +174,50 @@ run('GPT seventh note (round 8): Orbit side of A, C and D2, in a real database',
       expect(again.ok ? again.job.id : again.job?.id).toBe(jobs[0].id);
     });
 
+    it('variant: A’s registration itself is delayed past B’s job (A began first): A is answered with B’s job and makes none', async () => {
+      const sara = await owner('a1-late-insert');
+      const KEY_A = key();
+      const KEY_B = key();
+      const beganA = new Date();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const b = await post(sara, KEY_B, 'Please do the visa form');
+      expect(b).toMatchObject({ ok: true });
+      expect(await ackStart(sara.brickId, sara.id, KEY_B)).toBe(true);
+      // A's request began before B's, and only now writes its attempt
+      const issued = issuedOfKey(KEY_A);
+      if (!issued) throw new Error('untimed');
+      const registered = await registerStart(sara.brickId, sara.id, KEY_A, beganA, issued);
+      if (!('registration' in registered)) throw new Error(JSON.stringify(registered));
+      try {
+        const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Fill the visa form', startKey: KEY_A, acks: true, began: beganA, registration: registered.registration, origin: { kind: 'dm', ref: `!chat-${tag}:example.test` } });
+        expect(a).toMatchObject({ ok: true, job: { id: b.job.id } });
+      } finally {
+        await registered.registration.release();
+      }
+      expect((await jobsOf(sara)).map((job) => job.id)).toEqual([b.job.id]);
+      expect(await roomJobsOf(sara)).toEqual([b.job.id]);
+    });
+
+    it('variant: A held inside the spending check ends `rule`; B, which waited on A, is answered `rule` too on its retry (never `expired`), and nothing is made', async () => {
+      const sara = await owner('a1-rule');
+      await prisma.spendRule.create({ data: { ruleKey: `r-${randomUUID()}`, ownerPersonId: sara.id, scope: 'bot', botId: sara.brickId, period: 'day', capMicros: BigInt(1), words: 'Never more than this a day', createdById: sara.id } });
+      const KEY_A = key();
+      const KEY_B = key();
+      const hold = holdAfterSpendCheck(KEY_A);
+      const pendingA = post(sara, KEY_A, 'Fill the visa form');
+      await hold.reached;
+      const b = await post(sara, KEY_B, 'Please do the visa form');
+      expect(b).toMatchObject({ ok: false, reason: 'earlier', job: { id: null, state: 'starting', attempt: KEY_A } });
+      hold.letGo();
+      const a = await pendingA;
+      expect(a).toMatchObject({ ok: false, reason: 'rule' });
+      // Both keys, asked again: that same refusal, kept
+      expect(await post(sara, KEY_A, 'Fill the visa form')).toEqual(a);
+      expect(await post(sara, KEY_B, 'Please do the visa form')).toEqual(a);
+      expect(await jobsOf(sara)).toHaveLength(0);
+      expect(await roomJobsOf(sara)).toEqual([]);
+    });
+
     it('CONTROL: a deliberate new request with the same words under a NEW key, once the first is acknowledged, still makes its own job', async () => {
       const sara = await owner('a1-new');
       const KEY_A = key();
@@ -200,22 +245,53 @@ run('GPT seventh note (round 8): Orbit side of A, C and D2, in a real database',
       expect(again.ok).toBe(false);
       // `expired` makes the game start afresh under a derived key; a retired key's answer must not
       expect(again.reason).not.toBe('expired');
+      expect(again).toEqual({ ok: false, reason: 'retired' });
       expect(await jobsOf(sara)).toHaveLength(0);
       expect(await roomJobsOf(sara)).toEqual([a.job.id]);
     });
 
-    it('REPRO: after the clean-up pruned the record (past the retention), the IDENTICAL key makes nothing (an old message needs fresh consent)', async () => {
+    it('REPRO: after the clean-up pruned the record (past the retention), the IDENTICAL key makes nothing: it is `stale_consent` (an old message needs fresh consent)', async () => {
       const sara = await owner('a2-pruned');
       const KEY_A = key();
       const a = await post(sara, KEY_A, 'Fill the visa form');
       await ackStart(sara.brickId, sara.id, KEY_A);
       await finishJob(a.job.id, 'done', new Date());
       await prisma.computerJob.delete({ where: { id: a.job.id } });
-      // Eight days on, the clean-up runs
-      await prisma.computerStartAttempt.updateMany({ where: { personId: sara.id }, data: { beatAt: new Date(Date.now() - DEAD_ANSWER_MS - 86_400_000), createdAt: new Date(Date.now() - DEAD_ANSWER_MS - 86_400_000) } });
-      await forgetOldStartMarks(new Date());
-      const again = await post(sara, KEY_A, 'Fill the visa form');
-      expect(again.ok).toBe(false);
+      // Eight days on, the clean-up runs and the key's record is gone
+      const later = new Date(Date.now() + DEAD_ANSWER_MS + 86_400_000);
+      await forgetOldStartMarks(later);
+      expect(await prisma.computerStartAttempt.count({ where: { personId: sara.id } })).toBe(0);
+      // The identical key, eight days after it was issued (the route's own clock is the request's: the library is asked at that moment)
+      const issued = issuedOfKey(KEY_A);
+      if (!issued) throw new Error('the key carries no issue time');
+      expect(await registerStart(sara.brickId, sara.id, KEY_A, later, issued, later)).toEqual({ answer: { ok: false, reason: 'stale_consent' } });
+      expect(await jobsOf(sara)).toHaveLength(0);
+      expect(await prisma.computerStartAttempt.count({ where: { personId: sara.id } })).toBe(0);
+    });
+
+    it('through the route: a key issued 7 hours ago that Orbit never saw is `stale_consent`, and nothing is made or reserved; one issued 5 hours ago starts', async () => {
+      const sara = await owner('a2-stale');
+      const old = `t${(Date.now() - 7 * 3_600_000).toString(36)}-${randomUUID().replace(/-/g, '')}`;
+      expect(await post(sara, old, 'Fill the visa form')).toEqual({ ok: false, reason: 'stale_consent' });
+      expect(await post(sara, old, 'Fill the visa form')).toEqual({ ok: false, reason: 'stale_consent' });
+      expect(await jobsOf(sara)).toHaveLength(0);
+      expect(await roomJobsOf(sara)).toEqual([]);
+      const recent = `t${(Date.now() - 5 * 3_600_000).toString(36)}-${randomUUID().replace(/-/g, '')}`;
+      expect(await post(sara, recent, 'Fill the visa form')).toMatchObject({ ok: true });
+    });
+
+    it('a key that carries no issue time, or one from the future, is refused (400) on a start that acks', async () => {
+      const sara = await owner('a2-untimed');
+      const untimed = await POST(
+        new NextRequest(`http://orbit.test/api/bots/${sara.brickId}/computer-jobs`, { method: 'POST', body: JSON.stringify({ userId: sara.uuid, title: 'x' }), headers: { 'content-type': 'application/json', 'x-computer-start-attempt': `k_${randomUUID().replace(/-/g, '')}`, 'x-computer-start-acks': '1' } }),
+        { params: Promise.resolve({ id: sara.brickId }) },
+      );
+      expect(untimed.status).toBe(400);
+      const future = await POST(
+        new NextRequest(`http://orbit.test/api/bots/${sara.brickId}/computer-jobs`, { method: 'POST', body: JSON.stringify({ userId: sara.uuid, title: 'x' }), headers: { 'content-type': 'application/json', 'x-computer-start-attempt': `t${(Date.now() + 10 * 60_000).toString(36)}-abcdef0123`, 'x-computer-start-acks': '1' } }),
+        { params: Promise.resolve({ id: sara.brickId }) },
+      );
+      expect(future.status).toBe(400);
       expect(await jobsOf(sara)).toHaveLength(0);
     });
   });

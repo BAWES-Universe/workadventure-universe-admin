@@ -51,7 +51,8 @@ const wipe = async () => {
   await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
 };
 
-const key = () => `k_${randomUUID().replace(/-/g, '')}`;
+// Round 8, A2: a start that acks carries its issue time (the moment of the message) in its key
+const key = () => `t${Date.now().toString(36)}-${randomUUID().replace(/-/g, '')}`;
 const jobsOf = (sara: Owner) => prisma.computerJob.findMany({ where: { personId: sara.id }, orderBy: { createdAt: 'asc' }, select: { id: true, startKey: true, startAckedAt: true, status: true } });
 const roomsOf = (sara: Owner) => prisma.meterReservation.findMany({ where: { personId: sara.id }, select: { reservationKey: true, jobId: true } });
 const attemptOf = (sara: Owner, startKey: string) => prisma.computerStartAttempt.findUniqueOrThrow({ where: { botId_personId_startKey: { botId: sara.brickId, personId: sara.id, startKey } } });
@@ -333,8 +334,14 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     await prisma.computerStartAttempt.update({ where: { botId_personId_startKey: { botId: tom.brickId, personId: tom.id, startKey: KEY_B } }, data: { beatAt: minutes(-120) } });
     await forgetOldStartMarks(new Date());
     expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(2);
-    expect(await post(tom, KEY_B, 'Visa please')).toEqual({ ok: false, reason: 'expired' });
-    expect(await jobsOf(tom)).toHaveLength(0);
+    // Round 8, A2 (Opus): the message's own key, waiting on a start that came to nothing, is REOPENED under the same key within the consent window and makes ONE job (never `expired`, never a derived key) ...
+    const reopened = await post(tom, KEY_B, 'Visa please');
+    expect(reopened).toMatchObject({ ok: true });
+    expect(await jobsOf(tom)).toHaveLength(1);
+    // ... and a zombie copy of the expired start, arriving after that, is answered with that job: no second one
+    const zombie = await post(tom, KEY_A, 'Visa');
+    expect(zombie.ok ? zombie.job.id : zombie.job?.id).toBe(reopened.job.id);
+    expect(await jobsOf(tom)).toHaveLength(1);
     // CONTROL (N15): a lone attempt that made nothing and answers nothing is NOT swept after an hour any more: it is the record that its key was answered, so it stays a week and goes only then
     await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: key(), state: 'expired', beatAt: minutes(-120) } });
     await forgetOldStartMarks(new Date());
@@ -357,7 +364,7 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     expect(rooms.map((room) => room.jobId).sort()).toEqual([first.job.id, second.job.id].sort());
   });
 
-  it('N15: a key answered with a job that is then taken away is NOT forgotten: the attempt stays with no job, and a delayed copy of the start answers `expired` and makes nothing', async () => {
+  it('N15 (round 8: `retired`): a key answered with a job that is then taken away is NOT forgotten: the attempt stays with no job, and a delayed copy of the start answers `retired` and makes nothing', async () => {
     const sara = await owner('n15-away');
     const KEY_A = key();
     const KEY_B = key();
@@ -371,16 +378,16 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     // Even after the hour the old cleanup used (it is a week now)
     await forgetOldStartMarks(minutes(120));
     expect(await prisma.computerStartAttempt.count({ where: { personId: sara.id } })).toBe(2);
-    // A delayed copy of the answered start, and of the one that made the job: both are `expired`, and nothing is made
-    expect(await post(sara, KEY_B, 'Visa please')).toMatchObject({ ok: false, reason: 'expired' });
-    expect(await viaLib(sara, KEY_B, 'Visa please')).toMatchObject({ ok: false, reason: 'expired' });
+    // A delayed copy of the answered start, and of the one that made the job: both are `retired` (round 8, A2: the request already ran), and nothing is made
+    expect(await post(sara, KEY_B, 'Visa please')).toMatchObject({ ok: false, reason: 'retired' });
+    expect(await viaLib(sara, KEY_B, 'Visa please')).toMatchObject({ ok: false, reason: 'retired' });
     expect(await jobsOf(sara)).toHaveLength(0);
     // Nothing new was reserved: the only room is the one the deleted job took
     expect((await roomsOf(sara)).every((room) => room.jobId === a.job.id)).toBe(true);
-    // N15-a (Opus): a delayed copy of the start that MADE the job, whose attempt now reads `made` with no job, is `expired` too, by the route and the library, and makes no job and no room
+    // N15-a (Opus; round 8 makes it `retired`): a delayed copy of the start that MADE the job, whose attempt now reads `made` with no job, is `retired` too, by the route and the library, and makes no job and no room
     expect(await attemptOf(sara, KEY_A)).toMatchObject({ state: 'made', jobId: null });
-    expect(await post(sara, KEY_A, 'Visa')).toMatchObject({ ok: false, reason: 'expired' });
-    expect(await viaLib(sara, KEY_A, 'Visa')).toMatchObject({ ok: false, reason: 'expired' });
+    expect(await post(sara, KEY_A, 'Visa')).toMatchObject({ ok: false, reason: 'retired' });
+    expect(await viaLib(sara, KEY_A, 'Visa')).toMatchObject({ ok: false, reason: 'retired' });
     expect(await jobsOf(sara)).toHaveLength(0);
     expect((await roomsOf(sara)).every((room) => room.jobId === a.job.id)).toBe(true);
   });
@@ -391,9 +398,9 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     const a = await post(sara, KEY_A, 'Visa');
     await prisma.computerJob.delete({ where: { id: a.job.id } });
     await setUp();
-    expect(await post(sara, KEY_A, 'Visa')).toMatchObject({ ok: false, reason: 'expired' });
-    expect(await viaLib(sara, KEY_A, 'Visa')).toMatchObject({ ok: false, reason: 'expired' });
-    // Without an ack (the plain keyed path)
+    expect(await post(sara, KEY_A, 'Visa')).toMatchObject({ ok: false, reason: 'retired' });
+    expect(await viaLib(sara, KEY_A, 'Visa')).toMatchObject({ ok: false, reason: 'retired' });
+    // Without an ack (the plain keyed path, unchanged by round 8): `expired`
     const plain = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa', startKey: KEY_A }, NOW);
     expect(plain).toMatchObject({ ok: false, reason: 'expired' });
     expect(await jobsOf(sara)).toHaveLength(0);
@@ -415,7 +422,9 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     // Three hours after its last beat: the old hour-long cleanup would have deleted this row and the delayed start would have made a second job
     await forgetOldStartMarks(NOW);
     expect(await attemptOf(sara, KEY_OLD)).toMatchObject({ state: 'superseded', jobId: null });
-    expect(await viaLib(sara, KEY_OLD, 'Visa')).toMatchObject({ ok: false, reason: 'expired' });
+    // Round 8, A2: it was answered by a job that ran and was removed since: `retired`, terminal
+    expect(await viaLib(sara, KEY_OLD, 'Visa')).toMatchObject({ ok: false, reason: 'retired' });
+    expect(await post(sara, KEY_OLD, 'Visa')).toMatchObject({ ok: false, reason: 'retired' });
     expect(await jobsOf(sara)).toHaveLength(0);
   });
 

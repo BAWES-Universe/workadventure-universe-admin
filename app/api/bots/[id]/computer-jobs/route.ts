@@ -3,10 +3,12 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
-import { ackStart, computerView, earlierUnconfirmedStart, startAnsweredBefore, startJob, startedJobFor, type Started } from '@/lib/computer';
+import { ackStart, computerView, earlierUnconfirmedStart, refuseAttempt, registerStart, startAnsweredBefore, startJob, startedJobFor, type Registration } from '@/lib/computer';
+import { ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { startStateOf } from '@/lib/computer-values';
 import { ownerSpendAllowed } from '@/lib/spend-rules';
 import { carryOnFrom, retryCandidate } from '@/lib/computer-continue';
+import { prisma } from '@/lib/db';
 
 export const runtime = 'nodejs';
 
@@ -115,6 +117,15 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  *
  * Every refusal is HTTP 200 `{ ok: false, reason }` with a reason from `START_REFUSALS` (lib/computer-values): Orbit never answers a start with 429 or another error status for a refusal, so a 429 is an intermediary's and the outcome of the start is not known (look it up by its key).
  *
+ * Round 8 (GPT's seventh note, Opus's design A1/A2), for a start with `X-Computer-Start-Acks: 1`:
+ *  - The key MUST carry its issue time (`t<ms base36>-<rest>`, the moment of the person's message): 400 without one, or one more than 5 minutes in the future.
+ *  - The start is REGISTERED (its attempt, with the request's own moment) before anything else is asked, the spending rule included: a later request under another key that decides meanwhile waits for it, and a look for
+ *    this key says it is going on.
+ *  - Every refusal is kept on the key: a retry of it gets the same body again (never `expired`).
+ *  - `retired`: the key already made a job whose record was removed since. Terminal: the request already ran.
+ *  - `stale_consent`: the key was issued longer ago than 6 hours and Orbit holds no live record of it: nothing is made or reserved; Brick asks the person whether to start it now (a new message, a new key).
+ *  - A key whose attempt ended with no job, within those 6 hours, is reopened under the SAME key (never answered `expired`): a job made after the key was issued answers it, or it makes its own.
+ *
  * Auth: service token only.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -123,6 +134,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   } catch {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
+  // Round 8, A1: the start's own moment, before its body is read. Its attempt carries it, and every "made after this one began" compares with it, however long anything below is delayed
+  const began = new Date();
+  let registration: Registration | null = null;
+  let handedOn = false;
+  let key: { id: string; personId: string; startKey: string } | null = null;
   try {
     const { id } = await params;
     const raw = await request.json().catch(() => null);
@@ -145,16 +161,31 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const sentContinues = request.headers.get(CONTINUES_HEADER);
     const continues = sentContinues === null ? null : jobIdSchema.safeParse(sentContinues);
     if (continues && !continues.success) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
-    const person = await resolveUsagePerson(parsed.data.userId, parsed.data.isGuest);
-    // A guest never has a Brick computer: a Brick belongs to an account
-    if (!person.personId) return NextResponse.json({ ok: false, reason: 'not_owner' });
     // A start that says the game confirms its answers, retried under a NEW key while an earlier start of this person on this Brick is still unconfirmed, is answered with that job BEFORE the spend rule is asked: the earlier job may
     // have used what a chat-stated rule leaves, and the answer the game is owed is the job it asked for, never a false `rule`. (The decision that makes or refuses a job is still the one under the person's lock in `startJob`.)
     const acking = attempt?.success === true && request.headers.get(START_ACKS_HEADER) === '1';
+    // Round 8, A2: a start that acks carries the moment the person gave consent in its key. None, or one in the future, is not a start that can be held to its consent
+    const issued = acking && attempt?.success ? issuedOfKey(attempt.data) : null;
+    if (acking && (!issued || issued.getTime() > began.getTime() + ISSUE_SKEW_MS)) return NextResponse.json({ error: 'Invalid input data', reason: 'untimed_key' }, { status: 400 });
+    const person = await resolveUsagePerson(parsed.data.userId, parsed.data.isGuest);
+    // A guest never has a Brick computer: a Brick belongs to an account
+    if (!person.personId) return NextResponse.json({ ok: false, reason: 'not_owner' });
+    // Round 8, A1: registered FIRST, before every look and the spending rule below, so no later request can overtake it. A2: a key decided for good is answered here (its kept refusal, `retired`, `stale_consent`)
+    if (acking && attempt?.success && issued) {
+      key = { id, personId: person.personId, startKey: attempt.data };
+      const registered = await registerStart(id, person.personId, attempt.data, began, issued);
+      if ('answer' in registered) return NextResponse.json(startAnswerBody(registered.answer));
+      registration = registered.registration;
+    }
+    // A refusal decided here is kept on the key (round 8, A1), so its retry is the same answer
+    const refused = async (body: Record<string, unknown>) => {
+      if (key) await refuseAttempt(key.id, key.personId, key.startKey, body);
+      return NextResponse.json(body);
+    };
     // Finding 1 (GPT round 6): a key that was answered before with another start's job gets that same answer again, first: after the job was acknowledged, ended, or the game forgot the key, never a job of its own
     if (attempt?.success) {
       const answered = await startAnsweredBefore(id, person.personId, attempt.data);
-      if (answered) return NextResponse.json(bodyOf(answered));
+      if (answered) return NextResponse.json(startAnswerBody(answered));
     }
     if (acking && attempt?.success) {
       const earlier = await earlierUnconfirmedStart(id, person.personId, attempt.data);
@@ -164,31 +195,39 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // (the spend look below lets it through); only a continuation that would be MADE is held to the rule (CodeRabbit on #1025, 35). A start that names a run is answered by the run's own job first, so it is left to the start
     if (continues?.success && !parsed.data.runId) {
       const carry = await carryOnFrom(id, person.personId, continues.data);
-      if ('fresh' in carry) return NextResponse.json({ ok: false, reason: 'cannot_continue', why: carry.fresh, ...(carry.job ? { job: carry.job } : {}) });
+      if ('fresh' in carry) return refused({ ok: false, reason: 'cannot_continue', why: carry.fresh, ...(carry.job ? { job: carry.job } : {}) });
     }
     // A rule the person said in chat ("no more than $1 a month", "only my own accounts") is held before a job exists, so Brick can say so at once
     const ruled = await ownerSpendAllowed(id, person.personId, 'computer', new Date(), parsed.data.runId ?? null, attempt?.success ? attempt.data : null, continues?.success ? continues.data : null);
-    if (!ruled.ok) return NextResponse.json({ ok: false, reason: 'rule', rule: { id: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words } });
-    const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, brief: parsed.data.brief, writes: parsed.data.writes, runId: parsed.data.runId, startKey: attempt?.success ? attempt.data : undefined, acks: attempt?.success === true && request.headers.get(START_ACKS_HEADER) === '1', plan: parsed.data.plan, origin: parsed.data.origin ?? null, continuesJobId: continues?.success ? continues.data : null });
-    return NextResponse.json(bodyOf(started));
+    if (!ruled.ok) return refused({ ok: false, reason: 'rule', rule: { id: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words } });
+    handedOn = true;
+    const started = await startJob({
+      botId: id,
+      personId: person.personId,
+      title: parsed.data.title,
+      brief: parsed.data.brief,
+      writes: parsed.data.writes,
+      runId: parsed.data.runId,
+      startKey: attempt?.success ? attempt.data : undefined,
+      acks: acking,
+      plan: parsed.data.plan,
+      origin: parsed.data.origin ?? null,
+      continuesJobId: continues?.success ? continues.data : null,
+      began,
+      ...(registration ? { registration } : {}),
+    });
+    return NextResponse.json(startAnswerBody(started));
   } catch (error) {
+    // A registered start that failed before it was handed to the start lets its attempt go (only when this request made it): it is asked again under the same key and reopened
+    if (registration?.opened && key && !handedOn) await closeRegistered(key);
     Sentry.captureException(error, { tags: { area: 'computer' } });
     console.error('[Computer] Could not start a job:', error instanceof Error ? error.message : 'unknown');
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  } finally {
+    await registration?.release();
   }
 }
 
-/** The answer body of a start, as the bot server reads it (every refusal is HTTP 200 `{ ok: false, reason }`). */
-function bodyOf(started: Started): Record<string, unknown> {
-  // `continued`: the job carries on in the conversation of the job the header named ("try again"); absent, it is a fresh job (none was named)
-  if (started.ok) return { ok: true, job: started.job, restoredFrom: started.restoredFrom, ...(started.continued ? { continued: true } : {}) };
-  // A rule that stopped it on the try itself (the pre-check only asks for a first millionth): the same shape as above, with the rule's words
-  if (started.reason === 'rule') return { ok: false, reason: 'rule', rule: { id: null, why: null, leftMicros: null, words: started.words } };
-  // A connected app would do it for less: nothing was started, and the Brick is told which one to use
-  if (started.reason === 'cheaper_route') return { ok: false, reason: 'cheaper_route', app: started.app };
-  // An earlier start of this person on this Brick that the game has not confirmed: nothing was made. It is not a refusal of the ask (it is the job the game asked for earlier): the oldest such job and the key it was made under. It acks nothing
-  if (started.reason === 'earlier') return { ok: false, reason: 'earlier', job: started.job };
-  // "Try again" of a job that cannot be carried on: nothing was made (finding 6). Why, and the person's own named job, so Brick can say it and offer "Start a new job"
-  if (started.reason === 'cannot_continue') return { ok: false, reason: 'cannot_continue', why: started.why, ...(started.job ? { job: started.job } : {}) };
-  return { ok: false, reason: started.reason };
-}
+/** A registered start that failed before its decision: its attempt is let go (state `expired`, so a retry of the key reopens it). Never throws. */
+const closeRegistered = (key: { id: string; personId: string; startKey: string }) =>
+  prisma.computerStartAttempt.updateMany({ where: { botId: key.id, personId: key.personId, startKey: key.startKey, state: 'open' }, data: { state: 'expired' } }).catch(() => undefined);
