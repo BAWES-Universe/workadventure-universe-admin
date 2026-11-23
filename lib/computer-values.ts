@@ -131,3 +131,17 @@ export const jobTagOf = (jobId: string): string => `${JOB_TAG_PREFIX}${jobId}]${
  * A start that fails is 400 (the input is not valid), 401 (not the bot server) or 500 (Orbit could not do it): never with an `ok` field.
  */
 export const START_REFUSALS = ['not_owner', 'off', 'not_open', 'broken_start', 'no_run', 'paused', 'cheaper_route', 'not_set', 'rule', 'expired', 'cannot_continue'] as const;
+
+/**
+ * How long one command on a machine may take: waiting for the machine's own lock, stopping the browser, moving a profile, starting the browser
+ * again and waiting for it to answer (lib/computer-browser-profile-script.ts).
+ */
+export const MACHINE_COMMAND_MS = 150_000;
+
+/**
+ * How long a machine's cleanup claim is believed. It MUST be longer than `MACHINE_COMMAND_MS`, or a claim taken for a long command goes stale
+ * while that command still runs and a second one starts beside it: two commands stopping, moving and starting the same browser at once
+ * (CodeRabbit N7 on #1025). One shared value, so the two places that take this claim (`withClaim` in lib/computer-browser-profile.ts, and the
+ * cleanup claim and `untilCleaned` in lib/computer.ts) can never drift apart.
+ */
+export const CLEAN_CLAIM_STALE_MS = MACHINE_COMMAND_MS + 30_000;

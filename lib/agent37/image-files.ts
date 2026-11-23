@@ -119,7 +119,7 @@ fi
 # A cleanup that could not remove the browser's profile left a mark: no job may use that profile. It is removed here, before the browser
 # runs, and a profile that still cannot be removed means the machine is not ready.
 PROFILE_DIR="$HOME_DIR/.config/universe-chromium"
-if [ -f "$STATE/profile.dirty" ]; then
+if [ -e "$STATE/profile.dirty" ]; then
   pkill -x chromium 2>/dev/null
   pkill -x chrome 2>/dev/null
   i=0
@@ -131,7 +131,7 @@ if [ -f "$STATE/profile.dirty" ]; then
   done
   rm -rf "$PROFILE_DIR" "$HOME_DIR/.cache/chromium" 2>/dev/null
   if [ -e "$PROFILE_DIR" ] || [ -e "$HOME_DIR/.cache/chromium" ]; then echo "ready=0 reason=profile_not_cleared"; exit 1; fi
-  rm -f "$STATE/profile.dirty"
+  rm -rf "$STATE/profile.dirty"
 fi
 
 # Starts a part unless it is running. Each is its own session, so it outlives the command that started it.
@@ -1136,8 +1136,12 @@ until mkdir "$LOCK" 2>/dev/null; do
   sleep 0.2
 done
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
-# Marked first, unmarked only when the profile is proved gone: until then the next start-up removes it before any job can use it
-: > "$STATE/profile.dirty" 2>/dev/null || { echo "cleaned=0 reason=mark"; exit 1; }
+# Marked first, unmarked only when the profile is proved gone: until then the next start-up removes it before any job can use it.
+# A FOLDER made with mkdir, never a file opened with ">": this runs as root over a path the agent owns, and an open for writing would follow
+# a link the agent put there and empty its target. mkdir follows no link and truncates nothing; anything already at that name fails the run
+[ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "cleaned=0 reason=mark"; exit 1; }
+rm -rf "$STATE/profile.dirty" 2>/dev/null
+mkdir "$STATE/profile.dirty" 2>/dev/null || { echo "cleaned=0 reason=mark"; exit 1; }
 pkill -x websockify 2>/dev/null
 pkill -x chromium 2>/dev/null
 pkill -x chrome 2>/dev/null
@@ -1150,7 +1154,7 @@ while pgrep -x chromium >/dev/null 2>&1 || pgrep -x chrome >/dev/null 2>&1; do
 done
 rm -rf "$HOME_DIR/.config/universe-chromium" "$HOME_DIR/.cache/chromium" 2>/dev/null
 if [ -e "$HOME_DIR/.config/universe-chromium" ] || [ -e "$HOME_DIR/.cache/chromium" ]; then echo "cleaned=0 reason=profile_not_removed"; exit 1; fi
-rm -f "$STATE/profile.dirty"
+rm -rf "$STATE/profile.dirty"
 rmdir "$LOCK" 2>/dev/null
 trap - EXIT
 /usr/local/bin/universe-up --child >/dev/null 2>&1

@@ -15,7 +15,7 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests, type ExecOptions } from '@/lib/computer-provider';
-import { dropProfile, finishPendingParks, parkProfile, parkWorthWaitingFor, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settleResumedBrowser, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
+import { dropProfile, finishPendingParks, needsSignInAgain, parkProfile, parkWorthWaitingFor, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settleResumedBrowser, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -29,6 +29,8 @@ const env = process.env.COMPUTER_PROVIDER;
 
 interface Sent {
   action: string;
+  /** The machine the command went to, as the pretend provider names it: `fake-<botId>`. */
+  ref: string;
   job: string;
   keep: string[];
   user: string | undefined;
@@ -88,7 +90,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
     const exec = provider.exec.bind(provider);
     jest.spyOn(provider, 'exec').mockImplementation(async (ref: string, command: string, options?: ExecOptions) => {
       const action = /ACTION="([a-z]+)"/.exec(command)?.[1] ?? '?';
-      sent.push({ action, job: /JOB="([^"]*)"/.exec(command)?.[1] ?? '', keep: (/KEEP="([^"]*)"/.exec(command)?.[1] ?? '').split(' ').filter(Boolean), user: options?.user });
+      sent.push({ action, ref, job: /JOB="([^"]*)"/.exec(command)?.[1] ?? '', keep: (/KEEP="([^"]*)"/.exec(command)?.[1] ?? '').split(' ').filter(Boolean), user: options?.user });
       provider.execAnswer = () => ({ stdout: `${answers[action] ?? ''}\n` });
       return exec(ref, command);
     });
@@ -109,7 +111,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       await machine(sara.brickId);
       const visa = await job(sara, { pausedMinutesAgo: 0 });
       expect(await parkProfile(sara.brickId, visa.id, NOW)).toEqual({ state: 'parked', reason: null, cookies: 4, pages: 2 });
-      expect(sent).toEqual([{ action: 'park', job: visa.id, keep: [visa.id], user: 'root' }]);
+      expect(sent).toEqual([{ action: 'park', ref: `fake-${sara.brickId}`, job: visa.id, keep: [visa.id], user: 'root' }]);
       expect(provider.commands[0].ref).toBe(`fake-${sara.brickId}`);
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).cleanClaimedAt).toBeNull();
     });
@@ -193,15 +195,21 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       await machine(sara.brickId);
       const visa = await job(sara, { status: 'running', pausedMinutesAgo: 60 });
       expect(await restoreProfile(sara.brickId, visa.id, NOW)).toEqual({ state: 'restored', reason: null, cookies: 4, pages: 2 });
-      expect(sent).toEqual([{ action: 'restore', job: visa.id, keep: [visa.id], user: 'root' }]);
+      expect(sent).toEqual([{ action: 'restore', ref: `fake-${sara.brickId}`, job: visa.id, keep: [visa.id], user: 'root' }]);
     });
 
-    it('nothing of its own was kept: it gets an empty browser, and is told so (fresh: sign in again)', async () => {
+    it('nothing of its own was kept: the answer is `fresh`, which `needsSignInAgain` reads as a job that must sign in again (the words themselves are not told yet)', async () => {
       const sara = await person('Sara');
       await machine(sara.brickId);
       const visa = await job(sara, { status: 'running', pausedMinutesAgo: 60 });
       answers.restore = 'restored=0 reason=none';
-      expect(await restoreProfile(sara.brickId, visa.id, NOW)).toMatchObject({ state: 'fresh', reason: 'none' });
+      const back = await restoreProfile(sara.brickId, visa.id, NOW);
+      expect(back).toMatchObject({ state: 'fresh', reason: 'none' });
+      // Only the helper is checked here, and the title says so: nothing tells the person these words yet, because a telling of their own needs a
+      // new kind (a migration and words the game shows). CodeRabbit N (review body, lib/computer-browser-profile.ts:204) asked for the test to say
+      // what it really checks until that telling exists. What the resume path DOES act on is whether the job may run at all (GPT round 6, finding 7)
+      expect(needsSignInAgain(back)).toBe(true);
+      expect(needsSignInAgain({ state: 'restored', reason: null, cookies: 1, pages: 1 })).toBe(false);
     });
 
     it('kept longer than the Limits say: it is dropped first, and the job gets an empty browser', async () => {
@@ -489,6 +497,36 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       // Asked again within the hour: the machine is not asked again
       expect(await sweepPausedSignIns(minutes(5))).toEqual({ looked: 0, pruned: 0 });
       expect(await sweepPausedSignIns(minutes(61))).toEqual({ looked: 1, pruned: 1 });
+    });
+
+    it('a Brick inside its hour does not hold up the ones behind it: the sweep carries a cursor and reaches every Brick', async () => {
+      // Three Bricks, every one of them with sign-ins kept longer than the Limits allow
+      const three = [await person('One'), await person('Two'), await person('Three')];
+      for (const who of three) {
+        await machine(who.brickId);
+        await job(who, { pausedMinutesAgo: 25 * 60 });
+      }
+      const inOrder = three.map((who) => who.brickId).sort();
+      // A page of one Brick, so three Bricks are more pages than one sweep takes (the real page is 200: the behaviour, not the number, is what is tested)
+      resetSignInsSweepForTests(1);
+      const pruned = (): string[] => sent.filter((one) => one.action === 'prune').map((one) => one.ref.replace('fake-', ''));
+
+      // One sweep takes two pages, so it reaches the first two Bricks and stops with its cursor on the second
+      expect((await sweepPausedSignIns(NOW)).looked).toBe(2);
+      expect(pruned()).toEqual([inOrder[0], inOrder[1]]);
+
+      // The next sweep starts AFTER the second Brick, so the third is reached: before the cursor, the first page would have been the same two for ever
+      expect((await sweepPausedSignIns(minutes(1))).looked).toBe(1);
+      expect(pruned()).toEqual([inOrder[0], inOrder[1], inOrder[2]]);
+
+      // Past the last Brick the cursor starts again from the first, and what keeps it from pruning twice is the hour, not the cursor
+      expect((await sweepPausedSignIns(minutes(2))).looked).toBe(0);
+      expect(pruned()).toHaveLength(3);
+
+      // Once the hour has passed every Brick is reached a second time, each still only once in its own hour
+      for (const at of [61, 62, 63, 64]) await sweepPausedSignIns(minutes(at));
+      expect([...new Set(pruned().slice(3))].sort()).toEqual(inOrder);
+      expect(pruned()).toHaveLength(6);
     });
   });
 });

@@ -176,9 +176,19 @@ unlock() {
   trap - EXIT
 }
 
-# Marked before the profile is touched, unmarked only when it is proved moved: until then the image's start-up removes it before any job can use it
-mark() { : > "$STATE/profile.dirty" && chown -h "$NODE_USER" "$STATE/profile.dirty" 2>/dev/null; [ -f "$STATE/profile.dirty" ]; }
-unmark() { rm -f "$STATE/profile.dirty"; }
+# Marked before the profile is touched, unmarked only when it is proved moved: until then the image's start-up removes it before any job can use it.
+# The mark is a FOLDER made with mkdir, never a file opened with ">": this command runs as root over a path the agent owns, and an open for
+# writing would follow a link the agent put there and empty whatever it points at (/etc/sudoers, say). mkdir follows no link and truncates
+# nothing: anything already at that name makes it fail, and the action is refused, which is the safe way to fail. Nothing else root does here
+# opens a path under the agent's home for writing.
+mark() {
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  rm -rf "$STATE/profile.dirty" 2>/dev/null
+  mkdir "$STATE/profile.dirty" 2>/dev/null || return 1
+  chown -h "$NODE_USER" "$STATE/profile.dirty" 2>/dev/null
+  [ -d "$STATE/profile.dirty" ] && [ ! -L "$STATE/profile.dirty" ]
+}
+unmark() { rm -rf "$STATE/profile.dirty" 2>/dev/null; }
 
 stop_browser() {
   pkill -x websockify 2>/dev/null
@@ -300,6 +310,11 @@ except Exception:
     saved = {}
 cookies = [item for item in saved.get("cookies") or [] if isinstance(item, dict) and item.get("name") is not None]
 pages = [url for url in saved.get("pages") or [] if isinstance(url, str) and url.startswith(("http://", "https://"))]
+# Nothing was saved to put back (the park found no browser answering either): there is nothing a browser could lose, so the restore is not
+# held up waiting for one to answer (CodeRabbit N6 on #1025: only a replay that LOSES something counts as a failed restore)
+if not cookies and not pages:
+    print("cookies=0 pages=0 answer=1")
+    sys.exit(0)
 deadline = time.time() + wait
 connection = None
 while time.time() < deadline:
@@ -365,6 +380,18 @@ park)
   ;;
 restore)
   prune
+  # A try before this one already moved this job's profile into place and the browser never answered the session replay (the "moved" note). The profile
+  # on the machine is this job's OWN, so nothing is wiped and nothing is moved: only the replay that failed is done again. Wiping here would
+  # throw away the very profile the earlier try restored
+  if [ -f "$JOBDIR/moved" ]; then
+    start_browser
+    loaded=""
+    if [ -f "$JOBDIR/session.json" ]; then loaded="$(devtools load "$JOBDIR/session.json" 2>/dev/null)"; fi
+    case "$loaded" in *answer=0*) say "0 reason=no_answer"; exit 1 ;; esac
+    rm -rf "$JOBDIR" "$JOBDIR.new"
+    say "1 $(counts "$loaded")"
+    exit 0
+  fi
   lock
   mark || { say "0 reason=mark"; exit 1; }
   stop_browser || { say "0 reason=browser_running"; exit 1; }
@@ -377,11 +404,16 @@ restore)
     had=1
   fi
   [ -f "$JOBDIR/session.json" ] && had=1
+  # From here the live profile IS this job's own: a try that stops after this must not wipe it (the folder is root's alone, so this note is root's alone)
+  [ -d "$JOBDIR" ] && : > "$JOBDIR/moved" 2>/dev/null
   unmark
   unlock
   start_browser
   loaded=""
   if [ -f "$JOBDIR/session.json" ]; then loaded="$(devtools load "$JOBDIR/session.json" 2>/dev/null)"; fi
+  # The browser did not answer: the saved session is the ONLY copy of those cookies and open pages, so it is kept and the restore is reported
+  # failed rather than said to have worked. Orbit leaves the job in recover and asks again, and the try above finishes the replay alone
+  case "$loaded" in *answer=0*) say "0 reason=no_answer"; exit 1 ;; esac
   rm -rf "$JOBDIR" "$JOBDIR.new"
   if [ "$had" = "1" ]; then say "1 $(counts "$loaded")"; else say "0 reason=none"; fi
   ;;

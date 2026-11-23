@@ -3,6 +3,7 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { ownsBrick } from '@/lib/brick';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { isSafeJobId, readSignInsAnswer, signInsCommand, type SignInsAction, type SignInsAnswer } from '@/lib/computer-browser-profile-script';
+import { CLEAN_CLAIM_STALE_MS, MACHINE_COMMAND_MS } from '@/lib/computer-values';
 
 /**
  * A paused job's own browser sign-ins (piece 4 of the computers plan; decisions 23 Nov, 3f). When a running job is paused, the browser it
@@ -47,10 +48,9 @@ export interface SignInsResult {
 const PARK_WINDOW_MS = 10 * 60_000;
 /** How long a start is given to bring a resumed job's browser back before the sweep takes the job over: one command on the machine, with room to spare, so a live try is never cut across. */
 const RESTORE_STALE_MS = 5 * 60_000;
-/** How long a cleanup claim is believed (the same window as lib/computer.ts): a claim older than this was left by a server that stopped. */
-const CLAIM_STALE_MS = 90_000;
-/** How long one command may take on the machine: waiting for the lock, stopping the browser, starting it again and waiting for it to answer. */
-const COMMAND_MS = 150_000;
+/** How long a cleanup claim is believed, and how long one command may take: ONE pair of values for every holder of this claim (lib/computer-values), because a window shorter than a command lets a second command start beside the first (CodeRabbit N7). */
+const CLAIM_STALE_MS = CLEAN_CLAIM_STALE_MS;
+const COMMAND_MS = MACHINE_COMMAND_MS;
 /** The sweep looks at one machine at most this often for parked browsers that have been kept too long. */
 const SWEEP_EVERY_MS = 60 * 60_000;
 const HOUR_MS = 3600_000;
@@ -398,10 +398,19 @@ export async function dropProfile(botId: string, jobId: string, now: Date = new 
 }
 
 const lastSwept = new Map<string, number>();
+/** The Brick the last sweep stopped at: the next one starts after it, so no page of Bricks can hold up the ones behind it. Null = start from the first. */
+let sweptAfter: string | null = null;
+/** How many Bricks one sweep looks at in a page, and how many pages it takes before it leaves the rest to the next sweep. */
+const SWEEP_PAGE = 200;
+const SWEEP_PAGES = 2;
+/** The page size in use. Only a test lowers it, so that the cursor's wrapping can be shown with a handful of Bricks instead of hundreds. */
+let sweepPage = SWEEP_PAGE;
 
-/** For tests: forget when each machine was last looked at. */
-export function resetSignInsSweepForTests(): void {
+/** For tests: forget when each machine was last looked at, start again from the first Brick, and (with `page`) make a page that small. */
+export function resetSignInsSweepForTests(page?: number): void {
   lastSwept.clear();
+  sweptAfter = null;
+  sweepPage = page ?? SWEEP_PAGE;
 }
 
 /**
@@ -414,15 +423,40 @@ export async function sweepPausedSignIns(now: Date = new Date()): Promise<{ look
   try {
     const hours = await keepHours();
     const before = new Date(now.getTime() - hours * HOUR_MS);
-    const stale = await prisma.computerJob.findMany({ where: { status: 'queued', pauses: { gt: 0 }, pausedAt: { lt: before } }, select: { botId: true, id: true }, distinct: ['botId'], take: 200 });
-    for (const { botId, id } of stale) {
-      if ((lastSwept.get(botId) ?? 0) > now.getTime() - SWEEP_EVERY_MS) continue;
-      const machine = await awakeMachine(botId);
-      if (!machine || !isSafeJobId(id)) continue;
-      looked++;
-      lastSwept.set(botId, now.getTime());
-      const answer = await onMachine(machine, 'prune', id, await allowedToKeep(botId, now, hours), hours);
-      if (answer.done === 'dropped') pruned++;
+    // Bricks are taken in order of their id, from where the last sweep stopped: without that, a page of Bricks that are all inside the hour would be
+    // read again every sweep and the ones behind them would keep their expired sign-ins for good (CodeRabbit on #1025, lib/computer-browser-profile.ts:256).
+    // The cursor wraps, so every Brick is reached however many there are, and a sweep that finds nothing after it starts again from the beginning
+    for (let page = 0; page < SWEEP_PAGES; page++) {
+      const stale = await prisma.computerJob.findMany({
+        where: { status: 'queued', pauses: { gt: 0 }, pausedAt: { lt: before }, ...(sweptAfter ? { botId: { gt: sweptAfter } } : {}) },
+        select: { botId: true, id: true },
+        distinct: ['botId'],
+        orderBy: { botId: 'asc' },
+        take: sweepPage,
+      });
+      if (stale.length === 0) {
+        // The end of the Bricks: the next sweep starts from the first one again
+        if (!sweptAfter) break;
+        sweptAfter = null;
+        continue;
+      }
+      sweptAfter = stale[stale.length - 1].botId;
+      for (const { botId, id } of stale) {
+        if ((lastSwept.get(botId) ?? 0) > now.getTime() - SWEEP_EVERY_MS) continue;
+        const machine = await awakeMachine(botId);
+        if (!machine || !isSafeJobId(id)) continue;
+        // Read AGAIN after the wait: a sweep running beside this one may have taken this Brick while this one waited for the machine, and two prunes
+        // an hour apart is the whole point of the throttle. The write below happens before the next wait, so this closes the window (CodeRabbit N on #1025)
+        if ((lastSwept.get(botId) ?? 0) > now.getTime() - SWEEP_EVERY_MS) continue;
+        looked++;
+        lastSwept.set(botId, now.getTime());
+        const answer = await onMachine(machine, 'prune', id, await allowedToKeep(botId, now, hours), hours);
+        if (answer.done === 'dropped') pruned++;
+      }
+      if (stale.length < sweepPage) {
+        sweptAfter = null;
+        break;
+      }
     }
   } catch (error) {
     console.error('[Computer] Could not look for paused sign-ins kept too long:', error instanceof Error ? error.message : 'unknown');

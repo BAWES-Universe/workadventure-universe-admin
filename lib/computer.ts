@@ -64,6 +64,7 @@ import {
   type WaitingFor,
   NOT_PAUSED,
   type PausedWhy,
+  CLEAN_CLAIM_STALE_MS,
 } from '@/lib/computer-values';
 import {
   dropProfile,
@@ -1777,12 +1778,13 @@ export function setHandOverClaimWaitForTests(ms: number | null): void {
   claimWaitMs = ms ?? CLAIM_WAIT_MS;
 }
 
-/** How long a cleanup claim is believed: the commands it runs end within 40 seconds, so one older than this was left by a server that stopped. */
-const CLEAN_CLAIM_STALE_MS = 90_000;
-
-/** Waits (at most a minute) while the browser of this Brick's machine is being cleared, so the job that is starting is not cleared under. */
+/**
+ * Waits while the browser of this Brick's machine is being cleared, so the job that is starting is not cleared under. It waits out a claim that is
+ * still being renewed for as long as one machine command may take, plus its own slack (`CLEAN_CLAIM_STALE_MS`): waiting less would let this job start
+ * beside a command that is still stopping, moving and starting that browser (CodeRabbit N7 on #1025).
+ */
 async function untilCleaned(botId: string): Promise<void> {
-  for (let tries = 0; tries < 240; tries++) {
+  for (let tries = 0; tries < Math.ceil(CLEAN_CLAIM_STALE_MS / 250); tries++) {
     const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { cleanClaimedAt: true } });
     if (!row?.cleanClaimedAt || Date.now() - row.cleanClaimedAt.getTime() > CLEAN_CLAIM_STALE_MS) return;
     await new Promise((resolve) => setTimeout(resolve, 250));

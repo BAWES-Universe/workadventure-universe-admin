@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { MACHINE_PLACES, isSafeJobId, readSignInsAnswer, signInsCommand, type SignInsAction, type SignInsPlaces } from '@/lib/computer-browser-profile-script';
+import { CLEAN_CLAIM_STALE_MS, MACHINE_COMMAND_MS } from '@/lib/computer-values';
 
 const CHROME = ['/opt/pw-browsers/chromium-1243/chrome-linux64/chrome', process.env.CHROME_PATH ?? ''].find((path) => path && existsSync(path)) ?? '';
 const have = (command: string) => spawnSync('sh', ['-c', `command -v ${command}`]).status === 0;
@@ -109,6 +110,12 @@ describe('the command, as text', () => {
     expect(() => signInsCommand('park', '../../etc', [], 24)).toThrow();
     // A job in the keep list that is not an id is left out, never written into the command
     expect(signInsCommand('drop', JOB_A, [JOB_B, '$(reboot)', JOB_A], 24)).toContain(`KEEP="${JOB_B}"`);
+  });
+
+  it('CodeRabbit N7: the cleanup claim is believed for LONGER than one command may take, so no second command starts beside a running one', () => {
+    // A window shorter than a command would let the claim go stale while that command is still stopping, moving and starting the browser,
+    // and a cleanup or another sign-ins command would take the claim and run beside it. One pair of values, shared by every holder
+    expect(CLEAN_CLAIM_STALE_MS).toBeGreaterThan(MACHINE_COMMAND_MS);
   });
 
   it('holds no key, token or address of ours: only job ids and the machine’s own places', () => {
@@ -263,6 +270,61 @@ run('bringing a job’s browser back, and never into another job', () => {
     fakeProfile('job C left this behind');
     act('restore', JOB_A, [JOB_A], (script) => script.replace('  rm -rf "$PROFILE" "$CACHE" 2>/dev/null\n  if [ -e "$PROFILE" ] || [ -L "$PROFILE" ] || [ -e "$CACHE" ]; then say "0 reason=profile_not_removed"; exit 1; fi\n  had=0', '  had=0'));
     expect(existsSync(profile())).toBe(true);
+  });
+
+  it('CodeRabbit N5: root never empties a file the agent points the dirty mark at, whatever the action', () => {
+    const rootFile = join(root, 'sudoers');
+    writeFileSync(rootFile, 'root ALL=(ALL) ALL\n');
+    chownSync(rootFile, 0, 0);
+    chmodSync(rootFile, 0o600);
+    fakeProfile('job A cookies');
+    // The agent owns its own state folder, so it can put a link where the mark goes. Every action that marks is tried
+    for (const action of ['park', 'restore', 'clear'] as const) {
+      rmSync(join(home, '.universe', 'profile.dirty'), { recursive: true, force: true });
+      symlinkSync(rootFile, join(home, '.universe', 'profile.dirty'));
+      act(action, JOB_A, [JOB_A]);
+      expect(spawnSync('cat', [rootFile], { encoding: 'utf8' }).stdout).toBe('root ALL=(ALL) ALL\n');
+      expect(statSync(rootFile).uid).toBe(0);
+    }
+  });
+
+  it('planted bug: a mark written with a redirection (the old way) empties the file the link points at', () => {
+    const rootFile = join(root, 'sudoers');
+    writeFileSync(rootFile, 'root ALL=(ALL) ALL\n');
+    chownSync(rootFile, 0, 0);
+    fakeProfile('job A cookies');
+    symlinkSync(rootFile, join(home, '.universe', 'profile.dirty'));
+    act('park', JOB_A, [JOB_A], (script) =>
+      script.replace('  rm -rf "$STATE/profile.dirty" 2>/dev/null\n  mkdir "$STATE/profile.dirty" 2>/dev/null || return 1', '  : > "$STATE/profile.dirty" || return 1'),
+    );
+    expect(spawnSync('cat', [rootFile], { encoding: 'utf8' }).stdout).toBe('');
+  });
+
+  it('CodeRabbit N6: the browser not answering the session replay keeps the saved session and reports a failed restore, and the next try finishes it', () => {
+    fakeProfile('job A cookies');
+    // A park with a browser that answers, so there IS a session worth putting back
+    const saved = { cookies: [{ name: 'sid', value: 'signed-in-as-A', domain: 'example.test', path: '/' }], pages: ['http://example.test/visa-form'] };
+    act('park', JOB_A, [JOB_A]);
+    writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify(saved));
+    // No browser answers (nothing is started in these tests): the restore is reported failed, NOT as a restore that worked
+    const first = act('restore', JOB_A, [JOB_A]);
+    expect(first.out).toMatch(/restored=0 reason=no_answer/);
+    // The profile is back on the machine (that part worked), and the saved session is still there to be put back
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+    expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(true);
+    // The next try does not wipe the profile it already restored: it only replays. Still no browser, so it is still reported failed
+    const again = act('restore', JOB_A, [JOB_A]);
+    expect(again.out).toMatch(/restored=0 reason=no_answer/);
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+    expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(true);
+  });
+
+  it('planted bug: a restore that deletes the saved session whatever the replay answered loses it for good', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [{ name: 'sid', value: 'A', domain: 'example.test', path: '/' }], pages: [] }));
+    act('restore', JOB_A, [JOB_A], (script) => script.replace('  case "$loaded" in *answer=0*) say "0 reason=no_answer"; exit 1 ;; esac\n  rm -rf "$JOBDIR" "$JOBDIR.new"\n  if [ "$had" = "1" ]', '  rm -rf "$JOBDIR" "$JOBDIR.new"\n  if [ "$had" = "1" ]'));
+    expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(false);
   });
 
   it('hands the profile back without following a link inside it to a file the agent does not own', () => {
