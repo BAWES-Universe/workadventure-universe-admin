@@ -741,6 +741,46 @@ run('what a computer may ask of Orbit, in a real database', () => {
         expect(await hasOwnKeyCall(prisma, third.jobId)).toBe(true);
       });
 
+      it('CodeRabbit B4 (own key): while the job’s browser is being restored or its sign-ins are unproven (prepState set), a call on the person’s own key is refused and leaves no marker, no admission and no renewal of the hold, as a funded call is', async () => {
+        for (const state of ['recover', 'restoring']) {
+          const { jobId } = await running(`prep-${state}`);
+          const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+          await prisma.computerJob.update({ where: { id: jobId }, data: { prepState: state, ownerLeaseUntil: new Date(NOW.getTime() + 10_000) } });
+          expect(await authorizeModelCall({ token, callId: 'own-1', estimateMicros: 1, payer: 'own-key' }, NOW)).toEqual({ ok: false, reason: 'refused' });
+          expect(await hasOwnKeyCall(prisma, jobId)).toBe(false);
+          expect(await prisma.computerJobFault.count({ where: { jobId, callId: { startsWith: 'orbit:admit:' } } })).toBe(0);
+          expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).ownerLeaseUntil).toEqual(new Date(NOW.getTime() + 10_000));
+          // Once the state is cleared the same call is authorized
+          await prisma.computerJob.update({ where: { id: jobId }, data: { prepState: null } });
+          expect(await authorizeModelCall({ token, callId: 'own-1', estimateMicros: 1, payer: 'own-key' }, NOW)).toMatchObject({ ok: true, reservedMicros: null });
+          expect(await hasOwnKeyCall(prisma, jobId)).toBe(true);
+        }
+      });
+
+      it('CodeRabbit D11 (own key): the hold an own-key call renews runs 90 s from the time read AFTER the waits for the locks, not from the time the request began', async () => {
+        const { jobId } = await running('hal');
+        const { token } = (await mintJobToken(jobId, 'model')) as { token: string };
+        await prisma.computerJob.update({ where: { id: jobId }, data: { ownerLeaseUntil: new Date(Date.now() + 10_000) } });
+        const cutoff = holdCutoffLock(jobId, async () => undefined);
+        let call: Promise<unknown> = Promise.resolve();
+        const began = Date.now();
+        try {
+          await cutoff.ready;
+          call = observe(authorizeModelCall({ token, callId: 'own-1', estimateMicros: 1, payer: 'own-key' }));
+          expect(await waitingOnCutoffLock(jobId)).toBe(true);
+          await sleep(400);
+          cutoff.release();
+          await cutoff.done;
+          expect(await call).toMatchObject({ ok: true, reservedMicros: null });
+        } finally {
+          cutoff.release();
+          await Promise.allSettled([cutoff.done, call]);
+        }
+        const lease = (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).ownerLeaseUntil as Date;
+        // 90 s after the wait ended (at least began + the 400 ms waited), not 90 s after the request began
+        expect(lease.getTime()).toBeGreaterThanOrEqual(began + 400 + 90_000);
+      });
+
       // The key stays good through the fixture and the request's first look; only once the request is seen waiting at its lock does it run out (after the request began, and before the time it reads after the lock is let go)
       const expireWhileWaiting = async (jobId: string) => {
         await prisma.computerJobToken.updateMany({ where: { jobId }, data: { expiresAt: new Date(Date.now() + 150) } });

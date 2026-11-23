@@ -84,6 +84,7 @@ export async function authorizeModelCall(
           return still.ok && still.generation === verified.generation;
         },
         { turn: input.turn, run: input.run },
+        clock,
       );
       if (!kept) return { ok: false, reason: 'refused' };
     } catch (error) {
