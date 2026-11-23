@@ -208,7 +208,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
       // Every statement the admission sends, in order, with the transaction it was sent on (CodeRabbit on #1025, 27): the client handed to each transaction's callback is wrapped, and its own raw calls are logged under that
       // transaction's number and forwarded to the original method bound to that same client, so nothing is rebound to the root client. 
-      type Entry = { tx: number; what: string };
+      type Entry = { tx: number; what: string; values?: unknown[] };
       const log: Entry[] = [];
       let transactions = 0;
       const realTx = prisma.$transaction.bind(prisma) as unknown as (...args: unknown[]) => Promise<unknown>;
@@ -226,9 +226,22 @@ run('what a computer may ask of Orbit, in a real database', () => {
               const value = Reflect.get(target, property, target) as unknown;
               if ((property === '$executeRaw' || property === '$queryRaw') && typeof value === 'function') {
                 return (...raws: unknown[]) => {
-                  log.push({ tx: id, what: sql(raws[0]) });
+                  log.push({ tx: id, what: sql(raws[0]), values: raws.slice(1) });
                   return (value as (...inner: unknown[]) => unknown).apply(target, raws);
                 };
+              }
+              // The look at the key is a model call, not raw SQL: it is recorded in the same trace, so the order of the lock, the key and the stamp is read from one list
+              if (property === 'computerJobToken' && value && typeof value === 'object') {
+                return new Proxy(value as object, {
+                  get(delegate, method) {
+                    const inner = Reflect.get(delegate, method, delegate) as unknown;
+                    if (method !== 'findUnique' || typeof inner !== 'function') return inner;
+                    return (...asked: unknown[]) => {
+                      log.push({ tx: id, what: 'computerJobToken.findUnique' });
+                      return (inner as (...more: unknown[]) => unknown).apply(delegate, asked);
+                    };
+                  },
+                });
               }
               return value;
             },
@@ -254,8 +267,12 @@ run('what a computer may ask of Orbit, in a real database', () => {
       const stampAt = log.indexOf(stamp);
       const inThatTransaction = log.slice(0, stampAt).filter((entry) => entry.tx === stamp.tx);
       expect(inThatTransaction[0]).toEqual({ tx: stamp.tx, what: 'BEGIN' });
-      // ...which took the job's cutoff lock before it, on the same transaction (the lock a pause takes, so an admission and a pause are ordered exactly, never by two clocks)...
-      expect(inThatTransaction.some((entry) => entry.what.includes('pg_advisory_xact_lock'))).toBe(true);
+      // ...which took THIS job's cutoff lock before the look at the key and the stamp, on the same transaction (the lock a pause takes, so an admission and a pause are ordered exactly, never by two clocks)...
+      const lockAt = log.findIndex((entry) => entry.tx === stamp.tx && entry.what.includes('pg_advisory_xact_lock') && entry.values?.includes(cutoffLockKey(jobId)));
+      const keyAt = log.findIndex((entry) => entry.tx === stamp.tx && entry.what === 'computerJobToken.findUnique');
+      expect(lockAt).toBeGreaterThan(0);
+      expect(keyAt).toBeGreaterThan(lockAt);
+      expect(stampAt).toBeGreaterThan(keyAt);
       expect(inThatTransaction.some((entry) => entry.what === 'END')).toBe(false);
       // ...and the stamp is written before that transaction commits
       expect(log.findIndex((entry) => entry.tx === stamp.tx && entry.what === 'END')).toBeGreaterThan(stampAt);
@@ -1383,8 +1400,9 @@ run('what a computer may ask of Orbit, in a real database', () => {
             const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
             expect((await call(token, 'c1')).ok).toBe(true);
             const stretch = (await roomOf(jobId, 'c1'))?.jobStretch;
-            expect(stretch).not.toBeNull();
-            await prisma.computerJob.update({ where: { id: jobId }, data: { ownerLeaseUntil: new Date(NOW.getTime() + 10_000) } });
+            expect(typeof stretch).toBe('number');
+            // The job's current stretch moves on (the token and the held room are as they were): a replay that wrote the stretch again would write this one
+            await prisma.computerJob.update({ where: { id: jobId }, data: { pauses: (stretch as number) + 1, ownerLeaseUntil: new Date(NOW.getTime() + 10_000) } });
             expect((await call(token, 'c1')).ok).toBe(true);
             expect((await roomOf(jobId, 'c1'))?.jobStretch).toBe(stretch);
             expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(1);

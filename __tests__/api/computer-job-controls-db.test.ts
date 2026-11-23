@@ -523,14 +523,33 @@ run('computer job controls: pause, resume, do this next, cancel one job (piece 1
         },
         { timeout: 30_000, maxWait: 30_000 },
       );
-      await ready;
-      const booking = bookMissingPauses(minutes(7), 10);
-      // The write waits for the lock: nothing is in the books while the admission reads
-      await new Promise((resolve) => setTimeout(resolve, 600));
-      expect(await eventsOf(jobId)).toHaveLength(0);
-      release();
-      await holder;
-      expect(await booking).toBe(1);
+      // A holder that fails before it takes the lock ends the wait with its own error, not a timeout
+      const taken = Promise.race([ready, holder.then(() => Promise.reject(new Error('the holder ended before it took the lock')))]);
+      let booking: Promise<number> = Promise.resolve(0);
+      try {
+        await taken;
+        booking = bookMissingPauses(minutes(7), 10);
+        // Observed from the moment it starts: a rejection ends the poll below with its own error
+        let bookingFailure: { error: unknown } | null = null;
+        booking.catch((error) => {
+          bookingFailure = { error };
+        });
+        // The write waits for the lock: wait (bounded) until its transaction is blocked on the pool lock, then nothing is in the books while the admission reads
+        let waiting = false;
+        for (let tries = 0; tries < 250 && !waiting; tries += 1) {
+          if (bookingFailure) throw (bookingFailure as { error: unknown }).error;
+          waiting = (await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND ((classid::bigint << 32) | objid::bigint) = hashtext(${'meter:pool'})::bigint`)[0].n > 0;
+          if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(waiting).toBe(true);
+        expect(await eventsOf(jobId)).toHaveLength(0);
+        release();
+        await holder;
+        expect(await booking).toBe(1);
+      } finally {
+        release();
+        await Promise.allSettled([holder, booking]);
+      }
       expect(await eventsOf(jobId)).toHaveLength(1);
     });
   });
