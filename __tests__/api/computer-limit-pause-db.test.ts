@@ -11,6 +11,10 @@ import { randomUUID } from 'node:crypto';
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn(), getClient: jest.fn(() => undefined), flush: jest.fn(async () => true) }));
+jest.mock('@/lib/meter', () => {
+  const actual = jest.requireActual('@/lib/meter');
+  return { ...actual, recordMeterEvent: jest.fn((...args: unknown[]) => actual.recordMeterEvent(...args)) };
+});
 jest.mock('@/lib/computer-browser-profile', () => {
   const actual = jest.requireActual('@/lib/computer-browser-profile');
   return { ...actual, parkProfile: jest.fn(async () => ({ state: 'parked', reason: null })), restoreProfile: jest.fn(async () => ({ state: 'restored', reason: null })), dropProfile: jest.fn(async () => ({ state: 'dropped', reason: null })) };
@@ -20,7 +24,8 @@ import { prisma } from '@/lib/db';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
-import { memberAllowance } from '@/lib/meter-allowance';
+import { heldRoom, memberAllowance } from '@/lib/meter-allowance';
+import * as meterModule from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { claimJob, computerTimeInBooks, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { authorizeModelCall, callRoomKey, settleModelCall } from '@/lib/computer-calls';
@@ -440,6 +445,41 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       // 40,000 is left: not room for a 60,000 stretch, so it does not carry on
       expect(await carryOnPaused(minutes(6))).toBe(0);
       expect(await jobOf(jobId)).toMatchObject({ queuedFor: 'paused', pausedWhy: 'allowance' });
+    });
+
+    it('C6.4b (Opus P1-1) a limit pause whose write to the books FAILS: the carry-on still counts the stretch (no free room) until the sweep writes it, then counts it once; CONTROL: the write working', async () => {
+      for (const writes of ['failing', 'working'] as const) {
+        const { sara, jobId, epoch } = await running(`c6-p11-${writes}`);
+        await setUp({ memberAllowanceMicros: 1_000 });
+        const record = meterModule.recordMeterEvent as jest.Mock;
+        if (writes === 'failing') {
+          record.mockImplementation(async () => {
+            throw new Error('the books did not answer');
+          });
+        }
+        try {
+          expect(await renewJob(jobId, minutes(5), { epoch })).toEqual({ ok: false, reason: 'paused', why: 'allowance' });
+        } finally {
+          record.mockImplementation((...args: unknown[]) => jest.requireActual('@/lib/meter').recordMeterEvent(...args));
+        }
+        expect(await prisma.meterEvent.count({ where: { eventId: pauseEventId(jobId, 1) } })).toBe(writes === 'failing' ? 0 : 1);
+        // 80,000 for the month less the 30,000 stretch leaves 50,000: not room for a 60,000 stretch, so it waits (it would carry on if the stretch were counted nowhere)
+        await setUp({ memberAllowanceMicros: 80_000 });
+        expect((await memberAllowance(sara.id, minutes(5), await getMeterSettings()))!.usedMicros! + (await heldRoom(sara.id, minutes(5)))).toBe(5 * PER_MINUTE);
+        expect(await carryOnPaused(minutes(5))).toBe(0);
+        expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', reservationKey: null });
+        // The sweep writes the missing event: still counted once, still waiting
+        await sweepComputers(minutes(7));
+        expect(await prisma.meterEvent.count({ where: { eventId: pauseEventId(jobId, 1) } })).toBe(1);
+        expect((await memberAllowance(sara.id, minutes(7), await getMeterSettings()))!.usedMicros! + (await heldRoom(sara.id, minutes(7)))).toBe(5 * PER_MINUTE);
+        expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused' });
+        // More arrives: it carries on
+        await setUp({ memberAllowanceMicros: 100_000 });
+        expect(await carryOnPaused(minutes(8))).toBe(1);
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+        await stopJobFor(sara.brickId, sara.id, minutes(9));
+        await setUp();
+      }
     });
 
     it('C6.5 a fault of ours after the job carried on gives back only the faulty stretch: its time, its calls and the credit they drew; the stretch before the pause stays charged, calls and credit included', async () => {
