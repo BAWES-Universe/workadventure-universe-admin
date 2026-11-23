@@ -183,10 +183,15 @@ export interface RefundState {
 export async function refundStatesFor(jobIds: readonly string[]): Promise<Map<string, RefundState>> {
   const out = new Map<string, RefundState>();
   if (jobIds.length === 0) return out;
-  // One snapshot for both reads: a refund acknowledged between them would otherwise show a hold that has not been refunded next to an obligation that is no longer owed (neither returned nor pending)
+  // One snapshot for both reads: a refund acknowledged between them would otherwise show a hold that has not been refunded next to an obligation that is no longer owed (neither returned nor pending).
+  // The holds read are the SAME ones the obligations are written for (the job's last stretch, `HOLD_IN_LAST_STRETCH`): a job that was paused and carried on keeps what its earlier stretches drew
+  // (lib/computer-stretch), so those holds are neither returned nor pending here. A job that was never paused has all its holds in its last stretch.
   const [holds, obligations] = await prisma.$transaction(
     [
-      prisma.creditHold.findMany({ where: { jobKey: { in: [...jobIds] }, category: 'computers', state: 'settled' }, select: { jobKey: true, holdKey: true, customerMicros: true, refundedMicros: true } }),
+      prisma.$queryRaw<Array<{ jobKey: string; holdKey: string; customerMicros: bigint | null; refundedMicros: bigint }>>(Prisma.sql`
+        SELECT h."job_key" AS "jobKey", h."hold_key" AS "holdKey", h."customer_micros" AS "customerMicros", h."refunded_micros" AS "refundedMicros"
+        FROM "credit_holds" h JOIN "computer_jobs" j ON j."id" = h."job_key"
+        WHERE h."job_key" IN (${Prisma.join([...jobIds])}) AND h."category" = 'computers' AND h."state" = 'settled' AND ${HOLD_IN_LAST_STRETCH}`),
       prisma.computerRefundObligation.findMany({ where: { jobId: { in: [...jobIds] } }, select: { jobId: true, holdKey: true, amountMicros: true, state: true } }),
     ],
     { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
@@ -201,7 +206,6 @@ export async function refundStatesFor(jobIds: readonly string[]): Promise<Map<st
   };
   const obligated = new Map(obligations.map((one) => [one.holdKey, one] as const));
   for (const hold of holds) {
-    if (!hold.jobKey) continue;
     const state = entry(hold.jobKey);
     state.returnedMicros += Number(hold.refundedMicros);
     const ob = obligated.get(hold.holdKey);

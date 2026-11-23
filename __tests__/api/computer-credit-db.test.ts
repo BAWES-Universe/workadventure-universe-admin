@@ -25,7 +25,7 @@ import { createBrick } from '@/lib/brick-create';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { memberAllowance } from '@/lib/meter-allowance';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { finishJob, giveComputer, renewJob, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
+import { claimJob, finishJob, giveComputer, renewJob, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
 import { mintJobToken } from '@/lib/computer-token';
 import { recordFaults } from '@/lib/computer-faults';
 import { afterLateEvidence } from '@/lib/computer-giveback';
@@ -45,6 +45,7 @@ import { WorkerDied, afterWorkerDied } from '../helpers/worker-died';
 import { activityFor, closeReceipt, openReceipt, settleCheckingReceipts } from '@/lib/task-receipts';
 import { OUTCOME_WORDS } from '@/lib/task-receipt-words';
 import { reportsToTell } from '@/lib/computer-report';
+import { pauseJob, resumeJob } from '@/lib/computer-job-controls';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 // What happens to a failed job's calls is the release's own rule (`giveBackModelCalls`); the part that needs it runs where it is
@@ -1097,6 +1098,81 @@ run('credit for computers, on the real books', () => {
       // Said again later (a sweep, a read): the same receipt, the same words, no second refund
       expect(await itemFor(sara.id, 'Send the report')).toEqual([item]);
       expect(await prisma.creditRefund.count({ where: { holdId: { in: holds.map((hold) => hold.id) } } })).toBe(2);
+    });
+
+    it('a job that was paused, carried on and then failed on our side: what an EARLIER stretch drew is neither returned nor pending (it stays charged), only the last stretch is read, on the receipt and in the report', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      // Before the pause: one model call that drew 30,000 of credit (and the pause itself writes the stretch's time, which draws its own 12,000)
+      await call(token, 'a', 50_000, 30_000, at(1));
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Paused report', category: 'computer' }, NOW);
+      expect((await pauseJob(sara.brickId, sara.id, jobId, at(2))).ok).toBe(true);
+      expect((await resumeJob(sara.brickId, sara.id, jobId, at(4))).ok).toBe(true);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'running', pauses: 1 });
+      // After it: another call that drew 20,000, on the new key of the carried-on job
+      const claim = await claimJob(jobId, { run: 'carried-on', seen: (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).ownerEpoch }, at(4));
+      if (!claim.ok) throw new Error(`the claim was refused: ${claim.reason}`);
+      const minted = (await mintJobToken(jobId, 'model', at(4), undefined, { epoch: claim.epoch })) as { ok: true; token: string };
+      expect(minted.ok).toBe(true);
+      expect(await call(minted.token, 'b', 50_000, 20_000, at(5))).toMatchObject({ ok: true });
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(async () => {
+        throw new Error('books unreachable');
+      });
+      const mute = quiet();
+      try {
+        await failedOnOurSide(jobId, at(10));
+        await closeReceipt({ botId: sara.brickId, taskKey: jobId, personId: sara.id, state: 'done' }, at(11));
+        await settleCheckingReceipts(50, at(30));
+      } finally {
+        mute.mockRestore();
+      }
+      // Only the last stretch's draw is owed: the earlier call has no obligation and is not read as owed
+      const holds = await prisma.creditHold.findMany({ where: { jobKey: jobId, state: 'settled' } });
+      expect(holds.map((hold) => Number(hold.customerMicros)).sort((x, y) => x - y)).toEqual([12_000, 20_000, 30_000]);
+      expect((await prisma.computerRefundObligation.findMany({ where: { jobId } })).map((one) => [one.state, Number(one.amountMicros)])).toEqual([['owed', 20_000]]);
+      expect((await refundStatesFor([jobId])).get(jobId)).toEqual({ returnedMicros: 0, pendingMicros: 20_000 });
+      const later = at(60 * 24);
+      const failed = async () => (await reportsToTell(50, later)).find((report) => report.jobId === jobId);
+      expect(await failed()).toMatchObject({ kind: 'failed', givenBack: true, refundPendingMicros: 20_000 });
+      const [pending] = await itemFor(sara.id, 'Paused report');
+      expect(pending).toMatchObject({ outcome: 'refund_pending', refundPendingMicros: 20_000 });
+      // The books recover and acknowledge: nothing is pending (NOT the earlier 30,000), and only the last stretch came back
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(actualRefund());
+      await sweepComputers(at(600));
+      expect(await prisma.computerRefundObligation.count({ where: { jobId, state: 'acknowledged' } })).toBe(1);
+      expect((await refundStatesFor([jobId])).get(jobId)).toEqual({ returnedMicros: 20_000, pendingMicros: 0 });
+      const after = await failed();
+      expect(after).toMatchObject({ kind: 'failed', givenBack: true });
+      expect(after).not.toHaveProperty('refundPendingMicros');
+      const [done] = await itemFor(sara.id, 'Paused report');
+      expect(done).not.toHaveProperty('refundPendingMicros');
+      expect(done.outcome).not.toBe('refund_pending');
+      // The earlier stretch stays charged: its call (30,000) and its time (12,000) are still drawn from the 1,000,000 gift, and neither was given back
+      expect((await computerCredit(prisma as never, sara.id, at(60))).availableMicros).toBe(958_000);
+      expect((await prisma.creditHold.findMany({ where: { jobKey: jobId } })).map((hold) => [Number(hold.customerMicros), Number(hold.refundedMicros)]).sort((x, y) => x[0] - y[0])).toEqual([[12_000, 0], [20_000, 20_000], [30_000, 0]]);
+    });
+
+    it('control: a job that was never paused reads exactly as before (every hold), and a last-stretch obligation not yet acknowledged is still pending', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      await call(token, 'a', 50_000, 30_000);
+      await call(token, 'b', 50_000, 20_000);
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(async () => {
+        throw new Error('books unreachable');
+      });
+      const mute = quiet();
+      try {
+        await failedOnOurSide(jobId, at(10));
+      } finally {
+        mute.mockRestore();
+      }
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ pauses: 0 });
+      expect((await refundStatesFor([jobId])).get(jobId)).toEqual({ returnedMicros: 0, pendingMicros: 50_000 });
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(actualRefund());
+      await sweepComputers(at(600));
+      expect((await refundStatesFor([jobId])).get(jobId)).toEqual({ returnedMicros: 50_000, pendingMicros: 0 });
     });
 
     it('reads what a job’s holds returned and what its obligations still owe from ONE snapshot (repeatable read), so a refund acknowledged between the two reads is never half seen', async () => {
