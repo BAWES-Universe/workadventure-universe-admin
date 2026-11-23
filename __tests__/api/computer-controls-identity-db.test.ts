@@ -231,6 +231,49 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       expect(await eventsOf(jobId)).toHaveLength(1);
     });
 
+    it('a copy of a Pause that reaches the job’s lock after the first was applied AND the job resumed pauses nothing (the row is claimed before the effect)', async () => {
+      const { sara, jobId } = await running('f4-pause-late-copy');
+      const p = command();
+      // The copy has looked (nothing kept yet) and waits for the job's lock; meanwhile the first copy pauses and the person resumes
+      beforeLockOf(jobId, async () => {
+        expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(5), p)).toMatchObject({ ok: true });
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(6), command())).toMatchObject({ ok: true });
+      });
+      expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(5), p)).toMatchObject({ ok: true });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', pauses: 1 });
+      expect(await pausesOf(jobId)).toBe(1);
+      expect(await eventsOf(jobId)).toHaveLength(1);
+    });
+
+    it('a Cancel refused (`over`) answers `over` again under the same command', async () => {
+      const { sara } = await running('f4-cancel-over');
+      const taxi = await another(sara, 'Taxi', minutes(1));
+      await cancelJob(sara.brickId, sara.id, taxi, minutes(2), command());
+      const c = command();
+      expect(await cancelJob(sara.brickId, sara.id, taxi, minutes(3), c)).toEqual({ ok: false, reason: 'over' });
+      expect(await cancelJob(sara.brickId, sara.id, taxi, minutes(4), c)).toEqual({ ok: false, reason: 'over' });
+      expect(await commandOf(c.id)).toMatchObject({ outcome: { ok: false, reason: 'over' } });
+    });
+
+    it('a "do this first" refused AFTER it ranked the job (a pause refused under its lock) is undone whole: the rank as it was, nothing paused, the refusal kept', async () => {
+      const { sara, jobId, epoch } = await running('f4-first-late-refusal');
+      const taxi = await another(sara, 'Taxi', minutes(1));
+      const rankBefore = (await jobOf(taxi)).queueRank;
+      // The pause's own look at the running job (its second lock, after the rank was written) finds the person on the screen
+      let calls = 0;
+      lockJob.mockImplementation((async (tx: Parameters<typeof owner.lockJob>[0], id: string) => {
+        const row = await realLockJob(tx, id);
+        if (id === jobId && ++calls === 2 && row) return { ...row, control: 'person' };
+        return row;
+      }) as typeof owner.lockJob);
+      const f = command();
+      expect(await moveJobFirst(sara.brickId, sara.id, taxi, { pauseRunning: true }, minutes(3), f)).toEqual({ ok: false, reason: 'taken_over' });
+      expect(await jobOf(taxi)).toMatchObject({ status: 'queued', queueRank: rankBefore });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', pauses: 0, ownerEpoch: epoch, secondsBilled: 0 });
+      expect(await pausesOf(jobId)).toBe(0);
+      expect(await commandOf(f.id)).toMatchObject({ outcome: { ok: false, reason: 'taken_over' } });
+    });
+
     it('REPRO 4c: a delayed Resume replayed after the job was paused again leaves it paused', async () => {
       const { sara, jobId } = await running('f4-resume');
       await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
