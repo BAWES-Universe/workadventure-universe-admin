@@ -189,7 +189,10 @@ mark() {
   chown -h "$NODE_USER" "$STATE/profile.dirty" 2>/dev/null
   [ -d "$STATE/profile.dirty" ] && [ ! -L "$STATE/profile.dirty" ]
 }
-unmark() { rm -rf "$STATE/profile.dirty" 2>/dev/null; }
+unmark() {
+  rm -rf "$STATE/profile.dirty" 2>/dev/null
+  [ ! -e "$STATE/profile.dirty" ] && [ ! -L "$STATE/profile.dirty" ]
+}
 
 stop_browser() {
   pkill -x websockify 2>/dev/null
@@ -351,25 +354,45 @@ if cookies:
                 put += 1
             except Exception:
                 complete = False
-# A retry after a partial replay opens only the pages that are not open yet (a page that already came back is never opened twice)
-try:
-    already = set(str(item.get("url", "")) for item in http("GET", "/json/list") or [] if item.get("type") == "page")
-except Exception:
-    already = set()
+# A retry after a partial replay opens only the pages that are not open yet (a page that already came back is never opened twice).
+# Tabs are counted PER ADDRESS: two saved tabs on one address are two tabs to bring back, and one already open satisfies only one of them.
+def open_tabs():
+    return [str(item.get("url", "")) for item in http("GET", "/json/list") or [] if item.get("type") == "page"]
+
+present = {}
+if pages:
+    try:
+        for tab in open_tabs():
+            present[tab] = present.get(tab, 0) + 1
+    except Exception:
+        # A list that cannot be read is NOT an empty one: opening every page again would double the tabs a partial replay already brought back.
+        # The replay is said to be incomplete and the saved session is kept (the retry lists again)
+        print("cookies=%d pages=0 answer=0" % put)
+        sys.exit(0)
 opened = 0
 for url in pages:
-    if url in already:
+    if present.get(url, 0) > 0:
+        present[url] -= 1
         opened += 1
         continue
     try:
         http("PUT", "/json/new?" + urllib.parse.quote(url, safe=""))
         opened += 1
-        already.add(url)
     except Exception:
         complete = False
 # Only a replay that put back EVERY cookie and page is a finished one: the saved session is kept until then
 print("cookies=%d pages=%d answer=%d" % (put, opened, 1 if complete else 0))
 PYEND
+}
+
+# Puts the saved session back (when there is one) into "loaded". Only a replay that EXITED CLEANLY and said answer=1 is an acknowledged one: a saved
+# session the replay could not even read (it dies before it prints anything) or one that is not whole is never taken for one that worked, because the
+# saved session is the only copy. No saved session is a restore with nothing to replay (answered separately: nothing is held back).
+replay() {
+  loaded=""
+  [ -f "$JOBDIR/session.json" ] || return 0
+  loaded="$(devtools load "$JOBDIR/session.json" 2>/dev/null)" || return 1
+  [ "$(echo "$loaded" | tail -n 1 | grep -c '^cookies=[0-9]* pages=[0-9]* answer=1$')" = "1" ]
 }
 
 counts() { echo "$1" | grep -o 'cookies=[0-9]* pages=[0-9]*' | tail -1; }
@@ -405,17 +428,26 @@ restore)
   # A try before this one already moved this job's profile into place and the browser never answered the session replay (the "moved" note). The profile
   # on the machine is this job's OWN, so nothing is wiped and nothing is moved: only the replay that failed is done again. Wiping here would
   # throw away the very profile the earlier try restored
-  # A try that stopped between the move and its note: the move began ("moving") and the parked profile is no longer in the park folder, so it is already in place and is this job's own
+  # A try that stopped between the move and its note: the move began ("moving") and the parked profile is no longer in the park folder, so it is already in place and is this job's own.
+  # Its dirty mark may still be there (a try cut off after the move): it is cleared FIRST and under the lock, so the image's start-up (which removes a profile that is marked) cannot take it
   if [ -f "$JOBDIR/moving" ] && [ ! -f "$JOBDIR/moved" ] && [ ! -e "$JOBDIR/profile" ] && [ ! -L "$JOBDIR/profile" ] && [ -d "$PROFILE" ] && [ ! -L "$PROFILE" ]; then
+    lock
+    unmark || { say "0 reason=mark"; exit 1; }
     chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }
-    : > "$JOBDIR/moved" 2>/dev/null
+    # "moving" stays until "moved" is written: without both there is no record that the profile on the machine is this job's own
+    # printf, not ":", because a failed redirection on a special builtin ends the shell without a word
+    printf '' > "$JOBDIR/moved" || { say "0 reason=move"; exit 1; }
     rm -f "$JOBDIR/moving"
+    unlock
   fi
   if [ -f "$JOBDIR/moved" ]; then
+    # The live profile is this job's own. A mark left on it (by a try that was cut off) would have the start-up remove it before the browser runs:
+    # it is cleared under the lock, and the browser is never started while it is there
+    lock
+    unmark || { say "0 reason=mark"; exit 1; }
+    unlock
     start_browser
-    loaded=""
-    if [ -f "$JOBDIR/session.json" ]; then loaded="$(devtools load "$JOBDIR/session.json" 2>/dev/null)"; fi
-    case "$loaded" in *answer=0*) say "0 reason=no_answer"; exit 1 ;; esac
+    replay || { say "0 reason=no_answer"; exit 1; }
     rm -rf "$JOBDIR" "$JOBDIR.new"
     say "1 $(counts "$loaded")"
     exit 0
@@ -429,22 +461,24 @@ restore)
   if [ -d "$JOBDIR/profile" ] && [ ! -L "$JOBDIR/profile" ]; then
     mkdir -p "$(dirname "$PROFILE")" && chown -h "$NODE_USER": "$(dirname "$PROFILE")" 2>/dev/null
     # The move is noted BEFORE it is made: a try that stops anywhere after this knows whether the profile left the park folder (see above) and never wipes the one that did
-    : > "$JOBDIR/moving" || { say "0 reason=move"; exit 1; }
-    mv "$JOBDIR/profile" "$PROFILE" && chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }
+    printf '' > "$JOBDIR/moving" || { say "0 reason=move"; exit 1; }
+    mv "$JOBDIR/profile" "$PROFILE" || { say "0 reason=move"; exit 1; }
+    # In place from here: the mark is cleared under the lock BEFORE any exit that lets the lock go, so the start-up never removes the moved profile
+    unmark || { say "0 reason=mark"; exit 1; }
+    chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }
     had=1
   fi
   [ -f "$JOBDIR/session.json" ] && had=1
-  # From here the live profile IS this job's own: a try that stops after this must not wipe it (the folder is root's alone, so this note is root's alone)
-  [ -d "$JOBDIR" ] && : > "$JOBDIR/moved" 2>/dev/null
+  # From here the live profile IS this job's own: a try that stops after this must not wipe it (the folder is root's alone, so this note is root's alone).
+  # "moving" is removed only once "moved" is written: if the note cannot be written the record of the move stays
+  if [ -d "$JOBDIR" ]; then printf '' > "$JOBDIR/moved" || { say "0 reason=move"; exit 1; }; fi
   rm -f "$JOBDIR/moving"
-  unmark
+  unmark || { say "0 reason=mark"; exit 1; }
   unlock
   start_browser
-  loaded=""
-  if [ -f "$JOBDIR/session.json" ]; then loaded="$(devtools load "$JOBDIR/session.json" 2>/dev/null)"; fi
-  # The browser did not answer: the saved session is the ONLY copy of those cookies and open pages, so it is kept and the restore is reported
-  # failed rather than said to have worked. Orbit leaves the job in recover and asks again, and the try above finishes the replay alone
-  case "$loaded" in *answer=0*) say "0 reason=no_answer"; exit 1 ;; esac
+  # The browser did not answer, or the replay was not whole: the saved session is the ONLY copy of those cookies and open pages, so it is kept and the
+  # restore is reported failed rather than said to have worked. Orbit leaves the job in recover and asks again, and the try above finishes the replay alone
+  replay || { say "0 reason=no_answer"; exit 1; }
   rm -rf "$JOBDIR" "$JOBDIR.new"
   if [ "$had" = "1" ]; then say "1 $(counts "$loaded")"; else say "0 reason=none"; fi
   ;;
