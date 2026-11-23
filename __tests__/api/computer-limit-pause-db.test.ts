@@ -945,6 +945,43 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'working', wakeEpoch: 1 + 2 });
     });
 
+    it('(d) the replaced start that finds the machine `working` after its own readiness waits out a browser cleanup that holds it before it returns', async () => {
+      const sara = await sleepingBrick('b1-clean-replaced');
+      const a = gate();
+      let readies = 0;
+      const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+        if (++readies === 1) await a.opened;
+      });
+      let releasedAt = 0;
+      let xDoneAt = 0;
+      try {
+        const x = readerOf(sara, 'X', minutes(10)).then((result) => {
+          xDoneAt = Date.now();
+          return result;
+        });
+        await until(async () => readies === 1);
+        await ageWake(sara.brickId);
+        // The replacement makes the machine working while the first start is still waiting for its readiness
+        const ry = await readerOf(sara, 'Y', minutes(10));
+        expect(ry.ok && ry.job.status).toBe('running');
+        expect((await machineOf(sara.brickId)).machine).toBe('working');
+        // A cleanup of the browser holds the machine as the first start's readiness comes in; it is let go a little later
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NOW() WHERE "bot_id" = ${sara.brickId}`;
+        setTimeout(() => {
+          releasedAt = Date.now();
+          void prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NULL WHERE "bot_id" = ${sara.brickId}`.then(() => undefined);
+        }, 1500);
+        a.open();
+        const rx = await x;
+        expect(rx.ok && rx.job.status).toBe('running');
+      } finally {
+        a.open();
+        spy.mockRestore();
+      }
+      expect(releasedAt).toBeGreaterThan(0);
+      expect(xDoneAt).toBeGreaterThanOrEqual(releasedAt);
+    });
+
     describe('the wake is a heartbeat, not a length of time', () => {
       afterEach(() => setWakeTimingForTests(null));
 
@@ -1001,6 +1038,30 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
           spy.mockRestore();
         }
         expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'working' });
+      });
+
+      it('a wake call that THROWS leaves the machine waking with no stop, and its beat is let go with it: the next start takes the dead wake over after the stale time and runs', async () => {
+        setWakeTimingForTests({ beatMs: 100, staleMs: 700 });
+        const sara = await sleepingBrick('b1-wakefail');
+        // Another job is on the machine (so a failed start does not rewrite its state), and the machine is `waking` with a wake that has no start behind it
+        const other = await readerOf(sara, 'R', minutes(9));
+        expect(other.ok && other.job.status).toBe('running');
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'waking' } });
+        await ageWake(sara.brickId);
+        const wakes = wakesOf();
+        fake.failNext.wake = true;
+        const first = await readerOf(sara, 'X', minutes(10));
+        expect(first).toEqual({ ok: false, reason: 'broken_start' });
+        const epochAfterFail = (await machineOf(sara.brickId)).wakeEpoch;
+        expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'waking' });
+        const started = Date.now();
+        // A beat that outlived the failed wake would keep it fresh for ever, and this start would wait on it for ever
+        const second = await Promise.race([readerOf(sara, 'Y', minutes(10)), sleep(5000).then(() => 'still waiting' as const)]);
+        expect(second).not.toBe('still waiting');
+        expect(second !== 'still waiting' && second.ok && second.job.status).toBe('running');
+        expect(Date.now() - started).toBeGreaterThanOrEqual(300);
+        expect(wakesOf()).toBeGreaterThanOrEqual(wakes + 1);
+        expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'working', wakeEpoch: epochAfterFail + 1 });
       });
 
       it('a wake whose start is gone (no beat for the stale time) is taken over by the waiting start, which wakes it itself and runs', async () => {
