@@ -18,7 +18,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
-import { attemptRefundObligation, recordRefundObligationsForBrick, refundOverview, refundStatesFor, retryRefundObligation, sweepRefundObligations } from '@/lib/computer-refunds';
+import { attemptRefundObligation, recordRefundObligationsForBrick, refundKeyOf, refundOverview, refundStatesFor, retryRefundObligation, sweepRefundObligations } from '@/lib/computer-refunds';
 import { giveBackReadiness } from '@/lib/computer-fault-ops';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
@@ -1155,6 +1155,51 @@ run('credit for computers, on the real books', () => {
       // The earlier stretch stays charged: its call (30,000) and its time (12,000) are still drawn from the 1,000,000 gift, and neither was given back
       expect((await computerCredit(prisma as never, sara.id, at(60))).availableMicros).toBe(958_000);
       expect((await prisma.creditHold.findMany({ where: { jobKey: jobId } })).map((hold) => [Number(hold.customerMicros), Number(hold.refundedMicros)]).sort((x, y) => x[0] - y[0])).toEqual([[12_000, 0], [20_000, 20_000], [30_000, 0]]);
+    });
+
+    it('an obligation ALREADY WRITTEN for an earlier stretch stays owed: the fix filters the hold-only branch, never a refund the books were already told to make (GPT round 6, finding 10)', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      // Stretch 0: a call that drew 30,000
+      await call(token, 'a', 50_000, 30_000, at(1));
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Paused report', category: 'computer' }, NOW);
+      expect((await pauseJob(sara.brickId, sara.id, jobId, at(2))).ok).toBe(true);
+      expect((await resumeJob(sara.brickId, sara.id, jobId, at(4))).ok).toBe(true);
+      // Stretch 1: a call that drew 20,000
+      const claim = await claimJob(jobId, { run: 'carried-on', seen: (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).ownerEpoch }, at(4));
+      if (!claim.ok) throw new Error(`the claim was refused: ${claim.reason}`);
+      const minted = (await mintJobToken(jobId, 'model', at(4), undefined, { epoch: claim.epoch })) as { ok: true; token: string };
+      expect(await call(minted.token, 'b', 50_000, 20_000, at(5))).toMatchObject({ ok: true });
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(async () => {
+        throw new Error('books unreachable');
+      });
+      const mute = quiet();
+      try {
+        await failedOnOurSide(jobId, at(10));
+        await closeReceipt({ botId: sara.brickId, taskKey: jobId, personId: sara.id, state: 'done' }, at(11));
+        await settleCheckingReceipts(50, at(30));
+      } finally {
+        mute.mockRestore();
+      }
+      // An obligation an OLDER build wrote for the earlier stretch's hold, before the stretch rule existed: the books were told to give that 30,000 back, so it is a real debt to the person
+      const early = await prisma.creditHold.findFirstOrThrow({ where: { jobKey: jobId, customerMicros: BigInt(30_000) }, select: { holdKey: true } });
+      await prisma.computerRefundObligation.create({ data: { jobId, personId: sara.id, holdKey: early.holdKey, refundKey: refundKeyOf(early.holdKey), amountMicros: BigInt(30_000) } });
+
+      // Both are owed: the hold-only branch is what the stretch rule filters, never an obligation that was written
+      expect((await prisma.computerRefundObligation.findMany({ where: { jobId }, orderBy: { amountMicros: 'asc' } })).map((one) => [one.state, Number(one.amountMicros)])).toEqual([['owed', 20_000], ['owed', 30_000]]);
+      expect((await refundStatesFor([jobId])).get(jobId)).toEqual({ returnedMicros: 0, pendingMicros: 50_000 });
+      // ...and the person is shown the whole 50,000 as still coming back, on the receipt and in the report, never only the last stretch's 20,000
+      const later = at(60 * 24);
+      expect(await (async () => (await reportsToTell(50, later)).find((report) => report.jobId === jobId))()).toMatchObject({ kind: 'failed', givenBack: true, refundPendingMicros: 50_000 });
+      const [pending] = await itemFor(sara.id, 'Paused report');
+      expect(pending).toMatchObject({ outcome: 'refund_pending', refundPendingMicros: 50_000 });
+
+      // The books recover: BOTH are acknowledged and nothing is left pending
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(actualRefund());
+      await sweepComputers(at(600));
+      expect(await prisma.computerRefundObligation.count({ where: { jobId, state: 'acknowledged' } })).toBe(2);
+      expect((await refundStatesFor([jobId])).get(jobId)).toEqual({ returnedMicros: 50_000, pendingMicros: 0 });
     });
 
     it('N10: a call admitted BEFORE a pause belongs to the earlier stretch even when its own time is later than the pause’s (the pause took its time before it got the lock): only the call admitted after the resume is given back', async () => {

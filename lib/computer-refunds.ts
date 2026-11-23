@@ -211,8 +211,15 @@ export async function refundStatesFor(jobIds: readonly string[]): Promise<Map<st
     const ob = obligated.get(hold.holdKey);
     state.pendingMicros += ob ? (ob.state === 'owed' ? Number(ob.amountMicros) : 0) : Math.max(0, Number(hold.customerMicros ?? 0) - Number(hold.refundedMicros));
   }
+  // An obligation with no hold read above: its hold is gone (the Brick was purged) or it is of an earlier stretch (an older build wrote it before the stretch rule). Either way it is a real
+  // debt the books were told to make good, so it is said whole: still owed while it is `owed`, and counted as returned once the books acknowledge it, so the person is never shown less than
+  // came back (GPT round 6, finding 10: the stretch rule filters the hold-only branch, never an obligation that was written).
   const seen = new Set(holds.map((hold) => hold.holdKey));
-  for (const one of obligations) if (!seen.has(one.holdKey) && one.state === 'owed') entry(one.jobId).pendingMicros += Number(one.amountMicros);
+  for (const one of obligations) {
+    if (seen.has(one.holdKey)) continue;
+    if (one.state === 'owed') entry(one.jobId).pendingMicros += Number(one.amountMicros);
+    else entry(one.jobId).returnedMicros += Number(one.amountMicros);
+  }
   return out;
 }
 
