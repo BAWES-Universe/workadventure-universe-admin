@@ -105,10 +105,10 @@ export async function seenCommand(command: Command, row: CommandRow): Promise<Ex
 /** A refusal found before the control's own transaction (the job is over, or not in the state the tap was for): kept as the command's outcome, so the same command always answers the same. */
 export const refuseUnder = (command: Command, row: CommandRow, reason: string) => claimCommand(command, row, { ok: false, reason });
 
-/** The command id a request carries: null when it has none, `invalid` when it is not a uuid. */
+/** The command id a request carries: null when the header is absent (the 0.4.3 game's Stop), `invalid` when it is there and is not a uuid, an empty one included: a panel that sent it empty must never be answered as an unkeyed request (CodeRabbit on #1025, 46). */
 export function commandOf(request: Request): Command | null | 'invalid' {
   const raw = request.headers.get(COMMAND_HEADER);
-  if (raw === null || raw === '') return null;
+  if (raw === null) return null;
   const parsed = commandIdSchema.safeParse(raw.trim());
   return parsed.success ? { id: parsed.data.toLowerCase() } : 'invalid';
 }

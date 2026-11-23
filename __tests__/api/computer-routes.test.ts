@@ -166,6 +166,11 @@ describe('the owner’s calls', () => {
     expect(invalid.status).toBe(400);
     expect(await invalid.json()).toMatchObject({ reason: 'command_missing' });
     expect(lib.stopAll).not.toHaveBeenCalled();
+    // A header that is there and EMPTY is no id either (CodeRabbit on #1025, 46): never an unkeyed Stop
+    const empty = await stop(call('/x', { headers: { 'x-computer-command': '' } }), params);
+    expect(empty.status).toBe(400);
+    expect(await empty.json()).toMatchObject({ reason: 'command_missing' });
+    expect(lib.stopAll).not.toHaveBeenCalled();
     lib.stopAll.mockResolvedValue({ ok: false, reason: 'command_reused' });
     const reused = await stop(call('/x', { headers: { 'x-computer-command': cmd } }), params);
     expect(reused.status).toBe(400);
