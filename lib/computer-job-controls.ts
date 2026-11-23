@@ -327,13 +327,13 @@ export async function afterPause(jobId: string, decided: PauseDecision, now: Dat
   // Where its browser went so far is kept before anything can clear it
   await controlInternals.recordJobVisits({ id: jobId, botId, startedAt: (await prisma.computerJobPause.findUnique({ where: { jobId_n: { jobId, n } }, select: { startedAt: true } }))?.startedAt ?? null }, now);
   // Its sign-ins are put away for it alone, before anything else can run on the machine or it rests
-  const parked = await parkProfile(botId, jobId, now).catch((error) => {
+  const parked = await parkProfile(botId, jobId, now, n).catch((error) => {
     console.error('[Computer] Could not put away a paused job’s browser:', error instanceof Error ? error.message : 'unknown');
     return null;
   });
   // The mark the pause left on the machine is settled here: put away, or the live browser emptied at once. Only if neither works does the machine go on waiting, and then nothing else starts
   // on it until the sweep settles the park — a paused job's sign-ins are never handed to the next job (GPT round 6, finding 7)
-  await settlePark(botId, jobId, parked, now).catch((error) => console.error('[Computer] Could not settle a paused job’s browser:', error instanceof Error ? error.message : 'unknown'));
+  await settlePark(botId, jobId, parked, now, n).catch((error) => console.error('[Computer] Could not settle a paused job’s browser:', error instanceof Error ? error.message : 'unknown'));
   // A screen taken back: the computer goes back to Brick's once no job is left in the person's hands, exactly as when a job the person held ends (the screen link ends with it)
   if (decided.heldScreen) await releaseIfUnheld(botId).catch((error) => console.error('[Computer] Could not take the screen back at a pause:', error instanceof Error ? error.message : 'unknown'));
   if (decided.turnHold) await settleTurnHold(botId);
