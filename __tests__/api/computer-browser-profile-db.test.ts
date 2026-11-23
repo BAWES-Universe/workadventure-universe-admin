@@ -168,11 +168,19 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       const visa = await job(sara, { pausedMinutesAgo: 0 });
       const cleanup = new Date();
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { cleanClaimedAt: cleanup } });
-      // (a Prisma query runs only once it is awaited or then-ed)
-      setTimeout(() => prisma.brickComputer.updateMany({ where: { botId: sara.brickId, cleanClaimedAt: cleanup }, data: { cleanClaimedAt: null } }).then(() => undefined), 600);
-      const started = Date.now();
-      expect((await parkProfile(sara.brickId, visa.id, NOW)).state).toBe('parked');
-      expect(Date.now() - started).toBeGreaterThanOrEqual(500);
+      const release = () => prisma.brickComputer.updateMany({ where: { botId: sara.brickId, cleanClaimedAt: cleanup }, data: { cleanClaimedAt: null } });
+      let parking: ReturnType<typeof parkProfile> | undefined;
+      try {
+        parking = parkProfile(sara.brickId, visa.id, NOW);
+        // Held, the claim keeps every command off the machine: nothing is sent while it is held, however long the park has been looking (CodeRabbit on #1025)
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        expect(sent).toEqual([]);
+      } finally {
+        // Released in every case (a failed check above included), and observed here, so a failure of the release is this test's and never an unhandled rejection
+        await release();
+      }
+      expect((await parking).state).toBe('parked');
+      expect(sent.map((one) => one.action)).toEqual(['park']);
     });
 
     it('CodeRabbit on #1025: a machine that had nothing to put away is not "kept", the machine waits for nothing, and the pause says the sign-ins are not kept', async () => {

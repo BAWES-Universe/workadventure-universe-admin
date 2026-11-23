@@ -241,7 +241,9 @@ run('a start whose answer the game never confirmed, in a real database', () => {
         (error) => Promise.reject(error),
       );
       settled.catch(() => undefined);
-      expect(await blockedOn(`computer:giveback:${sara.id}`)).toBe(true);
+      // The waiter's own failure is this test's failure at once (not a poll that runs out), and a waiter that finished without ever blocking is reported as that
+      const reached = await Promise.race([blockedOn(`computer:giveback:${sara.id}`), settled.then(() => 'finished-early' as const)]);
+      expect(reached).toBe(true);
       release();
       await holder;
       await check(await waiting);

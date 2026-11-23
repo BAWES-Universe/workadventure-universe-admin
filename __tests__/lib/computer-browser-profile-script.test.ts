@@ -21,8 +21,17 @@ const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 const AGENT = 'nobody';
 const agentUid = Number(spawnSync('id', ['-u', AGENT], { encoding: 'utf8' }).stdout.trim());
 const usable = isRoot && have('python3') && have('setpriv') && Number.isFinite(agentUid) && !!CHROME;
+// The browser tests also need Playwright to drive the page: the file tests above stay on where it is missing (CodeRabbit on #1025)
+const havePlaywright = ((): boolean => {
+  try {
+    require.resolve('playwright');
+    return true;
+  } catch {
+    return false;
+  }
+})();
 const run = usable ? describe : describe.skip;
-const runWithBrowser = usable ? describe : describe.skip;
+const runWithBrowser = usable && havePlaywright ? describe : describe.skip;
 
 const JOB_A = '11111111-1111-4111-8111-111111111111';
 const JOB_B = '22222222-2222-4222-8222-222222222222';
@@ -68,9 +77,12 @@ function fakeProfile(secret: string): void {
   spawnSync('chown', ['-R', `${AGENT}:`, join(home, '.config'), join(home, '.cache')]);
 }
 
+/** Stops only the browsers THIS suite started (the ones on its own debugging port and profile folder), never another Chromium on the machine (CodeRabbit on #1025). */
 function killBrowsers(): void {
-  spawnSync('pkill', ['-x', 'chrome']);
-  for (let i = 0; i < 50 && spawnSync('pgrep', ['-x', 'chrome']).status === 0; i++) spawnSync('sleep', ['0.1']);
+  if (!port || !home) return;
+  const mine = `--remote-debugging-port=${port} `;
+  spawnSync('pkill', ['-f', '--', `chrome.*${mine.trim()}`]);
+  for (let i = 0; i < 50 && spawnSync('pgrep', ['-f', '--', `chrome.*${mine.trim()}`]).status === 0; i++) spawnSync('sleep', ['0.1']);
 }
 
 beforeEach(() => {
@@ -354,8 +366,11 @@ run('bringing a job’s browser back, and never into another job', () => {
     writeFileSync(rootFile, 'root');
     fakeProfile('job A cookies');
     symlinkSync(rootFile, join(profile(), 'Default', 'trap'));
-    act('park', JOB_A, [JOB_A]);
-    act('restore', JOB_A, [JOB_A]);
+    // The park and the restore both really happened (a pair of commands that failed would leave the root file root's as well)
+    expect(act('park', JOB_A, [JOB_A]).out).toMatch(/parked=1/);
+    expect(existsSync(join(parked(JOB_A), 'profile', 'Default', 'Cookies'))).toBe(true);
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
     expect(statSync(rootFile).uid).toBe(0);
   });
 });
@@ -432,7 +447,9 @@ runWithBrowser('a real browser’s sign-ins and open pages', () => {
   });
 
   beforeEach(() => {
-    places.start = `nohup setsid "${CHROME}" --headless=new --no-sandbox --disable-gpu --no-first-run --user-data-dir="$PROFILE" --remote-debugging-port=${port} --remote-debugging-address=127.0.0.1 about:blank >/dev/null 2>&1 &`;
+    // The browser runs as the agent's own user, as on the machine (never as root with the permission boundary this suite is about out of the way);
+    // its profile's parent and its cache are the agent's to write
+    places.start = `nohup setsid setpriv --reuid=${agentUid} --regid=${agentUid} --clear-groups env HOME="${home}" "${CHROME}" --headless=new --no-sandbox --disable-gpu --no-first-run --user-data-dir="$PROFILE" --remote-debugging-port=${port} --remote-debugging-address=127.0.0.1 about:blank >/dev/null 2>&1 &`;
     places.answerWait = 20;
   });
 
@@ -452,6 +469,8 @@ runWithBrowser('a real browser’s sign-ins and open pages', () => {
 
   function startBrowser() {
     mkdirSync(join(home, '.config'), { recursive: true });
+    mkdirSync(join(home, '.cache'), { recursive: true });
+    spawnSync('chown', [`${AGENT}:`, join(home, '.config'), join(home, '.cache')]);
     spawnSync('sh', ['-c', places.start.replace('"$PROFILE"', `"${profile()}"`)]);
   }
 

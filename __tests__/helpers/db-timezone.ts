@@ -21,13 +21,23 @@ export function databaseTimezone(prisma: PrismaClient, zone: string) {
     const seen = await Promise.all(Array.from({ length: 6 }, () => prisma.$queryRaw<Array<{ z: string }>>`SELECT current_setting('TimeZone') AS z, pg_sleep(0.3)::text AS s`));
     return seen.map((rows) => rows[0].z);
   };
-  /** Waits (bounded) until the pool has no open session: whatever it opens next has the database's current setting. */
-  const poolIsEmpty = async (): Promise<boolean> => {
+  /** The backend ids of the sessions the pool holds right now: overlapping statements never share a connection, so each one shows a different session. */
+  const poolSessions = async (): Promise<number[]> => {
+    const seen = await Promise.all(Array.from({ length: 12 }, () => prisma.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid, pg_sleep(0.3)::text AS s`));
+    return [...new Set(seen.map((rows) => rows[0].pid))];
+  };
+  /**
+   * Waits (bounded) until none of the pool's sessions (named by `pids`, read before the setting changed) is open: whatever it opens next has the database's current setting.
+   * Only the pool's own sessions are counted, never another client's that happens to be open on the same database (a psql left idle would have made this wait for
+   * nothing and fail: CodeRabbit on #1025).
+   */
+  const poolIsEmpty = async (pids: number[]): Promise<boolean> => {
+    if (pids.length === 0) return true;
     const watcher = new Client({ connectionString: process.env.DATABASE_URL });
     await watcher.connect();
     try {
       for (let tries = 0; tries < 200; tries += 1) {
-        const open = await watcher.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'`);
+        const open = await watcher.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend' AND pid = ANY($1::int[])`, [pids]);
         if (open.rows[0].n === 0) return true;
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
@@ -45,15 +55,17 @@ export function databaseTimezone(prisma: PrismaClient, zone: string) {
   return {
     async set(): Promise<void> {
       original = await override();
+      const pids = await poolSessions();
       await apply(zone);
-      if (!(await poolIsEmpty())) throw new Error('the pool never emptied after the time zone was set');
+      if (!(await poolIsEmpty(pids))) throw new Error('the pool never emptied after the time zone was set');
       const shown = await zonesOfSessions();
       if (!shown.every((one) => inZone(zone, one))) throw new Error(`the database sessions did not come up in ${zone}: ${shown.join(', ')}`);
     },
     async restore(): Promise<void> {
       if (original === undefined) return;
+      const pids = await poolSessions();
       await apply(original);
-      await poolIsEmpty();
+      await poolIsEmpty(pids);
       if ((await override()) !== original) throw new Error('the database time zone was not put back as it was');
     },
   };

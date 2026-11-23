@@ -151,11 +151,27 @@ run('notes to a running job, Activity, and Brick’s door (computers full plan, 
         },
         { timeout: 15_000, maxWait: 15_000 },
       );
-      await lockTaken;
-      const noting = addJobNote(sara.brickId, sara.id, jobId, 'Skip the hotel', minutes(1));
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      release();
-      await holder;
+      let noting: Promise<unknown> = Promise.resolve();
+      try {
+        await Promise.race([
+          lockTaken,
+          holder.then(() => {
+            throw new Error('the fixture transaction ended without holding the lock');
+          }),
+        ]);
+        noting = addJobNote(sara.brickId, sara.id, jobId, 'Skip the hotel', minutes(1));
+        // The turn changes only once THIS note is blocked on the lock, however long its first reads took (CodeRabbit on #1025)
+        let blocked = false;
+        for (let tries = 0; tries < 250 && !blocked; tries += 1) {
+          const rows = await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(${cutoffLockKey(jobId)}, 0)`;
+          blocked = rows[0].n > 0;
+          if (!blocked) await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(blocked).toBe(true);
+      } finally {
+        release();
+        await Promise.allSettled([holder, noting]);
+      }
       expect(await noting).toMatchObject({ ok: true, note: { seq: 1, delivery: 'now' } });
       expect(fake.cancelledTurns).toEqual(['resp-B']);
     });

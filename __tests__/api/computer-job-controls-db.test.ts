@@ -866,7 +866,8 @@ run('computer job controls: pause, resume, do this next, cancel one job (piece 1
         expect(a.secondsBilled).toBe(300);
         const view = await computerView(sara.brickId, sara.id, minutes(5));
         const ids = [view?.job?.id, ...(view?.queued.map((q) => q.id) ?? [])];
-        expect(new Set(ids).size).toBe(ids.length);
+        // All three are there, each once: a job dropped (stopped by mistake) or shown twice is caught (CodeRabbit on #1025)
+        expect([...ids].sort()).toEqual([jobId, one, two].sort());
       }
     });
 

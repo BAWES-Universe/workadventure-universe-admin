@@ -125,6 +125,9 @@ run('one owner per computer job: every write is decided in the write that lands 
   });
 
   const waiters = async (key: string): Promise<number> => (await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(${key}, 0)`)[0].n;
+  /** Whether the advisory lock can be taken right now by a transaction of its own that does not wait (a held lock is `false`, whoever waits or not). */
+  const lockIsFree = async (key: string): Promise<boolean> =>
+    prisma.$transaction(async (tx) => (await tx.$queryRaw<{ ok: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) AS ok`)[0].ok);
   const waitForWaiters = async (key: string, n: number): Promise<boolean> => {
     for (let tries = 0; tries < 250; tries += 1) {
       if ((await waiters(key)) >= n) return true;
@@ -440,7 +443,8 @@ run('one owner per computer job: every write is decided in the write that lands 
       const real = fake.cancelTurn.bind(fake);
       const spy = jest.spyOn(fake, 'cancelTurn').mockImplementation(async (ref: string, responseId: string) => {
         statusAtCancel.push((await jobOf(jobId)).status);
-        expect(await waiters(cutoffLockKey(jobId))).toBe(0);
+        // The cutoff lock is FREE at this seam (a separate transaction takes it without waiting), not merely unwanted: a cancel made under the lock would hold it
+        expect(await lockIsFree(cutoffLockKey(jobId))).toBe(true);
         return real(ref, responseId);
       });
       const holder = holdCutoff(jobId, (tx) => tx.$executeRaw`UPDATE "computer_jobs" SET "agent_response_id" = 'resp-2' WHERE "id" = ${jobId}`);
@@ -480,22 +484,33 @@ run('one owner per computer job: every write is decided in the write that lands 
       await prisma.meterReservation.update({ where: { reservationKey: (await jobOf(made.jobId)).reservationKey! }, data: { expiresAt: minutes(1000) } });
       return { ...made, ea };
     };
-    /** Runs `between` at the moment the sweep has selected the job and is about to end it (the first look it makes at the job's cutoff decision). */
-    const betweenSelectAndEnd = (between: () => Promise<unknown>) => {
+    /**
+     * Runs `between` once, at the moment the sweep has selected THIS job and is about to end it (the first look it makes at the job's cutoff decision).
+     * Every other job the sweep looks at in the meantime goes straight through to the real call (CodeRabbit on #1025: a job left by an earlier fixture
+     * could take the hook). `restore` puts the real call back.
+     */
+    const betweenSelectAndEnd = (jobId: string, between: () => Promise<unknown>) => {
       const real = actualCalls.endIfCutoffDecided;
-      return jest.mocked(calls.endIfCutoffDecided).mockImplementationOnce((async (...args: Parameters<typeof real>) => {
-        await between();
+      let fired = false;
+      const spy = jest.mocked(calls.endIfCutoffDecided).mockImplementation((async (...args: Parameters<typeof real>) => {
+        if (!fired && args[0] === jobId) {
+          fired = true;
+          await between();
+        }
         return real(...args);
       }) as never);
+      return { fired: () => fired, restore: () => spy.mockImplementation(real as never) };
     };
+    /** A job a sweep has already dealt with is put out of every later sweep's way, so each fixture is judged alone. */
+    const putAside = (jobId: string) => prisma.computerJob.update({ where: { id: jobId }, data: { status: 'done', endedAt: minutes(121) } });
 
     it('the sweep selects a waiting job past the wait and the owner takes control meanwhile: not ended as unanswered; CONTROL: a real unanswered wait still ends as `unanswered`', async () => {
       const { jobId } = await waitingPastLimit('s-e5-wait');
-      const spy = betweenSelectAndEnd(() => prisma.computerJob.update({ where: { id: jobId }, data: { control: 'person', controlGeneration: { increment: 1 }, leaseVersion: { increment: 1 } } }));
+      const spy = betweenSelectAndEnd(jobId, () => prisma.computerJob.update({ where: { id: jobId }, data: { control: 'person', controlGeneration: { increment: 1 }, leaseVersion: { increment: 1 } } }));
       try {
         await sweepComputers(minutes(120));
       } finally {
-        spy.mockClear();
+        spy.restore();
       }
       expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', control: 'person', endedBy: null });
       const real = await waitingPastLimit('s-e5-wait-real');
@@ -506,7 +521,7 @@ run('one owner per computer job: every write is decided in the write that lands 
     it('the sweep selects a waiting job and the worker answers it (a renewal, a claim, a new wait) meanwhile: not ended; the same selected job that did NOT move is ended', async () => {
       for (const move of ['claim', 'handover', 'lease'] as const) {
         const { jobId } = await waitingPastLimit(`s-e5-move-${move}`);
-        const spy = betweenSelectAndEnd(async () => {
+        const spy = betweenSelectAndEnd(jobId, async () => {
           if (move === 'claim') await claimed(jobId, 'rB', minutes(100));
           if (move === 'handover') await prisma.computerJob.update({ where: { id: jobId }, data: { handoverSeq: { increment: 1 } } }); // a new wait of the same job (the count is all that moves)
           if (move === 'lease') await prisma.computerJob.update({ where: { id: jobId }, data: { leaseVersion: { increment: 1 } } });
@@ -514,17 +529,19 @@ run('one owner per computer job: every write is decided in the write that lands 
         try {
           await sweepComputers(minutes(120));
         } finally {
-          spy.mockClear();
+          spy.restore();
         }
+        expect(spy.fired()).toBe(true);
         expect([move, (await jobOf(jobId)).status, (await jobOf(jobId)).endedBy]).toEqual([move, 'waiting', null]);
+        await putAside(jobId);
       }
       // CONTROL: the wait is no longer past its limit when the job is judged again (it began a new wait): not ended; one that is past it ends
       const fresh = await waitingPastLimit('s-e5-fresh');
-      const spy = betweenSelectAndEnd(() => prisma.computerJob.update({ where: { id: fresh.jobId }, data: { stretchStarted: minutes(119) } }));
+      const spy = betweenSelectAndEnd(fresh.jobId, () => prisma.computerJob.update({ where: { id: fresh.jobId }, data: { stretchStarted: minutes(119) } }));
       try {
         await sweepComputers(minutes(120));
       } finally {
-        spy.mockClear();
+        spy.restore();
       }
       expect(await jobOf(fresh.jobId)).toMatchObject({ status: 'waiting', endedBy: null });
     });
@@ -547,7 +564,7 @@ run('one owner per computer job: every write is decided in the write that lands 
       try {
         await sweepComputers(minutes(7));
       } finally {
-        spy.mockClear();
+        spy.mockRestore();
       }
       expect(renewed).toBe(true);
       expect(await jobOf(made.jobId)).toMatchObject({ status: 'running', endedBy: null });
@@ -585,11 +602,11 @@ run('one owner per computer job: every write is decided in the write that lands 
     it('a job with an intent or a decided cutoff is the finalizer’s: the unanswered and lapsed-lease passes skip it (the finalizer ends it as the intent or the pool says)', async () => {
       const { jobId, ea } = await waitingPastLimit('s-e5-fin');
       await recordFinishIntent(jobId, { outcome: 'done', epoch: ea }, minutes(1));
-      const spy = betweenSelectAndEnd(async () => undefined);
+      const spy = betweenSelectAndEnd(jobId, async () => undefined);
       try {
         await sweepComputers(minutes(120));
       } finally {
-        spy.mockClear();
+        spy.restore();
       }
       // Ended by the finalizer, as the intent said (done), never as unanswered
       expect(await jobOf(jobId)).toMatchObject({ status: 'done' });
@@ -715,7 +732,7 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect((await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: off.id, startKey: KEY_B } })).state).toBe('expired');
     });
 
-    it('B first, A later (both arrival orders): one job, one reservation; the same event delivered to two router instances at once, and again after a restart with empty Redis (the derived key is the same): one job, one reservation', async () => {
+    it('B first, A later (both arrival orders): one job, one reservation; the same key given twice at once, and again later, in this process (a same-key library replay: no router is restarted and no Redis is cleared here): one job, one reservation', async () => {
       const sara = await setUpBrick('s-s2-order');
       const b = await start(sara, KEY_B, 'Fill the visa form');
       expect(b).toMatchObject({ ok: true });
@@ -727,7 +744,7 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect((one as { job: { id: string } }).job.id).toBe((two as { job: { id: string } }).job.id);
       expect(await jobsOf(twice)).toBe(1);
       expect(await roomsOf(twice)).toBe(1);
-      // After a restart: the same key again answers the job it made
+      // Later, the same key again answers the job it made (a replay of the library call; the router's own key derivation across a restart is not exercised here)
       const again = await start(twice, KEY_A);
       expect((again as { job: { id: string } }).job.id).toBe((one as { job: { id: string } }).job.id);
       expect(await jobsOf(twice)).toBe(1);
@@ -963,27 +980,54 @@ run('one owner per computer job: every write is decided in the write that lands 
       await setUp({ poolCeilingMicros: 1 });
       let arrived = 0;
       let claimDone = false;
+      // A bounded barrier: when either call fails before the other can be let go (or B's claim is refused), BOTH are let go with that failure, so the test reports it and
+      // reaches its `finally` (CodeRabbit on #1025)
+      let broken: Error | null = null;
       const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      const until = async (done: () => boolean): Promise<void> => {
+        for (let tries = 0; tries < 1000 && !done(); tries += 1) {
+          if (broken) throw broken;
+          await pause(10);
+        }
+        if (broken) throw broken;
+        if (!done()) throw new Error('the barrier did not open');
+      };
       const spy = jest.mocked(meter.reserveRoom).mockImplementation((async (...args: Parameters<typeof actualMeter.reserveRoom>) => {
-        arrived += 1;
-        const first = arrived === 1;
-        while (arrived < 2) await pause(10);
-        if (first) {
-          const won = await takeOverClaim(jobId, 'rB', ea, minutes(1));
-          if (!won.ok) throw new Error('B’s claim was refused');
-          claimDone = true;
-        } else {
-          while (!claimDone) await pause(10);
+        try {
+          arrived += 1;
+          const first = arrived === 1;
+          await until(() => arrived >= 2);
+          if (first) {
+            const won = await takeOverClaim(jobId, 'rB', ea, minutes(1));
+            if (!won.ok) throw new Error('B’s claim was refused');
+            claimDone = true;
+          } else {
+            await until(() => claimDone);
+          }
+        } catch (error) {
+          broken = error instanceof Error ? error : new Error('the fixture failed');
+          throw broken;
         }
         return actualMeter.reserveRoom(...args);
       }) as never);
+      let answers: Awaited<ReturnType<typeof ask>>[] = [];
       try {
-        const answers = await Promise.all([ask(a, 'c1', { estimateMicros: 5_000 }), ask(a, 'c2', { estimateMicros: 5_000 })]);
-        expect(answers.every((one) => one.ok === false)).toBe(true);
+        const settled = await Promise.allSettled([ask(a, 'c1', { estimateMicros: 5_000 }), ask(a, 'c2', { estimateMicros: 5_000 })]);
+        if (broken) throw broken;
+        answers = settled.map((one) => {
+          if (one.status === 'rejected') throw one.reason;
+          return one.value;
+        });
       } finally {
         spy.mockImplementation(((...args: Parameters<typeof actualMeter.reserveRoom>) => actualMeter.reserveRoom(...args)) as never);
         await setUp();
       }
+      // Both calls reached the room decision (the barrier opened for both) and BOTH were refused for the pool, not stopped earlier as stale
+      expect(arrived).toBe(2);
+      expect(answers).toEqual([
+        { ok: false, reason: 'pool', full: true },
+        { ok: false, reason: 'pool', full: true },
+      ]);
       expect(await hasPoolCutoff(prisma, jobId)).toBe(false);
       expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
     });

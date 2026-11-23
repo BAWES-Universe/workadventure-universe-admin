@@ -1065,16 +1065,27 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       let both: () => void = () => undefined;
       const bothSelected = new Promise<void>((resolve) => (both = resolve));
       const spy = jest.spyOn(prisma.computerFinishIntent, 'findMany').mockImplementation(((args: never) =>
-        real(args).then(async (rows) => {
-          arrived += 1;
-          if (arrived === 2) both();
-          await bothSelected;
-          return rows;
-        })) as never);
-      let counts: number[];
+        real(args).then(
+          async (rows) => {
+            arrived += 1;
+            if (arrived === 2) both();
+            await bothSelected;
+            return rows;
+          },
+          (error) => {
+            // A read that fails lets the other one go too: it would wait for a second arrival that never comes (CodeRabbit on #1025)
+            both();
+            throw error;
+          },
+        )) as never);
+      let counts: number[] = [];
       try {
-        counts = await Promise.all([completeFinishIntents(later, 50), completeFinishIntents(later, 50)]);
+        const settled = await Promise.allSettled([completeFinishIntents(later, 50), completeFinishIntents(later, 50)]);
+        const failed = settled.find((one): one is PromiseRejectedResult => one.status === 'rejected');
+        if (failed) throw failed.reason;
+        counts = settled.map((one) => (one as PromiseFulfilledResult<number>).value);
       } finally {
+        both();
         spy.mockRestore();
       }
       expect(arrived).toBe(2);
@@ -1270,9 +1281,16 @@ run('the runner’s committed word that a job is to end, in a real database', ()
         },
         { timeout: 20_000, maxWait: 20_000 },
       );
+      // A fixture that fails before it holds the row is this test's failure at once, not a wait for Jest's timeout (CodeRabbit on #1025)
+      const lockReady = Promise.race([
+        lockTaken,
+        takeover.then(() => {
+          throw new Error('the fixture transaction ended without holding the row');
+        }),
+      ]);
       let stopping: Promise<unknown> = Promise.resolve();
       try {
-        await lockTaken;
+        await lockReady;
         stopping = recordFinishIntent(jobId, { outcome: 'failed', cause: 'agent', generation: 0 }, minutes(1));
         expect(await rowBlocked()).toBe(true);
         release();
