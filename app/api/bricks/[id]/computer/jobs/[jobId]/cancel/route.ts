@@ -1,7 +1,8 @@
 import { NextRequest } from 'next/server';
 import { asOwner, notFound, optionsFor } from '@/lib/computer-api';
 import { cancelJob } from '@/lib/computer-job-controls';
-import { controlAnswer, jobIdOk } from '@/lib/computer-job-controls-api';
+import { NextResponse } from 'next/server';
+import { controlAnswer, jobIdOk, needCommand } from '@/lib/computer-job-controls-api';
 
 export const runtime = 'nodejs';
 export const OPTIONS = optionsFor;
@@ -15,5 +16,7 @@ export const POST = (request: NextRequest, { params }: { params: Promise<{ id: s
   asOwner(request, params, async (id, ownerId) => {
     const { jobId } = await params;
     if (!jobIdOk(jobId)) return notFound(request);
-    return controlAnswer(request, await cancelJob(id, ownerId, jobId));
+    const command = needCommand(request);
+    if (command instanceof NextResponse) return command;
+    return controlAnswer(request, await cancelJob(id, ownerId, jobId, new Date(), command));
   });

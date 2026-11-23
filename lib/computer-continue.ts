@@ -6,16 +6,24 @@ import { continuableEnding, isOver } from '@/lib/computer-values';
  * on in the old job's agent conversation, so the agent knows what it already did. It is a new job in every other way: its own reservation, its own receipt, its own start key and
  * attempt, its own runner claim and keys. Only the conversation (`agent_session_id`) and the link (`continues_job_id`) come from the old job. One continuation per old job, ever (a unique
  * index): asking again finds the job the first ask made. After the person's own Stop or Cancel, a computer turned off or deleted, or a job that finished, the
- * ask is an ordinary fresh job. The game asks for a continuation only for words like "try again" (bots/ai/ComputerTryAgain.ts); Orbit decides here, on every ask, from its own record.
+ * ask makes NOTHING (GPT round 6, finding 6): the start answers `cannot_continue` with why, and Brick offers "Start a new job" as a separate choice (an ordinary start, under a new key, with no
+ * continuation header). A "try again" never authorizes unrelated fresh paid work. The game asks for a continuation only for words like "try again" (bots/ai/ComputerTryAgain.ts); Orbit decides here, on every ask, from its own record.
  *
  * Nothing here imports lib/computer (the start imports this file).
  */
 
-/** Why an ask to carry on a job makes a fresh job instead: the job is not there, is another Brick's or person's, is still going on, ended in a way that is a fresh job, or has no conversation to carry on. */
+/** Why an ask to carry on a job cannot carry it on: the job is not there, is another Brick's or person's, is still going on, ended in a way that does not carry on, or has no conversation to carry on. */
 export type FreshBecause = 'not_found' | 'not_theirs' | 'live' | 'not_continuable' | 'no_conversation';
 
-/** What a start that asks to carry on a job gets: the link and the conversation for the new job, the job that already carries it on, or a fresh job (and why). */
-export type CarryOn = { link: { continuesJobId: string; agentSessionId: string } } | { existing: { id: string } } | { fresh: FreshBecause };
+/** The job an ask named, as Brick needs it to say why it cannot carry on (its title, and how it stands or ended). Only ever the asker's own job on this Brick: never for `not_found` / `not_theirs`. */
+export interface NamedJob {
+  title: string;
+  status: string;
+  endedBy: string | null;
+}
+
+/** What a start that asks to carry on a job gets: the link and the conversation for the new job, the job that already carries it on, or why it cannot (the start then makes nothing). */
+export type CarryOn = { link: { continuesJobId: string; agentSessionId: string } } | { existing: { id: string } } | { fresh: FreshBecause; job?: NamedJob };
 
 type Db = Pick<typeof prisma, 'computerJob'>;
 
@@ -23,18 +31,19 @@ type Db = Pick<typeof prisma, 'computerJob'>;
 export async function carryOnFrom(botId: string, personId: string, fromJobId: string, db: Db = prisma): Promise<CarryOn> {
   const old = await db.computerJob.findUnique({
     where: { id: fromJobId },
-    select: { id: true, botId: true, personId: true, status: true, endedBy: true, agentSessionId: true, continuedBy: { select: { id: true } } },
+    select: { id: true, botId: true, personId: true, title: true, status: true, endedBy: true, agentSessionId: true, continuedBy: { select: { id: true } } },
   });
   if (!old) return { fresh: 'not_found' };
   // Another Brick's job, or another person's, is never carried on (and never said to exist)
   if (old.botId !== botId || old.personId !== personId) return { fresh: 'not_theirs' };
   // A job that is still going on is never carried on: it is in line, working or waiting for its person
-  if (!isOver(old.status)) return { fresh: 'live' };
+  const job: NamedJob = { title: old.title, status: old.status, endedBy: old.endedBy };
+  if (!isOver(old.status)) return { fresh: 'live', job };
   // One continuation per job, ever: the one that was made is the answer, whatever it came to
   if (old.continuedBy) return { existing: { id: old.continuedBy.id } };
-  if (!continuableEnding(old.status, old.endedBy)) return { fresh: 'not_continuable' };
+  if (!continuableEnding(old.status, old.endedBy)) return { fresh: 'not_continuable', job };
   // A job that never reached its agent has no conversation to carry on
-  if (!old.agentSessionId) return { fresh: 'no_conversation' };
+  if (!old.agentSessionId) return { fresh: 'no_conversation', job };
   return { link: { continuesJobId: old.id, agentSessionId: old.agentSessionId } };
 }
 

@@ -29,6 +29,7 @@ import { carriedOnFrom, carryOnFrom, retryCandidate } from '@/lib/computer-conti
 import { continuableEnding, CONTINUES_AFTER } from '@/lib/computer-values';
 import { GET, POST } from '@/app/api/bots/[id]/computer-jobs/route';
 import { pauseCapability, resumeCapability } from '@/lib/capability-pause';
+import { cancelJob } from '@/lib/computer-job-controls';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -252,71 +253,95 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
       if (again.ok) expect(await jobOf(again.job.id)).toMatchObject({ continuesJobId: old, agentSessionId: (await jobOf(old)).agentSessionId });
     });
 
-    it('after the person’s own Stop, "try again" is a fresh job: no link, no conversation, not said to carry on', async () => {
+    /** Nothing at all was made for a refused "try again": no job beyond the ones named, and no room for anything but them (finding 6). */
+    const nothingMade = async (sara: { id: string }, before: { jobs: number; rooms: number }) => {
+      expect(await prisma.computerJob.count({ where: { personId: sara.id } })).toBe(before.jobs);
+      expect(await prisma.meterReservation.count({ where: { personId: sara.id } })).toBe(before.rooms);
+    };
+    const countsOf = async (sara: { id: string }) => ({ jobs: await prisma.computerJob.count({ where: { personId: sara.id } }), rooms: await prisma.meterReservation.count({ where: { personId: sara.id } }) });
+
+    it('FINDING 6 (GPT round 6): after the person’s own Stop, "try again" makes NOTHING: `cannot_continue` with why and the named job; "Start a new job" (an ordinary start, a new key, no header) makes exactly one job', async () => {
       const { sara, jobId: old } = await ranOnce('c-person');
       await stopJobFor(sara.brickId, sara.id, minutes(5));
       expect((await jobOf(old)).endedBy).toBe('person');
-      const again = await tryAgain(sara, old);
-      if (!again.ok) throw new Error('no job');
-      expect(again.continued).toBeUndefined();
-      expect(await jobOf(again.job.id)).toMatchObject({ continuesJobId: null, agentSessionId: null });
-      expect(again.job.id).not.toBe(old);
+      const before = await countsOf(sara);
+      const again = await tryAgain(sara, old, minutes(6), { startKey: key(), acks: true });
+      expect(again).toEqual({ ok: false, reason: 'cannot_continue', why: 'not_continuable', job: { title: 'Visa form', status: 'stopped', endedBy: 'person' } });
+      await nothingMade(sara, before);
+      // The same ask again (another message, another key): still nothing, never a second unrelated job
+      expect(await tryAgain(sara, old, minutes(7), { startKey: key(), acks: true })).toMatchObject({ ok: false, reason: 'cannot_continue' });
+      await nothingMade(sara, before);
+      // "Start a new job": an ordinary start, its own key, no continuation: one job with its own room
+      const fresh = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey: key(), acks: true }, minutes(8));
+      if (!fresh.ok) throw new Error(`no job: ${JSON.stringify(fresh)}`);
+      expect(fresh.continued).toBeUndefined();
+      expect(await jobOf(fresh.job.id)).toMatchObject({ continuesJobId: null, agentSessionId: null, status: 'running' });
+      expect(await prisma.computerJob.count({ where: { personId: sara.id } })).toBe(before.jobs + 1);
+      expect(await roomsOf(fresh.job.id)).toHaveLength(1);
     });
 
     it.each([
-      ['a Brick deleted', async (jobId: string) => void (await endedAs(jobId, 'deleted'))],
-      ['a job that finished', async (jobId: string) => void (await finishJob(jobId, 'done', minutes(5)))],
-      ['a computer turned off', async (jobId: string) => void (await endedAs(jobId, 'off'))],
-    ])('after %s, it is a fresh job', async (_what, end) => {
+      ['a Brick deleted', 'deleted', async (jobId: string): Promise<void> => void (await endedAs(jobId, 'deleted'))],
+      ['a job that finished', null, async (jobId: string): Promise<void> => void (await finishJob(jobId, 'done', minutes(5)))],
+      ['a computer turned off', 'off', async (jobId: string): Promise<void> => void (await endedAs(jobId, 'off'))],
+    ])('after %s, "try again" makes nothing (`cannot_continue`, not_continuable, with how it ended)', async (_what, endedBy, end) => {
       const { sara, jobId: old } = await ranOnce(`c-fresh-${++made}`);
       await end(old);
+      const before = await countsOf(sara);
       const again = await tryAgain(sara, old);
-      if (!again.ok) throw new Error('no job');
-      expect(again.continued).toBeUndefined();
-      expect(await jobOf(again.job.id)).toMatchObject({ continuesJobId: null, agentSessionId: null });
+      const row = await jobOf(old);
+      expect(again).toEqual({ ok: false, reason: 'cannot_continue', why: 'not_continuable', job: { title: 'Visa form', status: row.status, endedBy } });
+      await nothingMade(sara, before);
     });
 
-    it('the same person’s job on ANOTHER of their Bricks is never carried on: the conversation never crosses Bricks', async () => {
+    it('the same person’s job on ANOTHER of their Bricks is never carried on, and never said to exist there: `not_theirs`, no job named, nothing made', async () => {
       const { sara, jobId: old } = await failedAsOurs('c-other-brick');
       const other = await createBrick({ ownerId: sara.id, name: 'Sara’s second Brick' });
       await giveComputer(other.id, sara.id);
       expect(await carryOnFrom(other.id, sara.id, old)).toEqual({ fresh: 'not_theirs' });
-      const again = await tryAgain({ id: sara.id, brickId: other.id }, old);
-      if (!again.ok) throw new Error(`no job: ${JSON.stringify(again)}`);
-      expect(again.continued).toBeUndefined();
-      expect(await jobOf(again.job.id)).toMatchObject({ botId: other.id, continuesJobId: null, agentSessionId: null });
+      const before = await countsOf(sara);
+      expect(await tryAgain({ id: sara.id, brickId: other.id }, old)).toEqual({ ok: false, reason: 'cannot_continue', why: 'not_theirs' });
+      await nothingMade(sara, before);
       expect(await prisma.computerJob.count({ where: { continuesJobId: old } })).toBe(0);
       expect(await retryCandidate(other.id, sara.id)).toBeNull();
     });
 
-    it('a job that is still going on is never carried on (asked for one, the start is a fresh job beside it in line)', async () => {
+    it('a job that is still going on is never carried on: `live` with the job, nothing beside it', async () => {
       const { sara, jobId: live } = await ranOnce('c-live');
-      const again = await tryAgain(sara, live);
-      if (!again.ok) throw new Error('no job');
-      expect(again.continued).toBeUndefined();
-      expect(again.job.id).not.toBe(live);
-      expect(await jobOf(again.job.id)).toMatchObject({ continuesJobId: null, agentSessionId: null });
+      const before = await countsOf(sara);
+      expect(await tryAgain(sara, live)).toEqual({ ok: false, reason: 'cannot_continue', why: 'live', job: { title: 'Visa form', status: 'running', endedBy: null } });
+      await nothingMade(sara, before);
       expect(await jobOf(live)).toMatchObject({ status: 'running' });
     });
 
-    it('another person’s job, or another Brick’s, is never carried on', async () => {
+    it('another person’s job is never carried on nor described (`not_theirs`), an unknown id is `not_found`: nothing made either way', async () => {
       const { jobId: theirs } = await failedAsOurs('c-theirs');
       const mine = await person('c-mine');
       await giveComputer(mine.brickId, mine.id);
-      const again = await tryAgain(mine, theirs);
-      if (!again.ok) throw new Error('no job');
-      expect(again.continued).toBeUndefined();
-      expect(await jobOf(again.job.id)).toMatchObject({ continuesJobId: null, agentSessionId: null });
+      expect(await tryAgain(mine, theirs)).toEqual({ ok: false, reason: 'cannot_continue', why: 'not_theirs' });
+      expect(await tryAgain(mine, `j_${randomUUID().replace(/-/g, '')}`)).toEqual({ ok: false, reason: 'cannot_continue', why: 'not_found' });
+      expect(await prisma.computerJob.count({ where: { personId: mine.id } })).toBe(0);
+      expect(await prisma.meterReservation.count({ where: { personId: mine.id } })).toBe(0);
       expect(await prisma.computerJob.count({ where: { continuesJobId: theirs } })).toBe(0);
     });
 
-    it('a job that never reached its agent has no conversation to carry on: a fresh job', async () => {
+    it('a job that never reached its agent has no conversation to carry on: `no_conversation`, nothing made', async () => {
       const { sara, jobId: old } = await failedAsOurs('c-nosession');
       await prisma.computerJob.update({ where: { id: old }, data: { agentSessionId: null } });
-      const again = await tryAgain(sara, old);
-      if (!again.ok) throw new Error('no job');
-      expect(again.continued).toBeUndefined();
-      expect((await jobOf(again.job.id)).continuesJobId).toBeNull();
+      const before = await countsOf(sara);
+      expect(await tryAgain(sara, old)).toEqual({ ok: false, reason: 'cannot_continue', why: 'no_conversation', job: { title: 'Visa form', status: 'failed', endedBy: 'error' } });
+      await nothingMade(sara, before);
+    });
+
+    it('CONTROL: an eligible continuation and an ordinary new task still work beside the refusal', async () => {
+      const { sara, jobId: old } = await failedAsOurs('c-control');
+      const carried = await tryAgain(sara, old, minutes(6), { startKey: key(), acks: true });
+      expect(carried).toMatchObject({ ok: true, continued: true });
+      if (!carried.ok) return;
+      await ackStart(sara.brickId, sara.id, (await jobOf(carried.job.id)).startKey as string);
+      const ordinary = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Book the hotel', startKey: key(), acks: true }, minutes(7));
+      expect(ordinary).toMatchObject({ ok: true });
+      if (ordinary.ok) expect(await jobOf(ordinary.job.id)).toMatchObject({ continuesJobId: null });
     });
 
     it('the one list of endings that carry on', () => {
@@ -418,14 +443,14 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
       const live = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Shop' }, minutes(6));
       if (!live.ok) throw new Error('no job');
       await prisma.computerJob.update({ where: { id: live.job.id }, data: { endedBy: 'error', agentSessionId: 'sess-Shop' } });
-      expect(await carryOnFrom(sara.brickId, sara.id, live.job.id)).toEqual({ fresh: 'live' });
+      expect(await carryOnFrom(sara.brickId, sara.id, live.job.id)).toEqual({ fresh: 'live', job: { title: 'Shop', status: (await jobOf(live.job.id)).status, endedBy: 'error' } });
     });
 
     it('names none, and carries none on, when the job never reached its agent (no conversation)', async () => {
       const { sara, jobId: old } = await failedAsOurs('c-look-nosession');
       await prisma.computerJob.update({ where: { id: old }, data: { agentSessionId: null } });
       expect(await retryCandidate(sara.brickId, sara.id)).toBeNull();
-      expect(await carryOnFrom(sara.brickId, sara.id, old)).toEqual({ fresh: 'no_conversation' });
+      expect(await carryOnFrom(sara.brickId, sara.id, old)).toEqual({ fresh: 'no_conversation', job: { title: 'Visa form', status: 'failed', endedBy: 'error' } });
     });
   });
 
@@ -497,6 +522,25 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
       const plain = await (await post(sara.brickId, { userId: user.uuid, title: 'Shop' })).json();
       expect(plain.ok).toBe(true);
       expect(plain.continued).toBeUndefined();
+    });
+
+    it('REPRO (GPT round 6, finding 6) through the POST route: after Cancel, a keyed "try again" naming the cancelled job makes NO job and NO reservation, twice (each under its own key), with the reason and the named job; "Start a new job" without the header makes one', async () => {
+      const { sara, jobId: old } = await ranOnce('c-route-cancel');
+      const user = await prisma.user.findUniqueOrThrow({ where: { id: sara.id } });
+      expect(await cancelJob(sara.brickId, sara.id, old, minutes(5))).toMatchObject({ ok: true });
+      expect(await jobOf(old)).toMatchObject({ status: 'stopped', endedBy: 'person' });
+      const rooms = await prisma.meterReservation.count({ where: { personId: sara.id } });
+      for (let ask = 0; ask < 2; ask++) {
+        const body = await (await post(sara.brickId, { userId: user.uuid, title: 'Visa form' }, { 'x-computer-continues': old, 'x-computer-start-attempt': key(), 'x-computer-start-acks': '1' })).json();
+        expect(body).toEqual({ ok: false, reason: 'cannot_continue', why: 'not_continuable', job: { title: 'Visa form', status: 'stopped', endedBy: 'person' } });
+        expect(await prisma.computerJob.count({ where: { personId: sara.id } })).toBe(1);
+        expect(await prisma.meterReservation.count({ where: { personId: sara.id } })).toBe(rooms);
+      }
+      const fresh = await (await post(sara.brickId, { userId: user.uuid, title: 'Visa form' }, { 'x-computer-start-attempt': key(), 'x-computer-start-acks': '1' })).json();
+      expect(fresh).toMatchObject({ ok: true });
+      expect(fresh.continued).toBeUndefined();
+      expect(await prisma.computerJob.count({ where: { personId: sara.id } })).toBe(2);
+      expect(await roomsOf(fresh.job.id)).toHaveLength(1);
     });
 
     it('GET with retry=1 names the job "try again" would carry on (and only then)', async () => {

@@ -134,7 +134,7 @@ describe('the owner’s calls', () => {
     lib.computerView.mockResolvedValue(null);
     lib.giveComputer.mockResolvedValue({ ok: false, reason: 'not_found' });
     lib.turnOffComputer.mockResolvedValue(null);
-    lib.stopJobFor.mockResolvedValue(null);
+    lib.stopAll.mockResolvedValue({ ok: false, reason: 'not_found' });
     lib.takeOver.mockResolvedValue({ ok: false, reason: 'not_found' });
     lib.handBack.mockResolvedValue({ ok: false, reason: 'not_found' });
     lib.fillInDetails.mockResolvedValue({ ok: false, reason: 'not_found' });
@@ -150,6 +150,24 @@ describe('the owner’s calls', () => {
       dismissRoute(call('/x', { body: { jobId: JOB } }), params),
     ]);
     expect(answers.map((a) => a.status)).toEqual(Array(8).fill(404));
+  });
+
+  it('finding 4: Stop with the panel’s command id passes it on; without one (the 0.4.3 game) it stops as before; an id that is not a uuid, or one used for another control, is 400', async () => {
+    const cmd = '6f1c2b8e-3d4a-4c5b-9e6f-7a8b9c0d1e2f';
+    lib.stopAll.mockResolvedValue({ ok: true, view: { on: true } as never });
+    expect(await (await stop(call('/x'), params)).json()).toEqual({ computer: { on: true } });
+    expect(lib.stopAll).toHaveBeenLastCalledWith(BRICK, 'u-sara', expect.any(Date), undefined);
+    expect((await stop(call('/x', { headers: { 'x-computer-command': cmd } }), params)).status).toBe(200);
+    expect(lib.stopAll).toHaveBeenLastCalledWith(BRICK, 'u-sara', expect.any(Date), { id: cmd });
+    lib.stopAll.mockClear();
+    const invalid = await stop(call('/x', { headers: { 'x-computer-command': 'nope' } }), params);
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toMatchObject({ reason: 'command_missing' });
+    expect(lib.stopAll).not.toHaveBeenCalled();
+    lib.stopAll.mockResolvedValue({ ok: false, reason: 'command_reused' });
+    const reused = await stop(call('/x', { headers: { 'x-computer-command': cmd } }), params);
+    expect(reused.status).toBe(400);
+    expect(await reused.json()).toMatchObject({ reason: 'command_reused' });
   });
 
   it('dismisses the notice of one named ending, for the person asking and nobody else', async () => {
@@ -245,6 +263,7 @@ describe('the bot server’s calls', () => {
       if (reason === 'cheaper_route') lib.startJob.mockResolvedValue({ ok: false, reason, app: 'Gmail' });
       else if (reason === 'rule') lib.startJob.mockResolvedValue({ ok: false, reason, words: 'No more than $1.00 a month' });
       else if (reason === 'not_set') lib.startJob.mockResolvedValue({ ok: false, reason });
+      else if (reason === 'cannot_continue') lib.startJob.mockResolvedValue({ ok: false, reason, why: 'not_continuable', job: { title: 'Visa form', status: 'stopped', endedBy: 'person' } });
       else lib.startJob.mockResolvedValue({ ok: false, reason });
       const response = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' } }), params);
       expect(response.status).toBe(200);

@@ -81,8 +81,11 @@ const claimed = async (jobId: string, runName: string, at: Date = NOW): Promise<
   return won.epoch;
 };
 const notesOf = (jobId: string) => prisma.computerJobNote.findMany({ where: { jobId }, orderBy: { seq: 'asc' } });
-const door = async (botId: string, body: Record<string, unknown>) =>
-  (await control(new NextRequest(`http://orbit.test/api/bots/${botId}/computer-jobs/control`, { method: 'POST', body: JSON.stringify(body) }), { params: Promise.resolve({ id: botId }) })).json();
+/** Brick's door, as a tool call asks it: every control with its own command id (a retried tool call passes the same `command`). */
+const doorAnswer = (botId: string, body: Record<string, unknown>, command: string | null = randomUUID()) =>
+  control(new NextRequest(`http://orbit.test/api/bots/${botId}/computer-jobs/control`, { method: 'POST', body: JSON.stringify(body), ...(command ? { headers: { 'x-computer-command': command } } : {}) }), { params: Promise.resolve({ id: botId }) });
+const door = async (botId: string, body: Record<string, unknown>, command?: string | null) => (await doorAnswer(botId, body, command)).json();
+const aCommand = expect.objectContaining({ id: expect.any(String) });
 
 run('notes to a running job, Activity, and Brick’s door (computers full plan, piece 2), in a real database', () => {
   beforeAll(() => {
@@ -401,11 +404,11 @@ run('notes to a running job, Activity, and Brick’s door (computers full plan, 
       const activity = await door(sara.brickId, { action: 'activity', personId: sara.uuid, jobId });
       expect(activity).toMatchObject({ ok: true, job: { id: jobId }, steps: [{ seq: 1, kind: 'step', key: 'step:1', label: 'Opening the visa site' }, { seq: 2, kind: 'note', key: 'note:1', label: 'use 12 March' }] });
       expect(await door(sara.brickId, { action: 'pause', personId: sara.uuid, jobId })).toEqual({ ok: false, reason: 'taken_over' });
-      expect(pauseJob).toHaveBeenCalledWith(sara.brickId, sara.id, jobId);
+      expect(pauseJob).toHaveBeenCalledWith(sara.brickId, sara.id, jobId, expect.any(Date), aCommand);
       await door(sara.brickId, { action: 'first', personId: sara.uuid, jobId, pauseRunning: true });
-      expect(moveJobFirst).toHaveBeenCalledWith(sara.brickId, sara.id, jobId, { pauseRunning: true });
+      expect(moveJobFirst).toHaveBeenCalledWith(sara.brickId, sara.id, jobId, { pauseRunning: true }, expect.any(Date), aCommand);
       await door(sara.brickId, { action: 'cancel', personId: sara.uuid, jobId });
-      expect(cancelJob).toHaveBeenCalledWith(sara.brickId, sara.id, jobId);
+      expect(cancelJob).toHaveBeenCalledWith(sara.brickId, sara.id, jobId, expect.any(Date), aCommand);
       // A job of another Brick is not found here
       const other = await running('d-calls-other');
       expect(await door(sara.brickId, { action: 'note', personId: sara.uuid, jobId: other.jobId, text: 'x' })).toEqual({ ok: false, reason: 'not_found' });
@@ -417,6 +420,30 @@ run('notes to a running job, Activity, and Brick’s door (computers full plan, 
       expect(stopped.ok).toBe(true);
       expect(stopped.view.job).toBeNull();
       expect((await jobOf(jobId)).status).toBe('stopped');
+    });
+
+    it('finding 4: every control needs its command id (400 `command_missing`, nothing done); list and activity do not; a retried tool call (the same id) is the same note, and an id used for another control is 400', async () => {
+      const { sara, jobId } = await running('d-command');
+      for (const body of [{ action: 'pause', personId: sara.uuid, jobId }, { action: 'note', personId: sara.uuid, jobId, text: 'x' }, { action: 'stop', personId: sara.uuid }]) {
+        const refused = await doorAnswer(sara.brickId, body, null);
+        expect(refused.status).toBe(400);
+        expect(await refused.json()).toMatchObject({ ok: false, reason: 'command_missing' });
+        const invalid = await doorAnswer(sara.brickId, body, 'not-a-uuid');
+        expect(invalid.status).toBe(400);
+      }
+      expect(pauseJob).not.toHaveBeenCalled();
+      expect(await pendingNotes(jobId)).toEqual([]);
+      expect((await jobOf(jobId)).status).toBe('running');
+      expect(await door(sara.brickId, { action: 'list', personId: sara.uuid }, null)).toMatchObject({ ok: true });
+      expect(await door(sara.brickId, { action: 'activity', personId: sara.uuid, jobId }, null)).toMatchObject({ ok: true });
+      const call = randomUUID();
+      expect(await door(sara.brickId, { action: 'note', personId: sara.uuid, jobId, text: 'use 12 March' }, call)).toMatchObject({ ok: true, note: { seq: 1 } });
+      expect(await door(sara.brickId, { action: 'note', personId: sara.uuid, jobId, text: 'use 12 March' }, call)).toMatchObject({ ok: true, note: { seq: 1 } });
+      expect(await pendingNotes(jobId)).toEqual([{ seq: 1, text: 'use 12 March' }]);
+      const reused = await doorAnswer(sara.brickId, { action: 'note', personId: sara.uuid, jobId, text: 'use 13 March' }, call);
+      expect(reused.status).toBe(400);
+      expect(await reused.json()).toMatchObject({ ok: false, reason: 'command_reused' });
+      expect(await pendingNotes(jobId)).toEqual([{ seq: 1, text: 'use 12 March' }]);
     });
 
     it('refuses a body it does not know (strict): no action is taken', async () => {

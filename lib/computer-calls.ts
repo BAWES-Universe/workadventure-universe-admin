@@ -127,11 +127,11 @@ export async function authorizeModelCall(
   // A call refused for the person's own allowance or a rule they said ends the job right here, as a refused renewal does (stopped, by `allowance` or `rule`,
   // which is theirs): the agent's turns that fail on the refusal can then never end the job as ours and give back everything it ran before the limit
   if (room.reason === 'allowance') {
-    await endForRefusal(base.jobId, { reason: 'allowance' }, now, from);
+    await endForRefusal(base.jobId, { reason: 'allowance' }, now, from, { kind: 'call', micros: input.estimateMicros });
     return { ok: false, reason: 'allowance' };
   }
   if (room.reason === 'rule') {
-    await endForRefusal(base.jobId, { reason: 'rule', words: room.words }, now, from);
+    await endForRefusal(base.jobId, { reason: 'rule', words: room.words }, now, from, { kind: 'call', micros: input.estimateMicros });
     return { ok: false, reason: 'rule', ruleId: room.ruleId, why: room.why, leftMicros: room.leftMicros, words: room.words };
   }
   // Asked again for a call whose room was settled or lapsed: the first try is the call, and a second one is not another
@@ -403,11 +403,12 @@ async function holdsItsRoom(jobId: string, callId: string, personId: string, now
  * The person's month or a limit they set PAUSES the job instead (piece 3, lib/computer-limit-pause), decided under the same conditions an ending was: the call's own key still good and the owner's, no kept intent, no
  * cutoff (while the person holds the screen too: it is taken back, section 7). It never ends the job for them. Our own pool's cutoff ends it as before, always.
  */
-async function endForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule' | 'pool'; words: string }, now: Date, from?: { epoch: number; tokenId: string }): Promise<boolean> {
+async function endForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule' | 'pool'; words: string }, now: Date, from?: { epoch: number; tokenId: string }, blocked?: { kind: 'call'; micros: number }): Promise<boolean> {
   try {
     if (why.reason !== 'pool') {
       const { pauseForLimit } = await import('@/lib/computer-limit-pause');
-      return (await pauseForLimit(jobId, why.reason, now, from)) === 'paused';
+      // What was refused goes with the pause (finding 5): it carries on by itself only once that call fits as well as the room to run
+      return (await pauseForLimit(jobId, why.reason, now, from, blocked)) === 'paused';
     }
     const { stopJobForRefusal } = await import('@/lib/computer');
     await stopJobForRefusal(jobId, why, now, from);

@@ -130,4 +130,4 @@ export const jobTagOf = (jobId: string): string => `${JOB_TAG_PREFIX}${jobId}]${
  * a start with 429 (or any other non-200 status) for a refusal, so a 429 a caller sees on a start did not come from Orbit: an intermediary (a proxy, a gateway) said it, and the start's outcome is NOT known: look it up by its key.
  * A start that fails is 400 (the input is not valid), 401 (not the bot server) or 500 (Orbit could not do it): never with an `ok` field.
  */
-export const START_REFUSALS = ['not_owner', 'off', 'not_open', 'broken_start', 'no_run', 'paused', 'cheaper_route', 'not_set', 'rule', 'expired'] as const;
+export const START_REFUSALS = ['not_owner', 'off', 'not_open', 'broken_start', 'no_run', 'paused', 'cheaper_route', 'not_set', 'rule', 'expired', 'cannot_continue'] as const;
