@@ -102,10 +102,11 @@ async function settleResume(command: Command, outcome: StoredOutcome): Promise<S
 }
 
 /**
- * A copy of a Resume seen while the first request has not kept its answer (the start is still being tried): it never answers success for a start that may still be refused, and never starts anything itself. It waits for the
- * first request's answer; if none comes in time (the first request stopped after its commit), it settles the command from the job as it stands, once, and answers that (CodeRabbit on #1025, 16 and 23).
+ * A copy of a control seen while the first request has not kept its answer (a Resume whose start is still being tried, a Pause whose browser is still being put away): it never answers success for what may still turn
+ * into a refusal or lose its sign-ins, and never does anything itself. It waits for the first request's answer; if none comes in time (the first request stopped after its commit), it settles the command from `settleFrom`,
+ * once, and answers that (CodeRabbit on #1025, 16, 23 and 51).
  */
-async function answerPendingResume(botId: string, ownerId: string, under: { command: Command; row: CommandRow }, jobId: string, now: Date): Promise<Controlled> {
+async function answerPendingCommand(botId: string, ownerId: string, under: { command: Command; row: CommandRow }, settleFrom: () => Promise<StoredOutcome>, now: Date): Promise<Controlled> {
   const deadline = Date.now() + resumeWait.ms;
   for (;;) {
     const seen = await seenCommand(under.command, under.row);
@@ -113,8 +114,21 @@ async function answerPendingResume(botId: string, ownerId: string, under: { comm
     if (Date.now() >= deadline) break;
     await new Promise((resolve) => setTimeout(resolve, resumeWait.stepMs));
   }
-  const outcome = await settleResume(under.command, await resumeOutcomeOf(jobId));
+  const outcome = await settleResume(under.command, await settleFrom());
   return answerOf(botId, ownerId, { replay: outcome, targets: null }, now);
+}
+
+/** What a Pause that was taken (its jobs listed in the pending mark) came to once the sign-ins were put away: what each pause kept of them, false where it never said (they are then needed again when the job carries on). */
+async function pausedOutcomeOf(command: Command): Promise<StoredOutcome> {
+  const rows = await prisma.$queryRaw<Array<{ outcome: StoredOutcome | null }>>`SELECT "outcome" FROM "computer_job_commands" WHERE "command_id" = ${command.id}::uuid`;
+  const outcome = rows[0]?.outcome;
+  const ids = outcome && outcome.ok && outcome.targets ? outcome.targets : [];
+  let kept: boolean | undefined;
+  for (const id of ids) {
+    const last = await prisma.computerJobPause.findFirst({ where: { jobId: id }, orderBy: { n: 'desc' }, select: { signInsKept: true } });
+    kept = (kept ?? true) && last?.signInsKept === true;
+  }
+  return kept === undefined ? { ok: true } : { ok: true, signInsKept: kept };
 }
 
 /** The command of a control, and the row it is kept under. */
@@ -374,7 +388,7 @@ export async function pauseJob(botId: string, ownerId: string, jobId: string, no
   let result: PauseResult;
   if (under) {
     const seen = await seenCommand(under.command, under.row);
-    if (seen) return answerOf(botId, ownerId, seen, now);
+    if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingCommand(botId, ownerId, under, () => pausedOutcomeOf(under.command), now);
     // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
     const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId } }));
     const done = await prisma.$transaction(async (tx) => {
@@ -383,12 +397,18 @@ export async function pauseJob(botId: string, ownerId: string, jobId: string, no
       const claimed = await claimCommandIn(tx, under.command, under.row);
       if (!('fresh' in claimed)) return { seen: claimed };
       const decided = await decidePauseIn(tx, jobId, 'person', now, provider);
-      await keepOutcome(tx, under.command, decisionOutcome(decided));
+      // A pause of a job that held the machine is kept PENDING until its sign-ins are put away (after this commit): a copy never reads a success that does not yet say whether they were kept (CodeRabbit on #1025, 51). A pause that
+      // only moved a job out of the line, or was refused, has nothing more to do: its answer is final here
+      await keepOutcome(tx, under.command, decided.kind === 'held' ? { ok: true, pending: true, targets: [jobId] } : decisionOutcome(decided));
       return { decided };
     }, TX);
-    if (done.seen) return answerOf(botId, ownerId, done.seen, now);
+    if (done.seen) return 'reused' in done.seen || done.seen.replay !== null ? answerOf(botId, ownerId, done.seen, now) : answerPendingCommand(botId, ownerId, under, () => pausedOutcomeOf(under.command), now);
     result = await afterPause(jobId, done.decided, now);
-    if (result.ok && result.kind === 'held') await keepOutcome(prisma, under.command, { ok: true, signInsKept: result.signInsKept });
+    if (result.ok && result.kind === 'held') {
+      // Kept once over the pending mark: a copy that settled the command meanwhile has decided it, and that is what this returns too
+      const final = await settleResume(under.command, { ok: true, signInsKept: result.signInsKept });
+      result = { ...result, signInsKept: final.ok && final.signInsKept !== undefined ? final.signInsKept : result.signInsKept };
+    }
   } else result = await pauseJobAs(jobId, 'person', now);
   const refusal = refusalOf(result);
   if (refusal) return refusal;
@@ -407,7 +427,7 @@ export async function resumeJob(botId: string, ownerId: string, jobId: string, n
   const under = underOf(command, botId, ownerId, jobId, as.kind, as.args ?? {}, job.pauses);
   if (under) {
     const seen = await seenCommand(under.command, under.row);
-    if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingResume(botId, ownerId, under, jobId, now);
+    if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingCommand(botId, ownerId, under, () => resumeOutcomeOf(jobId), now);
   }
   const moved = await prisma.$transaction(async (tx) => {
     const row = await lockJob(tx, jobId);
@@ -422,7 +442,7 @@ export async function resumeJob(botId: string, ownerId: string, jobId: string, n
     if (under && decided !== 'ok') await keepOutcome(tx, under.command, refusalOutcome(decided));
     return decided;
   }, TX);
-  if (typeof moved === 'object') return 'reused' in moved.seen || moved.seen.replay !== null ? answerOf(botId, ownerId, moved.seen, now) : answerPendingResume(botId, ownerId, under!, jobId, now);
+  if (typeof moved === 'object') return 'reused' in moved.seen || moved.seen.replay !== null ? answerOf(botId, ownerId, moved.seen, now) : answerPendingCommand(botId, ownerId, under!, () => resumeOutcomeOf(jobId), now);
   if (moved !== 'ok') return { ok: false, reason: moved };
   await controlInternals.tryStart(jobId, now, { quiet: true });
   // The month or a limit refused its start: tryStart put a job that ran before back as paused, with the reason. The start brings the job's own browser back before it answers, so a resume that got here has it: unless it could not
@@ -471,7 +491,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
   const under = underOf(command, botId, ownerId, jobId, 'first', args, job.pauses);
   if (under) {
     const seen = await seenCommand(under.command, under.row);
-    if (seen) return answerOf(botId, ownerId, seen, now);
+    if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingCommand(botId, ownerId, under, () => pausedOutcomeOf(under.command), now);
   }
   if (isOver(job.status)) return refused(botId, ownerId, under, 'over', now);
   if (job.status === 'queued' && job.queuedFor === 'paused') return resumeJob(botId, ownerId, jobId, now, command, { kind: 'first', args });
@@ -493,7 +513,8 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
     await tx.$executeRaw`SAVEPOINT "do_this_first"`;
     try {
       const paused = await firstIn(tx, botId, jobId, holding, rows, provider, now);
-      if (under) await keepOutcome(tx, under.command, { ok: true });
+      // What was paused has its sign-ins put away only after this commit: the answer stays pending until then (CodeRabbit on #1025, 51)
+      if (under) await keepOutcome(tx, under.command, paused.length > 0 ? { ok: true, pending: true, targets: paused.map((one) => one.id) } : { ok: true });
       return { paused };
     } catch (error) {
       if (!(error instanceof ControlRefused)) throw error;
@@ -502,7 +523,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
       return { refused: error.reason };
     }
   }, TX);
-  if ('seen' in decided) return answerOf(botId, ownerId, decided.seen, now);
+  if ('seen' in decided) return 'reused' in decided.seen || decided.seen.replay !== null ? answerOf(botId, ownerId, decided.seen, now) : answerPendingCommand(botId, ownerId, under!, () => pausedOutcomeOf(under!.command), now);
   if ('refused' in decided) return { ok: false, reason: decided.refused };
   const paused = decided.paused;
   // Rule C: only after the commit, for each pause it made
@@ -512,7 +533,10 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
     if (after.ok && after.kind === 'held') kept = (kept ?? true) && after.signInsKept;
   }
   await controlInternals.startNext(botId, now);
-  if (under && kept !== undefined) await keepOutcome(prisma, under.command, { ok: true, signInsKept: kept });
+  if (under && paused.length > 0) {
+    const final = await settleResume(under.command, kept === undefined ? { ok: true } : { ok: true, signInsKept: kept });
+    if (final.ok && final.signInsKept !== undefined) kept = final.signInsKept;
+  }
   const view = await viewOf(botId, ownerId, now);
   return view.ok && kept !== undefined ? { ...view, signInsKept: kept } : view;
 }

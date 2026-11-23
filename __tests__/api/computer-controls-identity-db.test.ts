@@ -31,6 +31,7 @@ import { cancelJob, moveJobFirst, pauseJob, resumeJob, resumeWait } from '@/lib/
 import { addJobNote } from '@/lib/computer-job-notes';
 import { claimCommand, commandRow } from '@/lib/computer-commands';
 import * as owner from '@/lib/computer-owner';
+import { parkProfile } from '@/lib/computer-browser-profile';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -403,6 +404,88 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       expect(await cancelJob(sara.brickId, sara.id, jobId, minutes(3), c)).toMatchObject({ ok: true });
       expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'person' });
       expect((await commandOf(c.id))?.outcome).toEqual({ ok: true, targets: [jobId] });
+    });
+
+    /** Holds the next browser park until `release` is called; resolves `entered` once it is being waited on. */
+    const gatedPark = (result: { state: 'parked' | 'failed'; reason: string | null }) => {
+      let release: () => void = () => undefined;
+      let entered: () => void = () => undefined;
+      const wasEntered = new Promise<void>((resolve) => (entered = resolve));
+      jest.mocked(parkProfile).mockImplementationOnce((async () => {
+        entered();
+        await new Promise<void>((resolve) => (release = resolve));
+        return result;
+      }) as unknown as typeof parkProfile);
+      return { wasEntered, release: () => release() };
+    };
+
+    it('CodeRabbit on #1025 (51): a copy of a Pause that arrives while the first one is still putting the sign-ins away waits, and answers with what the first kept (never an early success without signInsKept)', async () => {
+      const { sara, jobId } = await running('cr-51');
+      const c = command();
+      const gate = gatedPark({ state: 'parked', reason: null });
+      const first = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c);
+      await gate.wasEntered;
+      expect((await commandOf(c.id))?.outcome).toMatchObject({ ok: true, pending: true });
+      let copyAnswered = false;
+      const copy = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c).then((answer) => {
+        copyAnswered = true;
+        return answer;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(copyAnswered).toBe(false);
+      gate.release();
+      expect(await first).toMatchObject({ ok: true, signInsKept: true });
+      expect(await copy).toMatchObject({ ok: true, signInsKept: true });
+      expect((await commandOf(c.id))?.outcome).toEqual({ ok: true, signInsKept: true });
+      expect(await pausesOf(jobId)).toBe(1);
+    });
+
+    it('CodeRabbit on #1025 (51): when the first Pause never finishes putting the sign-ins away, the copy settles the answer once (kept: false), and the first one then returns that same answer', async () => {
+      const { sara, jobId } = await running('cr-51-stuck');
+      const c = command();
+      const old = resumeWait.ms;
+      resumeWait.ms = 300;
+      const gate = gatedPark({ state: 'parked', reason: null });
+      try {
+        const first = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c);
+        await gate.wasEntered;
+        expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(2), c)).toMatchObject({ ok: true, signInsKept: false });
+        expect((await commandOf(c.id))?.outcome).toEqual({ ok: true, signInsKept: false });
+        gate.release();
+        expect(await first).toMatchObject({ ok: true, signInsKept: false });
+      } finally {
+        resumeWait.ms = old;
+      }
+      expect(await pausesOf(jobId)).toBe(1);
+    });
+
+    it('CodeRabbit on #1025 (51): "do this first" with a running job to pause keeps its answer pending until that job’s sign-ins are put away; a copy waits for it', async () => {
+      const { sara, jobId } = await running('cr-51-first');
+      const taxi = await another(sara, 'Taxi', minutes(1));
+      const c = command();
+      const gate = gatedPark({ state: 'parked', reason: null });
+      const first = moveJobFirst(sara.brickId, sara.id, taxi, { pauseRunning: true }, minutes(2), c);
+      await gate.wasEntered;
+      expect((await commandOf(c.id))?.outcome).toMatchObject({ ok: true, pending: true, targets: [jobId] });
+      let copyAnswered = false;
+      const copy = moveJobFirst(sara.brickId, sara.id, taxi, { pauseRunning: true }, minutes(2), c).then((answer) => {
+        copyAnswered = true;
+        return answer;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(copyAnswered).toBe(false);
+      gate.release();
+      expect(await first).toMatchObject({ ok: true, signInsKept: true });
+      expect(await copy).toMatchObject({ ok: true, signInsKept: true });
+      expect((await commandOf(c.id))?.outcome).toEqual({ ok: true, signInsKept: true });
+    });
+
+    it('CodeRabbit on #1025 (51): a Pause of a job that only waited in line is answered in its own transaction (final, nothing pending)', async () => {
+      const { sara } = await running('cr-51-queued');
+      const waiting = await another(sara, 'Taxi', minutes(1));
+      const c = command();
+      expect(await pauseJob(sara.brickId, sara.id, waiting, minutes(2), c)).toMatchObject({ ok: true });
+      expect((await commandOf(c.id))?.outcome).toEqual({ ok: true });
     });
 
     it('a Stop’s command id used again on the owner’s OTHER Brick is `command_reused`, and stops nothing there', async () => {
