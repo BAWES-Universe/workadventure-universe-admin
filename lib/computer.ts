@@ -563,29 +563,41 @@ export async function earlierUnconfirmedStart(botId: string, personId: string, s
     });
     if (going) {
       // Finding 1: the answer is kept BEFORE it is given, so a retry of this key is answered with that start (whatever it comes to), never makes a job of its own
-      await answerAttemptIn(prisma, { botId, personId, startKey }, { aliasAttemptId: going.id });
-      return { id: null, status: null, state: 'starting', attempt: going.startKey };
+      if (await answerAttemptIn(prisma, { botId, personId, startKey }, { aliasAttemptId: going.id })) return { id: null, status: null, state: 'starting', attempt: going.startKey };
+      return keptAnswerOf(botId, personId, startKey);
     }
   }
   const earlier = await prisma.computerJob.findFirst({ where: { botId, personId, startAckedAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true, status: true, startKey: true } });
   if (!earlier) return null;
   // Finding 1: kept before it is answered (it acknowledges nothing: the earlier job stays unconfirmed until ITS key is acknowledged)
-  await answerAttemptIn(prisma, { botId, personId, startKey }, { jobId: earlier.id });
-  return { id: earlier.id, status: earlier.status, state: startStateOf(earlier.status), attempt: earlier.startKey };
+  if (await answerAttemptIn(prisma, { botId, personId, startKey }, { jobId: earlier.id })) return { id: earlier.id, status: earlier.status, state: startStateOf(earlier.status), attempt: earlier.startKey };
+  return keptAnswerOf(botId, personId, startKey);
+}
+
+/**
+ * The answer the key's attempt row durably records, read again after an answer write that stored nothing (a concurrent start under the same key made its own job first, or answered otherwise): that is what the start returns,
+ * never the earlier start the write was meant to record. Null when the row records no earlier start (the start goes on and meets the key's own job, or makes one) (CodeRabbit on #1025, 36).
+ */
+async function keptAnswerOf(botId: string, personId: string, startKey: string): Promise<EarlierStart | null> {
+  const answered = await attemptAnswer(botId, personId, startKey);
+  if (!answered || 'expired' in answered) return null;
+  if ('starting' in answered) return { id: null, status: null, state: 'starting', attempt: answered.starting };
+  return { id: answered.job.id, status: answered.job.status, state: startStateOf(answered.job.status), attempt: answered.job.startKey };
 }
 
 /**
  * Keeps, durably, that the start under `key` was answered with another start (finding 1, GPT round 6): state `answered`, with the job that answered it, or the attempt it waits for while that one has no job yet.
  * Written before the answer is given. It never touches a start that made its own job (`made`) or was superseded, and it acknowledges nothing: the answering job's `start_acked_at` is left as it is.
  */
-async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>, key: { botId: string; personId: string; startKey: string }, by: { jobId: string } | { aliasAttemptId: string }): Promise<void> {
+async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>, key: { botId: string; personId: string; startKey: string }, by: { jobId: string } | { aliasAttemptId: string }): Promise<boolean> {
   const jobId = 'jobId' in by ? by.jobId : null;
   const alias = 'aliasAttemptId' in by ? by.aliasAttemptId : null;
-  await db.$executeRaw`
+  const written = await db.$executeRaw`
     INSERT INTO "computer_start_attempts" ("id", "bot_id", "person_id", "start_key", "state", "job_id", "alias_attempt_id", "beat_at", "created_at")
     VALUES (${randomUUID()}, ${key.botId}, ${key.personId}, ${key.startKey}, 'answered', ${jobId}, ${alias}, NOW(), NOW())
     ON CONFLICT ("bot_id", "person_id", "start_key") DO UPDATE SET "state" = 'answered', "job_id" = EXCLUDED."job_id", "alias_attempt_id" = EXCLUDED."alias_attempt_id"
     WHERE "computer_start_attempts"."state" IN ('open', 'expired', 'answered')`;
+  return written > 0;
 }
 
 /** What a start's own attempt row says it was answered with (finding 1): a job, an older start still going on (its key), or a start that ended with no job (`expired`). Null when the row decides nothing (none, open, made, expired on its own). */

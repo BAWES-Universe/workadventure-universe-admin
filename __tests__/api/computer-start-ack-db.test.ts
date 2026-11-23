@@ -296,6 +296,35 @@ run('a start whose answer the game never confirmed, in a real database', () => {
     expect(await earlierUnconfirmedStart(sara.brickId, sara.id, keyOf())).toBeNull();
   });
 
+  it('CodeRabbit on #1025 (36): when a concurrent start under the same key made its own job between the read and the answer write, the answer the key durably records is returned, never `earlier` from a write that stored nothing', async () => {
+    const sara = await owner();
+    const a = await start(sara, 'Visa form', keyOf());
+    if (!a.ok) throw new Error('no');
+    const keyB = keyOf();
+    const real = prisma.computerJob.findFirst.bind(prisma.computerJob) as unknown as (args: { where?: { startAckedAt?: null } }) => Promise<unknown>;
+    let inside = false;
+    let madeFirst: Awaited<ReturnType<typeof startJob>> | null = null;
+    const spy = jest.spyOn(prisma.computerJob, 'findFirst').mockImplementation((async (args: { where?: { startAckedAt?: null } }) => {
+      const found = await real(args);
+      // The look at the oldest unconfirmed start has been made; now the other request under the same key makes its job first
+      if (!inside && args?.where?.startAckedAt === null) {
+        inside = true;
+        madeFirst = await start(sara, 'Visa form', keyB, false);
+      }
+      return found;
+    }) as never);
+    let answer: Awaited<ReturnType<typeof earlierUnconfirmedStart>>;
+    try {
+      answer = await earlierUnconfirmedStart(sara.brickId, sara.id, keyB);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(madeFirst).toMatchObject({ ok: true });
+    // The key records its own job: the start that asked goes on and meets it; it is not told another start came first
+    expect(answer).toBeNull();
+    expect(await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: keyB } })).toMatchObject({ state: 'made' });
+  });
+
   it('an old game is unchanged: a start without the capability is never blocked, makes a confirmed job, and never an unconfirmed one; rows from before the column never block', async () => {
     const sara = await owner();
     const a = await start(sara, 'Visa form', keyOf(), true);
