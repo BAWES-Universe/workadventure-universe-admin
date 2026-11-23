@@ -578,6 +578,52 @@ run('computer job controls: pause, resume, do this next, cancel one job (piece 1
     });
   });
 
+  describe('Opus read of piece 1: T2 and T3', () => {
+    it('T2: a job that had already counted time before this stretch (it waited once) is charged each second once: the pause takes the time so far, the ending only what ran after the resume', async () => {
+      const { sara, jobId } = await running('o-t2');
+      // 120 seconds already counted by an earlier stretch; this stretch started at minute 2
+      await prisma.computerJob.update({ where: { id: jobId }, data: { secondsRun: 120, stretchStarted: minutes(2) } });
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(5));
+      await resumeJob(sara.brickId, sara.id, jobId, minutes(6));
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', secondsRun: 0, secondsBilled: 300 });
+      await stopJobFor(sara.brickId, sara.id, minutes(11));
+      await sweepComputers(minutes(30));
+      const events = await eventsOf(jobId);
+      expect(events.map((event) => [event.eventId, Number(event.quantity)])).toEqual([
+        [`computer:${jobId}:time`, 300],
+        [pauseEventId(jobId, 1), 300],
+      ]);
+      // 120 before, 180 in the stretch, 300 after the resume
+      expect(events.reduce((sum, event) => sum + Number(event.quantity), 0)).toBe(600);
+    });
+
+    it('T3: a pause right after a first turn was sent with no response id puts the machine under the turn hold: the next job does not start until the machine is proved asleep', async () => {
+      const { sara, jobId } = await running('o-t3');
+      const next = await another(sara, 'Next one', minutes(1));
+      await prisma.computerJob.update({ where: { id: jobId }, data: { firstTurnSentAt: minutes(2), agentResponseId: null } });
+      const ref = `fake-${sara.brickId}`;
+      fake.stuckAwake.add(ref);
+      try {
+        expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(3))).toMatchObject({ ok: true });
+        expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).turnUnprovenSince).not.toBeNull();
+        expect(await jobOf(next)).toMatchObject({ status: 'queued' });
+        await sweepComputers(minutes(4));
+        expect(await jobOf(next)).toMatchObject({ status: 'queued' });
+        fake.stuckAwake.delete(ref);
+        await sweepComputers(minutes(5));
+        expect(await jobOf(next)).toMatchObject({ status: 'running' });
+        expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).turnUnprovenSince).toBeNull();
+      } finally {
+        fake.stuckAwake.delete(ref);
+      }
+      // CONTROL: a pause with no unnamed first turn holds nothing; the next job starts at once
+      const b = await running('o-t3-control');
+      const nextB = await another(b.sara, 'Next one', minutes(1));
+      await pauseJob(b.sara.brickId, b.sara.id, b.jobId, minutes(3));
+      expect(await jobOf(nextB)).toMatchObject({ status: 'running' });
+    });
+  });
+
   describe('Opus P1-1: a paused stretch is counted between the pause and its write to the books', () => {
     const failWrites = () =>
       recordMeterEvent.mockImplementation(async () => {
