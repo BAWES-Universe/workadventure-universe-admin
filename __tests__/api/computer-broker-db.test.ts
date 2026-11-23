@@ -18,6 +18,7 @@ jest.mock('@/lib/computer', () => {
   return {
     ...actual,
     finishJob: jest.fn(actual.finishJob),
+    finishJobUnder: jest.fn(actual.finishJobUnder),
     underTurnHold: jest.fn(actual.underTurnHold),
     settleTurnHold: jest.fn(actual.settleTurnHold),
     wakeIfStopped: jest.fn(actual.wakeIfStopped),
@@ -30,7 +31,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests, type TurnEvent } from '@/lib/computer-provider';
 import { Agent37Error, Agent37Unreached } from '@/lib/agent37/client';
-import { fenceMachine, finishJob, recordFinishIntent, settleTurnHold, underTurnHold, wakeIfStopped, setLeaderStopTimesForTests, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { fenceMachine, finishJob, finishJobUnder, recordFinishIntent, settleTurnHold, underTurnHold, wakeIfStopped, setLeaderStopTimesForTests, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { verifyJobToken } from '@/lib/computer-token';
 import { readFaultRows, recordFaults } from '@/lib/computer-faults';
 import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
@@ -1116,14 +1117,28 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         expect(opened).toHaveBeenCalledTimes(1);
       });
 
+      it('CodeRabbit on #1025 (29): the stream fails before the id after another worker claimed the job: the ending is refused, the stream says `superseded` and not that the job ended, and the job runs on for its new owner', async () => {
+        const { jobId } = await running();
+        fake.openTurn = async () =>
+          (async function* (): AsyncGenerator<TurnEvent> {
+            await prisma.computerJob.update({ where: { id: jobId }, data: { ownerEpoch: { increment: 1 } } });
+            throw new Error('socket hang up');
+          })();
+        const started = await startTurn(jobId, 'go');
+        if (!started.ok) throw new Error('no turn');
+        expect(await drain(started.events)).toEqual([expect.objectContaining({ type: 'failed', code: 'superseded' })]);
+        expect((await jobRow(jobId)).status).toBe('running');
+      });
+
       it('the job cannot be ended at that moment: the mark stays, so the next start ends it and never opens another turn', async () => {
         const { jobId } = await running();
         const { opened, wrap } = counted();
         fake.openTurn = wrap(failing('socket hang up'));
-        (finishJob as jest.Mock).mockRejectedValueOnce(new Error('database unreachable'));
+        (finishJobUnder as jest.Mock).mockRejectedValueOnce(new Error('database unreachable'));
         const started = await startTurn(jobId, 'go');
         if (!started.ok) throw new Error('no turn');
-        await drain(started.events);
+        // The ending could not be made: the stream says so (an unresolved turn), never that the job was ended (CodeRabbit on #1025)
+        expect(await drain(started.events)).toEqual([expect.objectContaining({ type: 'failed', code: 'turn_unresolved' })]);
         const still = await jobRow(jobId);
         expect(still.status).toBe('running');
         expect(still.firstTurnSentAt).not.toBeNull();

@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { agentCannotRun, providerFor, fenceMachine, finishJob, settleTurnHold, underTurnHold, wakeIfStopped } from '@/lib/computer';
+import { agentCannotRun, providerFor, fenceMachine, finishJobUnder, settleTurnHold, underTurnHold, wakeIfStopped } from '@/lib/computer';
 import { hasFinishIntent, hasPoolCutoff, lockRelayReach, recordRelayUnreachable } from '@/lib/computer-faults';
 import { epochMatches, lockJob, lockJobRow, type EpochSaid } from '@/lib/computer-owner';
 import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
@@ -137,6 +137,8 @@ export async function prepareJob(jobId: string, relay: unknown, now: Date = new 
         if (!epochMatches(now_.ownerEpoch, options.epoch)) return { ok: false as const, reason: 'superseded' as const };
         if (now_.status === 'waiting' && now_.control === 'person') return { ok: false as const, reason: 'person_has_it' as const };
         if (now_.status !== 'running' || now_.control !== 'brick') return { ok: false as const, reason: 'not_running' as const };
+        // A kept finish intent does not change the job's status or its epoch: the ordinary prepare answers `finish_pending` for it, and so does this one, before any fault is written (CodeRabbit on #1025)
+        if (await hasFinishIntent(tx, jobId)) return { ok: false as const, reason: 'finish_pending' as const };
         await recordRelayUnreachable(tx, jobId, { run: options.run ?? null, status: options.relayStatus ?? null, at: now });
         return { ok: false as const, reason: 'relay_unreachable' as const };
       });
@@ -386,7 +388,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       if (fresh.job.firstTurnSentAt) {
         const ended = await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
         await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
-        return { ok: false, reason: ended ? 'not_running' : 'failed' };
+        return ended === 'superseded' ? { ok: false, reason: 'superseded' } : { ok: false, reason: ended === 'ended' ? 'not_running' : 'failed' };
       }
       const markTime = new Date();
       const marked = await prisma.computerJob
@@ -477,18 +479,29 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
 
 /**
  * The job's first turn may be running on the machine with nothing to find it by: the job ends as failed (its keys revoked, its time settled, the
- * machine given back, which rests the turn). True when it ended; a job that cannot be ended now keeps its mark, so the next start ends it.
+ * machine given back, which rests the turn). Says what really happened: `ended` (the job is over, as a kept intent said when one was kept), `superseded` (another worker owns the job now: the ending was
+ * refused and nothing was ended) or `unresolved` (the ending could not be made now: the job keeps its mark, so the next start ends it). Never claims an ending the finalizer refused (CodeRabbit on #1025).
  */
-async function endJobOfUnknownTurn(jobId: string, epoch: number): Promise<boolean> {
+export type UnknownTurnEnd = 'ended' | 'superseded' | 'unresolved';
+async function endJobOfUnknownTurn(jobId: string, epoch: number): Promise<UnknownTurnEnd> {
   try {
     // Ends the job only while the worker that is starting the turn still owns it (decided in the ending's own write), and as a kept intent says when one is kept: a job another owner holds is not ended by this one's turn
-    await finishJob(jobId, 'failed', new Date(), null, null, null, null, { epoch });
-    return true;
+    const done = await finishJobUnder(jobId, null, 'failed', new Date(), null, null, null, null, epoch);
+    if (done.superseded) return 'superseded';
+    return done.job && ['done', 'failed', 'stopped'].includes(done.job.status) && !done.stale ? 'ended' : 'unresolved';
   } catch (error) {
     console.error('[Computer] Could not end a job whose first turn has no id:', error instanceof Error ? error.message : 'unknown');
-    return false;
+    return 'unresolved';
   }
 }
+
+/** What the stream says when a first turn never named itself: the terminal message only when the job did end; supersession and an unresolved ending are said as what they are. */
+const noTurnIdEvent = (end: UnknownTurnEnd): TurnEvent =>
+  end === 'ended'
+    ? { type: 'failed', code: 'no_turn_id', message: 'The agent never said its turn had started, so the job was ended' }
+    : end === 'superseded'
+      ? { type: 'failed', code: 'superseded', message: 'Another worker owns this job now, so it was not ended here' }
+      : { type: 'failed', code: 'turn_unresolved', message: 'The agent never said its turn had started and the job could not be ended yet; it is ended on the next start' };
 
 /** How long the agent has to accept a turn and say its id. */
 const TURN_START_LIMIT_MS = 30_000;
@@ -514,6 +527,7 @@ async function* keeping(
   const began = Date.now();
   // Set when the start is given up for good (see the cap below): the wait for the agent's answer ends at once
   let gaveUpAt: number | null = null;
+  let gaveUpEnd: UnknownTurnEnd = 'unresolved';
   let gaveUp: (() => void) | null = null;
   const givenUp = new Promise<'gave-up'>((resolve) => (gaveUp = () => resolve('gave-up')));
   const beat =
@@ -532,7 +546,7 @@ async function* keeping(
             if (!responseId && !job.sessionId && !over) {
               gaveUpAt = Date.now();
               renewing = (async () => {
-                await finishJob(job.jobId, 'failed', new Date(), null, null, null, null, { epoch: job.ownerEpoch }).catch((error) => console.error('[Computer] Could not end a job whose turn never said its id:', error instanceof Error ? error.message : 'unknown'));
+                gaveUpEnd = await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
                 gaveUp?.();
                 start?.controller.abort();
               })();
@@ -575,22 +589,24 @@ async function* keeping(
         if (gaveUpAt !== null) next = 'gave-up';
         else if (unnamed) {
           // The stream failed before the id: the job ends here (its mark stays if it cannot), never a second turn beside one that may run
-          await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
+          const end = await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
           over = true;
-          yield { type: 'failed', code: 'no_turn_id', message: 'The agent never said its turn had started, so the job was ended' };
+          yield noTurnIdEvent(end);
           return;
         } else throw error;
       }
       if (next === 'gave-up') {
         over = true;
-        yield { type: 'failed', code: 'no_turn_id', message: 'The agent never said its turn had started, so the job was ended' };
+        // The give-up's own ending is waited for, so what is said is what happened to the job
+        await renewing;
+        yield noTurnIdEvent(gaveUpEnd);
         return;
       }
       if (next.done) {
         if (unnamed) {
-          await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
+          const end = await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
           over = true;
-          yield { type: 'failed', code: 'no_turn_id', message: 'The agent never said its turn had started, so the job was ended' };
+          yield noTurnIdEvent(end);
         }
         return;
       }

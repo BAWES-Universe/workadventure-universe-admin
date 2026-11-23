@@ -1085,6 +1085,20 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect(opened()).toBe(before + 1);
     });
 
+    it('CodeRabbit on #1025 (5): a worker that says the relay was unreachable after the runner kept its finish intent is told `finish_pending` and no fault is written; CONTROL: a job with no intent records it', async () => {
+      const { jobId } = await running('s-relay-intent');
+      const ea = await claimed(jobId, 'rA');
+      const faults = () => prisma.computerJobFault.count({ where: { jobId } });
+      await recordFinishIntent(jobId, { outcome: 'done', epoch: ea }, minutes(1));
+      const before = await faults();
+      expect(await prepareJob(jobId, RELAY, minutes(2), { run: 'rA', epoch: ea, relayReached: false, relayStatus: 404 })).toEqual({ ok: false, reason: 'finish_pending' });
+      expect(await faults()).toBe(before);
+      const other = await running('s-relay-no-intent');
+      const eo = await claimed(other.jobId, 'rA');
+      expect(await prepareJob(other.jobId, RELAY, minutes(2), { run: 'rA', epoch: eo, relayReached: false, relayStatus: 404 })).toEqual({ ok: false, reason: 'relay_unreachable' });
+      expect(await prisma.computerJobFault.count({ where: { jobId: other.jobId } })).toBeGreaterThan(0);
+    });
+
     it('a stale prepare never takes the prepare claim (the owner’s own is not held off: `superseded`, not `preparing`), and a stale prepare that says the relay was unreachable records no fault', async () => {
       const { jobId } = await running('s-broker-claim');
       const ea = await claimed(jobId, 'rA');
