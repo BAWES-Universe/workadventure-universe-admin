@@ -196,6 +196,11 @@ run('finding 5 (GPT round 6): carrying on only when what was refused fits, in a 
       await prisma.spendRule.update({ where: { id: r.id }, data: { capMicros: BigInt(600_000), version: { increment: 1 } } });
       expect(await carryOnPaused(minutes(3))).toBe(0);
       expect(await roomsOf(sara.id)).toBe(1);
+      // 930,000 fits the call (900,000) on top of what the job has already used, but NOT the call plus the new room (60,000): a check of the call alone would carry it on, and it must not (CodeRabbit on #1025, 34)
+      await prisma.spendRule.update({ where: { id: r.id }, data: { capMicros: BigInt(930_000), version: { increment: 1 } } });
+      expect(await carryOnPaused(minutes(3))).toBe(0);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule' });
+      expect(await roomsOf(sara.id)).toBe(1);
       await prisma.spendRule.update({ where: { id: r.id }, data: { capMicros: BigInt(10_000_000), version: { increment: 1 } } });
       expect(await carryOnPaused(minutes(4))).toBe(1);
       expect(await jobOf(jobId)).toMatchObject({ status: 'running' });

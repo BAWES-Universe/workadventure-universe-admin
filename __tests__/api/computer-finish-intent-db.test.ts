@@ -1318,7 +1318,7 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       if (!next.ok) throw new Error('the second job was not made');
       // The runner commits to ending it as a fault of OURS (the relay was down in its turn 1)
       await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', 'rA')]);
-      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea })).toMatchObject({ ok: true });
+      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea }, minutes(1))).toMatchObject({ ok: true });
       // The person then cancels that one job
       expect((await cancelJob(sara.brickId, sara.id, jobId, minutes(2))).ok).toBe(true);
       const after = await jobOf(jobId);
@@ -1347,7 +1347,7 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       const inLine = await startJob({ botId: sara.brickId, personId: sara.id, title: 'In line' }, minutes(1));
       if (!inLine.ok) throw new Error('the second job was not made');
       await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', 'rA')]);
-      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea })).toMatchObject({ ok: true });
+      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea }, minutes(1))).toMatchObject({ ok: true });
       await stopJobFor(sara.brickId, sara.id, minutes(2));
       expect(await jobOf(jobId)).toMatchObject({ status: 'failed', endedBy: 'error' });
       expect(await decisionOf(jobId)).toMatchObject({ state: 'given', causeHint: 'ours' });
@@ -1364,7 +1364,7 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       const { sara, jobId } = await running('cr-9');
       const ea = await claimed(jobId, 'rA');
       await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', 'rA')]);
-      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea })).toMatchObject({ ok: true });
+      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea }, minutes(1))).toMatchObject({ ok: true });
       // Stop's read of what is on the computer saw this job in line (it has started and committed since)
       const original = prisma.computerJob.findMany.bind(prisma.computerJob) as unknown as (args: { where?: { status?: { in?: string[] } } }) => Promise<Array<{ id: string; status: string }>>;
       const spy = jest.spyOn(prisma.computerJob, 'findMany').mockImplementation(((args: { where?: { status?: { in?: string[] } } }) =>
@@ -1390,7 +1390,9 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       try {
         await holder.ready;
         cancelling = cancelJob(sara.brickId, sara.id, jobId, minutes(2));
-        expect(await waitingOn(cutoffLockKey(jobId))).toBe(true);
+        // A rejection is observed from the start (never unhandled), and ends the wait with its own error: a Cancel that fails or ends before it reaches the lock is not polled for
+        cancelling.catch(() => undefined);
+        expect(await Promise.race([waitingOn(cutoffLockKey(jobId)), cancelling.then(() => false)])).toBe(true);
         holder.release();
         await holder.done;
         await cancelling;
@@ -1407,7 +1409,7 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       const { sara, jobId } = await running('g6-held-cancel');
       const ea = await claimed(jobId, 'rA');
       await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', 'rA')]);
-      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea })).toMatchObject({ ok: true });
+      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea }, minutes(1))).toMatchObject({ ok: true });
       // The person takes the screen: the job is theirs now (`control: person`), with the intent still kept
       expect((await takeOver(sara.brickId, sara.id, minutes(1))).ok).toBe(true);
       expect(await jobOf(jobId)).toMatchObject({ control: 'person' });
@@ -1425,7 +1427,7 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       const inLine = await startJob({ botId: sara.brickId, personId: sara.id, title: 'In line' }, minutes(1));
       if (!inLine.ok) throw new Error('the second job was not made');
       await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', 'rA')]);
-      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea })).toMatchObject({ ok: true });
+      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea }, minutes(1))).toMatchObject({ ok: true });
       expect((await takeOver(sara.brickId, sara.id, minutes(1))).ok).toBe(true);
       await stopJobFor(sara.brickId, sara.id, minutes(2));
       expect(await jobOf(jobId)).toMatchObject({ status: 'failed', endedBy: 'error' });

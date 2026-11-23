@@ -206,8 +206,8 @@ run('a start whose answer the game never confirmed, in a real database', () => {
   });
 
   /** A barrier, not a delay: waits (bounded) until a session is blocked on this advisory lock. */
-  const blockedOn = async (lockKey: string): Promise<boolean> => {
-    for (let tries = 0; tries < 250; tries += 1) {
+  const blockedOn = async (lockKey: string, signal: { stop: boolean } = { stop: false }): Promise<boolean> => {
+    for (let tries = 0; tries < 250 && !signal.stop; tries += 1) {
       const rows = await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objid::bigint = (hashtext(${lockKey})::bigint & 4294967295)`;
       if (rows[0].n > 0) return true;
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -231,6 +231,9 @@ run('a start whose answer the game never confirmed, in a real database', () => {
       { timeout: 20_000, maxWait: 20_000 },
     );
     let waiting: Promise<unknown> = Promise.resolve();
+    // The poll can be stopped, and is joined before this returns: it never runs on into the next test or the teardown (CodeRabbit on #1025, 39)
+    const signal = { stop: false };
+    let polling: Promise<boolean> = Promise.resolve(false);
     try {
       // A holder that fails before it made its row is reported, never waited for
       await Promise.race([holderRan, holder.then(() => Promise.reject(new Error('the holder ended without making its job')))]);
@@ -242,14 +245,16 @@ run('a start whose answer the game never confirmed, in a real database', () => {
       );
       settled.catch(() => undefined);
       // The waiter's own failure is this test's failure at once (not a poll that runs out), and a waiter that finished without ever blocking is reported as that
-      const reached = await Promise.race([blockedOn(`computer:giveback:${sara.id}`), settled.then(() => 'finished-early' as const)]);
+      polling = blockedOn(`computer:giveback:${sara.id}`, signal);
+      const reached = await Promise.race([polling, settled.then(() => 'finished-early' as const)]);
       expect(reached).toBe(true);
       release();
       await holder;
       await check(await waiting);
     } finally {
+      signal.stop = true;
       release();
-      await Promise.allSettled([holder, waiting]);
+      await Promise.allSettled([holder, waiting, polling]);
     }
   };
 
