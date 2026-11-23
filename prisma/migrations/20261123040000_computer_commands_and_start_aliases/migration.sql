@@ -25,12 +25,13 @@ ALTER TABLE "computer_job_commands" ADD CONSTRAINT "computer_job_commands_bot_id
 
 -- Finding 1. A start that was answered with ANOTHER start's job (`earlier`) keeps that answer durably: state `answered`, with the answering job (`job_id`), or, while that start has no job yet,
 -- the attempt it waits for (`alias_attempt_id`). A retry under the same key is answered from this row before anything else, after the job was acknowledged, ended, or the game forgot its key.
--- An attempt bound to a job lives as long as that job (the foreign key below): it is never swept by age.
+-- An attempt that names a job lives as long as the job; when the job goes away (made and taken away again: controls not set up, a rule, a purge) the attempt STAYS with no job, because the row is the record that this
+-- key was already answered: a delayed copy of the start that finds no row would make a job of its own (CodeRabbit N15 on #1025, Opus's ruling 23 Nov). A job-less attempt is let go only after a week (the sweep).
 ALTER TABLE "computer_start_attempts" ADD COLUMN "alias_attempt_id" TEXT;
--- Attempts that name a job that is already gone (made and taken away again: controls not set up, a rule) are let go first, so the key can be added
-DELETE FROM "computer_start_attempts" a WHERE a."job_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "computer_jobs" j WHERE j."id" = a."job_id");
-ALTER TABLE "computer_start_attempts" ADD CONSTRAINT "computer_start_attempts_job_id_fkey" FOREIGN KEY ("job_id") REFERENCES "computer_jobs"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-ALTER TABLE "computer_start_attempts" ADD CONSTRAINT "computer_start_attempts_alias_attempt_id_fkey" FOREIGN KEY ("alias_attempt_id") REFERENCES "computer_start_attempts"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+-- Attempts that name a job that is already gone are kept, with no job, so the key can be added
+UPDATE "computer_start_attempts" a SET "job_id" = NULL WHERE a."job_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "computer_jobs" j WHERE j."id" = a."job_id");
+ALTER TABLE "computer_start_attempts" ADD CONSTRAINT "computer_start_attempts_job_id_fkey" FOREIGN KEY ("job_id") REFERENCES "computer_jobs"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "computer_start_attempts" ADD CONSTRAINT "computer_start_attempts_alias_attempt_id_fkey" FOREIGN KEY ("alias_attempt_id") REFERENCES "computer_start_attempts"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 CREATE INDEX "computer_start_attempts_job_id_idx" ON "computer_start_attempts"("job_id");
 CREATE INDEX "computer_start_attempts_alias_attempt_id_idx" ON "computer_start_attempts"("alias_attempt_id");
 

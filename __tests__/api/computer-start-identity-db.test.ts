@@ -18,6 +18,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { ackStart, finishJob, forgetOldStartMarks, giveComputer, startJob, startedJobFor } from '@/lib/computer';
+import { purgeBrick } from '@/lib/brick-purge';
 import { GET, POST } from '@/app/api/bots/[id]/computer-jobs/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -255,10 +256,13 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(2);
     expect(await post(tom, KEY_B, 'Visa please')).toEqual({ ok: false, reason: 'expired' });
     expect(await jobsOf(tom)).toHaveLength(0);
-    // CONTROL: a lone attempt that made nothing and answers nothing is still swept by age
+    // CONTROL (N15): a lone attempt that made nothing and answers nothing is NOT swept after an hour any more: it is the record that its key was answered, so it stays a week and goes only then
     await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: key(), state: 'expired', beatAt: minutes(-120) } });
     await forgetOldStartMarks(new Date());
-    expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(2);
+    expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(3);
+    await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: key(), state: 'expired', beatAt: minutes(-8 * 24 * 60) } });
+    await forgetOldStartMarks(new Date());
+    expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(3);
   });
 
   it('1d CONTROL: a deliberate second start with the SAME title after the first was acknowledged makes a second job with its own reservation', async () => {
@@ -274,13 +278,73 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     expect(rooms.map((room) => room.jobId).sort()).toEqual([first.job.id, second.job.id].sort());
   });
 
-  it('an attempt bound to a job goes WITH the job (never orphaned): a job taken away removes its attempts and the answers that point at it', async () => {
-    const sara = await owner('r1-cascade');
+  it('N15: a key answered with a job that is then taken away is NOT forgotten: the attempt stays with no job, and a delayed copy of the start answers `expired` and makes nothing', async () => {
+    const sara = await owner('n15-away');
     const KEY_A = key();
     const KEY_B = key();
     const a = await post(sara, KEY_A, 'Visa');
     await post(sara, KEY_B, 'Visa please');
+    expect(await attemptOf(sara, KEY_B)).toMatchObject({ state: 'answered', jobId: a.job.id });
+    // The job is made and taken away again (controls not set up, a rule, a purge of it): its attempts and the answers that point at it STAY, with no job
     await prisma.computerJob.delete({ where: { id: a.job.id } });
-    expect(await prisma.computerStartAttempt.count({ where: { personId: sara.id } })).toBe(0);
+    expect(await prisma.computerStartAttempt.count({ where: { personId: sara.id } })).toBe(2);
+    expect(await attemptOf(sara, KEY_B)).toMatchObject({ state: 'answered', jobId: null });
+    // Even after the hour the old cleanup used (it is a week now)
+    await forgetOldStartMarks(minutes(120));
+    expect(await prisma.computerStartAttempt.count({ where: { personId: sara.id } })).toBe(2);
+    // A delayed copy of the answered start, and of the one that made the job: both are `expired`, and nothing is made
+    expect(await post(sara, KEY_B, 'Visa please')).toMatchObject({ ok: false, reason: 'expired' });
+    expect(await viaLib(sara, KEY_B, 'Visa please')).toMatchObject({ ok: false, reason: 'expired' });
+    expect(await jobsOf(sara)).toHaveLength(0);
+    // Nothing new was reserved: the only room is the one the deleted job took
+    expect((await roomsOf(sara)).every((room) => room.jobId === a.job.id)).toBe(true);
+  });
+
+  it('N15: a SUPERSEDED start whose answering job is gone, delayed past the old cleanup horizon, still makes no second job', async () => {
+    const sara = await owner('n15-superseded');
+    const KEY_OLD = key();
+    const KEY_NEW = key();
+    // The older start was held back; the newer one made the job after it began, which supersedes the older one
+    await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: KEY_OLD, state: 'open', beatAt: minutes(-180), createdAt: minutes(-180) } });
+    const fresh = await post(sara, KEY_NEW, 'Visa');
+    expect(fresh).toMatchObject({ ok: true, job: { status: 'running' } });
+    await prisma.computerStartAttempt.update({ where: { botId_personId_startKey: { botId: sara.brickId, personId: sara.id, startKey: KEY_OLD } }, data: { state: 'superseded', jobId: fresh.job.id } });
+    await prisma.computerJob.delete({ where: { id: fresh.job.id } });
+    // Three hours after its last beat: the old hour-long cleanup would have deleted this row and the delayed start would have made a second job
+    await forgetOldStartMarks(NOW);
+    expect(await attemptOf(sara, KEY_OLD)).toMatchObject({ state: 'superseded', jobId: null });
+    expect(await viaLib(sara, KEY_OLD, 'Visa')).toMatchObject({ ok: false, reason: 'expired' });
+    expect(await jobsOf(sara)).toHaveLength(0);
+  });
+
+  it('N15: an EXPIRED key two hours later answers `expired` and makes nothing; only a week after its last beat is it let go', async () => {
+    const sara = await owner('n15-expired');
+    const KEY = key();
+    await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: KEY, state: 'expired', beatAt: minutes(-120), createdAt: minutes(-121) } });
+    await forgetOldStartMarks(NOW);
+    expect(await attemptOf(sara, KEY)).toMatchObject({ state: 'expired', jobId: null });
+    expect(await viaLib(sara, KEY, 'Visa')).toMatchObject({ ok: false, reason: 'expired' });
+    expect(await jobsOf(sara)).toHaveLength(0);
+    // A week and a bit after its last beat, every job-less attempt goes, whatever its state
+    for (const state of ['open', 'expired', 'superseded', 'answered']) {
+      await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: key(), state, beatAt: minutes(-8 * 24 * 60) } });
+    }
+    await forgetOldStartMarks(NOW);
+    expect(await prisma.computerStartAttempt.count({ where: { personId: sara.id } })).toBe(1);
+    expect(await attemptOf(sara, KEY)).toMatchObject({ state: 'expired' });
+  });
+
+  it('N15: an attempt bound to a LIVE job stays however old it is; the Brick’s purge removes every attempt of the Brick, with or without a job', async () => {
+    const sara = await owner('n15-purge');
+    const live = await post(sara, key(), 'Visa');
+    await prisma.computerStartAttempt.updateMany({ where: { jobId: live.job.id }, data: { beatAt: minutes(-30 * 24 * 60) } });
+    await forgetOldStartMarks(NOW);
+    expect(await prisma.computerStartAttempt.count({ where: { personId: sara.id, jobId: live.job.id } })).toBe(1);
+    await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: key(), state: 'expired', beatAt: minutes(-60) } });
+    await finishJob(live.job.id, 'done', minutes(1));
+    await prisma.computerJob.delete({ where: { id: live.job.id } });
+    await prisma.bot.update({ where: { id: sara.brickId }, data: { deletedAt: minutes(-8 * 24 * 60), goneAt: minutes(-60), enabled: false } });
+    expect(await purgeBrick(sara.brickId, NOW)).toBe('purged');
+    expect(await prisma.computerStartAttempt.count({ where: { botId: sara.brickId } })).toBe(0);
   });
 });

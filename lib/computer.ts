@@ -686,12 +686,10 @@ export const DEAD_ANSWER_MS = 7 * 24 * 60 * 60_000;
 
 /** Marks that were never removed (their process died) are deleted. Returns how many. */
 export async function forgetOldStartMarks(now: Date = new Date(), olderThanMs: number = 60 * 60_000): Promise<number> {
-  // The attempts of starts that are long over go with them. An attempt bound to a job (made, superseded or answered by it) lives as long as that job (the foreign key deletes it with the job), and so does one
-  // another start's answer waits on or that waits on another: a retry of either is answered from them after the game forgot its key (finding 1)
-  await prisma.computerStartAttempt.deleteMany({ where: { beatAt: { lt: new Date(now.getTime() - olderThanMs) }, jobId: null, aliasAttemptId: null, aliases: { none: {} } } });
-  // A start that ended with no job (let go, or one that stopped beating long ago) that other starts were answered with: after a week the answer it gives them is `expired` and stays so, so it goes, and the
-  // answers that wait on it go with it (the foreign key). A start bound to a job is never touched here
-  await prisma.computerStartAttempt.deleteMany({ where: { beatAt: { lt: new Date(now.getTime() - DEAD_ANSWER_MS) }, jobId: null, aliasAttemptId: null, state: { in: ['open', 'expired'] } } });
+  // A start's attempt is the record that its key was answered (a job, another start's job, or `expired`): a delayed copy of a start that finds no row would make a job of its own (CodeRabbit N15 on #1025, Opus's ruling).
+  // So no attempt goes after an hour, whatever its state: the one rule is that one with NO job (let go, superseded, answered, or its job taken away: the foreign key leaves it with none) goes a week after its last
+  // beat, and the answers that wait on it keep their state (the foreign key leaves them waiting on nothing, which answers `expired`). A start bound to a job stays as long as the job does
+  await prisma.computerStartAttempt.deleteMany({ where: { beatAt: { lt: new Date(now.getTime() - DEAD_ANSWER_MS) }, jobId: null } });
   return (await prisma.computerStartMark.deleteMany({ where: { startedAt: { lt: new Date(now.getTime() - olderThanMs) } } })).count;
 }
 

@@ -86,6 +86,8 @@ export async function purgeBrick(id: string, now: Date = new Date()): Promise<Pu
       await tx.botsTestResult.deleteMany({ where: botId });
       await tx.spendRule.deleteMany({ where: botId });
       await tx.appKeyRequest.deleteMany({ where: botId });
+      // The answers kept for a start's key stay with no job when a job goes (CodeRabbit N15), and no foreign key reaches them from the Brick: they go with it
+      await tx.computerStartAttempt.deleteMany({ where: botId });
       // Money stays; what was said does not: a task receipt keeps its amounts and loses its title and sponsor's name, a voice note keeps its seconds and cost
       await tx.taskReceipt.updateMany({ where: botId, data: { title: DELETED_TASK_TITLE, payerName: null } });
       await tx.voiceNoteTurn.updateMany({ where: botId, data: { buffer: null, bufferUntil: null, providerRefs: Prisma.DbNull } });

@@ -4197,9 +4197,9 @@ model ComputerStartAttempt {
   /// Finding 1 (GPT round 6): a start answered with another start that had no job yet waits for THAT attempt (state `answered`); a retry under this key is answered from it.
   aliasAttemptId String? @map("alias_attempt_id")
 
-  /// The job this start made or was answered with: the attempt lives as long as the job (never swept by age).
-  job     ComputerJob?           @relation("StartAttemptJob", fields: [jobId], references: [id], onDelete: Cascade)
-  alias   ComputerStartAttempt?  @relation("StartAttemptAlias", fields: [aliasAttemptId], references: [id], onDelete: Cascade)
+  /// The job this start made or was answered with. The attempt stays with no job when the job goes (it is the record that the key was answered); a job-less attempt is let go after a week.
+  job     ComputerJob?           @relation("StartAttemptJob", fields: [jobId], references: [id], onDelete: SetNull)
+  alias   ComputerStartAttempt?  @relation("StartAttemptAlias", fields: [aliasAttemptId], references: [id], onDelete: SetNull)
   aliases ComputerStartAttempt[] @relation("StartAttemptAlias")
 
   @@unique([botId, personId, startKey])
