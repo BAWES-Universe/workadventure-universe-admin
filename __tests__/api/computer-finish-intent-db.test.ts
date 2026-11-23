@@ -1360,6 +1360,24 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       expect(await decisionOf(plain.jobId)).toBeNull();
     });
 
+    it('CodeRabbit on #1025 (9): Stop that read a job as in line, which started and kept an intent of ours before it was ended, ends it as the intent said (given back), never as the person’s stop', async () => {
+      const { sara, jobId } = await running('cr-9');
+      const ea = await claimed(jobId, 'rA');
+      await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', 'rA')]);
+      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea })).toMatchObject({ ok: true });
+      // Stop's read of what is on the computer saw this job in line (it has started and committed since)
+      const original = prisma.computerJob.findMany.bind(prisma.computerJob) as (args: { where?: { status?: { in?: string[] } } }) => Promise<Array<{ id: string; status: string }>>;
+      const spy = jest.spyOn(prisma.computerJob, 'findMany').mockImplementation(((args: { where?: { status?: { in?: string[] } } }) =>
+        args?.where?.status?.in?.includes('queued') && args.where.status.in.includes('running') ? Promise.resolve([{ id: jobId, status: 'queued' }]) : original(args)) as never);
+      try {
+        await stopJobFor(sara.brickId, sara.id, minutes(2));
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await jobOf(jobId)).toMatchObject({ status: 'failed', endedBy: 'error' });
+      expect(await decisionOf(jobId)).toMatchObject({ state: 'given', causeHint: 'ours' });
+    });
+
     it('an intent that commits while the person’s Cancel waits for the cutoff lock still governs: the job ends as the intent said', async () => {
       const { sara, jobId } = await running('g6-cancel-race');
       const ea = await claimed(jobId, 'rA');

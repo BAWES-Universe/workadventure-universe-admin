@@ -1788,7 +1788,12 @@ async function endEverything(botId: string, now: Date, only: string[] | null): P
   const inLine = jobs.filter((job) => job.status === 'queued');
   const held = jobs.filter((job) => job.status !== 'queued');
   // Nothing in line may start while this Stop ends everything, so no end of a job in it moves the line
-  for (const job of inLine) await endJob(job.id, 'stopped', 'person', now, false);
+  for (const job of inLine) {
+    // Ended as a job in line only while it still is one: it may have started since it was read, and then it is a job that holds the machine, which ends under the rule for those
+    await endJob(job.id, 'stopped', 'person', now, false, 'queued');
+    const started = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { status: true } });
+    if (started?.status === 'running' || started?.status === 'waiting') await endJob(job.id, 'stopped', 'person', now, false, undefined, true, null, false, { personStop: true });
+  }
   // A job that holds the machine ends as the ending already committed for it says, when there is one (a runner's kept intent, a decided pool cutoff): the person's Stop never makes a fault of ours their own stop
   for (const job of held) await endJob(job.id, 'stopped', 'person', now, false, undefined, true, null, false, { personStop: true });
 }
