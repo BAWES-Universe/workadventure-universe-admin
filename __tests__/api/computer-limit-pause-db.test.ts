@@ -27,7 +27,7 @@ import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { heldRoom, memberAllowance } from '@/lib/meter-allowance';
 import * as meterModule from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { claimJob, computerTimeInBooks, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { claimJob, computerTimeInBooks, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver, takeWakeTicketForTests } from '@/lib/computer';
 import { authorizeModelCall, callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { mintJobToken } from '@/lib/computer-token';
 import { recordPoolCutoff } from '@/lib/computer-faults';
@@ -78,6 +78,8 @@ const wipe = async () => {
   await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
 };
 
+/** The wake of this Brick's machine that is in flight is older than a start can take (no start is behind it any more): another start wakes the machine itself instead of waiting for it (round 8, B1). */
+const ageWake = (botId: string) => prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = NOW() - INTERVAL '10 minutes' WHERE "bot_id" = ${botId}`;
 const jobOf = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
 const timeEvents = (jobId: string) => prisma.meterEvent.findMany({ where: { jobId, kind: 'computer_time' }, orderBy: { eventId: 'asc' } });
 const liveKeys = (jobId: string) => prisma.computerJobToken.count({ where: { jobId, revokedAt: null } });
@@ -612,6 +614,7 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         first = false;
         keys.push((await jobOf(jobId)).reservationKey);
         expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(3))).ok).toBe(true);
+        await ageWake(sara.brickId);
         expect((await resumeJob(sara.brickId, sara.id, jobId, minutes(4))).ok).toBe(true);
         keys.push((await jobOf(jobId)).reservationKey);
         await claimed(jobId, 'rB', minutes(4));
@@ -652,6 +655,8 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         if (!first) return;
         first = false;
         expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(3))).ok).toBe(true);
+        // The first wake is older than a start can take (no start is behind it any more): the replacement wakes the machine itself, with the next ticket
+        await ageWake(sara.brickId);
         expect((await resumeJob(sara.brickId, sara.id, jobId, minutes(4))).ok).toBe(true);
         await claimed(jobId, 'rB', minutes(4));
         if (ending === 'fails') throw new Error('the machine never came ready');
@@ -691,6 +696,173 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect(await fake.awake(await refOf(sara.brickId))).toBe(false);
       expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { machine: true } })).toEqual({ machine: 'broken' });
       expect(await jobOf(jobId)).toMatchObject({ status: 'failed' });
+    });
+  });
+
+  describe('GPT seventh note, B1 (Opus): one wake in flight per Brick', () => {
+    const wakesOf = () => fake.calls.filter((call) => call.name === 'wake').length;
+    const stopsOf = () => fake.calls.filter((call) => call.name === 'stop').length;
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const machineOf = async (botId: string) => (await prisma.brickComputer.findUniqueOrThrow({ where: { botId }, select: { machine: true, providerRef: true, wakeEpoch: true } }));
+    const until = async (check: () => Promise<boolean>) => {
+      for (let at = 0; at < 200; at++) {
+        if (await check()) return;
+        await sleep(25);
+      }
+      throw new Error('the state never came');
+    };
+    /** A Brick whose machine is asleep with no job on it. */
+    const sleepingBrick = async (name: string) => {
+      const sara = await person(name);
+      await giveComputer(sara.brickId, sara.id);
+      const first = await startJob({ botId: sara.brickId, personId: sara.id, title: 'First', writes: false }, NOW);
+      if (!first.ok) throw new Error('no first job');
+      await finishJobUnder(first.job.id, null, 'done', minutes(1), null, null, null);
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      return sara;
+    };
+    const readerOf = (sara: { id: string; brickId: string }, title: string, at: Date) => startJob({ botId: sara.brickId, personId: sara.id, title, writes: false }, at);
+    const gate = () => {
+      let open: () => void = () => undefined;
+      const opened = new Promise<void>((resolve) => (open = resolve));
+      return { open, opened };
+    };
+
+    it('(a) two readers start side by side on a sleeping machine: the second waits for the first wake instead of waking again, and both run on the one wake', async () => {
+      const sara = await sleepingBrick('b1-sib');
+      const first = gate();
+      let readies = 0;
+      const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+        readies++;
+        if (readies === 1) await first.opened;
+      });
+      const wakes = wakesOf();
+      const stops = stopsOf();
+      try {
+        const x = readerOf(sara, 'X', minutes(10));
+        await until(async () => (await machineOf(sara.brickId)).machine === 'waking');
+        const y = readerOf(sara, 'Y', minutes(10));
+        await sleep(700);
+        // The second start does not wake it again, and takes no ticket
+        expect(wakesOf()).toBe(wakes + 1);
+        expect((await machineOf(sara.brickId)).wakeEpoch).toBe(1 + 1);
+        first.open();
+        const [rx, ry] = await Promise.all([x, y]);
+        expect(rx.ok && rx.job.status).toBe('running');
+        expect(ry.ok && ry.job.status).toBe('running');
+      } finally {
+        first.open();
+        spy.mockRestore();
+      }
+      expect(wakesOf()).toBe(wakes + 1);
+      expect(readies).toBe(1);
+      expect(stopsOf()).toBe(stops);
+      expect(await fake.awake((await machineOf(sara.brickId)).providerRef as string)).toBe(true);
+      expect((await machineOf(sara.brickId)).machine).toBe('working');
+    });
+
+    it('(a) two starts that begin in the same instant on a sleeping machine take ONE wake ticket between them: the ticket is taken only from the state both saw, so the loser takes none and wakes nothing', async () => {
+      for (let round = 0; round < 3; round++) {
+        const sara = await sleepingBrick(`b1-race-${round}`);
+        const wakes = wakesOf();
+        const first = gate();
+        const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+          await first.opened;
+        });
+        try {
+          const both = Promise.all([readerOf(sara, 'X', minutes(10)), readerOf(sara, 'Y', minutes(10))]);
+          await sleep(600);
+          first.open();
+          const [rx, ry] = await both;
+          expect(rx.ok && rx.job.status).toBe('running');
+          expect(ry.ok && ry.job.status).toBe('running');
+        } finally {
+          first.open();
+          spy.mockRestore();
+        }
+        expect(wakesOf()).toBe(wakes + 1);
+        expect((await machineOf(sara.brickId)).wakeEpoch).toBe(1 + 1);
+      }
+    });
+
+    it('(a) the ticket is taken only from the state the start saw: of two starts that both saw the machine stopped, one gets the ticket and the other gets none (it waits for that wake)', async () => {
+      const sara = await sleepingBrick('b1-ticket');
+      const before = (await machineOf(sara.brickId)).wakeEpoch;
+      const [one, two] = await Promise.all([takeWakeTicketForTests(sara.brickId, 'waking', 'stopped'), takeWakeTicketForTests(sara.brickId, 'waking', 'stopped')]);
+      expect([one, two].filter((ticket) => ticket !== null)).toEqual([before + 1]);
+      expect([one, two].filter((ticket) => ticket === null)).toHaveLength(1);
+      expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'waking', wakeEpoch: before + 1 });
+    });
+
+    it('(a) the first of two side-by-side starts FAILS its readiness: its own stop is claimed and proved, and the second, which waited, wakes the machine itself and runs on it', async () => {
+      const sara = await sleepingBrick('b1-sibfail');
+      const first = gate();
+      let readies = 0;
+      const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+        readies++;
+        if (readies === 1) {
+          await first.opened;
+          throw new Error('the machine never came ready');
+        }
+      });
+      const wakes = wakesOf();
+      try {
+        const x = readerOf(sara, 'X', minutes(10));
+        await until(async () => (await machineOf(sara.brickId)).machine === 'waking');
+        const y = readerOf(sara, 'Y', minutes(10));
+        await sleep(700);
+        first.open();
+        const [rx, ry] = await Promise.all([x, y]);
+        expect(rx).toEqual({ ok: false, reason: 'broken_start' });
+        expect(ry.ok && ry.job.status).toBe('running');
+      } finally {
+        first.open();
+        spy.mockRestore();
+      }
+      // The failed start stopped the machine it had woken (once, claimed), and the second woke it again, after: it is awake and working, under the second's ticket
+      expect(wakesOf()).toBe(wakes + 2);
+      expect(await fake.awake((await machineOf(sara.brickId)).providerRef as string)).toBe(true);
+      expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'working', wakeEpoch: 1 + 2 });
+    });
+
+    it('(b) the first start’s readiness fails while the replacement is STILL waking (not yet working): the stop claim matches nothing, no stop is asked, the provider stays awake and the replacement then comes ready', async () => {
+      const sara = await sleepingBrick('b1-stillwaking');
+      const first = gate();
+      const second = gate();
+      let readies = 0;
+      const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+        readies++;
+        if (readies === 1) {
+          await first.opened;
+          throw new Error('the machine never came ready');
+        }
+        await second.opened;
+      });
+      const stops = stopsOf();
+      try {
+        const x = readerOf(sara, 'X', minutes(10));
+        await until(async () => (await machineOf(sara.brickId)).machine === 'waking');
+        // The first wake is older than a start can take: the second start wakes the machine itself, with the next ticket, and is still waiting for its readiness
+        await ageWake(sara.brickId);
+        const y = readerOf(sara, 'Y', minutes(10));
+        await until(async () => readies === 2);
+        expect((await machineOf(sara.brickId)).wakeEpoch).toBe(1 + 2);
+        // The first start's readiness now fails, while the machine is still waking for the second
+        first.open();
+        expect(await x).toEqual({ ok: false, reason: 'broken_start' });
+        expect(stopsOf()).toBe(stops);
+        expect(await fake.awake((await machineOf(sara.brickId)).providerRef as string)).toBe(true);
+        expect((await machineOf(sara.brickId)).machine).toBe('waking');
+        second.open();
+        const ry = await y;
+        expect(ry.ok && ry.job.status).toBe('running');
+      } finally {
+        first.open();
+        second.open();
+        spy.mockRestore();
+      }
+      expect(stopsOf()).toBe(stops);
+      expect((await machineOf(sara.brickId)).machine).toBe('working');
     });
   });
 
@@ -765,6 +937,7 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         if (!first) return;
         first = false;
         expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(3))).ok).toBe(true);
+        await ageWake(sara.brickId);
         expect((await resumeJob(sara.brickId, sara.id, jobId, minutes(4))).ok).toBe(true);
         await claimed(jobId, 'rB', minutes(4));
       });
@@ -951,6 +1124,8 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: state } });
         (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'left', reason: 'not_awake' }));
         expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+        // (a wake with no start behind it: older than a start can take, so the next job wakes the machine itself)
+        await ageWake(sara.brickId);
         expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: jobId });
         const seen: Array<{ job: string; machine: string; starts: number }> = [];
         (profiles.parkProfile as jest.Mock).mockImplementationOnce(async (_bot: string, job: string) => {
@@ -1076,6 +1251,38 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect(Math.abs(first.stretchStarted!.getTime() - NOW.getTime())).toBeLessThan(5_000);
       expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(4))).ok).toBe(true);
       expect(await chargedSeconds(jobId)).toBe(240);
+    });
+
+    it('a plain start whose wake takes 3 minutes, then 2 minutes of work and a Pause: 120 seconds are booked, and the stretch starts when the machine was ready (claim + 3 minutes), not at the claim', async () => {
+      const sara = await person('b2-slow');
+      await giveComputer(sara.brickId, sara.id);
+      // The wake takes 3 minutes of the server's clock: the readiness check itself moves it (nothing else sleeps)
+      const real = Date.now.bind(Date);
+      let skew = 0;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => real() + skew);
+      const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+        skew += 3 * 60_000;
+      });
+      let started;
+      try {
+        started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Slow wake', writes: false }, NOW);
+      } finally {
+        spy.mockRestore();
+        clock.mockRestore();
+      }
+      if (!started.ok) throw new Error('no job');
+      const jobId = started.job.id;
+      const ready = await jobOf(jobId);
+      expect(ready).toMatchObject({ status: 'running', prepState: null });
+      // Billing starts when the machine was ready: the claim at NOW plus the 3 minutes the wake took (never at the claim)
+      expect(ready.startedAt).not.toBeNull();
+      expect(ready.stretchStarted!.getTime()).toBeGreaterThanOrEqual(NOW.getTime() + 3 * 60_000);
+      expect(ready.stretchStarted!.getTime()).toBeLessThan(NOW.getTime() + 3 * 60_000 + 10_000);
+      // 2 minutes of work after it was ready, then Pause: exactly those 120 seconds are booked
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(5))).ok).toBe(true);
+      const job = await jobOf(jobId);
+      expect(job.secondsRun + job.secondsBilled).toBe(120);
+      expect(await chargedSeconds(jobId)).toBe(120);
     });
 
     it('the database refuses a job that is restoring and has a stretch started', async () => {

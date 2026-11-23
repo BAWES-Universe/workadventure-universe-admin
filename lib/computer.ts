@@ -396,10 +396,32 @@ async function claimStop(botId: string, ref: string, only?: string[], ticket?: n
 }
 
 /** The wake ticket (round 8, B1): the write that sets the machine waking or restoring takes the next number, and the number is this start's. A failure of this start stops the machine, and a late success marks it working, only while the ticket is still the Brick's. */
-async function takeWakeTicket(botId: string, machine: 'waking' | 'restoring'): Promise<number> {
-  const rows = await prisma.$queryRaw<Array<{ wake_epoch: number }>>`UPDATE "brick_computers" SET "machine" = ${machine}, "wake_epoch" = "wake_epoch" + 1, "updated_at" = NOW() WHERE "bot_id" = ${botId} RETURNING "wake_epoch"`;
-  if (rows.length !== 1) throw new Error('The computer is gone');
-  return rows[0].wake_epoch;
+async function takeWakeTicket(botId: string, machine: 'waking' | 'restoring', from: string): Promise<number | null> {
+  const rows = await prisma.$queryRaw<Array<{ wake_epoch: number }>>`UPDATE "brick_computers" SET "machine" = ${machine}, "wake_epoch" = "wake_epoch" + 1, "updated_at" = NOW() WHERE "bot_id" = ${botId} AND "machine" = ${from} RETURNING "wake_epoch"`;
+  return rows.length === 1 ? rows[0].wake_epoch : null;
+}
+
+/** Test seam: the ticket write itself, to prove two starts that saw the same state take ONE ticket between them. */
+export const takeWakeTicketForTests = takeWakeTicket;
+
+/** The longest a wake of a machine is waited for by another start: the provider's readiness limit and a little more. A machine that has been `waking` longer than this has no start behind it any more. */
+const WAKE_IN_FLIGHT_MS = 5 * 60_000;
+const WAKE_POLL_MS = 250;
+/**
+ * A machine another start is waking: waited for until it is `working` (returns `working`), or until it is in any other state, or its wake is too old to have a start behind it (returns the row as it stands, for this start to wake it). A
+ * machine that is in no wake is returned at once.
+ */
+async function awaitWakeInFlight(botId: string, seen: Prisma.BrickComputerGetPayload<Record<string, never>>): Promise<'working' | Prisma.BrickComputerGetPayload<Record<string, never>>> {
+  let row = seen;
+  for (;;) {
+    if (row.machine === 'working') return 'working';
+    if (row.machine !== 'waking' && row.machine !== 'restoring') return row;
+    // A machine with no disk yet is being made, not woken: the make has its own wait
+    if (!row.providerRef) return row;
+    if (Date.now() - row.updatedAt.getTime() > WAKE_IN_FLIGHT_MS) return row;
+    await new Promise((resolve) => setTimeout(resolve, WAKE_POLL_MS));
+    row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
+  }
 }
 
 /** Stops the machine at the provider and says whether it is proved asleep. Writes nothing. */
@@ -642,7 +664,7 @@ async function storedAnswerIn(tx: Pick<Prisma.TransactionClient, 'computerStartA
 /** What a start's own attempt row says it was answered with (finding 1): a job, an older start still going on (its key), or a start that ended with no job (`expired`). Null when the row decides nothing (none, open, made, expired on its own). */
 type AttemptAnswer = { job: { id: string; status: string; startKey: string | null; startAckedAt: Date | null } } | { starting: string } | { expired: true } | { retired: true } | { kept: Record<string, unknown> };
 
-/** The longest alias chain followed (a safety stop, not a rule: a chain is acyclic by construction and never comes near it). A chain that long, or a loop, is said to Sentry and answers `expired`, and the walk of the old-marks sweep stops at the same depth. */
+/** The longest alias chain followed (a safety stop, not a rule: a chain is acyclic by construction and never comes near it). A chain that long, or a loop, is said to Sentry and answers `retired` (never `expired`: that would reopen the key as a fresh paid start), and the walk of the old-marks sweep stops at the same depth. */
 const ALIAS_HOPS_MAX = 1000;
 
 async function attemptAnswer(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<AttemptAnswer | null> {
@@ -654,7 +676,7 @@ async function attemptAnswer(botId: string, personId: string, startKey: string, 
   for (let hop = 0; row; hop++) {
     if (hop >= ALIAS_HOPS_MAX) {
       Sentry.captureMessage('A start answer chain did not end', { level: 'error', tags: { area: 'computer', step: 'alias_chain' }, extra: { botId, startKey } });
-      return { expired: true };
+      return { retired: true };
     }
     // Round 8, A2: an answer that names neither a job nor a start any more: the job that answered it was removed (the foreign key cleared it). The request already ran: never reopened as a fresh start
     if (!row.jobId && !row.aliasAttemptId && (row.state === 'answered' || row.state === 'superseded')) return { retired: true };
@@ -1722,9 +1744,11 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
   }
   // A machine that was to be put to sleep and is not proved asleep is not woken on top of what may still run: it is stopped first
   if (row.machine === 'stopping' && row.providerRef && !(await stopMachine(botId, row.providerRef, provider, ['stopping']))) throw new Error('The computer could not be put to sleep yet');
+  let madeHere = false;
   if (!row.providerRef) {
     const claim = await prisma.brickComputer.updateMany({ where: { botId, providerRef: null, machine: 'none' }, data: { machine: 'waking', makeTriedAt: now } });
     if (claim.count === 1) {
+      madeHere = true;
       try {
         const info = await provider.create(botId);
         row = await prisma.brickComputer.update({ where: { botId }, data: { providerRef: info.ref, madeAt: now, machine: 'waking' } });
@@ -1745,9 +1769,33 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
     }
   }
   const ref = row.providerRef as string;
-  // A broken machine comes back from its last saved copy, and the person is told which day that was
-  const restoring = row.machine === 'broken';
-  const ticket = await takeWakeTicket(botId, restoring ? 'restoring' : 'waking');
+  // One wake in flight per Brick (round 8, B1): a machine another start is waking (or restoring) is waited for, never woken a second time under it. A second wake would take the next ticket, and a failure of the second would
+  // stop a machine the first start's job is already working on. If it becomes `working` this start has nothing to do; if the wake ends any other way (stopped, broken), or is older than a start can take, this start wakes it
+  // with its own ticket. The ticket is taken only from the state this start saw, so a wake that began in between is seen on the next look, not stepped over
+  const own = madeHere || cameBack !== null;
+  let ticket: number | null = null;
+  let restoring = false;
+  for (let spins = 0; ticket === null; spins++) {
+    if (spins >= 5) throw new Error('The computer changed under this start');
+    if (spins > 0) row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
+    if (!own || spins > 0) {
+      const settled = await awaitWakeInFlight(botId, row);
+      if (settled === 'working') {
+        await untilCleaned(botId);
+        return;
+      }
+      row = settled;
+    }
+    // A machine that was to be put to sleep and is not proved asleep (another start's failure claimed it) is stopped first, as above; a machine in any state that is not one a start may wake is not touched
+    if (row.machine === 'stopping') {
+      if (!row.providerRef || !(await stopMachine(botId, row.providerRef, provider, ['stopping']))) throw new Error('The computer could not be put to sleep yet');
+      continue;
+    }
+    if (!['none', 'resting', 'stopped', 'broken', 'waking', 'restoring'].includes(row.machine)) throw new Error('The computer changed under this start');
+    // A broken machine comes back from its last saved copy, and the person is told which day that was
+    restoring = row.machine === 'broken';
+    ticket = await takeWakeTicket(botId, restoring ? 'restoring' : 'waking', row.machine);
+  }
   await provider.wake(ref);
   // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready
   try {

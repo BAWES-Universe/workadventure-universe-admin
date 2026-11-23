@@ -18,7 +18,7 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { ackStart, earlierUnconfirmedStart, finishJob, forgetOldStartMarks, giveComputer, startAnsweredBefore, startJob, startedJobFor } from '@/lib/computer';
+import { ackStart, earlierUnconfirmedStart, finishJob, forgetOldStartMarks, giveComputer, registerStart, startAnsweredBefore, startJob, startedJobFor } from '@/lib/computer';
 import { purgeBrick } from '@/lib/brick-purge';
 import { GET, POST } from '@/app/api/bots/[id]/computer-jobs/route';
 
@@ -353,7 +353,7 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     expect(await post(sara, keys[10], 'Visa')).toMatchObject({ ok: false, reason: 'earlier', job: { id: made.job.id } });
   });
 
-  it('D9 (a safety stop): an alias chain that never ends (a loop that cannot be made by the code) answers `expired`, is said to Sentry once, and the sweep of old marks ends and lets it go', async () => {
+  it('D9 (a safety stop): an alias chain that never ends (a loop that cannot be made by the code) answers `retired` (never `expired`, which would reopen the key as a fresh paid start), is said to Sentry, and the sweep of old marks ends and lets it go', async () => {
     const sara = await owner('d9-loop');
     const old = new Date(Date.now() - 9 * 24 * 60 * 60_000);
     const a = key();
@@ -362,9 +362,15 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     const rowB = await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: b, state: 'answered', aliasAttemptId: rowA.id, beatAt: old, createdAt: new Date(Date.now() - 1_000) } });
     await prisma.computerStartAttempt.update({ where: { id: rowA.id }, data: { aliasAttemptId: rowB.id } });
     (Sentry.captureMessage as jest.Mock).mockClear();
-    expect(await startAnsweredBefore(sara.brickId, sara.id, a)).toEqual({ ok: false, reason: 'expired' });
+    expect(await startAnsweredBefore(sara.brickId, sara.id, a)).toEqual({ ok: false, reason: 'retired' });
     expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
     expect(await jobsOf(sara)).toHaveLength(0);
+    // The same key sent again (and the other end of the loop) is answered `retired` again by the start's own look and by the registration that every keyed start does first: never reopened, no job
+    expect(await startAnsweredBefore(sara.brickId, sara.id, a)).toEqual({ ok: false, reason: 'retired' });
+    expect(await startAnsweredBefore(sara.brickId, sara.id, b)).toEqual({ ok: false, reason: 'retired' });
+    expect(await registerStart(sara.brickId, sara.id, a, new Date(), new Date())).toEqual({ answer: { ok: false, reason: 'retired' } });
+    expect(await jobsOf(sara)).toHaveLength(0);
+    expect(await prisma.computerStartAttempt.findUnique({ where: { id: rowA.id }, select: { state: true } })).toEqual({ state: 'answered' });
     // The sweep's walk is bounded too (a loop would run for ever), and a chain that leads to no job goes after the week
     await forgetOldStartMarks(new Date());
     expect(await prisma.computerStartAttempt.count({ where: { personId: sara.id } })).toBe(0);

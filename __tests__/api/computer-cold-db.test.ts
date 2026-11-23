@@ -1237,6 +1237,8 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       const cameFrom = new Date(NOW.getTime() - 3 * DAY);
       // The newest copy (a day ago) stayed the saved-copy date; the older copy (3 days ago) was restored an hour ago and nothing was saved since
       await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'waking', providerRef: `fake-${brick.botId}`, olderCopyUsed: true, restoredFrom: cameFrom, filesSavedAt: new Date(NOW.getTime() - DAY), returnedAt: new Date(NOW.getTime() - 60 * 60_000) } });
+      // The machine is `waking` with no start behind it (its wake is older than a start can take): this start wakes it
+      await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = NOW() - INTERVAL '10 minutes' WHERE "bot_id" = ${brick.botId}`;
       const started = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Second' }, NOW);
       expect(started.ok && started.job.status).toBe('running');
       expect(await row(brick.botId)).toMatchObject({ machine: 'working', olderCopyUsed: true, restoredFrom: cameFrom });
@@ -1247,6 +1249,8 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       await packAway(brick.botId, provider, NOW);
       const cameFrom = new Date(NOW.getTime() - 3 * DAY);
       await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'waking', providerRef: `fake-${brick.botId}`, olderCopyUsed: true, restoredFrom: cameFrom, filesSavedAt: new Date(NOW.getTime() - 10 * 60_000), returnedAt: new Date(NOW.getTime() - 60 * 60_000) } });
+      // The machine is `waking` with no start behind it (its wake is older than a start can take): this start wakes it
+      await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = NOW() - INTERVAL '10 minutes' WHERE "bot_id" = ${brick.botId}`;
       const started = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Third' }, NOW);
       expect(started.ok && started.job.status).toBe('running');
       expect(await row(brick.botId)).toMatchObject({ machine: 'working', olderCopyUsed: false, restoredFrom: null });
