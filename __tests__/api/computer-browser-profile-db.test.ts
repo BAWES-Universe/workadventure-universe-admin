@@ -15,7 +15,7 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests, type ExecOptions } from '@/lib/computer-provider';
-import { dropProfile, finishPendingParks, needsSignInAgain, parkProfile, parkWorthWaitingFor, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settleResumedBrowser, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
+import { dropProfile, finishPendingParks, needsSignInAgain, parkProfile, parkWorthWaitingFor, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settlePark, settleResumedBrowser, signInsKept, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -173,6 +173,17 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       const started = Date.now();
       expect((await parkProfile(sara.brickId, visa.id, NOW)).state).toBe('parked');
       expect(Date.now() - started).toBeGreaterThanOrEqual(500);
+    });
+
+    it('CodeRabbit on #1025: a machine that had nothing to put away is not "kept", the machine waits for nothing, and the pause says the sign-ins are not kept', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      answers.park = 'parked=0 reason=nothing';
+      const parked = await parkProfile(sara.brickId, visa.id, NOW);
+      expect(parked).toMatchObject({ state: 'left', reason: 'nothing_saved' });
+      expect(signInsKept(parked)).toBe(false);
+      expect(await settlePark(sara.brickId, visa.id, parked, NOW)).toBe('settled');
     });
 
     it('a machine that does not answer, or answers with anything but its own line, is a failure and never throws', async () => {

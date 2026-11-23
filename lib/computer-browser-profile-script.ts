@@ -108,6 +108,7 @@ export function readSignInsAnswer(action: SignInsAction, exitCode: number, stdou
   if (exitCode === 0 && said === '1') return { done: action === 'park' || action === 'restore' ? 'kept' : 'dropped', reason: null, cookies: count('cookies'), pages: count('pages') };
   if (exitCode === 0 && said === '0' && action === 'restore' && reason === 'none') return { done: 'none', reason, cookies: 0, pages: 0 };
   if (exitCode === 0 && said === '0' && action === 'park' && reason === 'already') return { done: 'already', reason, cookies: 0, pages: 0 };
+  if (exitCode === 0 && said === '0' && action === 'park' && reason === 'nothing') return { done: 'none', reason, cookies: 0, pages: 0 };
   return { done: 'failed', reason: reason ?? (line ? 'unknown' : `exit_${exitCode}`), cookies: 0, pages: 0 };
 }
 
@@ -369,8 +370,14 @@ park)
   saved="$(devtools save "$JOBDIR.new/session.json" 2>/dev/null)"
   stop_browser || { say "0 reason=browser_running"; exit 1; }
   rm -rf "$CACHE" 2>/dev/null
-  if [ -d "$PROFILE" ] && [ ! -L "$PROFILE" ]; then mv "$PROFILE" "$JOBDIR.new/profile" || { say "0 reason=move"; exit 1; }; else rm -rf "$PROFILE"; fi
+  had_profile=0
+  if [ -d "$PROFILE" ] && [ ! -L "$PROFILE" ]; then had_profile=1; mv "$PROFILE" "$JOBDIR.new/profile" || { say "0 reason=move"; exit 1; }; else rm -rf "$PROFILE"; fi
   if [ -e "$PROFILE" ] || [ -L "$PROFILE" ] || [ -e "$CACHE" ]; then say "0 reason=profile_not_removed"; exit 1; fi
+  # Neither a browser profile nor a readable session (no cookie, no open page) was there to put away: nothing is kept, and it is NOT said as parked
+  # (the pause must not tell the person their sign-ins are kept; CodeRabbit on #1025). The browser is started empty again and the machine waits for nothing
+  case "$(counts "$saved")" in
+    "cookies=0 pages=0"|"") if [ "$had_profile" = "0" ]; then rm -rf "$JOBDIR.new"; unmark; unlock; start_browser; say "0 reason=nothing"; exit 0; fi ;;
+  esac
   chown -R -h root:root "$JOBDIR.new" && chmod -R go-rwx "$JOBDIR.new" || { rm -rf "$JOBDIR.new"; unmark; say "0 reason=folder"; exit 1; }
   mv "$JOBDIR.new" "$JOBDIR" || { rm -rf "$JOBDIR.new"; unmark; say "0 reason=folder"; exit 1; }
   unmark

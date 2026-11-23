@@ -138,6 +138,8 @@ describe('the command, as text', () => {
   it('reads only its own answer lines, and anything else is a failure', () => {
     expect(readSignInsAnswer('park', 0, 'noise\nparked=1 cookies=3 pages=2\n')).toEqual({ done: 'kept', reason: null, cookies: 3, pages: 2 });
     expect(readSignInsAnswer('park', 0, 'parked=0 reason=already\n').done).toBe('already');
+    expect(readSignInsAnswer('park', 0, 'parked=0 reason=nothing\n').done).toBe('none');
+    expect(readSignInsAnswer('park', 1, 'parked=0 reason=nothing\n').done).toBe('failed');
     expect(readSignInsAnswer('restore', 0, 'restored=0 reason=none\n').done).toBe('none');
     expect(readSignInsAnswer('restore', 1, 'restored=0 reason=busy\n')).toEqual({ done: 'failed', reason: 'busy', cookies: 0, pages: 0 });
     expect(readSignInsAnswer('drop', 0, 'dropped=1\n').done).toBe('dropped');
@@ -203,9 +205,29 @@ run('putting a job’s browser away, on a real file system with a real unprivile
     writeFileSync(join(target, 'keep.txt'), 'not the browser’s');
     mkdirSync(join(home, '.config'), { recursive: true });
     symlinkSync(target, profile());
-    expect(act('park', JOB_A, [JOB_A]).out).toMatch(/parked=1/);
+    // A link is no profile and no browser answered: nothing was put away, and it is not said as kept
+    expect(act('park', JOB_A, [JOB_A]).out).toMatch(/parked=0 reason=nothing/);
     expect(existsSync(join(target, 'keep.txt'))).toBe(true);
     expect(existsSync(profile())).toBe(false);
+  });
+
+  it('CodeRabbit on #1025: a park that saved neither a profile nor a session says nothing was kept, leaves no folder and no mark, and exits cleanly', () => {
+    const done = act('park', JOB_A, [JOB_A]);
+    expect(done.code).toBe(0);
+    expect(done.out).toMatch(/parked=0 reason=nothing/);
+    expect(done.out).not.toMatch(/parked=1/);
+    expect(existsSync(parked(JOB_A))).toBe(false);
+    expect(existsSync(`${parked(JOB_A)}.new`)).toBe(false);
+    expect(existsSync(join(home, '.universe', 'profile.dirty'))).toBe(false);
+    expect(readSignInsAnswer('park', done.code, done.out)).toEqual({ done: 'none', reason: 'nothing', cookies: 0, pages: 0 });
+    // With a profile there is something to keep: said as kept
+    fakeProfile('job A cookies');
+    expect(act('park', JOB_A, [JOB_A]).out).toMatch(/parked=1/);
+  });
+
+  it('planted bug: a park that says kept whatever it saved is caught by the check above', () => {
+    const done = act('park', JOB_A, [JOB_A], (script) => script.replace('"cookies=0 pages=0"|"") if [ "$had_profile" = "0" ]', '"cookies=0 pages=0"|"") if [ "$had_profile" = "9" ]'));
+    expect(done.out).toMatch(/parked=1/);
   });
 
   it('leaves a job’s browser that is already put away exactly as it is (a second park takes nothing)', () => {

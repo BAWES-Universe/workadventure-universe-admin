@@ -169,6 +169,7 @@ export async function parkProfile(botId: string, jobId: string, now: Date = new 
       const answer = await onMachine(machine, 'park', jobId, keep, hours);
       if (answer.done === 'kept') return result('parked', null, answer);
       if (answer.done === 'already') return result('left', 'already');
+      if (answer.done === 'none') return result('left', 'nothing_saved');
       return result('failed', answer.reason);
     });
     const answer = logged('put away', outcome ?? result('left', 'not_awake'));
@@ -352,7 +353,7 @@ export async function finishPendingParks(now: Date = new Date(), batch = 5): Pro
 }
 
 /** Whether a park left the machine with nothing of this job's in the live browser: it was put away, emptied, or there was never anything there to put away. */
-const PARK_SETTLED_REASONS = ['not_a_job', 'not_this_brick', 'not_paused', 'not_on_machine', 'shared', 'already'];
+const PARK_SETTLED_REASONS = ['not_a_job', 'not_this_brick', 'not_paused', 'not_on_machine', 'shared', 'already', 'nothing_saved'];
 const parkDone = (outcome: SignInsResult): boolean => outcome.state === 'parked' || outcome.state === 'cleared' || (outcome.state === 'left' && PARK_SETTLED_REASONS.includes(outcome.reason ?? ''));
 
 /**
