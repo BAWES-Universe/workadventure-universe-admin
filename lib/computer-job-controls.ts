@@ -16,6 +16,7 @@
  * Resume puts the job first in line and tries it at once: it runs again with a NEW reservation through the normal start (a computer that is cold is brought back), and its runner claims it afresh (a new epoch).
  * If it cannot start now it stays first in line. If the person's month or a limit they set does not let it start, it stays paused and says why (`allowance` / `rule`).
  */
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { brickOf, computerView, controlInternals, providerFor, settleTurnHold, type ComputerView } from '@/lib/computer';
 import { lockJob } from '@/lib/computer-owner';
@@ -25,6 +26,8 @@ import { settleRoomIn } from '@/lib/meter-allowance';
 import { pinnedMicrosPerMinute } from '@/lib/spend-rules-values';
 import { costOfSeconds, isOver, type PausedWhy } from '@/lib/computer-values';
 import { dropProfile, parkProfile, signInsKept } from '@/lib/computer-browser-profile';
+import { grantsPrintIn, tellIn } from '@/lib/computer-tellings';
+import type { ComputerProvider as Provider } from '@/lib/computer-provider';
 
 /** Why a control was not done. `not_found`: not the owner's Brick, or no such job on it. `over`: the job already ended. `taken_over`: the person has the screen. `ending`: its ending is already decided. `not_paused` / `not_queued`: the job is not in the state the tap was for. `allowance` / `rule`: a resume the person's month, or a limit they set, does not let start (the job stays paused). */
 export type ControlRefusal = 'not_found' | 'over' | 'taken_over' | 'ending' | 'not_paused' | 'not_queued' | 'allowance' | 'rule';
@@ -67,83 +70,109 @@ export interface PauseOptions {
   advance?: boolean;
 }
 
+/** What a pause decided inside its transaction: nothing (and why), or the pause of a job that held the machine, with what the steps after the commit need. */
+export type PauseDecision =
+  | { kind: 'not_found' | 'over' | 'superseded' | 'taken_over' | 'ending' | 'already' | 'queued' | 'key_gone' }
+  | { kind: 'held'; n: number; botId: string; responseId: string | null; turnHold: boolean };
+
+export interface PauseInOptions extends PauseOptions {
+  /** A pause decided for a refused model call: only while that call's key is still good and was made under the owner epoch the job has now (a delayed call of a worker that was replaced pauses nothing: `key_gone`). */
+  key?: string;
+  /** The person's own tap may pause a job waiting in line; a pause for the month or a limit is only ever for a job that holds the machine (one in line is left to the line). */
+  heldOnly?: boolean;
+}
+
 /**
- * Pauses one job, decided under its locks (see the head of this file). Exported for the other ways a job pauses (its month runs out). Safe to ask twice: a job already paused is left as it is (`already`).
+ * The pause itself, inside the caller's transaction (Rule A): the job's cutoff lock and row lock are taken here (taken again when the caller already holds them, which Postgres allows), everything is read under them, and every
+ * write lands in this one commit: the stretch counted and its room settled at that room's own terms, the pause row, the job back in line holding nothing, its owner epoch and lease version moved, every model key ended,
+ * and, for the month or a limit, what Brick is to tell the person. Nothing is sent to the provider here: the caller runs `afterPause` once this commits (Rule C).
+ * `provider`: the Brick computer's provider, read BEFORE the transaction opened (a read that fails inside it would leave the transaction aborted).
  */
-export async function pauseJobAs(jobId: string, why: PausedWhy, now: Date = new Date(), options: PauseOptions = {}): Promise<PauseResult> {
-  const first = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { botId: true } });
-  if (!first) return { ok: false, reason: 'not_found' };
-  // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
-  const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId: first.botId } }));
-  const decided = await prisma.$transaction(async (tx) => {
-    const row = await lockJob(tx, jobId);
-    if (!row) return { kind: 'not_found' as const };
-    if (isOver(row.status)) return { kind: 'over' as const };
-    if (options.ownerEpoch !== undefined && row.ownerEpoch !== options.ownerEpoch) return { kind: 'superseded' as const };
-    if (row.status === 'queued') {
-      if (options.backInLine) return { kind: 'already' as const };
-      const inLine = await tx.computerJob.findUnique({ where: { id: jobId }, select: { queuedFor: true } });
-      if (inLine?.queuedFor === 'paused') return { kind: 'already' as const };
-      // Never started (or waiting again): nothing is held, so nothing is counted; it only leaves the line until resumed
-      await tx.computerJob.update({ where: { id: jobId }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, leaseVersion: { increment: 1 } } });
-      return { kind: 'queued' as const };
-    }
-    // Rule A: the person holding the screen hands it back first (a pause is not offered then)
-    if (row.control !== 'brick') return { kind: 'taken_over' as const };
-    // Rule B: a kept finish or a decided cutoff owns the ending
-    if ((await hasFinishIntent(tx, jobId)) || (await hasPoolCutoff(tx, jobId))) return { kind: 'ending' as const };
-    const job = await tx.computerJob.findUniqueOrThrow({
-      where: { id: jobId },
-      select: { botId: true, secondsRun: true, secondsBilled: true, stretchStarted: true, reservationKey: true, startedAt: true, pauses: true, firstTurnSentAt: true, agentResponseId: true },
-    });
-    const stretch = job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
-    const seconds = job.secondsRun + stretch;
-    const n = job.pauses + 1;
-    // The time so far, priced as the room was held (the same rule a job's ending uses), settles the room in this very commit: the unused part goes back at once
-    if (job.reservationKey) {
-      const lease = await tx.meterReservation.findUnique({ where: { reservationKey: job.reservationKey }, select: { terms: true } });
-      const pinned = lease ? pinnedMicrosPerMinute(lease.terms, seconds, now.getTime()) : null;
-      const cost = costOfSeconds(seconds, pinned ?? (provider ? provider.microsPerMinute() : null));
-      await settleRoomIn(tx, { key: job.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
-    }
-    // A first turn that was sent and never named may still run with nothing to cancel it by: the machine is held until it is proved asleep (as a job's ending does), so nothing starts beside it
-    const turnHold = !!job.firstTurnSentAt && !job.agentResponseId;
-    if (turnHold) await tx.brickComputer.updateMany({ where: { botId: job.botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
-    await tx.computerJob.update({
-      where: { id: jobId },
-      data: {
-        status: 'queued',
-        queuedFor: options.backInLine ? 'turn' : 'paused',
-        pausedAt: options.backInLine ? null : now,
-        pausedWhy: options.backInLine ? null : why,
-        ...(options.backInLine ? { queueRank: options.backInLine.rank } : {}),
-        pauses: n,
-        // The time so far is the pause's (written below); the job counts again from 0 when it runs again
-        secondsRun: 0,
-        secondsBilled: { increment: seconds },
-        stretchStarted: null,
-        reservationKey: null,
-        // The agent's conversation is kept (`agent_session_id`): it carries on in it. The turn it was on is over
-        agentResponseId: null,
-        firstTurnSentAt: null,
-        turnClaimedAt: null,
-        prepareClaimedAt: null,
-        waitingFor: null,
-        readyWhat: null,
-        readyWhere: null,
-        handoverUntold: false,
-        lastTriedAt: null,
-        ownerEpoch: { increment: 1 },
-        leaseVersion: { increment: 1 },
-      },
-    });
-    await revokeJobTokens(jobId, now, undefined, tx);
-    await tx.computerJobPause.create({ data: { jobId, n, why, roomKey: job.reservationKey, seconds, startedAt: job.startedAt, at: now } });
-    return { kind: 'held' as const, n, botId: job.botId, responseId: job.agentResponseId, turnHold };
-  }, TX);
+export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string, why: PausedWhy, now: Date, provider: Provider | null, options: PauseInOptions = {}): Promise<PauseDecision> {
+  const row = await lockJob(tx, jobId);
+  if (!row) return { kind: 'not_found' };
+  if (isOver(row.status)) return { kind: 'over' };
+  if (options.ownerEpoch !== undefined && row.ownerEpoch !== options.ownerEpoch) return { kind: 'superseded' };
+  if (row.status === 'queued') {
+    if (options.heldOnly) return { kind: 'already' };
+    if (options.backInLine) return { kind: 'already' };
+    const inLine = await tx.computerJob.findUnique({ where: { id: jobId }, select: { queuedFor: true } });
+    if (inLine?.queuedFor === 'paused') return { kind: 'already' };
+    // Never started (or waiting again): nothing is held, so nothing is counted; it only leaves the line until resumed
+    await tx.computerJob.update({ where: { id: jobId }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, leaseVersion: { increment: 1 } } });
+    return { kind: 'queued' };
+  }
+  // Rule A: the person holding the screen hands it back first (a pause is not offered then)
+  if (row.control !== 'brick') return { kind: 'taken_over' };
+  // Rule B: a kept finish or a decided cutoff owns the ending
+  if ((await hasFinishIntent(tx, jobId)) || (await hasPoolCutoff(tx, jobId))) return { kind: 'ending' };
+  // E3: a refused call pauses the job only while its own key is still good and is the current owner's (a key of before the epochs counts as epoch 0)
+  if (options.key !== undefined) {
+    const live = await tx.computerJobToken.count({ where: { id: options.key, jobId, revokedAt: null, expiresAt: { gt: now }, OR: [{ ownerEpoch: row.ownerEpoch }, ...(row.ownerEpoch === 0 ? [{ ownerEpoch: null }] : [])] } });
+    if (live === 0) return { kind: 'key_gone' };
+  }
+  const job = await tx.computerJob.findUniqueOrThrow({
+    where: { id: jobId },
+    select: { botId: true, secondsRun: true, secondsBilled: true, stretchStarted: true, reservationKey: true, startedAt: true, pauses: true, firstTurnSentAt: true, agentResponseId: true },
+  });
+  const stretch = job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
+  const seconds = job.secondsRun + stretch;
+  const n = job.pauses + 1;
+  // The time so far, priced as THIS stretch's room was held (its own terms: the same rule a job's ending uses), settles the room in this very commit: the unused part goes back at once
+  if (job.reservationKey) {
+    const lease = await tx.meterReservation.findUnique({ where: { reservationKey: job.reservationKey }, select: { terms: true } });
+    const pinned = lease ? pinnedMicrosPerMinute(lease.terms, seconds, now.getTime()) : null;
+    const cost = costOfSeconds(seconds, pinned ?? (provider ? provider.microsPerMinute() : null));
+    await settleRoomIn(tx, { key: job.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
+  }
+  // A first turn that was sent and never named may still run with nothing to cancel it by: the machine is held until it is proved asleep (as a job's ending does), so nothing starts beside it
+  const turnHold = !!job.firstTurnSentAt && !job.agentResponseId;
+  if (turnHold) await tx.brickComputer.updateMany({ where: { botId: job.botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
+  await tx.computerJob.update({
+    where: { id: jobId },
+    data: {
+      status: 'queued',
+      queuedFor: options.backInLine ? 'turn' : 'paused',
+      pausedAt: options.backInLine ? null : now,
+      pausedWhy: options.backInLine ? null : why,
+      ...(options.backInLine ? { queueRank: options.backInLine.rank } : {}),
+      pauses: n,
+      // The time so far is the pause's (written below); the job counts again from 0 when it runs again
+      secondsRun: 0,
+      secondsBilled: { increment: seconds },
+      stretchStarted: null,
+      reservationKey: null,
+      // The agent's conversation is kept (`agent_session_id`): it carries on in it. The turn it was on is over
+      agentResponseId: null,
+      firstTurnSentAt: null,
+      turnClaimedAt: null,
+      prepareClaimedAt: null,
+      waitingFor: null,
+      readyWhat: null,
+      readyWhere: null,
+      handoverUntold: false,
+      lastTriedAt: null,
+      ownerEpoch: { increment: 1 },
+      leaseVersion: { increment: 1 },
+    },
+  });
+  await revokeJobTokens(jobId, now, undefined, tx);
+  // What the Brick's Apps were at this pause: the month or a limit carries the job on by itself only while they are the same (lib/computer-limit-pause)
+  const grantsPrint = await grantsPrintIn(tx, job.botId);
+  await tx.computerJobPause.create({ data: { jobId, n, why, roomKey: job.reservationKey, seconds, startedAt: job.startedAt, at: now, grantsPrint } });
+  // The month or a limit: Brick tells the person once, from this very commit (their own tap is never told back to them)
+  if (!options.backInLine && (why === 'allowance' || why === 'rule')) await tellIn(tx, jobId, 'paused', why, now);
+  return { kind: 'held', n, botId: job.botId, responseId: job.agentResponseId, turnHold };
+}
+
+/**
+ * The steps after a pause committed (Rule C), in this order: the turn the commit read is cancelled (that one only), the stretch is written to the books under its own event, where the browser went so far is kept, the job's
+ * sign-ins are put away for it alone, the machine rests (or is proved asleep under a turn hold), and the line moves. None of it can undo the pause.
+ */
+export async function afterPause(jobId: string, decided: PauseDecision, now: Date, options: PauseOptions = {}): Promise<PauseResult> {
   if (decided.kind !== 'held') {
     if (decided.kind === 'queued' || decided.kind === 'already') return { ok: true, kind: decided.kind };
-    return { ok: false, reason: decided.kind };
+    return { ok: false, reason: decided.kind === 'key_gone' ? 'superseded' : decided.kind };
   }
   const { botId, n } = decided;
   // Rule C: only now, and only the turn the commit read
@@ -160,6 +189,18 @@ export async function pauseJobAs(jobId: string, why: PausedWhy, now: Date = new 
   else await controlInternals.restIfUnheld(botId, now);
   if (options.advance !== false) await controlInternals.startNext(botId, now);
   return { ok: true, kind: 'held', n, signInsKept: parked ? signInsKept(parked) : false };
+}
+
+/**
+ * Pauses one job, decided under its locks (see the head of this file). Exported for the other ways a job pauses (its month runs out). Safe to ask twice: a job already paused is left as it is (`already`).
+ */
+export async function pauseJobAs(jobId: string, why: PausedWhy, now: Date = new Date(), options: PauseInOptions = {}): Promise<PauseResult> {
+  const first = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { botId: true } });
+  if (!first) return { ok: false, reason: 'not_found' };
+  // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
+  const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId: first.botId } }));
+  const decided = await prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, now, provider, options), TX);
+  return afterPause(jobId, decided, now, options);
 }
 
 /**
@@ -235,7 +276,7 @@ export async function resumeJob(botId: string, ownerId: string, jobId: string, n
     return 'ok' as const;
   }, TX);
   if (moved !== 'ok') return { ok: false, reason: moved };
-  await controlInternals.tryStart(jobId, now);
+  await controlInternals.tryStart(jobId, now, { quiet: true });
   // The month or a limit refused its start: tryStart put a job that ran before back as paused, with the reason
   const after = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, pausedWhy: true } });
   if (after?.status === 'queued' && after.queuedFor === 'paused' && (after.pausedWhy === 'allowance' || after.pausedWhy === 'rule')) return { ok: false, reason: after.pausedWhy };

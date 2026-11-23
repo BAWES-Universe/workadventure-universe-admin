@@ -8,6 +8,8 @@ import { readFilesList } from '@/lib/computer-files';
 import { refundStatesFor } from '@/lib/computer-refunds';
 import { markLateTold, tagLateBatch } from '@/lib/instant/executor';
 import { silentEnding, type UndeliverableWhy, type WaitingFor } from '@/lib/computer-values';
+import { HOLD_IN_LAST_STRETCH } from '@/lib/computer-stretch';
+import { TELLING_KINDS, keepTellingTold, tellingsToTell, type TellingKind } from '@/lib/computer-tellings';
 import { cardsOfJobs, handedPathsOf, HAND_OVER_ALIVE_MS, HAND_OVER_LATEST_MS, madeInJob, type Card } from '@/lib/computer-file-cards';
 
 /**
@@ -23,11 +25,14 @@ import { cardsOfJobs, handedPathsOf, HAND_OVER_ALIVE_MS, HAND_OVER_LATEST_MS, ma
  * no effect of that kind is on record.
  */
 
-export type ReportKind = 'done' | 'failed' | 'needs' | 'unanswered' | 'month' | 'rule' | 'late';
+export type ReportKind = 'done' | 'failed' | 'needs' | 'unanswered' | 'month' | 'rule' | 'late' | TellingKind;
 
-/** Kinds a reader must say it understands before it is sent one (a reader that does not, an older game, is never sent them). */
-export type OptInKind = 'late';
-export const OPT_IN_KINDS: readonly OptInKind[] = ['late'];
+/**
+ * Kinds a reader must say it understands before it is sent one (a reader that does not, an older game, is never sent them). `paused`, `carried_on` and `can_carry_on` are about a job the person's month or a limit
+ * paused (lib/computer-tellings): each said once, under its own number (`seq`), confirmed by that number.
+ */
+export type OptInKind = 'late' | TellingKind;
+export const OPT_IN_KINDS: readonly OptInKind[] = ['late', ...TELLING_KINDS];
 
 export interface ReportEffect {
   kind: string;
@@ -80,6 +85,8 @@ export interface Report {
   searchApps?: string[];
   /** `late` only: those Apps' holds were released and nothing was charged for them, then or later. */
   holdReleased?: true;
+  /** `paused` only: what paused it, the person's month of computer time (`allowance`) or a spending limit they set (`rule`). Never a number or a price. */
+  pausedWhy?: 'allowance' | 'rule';
 }
 
 /**
@@ -313,7 +320,7 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
         AND NOT EXISTS (
           SELECT 1 FROM "computer_give_back_decisions" d
             JOIN "credit_holds" h ON h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled'
-          WHERE d."job_id" = j."id" AND d."state" IN ('given', 'pending') AND COALESCE(h."customer_micros", 0) > h."refunded_micros"
+          WHERE d."job_id" = j."id" AND d."state" IN ('given', 'pending') AND COALESCE(h."customer_micros", 0) > h."refunded_micros" AND ${HOLD_IN_LAST_STRETCH}
             AND NOT EXISTS (SELECT 1 FROM "computer_refund_obligations" o2 WHERE o2."hold_key" = h."hold_key"))
       GROUP BY c."task_key"
       HAVING (MIN(c."at"), c."task_key") > (${after.at}::timestamptz, ${after.id})
@@ -413,6 +420,54 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
   return out;
 }
 
+/** What Brick is to say about jobs the person's month or a limit paused, to a reader that understands those kinds. Isolated like the follow-up: a failure here never holds an ending or a wait. */
+async function tellingReportsSafely(size: number, now: Date, accepts: readonly string[]): Promise<Report[]> {
+  const kinds = TELLING_KINDS.filter((kind) => accepts.includes(kind));
+  if (kinds.length === 0) return [];
+  try {
+    const tellings = (await tellingsToTell(size, now)).filter((one) => kinds.includes(one.kind));
+    if (tellings.length === 0) return [];
+    const jobs = await prisma.computerJob.findMany({
+      where: { id: { in: [...new Set(tellings.map((one) => one.jobId))] } },
+      select: { id: true, botId: true, personId: true, title: true, writes: true, secondsRun: true, secondsBilled: true, originKind: true, originRef: true },
+    });
+    const jobOf = new Map(jobs.map((job) => [job.id, job]));
+    const people = await prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.personId))] } }, select: { id: true, matrixChatId: true } });
+    const chatOf = new Map(people.map((person) => [person.id, person.matrixChatId ?? null]));
+    const out: Report[] = [];
+    for (const one of tellings) {
+      const job = jobOf.get(one.jobId);
+      if (!job) continue;
+      out.push({
+        key: `computer-told:${job.id}:${one.kind}:${one.seq}`,
+        jobId: job.id,
+        botId: job.botId,
+        matrixUserId: chatOf.get(job.personId) ?? null,
+        origin: originOf(job),
+        kind: one.kind,
+        title: job.title,
+        writes: job.writes,
+        seconds: job.secondsRun + job.secondsBilled,
+        seq: one.seq,
+        waitingFor: null,
+        ready: null,
+        waitedFor: null,
+        why: null,
+        effects: [],
+        files: [],
+        handed: [],
+        givenBack: false,
+        ...(one.kind === 'paused' && one.why ? { pausedWhy: one.why } : {}),
+      });
+    }
+    return out;
+  } catch (error) {
+    Sentry.captureException(error, { tags: { area: 'computer', step: 'pause_tellings' } });
+    console.error('[Computer] Could not read what to tell about paused jobs:', error instanceof Error ? error.message : 'unknown');
+    return [];
+  }
+}
+
 /** The follow-up is isolated: if it cannot be read, Sentry is told and every ending and wait still goes out (it is offered again at the next look). */
 async function lateReportsSafely(size: number, now: Date): Promise<Report[]> {
   try {
@@ -476,7 +531,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date(), options:
   });
   const jobs = [...ended, ...waiting];
   // The follow-up for an App that went out after all is offered only to a reader that said it understands it (an older game never sees the kind)
-  const late = options.accepts?.includes('late') ? await lateReportsSafely(size, now) : [];
+  const late = [...(options.accepts?.includes('late') ? await lateReportsSafely(size, now) : []), ...(await tellingReportsSafely(size, now, options.accepts ?? []))];
   if (jobs.length === 0) return late;
   const people = await prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.personId))] } }, select: { id: true, matrixChatId: true } });
   const chatOf = new Map(people.map((person) => [person.id, person.matrixChatId ?? null]));
@@ -564,6 +619,11 @@ export async function keepReportTold(jobId: string, kind: ReportKind, seq?: numb
     // A wait that can never be said is not offered again either (the person still sees it in the bar and in Files), and it is not recorded as said
     await prisma.computerJob.updateMany({ where: { id: jobId, handoverSeq: seq }, data: { handoverUntold: false } });
     return true;
+  }
+  if ((TELLING_KINDS as readonly string[]).includes(kind)) {
+    // Confirmed by its number only, like a follow-up: one that names none could be a later one
+    if (typeof seq !== 'number') return false;
+    return keepTellingTold(jobId, seq, outcome.delivered, now);
   }
   if (kind === 'late') {
     const there = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, personId: true, botId: true } });

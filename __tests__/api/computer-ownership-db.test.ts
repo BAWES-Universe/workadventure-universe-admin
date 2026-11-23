@@ -189,12 +189,13 @@ run('one owner per computer job: every write is decided in the write that lands 
       }
     });
 
-    it('CONTROL: the OWNER’s renewal at a real limit still stops the job (allowance, then pool), ending it as the limit says', async () => {
+    it('CONTROL: the OWNER’s renewal at a real limit still decides the job (allowance pauses it, the pool ends it), as the limit says', async () => {
       const own = await running('s-e3-ctl-a');
       const ea = await claimed(own.jobId, 'rA');
       await setUp({ memberAllowanceMicros: 1_000 });
-      expect(await renewJob(own.jobId, minutes(2), { epoch: ea })).toEqual({ ok: false, reason: 'allowance' });
-      expect(await jobOf(own.jobId)).toMatchObject({ status: 'stopped', endedBy: 'allowance' });
+      // The month ran out: the job pauses and waits (piece 3 of the controls), moving the owner, never ending
+      expect(await renewJob(own.jobId, minutes(2), { epoch: ea })).toEqual({ ok: false, reason: 'paused', why: 'allowance' });
+      expect(await jobOf(own.jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', endedBy: null, ownerEpoch: ea + 1 });
       await setUp();
       const pool = await running('s-e3-ctl-p');
       const ep = await claimed(pool.jobId, 'rA');
@@ -203,7 +204,7 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect(await jobOf(pool.jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
     });
 
-    it('a rule the person said: A’s delayed renewal never ends B’s job as `rule`; the owner’s renewal still does (words kept in the same write)', async () => {
+    it('a rule the person said: A’s delayed renewal never decides B’s job as `rule`; the owner’s renewal still does (it pauses the job)', async () => {
       const { sara, jobId } = await running('s-e3-rule');
       const ea = await claimed(jobId, 'rA');
       await prisma.spendRule.create({ data: { ruleKey: `r-${randomUUID()}`, ownerPersonId: sara.id, scope: 'bot', botId: sara.brickId, period: 'day', capMicros: BigInt(10), words: 'Never more than ten millionths a day', createdById: sara.id } });
@@ -211,8 +212,9 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect(answer).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
       expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null, endNote: null });
       const eb = (await jobOf(jobId)).ownerEpoch;
-      expect(await renewJob(jobId, minutes(3), { epoch: eb })).toMatchObject({ ok: false, reason: 'rule', words: 'Never more than ten millionths a day' });
-      expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'rule', endNote: expect.stringContaining('ten millionths') });
+      // The owner's renewal at the rule pauses the job (it waits for the person to raise their limit), never ends it
+      expect(await renewJob(jobId, minutes(3), { epoch: eb })).toEqual({ ok: false, reason: 'paused', why: 'rule' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule', endedBy: null, ownerEpoch: eb + 1 });
     });
   });
 
@@ -255,18 +257,18 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
     });
 
-    it('CONTROL: a genuine limit on the OWNER’s own call still stops the job (allowance, and a rule), ending it as theirs', async () => {
+    it('CONTROL: a genuine limit on the OWNER’s own call still decides the job (allowance, and a rule): it pauses, as theirs', async () => {
       const own = await running('s-e3-call-ctl');
       const eo = await claimed(own.jobId, 'rA');
       const k = await keyFor(own.jobId, eo);
       expect(await ask(k, 'c-big', { estimateMicros: 5_000_000 })).toEqual({ ok: false, reason: 'allowance' });
-      expect(await jobOf(own.jobId)).toMatchObject({ status: 'stopped', endedBy: 'allowance' });
+      expect(await jobOf(own.jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', endedBy: null, ownerEpoch: eo + 1 });
       const ruled = await running('s-e3-call-ctl-rule');
       const er = await claimed(ruled.jobId, 'rA');
       const kr = await keyFor(ruled.jobId, er);
       await prisma.spendRule.create({ data: { ruleKey: `r-${randomUUID()}`, ownerPersonId: ruled.sara.id, scope: 'bot', botId: ruled.sara.brickId, period: 'day', capMicros: BigInt(100), words: 'Never more than a hundred millionths a day', createdById: ruled.sara.id } });
       expect(await ask(kr, 'c-big', { estimateMicros: 5_000_000 })).toMatchObject({ ok: false, reason: 'rule' });
-      expect(await jobOf(ruled.jobId)).toMatchObject({ status: 'stopped', endedBy: 'rule' });
+      expect(await jobOf(ruled.jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule', endedBy: null, ownerEpoch: er + 1 });
     });
 
     it('a call whose key ended (revoked) before its refusal reached the ending decides nothing about the job, even for the same owner; two refusals of a worker that no longer owns the job never decide a pool cutoff', async () => {
@@ -688,6 +690,22 @@ run('one owner per computer job: every write is decided in the write that lands 
       }) as never);
     };
 
+    /** The first read a limit's pause makes of the job (lib/computer-limit-pause, before its transaction): `between` runs right after it. */
+    const afterPauseRead = (jobId: string, between: () => Promise<unknown>) => {
+      const real = prisma.computerJob.findUnique.bind(prisma.computerJob) as unknown as (args: { where?: { id?: string }; select?: Record<string, unknown> }) => Promise<unknown>;
+      let fired = false;
+      return jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: { where?: { id?: string }; select?: Record<string, unknown> }) => {
+        const mine = !fired && args?.where?.id === jobId && !!args.select && Object.keys(args.select).join() === 'botId';
+        return real(args).then(async (row) => {
+          if (mine) {
+            fired = true;
+            await between();
+          }
+          return row;
+        });
+      }) as never);
+    };
+
     it('a claim is a compare-and-set on the epoch the runner saw: a stale `seen` (older or newer) is `superseded` naming the job’s epoch and changes nothing; two claims on the same `seen` at once: ONE wins', async () => {
       const { jobId } = await running('s-claim-cas');
       const e1 = await claimed(jobId, 'rA');
@@ -756,27 +774,31 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
     });
 
-    it('a renewal that is refused ends the job only as the owner it was decided for, in the write that ends it: B claims between the refusal and the ending, and nothing is ended (allowance, and a rule)', async () => {
+    it('a renewal that is refused decides the job only as the owner it was decided for, in the write that pauses it: B claims before that write, and nothing is paused or ended (allowance, and a rule); once paused, there is no window left for a claim', async () => {
       for (const kind of ['allowance', 'rule'] as const) {
         const { sara, jobId } = await running(`s-renew-end-${kind}`);
         const ea = await claimed(jobId, 'rA');
         if (kind === 'allowance') await setUp({ memberAllowanceMicros: 1_000 });
         else await prisma.spendRule.create({ data: { ruleKey: `r-${randomUUID()}`, ownerPersonId: sara.id, scope: 'bot', botId: sara.brickId, period: 'day', capMicros: BigInt(10), words: 'Never more than ten millionths a day', createdById: sara.id } });
         const real = prisma.$transaction.bind(prisma) as (fn: unknown, options?: unknown) => Promise<unknown>;
-        const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((fn: unknown, options?: unknown) =>
-          real(fn, options).then(async (decided) => {
-            await claimed(jobId, 'rB', minutes(1));
-            return decided;
-          })) as never);
+        // B claims just before the renewal's own write (the pause is decided inside it, so this is the only seam left)
+        const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce((async (fn: unknown, options?: unknown) => {
+          await claimed(jobId, 'rB', minutes(1));
+          return real(fn, options);
+        }) as never);
         let answer: unknown;
         try {
           answer = await renewJob(jobId, minutes(2), { epoch: ea });
         } finally {
           spy.mockRestore();
         }
-        await setUp();
         expect(answer).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
-        expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null, endNote: null, ownerEpoch: ea + 1 });
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running', queuedFor: null, pausedWhy: null, endedBy: null, endNote: null, ownerEpoch: ea + 1 });
+        // B's own renewal at the same limit pauses it; a claim after that write finds no running job (the decision and the pause are one write)
+        expect(await renewJob(jobId, minutes(3), { epoch: ea + 1 })).toEqual({ ok: false, reason: 'paused', why: kind });
+        expect(await claimJob(jobId, { run: 'rC', seen: ea + 2 }, minutes(4))).toMatchObject({ ok: false });
+        expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: kind, endedBy: null, ownerEpoch: ea + 2 });
+        await setUp();
       }
     });
 
@@ -840,30 +862,20 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'error' });
     });
 
-    it('a refusal’s ending decides under the cutoff lock: an intent kept, or a pool cutoff decided, AFTER the room was refused and before the ending’s own transaction leaves the ending to the finalizer (nothing written by the refusal)', async () => {
+    it('a refusal’s pause decides under the cutoff lock: an intent kept, or a pool cutoff decided, AFTER the pause’s own read leaves the ending to the finalizer (nothing written by the refusal)', async () => {
       for (const kind of ['intent', 'cutoff'] as const) {
         const { jobId } = await running(`s-after-read-${kind}`);
         const ea = await claimed(jobId, 'rA');
         const a = await keyFor(jobId, ea);
-        let armed = false;
-        const roomSpy = jest.mocked(meter.reserveRoom).mockImplementationOnce((async (...args: Parameters<typeof actualMeter.reserveRoom>) => {
-          const room = await actualMeter.reserveRoom(...args);
-          armed = true;
-          return room;
-        }) as never);
-        const real = prisma.$transaction.bind(prisma) as (fn: unknown, options?: unknown) => Promise<unknown>;
-        const txSpy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options?: unknown) => {
-          if (!armed) return real(fn, options);
-          armed = false;
-          return (kind === 'intent' ? recordFinishIntent(jobId, { outcome: 'done', epoch: ea }, minutes(1)) : recordPoolCutoff(prisma, jobId, minutes(1))).then(() => real(fn, options));
-        }) as never);
+        // The refusal now pauses the job (piece 3): the intent or cutoff lands after the pause's first read and before its write, which reads them under the cutoff lock
+        const spy = afterPauseRead(jobId, () => (kind === 'intent' ? recordFinishIntent(jobId, { outcome: 'done', epoch: ea }, minutes(1)) : recordPoolCutoff(prisma, jobId, minutes(1))));
         try {
           expect(await ask(a, 'c-big', { estimateMicros: 5_000_000 })).toEqual({ ok: false, reason: 'allowance' });
         } finally {
-          txSpy.mockRestore();
-          roomSpy.mockClear();
+          spy.mockRestore();
         }
-        expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running', queuedFor: null, endedBy: null, ownerEpoch: ea });
+        expect(await prisma.computerJobPause.count({ where: { jobId } })).toBe(0);
       }
     });
 

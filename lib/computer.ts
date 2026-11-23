@@ -28,6 +28,8 @@ import {
 } from '@/lib/computer-control';
 import { cleanStepLabel } from '@/lib/computer-redact';
 import { appendStep } from '@/lib/computer-job-steps';
+import { CALL_IN_LAST_STRETCH, HOLD_IN_LAST_STRETCH } from '@/lib/computer-stretch';
+import { tellIn } from '@/lib/computer-tellings';
 import { callRoomKey, endIfCutoffDecided, endStuckCutoffs, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { reconcileComputers } from '@/lib/computer-reconcile';
@@ -828,7 +830,7 @@ async function runIsTheirs(botId: string, personId: string, runId: string): Prom
 type Tried = 'running' | 'queued' | 'failed' | 'not_set' | 'gone' | { rule: string };
 
 /** One try to put a queued job on the machine. Safe to ask again: a job that is no longer queued is left as it is. */
-async function tryStart(jobId: string, now: Date): Promise<Tried> {
+async function tryStart(jobId: string, now: Date, options: { /** The person's own Resume: they are answered at once, so a pause for their month or a limit is not told to them again. */ quiet?: boolean } = {}): Promise<Tried> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (!job || job.status !== 'queued') return job ? (job.status === 'running' ? 'running' : 'gone') : 'gone';
   // A paused job is skipped until it is resumed: a repeated ask for it, the sweep and the line never start it
@@ -894,7 +896,12 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     if (room.reason === 'not_set') return 'not_set';
     // A job that already ran and was paused (its time so far is charged) does not end because its month or a limit it was resumed under refuses its next start: it stays paused, saying why, and is carried on later
     if ((room.reason === 'rule' || room.reason === 'allowance') && job.pauses > 0) {
-      await prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: room.reason, leaseVersion: { increment: 1 } } });
+      const why = room.reason;
+      // Brick tells the person once, in the same commit (piece 3): not for their own Resume, which is answered at once
+      await prisma.$transaction(async (tx) => {
+        const moved = await tx.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, leaseVersion: { increment: 1 } } });
+        if (moved.count === 1 && !options.quiet) await tellIn(tx, job.id, 'paused', why, now);
+      });
       return 'queued';
     }
     // A rule the person said is not a wait in line: waiting would not change it, and a job that keeps being retried would hold up the Brick. It ends,
@@ -1244,7 +1251,13 @@ export async function renewJob(
   now: Date = new Date(),
   /** The worker that renews (the epoch it won by its claim; none = a worker that knows none, good only while the job has none). Orbit's own renewal of a waiting job names the epoch it read. */
   owner: { epoch?: EpochSaid } = {},
-): Promise<{ ok: true; renewInSeconds: number } | { ok: false; reason: 'allowance' | 'pool' | 'closed' | 'over' | 'unanswered' | 'ending' } | { ok: false; reason: 'stale'; /** A worker that does not own the job: the caller exits. */ run: 'superseded' } | { ok: false; reason: 'rule'; words: string }> {
+): Promise<
+  | { ok: true; renewInSeconds: number }
+  | { ok: false; reason: 'allowance' | 'pool' | 'closed' | 'over' | 'unanswered' | 'ending' }
+  | { ok: false; reason: 'stale'; /** A worker that does not own the job: the caller exits. */ run: 'superseded' }
+  | { ok: false; reason: 'rule'; words: string }
+  | { ok: false; /** The month or a limit the person set paused the job (it is NOT over): the worker aborts its turn, sends no cancel and no finish (Orbit owns both), and exits on the moved epoch. */ reason: 'paused'; why: 'allowance' | 'rule' }
+> {
   const first = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (first && isOver(first.status) && first.endedBy === 'unanswered') return { ok: false, reason: 'unanswered' };
   if (!first || isOver(first.status)) return { ok: false, reason: 'over' };
@@ -1255,6 +1268,8 @@ export async function renewJob(
   const provider = providerFor(row);
   const settings = await getMeterSettings();
   const moreMicros = roomFor(settings.renewMinutes, provider ? provider.microsPerMinute() : null);
+  // Read when called: lib/computer-job-controls builds on this module
+  const controls = await import('@/lib/computer-job-controls');
   const decided = await prisma.$transaction(
     async (tx) => {
       const job = await lockJob(tx, jobId);
@@ -1272,6 +1287,12 @@ export async function renewJob(
         await tx.$executeRaw`UPDATE "computer_jobs" SET "lease_version" = "lease_version" + 1 WHERE "id" = ${jobId}`;
         return { kind: 'ok' as const, epoch: job.ownerEpoch };
       }
+      // The person's month or a limit they set: the job PAUSES and waits (piece 3), decided right here, in the same transaction and under the same locks as the refusal (the owner, no kept intent, no cutoff: all read
+      // above). Its time so far is charged and the unused room released in this commit; it carries on by itself when more arrives. Not while the person holds the screen: that ends as before
+      if ((room.reason === 'allowance' || room.reason === 'rule') && job.control === 'brick') {
+        const paused = await controls.decidePauseIn(tx, jobId, room.reason, now, provider, { ownerEpoch: job.ownerEpoch, heldOnly: true });
+        if (paused.kind === 'held') return { kind: 'paused' as const, paused, why: room.reason };
+      }
       return { kind: 'refused' as const, room, epoch: job.ownerEpoch };
     },
     { timeout: 15_000, maxWait: 15_000 },
@@ -1285,6 +1306,11 @@ export async function renewJob(
   if (decided.kind === 'ok') {
     // Each renewal holds more room, so the runner is told how often to ask: well inside the time the room is held, never so often it over-holds
     return { ok: true, renewInSeconds: first.status === 'queued' ? 60 : Math.max(30, Math.min(Math.floor(settings.renewMinutes * 60 * 0.4), TOKEN_RENEW_EVERY_SECONDS)) };
+  }
+  if (decided.kind === 'paused') {
+    // Rule C: the turn the commit read is cancelled only now, the stretch is written, the machine rests and the line moves
+    await controls.afterPause(jobId, decided.paused, now);
+    return { ok: false, reason: 'paused', why: decided.why };
   }
   const room = decided.room;
   const report: EndReport = {};
@@ -2006,12 +2032,12 @@ async function giveBackMissingModelCalls(batch: number, botId: string | undefine
         FROM "computer_jobs" j
         WHERE (j."status" IN ('failed', 'stopped') AND j."ended_by" IN ('error', 'pool')) ${only}
           AND (
-            EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
+            EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id" AND ${CALL_IN_LAST_STRETCH})
             -- ...or the job's own time, written against the person by an end that overlapped the decision that gave the job back (the decision found no event to detach)
             OR EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time' AND e."person_key" = 'person:' || j."person_id")
             -- ...or credit the job drew that has not gone back and has no refund obligation yet (an obligation, once written, is asked again by its own sweep with a
             -- growing wait: lib/computer-refunds)
-            OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros"
+            OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros" AND ${HOLD_IN_LAST_STRETCH}
               AND NOT EXISTS (SELECT 1 FROM "computer_refund_obligations" o WHERE o."hold_key" = h."hold_key"))
           )
       ),
@@ -2227,6 +2253,8 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   // What a job ran whose write to the books failed is written again (same event id, so never twice), and the same for a pause's time
   await recordMissingComputerTime(now, batch);
   await (await import('@/lib/computer-job-controls')).bookMissingPauses(now, batch);
+  // Jobs the person's month or a limit paused carry on by themselves once more arrived (one per person per sweep, oldest first), or Brick asks first when something about them changed (piece 3)
+  started += await (await import('@/lib/computer-limit-pause')).carryOnPaused(now, batch);
   // One try per Brick: the oldest job in line has the turn. Bricks tried and blocked are skipped by the next page, so a long run of
   // blocked Bricks never keeps the ones behind them from their turn.
   const tried: string[] = [];
@@ -3249,12 +3277,12 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
     SELECT COUNT(*)::bigint AS "n" FROM "computer_jobs" j
     WHERE j."bot_id" = ${botId} AND (j."status" IN ('failed', 'stopped') AND j."ended_by" IN ('error', 'pool'))
       AND (
-        EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
+        EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id" AND ${CALL_IN_LAST_STRETCH})
         -- ...or the job's own time, written against the person by an end that overlapped the decision that gave the job back (the same condition the repair sweep looks for): once the job is gone nothing can find it to detach it
         OR EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time' AND e."person_key" = 'person:' || j."person_id")
         -- ...or credit the job drew that has not gone back and that no refund obligation covers yet: an obligation keeps the minimum references to finish the
         -- reimbursement (job, person, hold key, refund key, amount) without the job, so a refund the books cannot take yet never holds the deletion for ever
-        OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros"
+        OR EXISTS (SELECT 1 FROM "credit_holds" h WHERE h."job_key" = j."id" AND h."category" = 'computers' AND h."state" = 'settled' AND COALESCE(h."customer_micros", 0) > h."refunded_micros" AND ${HOLD_IN_LAST_STRETCH}
           AND NOT EXISTS (SELECT 1 FROM "computer_refund_obligations" o WHERE o."hold_key" = h."hold_key"))
       )`);
   return Number(owed[0]?.n ?? 0) === 0;
@@ -3264,7 +3292,7 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
  * The few steps of the line the job controls (lib/computer-job-controls) use, kept here so they stay the same steps every other path takes. Not for anything else.
  */
 export const controlInternals = {
-  tryStart,
+  tryStart: (jobId: string, now: Date, options: { quiet?: boolean } = {}) => tryStart(jobId, now, options),
   startNext,
   cancelAgentTurn,
   restIfUnheld,

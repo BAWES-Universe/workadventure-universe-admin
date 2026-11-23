@@ -3649,6 +3649,7 @@ model ComputerJob {
   notes   ComputerJobNote[]
   steps   ComputerJobStep[]
   pauseRows ComputerJobPause[]
+  tellings  ComputerJobTelling[]
 
   @@unique([botId, runId])
   @@unique([botId, personId, startKey])
@@ -3704,12 +3705,37 @@ model ComputerJobPause {
   bookedAt  DateTime? @map("booked_at")
   /// When the job ran again after this pause (its next start on the machine, however it was resumed); null while it has not.
   resumedAt DateTime? @map("resumed_at")
+  /// A digest of the Apps the Brick had at this pause (never the Apps themselves): a job the month or a limit paused carries on by itself only while they are the same. Null = not known (Brick asks first).
+  grantsPrint String? @map("grants_print") @db.VarChar(64)
 
   job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
   @@unique([jobId, n])
   @@index([bookedAt, at])
   @@map("computer_job_pauses")
+}
+
+/// What Brick is to tell the person about a job the month or a limit paused (`paused`), about it carrying on by itself (`carried_on`), and the question when it could carry on but
+/// something about it changed while it waited (`can_carry_on`). Written in the same transaction as the change it is about; said once each, under its own key (lib/computer-limit-pause).
+model ComputerJobTelling {
+  id              String    @id @default(uuid())
+  jobId           String    @map("job_id")
+  seq             Int
+  /// paused | carried_on | can_carry_on
+  kind            String    @db.VarChar(16)
+  /// allowance | rule (for `paused`); null otherwise
+  why             String?   @db.VarChar(10)
+  createdAt       DateTime  @map("created_at")
+  toldAt          DateTime? @map("told_at")
+  undeliverableAt DateTime? @map("undeliverable_at")
+  /// No longer true by the time it would be said (the job carried on, ended, or was paused again): never offered
+  staleAt         DateTime? @map("stale_at")
+
+  job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, seq])
+  @@index([toldAt, undeliverableAt, staleAt, createdAt], map: "computer_job_tellings_open_idx")
+  @@map("computer_job_tellings")
 }
 
 // Where a job's computer browsed, for the owner to look at later (R06, handoff v2 section 4: "every navigation and form post is recorded"). Taken

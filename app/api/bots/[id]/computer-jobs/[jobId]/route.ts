@@ -102,7 +102,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         return NextResponse.json(done.superseded ? { ...SUPERSEDED, job: done.job } : { job: done.job });
       }
       case 'renew':
-        // `{ ok: true, renewInSeconds }`, or `{ ok: false, reason }`: allowance, pool, closed, over, unanswered, rule (the job has saved and stopped), `ending` (a finish intent is kept or a pool cutoff is decided: no room was added, the finalizer ends the job: abort the turn, read the job, complete the finish), or `stale` with `run: 'superseded'` (not the owner: exit)
+        // `{ ok: true, renewInSeconds }`, or `{ ok: false, reason }`: allowance, pool, closed, over, unanswered, rule (the job has saved and stopped), `ending` (a finish intent is kept or a pool cutoff is decided: no room was added, the finalizer ends the job: abort the turn, read the job, complete the finish), `paused` with `why` (allowance | rule: the person's month or a limit they set PAUSED the job, it is not over: abort the turn, send NO cancel and NO finish, do not count it as a bad turn, and exit on the moved epoch), or `stale` with `run: 'superseded'` (not the owner: exit)
         return NextResponse.json(await renewJob(jobId, new Date(), { epoch: body.epoch }));
       case 'handover': {
         const done = await requestHandoverAs(jobId, body.waitingFor, new Date(), body.ready, { epoch: body.epoch, generation: body.generation, responseId: body.responseId });
