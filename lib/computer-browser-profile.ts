@@ -57,10 +57,13 @@ const HOUR_MS = 3600_000;
 
 const result = (state: SignInsState, reason: string | null = null, answer?: SignInsAnswer): SignInsResult => ({ state, reason, cookies: answer?.cookies ?? 0, pages: answer?.pages ?? 0 });
 
-/** Writes whether the job's LAST pause put a browser away. Never throws. */
-async function recordKept(jobId: string, kept: boolean): Promise<void> {
-  const last = await prisma.computerJobPause.findFirst({ where: { jobId }, orderBy: { n: 'desc' }, select: { id: true } }).catch(() => null);
-  if (last) await prisma.computerJobPause.updateMany({ where: { id: last.id }, data: { signInsKept: kept } }).catch((error) => console.error('[Computer] Could not keep what a pause put away:', error instanceof Error ? error.message : 'unknown'));
+/**
+ * Writes whether a pause put a browser away: the pause `pause` names (its number), or the job's LAST pause when none is named. A park or a wipe that settles
+ * for one pause names it, so a stale one never writes onto a later pause of the same job (CodeRabbit A9). Never throws.
+ */
+async function recordKept(jobId: string, kept: boolean, pause?: number): Promise<void> {
+  const target = pause ?? (await prisma.computerJobPause.findFirst({ where: { jobId }, orderBy: { n: 'desc' }, select: { n: true } }).catch(() => null))?.n;
+  if (target !== undefined) await prisma.computerJobPause.updateMany({ where: { jobId, n: target }, data: { signInsKept: kept } }).catch((error) => console.error('[Computer] Could not keep what a pause put away:', error instanceof Error ? error.message : 'unknown'));
 }
 
 /** A job that is on the machine now (running, or waiting for its person). */
@@ -107,7 +110,7 @@ async function allowedToKeep(botId: string, now: Date, hours: number): Promise<s
  * while the command runs, so a cleanup and this never run at once and a job that starts waits for the browser to be put away first.
  * Waits for a claim another holds; a claim left by a server that stopped is taken over after a while.
  */
-async function withClaim<T>(botId: string, work: () => Promise<T>): Promise<T | null> {
+async function withClaim<T>(botId: string, work: (renew: () => Promise<boolean>) => Promise<T>): Promise<T | null> {
   let claimedAt: Date | null = null;
   for (let tries = 0; tries < 400 && !claimedAt; tries++) {
     const now = new Date();
@@ -123,8 +126,16 @@ async function withClaim<T>(botId: string, work: () => Promise<T>): Promise<T | 
     }
   }
   if (!claimedAt) return null;
+  // Work that runs more than one command under the claim renews it before each next one: a claim is believed for ONE command and a little more, so a second command that began late must not run on a claim that has gone stale.
+  // False when the claim is no longer ours (another holder took it over), and then no further command is run
+  const renew = async (): Promise<boolean> => {
+    const at = new Date();
+    const held = await prisma.brickComputer.updateMany({ where: { botId, cleanClaimedAt: claimedAt }, data: { cleanClaimedAt: at } }).catch(() => ({ count: 0 }));
+    if (held.count === 1) claimedAt = at;
+    return held.count === 1;
+  };
   try {
-    return await work();
+    return await work(renew);
   } finally {
     await prisma.brickComputer.updateMany({ where: { botId, cleanClaimedAt: claimedAt }, data: { cleanClaimedAt: null } }).catch(() => undefined);
   }
@@ -150,12 +161,15 @@ function logged(what: string, outcome: SignInsResult): SignInsResult {
  * After a running (or waiting) job was paused and the pause committed, before the line moves and before the machine rests: its browser is
  * put away for it, and the machine's browser comes back empty for whatever runs next.
  */
-export async function parkProfile(botId: string, jobId: string, now: Date = new Date()): Promise<SignInsResult> {
+export async function parkProfile(botId: string, jobId: string, now: Date = new Date(), /** The number of the pause this park settles (its pause row); read from the job when the caller does not know it. */ pause?: number): Promise<SignInsResult> {
   try {
     if (!isSafeJobId(jobId)) return result('left', 'not_a_job');
-    const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { botId: true, status: true, writes: true } });
+    const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { botId: true, status: true, writes: true, pauses: true } });
     if (!job || job.botId !== botId) return result('left', 'not_this_brick');
     if (job.status !== 'queued') return result('left', 'not_paused');
+    // Each park settles ONE pause: a job that paused again since is a later pause's to settle, and this one clears nothing of it (CodeRabbit A9)
+    const generation = pause ?? job.pauses;
+    if (job.pauses !== generation) return result('left', 'not_paused');
     // Two pauses left their marks together: the browser is part of both jobs, so it is never put away under either name; `settlePark` empties it. The pointer holds only the FIRST job's id, so the flag
     // is read for the whole Brick: the second job's settle, if it runs first, must not park the shared browser under its own name either (Opus on slice 1, S1-a)
     const marked = await prisma.brickComputer.findFirst({ where: { botId, parkPendingWipe: true }, select: { botId: true } });
@@ -167,6 +181,8 @@ export async function parkProfile(botId: string, jobId: string, now: Date = new 
     if (!machine) return result('left', 'not_awake');
     const hours = await keepHours();
     const outcome = await withClaim(botId, async () => {
+      // Read AGAIN inside the claim: a job that started again, or paused again, while this waited for the claim is not the pause this park settles (the claim is what a start waits for too, so from here on it cannot move)
+      if ((await prisma.computerJob.count({ where: { id: jobId, status: 'queued', pauses: generation } })) === 0) return result('left', 'not_paused');
       const others = await prisma.computerJob.findMany({ where: { botId, id: { not: jobId }, status: { in: ['running', 'waiting'] } }, select: { writes: true } });
       if (others.length > 0) {
         // Another job is on the machine and shares this browser. A looker beside a paused writer: the browser is emptied, nothing kept (part of it is theirs).
@@ -175,6 +191,9 @@ export async function parkProfile(botId: string, jobId: string, now: Date = new 
         const cleared = await onMachine(machine, 'clear', jobId, await allowedToKeep(botId, now, hours), hours);
         return cleared.done === 'dropped' ? result('cleared', 'shared') : result('failed', cleared.reason);
       }
+      // The wipe flag is read here, AFTER the jobs beside were counted and inside the claim (CodeRabbit A5). A second pause writes the flag and leaves the held states in ONE commit, so it either left the held states before the
+      // count above (its flag is committed, and is seen now) or was still held at the count (the shared branch above, where nothing is put away). A job cannot start under the claim, so no other job can come into the held states after the count
+      if (await prisma.brickComputer.findFirst({ where: { botId, parkPendingWipe: true }, select: { botId: true } })) return result('left', 'wipe_pending');
       const keep = [...new Set([...(await allowedToKeep(botId, now, hours)), jobId])];
       const answer = await onMachine(machine, 'park', jobId, keep, hours);
       if (answer.done === 'kept') return result('parked', null, answer);
@@ -184,10 +203,10 @@ export async function parkProfile(botId: string, jobId: string, now: Date = new 
     });
     const answer = logged('put away', outcome ?? result('left', 'not_awake'));
     // What this pause came to is kept on its own row: a job that found nothing to put away has no browser of its own to wait for (`parkWorthWaitingFor`)
-    if (answer.state === 'parked' || (answer.state === 'left' && answer.reason === 'already')) await recordKept(jobId, true);
-    else if (answer.state === 'left' && answer.reason === 'nothing_saved') await recordKept(jobId, false);
+    if (answer.state === 'parked' || (answer.state === 'left' && answer.reason === 'already')) await recordKept(jobId, true, generation);
+    else if (answer.state === 'left' && answer.reason === 'nothing_saved') await recordKept(jobId, false, generation);
     // The machine waits for no job's browser now (a park that FAILED, or a machine that was not awake, leaves the pointer: nothing else starts there until the sweep has put it right)
-    if (parkDone(answer)) await clearParkPending(botId, jobId);
+    if (parkDone(answer)) await clearParkPending(botId, jobId, { pauses: generation });
     return answer;
   } catch (error) {
     console.error('[Computer] Could not put a job’s browser sign-ins away:', error instanceof Error ? error.message : 'unknown');
@@ -196,10 +215,37 @@ export async function parkProfile(botId: string, jobId: string, now: Date = new 
 }
 
 /**
+ * What a resumed job's browser attempt still has to own, in the one write or the one check that lands it: the job is on the machine (running or waiting), still in the room the attempt started on, and still in the prep state the
+ * attempt read. A late attempt (the sweep took over a start, or two sweeps read the same job) finds one of these gone and does nothing (CodeRabbit A6, A7).
+ */
+export interface ResumeFence {
+  reservation?: string;
+  from?: 'restoring' | 'recover';
+}
+/** What a park's or a wipe's job must be in for a wipe of the live browser: not on the machine (paused, or over) and on the pause the wipe settles. */
+export interface PauseFence {
+  pauses: number;
+}
+const prepWhere = (jobId: string, fence?: ResumeFence) => ({ id: jobId, status: { in: ['running', 'waiting'] }, ...(fence?.reservation ? { reservationKey: fence.reservation } : {}), ...(fence?.from ? { prepState: fence.from } : {}) });
+async function fenceHolds(jobId: string, fence: ResumeFence | PauseFence): Promise<boolean> {
+  if ('pauses' in fence) return (await prisma.computerJob.count({ where: { id: jobId, pauses: fence.pauses, status: { notIn: ['running', 'waiting'] } } })) === 1;
+  return (await prisma.computerJob.count({ where: prepWhere(jobId, fence) })) === 1;
+}
+
+/** What the claim holder has in hand while it settles inside the claim. */
+interface Under {
+  machine: Machine;
+  hours: number;
+  renew: () => Promise<boolean>;
+}
+/** Runs inside the claim of a restore, with the restore's own answer: the settlement of the job lands under the same claim as the command, so no second attempt can restore in between (CodeRabbit A7). */
+export type SettleUnderClaim = (back: SignInsResult, under: Under) => Promise<void>;
+
+/**
  * When a job that was paused is running again (in tryStart, after the machine is up, before the runner has it): the live browser is replaced by
  * the job's own kept browser, or by an empty one when nothing of its own was kept (or it was kept too long). `fresh` means: sign in again.
  */
-export async function restoreProfile(botId: string, jobId: string, now: Date = new Date()): Promise<SignInsResult> {
+export async function restoreProfile(botId: string, jobId: string, now: Date = new Date(), /** Only while the job is still the attempt's own (see `ResumeFence`): checked under the claim that issues the command. */ fence?: ResumeFence, /** Run under the same claim, with this restore's answer. */ settle?: SettleUnderClaim): Promise<SignInsResult> {
   try {
     if (!isSafeJobId(jobId)) return result('left', 'not_a_job');
     const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { botId: true, personId: true, status: true } });
@@ -210,32 +256,41 @@ export async function restoreProfile(botId: string, jobId: string, now: Date = n
     const hours = await keepHours();
     const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { ownerId: true, roomId: true, deletedAt: true } });
     const paused = await lastPausedFromRunning(jobId);
-    const outcome = await withClaim(botId, async () => {
-      const keep = await allowedToKeep(botId, now, hours);
-      const others = await prisma.computerJob.count({ where: { botId, id: { not: jobId }, status: { in: ['running', 'waiting'] } } });
-      if (others > 0) {
-        // Another job is on the machine: its browser is not taken from under it, and this job's kept browser is never shown to it. Its park is LEFT WHERE IT IS: a job whose park is still
-        // valid waits for the machine instead of coming here (`parkWorthWaitingFor`, read by tryStart), and throwing it away here would lose the person's sign-ins for a job that is
-        // allowed to keep them (GPT round 6, finding 7, Opus's ruling 23 Nov)
-        return result('fresh', 'shared');
-      }
-      // Kept only for the job it was kept for, while its Brick is still its owner's, and not longer than the Limits say
-      const expired = !paused || now.getTime() - paused.getTime() > hours * HOUR_MS;
-      const owner = !!bot && ownsBrick(bot, job.personId);
-      if (expired || !owner) {
-        const dropped = await onMachine(machine, 'drop', jobId, keep.filter((id) => id !== jobId), hours);
-        if (dropped.done !== 'dropped') return result('failed', dropped.reason);
-      }
-      const answer = await onMachine(machine, 'restore', jobId, expired || !owner ? keep.filter((id) => id !== jobId) : keep, hours);
-      if (answer.done === 'kept') return result('restored', null, answer);
-      if (answer.done === 'none') return result('fresh', expired ? 'expired' : !owner ? 'owner' : 'none');
-      return result('failed', answer.reason);
+    const outcome = await withClaim(botId, async (renew) => {
+      // The state is read under the claim that issues the command, never before it: a restore that was already done by an earlier attempt is never repeated (a second one finds no parked copy and empties the live browser)
+      if (fence && !(await fenceHolds(jobId, fence))) return result('left', 'superseded');
+      const back = await restoreUnder(machine, botId, jobId, job.personId, bot, paused, now, hours);
+      if (settle) await settle(back, { machine, hours, renew });
+      return back;
     });
     return logged('brought back', outcome ?? result('left', 'not_awake'));
   } catch (error) {
     console.error('[Computer] Could not bring a job’s browser sign-ins back:', error instanceof Error ? error.message : 'unknown');
     return result('failed', 'error');
   }
+}
+
+/** The restore itself, under the claim. */
+async function restoreUnder(machine: Machine, botId: string, jobId: string, personId: string, bot: Parameters<typeof ownsBrick>[0] | null, paused: Date | null, now: Date, hours: number): Promise<SignInsResult> {
+  const keep = await allowedToKeep(botId, now, hours);
+  const others = await prisma.computerJob.count({ where: { botId, id: { not: jobId }, status: { in: ['running', 'waiting'] } } });
+  if (others > 0) {
+    // Another job is on the machine: its browser is not taken from under it, and this job's kept browser is never shown to it. Its park is LEFT WHERE IT IS: a job whose park is still
+    // valid waits for the machine instead of coming here (`parkWorthWaitingFor`, read by tryStart), and throwing it away here would lose the person's sign-ins for a job that is
+    // allowed to keep them (GPT round 6, finding 7, Opus's ruling 23 Nov)
+    return result('fresh', 'shared');
+  }
+  // Kept only for the job it was kept for, while its Brick is still its owner's, and not longer than the Limits say
+  const expired = !paused || now.getTime() - paused.getTime() > hours * HOUR_MS;
+  const owner = !!bot && ownsBrick(bot, personId);
+  if (expired || !owner) {
+    const dropped = await onMachine(machine, 'drop', jobId, keep.filter((id) => id !== jobId), hours);
+    if (dropped.done !== 'dropped') return result('failed', dropped.reason);
+  }
+  const answer = await onMachine(machine, 'restore', jobId, expired || !owner ? keep.filter((id) => id !== jobId) : keep, hours);
+  if (answer.done === 'kept') return result('restored', null, answer);
+  if (answer.done === 'none') return result('fresh', expired ? 'expired' : !owner ? 'owner' : 'none');
+  return result('failed', answer.reason);
 }
 
 /**
@@ -266,24 +321,29 @@ export async function parkWorthWaitingFor(botId: string, jobId: string, now: Dat
  * Empties the live browser on the machine and proves it empty. Used when a resumed job could not have its OWN browser brought back (nothing of its own was kept, or it was kept too long): a clean
  * browser that needs signing in again is valid, one that may still hold what another job left is not. Also used by the sweep for a pause whose park never ran (GPT round 6, finding 7).
  */
-export async function wipeLiveProfile(botId: string, jobId: string, now: Date = new Date()): Promise<SignInsResult> {
+export async function wipeLiveProfile(botId: string, jobId: string, now: Date = new Date(), /** The job must still be in this state when the command is about to run, checked under the claim (CodeRabbit A6, A8). */ fence?: ResumeFence | PauseFence): Promise<SignInsResult> {
   try {
     if (!isSafeJobId(jobId)) return result('left', 'not_a_job');
     const machine = await awakeMachine(botId);
     if (!machine) return result('left', 'not_awake');
     const hours = await keepHours();
-    const outcome = await withClaim(botId, async () => {
-      // Read INSIDE the claim, so a job that starts in between is seen (the claim that starts a job and this one exclude each other): the browser of a job that runs beside is its own, and is never emptied under it
-      const beside = await prisma.computerJob.count({ where: { botId, id: { not: jobId }, status: { in: ['running', 'waiting'] } } });
-      if (beside > 0) return result('left', 'shared');
-      const cleared = await onMachine(machine, 'clear', jobId, await allowedToKeep(botId, now, hours), hours);
-      return cleared.done === 'dropped' ? result('cleared', null, cleared) : result('failed', cleared.reason);
-    });
+    const outcome = await withClaim(botId, async () => wipeUnder(machine, botId, jobId, now, hours, fence));
     return logged('emptied', outcome ?? result('left', 'not_awake'));
   } catch (error) {
     console.error('[Computer] Could not empty the live browser:', error instanceof Error ? error.message : 'unknown');
     return result('failed', 'error');
   }
+}
+
+/** The emptying itself, under the claim. */
+async function wipeUnder(machine: Machine, botId: string, jobId: string, now: Date, hours: number, fence?: ResumeFence | PauseFence): Promise<SignInsResult> {
+  // Read INSIDE the claim, so a job that starts in between is seen (the claim that starts a job and this one exclude each other): the browser of a job that runs beside is its own, and is never emptied under it
+  const beside = await prisma.computerJob.count({ where: { botId, id: { not: jobId }, status: { in: ['running', 'waiting'] } } });
+  if (beside > 0) return result('left', 'shared');
+  // And the job this is for: its reservation and prep state (or its pause) are checked before the command, never after it, because a clear that already ran cannot be undone by a check that comes later (CodeRabbit A6)
+  if (fence && !(await fenceHolds(jobId, fence))) return result('left', 'superseded');
+  const cleared = await onMachine(machine, 'clear', jobId, await allowedToKeep(botId, now, hours), hours);
+  return cleared.done === 'dropped' ? result('cleared', null, cleared) : result('failed', cleared.reason);
 }
 
 /**
@@ -293,16 +353,45 @@ export async function wipeLiveProfile(botId: string, jobId: string, now: Date = 
  * tries again. Written only while `reservation` is still the job's room, so a late try settles nothing for a stretch that moved on without it (finding 3b).
  */
 export async function settleResumedBrowser(jobId: string, botId: string, back: SignInsResult, now: Date = new Date(), reservation?: string, /** The state the attempt read: written only while the job still holds it, so a late second attempt never undoes what a faster one settled (CodeRabbit on #1025). */ from?: 'restoring' | 'recover'): Promise<'ready' | 'recover'> {
+  const fence: ResumeFence = { reservation, from };
+  const needsWipe = back.state === 'fresh' && back.reason !== 'shared';
+  if (needsWipe) {
+    try {
+      const machine = await awakeMachine(botId);
+      const hours = await keepHours();
+      // The check, the emptying and the write are one claim: a ready job's browser is never emptied by an attempt that was late (CodeRabbit A6)
+      const settled = machine ? await withClaim(botId, (renew) => settleUnder({ machine, hours, renew }, jobId, botId, back, now, fence)) : null;
+      if (settled) return settled;
+    } catch (error) {
+      console.error('[Computer] Could not empty the live browser for a resumed job:', error instanceof Error ? error.message : 'unknown');
+    }
+    await writePrep(jobId, false, fence);
+    return 'recover';
+  }
+  const ready = back.state === 'restored' || (back.state === 'fresh' && back.reason === 'shared');
+  return (await writePrep(jobId, ready, fence)) && ready ? 'ready' : 'recover';
+}
+
+/** The emptying a fresh result needs (when it does) and the job's write, with the claim already held. */
+async function settleUnder(under: Under, jobId: string, botId: string, back: SignInsResult, now: Date, fence: ResumeFence): Promise<'ready' | 'recover'> {
   let ready = back.state === 'restored' || (back.state === 'fresh' && back.reason === 'shared');
-  if (!ready && back.state === 'fresh') {
+  if (!ready && back.state === 'fresh' && (await under.renew())) {
     // A browser a job beside it is using is left exactly as it is, and the job is ready (the wipe decides this inside its claim)
-    const wiped = await wipeLiveProfile(botId, jobId, now);
+    const wiped = logged('emptied', await wipeUnder(under.machine, botId, jobId, now, under.hours, fence));
     ready = wiped.state === 'cleared' || (wiped.state === 'left' && wiped.reason === 'shared');
   }
-  await prisma.computerJob
-    .updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] }, ...(reservation ? { reservationKey: reservation } : {}), ...(from ? { prepState: from } : {}) }, data: { prepState: ready ? null : 'recover' } })
-    .catch((error) => console.error('[Computer] Could not write whether a resumed job is ready:', error instanceof Error ? error.message : 'unknown'));
-  return ready ? 'ready' : 'recover';
+  return (await writePrep(jobId, ready, fence)) && ready ? 'ready' : 'recover';
+}
+
+/** Writes whether the job is ready, only while the attempt still owns it. True only when a row was written: a failed write, or a job that moved on (a later room, a later pause, settled by a faster attempt), is not a settlement (CodeRabbit B/C19, A12). */
+async function writePrep(jobId: string, ready: boolean, fence: ResumeFence): Promise<boolean> {
+  try {
+    const done = await prisma.computerJob.updateMany({ where: prepWhere(jobId, fence), data: { prepState: ready ? null : 'recover' } });
+    return done.count === 1;
+  } catch (error) {
+    console.error('[Computer] Could not write whether a resumed job is ready:', error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
 }
 
 /**
@@ -351,8 +440,15 @@ export async function recoverResumedBrowsers(now: Date = new Date(), batch = 5):
       const paused = await lastPausedFromRunning(job.id);
       const tooOld = !paused || now.getTime() - paused.getTime() > hours * HOUR_MS;
       // Past the hours its own browser may be kept there is nothing of its own left to bring back: a clean browser, proved clean, is what makes it ready
-      const back = tooOld ? result('fresh', 'expired') : await restoreProfile(job.botId, job.id, now);
-      if ((await settleResumedBrowser(job.id, job.botId, back, now, job.reservationKey ?? undefined, 'recover')) === 'ready') ready++;
+      // The restore and the settlement are ONE claim, checked there: two sweeps that read the same job never both restore it, and the later one finds it settled and does nothing (CodeRabbit A7)
+      const fence: ResumeFence = { reservation: job.reservationKey ?? undefined, from: 'recover' };
+      let settledUnder: 'ready' | 'recover' | undefined;
+      const back = tooOld
+        ? result('fresh', 'expired')
+        : await restoreProfile(job.botId, job.id, now, fence, async (restored, under) => {
+            settledUnder = await settleUnder(under, job.id, job.botId, restored, now, fence);
+          });
+      if ((settledUnder ?? (await settleResumedBrowser(job.id, job.botId, back, now, fence.reservation, 'recover'))) === 'ready') ready++;
     }
   } catch (error) {
     console.error('[Computer] Could not put a resumed job’s browser right:', error instanceof Error ? error.message : 'unknown');
@@ -382,7 +478,9 @@ export async function finishPendingParks(now: Date = new Date(), batch = 5): Pro
       const jobId = machine.parkPendingJobId;
       if (!jobId) continue;
       looked++;
-      const settled = await settlePark(machine.botId, jobId, await parkProfile(machine.botId, jobId, now), now);
+      // The pause this park and its settlement are for is read once, so a pause that lands between the two is never settled by them (CodeRabbit A9)
+      const pause = (await prisma.computerJob.findUnique({ where: { id: jobId }, select: { pauses: true } }))?.pauses;
+      const settled = await settlePark(machine.botId, jobId, await parkProfile(machine.botId, jobId, now, pause), now, pause);
       if (settled === 'settled') parked++;
       if (settled === 'wiped') wiped++;
     }
@@ -407,29 +505,56 @@ const parkDone = (outcome: SignInsResult): boolean => outcome.state === 'parked'
  * sweep owns it (`finishPendingParks`). Called by the pause itself and by the sweep, so both settle a park exactly the same way.
  * Two pauses that left their marks together (one command paused a writer and a looker) leave `park_pending_wipe`: the browser is never put away under either name, it is emptied.
  */
-export async function settlePark(botId: string, jobId: string, outcome: SignInsResult | null, now: Date = new Date()): Promise<'settled' | 'wiped' | 'waiting'> {
+export async function settlePark(botId: string, jobId: string, outcome: SignInsResult | null, now: Date = new Date(), /** The number of the pause this settles; read from the job when the caller does not know it. */ pause?: number): Promise<'settled' | 'wiped' | 'waiting'> {
   const machine = await prisma.brickComputer.findUnique({ where: { botId }, select: { parkPendingWipe: true } });
-  // A job that is on the machine again owns the live browser (its own restore replaced it): nothing of its pause is left to clean up
-  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, prepState: true, pauses: true } });
+  const generation = pause ?? job?.pauses;
+  // The job paused again since this pause: the marker is the later pause's now, and the later pause settles it (CodeRabbit A9)
+  if (job && generation !== undefined && job.pauses !== generation) return 'waiting';
+  // A job that is on the machine again owns the live browser (its own restore replaced it): nothing of its pause is left to clean up. Only once that restore is settled (CodeRabbit A8): while it is `restoring` or
+  // `recover` the browser is not the job's yet, and the marker and the wipe it may carry stay until it is (the start's own settlement, or the sweep, lets them go)
   if (job && (job.status === 'running' || job.status === 'waiting')) {
-    await clearParkPending(botId, jobId);
+    if (job.prepState !== null) return 'waiting';
+    await clearParkPending(botId, jobId, generation === undefined ? undefined : { pauses: generation });
     return 'settled';
   }
   if (outcome && parkDone(outcome) && !machine?.parkPendingWipe) {
-    await clearParkPending(botId, jobId);
+    await clearParkPending(botId, jobId, generation === undefined ? undefined : { pauses: generation });
     return 'settled';
   }
-  const cleared = await wipeLiveProfile(botId, jobId, now);
+  const cleared = await wipeLiveProfile(botId, jobId, now, generation === undefined ? undefined : { pauses: generation });
   if (cleared.state !== 'cleared' && !(cleared.state === 'left' && cleared.reason === 'shared')) return 'waiting';
   // The browser was emptied: this pause kept nothing, so the job has no browser of its own to wait for when it carries on
-  if (cleared.state === 'cleared') await recordKept(jobId, false);
-  await clearParkPending(botId, jobId);
+  if (cleared.state === 'cleared') await recordKept(jobId, false, generation);
+  await clearParkPending(botId, jobId, generation === undefined ? undefined : { pauses: generation });
   return 'wiped';
 }
 
-/** The machine no longer waits for this job's browser to be put away: whatever was to be done on it is done (or was never there to do). */
-export async function clearParkPending(botId: string, jobId: string): Promise<void> {
-  await prisma.brickComputer.updateMany({ where: { botId, parkPendingJobId: jobId }, data: { parkPendingJobId: null, parkPendingWipe: false } }).catch((error) => console.error('[Computer] Could not let go of a park that is done:', error instanceof Error ? error.message : 'unknown'));
+/**
+ * The machine no longer waits for this job's browser to be put away: whatever was to be done on it is done (or was never there to do). With `bound` it lets go only while the job is still on the pause (and, for a start, the room)
+ * the caller settled: the job's row is read under a share lock, which a pause's own lock on the job (it is taken first, at the top of its commit) excludes, so a pause that lands between the caller's decision and this write is either
+ * seen here or waits for it, and its new marker is never cleared by an older settlement (CodeRabbit A9, A12). A job whose row is locked by someone else is left for the next settlement: nothing is cleared on a guess.
+ */
+export async function clearParkPending(botId: string, jobId: string, bound?: { pauses: number; reservation?: string }): Promise<void> {
+  const fail = (error: unknown) => console.error('[Computer] Could not let go of a park that is done:', error instanceof Error ? error.message : 'unknown');
+  if (!bound) {
+    await prisma.brickComputer.updateMany({ where: { botId, parkPendingJobId: jobId }, data: { parkPendingJobId: null, parkPendingWipe: false } }).catch(fail);
+    return;
+  }
+  await prisma
+    .$transaction(
+      async (tx) => {
+        const rows = await tx.$queryRaw<Array<{ pauses: number; status: string; reservation_key: string | null }>>`SELECT "pauses", "status", "reservation_key" FROM "computer_jobs" WHERE "id" = ${jobId} FOR SHARE SKIP LOCKED`;
+        // A row that is locked by another write is skipped, and then none is read: that is not a job that is gone
+        const locked = rows.length === 0 && (await tx.computerJob.count({ where: { id: jobId } })) > 0;
+        if (locked) return;
+        const row = rows[0];
+        if (row && (row.pauses !== bound.pauses || (bound.reservation !== undefined && (row.reservation_key !== bound.reservation || !isHeld(row.status))))) return;
+        await tx.brickComputer.updateMany({ where: { botId, parkPendingJobId: jobId }, data: { parkPendingJobId: null, parkPendingWipe: false } });
+      },
+      { timeout: 15_000, maxWait: 15_000 },
+    )
+    .catch(fail);
 }
 
 /** After any ending of a job that was ever paused, and after a cancel: its kept browser is thrown away (and anything else no longer allowed on that machine). */

@@ -543,10 +543,12 @@ run('computer job controls: pause, resume, do this next, cancel one job (piece 1
       expect(profile.parkProfile).not.toHaveBeenCalled();
       await pauseJob(sara.brickId, sara.id, jobId, minutes(2));
       expect(profile.parkProfile).toHaveBeenCalledTimes(1);
-      expect(profile.parkProfile).toHaveBeenCalledWith(sara.brickId, jobId, minutes(2));
+      // The park is for ONE pause: it is told which (the pause's number), so it never clears or records for a later pause of the job
+      expect(profile.parkProfile).toHaveBeenCalledWith(sara.brickId, jobId, minutes(2), 1);
       expect(profile.restoreProfile).not.toHaveBeenCalled();
       await resumeJob(sara.brickId, sara.id, jobId, minutes(9));
-      expect(profile.restoreProfile).toHaveBeenCalledWith(sara.brickId, jobId, minutes(9));
+      // The restore is this try's own: it runs only while the job is on the room this try claimed and still `restoring`
+      expect(profile.restoreProfile).toHaveBeenCalledWith(sara.brickId, jobId, minutes(9), { reservation: (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId }, select: { reservationKey: true } })).reservationKey, from: 'restoring' });
       expect((await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId, n: 1 } } })).resumedAt).toEqual(minutes(9));
       expect(profile.dropProfile).not.toHaveBeenCalled();
       await stopJobFor(sara.brickId, sara.id, minutes(10));
