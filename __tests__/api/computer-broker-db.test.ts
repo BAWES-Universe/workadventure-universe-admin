@@ -681,21 +681,33 @@ run('the broker, the fence and keep-awake, in a real database', () => {
     });
 
     describe('no turn after the runner committed to ending the job (its finish intent), even in the instant between the last look and the dispatch (CodeRabbit)', () => {
-      it('an intent that commits after the last look and before the dispatch: no turn is opened, the first-turn mark goes, the claim is let go, and the answer is `finish_pending`', async () => {
+      it('an intent that commits while the admission waits for the job’s lock: no turn is opened, NO first-turn mark is ever written, the claim is let go, and the answer is `finish_pending`', async () => {
         const { jobId } = await running('fence-a');
-        // The first turn is marked in the job's row right before it is sent: the intent commits in that very instant
-        const real = prisma.computerJob.updateMany.bind(prisma.computerJob);
-        const spy = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation(((args: { data?: { firstTurnSentAt?: Date | null } }) =>
-          real(args as never).then(async (result) => {
-            if (args.data?.firstTurnSentAt instanceof Date) await recordFinishIntent(jobId, { outcome: 'done' }, new Date());
-            return result;
-          })) as never);
+        // The admission (the last look at the job, which is also where the first turn is marked) finds the intent that committed just before it
+        const original = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+        let fired = false;
+        const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options?: unknown) => {
+          if (!fired && typeof fn === 'function' && fn.toString().includes('finish_pending')) {
+            fired = true;
+            return recordFinishIntent(jobId, { outcome: 'done' }, new Date()).then(() => original(fn, options));
+          }
+          return original(fn, options);
+        }) as unknown as typeof prisma.$transaction);
         const sent = jest.spyOn(fake, 'openTurn');
+        let marks = 0;
+        const realMark = prisma.computerJob.updateMany.bind(prisma.computerJob);
+        const markSpy = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation(((args: { data?: { firstTurnSentAt?: Date | null } }) => {
+          if (args.data?.firstTurnSentAt instanceof Date) marks++;
+          return realMark(args as never);
+        }) as never);
         try {
           expect(await startTurn(jobId, 'carry on')).toEqual({ ok: false, reason: 'finish_pending' });
         } finally {
           spy.mockRestore();
+          markSpy.mockRestore();
         }
+        expect(fired).toBe(true);
+        expect(marks).toBe(0);
         expect(sent).not.toHaveBeenCalled();
         expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ firstTurnSentAt: null, turnClaimedAt: null, agentResponseId: null });
         sent.mockRestore();

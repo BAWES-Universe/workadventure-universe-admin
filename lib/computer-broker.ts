@@ -387,7 +387,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     }
     sessionId = fresh.job.sessionId;
     // A job's very first turn has no conversation to be found by, and the agent has no way to be asked for "the turn this request started" (a request
-    // carries no key of ours and sessions cannot be listed). So the turn is marked in the job's row BEFORE it is sent, and a start that finds the mark
+    // carries no key of ours and sessions cannot be listed). So the turn is marked in the job's row BEFORE it is sent (below, after the last look at the job and right before the provider is called: a mark that is written earlier would stand for a turn that was never sent), and a start that finds the mark
     // with no turn id and no conversation (the server stopped after the agent accepted the turn, or the stream failed before its id came) never opens
     // a second one beside it: the job ends, visibly, as it does when the turn never says its id. In a conversation the agent knows, a second turn is
     // refused by the agent itself, atomically, so only the first turn needs the mark.
@@ -396,15 +396,6 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
         const ended = await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
         await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
         return ended === 'superseded' ? { ok: false, reason: 'superseded' } : { ok: false, reason: ended === 'ended' ? 'not_running' : 'failed' };
-      }
-      const markTime = new Date();
-      const marked = await prisma.computerJob
-        .updateMany({ where: { id: job.jobId, status: 'running', control: 'brick', controlGeneration: fresh.job.generation, ownerEpoch: fresh.job.ownerEpoch, firstTurnSentAt: null }, data: { firstTurnSentAt: markTime } })
-        .catch(() => null);
-      if (marked?.count === 1) markedAt = markTime;
-      if (!marked || marked.count !== 1) {
-        await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
-        return { ok: false, reason: marked ? 'not_running' : 'failed' };
       }
     }
     ready = fresh;
@@ -422,14 +413,15 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   try {
     if (signal?.aborted) {
       clearTimeout(timer);
-      // Nothing was sent: the mark goes too
-      if (!sessionId) await prisma.computerJob.updateMany({ where: { id: job.jobId, ownerEpoch: job.ownerEpoch }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+      // Nothing was sent, and nothing is marked yet (the mark is written right before the provider is called)
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       return { ok: false, reason: 'failed' };
     }
     // The last look before the provider hears of the turn is made under the job's cutoff lock and its row lock, the two a claim of the job (a new owner), a finish intent and a pause write under: this worker is still the owner (its
     // epoch), the job is still running in Brick's hands under the same control number, and no finish intent or pool cutoff is kept. A new owner's claim that lands first is seen here and the turn is never opened; a claim that lands
     // after this look finds a turn that was admitted before it, which the id fence and the cancellation cover as before (CodeRabbit on #1025). No provider call is made inside the lock
+    const mark = new Date();
+    let wroteMark = false;
     const standing = await prisma
       .$transaction(
         async (tx) => {
@@ -438,15 +430,22 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
           if (row.ownerEpoch !== job.ownerEpoch) return 'superseded' as const;
           if (row.status !== 'running' || row.control !== 'brick' || row.controlGeneration !== ready.job.generation) return 'not_running' as const;
           if ((await hasFinishIntent(tx, job.jobId)) || (await hasPoolCutoff(tx, job.jobId))) return 'finish_pending' as const;
+          // A job's first turn is marked here, in the same decision that admits it and not before: a mark found later with no turn id means the turn was admitted and may have reached the agent. The mark is this attempt's (its time)
+          if (!sessionId) {
+            const wrote = await tx.computerJob.updateMany({ where: { id: job.jobId, firstTurnSentAt: null }, data: { firstTurnSentAt: mark } });
+            if (wrote.count !== 1) return 'not_running' as const;
+            wroteMark = true;
+          }
           return 'ok' as const;
         },
         { timeout: 15_000, maxWait: 15_000 },
       )
       .catch(() => 'failed' as const);
+    // The mark is kept only if the transaction that wrote it committed
+    if (standing === 'ok' && wroteMark) markedAt = mark;
     if (standing !== 'ok') {
       clearTimeout(timer);
-      // Nothing was sent: the mark this start put on goes, whoever owns the job now (a new owner that finds a mark and no turn would end the job for a turn that was never sent); only this start's own mark, by its time
-      if (!sessionId && markedAt) await prisma.computerJob.updateMany({ where: { id: job.jobId, firstTurnSentAt: markedAt, agentResponseId: null, agentSessionId: null }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+      // Nothing was sent, and nothing is marked yet: the claim is let go of
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       if (standing === 'finish_pending') return { ok: false, reason: 'finish_pending' };
       if (standing === 'gone') return { ok: false, reason: 'not_found' };
@@ -454,6 +453,14 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       // Superseded (or no longer Brick's to run): the same answer the worker gets on every other route
       const now_ = await liveJob(job.jobId, owner);
       return now_.ok ? { ok: false, reason: 'not_running' } : now_;
+    }
+    // The request was cut while the admission waited for the job's lock: nothing is sent, the claim is let go of and this attempt's own mark goes (the request's own signal is not handed on once the turn is dispatched, so a runner that goes
+    // away later cannot stop the id being kept)
+    if (signal?.aborted) {
+      clearTimeout(timer);
+      if (markedAt) await prisma.computerJob.updateMany({ where: { id: job.jobId, firstTurnSentAt: markedAt, agentResponseId: null, agentSessionId: null }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+      await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+      return { ok: false, reason: 'failed' };
     }
     events = await provider.openTurn(ready.job.ref, { text: `${jobTagOf(job.jobId)}\n${text}`, sessionId }, own.signal);
     // The agent has answered, so the turn is accepted: the limit was for that answer. Its id follows on the stream, however long that takes.
@@ -468,7 +475,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       // An answer below 500 is a refusal, and `try_again` is Agent37 saying so itself. A 502/503/504 is not: it can come from a gateway after the agent
       // accepted the turn, so it ends the job rather than let a retry open a second first turn beside one that runs (the person would pay for both)
       const notSent = error instanceof TurnNotSent || (error instanceof Agent37Error && (error.status < 500 || error.code === 'try_again'));
-      if (notSent) await prisma.computerJob.updateMany({ where: { id: job.jobId, ownerEpoch: job.ownerEpoch }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+      if (notSent && markedAt) await prisma.computerJob.updateMany({ where: { id: job.jobId, firstTurnSentAt: markedAt }, data: { firstTurnSentAt: null } }).catch(() => undefined);
       else await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
     }
     // A job that carries on an ended one's conversation ("try again", piece 8) on a computer that no longer has it (a new machine, an older copy brought back): the agent says it does
@@ -481,7 +488,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     if (error instanceof Agent37Error && error.code === 'session_busy') return { ok: false, reason: 'busy', responseId: error.runningResponseId };
     return { ok: false, reason: 'failed' };
   }
-  return { ok: true, events: withoutTags(keeping(ready.job, ready.provider, events, { timer, controller: own, claim })) };
+  return { ok: true, events: withoutTags(keeping(ready.job, ready.provider, events, { timer, controller: own, claim, markedAt })) };
 }
 
 /**
@@ -522,7 +529,7 @@ async function* keeping(
   job: Live,
   provider: NonNullable<ReturnType<typeof providerFor>>,
   events: AsyncGenerator<TurnEvent>,
-  start?: { timer: ReturnType<typeof setTimeout>; controller: AbortController; claim?: Date },
+  start?: { timer: ReturnType<typeof setTimeout>; controller: AbortController; claim?: Date; /** The first-turn mark this start wrote (null when it wrote none): the only mark it clears, whoever owns the job now. */ markedAt?: Date | null },
 ): AsyncGenerator<TurnEvent> {
   let responseId: string | null = null;
   let over = false;
@@ -649,7 +656,7 @@ async function* keeping(
           // what a start looks at first). When the cancel could not be made, the machine's fence took its place, and that keeps the agent's gateway, where the
           // turn runs: the mark stays (the next start ends the job and opens no second turn) unless the machine itself is proved asleep
           if (cancelled || (await agentCannotRun(job.botId).catch(() => false))) {
-            await prisma.computerJob.updateMany({ where: { id: job.jobId, ownerEpoch: job.ownerEpoch, agentResponseId: null }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+            if (start?.markedAt) await prisma.computerJob.updateMany({ where: { id: job.jobId, firstTurnSentAt: start.markedAt, agentResponseId: null }, data: { firstTurnSentAt: null } }).catch(() => undefined);
           }
           responseId = null;
           over = true;
@@ -660,7 +667,7 @@ async function* keeping(
       if (event.type === 'completed' || event.type === 'failed') {
         over = true;
         // The turn is over without its id having been kept: nothing runs that nothing names
-        if (start && !responseId) await prisma.computerJob.updateMany({ where: { id: job.jobId, ownerEpoch: job.ownerEpoch }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+        if (start?.markedAt && !responseId) await prisma.computerJob.updateMany({ where: { id: job.jobId, firstTurnSentAt: start.markedAt }, data: { firstTurnSentAt: null } }).catch(() => undefined);
       }
       yield event;
       if (over) return;
