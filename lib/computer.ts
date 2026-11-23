@@ -1406,7 +1406,13 @@ const saidByIntent = (intent: { outcome: string; why: string | null; cause: stri
  * before it (read under the cutoff lock in that write: when one was, the job ends as the intent said, never as this finish says). Answers whether the generation had moved (`stale`), whether THIS call wrote the ending (`ended`), whether
  * the person had the job (`notBrick`, nothing written), and the job as it stands.
  */
-async function finishWith(jobId: string, said: Said, guard: Pick<EndGuard, 'generation' | 'brick' | 'intentFirst' | 'owner' | 'startNextAt'>): Promise<{ stale: boolean; superseded: boolean; ended: boolean; notBrick: boolean; job: JobView | null }> {
+async function finishWith(
+  jobId: string,
+  said: Said,
+  guard: Pick<EndGuard, 'generation' | 'brick' | 'intentFirst' | 'owner' | 'startNextAt'>,
+  /** Whether the next job in line may start once this one is over. False for a Stop of everything: nothing in line may start while that Stop ends them all. */
+  advance = true,
+): Promise<{ stale: boolean; superseded: boolean; ended: boolean; notBrick: boolean; job: JobView | null }> {
   const report: EndReport = {};
   // At most one turn of "an intent was kept first": the intent's own words are never judged against another intent
   for (let round = 0; round < 2; round++) {
@@ -1424,7 +1430,7 @@ async function finishWith(jobId: string, said: Said, guard: Pick<EndGuard, 'gene
       // The run the runner reported is carried whatever else it named: it is where the relay's arrival is looked for (never another run's). Which fault rows are read does not follow it (no turn named: every row of the job)
       const runner = mine.outcome !== 'failed' ? null : { turns: mine.turns ?? null, run: mine.run ?? null, hint: ours ? ('ours' as const) : mine.cause === 'agent' ? ('agent' as const) : ('none' as const) };
       // A finish honors a pool cutoff Orbit decided for this job (`finish`): such a job ends as `pool` (ours, given back), never as the outcome the runner reports after its keys were ended for our own capacity
-      await endJob(jobId, mine.outcome, ours ? 'error' : null, mine.now, true, undefined, true, runner, true, { generation: guard.generation, brick: guard.brick, intentFirst: guard.intentFirst && round === 0, owner: round === 0 ? guard.owner : undefined, note, startNextAt: guard.startNextAt }, report);
+      await endJob(jobId, mine.outcome, ours ? 'error' : null, mine.now, advance, undefined, true, runner, true, { generation: guard.generation, brick: guard.brick, intentFirst: guard.intentFirst && round === 0, owner: round === 0 ? guard.owner : undefined, note, startNextAt: guard.startNextAt }, report);
     }
     if (!report.intent) break;
   }
@@ -1739,8 +1745,11 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     const deferToIntent = async (intent: NonNullable<EndReport['intent']>): Promise<void> => {
       report.intent = intent;
       if (!personStop) return;
-      // The intent's own time is its accounting (the wait for this is not the person's time); the next job in line starts now
-      const done = await finishWith(jobId, saidByIntent(intent, intent.createdAt), { brick: true, startNextAt: now });
+      // The person's own Cancel or Stop is valid under ANY control: the ending is written without Brick's guard, so a job the person HOLDS (they took it over, or it was handed to
+      // them) still ends here as the committed word says. With the guard it wrote nothing, the person's request answered "ok" and the job stayed theirs forever, with nothing left
+      // to end it (a kept intent is never completed for a job under person control).
+      // The intent's own time is its accounting (the wait for this is not the person's time); the next job in line starts now, unless this Stop is ending everything
+      const done = await finishWith(jobId, saidByIntent(intent, intent.createdAt), { brick: false, startNextAt: now }, advance);
       report.ended = done.ended;
     };
     if (runnerJudged || hintJudged || orbitSeen || turnHold) {

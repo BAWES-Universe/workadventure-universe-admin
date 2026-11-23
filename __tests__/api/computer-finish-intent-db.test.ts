@@ -1362,6 +1362,38 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       void ea;
     });
 
+    it('R6-2a: Cancel of a job the person HOLDS that has a kept intent really ends it (the person’s own request is valid under any control), as the intent said', async () => {
+      const { sara, jobId } = await running('g6-held-cancel');
+      const ea = await claimed(jobId, 'rA');
+      await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', 'rA')]);
+      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea })).toMatchObject({ ok: true });
+      // The person takes the screen: the job is theirs now (`control: person`), with the intent still kept
+      expect((await takeOver(sara.brickId, sara.id, minutes(1))).ok).toBe(true);
+      expect(await jobOf(jobId)).toMatchObject({ control: 'person' });
+      expect((await cancelJob(sara.brickId, sara.id, jobId, minutes(2))).ok).toBe(true);
+      // It is over, as the runner's committed word said, and given back as ours
+      expect(await jobOf(jobId)).toMatchObject({ status: 'failed', endedBy: 'error' });
+      expect(await decisionOf(jobId)).toMatchObject({ state: 'given', causeHint: 'ours' });
+      // Nothing is left for the sweep to end (a kept intent is never completed for a job under person control: with the guard this job would have stayed theirs forever)
+      expect(await completeFinishIntents(minutes(60), 10)).toBe(0);
+    });
+
+    it('R6-2a: Stop all ends a job the person HOLDS that has a kept intent, as the intent said, and nothing in line starts while that Stop runs', async () => {
+      const { sara, jobId } = await running('g6-held-stop');
+      const ea = await claimed(jobId, 'rA');
+      const inLine = await startJob({ botId: sara.brickId, personId: sara.id, title: 'In line' }, minutes(1));
+      if (!inLine.ok) throw new Error('the second job was not made');
+      await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', 'rA')]);
+      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea })).toMatchObject({ ok: true });
+      expect((await takeOver(sara.brickId, sara.id, minutes(1))).ok).toBe(true);
+      await stopJobFor(sara.brickId, sara.id, minutes(2));
+      expect(await jobOf(jobId)).toMatchObject({ status: 'failed', endedBy: 'error' });
+      expect(await decisionOf(jobId)).toMatchObject({ state: 'given', causeHint: 'ours' });
+      // A Stop of everything stops everything: the one in line is their own stop, and it was never started by the ending of the held one
+      expect(await jobOf(inLine.job.id)).toMatchObject({ status: 'stopped', endedBy: 'person', secondsRun: 0 });
+      expect(await completeFinishIntents(minutes(60), 10)).toBe(0);
+    });
+
     it('CONTROL: Cancel of a job still IN LINE is the person’s own, whatever any other job committed', async () => {
       const { sara, jobId } = await running('g6-cancel-queued');
       const queued = await startJob({ botId: sara.brickId, personId: sara.id, title: 'In line' }, minutes(1));
