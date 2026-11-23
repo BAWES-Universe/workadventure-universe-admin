@@ -309,11 +309,15 @@ run('a start whose answer the game never confirmed, in a real database', () => {
     const real = prisma.computerJob.findFirst.bind(prisma.computerJob) as unknown as (args: { where?: { startAckedAt?: null } }) => Promise<unknown>;
     let inside = false;
     let madeFirst: Awaited<ReturnType<typeof startJob>> | null = null;
+    let lookedAt: string | null = null;
     const spy = jest.spyOn(prisma.computerJob, 'findFirst').mockImplementation((async (args: { where?: { startAckedAt?: null } }) => {
       const found = await real(args);
       // The look at the oldest unconfirmed start has been made; now the other request under the same key makes its job first
       if (!inside && args?.where?.startAckedAt === null) {
         inside = true;
+        // The look found A's job: a look that found nothing would never reach the write this test is about
+        lookedAt = (found as { id?: string } | null)?.id ?? null;
+        expect(found).toMatchObject({ id: a.job.id });
         madeFirst = await start(sara, 'Visa form', keyB, false);
       }
       return found;
@@ -324,6 +328,8 @@ run('a start whose answer the game never confirmed, in a real database', () => {
     } finally {
       spy.mockRestore();
     }
+    // Recorded again outside the spy, which an error inside the lookup could have hidden
+    expect(lookedAt).toBe(a.job.id);
     expect(madeFirst).toMatchObject({ ok: true });
     // The key records its own job: the start that asked goes on and meets it; it is not told another start came first
     expect(answer).toBeNull();

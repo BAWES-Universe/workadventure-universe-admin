@@ -137,6 +137,24 @@ run('where a job’s computer browsed, in a real database', () => {
       expect(await pathsOf(id)).toEqual(['/first-stretch', '/second-stretch']);
     });
 
+    it('CodeRabbit on #1025 (C5): a capture of an earlier stretch that finishes after a later stretch saved replaces only its own window, and never deletes the later stretch’s rows', async () => {
+      const sara = await person('c5');
+      const id = await jobFor(sara);
+      // The job ran from second 0 to 300 (paused), then carried on at 360; the later stretch was read and saved first
+      await prisma.computerJobPause.create({ data: { jobId: id, n: 1, why: 'person', seconds: 60, at: seconds(300) } });
+      await prisma.computerJob.update({ where: { id }, data: { pauses: 1, startedAt: seconds(360), visitsState: 'complete' } });
+      const row = (second: number, path: string) => ({ jobId: id, kind: 'visit', at: seconds(second), by: 'brick', method: 'GET', host: 'shop.example', path, count: 1, failed: false, form: false });
+      await prisma.computerJobVisit.createMany({ data: [row(10, '/stale-first'), row(370, '/second-stretch'), row(480, '/second-later')] });
+      // The late capture of the first stretch reads the whole file, which holds the later stretch's visits too
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? reading([visit(10, { p: '/first-fresh' }), visit(370, { p: '/second-stretch' }), visit(480, { p: '/second-later' })]) : {});
+      expect(await recordVisits({ id, startedAt: seconds(0) }, provider, `fake-${sara.brickId}`, seconds(300))).toBe('complete');
+      expect(await pathsOf(id)).toEqual(['/first-fresh', '/second-stretch', '/second-later']);
+      // The same when the first stretch has no recorder: only its own window is replaced
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? { exitCode: 127, stderr: 'universe-visits: not found' } : {});
+      expect(await recordVisits({ id, startedAt: seconds(0) }, provider, `fake-${sara.brickId}`, seconds(300))).toBe('none');
+      expect(await pathsOf(id)).toEqual(['/second-stretch', '/second-later']);
+    });
+
     it('N16: a resumed machine with no listener (exit 127) keeps the earlier stretches’ rows and says the record is partial, never "none" over rows that exist', async () => {
       const { sara, id } = await resumed('n16');
       provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? { exitCode: 127, stderr: 'universe-visits: not found' } : {});

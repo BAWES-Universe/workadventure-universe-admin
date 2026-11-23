@@ -417,6 +417,45 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       }
     });
 
+    it('CodeRabbit on #1025 (C10): a delayed prepare of an OLDER job never puts its key over relay.json a newer claim of ANOTHER job wrote; its own file is still written, and a newer claim still replaces relay.json', async () => {
+      const { sara, jobId: a } = await running();
+      const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second', writes: false }, NOW);
+      if (!second.ok) throw new Error('the second job did not start');
+      const b = second.job.id;
+      const commandOf = async (jobId: string) => {
+        await prepareJob(jobId, RELAY, NOW);
+        return fake.commands.filter((entry) => entry.command.includes('relay.json')).at(-1)?.command ?? '';
+      };
+      const forA = await commandOf(a);
+      const forB = await commandOf(b);
+      const markOf = (command: string) => Number(/ (\d+) > "\$d\/relay\.gen"/.exec(command)?.[1]);
+      const tokenOf = (command: string) => /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(command)?.[1] ?? '';
+      // The claims are put well apart, so which is older does not depend on the clock of the test
+      const at = (command: string, from: number, to: number, token: string, to_token: string) => command.replaceAll(new RegExp(`\\b${from}\\b`, 'g'), String(to)).replaceAll(token, to_token);
+      const olderA = at(forA, markOf(forA), 1_000_000, tokenOf(forA), 'cjt_older_a');
+      const newerB = at(forB, markOf(forB), 2_000_000, tokenOf(forB), 'cjt_newer_b');
+      const home = mkdtempSync(join(tmpdir(), 'universe-relay-'));
+      const runIt = (text: string) => spawnSync('sh', ['-c', text], { env: { ...process.env, HOME: home }, encoding: 'utf8' });
+      const keyIn = (path: string) => (JSON.parse(readFileSync(join(home, '.universe', path), 'utf8')) as { token: string }).token;
+      try {
+        expect(runIt(newerB).status).toBe(0);
+        expect(keyIn('relay.json')).toBe('cjt_newer_b');
+        const gen = readFileSync(join(home, '.universe', 'relay.gen'), 'utf8');
+        // The older job's write arrives late: the shared file and its note stay the newer claim's, the older job's own file is written
+        expect(runIt(olderA).status).toBe(0);
+        expect(keyIn('relay.json')).toBe('cjt_newer_b');
+        expect(readFileSync(join(home, '.universe', 'relay.gen'), 'utf8')).toBe(gen);
+        expect(keyIn(`jobs/${a}.json`)).toBe('cjt_older_a');
+        expect(keyIn(`jobs/${b}.json`)).toBe('cjt_newer_b');
+        // A claim later than the one that wrote it still replaces the shared file
+        const newest = at(forA, markOf(forA), 3_000_000, tokenOf(forA), 'cjt_newest_a');
+        expect(runIt(newest).status).toBe(0);
+        expect(keyIn('relay.json')).toBe('cjt_newest_a');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
     it('a write delayed past its claim never puts its ended key over the one the claim after it wrote, though both are of the same control number', async () => {
       const { jobId } = await running();
       await prepareJob(jobId, RELAY, NOW);

@@ -220,7 +220,8 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
     `if [ -n "$jg" ] && { [ ${generation} -lt "$jg" ] || { [ ${generation} -eq "$jg" ] && [ -n "$jm" ] && [ ${mark} -lt "$jm" ]; }; } 2>/dev/null; then exit 0; fi; ` +
     `read -r who cur mk < "$d/relay.gen" 2>/dev/null; ` +
     `if [ "$who" = '${jobId}' ] && [ -n "$cur" ] && { [ "$cur" -gt ${generation} ] || { [ "$cur" -eq ${generation} ] && [ -n "$mk" ] && [ "$mk" -gt ${mark} ]; }; } 2>/dev/null; then exit 0; fi; ` +
-    `printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json" && printf '%s %s %s' '${jobId}' ${generation} ${mark} > "$d/relay.gen" && ` +
+    // The shared file is also left alone when ANOTHER job's claim that wrote it is later than this one (control numbers are of one job, so only the claims are compared): a delayed prepare of an older job never puts its key over a newer claim's. Its own files below are still written
+    `if [ "$who" != '${jobId}' ] && [ -n "$mk" ] && [ "$mk" -gt ${mark} ] 2>/dev/null; then :; else printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json" && printf '%s %s %s' '${jobId}' ${generation} ${mark} > "$d/relay.gen"; fi && ` +
     // The job's own key goes where the model address looks for the job a call belongs to (its turns carry the job's tag). Another job's key beside it is never
     // touched, so jobs that run at once each call on their own. Files a week old are removed.
     `mkdir -p "$d/jobs" && ` +

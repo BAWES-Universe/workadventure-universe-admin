@@ -128,8 +128,15 @@ run('one owner per computer job: every write is decided in the write that lands 
   /** Whether the advisory lock can be taken right now by a transaction of its own that does not wait (a held lock is `false`, whoever waits or not). */
   const lockIsFree = async (key: string): Promise<boolean> =>
     prisma.$transaction(async (tx) => (await tx.$queryRaw<{ ok: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) AS ok`)[0].ok);
-  const waitForWaiters = async (key: string, n: number): Promise<boolean> => {
+  /** Whether at least `n` requests wait for the advisory lock. Given the request that is meant to be one of them, its failure ends the wait with its own error (CodeRabbit on #1025, C8). */
+  const waitForWaiters = async (key: string, n: number, request?: Promise<unknown>): Promise<boolean> => {
+    const outcome: { failed: boolean; error?: unknown } = { failed: false };
+    request?.then(undefined, (error) => {
+      outcome.failed = true;
+      outcome.error = error;
+    });
     for (let tries = 0; tries < 250; tries += 1) {
+      if (outcome.failed) throw outcome.error;
       if ((await waiters(key)) >= n) return true;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
@@ -166,9 +173,24 @@ run('one owner per computer job: every write is decided in the write that lands 
       });
     return { locked: lockTaken, release, done, pid: () => pid };
   };
-  /** Whether a request is waiting for the row the fixture holds: a backend that the fixture's own backend blocks (never any waiter of the server). */
-  const waitForRowWaiter = async (holder: { pid: () => number }): Promise<boolean> => {
+  /**
+   * Whether a request is waiting for the row the fixture holds: a backend that the fixture's own backend blocks (never any waiter of the server).
+   * Given the request, its outcome is watched from the moment of asking: a request that fails ends the wait with its own error, and one that already answered is not waiting (CodeRabbit on #1025, C8).
+   */
+  const waitForRowWaiter = async (holder: { pid: () => number }, request?: Promise<unknown>): Promise<boolean> => {
+    const outcome: { failed: boolean; error?: unknown; answered: boolean } = { failed: false, answered: false };
+    request?.then(
+      () => {
+        outcome.answered = true;
+      },
+      (error) => {
+        outcome.failed = true;
+        outcome.error = error;
+      },
+    );
     for (let tries = 0; tries < 250; tries += 1) {
+      if (outcome.failed) throw outcome.error;
+      if (outcome.answered) return false;
       const pid = holder.pid();
       if (pid > 0 && (await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`)[0].n >= 1) return true;
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1055,30 +1077,23 @@ run('one owner per computer job: every write is decided in the write that lands 
       const ea = await claimed(jobId, 'rA');
       const opened = () => fake.calls.filter((call) => call.name === 'openTurn').length;
       // Another worker is claiming (it holds the job's cutoff lock, the one the last look waits for) and its claim lands while the start waits
-      let release: () => void = () => undefined;
-      const released = new Promise<void>((resolve) => {
-        release = resolve;
+      const claiming = holdCutoff(jobId, async (tx) => {
+        await tx.computerJob.update({ where: { id: jobId }, data: { ownerEpoch: { increment: 1 } } });
       });
-      let locked: () => void = () => undefined;
-      const lockTaken = new Promise<void>((resolve) => {
-        locked = resolve;
-      });
-      const claiming = prisma.$transaction(
-        async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
-          locked();
-          await released;
-          await tx.computerJob.update({ where: { id: jobId }, data: { ownerEpoch: { increment: 1 } } });
-        },
-        { timeout: 30_000, maxWait: 30_000 },
-      );
-      await lockTaken;
       const before = opened();
-      const start = startTurn(jobId, 'Do it', new AbortController().signal, { epoch: ea });
-      await new Promise((resolve) => setTimeout(resolve, 700));
-      release();
-      await claiming;
-      expect(await start).toEqual({ ok: false, reason: 'superseded' });
+      let start: ReturnType<typeof startTurn> | undefined;
+      try {
+        await claiming.ready;
+        start = startTurn(jobId, 'Do it', new AbortController().signal, { epoch: ea });
+        // The start is blocked on the cutoff lock before the epoch changes: without this it could first look after the claim and be superseded by the plain first check
+        expect(await waitForWaiters(cutoffLockKey(jobId), 1, start)).toBe(true);
+        claiming.release();
+        await claiming.done;
+        expect(await start).toEqual({ ok: false, reason: 'superseded' });
+      } finally {
+        claiming.release();
+        await Promise.allSettled([claiming.done, ...(start ? [start] : [])]);
+      }
       expect(opened()).toBe(before);
       // The mark the start put on the job for its first turn went with it (nothing was sent): the new owner is not told of a turn that never was
       expect((await jobOf(jobId)).firstTurnSentAt).toBeNull();
@@ -1121,7 +1136,7 @@ run('one owner per computer job: every write is decided in the write that lands 
       try {
         await holder.locked;
         waiting = prepareJob(jobId, RELAY, minutes(3), { run: 'rB', epoch: eb, relayReached: false, relayStatus: 404 });
-        expect(await waitForRowWaiter(holder)).toBe(true);
+        expect(await waitForRowWaiter(holder, waiting)).toBe(true);
         holder.release();
         await holder.done;
         expect(await waiting!).toEqual({ ok: false, reason: 'superseded' });
@@ -1281,6 +1296,34 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect(await beatJob(jobId, new Date(NOW.getTime() + 400_000), { epoch: ea })).toEqual({ ok: true, until: new Date(NOW.getTime() + 490_000) });
     });
 
+    it('CodeRabbit on #1025 (26): a renewal that commits between a beat’s start and its conditional update is not moved back by the beat: the hold keeps the later deadline and the answer says it is held', async () => {
+      const { jobId } = await running('s-lease-interleave');
+      const ea = await claimed(jobId, 'rA');
+      // The hold stands to 90 s. A beat that began at 10 s would move it to 100 s; before that statement runs, a renewal commits 150 s
+      expect((await jobOf(jobId)).ownerLeaseUntil).toEqual(new Date(NOW.getTime() + 90_000));
+      const real = prisma.computerJob.updateMany.bind(prisma.computerJob) as unknown as (args: { where?: { ownerLeaseUntil?: unknown } }) => Promise<unknown>;
+      let renewal: Promise<unknown> | undefined;
+      const spy = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation((async (args: { where?: { ownerLeaseUntil?: unknown } }) => {
+        // Only the beat's own conditional extension of the hold is held back, once; everything else (the renewal's writes included) goes straight through
+        if (!renewal && args?.where?.ownerLeaseUntil !== undefined) {
+          renewal = renewJob(jobId, new Date(NOW.getTime() + 60_000), { epoch: ea });
+          await renewal;
+        }
+        return real(args);
+      }) as never);
+      let beat: Awaited<ReturnType<typeof beatJob>>;
+      try {
+        beat = await beatJob(jobId, new Date(NOW.getTime() + 10_000), { epoch: ea });
+      } finally {
+        spy.mockRestore();
+      }
+      // The renewal did commit the later deadline while the beat was held back, and the beat did not write over it
+      expect(renewal).toBeDefined();
+      expect(await renewal).toMatchObject({ ok: true });
+      expect(beat).toEqual({ ok: true, until: new Date(NOW.getTime() + 150_000), held: true });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toEqual(new Date(NOW.getTime() + 150_000));
+    });
+
     it('CodeRabbit on #1025 (7, 42): after the owner let the job go, a beat, a renewal and a call admitted on a key made before cannot bring the hold back: the replacement claims at once', async () => {
       const { jobId } = await running('s-lease-after-release');
       const ea = await claimed(jobId, 'rA');
@@ -1427,7 +1470,7 @@ run('one owner per computer job: every write is decided in the write that lands 
       try {
         await holder.locked;
         waiting = settleEffectAs(jobId, 'send-1', 'done', 'sent', { epoch: ea });
-        expect(await waitForRowWaiter(holder)).toBe(true);
+        expect(await waitForRowWaiter(holder, waiting)).toBe(true);
         holder.release();
         await holder.done;
         expect(await waiting!).toEqual({ ok: false, superseded: true });
@@ -1483,7 +1526,7 @@ run('one owner per computer job: every write is decided in the write that lands 
       try {
         await holder.locked;
         waiting = requestHandoverAs(jobId, 'signin', minutes(5), null, { epoch: ea });
-        expect(await waitForRowWaiter(holder)).toBe(true);
+        expect(await waitForRowWaiter(holder, waiting)).toBe(true);
         holder.release();
         await holder.done;
         const landed = await waiting!;
@@ -1541,7 +1584,7 @@ run('one owner per computer job: every write is decided in the write that lands 
       try {
         await holder.locked;
         waiting = requestHandoverAs(jobId, 'signin', minutes(2), null, { epoch: ea });
-        expect(await waitForRowWaiter(holder)).toBe(true);
+        expect(await waitForRowWaiter(holder, waiting)).toBe(true);
         holder.release();
         await holder.done;
         await waiting!;
