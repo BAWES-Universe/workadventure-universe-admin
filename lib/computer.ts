@@ -800,6 +800,9 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
           const ownKey = { botId: input.botId, personId: input.personId, startKey: input.startKey as string };
           // Answered meanwhile (another request of this same key was answered with an earlier start while this one waited): the same answer, decided from the row after the lock
           if (mine && mine.state === 'answered') return { reanswer: true as const };
+          // The start that MADE a job whose job was taken away since (Brick purge, the job's removal): its attempt stays as `made` with no job. A delayed copy of it makes nothing: it answers `expired`, never a second paid
+          // job for a request that was already answered (Opus's ruling N15-a)
+          if (mine && mine.state === 'made' && !mine.jobId) return { expired: true as const };
           // Finding 1 (GPT's second order): an OLDER open attempt loses to a job another keyed start made after it began. That start could not see this one (it was not committed yet when it decided),
           // so this one is superseded by that job now and answers it: never a second job for one request
           if (mine && mine.state === 'open') {
@@ -859,6 +862,11 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
         return { done: words !== null ? { ok: false, reason: 'rule', words } : { ok: false, reason: 'not_set' } };
       } else created = decided.made;
     } else {
+      // The same rule without an ack: a keyed start whose own attempt MADE a job that was taken away since makes nothing (N15-a)
+      if (input.startKey) {
+        const own = await prisma.computerStartAttempt.findUnique({ where: { botId_personId_startKey: { botId: input.botId, personId: input.personId, startKey: input.startKey } }, select: { state: true, jobId: true } });
+        if (own && own.state === 'made' && !own.jobId) return { done: { ok: false, reason: 'expired' } };
+      }
       created = await prisma.computerJob.create({ data: { ...data, startAckedAt: now } });
       if (input.startKey) await prisma.computerStartAttempt.updateMany({ where: { botId: input.botId, personId: input.personId, startKey: input.startKey, state: 'open' }, data: { state: 'made', jobId: created.id } }).catch(() => undefined);
     }

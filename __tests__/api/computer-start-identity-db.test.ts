@@ -298,6 +298,29 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     expect(await jobsOf(sara)).toHaveLength(0);
     // Nothing new was reserved: the only room is the one the deleted job took
     expect((await roomsOf(sara)).every((room) => room.jobId === a.job.id)).toBe(true);
+    // N15-a (Opus): a delayed copy of the start that MADE the job, whose attempt now reads `made` with no job, is `expired` too, by the route and the library, and makes no job and no room
+    expect(await attemptOf(sara, KEY_A)).toMatchObject({ state: 'made', jobId: null });
+    expect(await post(sara, KEY_A, 'Visa')).toMatchObject({ ok: false, reason: 'expired' });
+    expect(await viaLib(sara, KEY_A, 'Visa')).toMatchObject({ ok: false, reason: 'expired' });
+    expect(await jobsOf(sara)).toHaveLength(0);
+    expect((await roomsOf(sara)).every((room) => room.jobId === a.job.id)).toBe(true);
+  });
+
+  it('N15-a: the same after the controls are set up again between the take-away and the replay, and for a start that does not ack: a made-and-gone start never runs as a fresh paid job', async () => {
+    const sara = await owner('n15-made-gone');
+    const KEY_A = key();
+    const a = await post(sara, KEY_A, 'Visa');
+    await prisma.computerJob.delete({ where: { id: a.job.id } });
+    await setUp();
+    expect(await post(sara, KEY_A, 'Visa')).toMatchObject({ ok: false, reason: 'expired' });
+    expect(await viaLib(sara, KEY_A, 'Visa')).toMatchObject({ ok: false, reason: 'expired' });
+    // Without an ack (the plain keyed path)
+    const plain = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa', startKey: KEY_A }, NOW);
+    expect(plain).toMatchObject({ ok: false, reason: 'expired' });
+    expect(await jobsOf(sara)).toHaveLength(0);
+    expect((await roomsOf(sara)).every((room) => room.jobId === a.job.id)).toBe(true);
+    // CONTROL: another key is a deliberate new start and makes its job
+    expect(await post(sara, key(), 'Visa')).toMatchObject({ ok: true });
   });
 
   it('N15: a SUPERSEDED start whose answering job is gone, delayed past the old cleanup horizon, still makes no second job', async () => {
