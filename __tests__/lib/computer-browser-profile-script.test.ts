@@ -77,12 +77,14 @@ function fakeProfile(secret: string): void {
   spawnSync('chown', ['-R', `${AGENT}:`, join(home, '.config'), join(home, '.cache')]);
 }
 
-/** Stops only the browsers THIS suite started (the ones on its own debugging port and profile folder), never another Chromium on the machine (CodeRabbit on #1025). */
+/**
+ * Stops only the browsers THIS test started, never another Chromium on the machine (CodeRabbit on #1025): every process of a browser (its helpers too) carries the test's own
+ * temporary folder in its command line (its profile folder is under it), so that folder names them all. Nothing is stopped when the test made no browser folder.
+ */
 function killBrowsers(): void {
-  if (!port || !home) return;
-  const mine = `--remote-debugging-port=${port} `;
-  spawnSync('pkill', ['-f', '--', `chrome.*${mine.trim()}`]);
-  for (let i = 0; i < 50 && spawnSync('pgrep', ['-f', '--', `chrome.*${mine.trim()}`]).status === 0; i++) spawnSync('sleep', ['0.1']);
+  if (!root) return;
+  spawnSync('pkill', ['-f', '--', root]);
+  for (let i = 0; i < 50 && spawnSync('pgrep', ['-f', '--', root]).status === 0; i++) spawnSync('sleep', ['0.1']);
 }
 
 beforeEach(() => {
@@ -112,7 +114,16 @@ beforeEach(() => {
 afterEach(() => {
   if (!usable) return;
   killBrowsers();
-  rmSync(root, { recursive: true, force: true });
+  // A browser that was stopped may still be writing for a moment: the folder is removed again if it is not empty yet
+  for (let tries = 0; tries < 20; tries++) {
+    try {
+      rmSync(root, { recursive: true, force: true });
+      break;
+    } catch (error) {
+      if (tries === 19) throw error;
+      spawnSync('sleep', ['0.25']);
+    }
+  }
 });
 
 describe('the command, as text', () => {
