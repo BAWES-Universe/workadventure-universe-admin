@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
-import { brickOf, computerView, stopAll } from '@/lib/computer';
+import { brickOf, computerView, stopAll, STOP_CONFIRMED_MAX } from '@/lib/computer';
 import { commandOf, COMMAND_HEADER } from '@/lib/computer-commands';
 import { cancelJob, moveJobFirst, pauseJob, resumeJob } from '@/lib/computer-job-controls';
 import { addJobNote, NOTE_MAX } from '@/lib/computer-job-notes';
@@ -12,10 +12,13 @@ import { jobActivity } from '@/lib/computer-job-steps';
 export const runtime = 'nodejs';
 
 const jobIdSchema = z.string().min(1).max(64);
+// Round 8, D2: the jobs the person was shown and confirmed for Stop all (1 to 50 job ids, which are uuids)
+const confirmedSchema = z.array(z.string().uuid()).min(1).max(STOP_CONFIRMED_MAX);
 
 const bodySchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('list'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional() }).strict(),
-  z.object({ action: z.literal('stop'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional() }).strict(),
+  z.object({ action: z.literal('stop'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional(), confirmedJobIds: confirmedSchema.optional() }).strict(),
+  z.object({ action: z.literal('stop_all'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional(), confirmedJobIds: confirmedSchema }).strict(),
   z.object({ action: z.literal('activity'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional(), jobId: jobIdSchema }).strict(),
   z.object({ action: z.literal('pause'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional(), jobId: jobIdSchema }).strict(),
   z.object({ action: z.literal('resume'), personId: z.string().min(1).max(255), isGuest: z.boolean().optional(), jobId: jobIdSchema }).strict(),
@@ -37,6 +40,8 @@ const bodySchema = z.discriminatedUnion('action', [
  *  - `pause`, `resume`, `cancel` (jobId), `first` (jobId, `pauseRunning`): `{ ok: true, view }`.
  *  - `note` (jobId, text): `{ ok: true, view, note: { seq, delivery } }`, delivery: now, answer, after_hand_back, when_it_starts.
  *  - `stop`: ends everything on the computer, paused jobs included: `{ ok: true, view }`.
+ *  - `stop_all` (confirmedJobIds, round 8 D2; `stop` takes it too): ends ONLY the live jobs in the set the person confirmed (1 to 50 ids; ids over or unknown are skipped) on the FIRST dispatch:
+ *    `{ ok: true, view, stopped: [ids], left: [ids of live jobs not in the set, still going] }`, kept as the command's outcome. The set is part of the command: the same command id with another set is 409 `command_reused`.
  *
  * Every action but `list` and `activity` needs the command id of that one tool call (header X-Computer-Command, a uuid; Brick derives it from the chat event, the action, the job and the call's number in the
  * turn, so a retried turn sends the same ids): the same id again answers what it came to and does nothing more (finding 4). 400 `{ ok: false, reason: 'command_missing' }` without one, 400
@@ -72,9 +77,14 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         const view = await computerView(id, ownerId);
         return NextResponse.json(view ? { ok: true, view } : { ok: false, reason: 'not_owner' });
       }
-      case 'stop': {
-        const stopped = await stopAll(id, ownerId, new Date(), control);
-        return stopped.ok ? NextResponse.json({ ok: true, view: stopped.view }) : answer({ ok: false, reason: stopped.reason === 'not_found' ? 'not_owner' : stopped.reason });
+      case 'stop':
+      case 'stop_all': {
+        const confirmed = body.confirmedJobIds ?? null;
+        const stopped = confirmed ? await stopAll(id, ownerId, new Date(), control, confirmed) : await stopAll(id, ownerId, new Date(), control);
+        if (stopped.ok) return NextResponse.json({ ok: true, view: stopped.view, ...(confirmed ? { stopped: stopped.stopped ?? [], left: stopped.left ?? [] } : {}) });
+        // The same command id with another confirmed set: a conflict (round 8, D2)
+        if (confirmed && stopped.reason === 'command_reused') return NextResponse.json({ ok: false, reason: 'command_reused' }, { status: 409 });
+        return answer({ ok: false, reason: stopped.reason === 'not_found' ? 'not_owner' : stopped.reason });
       }
       case 'activity': {
         const activity = await jobActivity(id, ownerId, body.jobId);

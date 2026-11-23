@@ -1759,43 +1759,74 @@ export async function stopJobFor(botId: string, ownerId: string, now: Date = new
   return stopped.ok ? stopped.view : null;
 }
 
-/** What Stop came to: the computer as it stands after, or why not (not the owner's Brick; a command id already used for another control). */
-export type Stopped = { ok: true; view: ComputerView } | { ok: false; reason: 'not_found' | 'command_reused' };
+/**
+ * What Stop came to: the computer as it stands after, or why not (not the owner's Brick; a command id already used for another control). With a confirmed set (round 8, D2): `stopped`, the confirmed jobs that were
+ * live at the first dispatch and were ended; `left`, the live jobs that were NOT in the set (they keep going).
+ */
+export type Stopped = { ok: true; view: ComputerView; stopped?: string[]; left?: string[] } | { ok: false; reason: 'not_found' | 'command_reused' };
+
+/** The most job ids a confirmed Stop all may carry. */
+export const STOP_CONFIRMED_MAX = 50;
 
 /**
  * Stop everything on the computer, under the tap's (or Brick's tool call's) command id when it has one (finding 4): the command's row is committed FIRST, naming the jobs that are on the computer at that moment, then those
  * jobs end through the finalizer's own transactions. The same id again answers what it came to, or, while the first request did not keep that (it stopped half way), finishes ending THOSE jobs: never one that was
  * started after the Stop. Without a command (the 0.4.3 game's Stop) it ends what is there now, as before.
+ *
+ * Round 8, D2 (GPT's seventh note): with `confirmed` (the job ids the person was shown and confirmed), the FIRST dispatch ends ONLY the live jobs in that set; ids that are over or unknown are skipped, and a live job not in
+ * the set (one that joined the line after the question) is left alone and named in `left`. The set is part of the command's identity: the same command id with another set is `command_reused`. Without it, as before.
  */
-export async function stopAll(botId: string, ownerId: string, now: Date = new Date(), command?: Command): Promise<Stopped> {
+export async function stopAll(botId: string, ownerId: string, now: Date = new Date(), command?: Command, confirmed?: string[] | null): Promise<Stopped> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  const set = confirmed ? [...new Set(confirmed)].sort() : null;
   let targets: string[] | null = null;
+  let left: string[] | null = null;
+  const liveNow = async (db: Pick<Prisma.TransactionClient, 'computerJob'>) => (await db.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting', 'queued'] } }, select: { id: true }, orderBy: { id: 'asc' } })).map((job) => job.id);
+  const split = (live: string[]) => (set ? { targets: live.filter((id) => set.includes(id)), left: live.filter((id) => !set.includes(id)) } : { targets: live, left: null });
   if (command) {
-    const row = commandRow(botId, ownerId, null, 'stop');
+    const row = commandRow(botId, ownerId, null, 'stop', set ? { confirmed: set } : {});
     const seen = await seenCommand(command, row);
     const claimed =
       seen ??
       (await prisma.$transaction(async (tx) => {
-        const live = (await tx.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting', 'queued'] } }, select: { id: true }, orderBy: { id: 'asc' } })).map((job) => job.id);
-        const got = await claimCommandIn(tx, command, row, { ok: true, pending: true, targets: live });
-        return 'fresh' in got ? { live } : got;
+        const chosen = split(await liveNow(tx));
+        const got = await claimCommandIn(tx, command, row, { ok: true, pending: true, targets: chosen.targets, ...(chosen.left ? { left: chosen.left } : {}) });
+        return 'fresh' in got ? { chosen } : got;
       }, { timeout: 15_000, maxWait: 15_000 }));
     if ('reused' in claimed) return { ok: false, reason: 'command_reused' };
     if ('replay' in claimed && claimed.replay) {
       const view = await computerView(botId, ownerId, now);
-      return view ? { ok: true, view } : { ok: false, reason: 'not_found' };
+      const kept = claimed.replay.ok ? claimed.replay : null;
+      return view ? { ok: true, view, ...(set && kept ? { stopped: kept.targets ?? [], left: kept.left ?? [] } : {}) } : { ok: false, reason: 'not_found' };
     }
-    targets = 'live' in claimed ? claimed.live : (claimed.targets ?? []);
+    if ('chosen' in claimed) {
+      targets = claimed.chosen.targets;
+      left = claimed.chosen.left;
+    } else {
+      // A replay of a first request that stopped half way: THOSE jobs again, and the same `left`
+      targets = claimed.targets ?? [];
+      left = set ? (await keptLeftOf(command)) : null;
+    }
+  } else if (set) {
+    const chosen = split(await liveNow(prisma));
+    targets = chosen.targets;
+    left = chosen.left;
   }
   await endEverything(botId, now, targets);
   if (command) {
     // A job asked for after the Stop is not the Stop's: it was left in line, and the line moves for it now that the Stop's jobs are over. The Stop's answer is kept only AFTER the line has moved: a request that
     // stopped between the two leaves it pending, and its retry ends the same jobs again (those are over already) and moves the line, never adding a later job to the Stop (CodeRabbit on #1025, 31)
     await startNext(botId, now);
-    await keepOutcome(prisma, command, { ok: true, targets: targets ?? [] });
-  }
+    await keepOutcome(prisma, command, { ok: true, targets: targets ?? [], ...(left ? { left } : {}) });
+  } else if (set) await startNext(botId, now);
   const view = await computerView(botId, ownerId, now);
-  return view ? { ok: true, view } : { ok: false, reason: 'not_found' };
+  return view ? { ok: true, view, ...(set ? { stopped: targets ?? [], left: left ?? [] } : {}) } : { ok: false, reason: 'not_found' };
+}
+
+/** The `left` a Stop all command kept on its row (its pending outcome names it from the first request). */
+async function keptLeftOf(command: Command): Promise<string[]> {
+  const rows = await prisma.$queryRaw<Array<{ outcome: { left?: string[] } | null }>>`SELECT "outcome" FROM "computer_job_commands" WHERE "command_id" = ${command.id}::uuid`;
+  return rows[0]?.outcome?.left ?? [];
 }
 
 /** Ends what is on the Brick's computer (with `only`, only those jobs, whatever they are now). */

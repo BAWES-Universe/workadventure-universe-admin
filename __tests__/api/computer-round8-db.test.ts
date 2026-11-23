@@ -274,14 +274,49 @@ run('GPT seventh note (round 8): Orbit side of A, C and D2, in a real database',
       const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Taxi booking' });
       if (!b.ok) throw new Error('B was not made');
       expect(b.job.status).toBe('queued');
-      const stopped = await control(sara, { action: 'stop', confirmedJobIds: confirmed });
+      const command = randomUUID();
+      const stopped = await control(sara, { action: 'stop_all', confirmedJobIds: confirmed }, command);
       expect(stopped.status).toBe(200);
-      expect(stopped.body.ok).toBe(true);
+      expect(stopped.body).toMatchObject({ ok: true, stopped: [a.job.id], left: [b.job.id] });
+      // The same command again: the same outcome, nothing more ended
+      const replay = await control(sara, { action: 'stop_all', confirmedJobIds: confirmed }, command);
+      expect(replay.body).toMatchObject({ ok: true, stopped: [a.job.id], left: [b.job.id] });
+      // The same command id with ANOTHER set is a conflict, and ends nothing
+      const other = await control(sara, { action: 'stop_all', confirmedJobIds: [b.job.id] }, command);
+      expect(other.status).toBe(409);
+      expect(other.body).toMatchObject({ ok: false, reason: 'command_reused' });
       const after = await prisma.computerJob.findMany({ where: { id: { in: [a.job.id, b.job.id] } }, select: { id: true, status: true, endedBy: true } });
       expect(after.find((job) => job.id === a.job.id)).toMatchObject({ status: 'stopped', endedBy: 'person' });
       const bAfter = after.find((job) => job.id === b.job.id);
       expect(bAfter?.endedBy).not.toBe('person');
       expect(['queued', 'running']).toContain(bAfter?.status);
+    });
+
+    it('confirmed ids that are already over or unknown are skipped; `stop` with the set behaves as `stop_all`', async () => {
+      const sara = await owner('d2-skip');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' });
+      if (!a.ok) throw new Error('A was not made');
+      const stopped = await control(sara, { action: 'stop', confirmedJobIds: [a.job.id, randomUUID()] });
+      expect(stopped.body).toMatchObject({ ok: true, stopped: [a.job.id], left: [] });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'person' });
+    });
+
+    it('CONTROL (legacy): `stop` with no set still ends everything live, and answers no stopped/left', async () => {
+      const sara = await owner('d2-legacy');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' });
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Taxi booking' });
+      if (!a.ok || !b.ok) throw new Error('jobs were not made');
+      const stopped = await control(sara, { action: 'stop' });
+      expect(stopped.body.ok).toBe(true);
+      expect(stopped.body.stopped).toBeUndefined();
+      const after = await prisma.computerJob.findMany({ where: { id: { in: [a.job.id, b.job.id] } }, select: { status: true } });
+      expect(after.map((job) => job.status)).toEqual(['stopped', 'stopped']);
+    });
+
+    it('`stop_all` without a set, or with more than 50 ids, is refused as invalid', async () => {
+      const sara = await owner('d2-invalid');
+      expect((await control(sara, { action: 'stop_all' })).status).toBe(400);
+      expect((await control(sara, { action: 'stop_all', confirmedJobIds: Array.from({ length: 51 }, () => randomUUID()) })).status).toBe(400);
     });
   });
 });
