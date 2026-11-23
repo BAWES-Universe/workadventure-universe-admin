@@ -1166,8 +1166,10 @@ run('credit for computers, on the real books', () => {
       const minted = (await mintJobToken(jobId, 'model', at(4), undefined, { epoch: claim.epoch })) as { ok: true; token: string };
       expect(await call(minted.token, 'b', 50_000, 20_000, at(5))).toMatchObject({ ok: true });
       // The stretch each call was admitted in is on its room
-      const stretches = await prisma.meterReservation.findMany({ where: { jobId, reservationKey: { startsWith: 'computer:call:' } }, select: { reservationKey: true, stretch: true }, orderBy: { reservationKey: 'asc' } });
-      expect(stretches.map((one) => one.stretch)).toEqual([0, 1]);
+      const stretches = await prisma.meterReservation.findMany({ where: { jobId, reservationKey: { startsWith: 'computer:call:' } }, select: { reservationKey: true, jobStretch: true }, orderBy: { reservationKey: 'asc' } });
+      expect(stretches.map((one) => one.jobStretch)).toEqual([0, 1]);
+      // ...and the credit each call drew carries the same number, so the give-back touches the last stretch's draw and no earlier one
+      expect((await prisma.creditHold.findMany({ where: { jobKey: jobId, chargeClass: 'computer_model' }, select: { holdKey: true, jobStretch: true }, orderBy: { holdKey: 'asc' } })).map((one) => one.jobStretch)).toEqual([0, 1]);
       (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(async () => {
         throw new Error('books unreachable');
       });
@@ -1177,6 +1179,34 @@ run('credit for computers, on the real books', () => {
       } finally {
         mute.mockRestore();
       }
+      expect((await prisma.computerRefundObligation.findMany({ where: { jobId } })).map((one) => Number(one.amountMicros))).toEqual([20_000]);
+      expect((await refundStatesFor([jobId])).get(jobId)).toEqual({ returnedMicros: 0, pendingMicros: 20_000 });
+    });
+
+    it('finding 8a: the reservation and the pause at the very SAME moment are told apart by the stretch number, never by their times: the earlier stretch’s call stays charged', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      // The call is admitted at exactly the time the pause is taken at: no clock can order these two, only the number written under the pause's own lock
+      await call(token, 'a', 50_000, 30_000, at(2));
+      expect((await pauseJob(sara.brickId, sara.id, jobId, at(2))).ok).toBe(true);
+      expect((await resumeJob(sara.brickId, sara.id, jobId, at(2))).ok).toBe(true);
+      const claim = await claimJob(jobId, { run: 'carried-on', seen: (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).ownerEpoch }, at(2));
+      if (!claim.ok) throw new Error(`the claim was refused: ${claim.reason}`);
+      const minted = (await mintJobToken(jobId, 'model', at(2), undefined, { epoch: claim.epoch })) as { ok: true; token: string };
+      expect(await call(minted.token, 'b', 50_000, 20_000, at(2))).toMatchObject({ ok: true });
+      const rooms = await prisma.meterReservation.findMany({ where: { jobId, reservationKey: { startsWith: 'computer:call:' } }, select: { jobStretch: true, createdAt: true }, orderBy: { reservationKey: 'asc' } });
+      expect(rooms.map((one) => one.jobStretch)).toEqual([0, 1]);
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(async () => {
+        throw new Error('books unreachable');
+      });
+      const mute = quiet();
+      try {
+        await failedOnOurSide(jobId, at(10));
+      } finally {
+        mute.mockRestore();
+      }
+      // Only the call of the last stretch (20,000) is owed back; the earlier stretch's 30,000 stays charged
       expect((await prisma.computerRefundObligation.findMany({ where: { jobId } })).map((one) => Number(one.amountMicros))).toEqual([20_000]);
       expect((await refundStatesFor([jobId])).get(jobId)).toEqual({ returnedMicros: 0, pendingMicros: 20_000 });
     });

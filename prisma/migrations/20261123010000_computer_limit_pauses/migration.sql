@@ -8,10 +8,6 @@ ALTER TABLE "computer_job_pauses" ADD COLUMN "grants_print" VARCHAR(64);
 -- carries on by itself (Brick asks first), and on resume it asks the person again for the step they were on.
 ALTER TABLE "computer_job_pauses" ADD COLUMN "held_screen" BOOLEAN NOT NULL DEFAULT false;
 
--- The stretch of its job a computer model call was admitted in (the job's pauses at the moment of its admission, written under the cutoff lock a pause takes): a give-back after a pause reads this, never two clocks.
--- Null on a row of before this and on any room that is not a call's (read by time, as before).
-ALTER TABLE "meter_reservations" ADD COLUMN "stretch" INTEGER;
-
 -- What Brick is to tell the person about a job that the month or a limit paused, and about it carrying on (said once each, under its own key, like a report back).
 CREATE TABLE "computer_job_tellings" (
     "id" TEXT NOT NULL,
