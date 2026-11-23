@@ -426,7 +426,7 @@ async function tellingReportsSafely(size: number, now: Date, accepts: readonly s
   const kinds = TELLING_KINDS.filter((kind) => accepts.includes(kind));
   if (kinds.length === 0) return [];
   try {
-    const tellings = (await tellingsToTell(size, now)).filter((one) => kinds.includes(one.kind));
+    const tellings = await tellingsToTell(size, now, kinds);
     if (tellings.length === 0) return [];
     const jobs = await prisma.computerJob.findMany({
       where: { id: { in: [...new Set(tellings.map((one) => one.jobId))] } },

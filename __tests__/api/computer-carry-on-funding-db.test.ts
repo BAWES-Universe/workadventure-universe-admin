@@ -268,5 +268,47 @@ run('finding 5 (GPT round 6): carrying on only when what was refused fits, in a 
       expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
       expect(await tellings(jobId)).toEqual([]);
     });
+
+    it('N11: a reader that accepts only `carried_on` gets it when an older `paused` telling of another job (which it cannot say) would take the only place of a batch of one', async () => {
+      // A: paused by a spending rule it keeps hitting (so it stays paused, with its `paused` telling the oldest)
+      const a = await running('n11-a');
+      await rule(a.sara, 1_000);
+      await renewJob(a.jobId, minutes(5), { epoch: a.epoch });
+      expect(await jobOf(a.jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule' });
+      // B: paused by the month, then carried on by itself: `paused`, then `carried_on`
+      const b = await running('n11-b');
+      await setUp({ memberAllowanceMicros: 1_000 });
+      await renewJob(b.jobId, minutes(6), { epoch: b.epoch });
+      await setUp();
+      await carryOnPaused(minutes(7));
+      expect(await jobOf(b.jobId)).toMatchObject({ status: 'running' });
+      expect((await tellings(b.jobId)).map((one) => one.kind)).toEqual(['paused', 'carried_on']);
+      // A batch of ONE, for a reader that says only `carried_on`: it is B's `carried_on`, never nothing because A's older `paused` held the place
+      const only = await reportsToTell(1, minutes(8), { accepts: ['carried_on'] });
+      expect(only.filter((one) => one.kind === 'carried_on').map((one) => one.jobId)).toEqual([b.jobId]);
+      // CONTROL: A's `paused` is still there for a reader that says it understands it
+      const both = await reportsToTell(50, minutes(8), { accepts: ACCEPTS });
+      expect(both.filter((one) => one.jobId === a.jobId).map((one) => one.kind)).toEqual(['paused']);
+    });
+
+    it('a `carried_on` is not told of a job the PERSON paused again after it carried on (a person pause makes no newer telling)', async () => {
+      const { sara, jobId, epoch } = await running('n11-again');
+      await setUp({ memberAllowanceMicros: 1_000 });
+      await renewJob(jobId, minutes(5), { epoch });
+      await setUp();
+      await carryOnPaused(minutes(6));
+      expect((await tellings(jobId)).map((one) => one.kind)).toEqual(['paused', 'carried_on']);
+      await claimed(jobId, 'rB', minutes(6));
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(7))).ok).toBe(true);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'person' });
+      expect((await told(minutes(8))).filter((one) => one.jobId === jobId)).toEqual([]);
+      // CONTROL: a job that carried on and is still running is told
+      const still = await running('n11-still');
+      await setUp({ memberAllowanceMicros: 1_000 });
+      await renewJob(still.jobId, minutes(5), { epoch: still.epoch });
+      await setUp();
+      await carryOnPaused(minutes(6));
+      expect((await told(minutes(8))).filter((one) => one.jobId === still.jobId).map((one) => one.kind)).toEqual(['carried_on']);
+    });
   });
 });

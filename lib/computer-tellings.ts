@@ -54,9 +54,12 @@ export interface Telling {
  * by its month or a limit (it carried on, the person resumed or cancelled it, it ended), and anything about a job that ended (its ending is told instead), or that a newer telling
  * of the same job replaced. Nothing is said about a job of a Brick that was deleted.
  */
-export async function tellingsToTell(limit: number, now: Date): Promise<Telling[]> {
+export async function tellingsToTell(limit: number, now: Date, kinds?: readonly TellingKind[]): Promise<Telling[]> {
+  // The kinds the caller understands are chosen BEFORE the limit is applied: an older telling of a kind it does not accept would otherwise take the only place of a newer one it does, and it can never
+  // be acknowledged by this caller, so it would take that place at every poll (CodeRabbit N11 on #1025). A newer telling of ANY kind still makes an older one stale (below)
+  if (kinds && kinds.length === 0) return [];
   const open = await prisma.computerJobTelling.findMany({
-    where: { toldAt: null, undeliverableAt: null, staleAt: null, job: { bot: { deletedAt: null } } },
+    where: { toldAt: null, undeliverableAt: null, staleAt: null, job: { bot: { deletedAt: null } }, ...(kinds ? { kind: { in: [...kinds] } } : {}) },
     orderBy: [{ createdAt: 'asc' }, { jobId: 'asc' }, { seq: 'asc' }],
     take: Math.max(1, Math.min(limit, 200)),
     include: { job: { select: { status: true, queuedFor: true, pausedWhy: true, pausedAt: true } } },
@@ -69,7 +72,9 @@ export async function tellingsToTell(limit: number, now: Date): Promise<Telling[
     const limitPaused = job.status === 'queued' && job.queuedFor === 'paused' && (job.pausedWhy === 'allowance' || job.pausedWhy === 'rule');
     // `back_in_line` is true while the job waits in line (not paused); `carried_on` while it is not paused again; the others while the month or a limit still holds it
     const inLine = job.status === 'queued' && job.queuedFor !== 'paused';
-    const stillTrue = !ended && newer === 0 && (one.kind === 'carried_on' ? !limitPaused : one.kind === 'back_in_line' ? inLine : limitPaused && !!job.pausedAt && job.pausedAt.getTime() <= one.createdAt.getTime());
+    // `carried_on` is untrue for EVERY pause, not only the month's or a limit's: a person who pauses the job again after it went back in line makes no newer telling, and "I'm carrying on" must not be said of a job they just paused (CodeRabbit on #1025)
+    const pausedNow = job.status === 'queued' && job.queuedFor === 'paused';
+    const stillTrue = !ended && newer === 0 && (one.kind === 'carried_on' ? !pausedNow : one.kind === 'back_in_line' ? inLine : limitPaused && !!job.pausedAt && job.pausedAt.getTime() <= one.createdAt.getTime());
     if (!stillTrue) {
       await prisma.computerJobTelling.updateMany({ where: { id: one.id, toldAt: null, undeliverableAt: null, staleAt: null }, data: { staleAt: now } });
       continue;
