@@ -198,7 +198,12 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
   // A job that carries on an ended one ("try again", piece 8) talks in that job's conversation, which holds the OLD jobs' tags too, and the model address reads the first tag it finds: this job's key is
   // also written under the id of every job it carries on from, so every call of the conversation goes with THIS job's key (theirs ended with them). Ids are Orbit's own (uuid characters only)
   const aliases = live.job.continuesJobId ? (await carriedOnFrom(jobId)).filter((id) => /^[A-Za-z0-9-]{8,64}$/.test(id)) : [];
-  const aliasPart = aliases.map((id) => `printf '%s' '${file}' > "$d/jobs/${id}.json.new" && mv "$d/jobs/${id}.json.new" "$d/jobs/${id}.json" && `).join('');
+  // Every file a key is written to has its own order, kept in a stamp beside it (the claim time of the prepare that last wrote it, whichever job's prepare that was): a prepare writes a file only when no later prepare wrote it
+  // already, so a delayed predecessor never puts its revoked key over the file of a successor that carries on its conversation, and a later valid prepare still refreshes it (CodeRabbit on #1025)
+  const mark0 = claim.getTime();
+  const writeTo = (dest: string): string =>
+    `{ read -r sm < "$d/jobs/${dest}.stamp" 2>/dev/null; if [ -n "$sm" ] && [ "$sm" -gt ${mark0} ] 2>/dev/null; then :; else printf '%s' '${file}' > "$d/jobs/${dest}.json.new" && mv "$d/jobs/${dest}.json.new" "$d/jobs/${dest}.json" && printf '%s' ${mark0} > "$d/jobs/${dest}.stamp"; fi; } && `;
+  const aliasPart = aliases.map((id) => writeTo(id)).join('');
   const gitPart = await gitLoginFor(jobId, live.job.generation, now, epoch);
   // Written whole to a new file and moved over the old one, so a call never reads half of it. Only the machine's own user can read it.
   // Under a lock, and only over a key of an older or the same control number: a write that was delayed past a take-over and a hand-back
@@ -218,7 +223,9 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
     `printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json" && printf '%s %s %s' '${jobId}' ${generation} ${mark} > "$d/relay.gen" && ` +
     // The job's own key goes where the model address looks for the job a call belongs to (its turns carry the job's tag). Another job's key beside it is never
     // touched, so jobs that run at once each call on their own. Files a week old are removed.
-    `mkdir -p "$d/jobs" && printf '%s' '${file}' > "$d/jobs/${jobId}.json.new" && mv "$d/jobs/${jobId}.json.new" "$d/jobs/${jobId}.json" && printf '%s %s' ${generation} ${mark} > "$d/jobs/${jobId}.gen" && ` +
+    `mkdir -p "$d/jobs" && ` +
+    writeTo(jobId) +
+    `printf '%s %s' ${generation} ${mark} > "$d/jobs/${jobId}.gen" && ` +
     aliasPart +
     `{ find "$d/jobs" -type f -mtime +7 -delete 2>/dev/null || :; } && ` +
     `{ ${gitPart.command}; } ) 9>"$d/relay.lock"`;

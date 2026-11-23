@@ -6,6 +6,10 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/computer-continue-db.test.ts --runInBand
  */
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
@@ -477,6 +481,36 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
       await prepareJob(other.jobId, RELAY, minutes(6));
       const plain = fake.commands.at(-1)?.command ?? '';
       expect([...plain.matchAll(/"\$d\/jobs\/([A-Za-z0-9-]+)\.json"/g)].map((m) => m[1])).toEqual([other.jobId]);
+    });
+
+    it('CodeRabbit on #1025 (1): every file a key is written to keeps its own order: a delayed earlier prepare never puts its revoked key over the file a later prepare wrote (own file or alias), and a later valid prepare refreshes it', async () => {
+      const { sara, jobId: old } = await failedAsOurs('c-alias-order');
+      const again = await tryAgain(sara, old);
+      if (!again.ok) throw new Error('no continuation');
+      expect((await prepareJob(again.job.id, RELAY, minutes(6))).ok).toBe(true);
+      const command = fake.commands.at(-1)?.command ?? '';
+      const mark = Number(/ (\d+) > "\$d\/relay\.gen"/.exec(command)?.[1]);
+      const token = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(command)?.[1] ?? '';
+      const home = mkdtempSync(join(tmpdir(), 'universe-relay-'));
+      const runIt = (text: string) => spawnSync('sh', ['-c', text], { env: { ...process.env, HOME: home }, encoding: 'utf8' });
+      const keyIn = (path: string) => (JSON.parse(readFileSync(join(home, '.universe', path), 'utf8')) as { token: string }).token;
+      try {
+        expect(runIt(command).status).toBe(0);
+        expect(keyIn(`jobs/${old}.json`)).toBe(token);
+        // A prepare that began earlier (an earlier claim) lands late with a key that is revoked since: the files stay as the later prepare left them
+        // (a predecessor of another job that carries on the same conversation: its own files and relay.gen are not this job's, so only the stamp of the shared alias file can stop it)
+        const delayed = command.replaceAll(new RegExp(`\\b${mark}\\b`, 'g'), String(mark - 5_000)).replaceAll(token, 'cjt_revoked').replaceAll(again.job.id, 'delayed-job-id-0001');
+        expect(runIt(delayed).status).toBe(0);
+        expect(keyIn(`jobs/${old}.json`)).toBe(token);
+        expect(keyIn(`jobs/${again.job.id}.json`)).toBe(token);
+        // A later valid prepare refreshes both
+        const later = command.replaceAll(new RegExp(`\\b${mark}\\b`, 'g'), String(mark + 5_000)).replaceAll(token, 'cjt_later');
+        expect(runIt(later).status).toBe(0);
+        expect(keyIn(`jobs/${old}.json`)).toBe('cjt_later');
+        expect(keyIn(`jobs/${again.job.id}.json`)).toBe('cjt_later');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
     });
 
     it('the first turn of a continuation goes on in the old conversation', async () => {
