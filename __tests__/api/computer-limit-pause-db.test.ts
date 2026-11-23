@@ -196,8 +196,12 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: room.reservationKey } })).toMatchObject({ state: 'held', amountMicros: room.amountMicros });
       expect((await mintJobToken(jobId, 'model', minutes(2), { generation: 0 }, { epoch: eb })).ok).toBe(true);
       expect(old).not.toEqual(b);
-      // A key of the current owner that was ended before its refusal decides nothing either
       const bKey = await prisma.computerJobToken.findFirstOrThrow({ where: { jobId, revokedAt: null, ownerEpoch: eb } });
+      // The epoch is checked on its own too: a refusal that names the OLD epoch pauses nothing even with a key that is live, and one that names no epoch at all pauses only a job nobody claimed
+      expect(await pauseForLimit(jobId, 'allowance', minutes(2), { epoch, tokenId: bKey.id })).toBe('not');
+      expect(await pauseForLimit(jobId, 'allowance', minutes(2))).toBe('not');
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', ownerEpoch: eb, pauses: 0 });
+      // A key of the current owner that was ended before its refusal decides nothing either
       await prisma.computerJobToken.update({ where: { id: bKey.id }, data: { revokedAt: minutes(2) } });
       expect(await pauseForLimit(jobId, 'allowance', minutes(3), { epoch: eb, tokenId: bKey.id })).toBe('not');
       expect(await jobOf(jobId)).toMatchObject({ status: 'running', pauses: 0 });
@@ -255,6 +259,34 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect(await renewJob(jobId, minutes(5), { epoch: held.ownerEpoch })).toMatchObject({ ok: false, reason: 'allowance' });
       expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'allowance', pauses: 0 });
       expect(epoch).toBeGreaterThan(0);
+      // A model call refused just as the person takes the screen never pauses the job
+      await setUp();
+      const call = await running('c5-person-call');
+      const ce = (await jobOf(call.jobId)).ownerEpoch;
+      await setUp({ memberAllowanceMicros: 1_000 });
+      const k = await keyFor(call.jobId, ce, minutes(6));
+      // No call is let through while the person holds the screen, so the person takes it just as the refusal reaches the pause (right after the pause's first read)
+      const real = prisma.computerJob.findUnique.bind(prisma.computerJob) as unknown as (args: { where?: { id?: string }; select?: Record<string, unknown> }) => Promise<unknown>;
+      let fired = false;
+      const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: { where?: { id?: string }; select?: Record<string, unknown> }) => {
+        const mine = !fired && args?.where?.id === call.jobId && !!args.select && Object.keys(args.select).join() === 'botId';
+        return real(args).then(async (row) => {
+          if (mine) {
+            fired = true;
+            await takeOver(call.sara.brickId, call.sara.id, minutes(7));
+          }
+          return row;
+        });
+      }) as never);
+      try {
+        expect(await ask(k, 'c-big', { estimateMicros: 50_000_000 }, minutes(7))).toMatchObject({ ok: false, reason: 'allowance' });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(fired).toBe(true);
+      // Taking the screen moved the owner, so the refused call's key no longer decides anything: nothing is paused or ended, the job stays with the person (its next renewal at the month ends it, above)
+      expect(await jobOf(call.jobId)).toMatchObject({ status: 'waiting', control: 'person', endedBy: null, pauses: 0, queuedFor: null });
+      expect(await prisma.computerJobPause.count({ where: { jobId: call.jobId } })).toBe(0);
     });
 
     it('C5.7 the person’s own Resume refused by the month is answered to them, not told again; a stale message is never offered', async () => {
@@ -381,6 +413,42 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect((await event(`computer:${jobId}:call:c1`)).personKey).toBe(`person:${sara.id}`);
       expect(await prisma.computerRefundObligation.count({ where: { jobId } })).toBe(1);
       expect(await computerTimeInBooks(sara.brickId, minutes(21))).toBe(true);
+      // ...and the job is not even looked at again: the sweep's window found nothing left to give back
+      expect((await prisma.appSetting.findUnique({ where: { key: 'computer_giveback_sweep_cursor' } }))?.value).toEqual({ after: '' });
+    });
+
+    it('C6.5b two pauses: a fault after the second gives back only the stretch after the LAST pause; the middle stretch stays charged like the first', async () => {
+      const { sara, jobId, epoch } = await running('c6-two');
+      await gift(sara.id, 10_000_000);
+      const k1 = await keyFor(jobId, epoch);
+      expect(await ask(k1, 'c1', { estimateMicros: 20_000 }, minutes(1))).toMatchObject({ ok: true });
+      await settle(jobId, 'c1', 10_000, minutes(1));
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2));
+      await resumeJob(sara.brickId, sara.id, jobId, minutes(3));
+      const e2 = await claimed(jobId, 'rB', minutes(3));
+      const k2 = await keyFor(jobId, e2, minutes(3));
+      expect(await ask(k2, 'c2', { estimateMicros: 20_000, run: 'rB' }, minutes(4))).toMatchObject({ ok: true });
+      await settle(jobId, 'c2', 11_000, minutes(4));
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(5));
+      await resumeJob(sara.brickId, sara.id, jobId, minutes(6));
+      const e3 = await claimed(jobId, 'rC', minutes(6));
+      const k3 = await keyFor(jobId, e3, minutes(6));
+      expect(await ask(k3, 'c3', { estimateMicros: 20_000, run: 'rC' }, minutes(7))).toMatchObject({ ok: true });
+      await settle(jobId, 'c3', 12_000, minutes(7));
+      expect([await callInLastStretch(jobId, 'c1'), await callInLastStretch(jobId, 'c2'), await callInLastStretch(jobId, 'c3')]).toEqual([false, false, true]);
+      await prisma.meterReservation.update({ where: { reservationKey: (await jobOf(jobId)).reservationKey! }, data: { expiresAt: minutes(8) } });
+      await sweepComputers(minutes(9));
+      expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'error', pauses: 2 });
+      const event = (id: string) => prisma.meterEvent.findUniqueOrThrow({ where: { eventId: id } });
+      expect((await event(`computer:${jobId}:call:c1`)).personKey).toBe(`person:${sara.id}`);
+      expect((await event(`computer:${jobId}:call:c2`)).personKey).toBe(`person:${sara.id}`);
+      expect((await event(`computer:${jobId}:call:c3`)).personKey).toBe('unknown');
+      expect((await event(pauseEventId(jobId, 1))).personKey).toBe(`person:${sara.id}`);
+      expect((await event(pauseEventId(jobId, 2))).personKey).toBe(`person:${sara.id}`);
+      expect((await prisma.computerRefundObligation.findMany({ where: { jobId }, select: { holdKey: true } })).map((one) => one.holdKey)).toEqual([`computer:credit:computer:${jobId}:call:c3`]);
+      await sweepComputers(minutes(20));
+      expect((await event(`computer:${jobId}:call:c2`)).personKey).toBe(`person:${sara.id}`);
+      expect(await computerTimeInBooks(sara.brickId, minutes(21))).toBe(true);
     });
 
     it('C6.6 CONTROL: a job that was never paused is charged once, and a fault of ours gives ALL of it back, as before', async () => {
@@ -399,6 +467,21 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
   });
 
   describe('C7: a job the month or a limit paused carries on by itself when more arrives', () => {
+    it('C7.0 the sweep itself carries it on (nothing else needs to ask): out of time it waits, with more it runs again on a new room', async () => {
+      const { jobId, epoch } = await running('c7-sweep');
+      const firstRoom = (await jobOf(jobId)).reservationKey;
+      await setUp({ memberAllowanceMicros: 1_000 });
+      expect(await renewJob(jobId, minutes(5), { epoch })).toEqual({ ok: false, reason: 'paused', why: 'allowance' });
+      await sweepComputers(minutes(6));
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance' });
+      await setUp();
+      await sweepComputers(minutes(7));
+      const after = await jobOf(jobId);
+      expect(after).toMatchObject({ status: 'running', queuedFor: null, pausedWhy: null, endedBy: null });
+      expect(after.reservationKey).not.toBeNull();
+      expect(after.reservationKey).not.toBe(firstRoom);
+    });
+
     it('C7.1 more in the month: the OLDEST paused job of the person carries on first, one at a time, through a conditional flip and a NEW reservation; Brick tells once', async () => {
       const sara = await person('c7-order');
       const other = await createBrick({ ownerId: sara.id, name: 'Second Brick' });
@@ -453,6 +536,32 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       await sweepComputers(minutes(7));
       expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'person' });
       expect(await tellings(jobId)).toEqual([]);
+    });
+
+    it('C7.2b a job the person took over as their own pause AFTER the sweep picked it (they resumed it, then paused it) is not carried on: the flip re-reads it under its lock', async () => {
+      const { sara, jobId, epoch } = await running('c7-race');
+      await setUp({ memberAllowanceMicros: 1_000 });
+      await renewJob(jobId, minutes(5), { epoch });
+      await setUp();
+      // Right after the sweep chose it (its first read of the Brick's computer), the person's own pause replaces the month's
+      const real = prisma.brickComputer.findUnique.bind(prisma.brickComputer) as unknown as (args: unknown) => Promise<unknown>;
+      let fired = false;
+      const spy = jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementation(((args: { where?: { botId?: string } }) =>
+        real(args).then(async (row) => {
+          if (!fired && args?.where?.botId === sara.brickId) {
+            fired = true;
+            await prisma.computerJob.update({ where: { id: jobId }, data: { pausedWhy: 'person', pausedAt: minutes(6) } });
+          }
+          return row;
+        })) as never);
+      try {
+        expect(await carryOnPaused(minutes(6))).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(fired).toBe(true);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'person' });
+      expect((await tellings(jobId)).map((one) => one.kind)).toEqual(['paused']);
     });
 
     it('C7.3 the Brick’s Apps changed, or a step’s outcome is not known: it stays paused and Brick asks ONCE; CONTROL: unchanged, it carries on', async () => {
