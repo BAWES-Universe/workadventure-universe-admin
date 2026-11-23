@@ -642,6 +642,9 @@ async function storedAnswerIn(tx: Pick<Prisma.TransactionClient, 'computerStartA
 /** What a start's own attempt row says it was answered with (finding 1): a job, an older start still going on (its key), or a start that ended with no job (`expired`). Null when the row decides nothing (none, open, made, expired on its own). */
 type AttemptAnswer = { job: { id: string; status: string; startKey: string | null; startAckedAt: Date | null } } | { starting: string } | { expired: true } | { retired: true } | { kept: Record<string, unknown> };
 
+/** The longest alias chain followed (a safety stop, not a rule: a chain is acyclic by construction and never comes near it). A chain that long, or a loop, is said to Sentry and answers `expired`, and the walk of the old-marks sweep stops at the same depth. */
+const ALIAS_HOPS_MAX = 1000;
+
 async function attemptAnswer(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<AttemptAnswer | null> {
   const select = { id: true, state: true, jobId: true, aliasAttemptId: true, startKey: true, beatAt: true, outcome: true } as const;
   let row = await prisma.computerStartAttempt.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select });
@@ -649,6 +652,10 @@ async function attemptAnswer(botId: string, personId: string, startKey: string, 
   if (!row || (row.state !== 'answered' && row.state !== 'superseded')) return null;
   // The chain is followed through any number of links (an alias of an alias). Its order is acyclic (an alias is only ever set to an open start made earlier than the one answered), so it ends at a job, a start still going on, or one that ended with no job
   for (let hop = 0; row; hop++) {
+    if (hop >= ALIAS_HOPS_MAX) {
+      Sentry.captureMessage('A start answer chain did not end', { level: 'error', tags: { area: 'computer', step: 'alias_chain' }, extra: { botId, startKey } });
+      return { expired: true };
+    }
     // Round 8, A2: an answer that names neither a job nor a start any more: the job that answered it was removed (the foreign key cleared it). The request already ran: never reopened as a fresh start
     if (!row.jobId && !row.aliasAttemptId && (row.state === 'answered' || row.state === 'superseded')) return { retired: true };
     if (row.jobId) {
@@ -917,7 +924,7 @@ export async function forgetOldStartMarks(now: Date = new Date(), olderThanMs: n
       WITH RECURSIVE walk("id", "next", "depth") AS (
         SELECT "id", "alias_attempt_id", 1 FROM "computer_start_attempts" WHERE "job_id" IS NULL AND "alias_attempt_id" IS NOT NULL
         UNION ALL
-        SELECT walk."id", t."alias_attempt_id", walk."depth" + 1 FROM walk JOIN "computer_start_attempts" t ON t."id" = walk."next" WHERE t."job_id" IS NULL AND t."alias_attempt_id" IS NOT NULL
+        SELECT walk."id", t."alias_attempt_id", walk."depth" + 1 FROM walk JOIN "computer_start_attempts" t ON t."id" = walk."next" WHERE t."job_id" IS NULL AND t."alias_attempt_id" IS NOT NULL AND walk."depth" < ${ALIAS_HOPS_MAX}
       )
       SELECT walk."id" FROM walk JOIN "computer_start_attempts" t ON t."id" = walk."next" WHERE t."job_id" IS NOT NULL
     )`;
