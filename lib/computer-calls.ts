@@ -356,8 +356,10 @@ async function authorizedPastCutoff(jobId: string, callId: string, token: string
       // no admission, no stretch and no renewal of the hold behind. Its answer is kept under that lock, so the room is never released from under a call that was authorized (CodeRabbit on #1025)
       if (replayOf !== null) {
         if (!(await holdsItsRoom(jobId, callId, replayOf, clock(), tx))) return false;
-        await recordCallAdmission(tx, jobId, callId, clock());
       }
+      // The call is ADMITTED: kept per call (one row), in this very transaction, for the first request and every replay alike. A room that lapses with no such row belongs to a call that was never admitted and is released, never
+      // settled as unknown usage (the sweep reads it with `hasCallAdmission`), and a room whose creator could not give it back is kept for any request that was answered with it (CodeRabbit on #1025)
+      await recordCallAdmission(tx, jobId, callId, clock());
       await recordTurnAdmitted(tx, jobId, { turn: admitted.turn, run: admitted.run, at: clock() });
       // The call belongs to the stretch it is admitted in: written HERE, under the lock a pause takes, so the order of an admission and a pause is exact (never two clocks), and the first admission decides (an
       // answer given again keeps it). A give-back after a pause reads it (lib/computer-stretch)

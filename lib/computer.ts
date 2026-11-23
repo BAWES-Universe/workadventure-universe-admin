@@ -40,7 +40,7 @@ import { computersArePaused } from '@/lib/capability-pause';
 import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
-import { hasFinishIntent, hasPoolCutoff, hasTurnAdmitted, lockCutoff, lockRelayReach } from '@/lib/computer-faults';
+import { hasCallAdmission, hasFinishIntent, hasPoolCutoff, hasTurnAdmitted, lockCutoff, lockRelayReach } from '@/lib/computer-faults';
 import { extendHoldIn } from '@/lib/computer-lease';
 import { epochMatches, leaseUntil, lockJob, lockJobRow, noEndingWhere, ownerWhere, SUPERSEDED, type EpochSaid } from '@/lib/computer-owner';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
@@ -2573,6 +2573,12 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   const lapsedCalls = await prisma.meterReservation.findMany({ where: { state: 'held', expiresAt: { lte: now }, jobId: { not: null }, reservationKey: { startsWith: 'computer:call:' } }, take: 200 });
   for (const reservation of lapsedCalls) {
     const callId = reservation.jobId && reservation.reservationKey.startsWith(callRoomKey(reservation.jobId, '')) ? reservation.reservationKey.slice(callRoomKey(reservation.jobId, '').length) : null;
+    // A room whose call was never admitted (its refusal could not give the room back) is released, not written as usage the person is charged for: only an admitted call that never reported is unknown usage
+    if (reservation.jobId && callId && !(await hasCallAdmission(prisma, reservation.jobId, callId).catch(() => true))) {
+      await releaseRoom({ key: reservation.reservationKey }, now);
+      released++;
+      continue;
+    }
     const settled =
       reservation.jobId && callId
         ? await settleModelCall(reservation.jobId, callId, { costMicros: null, basis: 'unknown', payer: { kind: 'universe' }, route: 'universe-ai', cutShort: true }, now).catch(() => 'failed' as const)

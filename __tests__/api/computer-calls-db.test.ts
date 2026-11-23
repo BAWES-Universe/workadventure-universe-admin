@@ -1306,7 +1306,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
             }
             expect(answer).toEqual({ ok: false, reason: 'refused' });
             expect(await roomOf(jobId, 'c1')).toMatchObject({ state: 'released' });
-            expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(0);
+            expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(1); // the first request's own admission only: the refused replay adds none
           });
 
           it('CodeRabbit on #1025 (24): a replay whose room is gone is refused before anything is written: no admission, no stretch stamp, no renewal of the owner’s hold', async () => {
@@ -1355,7 +1355,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
               await lock.done;
               expect(await again).toEqual({ ok: false, reason: 'refused' });
               // Nothing was kept for it, and the room is as the first request left it
-              expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(0);
+              expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(1); // the first request's own admission only: the refused replay adds none
               expect(await roomOf(jobId, 'c1')).toMatchObject({ state: 'held' });
             } finally {
               lock.release();
@@ -1381,7 +1381,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
               lock.release();
               await lock.done;
               expect(await again).toEqual({ ok: false, reason: 'refused' });
-              expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(0);
+              expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(1); // the first request's own admission only: the refused replay adds none
             } finally {
               lock.release();
               await Promise.allSettled([lock.done, again]);
@@ -1425,7 +1425,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
             }
             expect(looks).toBe(1);
             expect(answer).toEqual({ ok: false, reason: 'refused' });
-            expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(0);
+            expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(1); // the first request's own admission only: the refused replay adds none
           });
 
           it('a request that asks again reads the key only through the pool outside its transaction: under the call’s lock every read is the transaction’s, so requests waiting for a second connection never wait for each other (CodeRabbit)', async () => {
@@ -1848,6 +1848,22 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect(Number(room.settledMicros)).toBe(9_000);
       const event = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:lost` } });
       expect(event).toMatchObject({ basis: 'unknown', costMicros: null });
+    });
+
+    it('CodeRabbit on #1025 (26): a lapsed room whose call was never admitted (its refusal could not give the room back) is released, never settled as the person’s unknown usage', async () => {
+      const { jobId, sara } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await call(token, 'refused', 9_000);
+      await call(token, 'admitted', 9_000);
+      // The first call is the one a refusal left held: its admission is not kept
+      await prisma.computerJobFault.deleteMany({ where: { jobId, callId: 'orbit:admit:refused' } });
+      await sweepComputers(minutes(30));
+      expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'refused') } })).state).toBe('released');
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${jobId}:call:refused` } })).toBe(0);
+      // An admitted call that never reported is unknown usage, as before
+      expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'admitted') } })).state).toBe('settled');
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:admitted` } })).toMatchObject({ basis: 'unknown', costMicros: null });
+      void sara;
     });
 
     it('a report that comes after the sweep wrote the call as unknown replaces the unknown figure, and never a figure that was written', async () => {
