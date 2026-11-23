@@ -117,7 +117,9 @@ async function carryOnOne(job: { id: string; botId: string; personId: string }, 
   // Finding 5 (GPT round 6): enough to START is not enough. The pause remembers what was refused: a model call's estimate (it will be asked again first thing) must fit on top of the room to run, or the job
   // would start, meet the same refusal, book another stretch of time and pause again, sweep after sweep. With nothing more arrived, nothing is written at all
   const room = roomFor(renewMinutes, provider.microsPerMinute());
-  const amountMicros = room + (await blockedCallMicros(job.id));
+  // The estimate belongs to ONE pause (its number): the flip below carries the job on only while it is still paused by that very pause (CodeRabbit on #1025, 55)
+  const funded = await blockedCallMicros(job.id);
+  const amountMicros = room + funded.micros;
   const no = await roomWouldFit({ personId: job.personId, amountMicros, botId: job.botId, jobId: job.id }, now);
   if (no && (no.reason === 'allowance' || no.reason === 'rule' || no.reason === 'not_set')) return 'waits';
   const decided = await prisma.$transaction(
@@ -139,7 +141,7 @@ async function carryOnOne(job: { id: string; botId: string; personId: string }, 
       const top = await tx.computerJob.aggregate({ where: { botId: job.botId, status: 'queued' }, _max: { queueRank: true } });
       // Finding 5: the flip writes NO telling. `carried_on` is written by the start in the very write that sets the job running (`carry_on_pending`, once); a job still in line after the try is told `back_in_line`
       const flipped = await tx.computerJob.updateMany({
-        where: { id: job.id, status: 'queued', queuedFor: 'paused', pausedWhy: { in: ['allowance', 'rule'] } },
+        where: { id: job.id, status: 'queued', queuedFor: 'paused', pausedWhy: { in: ['allowance', 'rule'] }, pauses: funded.pauses },
         data: { queuedFor: 'turn', pausedAt: null, pausedWhy: null, queueRank: (top._max.queueRank ?? 0) + 1, lastTriedAt: null, leaseVersion: { increment: 1 }, carryOnPending: true },
       });
       if (flipped.count !== 1) return 'waits' as const;
@@ -149,18 +151,22 @@ async function carryOnOne(job: { id: string; botId: string; personId: string }, 
   );
   // Through the normal start: a NEW reservation (its key is new with the moment), a new claim by the runner, its own browser back
   if (decided === 'carried') {
-    await controlInternals.tryStart(job.id, now);
-    await afterCarryOn(job.id, now);
+    // The telling that says where the job stands is written whether or not the start came back: a start that rejects after the commit leaves the job in line with its mark set, and nothing else would tell (CodeRabbit on #1025, 56)
+    try {
+      await controlInternals.tryStart(job.id, now);
+    } finally {
+      await afterCarryOn(job.id, now);
+    }
   }
   return decided;
 }
 
 /** The refused model call's estimate the job's last pause remembers (finding 5), or 0: a renewal's own room, a pause of before this, or the person's own pause. */
-async function blockedCallMicros(jobId: string): Promise<number> {
+async function blockedCallMicros(jobId: string): Promise<{ micros: number; pauses: number }> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { pauses: true } });
-  if (!job || job.pauses === 0) return 0;
+  if (!job || job.pauses === 0) return { micros: 0, pauses: job?.pauses ?? 0 };
   const last = await prisma.computerJobPause.findUnique({ where: { jobId_n: { jobId, n: job.pauses } }, select: { blockedKind: true, blockedMicros: true } });
-  return last?.blockedKind === 'call' && last.blockedMicros !== null ? Number(last.blockedMicros) : 0;
+  return { micros: last?.blockedKind === 'call' && last.blockedMicros !== null ? Number(last.blockedMicros) : 0, pauses: job.pauses };
 }
 
 /**

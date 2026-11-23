@@ -65,8 +65,10 @@ export function databaseTimezone(prisma: PrismaClient, zone: string) {
       if (original === undefined) return;
       const pids = await poolSessions();
       await apply(original);
-      await poolIsEmpty(pids);
+      // As in `set()`: a pooled session that stays open past the wait still has the test's zone (the override reaches new sessions only), and that is a failure to report (CodeRabbit on #1025, 54)
+      const drained = await poolIsEmpty(pids);
       if ((await override()) !== original) throw new Error('the database time zone was not put back as it was');
+      if (!drained) throw new Error('the pool never emptied after the time zone was put back');
     },
   };
 }

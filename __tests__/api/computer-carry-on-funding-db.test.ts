@@ -15,6 +15,11 @@ jest.mock('@/lib/meter', () => {
   const actual = jest.requireActual('@/lib/meter');
   return { ...actual, recordMeterEvent: jest.fn((...args: unknown[]) => actual.recordMeterEvent(...args)) };
 });
+// The funding look is the real one behind a jest.fn: a test runs something between that look and the write that carries a job on
+jest.mock('@/lib/meter-allowance', () => {
+  const actual = jest.requireActual('@/lib/meter-allowance');
+  return { ...actual, roomWouldFit: jest.fn((...args: unknown[]) => actual.roomWouldFit(...args)) };
+});
 jest.mock('@/lib/computer-browser-profile', () => {
   const actual = jest.requireActual('@/lib/computer-browser-profile');
   return { ...actual, parkProfile: jest.fn(async () => ({ state: 'parked', reason: null })), restoreProfile: jest.fn(async () => ({ state: 'restored', reason: null })), dropProfile: jest.fn(async () => ({ state: 'dropped', reason: null })) };
@@ -25,9 +30,10 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { heldRoom, memberAllowance } from '@/lib/meter-allowance';
+import * as allowanceModule from '@/lib/meter-allowance';
 import * as meterModule from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { claimJob, computerTimeInBooks, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { claimJob, computerTimeInBooks, controlInternals, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { authorizeModelCall, callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { mintJobToken } from '@/lib/computer-token';
 import { recordPoolCutoff } from '@/lib/computer-faults';
@@ -161,6 +167,44 @@ run('finding 5 (GPT round 6): carrying on only when what was refused fits, in a 
       expect(await roomsOf(sara.id)).toBe(before.rooms);
       expect(await credits(sara.id)).toBe(before.holds);
       expect((await tellings(jobId)).map((one) => one.kind)).toEqual(['paused']);
+    });
+
+    it('CodeRabbit on #1025 (55): the estimate belongs to one pause: a job paused again between the estimate and the flip is not carried on with the earlier pause’s estimate', async () => {
+      const { jobId, epoch } = await running('f5-55');
+      await setUp({ memberAllowanceMicros: 1_000 });
+      expect(await renewJob(jobId, minutes(5), { epoch })).toEqual({ ok: false, reason: 'paused', why: 'allowance' });
+      await setUp();
+      const real = jest.requireActual('@/lib/meter-allowance').roomWouldFit as typeof allowanceModule.roomWouldFit;
+      // While the funding is being looked at, the job is resumed and paused again by a limit (its pause number moves on)
+      (allowanceModule.roomWouldFit as jest.Mock).mockImplementationOnce(async (...args: Parameters<typeof real>) => {
+        const answer = await real(...args);
+        const first = await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId, n: 1 } } });
+        // ...a second pause of the same kind is on record, with a bigger refused call than the first one's estimate
+        await prisma.computerJobPause.create({ data: { jobId, n: 2, why: 'allowance', seconds: 0, at: first.at, grantsPrint: first.grantsPrint, heldScreen: false, blockedKind: 'call', blockedMicros: BigInt(5_000_000), blockedMonth: first.blockedMonth } });
+        await prisma.computerJob.update({ where: { id: jobId }, data: { pauses: 2 } });
+        return answer;
+      });
+      expect(await carryOnPaused(minutes(6))).toBe(0);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', carryOnPending: false });
+    });
+
+    it('CodeRabbit on #1025 (56): a start that rejects after the carry-on committed still leaves the `back_in_line` telling (the job stays in line with its mark set, and nothing else would tell)', async () => {
+      const { jobId, epoch } = await running('f5-56');
+      await setUp({ memberAllowanceMicros: 1_000 });
+      expect(await renewJob(jobId, minutes(5), { epoch })).toEqual({ ok: false, reason: 'paused', why: 'allowance' });
+      await setUp();
+      const spy = jest.spyOn(controlInternals, 'tryStart').mockImplementation(async () => {
+        throw new Error('the database went away');
+      });
+      const mute = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        expect(await carryOnPaused(minutes(6))).toBe(0);
+      } finally {
+        spy.mockRestore();
+        mute.mockRestore();
+      }
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'turn', carryOnPending: true });
+      expect((await tellings(jobId)).map((one) => one.kind)).toEqual(['paused', 'back_in_line']);
     });
 
     it('a renewal refused for the month keeps `renewal` and its room; with the room back it carries on (only the room to run is needed)', async () => {
