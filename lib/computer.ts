@@ -369,10 +369,33 @@ async function saveCopy(botId: string, ref: string, provider: Provider): Promise
  * `stopping`: nothing uses it, it still counts as awake for the wind-down, and every sweep tries again. `only` limits which stored states this
  * may rewrite (the caller knows what it saw). Returns whether the machine is proved asleep.
  */
-async function stopMachine(botId: string, ref: string, provider: Provider, only?: string[]): Promise<boolean> {
+async function stopMachine(botId: string, ref: string, provider: Provider, only?: string[], ticket?: number): Promise<boolean> {
+  // A stop the caller decided from a state it saw (`only`, and for a start that failed, its wake ticket) is CLAIMED first, in a committed conditional write, and the provider is called only when that write changed the row: a
+  // replacement that woke the machine since (it sets another state and takes the next ticket) makes the claim write nothing, and nothing is stopped under it (GPT's seventh note, B)
+  if (only || ticket !== undefined) {
+    if (!(await claimStop(botId, ref, only, ticket))) return false;
+    const proven = await stopAtProvider(ref, provider);
+    await noteStopped(botId, ref, proven, ['stopping']);
+    return proven;
+  }
   const proven = await stopAtProvider(ref, provider);
   await noteStopped(botId, ref, proven, only);
   return proven;
+}
+
+/** The claim of a stop: the machine goes to `stopping` only while it is still in a state the caller saw (and, for a start's own failure, under that start's ticket). True when this write took it. */
+async function claimStop(botId: string, ref: string, only?: string[], ticket?: number): Promise<boolean> {
+  const states = only ? Prisma.sql`AND "machine" = ANY(${only}::text[])` : Prisma.empty;
+  const epoch = ticket !== undefined ? Prisma.sql`AND "wake_epoch" = ${ticket}` : Prisma.empty;
+  const taken = await prisma.$executeRaw(Prisma.sql`UPDATE "brick_computers" SET "machine" = 'stopping', "rest_claimed_at" = NULL, "updated_at" = NOW() WHERE "bot_id" = ${botId} AND "provider_ref" = ${ref} ${states} ${epoch}`);
+  return taken === 1;
+}
+
+/** The wake ticket (round 8, B1): the write that sets the machine waking or restoring takes the next number, and the number is this start's. A failure of this start stops the machine, and a late success marks it working, only while the ticket is still the Brick's. */
+async function takeWakeTicket(botId: string, machine: 'waking' | 'restoring'): Promise<number> {
+  const rows = await prisma.$queryRaw<Array<{ wake_epoch: number }>>`UPDATE "brick_computers" SET "machine" = ${machine}, "wake_epoch" = "wake_epoch" + 1, "updated_at" = NOW() WHERE "bot_id" = ${botId} RETURNING "wake_epoch"`;
+  if (rows.length !== 1) throw new Error('The computer is gone');
+  return rows[0].wake_epoch;
 }
 
 /** Stops the machine at the provider and says whether it is proved asleep. Writes nothing. */
@@ -1495,14 +1518,15 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
   const ref = row.providerRef as string;
   // A broken machine comes back from its last saved copy, and the person is told which day that was
   const restoring = row.machine === 'broken';
-  await prisma.brickComputer.update({ where: { botId }, data: { machine: restoring ? 'restoring' : 'waking' } });
+  const ticket = await takeWakeTicket(botId, restoring ? 'restoring' : 'waking');
   await provider.wake(ref);
   // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready
   try {
     await provider.ready(ref);
   } catch (error) {
-    // Awake and not ready: no job will use it, so it is put to sleep (and tried again by the sweep until proved) instead of left running
-    await stopMachine(botId, ref, provider, ['waking', 'restoring']);
+    // Awake and not ready: no job will use it, so it is put to sleep (and tried again by the sweep until proved) instead of left running. Only while this start still holds the machine (its ticket is the Brick's
+    // number): a replacement that woke it meanwhile keeps it awake, and this start only throws its own error (the job it served is ended or left by the reservation guard as before)
+    await stopMachine(botId, ref, provider, ['waking', 'restoring'], ticket);
     throw error;
   }
   // Back from cold storage on the older copy: the person is told which day their files are from (restoredFrom); the newest copy is no event to tell
@@ -1519,9 +1543,14 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
       older = kept.olderCopyUsed;
     }
   }
-  await prisma.brickComputer.update({
-    where: { botId },
-    data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: older, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
+  // Only while this start's ticket is still the Brick's: a start that was replaced while it waited for readiness writes nothing (the replacement marks the machine working itself)
+  await prisma.$transaction(async (tx) => {
+    const held = await tx.$queryRaw<Array<{ wake_epoch: number }>>`SELECT "wake_epoch" FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
+    if (held[0]?.wake_epoch !== ticket) return;
+    await tx.brickComputer.update({
+      where: { botId },
+      data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: older, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
+    });
   });
 }
 

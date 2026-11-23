@@ -640,6 +640,60 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
     });
   });
 
+  describe('GPT seventh note, B1: a stale start never stops or marks a machine a replacement woke (the wake ticket)', () => {
+    const stopsOf = () => fake.calls.filter((call) => call.name === 'stop').length;
+    const refOf = async (botId: string) => (await prisma.brickComputer.findUniqueOrThrow({ where: { botId }, select: { providerRef: true } })).providerRef as string;
+    /** The first try waits at readiness; while it waits the job is paused and carried on (a replacement wakes the machine); then `ending` decides how the first try's readiness ends. */
+    const replacedWhileWaiting = async (name: string, ending: 'fails' | 'succeeds') => {
+      const { sara, jobId } = await running(name);
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      let first = true;
+      const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+        if (!first) return;
+        first = false;
+        expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(3))).ok).toBe(true);
+        expect((await resumeJob(sara.brickId, sara.id, jobId, minutes(4))).ok).toBe(true);
+        await claimed(jobId, 'rB', minutes(4));
+        if (ending === 'fails') throw new Error('the machine never came ready');
+      });
+      const stopsBefore = stopsOf();
+      try {
+        await resumeJob(sara.brickId, sara.id, jobId, minutes(2));
+      } finally {
+        spy.mockRestore();
+      }
+      return { sara, jobId, stopsBefore };
+    };
+
+    it('the first try’s readiness FAILS after the replacement is running: the provider is still awake, no stop was asked, the machine is working and the job runs', async () => {
+      const { sara, jobId, stopsBefore } = await replacedWhileWaiting('b1-fail', 'fails');
+      expect(stopsOf()).toBe(stopsBefore);
+      expect(await fake.awake(await refOf(sara.brickId))).toBe(true);
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { machine: true } })).toEqual({ machine: 'working' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
+    });
+
+    it('the first try’s readiness SUCCEEDS late after the replacement is running: it writes nothing (the replacement’s own working mark stands) and the replacement is unaffected', async () => {
+      const { sara, jobId } = await replacedWhileWaiting('b1-late', 'succeeds');
+      // The replacement marked the machine working at its own time (minutes(4)); the late first try (minutes(2)) wrote nothing over it
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { machine: true, lastWorkedAt: true } })).toEqual({ machine: 'working', lastWorkedAt: minutes(4) });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null });
+    });
+
+    it('CONTROL: a start that fails with no replacement stops the machine (claimed and proved) and marks it broken, as before, and the job is over', async () => {
+      const { sara, jobId } = await running('b1-alone');
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      fake.failNext.ready = true;
+      const stopsBefore = stopsOf();
+      await resumeJob(sara.brickId, sara.id, jobId, minutes(2)).catch(() => undefined);
+      expect(stopsOf()).toBe(stopsBefore + 1);
+      expect(await fake.awake(await refOf(sara.brickId))).toBe(false);
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { machine: true } })).toEqual({ machine: 'broken' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'failed' });
+    });
+  });
+
   describe('CodeRabbit on #1025 (8): the machine is written under the job row, with the room checked there', () => {
     it('a bring-up that fails while another request is giving the job a new room (its row is locked and changed) does not mark the machine broken, and ends nothing', async () => {
       const { sara, jobId } = await running('cr-8');
