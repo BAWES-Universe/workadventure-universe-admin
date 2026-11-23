@@ -360,6 +360,20 @@ run('finding 5 (GPT round 6): carrying on only when what was refused fits, in a 
       expect((await told(minutes(8))).filter((one) => one.jobId === still.jobId).map((one) => one.kind)).toEqual(['carried_on']);
     });
 
+    it('CodeRabbit on #1025 (58): a confirmation names the kind of the telling it confirms: another kind’s number changes nothing, the right one confirms, and a correct repeat still succeeds', async () => {
+      const { jobId, epoch } = await running('cr58');
+      await setUp({ memberAllowanceMicros: 1_000 });
+      await renewJob(jobId, minutes(5), { epoch });
+      const [paused] = await tellings(jobId);
+      expect(paused).toMatchObject({ kind: 'paused', toldAt: null });
+      expect(await keepReportTold(jobId, 'back_in_line', paused.seq, { delivered: true }, minutes(6))).toBe(false);
+      expect((await tellings(jobId))[0].toldAt).toBeNull();
+      expect(await keepReportTold(jobId, 'paused', paused.seq, { delivered: true }, minutes(6))).toBe(true);
+      expect((await tellings(jobId))[0].toldAt).not.toBeNull();
+      expect(await keepReportTold(jobId, 'paused', paused.seq, { delivered: true }, minutes(7))).toBe(true);
+      expect(await keepReportTold(jobId, 'carried_on', paused.seq, { delivered: true }, minutes(7))).toBe(false);
+    });
+
     it('CodeRabbit on #1025 (57): a `carried_on` that was not told yet is let go by the person’s Pause, so a manual Resume afterwards (into a busy queue or onto the computer) never makes it say the job is carrying on', async () => {
       const { sara, jobId, epoch } = await running('cr57');
       await setUp({ memberAllowanceMicros: 1_000 });

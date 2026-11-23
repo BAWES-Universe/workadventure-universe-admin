@@ -87,8 +87,10 @@ export async function tellingsToTell(limit: number, now: Date, kinds?: readonly 
 }
 
 /** The bot server says what became of one: said (`delivered`) or never to be said (it cannot reach the person). Either way it is not offered again. False when there is no such telling. */
-export async function keepTellingTold(jobId: string, seq: number, delivered: boolean, now: Date = new Date()): Promise<boolean> {
-  const done = await prisma.computerJobTelling.updateMany({ where: { jobId, seq, toldAt: null, undeliverableAt: null }, data: delivered ? { toldAt: now } : { undeliverableAt: now } });
+export async function keepTellingTold(jobId: string, seq: number, delivered: boolean, now: Date = new Date(), kind?: TellingKind): Promise<boolean> {
+  // The kind is part of the match: a number that belongs to another kind of telling of this job confirms nothing (CodeRabbit on #1025, 58)
+  const mine = { jobId, seq, ...(kind ? { kind } : {}) };
+  const done = await prisma.computerJobTelling.updateMany({ where: { ...mine, toldAt: null, undeliverableAt: null }, data: delivered ? { toldAt: now } : { undeliverableAt: now } });
   if (done.count > 0) return true;
-  return (await prisma.computerJobTelling.count({ where: { jobId, seq } })) > 0;
+  return (await prisma.computerJobTelling.count({ where: mine })) > 0;
 }

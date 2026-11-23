@@ -626,7 +626,7 @@ export async function keepReportTold(jobId: string, kind: ReportKind, seq?: numb
   if ((TELLING_KINDS as readonly string[]).includes(kind)) {
     // Confirmed by its number only, like a follow-up: one that names none could be a later one
     if (typeof seq !== 'number') return false;
-    return keepTellingTold(jobId, seq, outcome.delivered, now);
+    return keepTellingTold(jobId, seq, outcome.delivered, now, kind as TellingKind);
   }
   if (kind === 'late') {
     const there = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, personId: true, botId: true } });
