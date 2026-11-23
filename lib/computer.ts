@@ -82,6 +82,8 @@ import {
   settleResumedBrowser,
 } from '@/lib/computer-browser-profile';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
+import { CONSENT_WINDOW_MS, startAnswerBody } from '@/lib/computer-start-answer';
+export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { claimCommandIn, commandRow, keepOutcome, seenCommand, type Command } from '@/lib/computer-commands';
 
 /**
@@ -499,8 +501,14 @@ export type Started =
   | { ok: false; reason: 'earlier'; job: EarlierStart }
   /** A rule the person said in chat does not let this job take room: nothing is left behind, and the rule's own words come with it. */
   | { ok: false; reason: 'rule'; words: string }
-  /** This start was delayed past its life (it stopped beating) and no job may be made for it now: the game starts afresh under a new key. */
+  /** This start was delayed past its life (it stopped beating) and no job may be made for it now (the legacy path, a start without acks). A timed key of the 0.5 game is reopened instead (round 8, A2). */
   | { ok: false; reason: 'expired' }
+  /** Round 8, A2: this key already made a job and that job's record was removed since. Terminal: the request already ran, and nothing is made for it again (never `expired`, which a game answers with a fresh start). */
+  | { ok: false; reason: 'retired' }
+  /** Round 8, A2: the key was issued (the person's message) longer ago than CONSENT_WINDOW_MS and Orbit holds no live record of it: nothing is made or reserved; the person is asked whether to start it now. Terminal for this key. */
+  | { ok: false; reason: 'stale_consent' }
+  /** Round 8, A1: this key was refused before; the same answer again, exactly as it was given (its HTTP body, kept on the key's attempt). Never leaves the route as `kept`: the body is the answer. */
+  | { ok: false; reason: 'kept'; body: Record<string, unknown> }
   /**
    * "Try again" named a job that cannot be carried on (GPT round 6, finding 6): NOTHING was made or reserved. `why` says which (lib/computer-continue `FreshBecause`); `job` is the named job's title and how it stands
    * (only the asker's own: never for not_found / not_theirs). Brick says so and offers "Start a new job" as its own choice: an ordinary start under a new key, with no continuation header.
@@ -605,7 +613,7 @@ export async function earlierUnconfirmedStart(botId: string, personId: string, s
  */
 async function keptAnswerOf(botId: string, personId: string, startKey: string): Promise<EarlierStart | null> {
   const answered = await attemptAnswer(botId, personId, startKey);
-  if (!answered || 'expired' in answered) return null;
+  if (!answered || 'expired' in answered || 'retired' in answered || 'kept' in answered) return null;
   if ('starting' in answered) return { id: null, status: null, state: 'starting', attempt: answered.starting };
   return { id: answered.job.id, status: answered.job.status, state: startStateOf(answered.job.status), attempt: answered.job.startKey };
 }
@@ -632,22 +640,30 @@ async function storedAnswerIn(tx: Pick<Prisma.TransactionClient, 'computerStartA
 }
 
 /** What a start's own attempt row says it was answered with (finding 1): a job, an older start still going on (its key), or a start that ended with no job (`expired`). Null when the row decides nothing (none, open, made, expired on its own). */
-type AttemptAnswer = { job: { id: string; status: string; startKey: string | null; startAckedAt: Date | null } } | { starting: string } | { expired: true };
+type AttemptAnswer = { job: { id: string; status: string; startKey: string | null; startAckedAt: Date | null } } | { starting: string } | { expired: true } | { retired: true } | { kept: Record<string, unknown> };
 
 async function attemptAnswer(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<AttemptAnswer | null> {
-  const select = { id: true, state: true, jobId: true, aliasAttemptId: true, startKey: true, beatAt: true } as const;
+  const select = { id: true, state: true, jobId: true, aliasAttemptId: true, startKey: true, beatAt: true, outcome: true } as const;
   let row = await prisma.computerStartAttempt.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select });
   // Only a start that was answered with another (`answered`, or `superseded` by a job made after it began) is answered from its row. Its own open, made or expired attempt is decided as before
   if (!row || (row.state !== 'answered' && row.state !== 'superseded')) return null;
   // The chain is followed through any number of links (an alias of an alias). Its order is acyclic (an alias is only ever set to an open start made earlier than the one answered), so it ends at a job, a start still going on, or one that ended with no job
   for (let hop = 0; row; hop++) {
+    // Round 8, A2: an answer that names neither a job nor a start any more: the job that answered it was removed (the foreign key cleared it). The request already ran: never reopened as a fresh start
+    if (!row.jobId && !row.aliasAttemptId && (row.state === 'answered' || row.state === 'superseded')) return { retired: true };
     if (row.jobId) {
       const job = await prisma.computerJob.findUnique({ where: { id: row.jobId }, select: { id: true, status: true, startKey: true, startAckedAt: true } });
-      return job ? { job } : { expired: true };
+      // Round 8, A2: the job that answered it ran and its record was removed since: the request already ran (never `expired`)
+      return job ? { job } : { retired: true };
     }
     if (row.aliasAttemptId) {
       row = await prisma.computerStartAttempt.findUnique({ where: { id: row.aliasAttemptId }, select });
       continue;
+    }
+    // The start it waited for came to an end of its own (round 8): refused (its kept answer), or made a job that was removed since
+    if (hop > 0) {
+      const own = ownTerminalOf(row);
+      if (own) return own;
     }
     if (hop > 0 && row.state === 'open' && row.beatAt.getTime() > now.getTime() - attemptLifeMs()) return { starting: row.startKey };
     return { expired: true };
@@ -661,12 +677,18 @@ async function attemptAnswer(botId: string, personId: string, startKey: string, 
  */
 export async function startAnsweredBefore(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<Started | null> {
   const answered = await attemptAnswer(botId, personId, startKey, now);
-  if (!answered) return null;
+  if (!answered) {
+    // Round 8, A1: a key refused before is that refusal again, first (a refusal exists only for starts that ack)
+    const own = await ownAnswerOf(botId, personId, startKey);
+    return own && !own.ok && own.reason === 'kept' ? own : null;
+  }
   if ('expired' in answered) return { ok: false, reason: 'expired' };
+  if ('retired' in answered) return { ok: false, reason: 'retired' };
+  if ('kept' in answered) return { ok: false, reason: 'kept', body: answered.kept };
   if ('starting' in answered) return { ok: false, reason: 'earlier', job: { id: null, status: null, state: 'starting', attempt: answered.starting } };
   const { job } = answered;
   if (!job.startAckedAt) return { ok: false, reason: 'earlier', job: { id: job.id, status: job.status, state: startStateOf(job.status), attempt: job.startKey } };
-  return (await reuseJob(botId, { id: job.id }, now)) ?? { ok: false, reason: 'expired' };
+  return (await reuseJob(botId, { id: job.id }, now)) ?? { ok: false, reason: 'retired' };
 }
 
 /** What a start with a key is for: the sha-256 of the Brick, the person and the key. */
@@ -695,10 +717,10 @@ const attemptLifeMs = (): number => startMarkTiming.beatMs * 3;
  * left as it is (its answer is decided in the transaction that makes the job). Throws when it could not be kept. Answers whether THIS request made the attempt: only the request that made it lets it go when it fails (the same key said
  * twice shares one attempt, and the second request's own trouble must never end the first one's start).
  */
-async function openAttempt(botId: string, personId: string, startKey: string, began: Date): Promise<boolean> {
+async function openAttempt(botId: string, personId: string, startKey: string, began: Date, issued: Date | null = null): Promise<boolean> {
   try {
     // The attempt's time is when the START began, never when this insert ran: an insert that is delayed past another start's job must still sort before that job (CodeRabbit on #1025)
-    await prisma.computerStartAttempt.create({ data: { botId, personId, startKey, state: 'open', beatAt: new Date(), createdAt: began } });
+    await prisma.computerStartAttempt.create({ data: { botId, personId, startKey, state: 'open', beatAt: new Date(), createdAt: began, issuedAt: issued } });
     return true;
   } catch (error) {
     if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) throw error;
@@ -730,6 +752,156 @@ async function forgetStartMark(id: string): Promise<void> {
   await prisma.computerStartMark.deleteMany({ where: { id } }).catch((error) => console.error('[Computer] Could not remove the mark of a start:', error instanceof Error ? error.message : 'unknown'));
 }
 
+/** What a start's OWN attempt row decides for good (round 8): a refusal kept on it, or a job it made whose record was removed since. Null otherwise. */
+function ownTerminalOf(row: { state: string; jobId: string | null; outcome?: Prisma.JsonValue | null }): { kept: Record<string, unknown> } | { retired: true } | null {
+  if (row.state === 'refused' && row.outcome && typeof row.outcome === 'object' && !Array.isArray(row.outcome)) return { kept: row.outcome as Record<string, unknown> };
+  if (row.state === 'made' && !row.jobId) return { retired: true };
+  return null;
+}
+
+/** The key's own attempt decided for good (round 8): its kept refusal, or `retired`. Null otherwise. */
+async function ownAnswerOf(botId: string, personId: string, startKey: string): Promise<Started | null> {
+  const row = await prisma.computerStartAttempt.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select: { state: true, jobId: true, outcome: true } });
+  const own = row ? ownTerminalOf(row) : null;
+  if (!own) return null;
+  return 'kept' in own ? { ok: false, reason: 'kept', body: own.kept } : { ok: false, reason: 'retired' };
+}
+
+/** A registered start (round 8, A1): its attempt is open and beating, and its mark is kept, for the whole request. `release` ends both (never throws). */
+export interface Registration {
+  /** This request made the attempt (or reopened it): only it lets the attempt go when it fails. */
+  opened: boolean;
+  /** The attempt had ended with no job and was opened again for this request (A2): a job of this person on this Brick made after the key was issued answers it. */
+  reopened: boolean;
+  release: () => Promise<void>;
+}
+
+/**
+ * Round 8, A1: registers a keyed start that acks BEFORE anything else is asked (the earlier-start look, "try again", the person's spending rule): its attempt row is written with the request's own moment `began`, so a
+ * later request (a reworded retry under a new key) that decides while this one is held finds it, open and beating, and waits for it; and the look for this key says it is going on. Kept beating until `release`.
+ *
+ * A2, decided here from the key's own row first: a key that was refused before answers that refusal again; one whose job was removed answers `retired`; one with no live record issued longer ago than CONSENT_WINDOW_MS
+ * answers `stale_consent`; one whose attempt ended with no job (expired, or the start it waited for did) within the window is REOPENED under the same key (the supersede rule still answers it with a job made after it
+ * was issued). Nothing is written for a terminal answer.
+ */
+export async function registerStart(botId: string, personId: string, startKey: string, began: Date, issued: Date, now: Date = new Date()): Promise<{ registration: Registration } | { answer: Started }> {
+  const fresh = now.getTime() - issued.getTime() <= CONSENT_WINDOW_MS;
+  const row = await prisma.computerStartAttempt.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select: { id: true, state: true, jobId: true, aliasAttemptId: true, beatAt: true, outcome: true } });
+  let reopened = false;
+  if (!row) {
+    if (!fresh) return { answer: { ok: false, reason: 'stale_consent' } };
+  } else {
+    const own = ownTerminalOf(row);
+    if (own) return { answer: 'kept' in own ? { ok: false, reason: 'kept', body: own.kept } : { ok: false, reason: 'retired' } };
+    // Ended with no job of its own: expired, open but no longer beating, or answered by a start that came to nothing
+    let ended = row.state === 'expired' || (row.state === 'open' && row.beatAt.getTime() <= now.getTime() - attemptLifeMs());
+    if (!ended && (row.state === 'answered' || row.state === 'superseded')) {
+      const answered = await attemptAnswer(botId, personId, startKey, now);
+      if (answered && 'retired' in answered) return { answer: { ok: false, reason: 'retired' } };
+      if (answered && 'kept' in answered) return { answer: { ok: false, reason: 'kept', body: answered.kept } };
+      ended = !!answered && 'expired' in answered;
+    }
+    if (ended) {
+      if (!fresh) return { answer: { ok: false, reason: 'stale_consent' } };
+      // Reopened under the same key, never a derived one: one conditional write (a concurrent request of the same key that reopened it first leaves it open, and both share it)
+      const again = await prisma.computerStartAttempt.updateMany({ where: { id: row.id, state: row.state, jobId: row.jobId, aliasAttemptId: row.aliasAttemptId }, data: { state: 'open', beatAt: new Date(), jobId: null, aliasAttemptId: null, issuedAt: issued } });
+      reopened = again.count === 1;
+    }
+  }
+  const opened = (await openAttempt(botId, personId, startKey, began, issued)) || reopened;
+  const mark = await markStart(startFenceOf(botId, personId, startKey)).catch(async (error) => {
+    if (opened) await closeAttempt(botId, personId, startKey);
+    throw error;
+  });
+  const beat = setInterval(() => void Promise.all([renewStartMark(mark), beatAttempt(botId, personId, startKey)]), startMarkTiming.beatMs);
+  beat.unref?.();
+  let released = false;
+  return {
+    registration: {
+      opened,
+      reopened,
+      release: async () => {
+        if (released) return;
+        released = true;
+        clearInterval(beat);
+        await forgetStartMark(mark);
+      },
+    },
+  };
+}
+
+/**
+ * Round 8, A1: a keyed start that ended WITHOUT a job keeps its answer on its attempt (state `refused`, the HTTP body in `outcome`), in one conditional write on an attempt that is still open: a retry of the same key, and
+ * a later start answered as waiting on it, get the same answer (never `expired`). `made`: the attempt made a job the refusal took away again (a rule or controls not set up at its first try). Never throws.
+ */
+export async function refuseAttempt(botId: string, personId: string, startKey: string, body: Record<string, unknown>, from: 'open' | 'made' = 'open', jobId?: string): Promise<void> {
+  await prisma.computerStartAttempt
+    .updateMany({ where: { botId, personId, startKey, state: from, ...(from === 'made' ? { jobId: jobId ?? null } : {}) }, data: { state: 'refused', outcome: body as Prisma.InputJsonValue } })
+    .catch((error) => console.error('[Computer] Could not keep the refusal of a start:', error instanceof Error ? error.message : 'unknown'));
+}
+
+/** What `start-retire` came to (round 8, Opus's ruling on CodeRabbit's pass of game 24dea75c): the key is retired, or it was seen and this is the answer a send of it would get. */
+export type StartRetired = { retired: true } | { retired: false; answer: Record<string, unknown> };
+
+/** The body a key retired by the game is answered with from then on. */
+export const RETIRED_BY_GAME = { ok: false, reason: 'retired_by_game' } as const;
+
+/**
+ * The game gives up on a key of an earlier ask it holds open and Orbit never answered (a DIFFERENT request is being made now): under the person's lock, a key with no attempt, or one whose start came to nothing
+ * (expired, no longer beating, or waiting on a start that came to nothing), is written as refused with `retired_by_game`, and every later send of it gets that answer: a start of it that is still on its way (delayed
+ * before it registered) makes nothing. A key Orbit did see is NOT retired: the answer a send of it would get now is returned, read only (that start happened, and the game follows it).
+ */
+export async function retireStartKey(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<StartRetired> {
+  const where = { botId_personId_startKey: { botId, personId, startKey } };
+  const before = await prisma.computerStartAttempt.findUnique({ where, select: { state: true } });
+  // A start that waited on another that came to nothing is a start that came to nothing too (read before the lock: the write below is conditional on the state it read)
+  const cameToNothing = before && (before.state === 'answered' || before.state === 'superseded') ? (await attemptAnswer(botId, personId, startKey, now))?.hasOwnProperty('expired') === true : false;
+  const done = await prisma.$transaction(
+    async (tx) => {
+      await lockPerson(tx, personId);
+      const row = await tx.computerStartAttempt.findUnique({ where, select: { id: true, state: true, beatAt: true } });
+      if (!row) {
+        await tx.computerStartAttempt.create({ data: { botId, personId, startKey, state: 'refused', outcome: RETIRED_BY_GAME, beatAt: now, createdAt: now } });
+        return true;
+      }
+      const dead = row.state === 'expired' || (row.state === 'open' && row.beatAt.getTime() <= now.getTime() - attemptLifeMs()) || (cameToNothing && row.state === before?.state);
+      if (!dead) return false;
+      const retired = await tx.computerStartAttempt.updateMany({ where: { id: row.id, state: row.state }, data: { state: 'refused', outcome: RETIRED_BY_GAME, jobId: null, aliasAttemptId: null } });
+      return retired.count === 1;
+    },
+    { timeout: 15_000, maxWait: 15_000 },
+  );
+  if (done) return { retired: true };
+  return { retired: false, answer: await seenStartAnswer(botId, personId, startKey, now) };
+}
+
+/** The answer a send of a key Orbit has seen would get now, READ ONLY (nothing is tried, made or confirmed). */
+async function seenStartAnswer(botId: string, personId: string, startKey: string, now: Date): Promise<Record<string, unknown>> {
+  const row = await prisma.computerStartAttempt.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select: { state: true, jobId: true, outcome: true, beatAt: true } });
+  const own = row ? ownTerminalOf(row) : null;
+  if (own) return 'kept' in own ? own.kept : { ok: false, reason: 'retired' };
+  const jobAnswer = async (jobId: string): Promise<Record<string, unknown>> => {
+    const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
+    if (!job) return { ok: false, reason: 'retired' };
+    if (job.status === 'failed') return { ok: false, reason: 'broken_start' };
+    return startAnswerBody({ ok: true, job: jobView(job), restoredFrom: null, ...(job.continuesJobId ? { continued: true as const } : {}) });
+  };
+  if (row?.state === 'made' && row.jobId) return jobAnswer(row.jobId);
+  const answered = await attemptAnswer(botId, personId, startKey, now);
+  if (answered && 'job' in answered) {
+    const { job } = answered;
+    return job.startAckedAt ? jobAnswer(job.id) : { ok: false, reason: 'earlier', job: { id: job.id, status: job.status, state: startStateOf(job.status), attempt: job.startKey } };
+  }
+  if (answered && 'starting' in answered) return { ok: false, reason: 'earlier', job: { id: null, status: null, state: 'starting', attempt: answered.starting } };
+  if (answered && 'retired' in answered) return { ok: false, reason: 'retired' };
+  if (answered && 'kept' in answered) return answered.kept;
+  // Its own start, still going on: the game follows that key (it is the one to look up)
+  return { ok: false, reason: 'earlier', job: { id: null, status: null, state: 'starting', attempt: startKey } };
+}
+
+/** The answers of a start that are a REFUSAL of this ask, kept on its attempt (round 8, A1): not `earlier` (another start's job), not the key's own end (`expired`, `retired`, `stale_consent`), not one given before (`kept`). */
+const keptAsRefusal = (started: Started): boolean => !started.ok && !['earlier', 'expired', 'retired', 'stale_consent', 'kept'].includes(started.reason);
+
 /** How long a start that ended with no job is kept while other starts' answers wait on it (they answer `expired` all that time): about a week, far past any retry of the game. */
 export const DEAD_ANSWER_MS = 7 * 24 * 60 * 60_000;
 
@@ -758,16 +930,18 @@ export interface JobOrigin {
   ref: string;
 }
 
-type StartInput = { botId: string; /** The start says the game acks it (header `X-Computer-Start-Acks`): its job is made unconfirmed, and a start under another key meets an unconfirmed one as `earlier`. Without it the job is confirmed when it is made, as before. */ acks?: boolean; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; /** The caller's key for this one start: a start repeating it answers the job it made. */ startKey?: string | null; plan?: RoutePlan | null; origin?: JobOrigin | null; /** "Try again" of an ended job (piece 8): the job to carry on in the conversation of. Orbit decides from its own record whether it does (lib/computer-continue); when it does not, the start is an ordinary fresh job. */ continuesJobId?: string | null };
+type StartInput = { botId: string; /** The start says the game acks it (header `X-Computer-Start-Acks`): its job is made unconfirmed, and a start under another key meets an unconfirmed one as `earlier`. Without it the job is confirmed when it is made, as before. */ acks?: boolean; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; /** The caller's key for this one start: a start repeating it answers the job it made. */ startKey?: string | null; plan?: RoutePlan | null; origin?: JobOrigin | null; /** "Try again" of an ended job (piece 8): the job to carry on in the conversation of. Orbit decides from its own record whether it does (lib/computer-continue); when it does not, the start is an ordinary fresh job. */ continuesJobId?: string | null; /** Round 8, A1: the moment the request began (the route's first statement): the attempt's own time, and the line every "made after this one began" compares with. */ began?: Date; /** Round 8, A1: the route registered this start already (attempt open and beating, mark kept): it is reused, never opened twice. */ registration?: Registration };
 type Begun = { done: Started } | { created: { id: string } };
 
 export async function startJob(input: StartInput, now: Date = new Date()): Promise<Started> {
   // A start with a key opens its attempt FIRST, in one statement, before anything else is written or read (finding 1, GPT round 6): there is no moment where only its mark is visible, so a reworded retry that
   // decides while this one is held sees it (and waits for it), and a job another start made after this one began supersedes it (decided in the transaction that makes the job). Kept beating with the mark
-  const began = new Date();
-  const opened = input.startKey ? await openAttempt(input.botId, input.personId, input.startKey, began) : false;
+  const began = input.began ?? new Date();
+  // Round 8, A1: a start the route registered already holds its attempt and its mark (both kept beating by the route until it answers): nothing is opened twice
+  const registered = input.registration ?? null;
+  const opened = registered ? registered.opened : input.startKey ? await openAttempt(input.botId, input.personId, input.startKey, began) : false;
   // ...then its mark, from before its first read until its job is saved, or it ends without one, so the look for it (`startedJobFor`) can say it is still going on. A start with no key is never asked about
-  const mark = input.startKey
+  const mark = input.startKey && !registered
     ? await markStart(startFenceOf(input.botId, input.personId, input.startKey)).catch(async (error) => {
         if (input.startKey && opened) await closeAttempt(input.botId, input.personId, input.startKey);
         throw error;
@@ -790,8 +964,10 @@ export async function startJob(input: StartInput, now: Date = new Date()): Promi
     if (mark) await forgetStartMark(mark);
   }
   if ('done' in begun) {
+    // Round 8, A1: a refusal of a start that acks is kept on its attempt (a retry of the key, and a start waiting on it, get the same answer)
+    if (input.startKey && input.acks && keptAsRefusal(begun.done)) await refuseAttempt(input.botId, input.personId, input.startKey, startAnswerBody(begun.done));
     // No job was made by this start (refused, found one that was made earlier, or told it is `earlier`/`expired`): its attempt is over
-    if (input.startKey && opened && !(begun.done.ok)) await closeAttempt(input.botId, input.personId, input.startKey);
+    else if (input.startKey && opened && !(begun.done.ok)) await closeAttempt(input.botId, input.personId, input.startKey);
     return begun.done;
   }
   return tryNewJob(input, now, begun.created);
@@ -865,14 +1041,18 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
           const ownKey = { botId: input.botId, personId: input.personId, startKey: input.startKey as string };
           // Answered meanwhile (another request of this same key was answered with an earlier start while this one waited): the same answer, decided from the row after the lock
           if (mine && mine.state === 'answered') return { reanswer: true as const };
-          // The start that MADE a job whose job was taken away since (Brick purge, the job's removal): its attempt stays as `made` with no job. A delayed copy of it makes nothing: it answers `expired`, never a second paid
-          // job for a request that was already answered (Opus's ruling N15-a)
-          if (mine && mine.state === 'made' && !mine.jobId) return { expired: true as const };
+          // Refused meanwhile (round 8, A1): the refusal kept on it, the same answer
+          if (mine && mine.state === 'refused') return { reanswer: true as const };
+          // The start that MADE a job whose job was taken away since (Brick purge, the job's removal): its attempt stays as `made` with no job. A delayed copy of it makes nothing: it answers `retired` (round 8, A2; it
+          // replaces N15-a's `expired`, which the game answered with a fresh start), never a second paid job for a request that was already answered
+          if (mine && mine.state === 'made' && !mine.jobId) return { retired: true as const };
           // Finding 1 (GPT's second order): an OLDER open attempt loses to a job another keyed start made after it began. That start could not see this one (it was not committed yet when it decided),
           // so this one is superseded by that job now and answers it: never a second job for one request
           if (mine && mine.state === 'open') {
+            // A reopened key (round 8, A2) is answered by a job made after the person's message was issued; any other by one made after the request began (A1: `began` is the route's first moment)
+            const since = input.registration?.reopened && mine.issuedAt && mine.issuedAt < mine.createdAt ? mine.issuedAt : mine.createdAt;
             const after = await tx.computerJob.findFirst({
-              where: { botId: input.botId, personId: input.personId, runId: null, startKey: { not: null }, NOT: { startKey: input.startKey as string }, createdAt: { gte: mine.createdAt } },
+              where: { botId: input.botId, personId: input.personId, runId: null, startKey: { not: null }, NOT: { startKey: input.startKey as string }, createdAt: { gte: since } },
               orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
               select: { id: true },
             });
@@ -917,7 +1097,8 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
         { timeout: 15_000, maxWait: 15_000 },
       );
       if ('expired' in decided) return { done: { ok: false, reason: 'expired' } };
-      if ('reanswer' in decided) return { done: (await startAnsweredBefore(input.botId, input.personId, input.startKey, now)) ?? { ok: false, reason: 'expired' } };
+      if ('retired' in decided) return { done: { ok: false, reason: 'retired' } };
+      if ('reanswer' in decided) return { done: (await startAnsweredBefore(input.botId, input.personId, input.startKey, now)) ?? (await ownAnswerOf(input.botId, input.personId, input.startKey)) ?? { ok: false, reason: 'expired' } };
       if ('earlier' in decided && decided.earlier) return { done: { ok: false, reason: 'earlier', job: decided.earlier } };
       if ('same' in decided) {
         const winner = await reuseJob(input.botId, { botId_personId_startKey: { botId: input.botId, personId: input.personId, startKey: input.startKey } }, now);
@@ -962,15 +1143,22 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
 /** What a start does once its job is saved: the first try, and the answer. */
 async function tryNewJob(input: StartInput, now: Date, created: { id: string }): Promise<Started> {
   const outcome = await tryStart(created.id, now);
+  // Round 8, A1: the job this start made is taken away again below: its attempt keeps the refusal FIRST (while it still names the job), so a retry of the key is that refusal, never `retired`
+  const keepOnAttempt = async (answer: Started) => {
+    if (input.startKey && input.acks) await refuseAttempt(input.botId, input.personId, input.startKey, startAnswerBody(answer), 'made', created.id);
+    return answer;
+  };
   if (typeof outcome === 'object') {
+    const answer = await keepOnAttempt({ ok: false, reason: 'rule', words: outcome.rule });
     // Refused by a rule the person said in chat: no job was ever going to run, so none is left behind, and the answer carries the rule's words
     await prisma.computerJob.deleteMany({ where: { id: created.id, status: 'stopped', endedBy: 'rule', startedAt: null } });
-    return { ok: false, reason: 'rule', words: outcome.rule };
+    return answer;
   }
   if (outcome === 'not_set') {
+    const answer = await keepOnAttempt({ ok: false, reason: 'not_set' });
     // Controls that are not set up: no job was ever going to run, so none is left behind (a second ask for the same run may have taken it away already)
     await prisma.computerJob.deleteMany({ where: { id: created.id } });
-    return { ok: false, reason: 'not_set' };
+    return answer;
   }
   const job = await prisma.computerJob.findUnique({ where: { id: created.id }, include: JOB_INCLUDE });
   // A second ask for the same run found this job while it waited for its first try, saw the controls not set up (or a rule the person said
@@ -1199,15 +1387,20 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
 
   const settings = await getMeterSettings();
   const key = roomKey(job.id, now);
-  const room = await reserveRoom({ key, personId: job.personId, amountMicros: roomFor(settings.renewMinutes, provider.microsPerMinute()), botId: job.botId, jobId: job.id }, now);
+  // Round 8, C (GPT's seventh note): a job whose last pause was a model call its month or a limit refused is admitted only if THAT call still fits beside the room to run, decided at the real start (the sweep's carry-on,
+  // the person's Resume, "do this first" and the line moving all come through here) in the same pool-locked transaction that takes the room. The amount is the pause's own record, kept while the job waits in line
+  const blocked = job.pauses > 0 ? await prisma.computerJobPause.findUnique({ where: { jobId_n: { jobId: job.id, n: job.pauses } }, select: { blockedKind: true, blockedMicros: true } }) : null;
+  const alsoFits = blocked?.blockedKind === 'call' && blocked.blockedMicros !== null ? Number(blocked.blockedMicros) : 0;
+  const room = await reserveRoom({ key, personId: job.personId, amountMicros: roomFor(settings.renewMinutes, provider.microsPerMinute()), botId: job.botId, jobId: job.id, ...(alsoFits > 0 ? { alsoFits } : {}) }, now);
   if (!room.ok) {
     if (room.reason === 'not_set') return 'not_set';
-    // A job that already ran and was paused (its time so far is charged) does not end because its month or a limit it was resumed under refuses its next start: it stays paused, saying why, and is carried on later
+    // A job that already ran and was paused (its time so far is charged) does not end because its month or a limit it was resumed under refuses its next start: it stays paused, saying why, and is carried on later.
+    // Nothing is held and no stretch starts: zero new billable time (round 8, C). A carry-on that is paused again is not carrying on any more (its pending mark goes in the same write)
     if ((room.reason === 'rule' || room.reason === 'allowance') && job.pauses > 0) {
       const why = room.reason;
       // Brick tells the person once, in the same commit (piece 3): not for their own Resume, which is answered at once
       await prisma.$transaction(async (tx) => {
-        const moved = await tx.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, leaseVersion: { increment: 1 } } });
+        const moved = await tx.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, carryOnPending: false, leaseVersion: { increment: 1 } } });
         if (moved.count === 1 && !options.quiet) await tellIn(tx, job.id, 'paused', why, now);
       });
       return 'queued';
@@ -1824,43 +2017,90 @@ export async function stopJobFor(botId: string, ownerId: string, now: Date = new
   return stopped.ok ? stopped.view : null;
 }
 
-/** What Stop came to: the computer as it stands after, or why not (not the owner's Brick; a command id already used for another control). */
-export type Stopped = { ok: true; view: ComputerView } | { ok: false; reason: 'not_found' | 'command_reused' };
+/**
+ * What Stop came to: the computer as it stands after, or why not (not the owner's Brick; a command id already used for another control). With a confirmed set (round 8, D2): `stopped`, the confirmed jobs that were
+ * live at the first dispatch and were ended; `left`, the live jobs that were NOT in the set (they keep going).
+ */
+export type Stopped = { ok: true; view: ComputerView; stopped?: string[]; left?: StopLeft[] } | { ok: false; reason: 'not_found' | 'command_reused' };
+
+/** A live job a confirmed Stop all left alone (round 8, D2): its id and its title as it was then. */
+export interface StopLeft {
+  id: string;
+  title: string;
+}
+
+/** The most job ids a confirmed Stop all may carry. */
+export const STOP_CONFIRMED_MAX = 50;
 
 /**
  * Stop everything on the computer, under the tap's (or Brick's tool call's) command id when it has one (finding 4): the command's row is committed FIRST, naming the jobs that are on the computer at that moment, then those
  * jobs end through the finalizer's own transactions. The same id again answers what it came to, or, while the first request did not keep that (it stopped half way), finishes ending THOSE jobs: never one that was
  * started after the Stop. Without a command (the 0.4.3 game's Stop) it ends what is there now, as before.
+ *
+ * Round 8, D2 (GPT's seventh note): with `confirmed` (the job ids the person was shown and confirmed), the FIRST dispatch ends ONLY the live jobs in that set; ids that are over or unknown are skipped, and a live job not in
+ * the set (one that joined the line after the question) is left alone and named in `left`. The set is part of the command's identity: the same command id with another set is `command_reused`. Without it, as before.
  */
-export async function stopAll(botId: string, ownerId: string, now: Date = new Date(), command?: Command): Promise<Stopped> {
+export async function stopAll(botId: string, ownerId: string, now: Date = new Date(), command?: Command, confirmed?: string[] | null): Promise<Stopped> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  const set = confirmed ? [...new Set(confirmed)].sort() : null;
   let targets: string[] | null = null;
+  let left: StopLeft[] | null = null;
+  const liveNow = (db: Pick<Prisma.TransactionClient, 'computerJob'>) => db.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting', 'queued'] } }, select: { id: true, title: true, createdAt: true }, orderBy: { id: 'asc' } });
+  // The targets in id order (as before); `left` newest first, with their titles
+  const split = (live: Array<{ id: string; title: string; createdAt: Date }>) =>
+    set
+      ? {
+          targets: live.filter((job) => set.includes(job.id)).map((job) => job.id),
+          left: live
+            .filter((job) => !set.includes(job.id))
+            .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.id.localeCompare(a.id))
+            .map((job) => ({ id: job.id, title: job.title })),
+        }
+      : { targets: live.map((job) => job.id), left: null };
   if (command) {
-    const row = commandRow(botId, ownerId, null, 'stop');
+    const row = commandRow(botId, ownerId, null, 'stop', set ? { confirmed: set } : {});
     const seen = await seenCommand(command, row);
     const claimed =
       seen ??
       (await prisma.$transaction(async (tx) => {
-        const live = (await tx.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting', 'queued'] } }, select: { id: true }, orderBy: { id: 'asc' } })).map((job) => job.id);
-        const got = await claimCommandIn(tx, command, row, { ok: true, pending: true, targets: live });
-        return 'fresh' in got ? { live } : got;
+        const chosen = split(await liveNow(tx));
+        const got = await claimCommandIn(tx, command, row, { ok: true, pending: true, targets: chosen.targets, ...(chosen.left ? { left: chosen.left } : {}) });
+        return 'fresh' in got ? { chosen } : got;
       }, { timeout: 15_000, maxWait: 15_000 }));
     if ('reused' in claimed) return { ok: false, reason: 'command_reused' };
     if ('replay' in claimed && claimed.replay) {
       const view = await computerView(botId, ownerId, now);
-      return view ? { ok: true, view } : { ok: false, reason: 'not_found' };
+      const kept = claimed.replay.ok ? claimed.replay : null;
+      return view ? { ok: true, view, ...(set && kept ? { stopped: kept.targets ?? [], left: kept.left ?? [] } : {}) } : { ok: false, reason: 'not_found' };
     }
-    targets = 'live' in claimed ? claimed.live : (claimed.targets ?? []);
+    if ('chosen' in claimed) {
+      targets = claimed.chosen.targets;
+      left = claimed.chosen.left;
+    } else {
+      // A replay of a first request that stopped half way: THOSE jobs again, and the same `left`
+      targets = claimed.targets ?? [];
+      left = set ? (await keptLeftOf(command)) : null;
+    }
+  } else if (set) {
+    const chosen = split(await liveNow(prisma));
+    targets = chosen.targets;
+    left = chosen.left;
   }
   await endEverything(botId, now, targets);
   if (command) {
     // A job asked for after the Stop is not the Stop's: it was left in line, and the line moves for it now that the Stop's jobs are over. The Stop's answer is kept only AFTER the line has moved: a request that
     // stopped between the two leaves it pending, and its retry ends the same jobs again (those are over already) and moves the line, never adding a later job to the Stop (CodeRabbit on #1025, 31)
     await startNext(botId, now);
-    await keepOutcome(prisma, command, { ok: true, targets: targets ?? [] });
-  }
+    await keepOutcome(prisma, command, { ok: true, targets: targets ?? [], ...(left ? { left } : {}) });
+  } else if (set) await startNext(botId, now);
   const view = await computerView(botId, ownerId, now);
-  return view ? { ok: true, view } : { ok: false, reason: 'not_found' };
+  return view ? { ok: true, view, ...(set ? { stopped: targets ?? [], left: left ?? [] } : {}) } : { ok: false, reason: 'not_found' };
+}
+
+/** The `left` a Stop all command kept on its row (its pending outcome names it from the first request). */
+async function keptLeftOf(command: Command): Promise<StopLeft[]> {
+  const rows = await prisma.$queryRaw<Array<{ outcome: { left?: StopLeft[] } | null }>>`SELECT "outcome" FROM "computer_job_commands" WHERE "command_id" = ${command.id}::uuid`;
+  return rows[0]?.outcome?.left ?? [];
 }
 
 /** Ends what is on the Brick's computer (with `only`, only those jobs, whatever they are now). */

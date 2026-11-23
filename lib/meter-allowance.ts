@@ -346,7 +346,20 @@ export async function roomWouldFit(input: { personId: string; amountMicros: numb
  * the envelope keeps counting until it is settled or released. Never throws for "no room": that is an answer.
  */
 export async function reserveRoom(
-  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; /** False for a step inside a job that already holds its place (a model call): it is not another job at once. */ newJob?: boolean },
+  input: {
+    key: string;
+    personId: string;
+    amountMicros: number;
+    botId?: string | null;
+    jobId?: string | null;
+    chargeClass?: ChargeClass;
+    /** False for a step inside a job that already holds its place (a model call): it is not another job at once. */ newJob?: boolean;
+    /**
+     * Round 8, C: an amount that must ALSO fit, on top of `amountMicros`, under the person's allowance, every rule and the pool, in the same pool-locked transaction (a paused job's refused model call, asked again
+     * first thing once it runs). Only `amountMicros` is held: the call takes its own room when it comes.
+     */
+    alsoFits?: number;
+  },
   asked?: Date,
 ): Promise<Room> {
   wholeMicros(input.amountMicros, 'amountMicros');
@@ -359,9 +372,11 @@ export async function reserveRoom(
 }
 
 async function reserveRoomOnce(
-  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; newJob?: boolean },
+  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; newJob?: boolean; alsoFits?: number },
   asked?: Date,
 ): Promise<Room> {
+  // What must fit: the room, and what must also fit beside it (round 8, C). Only the room is held
+  const mustFit = input.amountMicros + Math.max(0, Math.floor(input.alsoFits ?? 0));
   return prisma.$transaction(async (tx): Promise<Room> => {
     await lockPool(tx);
     // The time is read once the lock is held, unless the caller fixed it
@@ -373,10 +388,10 @@ async function reserveRoomOnce(
       return already.state === 'held' && already.expiresAt > now ? { ok: true, reservation: viewOf(already), created: false } : { ok: false, reason: 'closed' };
     }
     // What the person said in chat comes first: a rule that does not let this step take that much stops it, whatever the allowance holds
-    const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.jobId ?? null, chargeClass: input.chargeClass ?? 'computer', amountMicros: input.amountMicros }, now, tx);
+    const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.jobId ?? null, chargeClass: input.chargeClass ?? 'computer', amountMicros: mustFit }, now, tx);
     if (!ruled.ok) return { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
     const settings = await getMeterSettings(tx);
-    const no = await fits(tx, input.personId, input.amountMicros, now, settings, { newJob: input.newJob !== false });
+    const no = await fits(tx, input.personId, mustFit, now, settings, { newJob: input.newJob !== false });
     if (no) return no;
     const row = await tx.meterReservation.create({
       data: {

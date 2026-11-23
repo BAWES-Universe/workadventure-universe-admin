@@ -50,7 +50,8 @@ const wipe = async () => {
 };
 
 let keys = 0;
-const keyOf = () => `ack-key-${tag}-${++keys}-${randomUUID().slice(0, 8)}`;
+// Round 8, A2: a start that acks carries its issue time (the moment of the message) in its key
+const keyOf = () => `t${Date.now().toString(36)}-ack-${tag}-${++keys}-${randomUUID().slice(0, 8)}`;
 const reservationsOf = (jobId: string) => prisma.meterReservation.count({ where: { jobId } });
 const jobsOf = (personId: string) => prisma.computerJob.count({ where: { personId } });
 

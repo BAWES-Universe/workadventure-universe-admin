@@ -72,7 +72,8 @@ const wipe = async () => {
 const jobOf = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
 const timeEvents = (jobId: string) => prisma.meterEvent.findMany({ where: { jobId, kind: 'computer_time' }, orderBy: { eventId: 'asc' } });
 const roomsOf = (jobId: string) => prisma.meterReservation.findMany({ where: { reservationKey: { startsWith: `computer:job:${jobId}:` } } });
-const key = () => `k_${randomUUID().replace(/-/g, '')}`;
+// Round 8, A2: a start that acks carries its issue time (the moment of the message) in its key
+const key = () => `t${Date.now().toString(36)}-${randomUUID().replace(/-/g, '')}`;
 
 /** A person with a Brick with a computer, and one job that ran from NOW and reached its agent (its conversation is `sess-<title>`). */
 async function ranOnce(name: string, title = 'Visa form') {
