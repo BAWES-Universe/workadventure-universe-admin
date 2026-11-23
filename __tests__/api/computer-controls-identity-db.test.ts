@@ -274,6 +274,30 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       expect(await commandOf(f.id)).toMatchObject({ outcome: { ok: false, reason: 'taken_over' } });
     });
 
+    it('a Resume refused by the month AFTER its start was tried keeps that refusal: the same command answers `allowance` again (never ok while the job stays paused)', async () => {
+      const { sara, jobId } = await running('f4-resume-refused');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      await saveMeterSettings({ memberAllowanceMicros: 1_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+      const r = command();
+      expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(10), r)).toEqual({ ok: false, reason: 'allowance' });
+      expect(await commandOf(r.id)).toMatchObject({ outcome: { ok: false, reason: 'allowance' } });
+      expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(11), r)).toEqual({ ok: false, reason: 'allowance' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance' });
+    });
+
+    it('a Stop’s command id used again on the owner’s OTHER Brick is `command_reused`, and stops nothing there', async () => {
+      const { sara, jobId } = await running('f4-stop-two-bricks');
+      const second = await createBrick({ ownerId: sara.id, name: 'Second Brick' });
+      await giveComputer(second.id, sara.id);
+      const there = await startJob({ botId: second.id, personId: sara.id, title: 'Hotel' }, NOW);
+      if (!there.ok) throw new Error('the job was not made');
+      const s = command();
+      expect(await stopAll(sara.brickId, sara.id, minutes(2), s)).toMatchObject({ ok: true });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'stopped' });
+      expect(await stopAll(second.id, sara.id, minutes(3), s)).toEqual({ ok: false, reason: 'command_reused' });
+      expect(await jobOf(there.job.id)).toMatchObject({ status: 'running' });
+    });
+
     it('REPRO 4c: a delayed Resume replayed after the job was paused again leaves it paused', async () => {
       const { sara, jobId } = await running('f4-resume');
       await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());

@@ -673,11 +673,17 @@ async function forgetStartMark(id: string): Promise<void> {
   await prisma.computerStartMark.deleteMany({ where: { id } }).catch((error) => console.error('[Computer] Could not remove the mark of a start:', error instanceof Error ? error.message : 'unknown'));
 }
 
+/** How long a start that ended with no job is kept while other starts' answers wait on it (they answer `expired` all that time): about a week, far past any retry of the game. */
+export const DEAD_ANSWER_MS = 7 * 24 * 60 * 60_000;
+
 /** Marks that were never removed (their process died) are deleted. Returns how many. */
 export async function forgetOldStartMarks(now: Date = new Date(), olderThanMs: number = 60 * 60_000): Promise<number> {
   // The attempts of starts that are long over go with them. An attempt bound to a job (made, superseded or answered by it) lives as long as that job (the foreign key deletes it with the job), and so does one
   // another start's answer waits on or that waits on another: a retry of either is answered from them after the game forgot its key (finding 1)
   await prisma.computerStartAttempt.deleteMany({ where: { beatAt: { lt: new Date(now.getTime() - olderThanMs) }, jobId: null, aliasAttemptId: null, aliases: { none: {} } } });
+  // A start that ended with no job (let go, or one that stopped beating long ago) that other starts were answered with: after a week the answer it gives them is `expired` and stays so, so it goes, and the
+  // answers that wait on it go with it (the foreign key). A start bound to a job is never touched here
+  await prisma.computerStartAttempt.deleteMany({ where: { beatAt: { lt: new Date(now.getTime() - DEAD_ANSWER_MS) }, jobId: null, aliasAttemptId: null, state: { in: ['open', 'expired'] } } });
   return (await prisma.computerStartMark.deleteMany({ where: { startedAt: { lt: new Date(now.getTime() - olderThanMs) } } })).count;
 }
 

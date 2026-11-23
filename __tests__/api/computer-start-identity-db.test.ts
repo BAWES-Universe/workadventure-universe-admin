@@ -192,6 +192,44 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     expect(await jobsOf(tom)).toHaveLength(0);
   });
 
+  it('1a REPRO through the route’s answered-before check: B answered `earlier A`; A acknowledged; a spending rule is now at its limit; B’s retry still answers A’s job (never `rule`). CONTROL: a new key is refused by the rule', async () => {
+    const sara = await owner('r1a-rule');
+    const KEY_A = key();
+    const KEY_B = key();
+    const a = await post(sara, KEY_A, 'Fill the visa form');
+    expect(a).toMatchObject({ ok: true });
+    expect(await post(sara, KEY_B, 'Please do the visa form')).toMatchObject({ ok: false, reason: 'earlier', job: { id: a.job.id } });
+    expect(await ackStart(sara.brickId, sara.id, KEY_A)).toBe(true);
+    // The rule leaves nothing now
+    await prisma.spendRule.create({ data: { ruleKey: `r-${randomUUID()}`, ownerPersonId: sara.id, scope: 'bot', botId: sara.brickId, period: 'day', capMicros: BigInt(0), words: 'Nothing more today', createdById: sara.id } });
+    expect(await post(sara, KEY_B, 'Please do the visa form')).toMatchObject({ ok: true, job: { id: a.job.id } });
+    expect(await post(sara, key(), 'Another task')).toMatchObject({ ok: false, reason: 'rule' });
+    expect((await jobsOf(sara)).map((job) => job.id)).toEqual([a.job.id]);
+  });
+
+  it('an answer that waits on a start that ended with NO job is swept with it after about a week (it answers `expired` all along); before that, and for a start bound to a job, nothing goes', async () => {
+    const tom = await owner('r1-dead-sweep');
+    const KEY_A = key();
+    const KEY_B = key();
+    const deadA = await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_A, state: 'open', beatAt: new Date() } });
+    await viaLib(tom, KEY_B, 'Visa please');
+    expect(await attemptOf(tom, KEY_B)).toMatchObject({ state: 'answered', aliasAttemptId: deadA.id });
+    await prisma.computerStartAttempt.update({ where: { id: deadA.id }, data: { state: 'expired' } });
+    // A start that made a job, with an answer bound to it, beside it
+    const sara = await owner('r1-dead-sweep-live');
+    const a = await post(sara, KEY_A, 'Visa');
+    await post(sara, KEY_B, 'Visa please');
+    const week = 7 * 24 * 60 * 60_000;
+    const left = () => prisma.computerStartAttempt.count({ where: { personId: { in: [tom.id, sara.id] } } });
+    await forgetOldStartMarks(new Date(Date.now() + week - 60 * 60_000));
+    expect(await left()).toBe(4);
+    expect(await viaLib(tom, KEY_B, 'Visa please')).toEqual({ ok: false, reason: 'expired' });
+    await forgetOldStartMarks(new Date(Date.now() + week + 60 * 60_000));
+    expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(0);
+    expect(await attemptOf(sara, KEY_B)).toMatchObject({ state: 'answered', jobId: a.job.id });
+    expect(await attemptOf(sara, KEY_A)).toMatchObject({ state: 'made', jobId: a.job.id });
+  });
+
   it('1c the game’s expired-key retry (its record gone, hours later, after the sweep of old marks): the kept answer survives the sweep and the retry makes no second job', async () => {
     const sara = await owner('r1c');
     const KEY_A = key();
