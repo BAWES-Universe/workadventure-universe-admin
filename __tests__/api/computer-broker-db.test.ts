@@ -30,10 +30,10 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests, type TurnEvent } from '@/lib/computer-provider';
-import { Agent37Error, Agent37Unreached } from '@/lib/agent37/client';
+import { Agent37Error, Agent37Unreached, TurnNotSent } from '@/lib/agent37/client';
 import { fenceMachine, finishJob, finishJobUnder, recordFinishIntent, settleTurnHold, underTurnHold, wakeIfStopped, setLeaderStopTimesForTests, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { verifyJobToken } from '@/lib/computer-token';
-import { readFaultRows, recordFaults } from '@/lib/computer-faults';
+import { lockCutoff, readFaultRows, recordFaults } from '@/lib/computer-faults';
 import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -711,6 +711,103 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         expect(sent).not.toHaveBeenCalled();
         expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ firstTurnSentAt: null, turnClaimedAt: null, agentResponseId: null });
         sent.mockRestore();
+      });
+
+      /** Holds the job's cutoff lock in a transaction of its own, as a pause, a claim or a finish would (the lock the admission waits for); `release` lets it go. */
+      const holdJob = (jobId: string) => {
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        let ready: () => void = () => undefined;
+        const held = new Promise<void>((resolve) => (ready = resolve));
+        const done = prisma.$transaction(
+          async (tx) => {
+            await lockCutoff(tx, jobId);
+            ready();
+            await gate;
+          },
+          { timeout: 30_000, maxWait: 30_000 },
+        );
+        return { held, release: () => release(), done };
+      };
+      const waitingOnJob = async () => {
+        for (let at = 0; at < 150; at++) {
+          const rows = await prisma.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
+          if (rows[0].n > 0) return true;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return false;
+      };
+
+      it('CodeRabbit A2: while the admission waits for the job’s lock, the first turn is NOT marked yet (a start that stalls before its dispatch leaves no mark for a new owner to end the job by); the mark is written by the admission and the turn then goes', async () => {
+        const { jobId } = await running('mark-a2');
+        const lock = holdJob(jobId);
+        let start: Promise<unknown> = Promise.resolve();
+        try {
+          await lock.held;
+          start = startTurn(jobId, 'carry on').then((started) => (started.ok ? drain(started.events).then(() => started) : started));
+          expect(await waitingOnJob()).toBe(true);
+          // The claim is held and the admission is waiting: nothing is marked
+          expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ firstTurnSentAt: null });
+          lock.release();
+          await lock.done;
+          expect(await start).toMatchObject({ ok: true });
+        } finally {
+          lock.release();
+          await Promise.allSettled([lock.done, start]);
+        }
+      });
+
+      it('CodeRabbit C9: a request cut while the admission waited sends nothing: the claim is let go and this attempt’s mark goes, whoever asks next opens the turn normally', async () => {
+        const { jobId } = await running('abort-c9');
+        const lock = holdJob(jobId);
+        const cut = new AbortController();
+        const sent = jest.spyOn(fake, 'openTurn');
+        let start: Promise<unknown> = Promise.resolve();
+        try {
+          await lock.held;
+          start = startTurn(jobId, 'carry on', cut.signal);
+          expect(await waitingOnJob()).toBe(true);
+          cut.abort();
+          lock.release();
+          await lock.done;
+          expect(await start).toEqual({ ok: false, reason: 'failed' });
+        } finally {
+          lock.release();
+          await Promise.allSettled([lock.done, start]);
+        }
+        expect(sent).not.toHaveBeenCalled();
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ firstTurnSentAt: null, turnClaimedAt: null, agentResponseId: null });
+        sent.mockRestore();
+        const again = await startTurn(jobId, 'carry on');
+        expect(again).toMatchObject({ ok: true });
+        if (again.ok) await drain(again.events);
+      });
+
+      it('CodeRabbit B1: a turn the provider proves was not sent clears only THIS attempt’s mark: a replacement mark (another attempt’s) stays', async () => {
+        const { jobId } = await running('notsent-b1');
+        const replacement = new Date(Date.now() + 5_000);
+        const open = jest.spyOn(fake, 'openTurn').mockImplementation((async () => {
+          // While the request is in flight another attempt's mark takes this attempt's place
+          await prisma.computerJob.update({ where: { id: jobId }, data: { firstTurnSentAt: replacement } });
+          throw new TurnNotSent('the agent said no');
+        }) as never);
+        try {
+          expect(await startTurn(jobId, 'carry on')).toEqual({ ok: false, reason: 'failed' });
+        } finally {
+          open.mockRestore();
+        }
+        expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).firstTurnSentAt).toEqual(replacement);
+        // CONTROL: its own mark goes
+        await prisma.computerJob.update({ where: { id: jobId }, data: { firstTurnSentAt: null } });
+        const own = jest.spyOn(fake, 'openTurn').mockImplementation((async () => {
+          throw new TurnNotSent('the agent said no');
+        }) as never);
+        try {
+          expect(await startTurn(jobId, 'carry on')).toEqual({ ok: false, reason: 'failed' });
+        } finally {
+          own.mockRestore();
+        }
+        expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).firstTurnSentAt).toBeNull();
       });
 
       it('an intent that commits while the agent accepts the turn: the turn’s id is NOT kept for the job, the turn is cancelled, and the runner is told the job is ending', async () => {
