@@ -245,10 +245,16 @@ run('finding 5 (GPT round 6): carrying on only when what was refused fits, in a 
       expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
     });
 
-    it('the person’s manual Resume bypasses the sweep: it starts on a new room even while the refused call would not fit', async () => {
+    it('round 8, C (Opus’s design: the same admission check for every way a job starts): the person’s Resume while the refused call would not fit is answered with the reason, and nothing is held or booked; once it fits, Resume starts it', async () => {
       const { sara, jobId } = await pausedByBigCall('f5-manual');
+      const before = { events: (await timeEvents(jobId)).length, rooms: await roomsOf(sara.id) };
       const resumed = await resumeJob(sara.brickId, sara.id, jobId, minutes(3));
-      expect(resumed).toMatchObject({ ok: true });
+      expect(resumed).toEqual({ ok: false, reason: 'allowance' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', reservationKey: null });
+      expect((await timeEvents(jobId)).length).toBe(before.events);
+      expect(await roomsOf(sara.id)).toBe(before.rooms);
+      await setUp({ memberAllowanceMicros: 5_000_000 });
+      expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(4))).toMatchObject({ ok: true });
       expect(await jobOf(jobId)).toMatchObject({ status: 'running', pausedWhy: null });
     });
   });

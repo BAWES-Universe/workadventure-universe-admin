@@ -251,6 +251,8 @@ run('GPT seventh note (round 8): Orbit side of A, C and D2, in a real database',
       await finishJobUnder(other.job.id, null, 'done', new Date());
       expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', reservationKey: null });
       expect((await timeEvents(jobId)).length).toBe(before.events);
+      // Exactly one time event: the first pause's
+      expect(before.events).toBe(1);
       expect(await roomsOfJob(jobId)).toBe(before.rooms);
       // CONTROL: when the money is back the sweep carries it on (and only then)
       await setUp({ memberAllowanceMicros: 5_000_000 });

@@ -1140,15 +1140,20 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
 
   const settings = await getMeterSettings();
   const key = roomKey(job.id, now);
-  const room = await reserveRoom({ key, personId: job.personId, amountMicros: roomFor(settings.renewMinutes, provider.microsPerMinute()), botId: job.botId, jobId: job.id }, now);
+  // Round 8, C (GPT's seventh note): a job whose last pause was a model call its month or a limit refused is admitted only if THAT call still fits beside the room to run, decided at the real start (the sweep's carry-on,
+  // the person's Resume, "do this first" and the line moving all come through here) in the same pool-locked transaction that takes the room. The amount is the pause's own record, kept while the job waits in line
+  const blocked = job.pauses > 0 ? await prisma.computerJobPause.findUnique({ where: { jobId_n: { jobId: job.id, n: job.pauses } }, select: { blockedKind: true, blockedMicros: true } }) : null;
+  const alsoFits = blocked?.blockedKind === 'call' && blocked.blockedMicros !== null ? Number(blocked.blockedMicros) : 0;
+  const room = await reserveRoom({ key, personId: job.personId, amountMicros: roomFor(settings.renewMinutes, provider.microsPerMinute()), botId: job.botId, jobId: job.id, ...(alsoFits > 0 ? { alsoFits } : {}) }, now);
   if (!room.ok) {
     if (room.reason === 'not_set') return 'not_set';
-    // A job that already ran and was paused (its time so far is charged) does not end because its month or a limit it was resumed under refuses its next start: it stays paused, saying why, and is carried on later
+    // A job that already ran and was paused (its time so far is charged) does not end because its month or a limit it was resumed under refuses its next start: it stays paused, saying why, and is carried on later.
+    // Nothing is held and no stretch starts: zero new billable time (round 8, C). A carry-on that is paused again is not carrying on any more (its pending mark goes in the same write)
     if ((room.reason === 'rule' || room.reason === 'allowance') && job.pauses > 0) {
       const why = room.reason;
       // Brick tells the person once, in the same commit (piece 3): not for their own Resume, which is answered at once
       await prisma.$transaction(async (tx) => {
-        const moved = await tx.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, leaseVersion: { increment: 1 } } });
+        const moved = await tx.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, carryOnPending: false, leaseVersion: { increment: 1 } } });
         if (moved.count === 1 && !options.quiet) await tellIn(tx, job.id, 'paused', why, now);
       });
       return 'queued';
