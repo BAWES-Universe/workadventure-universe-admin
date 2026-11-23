@@ -16,7 +16,7 @@ import { deleteBrick, removeGoneBricks } from '@/lib/brick-delete';
 import { saveMeterSettings } from '@/lib/meter';
 import { CONTROL_TIMING } from '@/lib/computer-control';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { HANDS_MAX, VISITS_MAX, visitsFor } from '@/lib/computer-visits';
+import { HANDS_MAX, VISITS_MAX, recordVisits, visitsFor } from '@/lib/computer-visits';
 import { finishJob, giveComputer, handBack, startJob, takeOver } from '@/lib/computer';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -113,6 +113,61 @@ run('where a job’s computer browsed, in a real database', () => {
     // Nothing that was cut away is anywhere in the rows
     const rows = await prisma.computerJobVisit.findMany({ where: { jobId: id } });
     expect(JSON.stringify(rows)).not.toMatch(/4242|secret|AbCdEf|Bad Host|dropped|earlier-job|after-the-job/);
+  });
+
+  describe('a job that was paused and carried on is read once per stretch (CodeRabbit N12, N16 and the unread note on #1025)', () => {
+    /** A job that ran a first stretch (its visit kept at second 245, `complete`), was paused and carried on at second 360: the stretch now being read begins there, and the read starts 120 s before it. */
+    async function resumed(name: string) {
+      const sara = await person(name);
+      const id = await jobFor(sara);
+      await prisma.computerJobPause.create({ data: { jobId: id, n: 1, why: 'person', seconds: 100, at: seconds(300) } });
+      await prisma.computerJob.update({ where: { id }, data: { pauses: 1, startedAt: seconds(360), visitsState: 'complete' } });
+      await prisma.computerJobVisit.create({ data: { jobId: id, kind: 'visit', at: seconds(245), by: 'brick', method: 'GET', host: 'shop.example', path: '/first-stretch', count: 1, failed: false, form: false } });
+      return { sara, id };
+    }
+    const pathsOf = async (id: string) => (await prisma.computerJobVisit.findMany({ where: { jobId: id, kind: { in: ['visit', 'post'] } }, orderBy: { at: 'asc' } })).map((row) => row.path);
+
+    it('N12: the replacement boundary is the stretch’s own start, not the padded read start: a visit of the stretch before that falls inside the padding is kept', async () => {
+      const { sara, id } = await resumed('n12');
+      // The padded read (from second 240) returns the earlier stretch's visit too, which belongs to the stretch before and is left out of what this stretch keeps
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? reading([visit(245, { p: '/first-stretch' }), visit(370, { p: '/second-stretch' })]) : {});
+      const done = await recordVisits({ id, startedAt: seconds(360) }, provider, `fake-${sara.brickId}`, seconds(500));
+      expect(reads()[0].command).toBe(`universe-visits read ${seconds(360).getTime() - 120_000}`);
+      expect(done).toBe('complete');
+      expect(await pathsOf(id)).toEqual(['/first-stretch', '/second-stretch']);
+    });
+
+    it('N16: a resumed machine with no listener (exit 127) keeps the earlier stretches’ rows and says the record is partial, never "none" over rows that exist', async () => {
+      const { sara, id } = await resumed('n16');
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? { exitCode: 127, stderr: 'universe-visits: not found' } : {});
+      expect(await recordVisits({ id, startedAt: seconds(360) }, provider, `fake-${sara.brickId}`, seconds(500))).toBe('none');
+      expect(await pathsOf(id)).toEqual(['/first-stretch']);
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id } })).visitsState).toBe('partial');
+      // CONTROL: a job that never paused and has no listener is `none`, with nothing kept
+      const lone = await person('n16-lone');
+      const loneId = await jobFor(lone);
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? { exitCode: 127, stderr: 'universe-visits: not found' } : {});
+      await recordVisits({ id: loneId, startedAt: NOW }, provider, `fake-${lone.brickId}`, seconds(60));
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: loneId } })).visitsState).toBe('none');
+    });
+
+    it('a resumed stretch that cannot be read at all says `unread` even though the first stretch was kept `complete`, and deletes no row', async () => {
+      const { sara, id } = await resumed('unread');
+      const real = provider.exec.bind(provider);
+      const spy = jest.spyOn(provider, 'exec').mockImplementation(async (ref, command, options) => {
+        if (command.startsWith('universe-visits read')) throw new Error('machine unreachable');
+        return real(ref, command, options);
+      });
+      const mute = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        expect(await recordVisits({ id, startedAt: seconds(360) }, provider, `fake-${sara.brickId}`, seconds(500))).toBe('unread');
+      } finally {
+        spy.mockRestore();
+        mute.mockRestore();
+      }
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id } })).visitsState).toBe('unread');
+      expect(await pathsOf(id)).toEqual(['/first-stretch']);
+    });
   });
 
   it('says complete for a clean read, and the computer is read before its browser is cleared', async () => {

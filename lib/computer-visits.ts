@@ -256,6 +256,8 @@ async function save(jobId: string, rows: VisitRow[], state: VisitsState, since: 
   if ((await prisma.computerJobPause.count({ where: { jobId } })) > 0) {
     const kept = (await prisma.computerJob.findUnique({ where: { id: jobId }, select: { visitsState: true } }))?.visitsState as VisitsState | null | undefined;
     if (kept && SHORT_BY[kept] !== undefined && SHORT_BY[kept] > SHORT_BY[state]) state = kept;
+    // This stretch could not be recorded at all (`none`) but an earlier one was: the record is partial, never "none" over rows that exist
+    else if (state === 'none' && (kept === 'complete' || kept === 'partial')) state = 'partial';
   } else {
     since = new Date(0);
   }
@@ -296,7 +298,8 @@ export async function recordVisits(job: { id: string; startedAt: Date | null }, 
     const after = Date.now();
     // The program is not on the machine (it was made before this existed): there is no record, and that is said
     if (done.exitCode === 127 || /universe-visits: (command )?not found|No such file or directory/.test(done.stderr)) {
-      await save(job.id, [], 'none');
+      // A resumed job keeps what its earlier stretches kept: only this stretch's rows are replaced (CodeRabbit N16 on #1025)
+      await save(job.id, [], 'none', job.startedAt);
       return 'none';
     }
     if (done.exitCode !== 0 && !/(^|\n)end=1\s*$/.test(done.stdout)) {
@@ -308,11 +311,14 @@ export async function recordVisits(job: { id: string; startedAt: Date | null }, 
     const notes = await prisma.computerJobVisit.findMany({ where: { jobId: job.id, kind: 'hands' }, select: { at: true, by: true } });
     const hands: Hands[] = notes.map((note) => ({ at: note.at, by: note.by === 'person' ? 'person' : 'brick' }));
     const shaped = shapeVisits({ back, startedAt: job.startedAt, endedAt, before, after, hands });
-    await save(job.id, shaped.rows, shaped.state, new Date(since));
+    // The read starts a little before the stretch (padding for a clock that differs by a moment), but the rows replaced are the STRETCH's: a visit of the stretch before, inside the padding, was left out of
+    // `shaped` and must not be deleted with it (CodeRabbit N12 on #1025)
+    await save(job.id, shaped.rows, shaped.state, job.startedAt);
     return shaped.state;
   } catch (error) {
     console.error('[Computer] Could not read where a job’s computer browsed:', error instanceof Error ? error.message : 'unknown');
-    await prisma.computerJob.updateMany({ where: { id: job.id, visitsState: null }, data: { visitsState: 'unread' } }).catch(() => undefined);
+    // Said whatever the state was: a job whose first stretch was kept `complete` and whose next read failed is no longer a complete record, and no row is deleted for saying so
+    await prisma.computerJob.updateMany({ where: { id: job.id, OR: [{ visitsState: null }, { visitsState: { not: 'unread' } }] }, data: { visitsState: 'unread' } }).catch(() => undefined);
     return 'unread';
   }
 }
