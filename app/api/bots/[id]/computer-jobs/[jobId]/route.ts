@@ -5,6 +5,7 @@ import { requireServiceToken } from '@/lib/service-tokens';
 import { WAITING_FOR, EFFECT_KINDS, FINISH_CAUSES } from '@/lib/computer-values';
 import { claimJob, finishJobUnder, getJob, planEffect, recordFinishIntent, renewJob, reportProgressAs, requestHandoverAs, settleEffect } from '@/lib/computer';
 import { SUPERSEDED } from '@/lib/computer-owner';
+import { notesSent, pendingNotes } from '@/lib/computer-job-notes';
 
 export const runtime = 'nodejs';
 // Finishing a job hands its files over before it answers (limited by time: a few minutes), so a host that limits how long a request may run is told how long this one may
@@ -33,6 +34,8 @@ const actionSchema = z.discriminatedUnion('action', [
   // The runner's committed word that this job is to end, kept BEFORE it gives up (what the finish will say, as the finish says it)
   z.object({ action: z.literal('finish-intent'), epoch: epochSchema, outcome: z.enum(['done', 'failed']), cause: z.enum(FINISH_CAUSES).nullable().optional(), turns: z.array(z.number().int().min(0).max(100_000)).max(200).nullable().optional(), run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional(), why: z.string().max(2000).nullable().optional(), generation: z.number().int().min(0).nullable().optional(), /** What the stop rests on: `pool` = the runner gives up only because the pool refused its calls. A stop on that basis is stale once a call was admitted for its turn (or a later one) of the run. */ basis: z.enum(['pool']).nullable().optional() }),
   z.object({ action: z.literal('plan-effect'), key: z.string().min(1).max(255), kind: z.enum(EFFECT_KINDS), evidence: z.string().max(500).nullable().optional() }),
+  // The runner gave the agent every pending note up to `through` (the highest `seq` it sent): marked sent once, by the job's owner only
+  z.object({ action: z.literal('notes-sent'), epoch: epochSchema, through: z.number().int().min(1).max(2_000_000_000) }),
   z.object({ action: z.literal('settle-effect'), key: z.string().min(1).max(255), state: z.enum(['done', 'failed']), evidence: z.string().max(500).nullable().optional() }),
 ]);
 
@@ -53,21 +56,23 @@ async function jobOf(botId: string, jobId: string) {
 
 /**
  * GET /api/bots/:id/computer-jobs/:jobId - the job as it stands, with the details the person asked Brick to fill in that are still
- * to be done (what and where). Auth: service token only.
+ * to be done (what and where), and `notes`: what the person told the job since it started that the agent has not been given yet ([{ seq, text }], in
+ * order). Auth: service token only.
  */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string; jobId: string }> }) {
   const denied = guard(request);
   if (denied) return denied;
   const { id, jobId } = await params;
   const job = await jobOf(id, jobId);
-  return job ? NextResponse.json({ job }) : NextResponse.json({ error: 'Job not found' }, { status: 404 });
+  // `job.notes`: what the person told the job since it started, still to give the agent, in order ([{ seq, text }]); after giving them, say `notes-sent` with the highest seq
+  return job ? NextResponse.json({ job: { ...job, notes: await pendingNotes(jobId) } }) : NextResponse.json({ error: 'Job not found' }, { status: 404 });
 }
 
 /**
  * POST /api/bots/:id/computer-jobs/:jobId { action, ... } (game #2000). What a running job tells us, each safe to say twice:
  * `progress` (step n of m), `renew` (keep its room; with `run`, a renewal from a run that was replaced answers `{ ok: false, reason: 'stale', run: 'superseded' }` and holds nothing: answers `{ ok: false, reason }` when the allowance or our room is used up, and the
  * job has then saved and stopped), `handover` (it needs its person before details, a sign-in, an upload, paying or submitting),
- * `finish` (idempotent: a job that is over answers as it ended, nothing is written twice; with `generation`, an older control generation answers HTTP 200 `{ ok: false, reason: 'stale', job }` and does nothing; so does a `run` that is not the job's current one, i.e. a run that was replaced by a prepare of another (the answer then also says `run: 'superseded'`, which a stale generation never does): send `run` with every finish), `finish-intent` (the runner's committed word that the job is to end, kept BEFORE it gives up: first wins; every key of the job ends in the same transaction and no key, prepare, call or turn is allowed for it from then on; the job then shows `finishPending` on GET until a finish ends it, and the sweep completes it after about 2 minutes with what was said; answers HTTP 200 `{ ok: true, already, finishPending }` or `{ ok: false, reason: 'stale' | 'cutoff', job }`: stale = the job is over, was never started, or is on another generation; cutoff = Orbit already decided to end it for its own capacity, which wins; with `basis: 'pool'` (the runner gives up only because the pool refused its calls) a call admitted for the turn it names (the earliest of `turns`), or a later one, of the same run makes it stale too: capacity came back and the work goes on, nothing is written; an admission on an earlier turn never does), and `plan-effect` / `settle-effect` for anything it does outside its computer. `plan-effect` is written BEFORE it is
+ * `finish` (idempotent: a job that is over answers as it ended, nothing is written twice; with `generation`, an older control generation answers HTTP 200 `{ ok: false, reason: 'stale', job }` and does nothing; so does a `run` that is not the job's current one, i.e. a run that was replaced by a prepare of another (the answer then also says `run: 'superseded'`, which a stale generation never does): send `run` with every finish), `finish-intent` (the runner's committed word that the job is to end, kept BEFORE it gives up: first wins; every key of the job ends in the same transaction and no key, prepare, call or turn is allowed for it from then on; the job then shows `finishPending` on GET until a finish ends it, and the sweep completes it after about 2 minutes with what was said; answers HTTP 200 `{ ok: true, already, finishPending }` or `{ ok: false, reason: 'stale' | 'cutoff', job }`: stale = the job is over, was never started, or is on another generation; cutoff = Orbit already decided to end it for its own capacity, which wins; with `basis: 'pool'` (the runner gives up only because the pool refused its calls) a call admitted for the turn it names (the earliest of `turns`), or a later one, of the same run makes it stale too: capacity came back and the work goes on, nothing is written; an admission on an earlier turn never does), `notes-sent` (the runner gave the agent the person's notes up to `through`, the highest `seq` it sent: marked once, only by the job's owner), and `plan-effect` / `settle-effect` for anything it does outside its computer. `plan-effect` is written BEFORE it is
  * tried: `look_up` means it was tried before and the outcome is not known, so Brick looks it up and settles it, never repeats it.
  *
  * Auth: service token only.
@@ -120,6 +125,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       }
       case 'plan-effect':
         return NextResponse.json(await planEffect(jobId, { key: body.key, kind: body.kind, evidence: body.evidence }));
+      case 'notes-sent': {
+        // `{ ok: true, sent }` (sent = how many were marked now; 0 when said again), `{ ok: false, reason: 'stale', run: 'superseded' }` (not the owner: exit), `{ ok: false, reason: 'over' }`
+        return NextResponse.json(await notesSent(jobId, { through: body.through, epoch: body.epoch }));
+      }
       case 'settle-effect':
         return NextResponse.json({ ok: await settleEffect(jobId, body.key, body.state, body.evidence) });
     }

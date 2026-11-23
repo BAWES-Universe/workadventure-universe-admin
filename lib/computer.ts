@@ -27,6 +27,7 @@ import {
   sleep,
 } from '@/lib/computer-control';
 import { cleanStepLabel } from '@/lib/computer-redact';
+import { appendStep } from '@/lib/computer-job-steps';
 import { callRoomKey, endIfCutoffDecided, endStuckCutoffs, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { reconcileComputers } from '@/lib/computer-reconcile';
@@ -1219,6 +1220,8 @@ export async function reportProgressAs(jobId: string, progress: { stepDone: numb
     where: { id: jobId, status: { in: ['running', 'waiting'] }, ...ownerWhere(owner.epoch) },
     data: { stepDone, ...(stepTotal !== undefined ? { stepTotal } : {}), ...(progress.label !== undefined ? { stepLabel: cleanStepLabel(progress.label) } : {}) },
   });
+  // Activity: a new step the owner reported is kept in the job's list of steps (the same owner rule, in its own conditional write)
+  if (done.count === 1) await appendStep(jobId, progress.label, owner);
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return { job: job ? jobView(job) : null, applied: done.count === 1, superseded: !!job && !epochMatches(job.ownerEpoch, owner.epoch) };
 }

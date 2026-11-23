@@ -750,6 +750,20 @@ export function brickLimits(values: BrickLimits): Limit[] {
       ],
     },
     {
+      id: 'computerSteps',
+      label: 'Steps of a computer job kept for its Activity',
+      hint: 'Activity lists what a computer job has done so far, step by step, beside Watch and Files. A job that takes more steps than this keeps the newest ones.',
+      unit: 'steps',
+      value: values.computerSteps,
+      recommended: recommended.computerSteps,
+      note: 'Applies from the next step a job takes.',
+      options: [
+        { value: 50, label: '50 steps', meaning: 'Enough for short jobs.' },
+        { value: 200, label: '200 steps', meaning: 'A steady pace.' },
+        { value: 1000, label: '1,000 steps', meaning: 'For long jobs.' },
+      ],
+    },
+    {
       id: 'scheduledCardWait',
       label: 'How long a card from a goal or task waits for a person',
       hint: 'When a goal or task needs a yes before it goes on, its card waits this long. If it is the same thing again on a later check, that check joins the waiting card: no second card, no second message. When the time is up the card ends.',
