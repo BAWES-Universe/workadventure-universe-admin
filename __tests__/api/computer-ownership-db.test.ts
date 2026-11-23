@@ -147,10 +147,13 @@ run('one owner per computer job: every write is decided in the write that lands 
       locked = resolve;
       failed = reject;
     });
+    // The fixture's own backend: a waiter is only the one blocked BY it (CodeRabbit on #1025, 45)
+    let pid = 0;
     const done = prisma
       .$transaction(
         async (tx) => {
           await tx.$queryRaw`SELECT "id" FROM "computer_jobs" WHERE "id" = ${jobId} FOR UPDATE`;
+          pid = (await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`)[0].pid;
           locked();
           await released;
           await work(tx);
@@ -161,12 +164,13 @@ run('one owner per computer job: every write is decided in the write that lands 
         failed(error);
         throw error;
       });
-    return { locked: lockTaken, release, done };
+    return { locked: lockTaken, release, done, pid: () => pid };
   };
-  /** Whether some request is waiting for a row lock (a transaction waiting for another to finish). */
-  const waitForRowWaiter = async (): Promise<boolean> => {
+  /** Whether a request is waiting for the row the fixture holds: a backend that the fixture's own backend blocks (never any waiter of the server). */
+  const waitForRowWaiter = async (holder: { pid: () => number }): Promise<boolean> => {
     for (let tries = 0; tries < 250; tries += 1) {
-      if ((await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'transactionid' AND NOT granted`)[0].n >= 1) return true;
+      const pid = holder.pid();
+      if (pid > 0 && (await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`)[0].n >= 1) return true;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     return false;
@@ -1113,13 +1117,19 @@ run('one owner per computer job: every write is decided in the write that lands 
       const holder = holdRow(jobId, async (tx) => {
         await tx.computerJob.update({ where: { id: jobId }, data: { ownerEpoch: { increment: 1 } } });
       });
-      await holder.locked;
-      const waiting = prepareJob(jobId, RELAY, minutes(3), { run: 'rB', epoch: eb, relayReached: false, relayStatus: 404 });
-      expect(await waitForRowWaiter()).toBe(true);
-      holder.release();
-      await holder.done;
-      expect(await waiting).toEqual({ ok: false, reason: 'superseded' });
-      expect(await prisma.computerJobFault.count({ where: { jobId } })).toBe(faults);
+      let waiting: ReturnType<typeof prepareJob> | undefined;
+      try {
+        await holder.locked;
+        waiting = prepareJob(jobId, RELAY, minutes(3), { run: 'rB', epoch: eb, relayReached: false, relayStatus: 404 });
+        expect(await waitForRowWaiter(holder)).toBe(true);
+        holder.release();
+        await holder.done;
+        expect(await waiting!).toEqual({ ok: false, reason: 'superseded' });
+        expect(await prisma.computerJobFault.count({ where: { jobId } })).toBe(faults);
+      } finally {
+        holder.release();
+        await Promise.allSettled([holder.done, ...(waiting ? [waiting] : [])]);
+      }
     });
 
     it('a prepare that is overtaken by a claim after its key was made is `superseded` and its key is ended: only the owner’s key stands', async () => {
@@ -1210,6 +1220,9 @@ run('one owner per computer job: every write is decided in the write that lands 
       const won = await claimJob(jobId, { run: 'rA', seen: 0 }, NOW);
       expect(won).toEqual({ ok: true, epoch: 1 });
       expect(await jobOf(jobId)).toMatchObject({ ownerEpoch: 1, ownerRun: 'rA', ownerLeaseUntil: HELD_UNTIL });
+      // The owner has a key (CodeRabbit on #1025, 43): a claim that is refused must leave it valid
+      const ownersKey = await keyFor(jobId, 1);
+      expect(await liveKeys(jobId)).toBe(1);
       const before = await jobOf(jobId);
       // A second server with the current epoch: refused, and told when to look again
       expect(await claimJob(jobId, { run: 'rB', seen: 1 }, new Date(NOW.getTime() + 89_000))).toEqual({ ok: false, reason: 'held', until: HELD_UNTIL });
@@ -1217,7 +1230,8 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect([after.ownerEpoch, after.ownerRun, after.leaseVersion]).toEqual([before.ownerEpoch, before.ownerRun, before.leaseVersion]);
       expect(after.ownerLeaseUntil).toEqual(HELD_UNTIL);
       // The owner's keys are untouched by a refused claim
-      expect(await liveKeys(jobId)).toBe(await liveKeys(jobId));
+      expect(await liveKeys(jobId)).toBe(1);
+      expect((await verifyJobToken(ownersKey, 'model', new Date(NOW.getTime() + 89_000))).ok).toBe(true);
       // Once the hold has run out (the owner stopped beating) the next worker takes it
       expect(await claimJob(jobId, { run: 'rB', seen: 1 }, new Date(NOW.getTime() + 91_000))).toEqual({ ok: true, epoch: 2 });
     });
@@ -1409,13 +1423,19 @@ run('one owner per computer job: every write is decided in the write that lands 
       const holder = holdRow(jobId, async (tx) => {
         await tx.computerJob.update({ where: { id: jobId }, data: { ownerEpoch: { increment: 1 } } });
       });
-      await holder.locked;
-      const waiting = settleEffectAs(jobId, 'send-1', 'done', 'sent', { epoch: ea });
-      expect(await waitForRowWaiter()).toBe(true);
-      holder.release();
-      await holder.done;
-      expect(await waiting).toEqual({ ok: false, superseded: true });
-      expect((await prisma.computerEffect.findUniqueOrThrow({ where: { jobId_effectKey: { jobId, effectKey: 'send-1' } } })).state).toBe('planned');
+      let waiting: ReturnType<typeof settleEffectAs> | undefined;
+      try {
+        await holder.locked;
+        waiting = settleEffectAs(jobId, 'send-1', 'done', 'sent', { epoch: ea });
+        expect(await waitForRowWaiter(holder)).toBe(true);
+        holder.release();
+        await holder.done;
+        expect(await waiting!).toEqual({ ok: false, superseded: true });
+        expect((await prisma.computerEffect.findUniqueOrThrow({ where: { jobId_effectKey: { jobId, effectKey: 'send-1' } } })).state).toBe('planned');
+      } finally {
+        holder.release();
+        await Promise.allSettled([holder.done, ...(waiting ? [waiting] : [])]);
+      }
     });
 
     it('N4: a worker that says the relay was unreachable records the fault only while the job still is what it found: a job that is no longer Brick’s, or another owner’s, keeps none; the owner’s is kept once', async () => {
@@ -1459,19 +1479,25 @@ run('one owner per computer job: every write is decided in the write that lands 
       const holder = holdRow(jobId, async (tx) => {
         await tx.computerJob.update({ where: { id: jobId }, data: { secondsRun: 90, stretchStarted: minutes(2), handoverSeq: { increment: 1 } } });
       });
-      await holder.locked;
-      const waiting = requestHandoverAs(jobId, 'signin', minutes(5), null, { epoch: ea });
-      expect(await waitForRowWaiter()).toBe(true);
-      holder.release();
-      await holder.done;
-      const landed = await waiting;
-      expect(landed.refused).toBeNull();
-      // 90 s already counted + the 3 minutes since the stretch the job is in began (read AFTER the wait, never the 5 minutes of the stretch read before it)
-      expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', waitingFor: 'signin', secondsRun: 90 + 180 });
-      // CONTROL: asked again while it waits, it is the same wait (nothing counted twice)
-      const again = await requestHandoverAs(jobId, 'upload', minutes(6), null, { epoch: ea });
-      expect(again.refused).toBeNull();
-      expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', waitingFor: 'upload', secondsRun: 90 + 180 });
+      let waiting: ReturnType<typeof requestHandoverAs> | undefined;
+      try {
+        await holder.locked;
+        waiting = requestHandoverAs(jobId, 'signin', minutes(5), null, { epoch: ea });
+        expect(await waitForRowWaiter(holder)).toBe(true);
+        holder.release();
+        await holder.done;
+        const landed = await waiting!;
+        expect(landed.refused).toBeNull();
+        // 90 s already counted + the 3 minutes since the stretch the job is in began (read AFTER the wait, never the 5 minutes of the stretch read before it)
+        expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', waitingFor: 'signin', secondsRun: 90 + 180 });
+        // CONTROL: asked again while it waits, it is the same wait (nothing counted twice)
+        const again = await requestHandoverAs(jobId, 'upload', minutes(6), null, { epoch: ea });
+        expect(again.refused).toBeNull();
+        expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', waitingFor: 'upload', secondsRun: 90 + 180 });
+      } finally {
+        holder.release();
+        await Promise.allSettled([holder.done, ...(waiting ? [waiting] : [])]);
+      }
     });
 
     it('handover: the write that lands the wait names the very `secondsRun` and `stretchStarted` it read (behind the row lock: belt and braces against a delayed worker)', async () => {
@@ -1511,13 +1537,19 @@ run('one owner per computer job: every write is decided in the write that lands 
       const holder = holdRow(jobId, async (tx) => {
         await tx.computerFinishIntent.create({ data: { jobId, outcome: 'done', turns: [] } });
       });
-      await holder.locked;
-      const waiting = requestHandoverAs(jobId, 'signin', minutes(2), null, { epoch: ea });
-      expect(await waitForRowWaiter()).toBe(true);
-      holder.release();
-      await holder.done;
-      await waiting;
-      expect(await jobOf(jobId)).toMatchObject({ status: 'running', waitingFor: null });
+      let waiting: ReturnType<typeof requestHandoverAs> | undefined;
+      try {
+        await holder.locked;
+        waiting = requestHandoverAs(jobId, 'signin', minutes(2), null, { epoch: ea });
+        expect(await waitForRowWaiter(holder)).toBe(true);
+        holder.release();
+        await holder.done;
+        await waiting!;
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running', waitingFor: null });
+      } finally {
+        holder.release();
+        await Promise.allSettled([holder.done, ...(waiting ? [waiting] : [])]);
+      }
     });
 
     it('N13: the same start key said twice shares one attempt: the second request’s trouble does not let the first one’s attempt go, and the first still makes its job', async () => {
