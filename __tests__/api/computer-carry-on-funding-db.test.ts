@@ -28,20 +28,16 @@ jest.mock('@/lib/computer-browser-profile', () => {
 import { prisma } from '@/lib/db';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
-import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
-import { heldRoom, memberAllowance } from '@/lib/meter-allowance';
+import { saveMeterSettings } from '@/lib/meter';
 import * as allowanceModule from '@/lib/meter-allowance';
-import * as meterModule from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { claimJob, computerTimeInBooks, controlInternals, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
-import { authorizeModelCall, callRoomKey, settleModelCall } from '@/lib/computer-calls';
+import { claimJob, controlInternals, finishJobUnder, giveComputer, renewJob, startJob, sweepComputers } from '@/lib/computer';
+import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { mintJobToken } from '@/lib/computer-token';
-import { recordPoolCutoff } from '@/lib/computer-faults';
-import { pauseEventId, pauseJob, resumeJob } from '@/lib/computer-job-controls';
-import { carryOnPaused, pauseForLimit } from '@/lib/computer-limit-pause';
+import { pauseJob, resumeJob } from '@/lib/computer-job-controls';
+import { carryOnPaused } from '@/lib/computer-limit-pause';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
 import { createGiftFor } from '@/lib/grants-admin';
-import { callInLastStretch } from '@/lib/computer-stretch';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -85,7 +81,6 @@ const wipe = async () => {
 
 const jobOf = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
 const timeEvents = (jobId: string) => prisma.meterEvent.findMany({ where: { jobId, kind: 'computer_time' }, orderBy: { eventId: 'asc' } });
-const liveKeys = (jobId: string) => prisma.computerJobToken.count({ where: { jobId, revokedAt: null } });
 const tellings = (jobId: string) => prisma.computerJobTelling.findMany({ where: { jobId }, orderBy: { seq: 'asc' } });
 const claimed = async (jobId: string, runName: string, at: Date = NOW): Promise<number> => {
   const won = await claimJob(jobId, { run: runName, seen: (await jobOf(jobId)).ownerEpoch }, at);
