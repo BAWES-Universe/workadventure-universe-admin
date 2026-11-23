@@ -736,6 +736,20 @@ export function brickLimits(values: BrickLimits): Limit[] {
       ],
     },
     {
+      id: 'pausedSignInsHours',
+      label: 'How long a paused computer job keeps its sign-ins',
+      hint: 'A paused job keeps the sites it was signed in to and the pages it had open, locked away from every other job, so it carries on where it was. After this long they are dropped: the job stays paused, and it signs in again when it carries on.',
+      unit: 'hours',
+      value: values.pausedSignInsHours,
+      recommended: recommended.pausedSignInsHours,
+      note: 'Applies from the next check, to jobs already paused too.',
+      options: [
+        { value: 4, label: '4 hours', meaning: 'Keeps sign-ins for the shortest time.' },
+        { value: 24, label: '1 day', meaning: 'Time to come back to it.' },
+        { value: 72, label: '3 days', meaning: 'For people who step away.' },
+      ],
+    },
+    {
       id: 'scheduledCardWait',
       label: 'How long a card from a goal or task waits for a person',
       hint: 'When a goal or task needs a yes before it goes on, its card waits this long. If it is the same thing again on a later check, that check joins the waiting card: no second card, no second message. When the time is up the card ends.',
