@@ -1200,6 +1200,9 @@ run('rules said in chat and task receipts, in a real database', () => {
         ['allowance', 'done', 'Stopped: your computer time ran out', 'month'],
         ['person', 'done', 'Stopped by you', null],
         ['pool', 'refunded', 'Stopped: our computers were busy, and its time was given back', 'failed'],
+        // Sentry on #1025: the computer turned off or the Brick deleted ends a job that ran as `stopped` too. Such a job did not finish, so its receipt is not done either, and what the person reads is the stopped line (never "It didn't finish"); Brick says nothing (they did it)
+        ['off', 'done', OUTCOME_WORDS.stopped, null],
+        ['deleted', 'done', OUTCOME_WORDS.stopped, null],
       ])('stopped by %s: the receipt is %s and says "%s", and the report kind is %s, never done', async (endedBy, state, words, kind) => {
         const { sara, jobId } = await stoppedBy(endedBy, `Stopped by ${endedBy}`);
         const item = (await activityFor(sara.id)).find((one) => one.title === `Stopped by ${endedBy}`);

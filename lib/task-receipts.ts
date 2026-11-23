@@ -283,7 +283,7 @@ const jobOf = (tx: Tx, task: Task): Promise<JobRow> => tx.computerJob.findFirst(
 
 /** The task ran a computer job for the person: it started and did not fail on our side (a job given back did nothing for them). */
 const jobRan = (job: JobRow): job is NonNullable<JobRow> => job !== null && job.startedAt !== null && !givenBackJob(job.status, job.endedBy);
-/** That job did not finish: it failed after running (the agent gave up, or it hit its turn cap) or was stopped before it finished (their spending rule, or their own Stop), and its time is the person's like any other run. */
+/** That job did not finish: it failed after running (the agent gave up, or it hit its turn cap) or was stopped before it finished (their spending rule, their own Stop, the computer turned off, the Brick deleted: whoever stopped it, a job that did not finish is never receipted as done; what the person READS for these is the stopped line, put right at read time from the job, never "It didn’t finish"), and its time is the person's like any other run. */
 const jobFailed = (job: JobRow): boolean => jobRan(job) && (job?.status === 'failed' || job?.status === 'stopped');
 
 /**
