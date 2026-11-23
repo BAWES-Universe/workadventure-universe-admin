@@ -87,6 +87,8 @@ export interface Report {
   holdReleased?: true;
   /** `paused` only: what paused it, the person's month of computer time (`allowance`) or a spending limit they set (`rule`). Never a number or a price. */
   pausedWhy?: 'allowance' | 'rule';
+  /** Only on `paused`, and only when it is so: the month or the limit was reached while the person held the screen, so it was taken back (Brick says the held-screen line, and asks before it carries on). */
+  heldScreen?: true;
 }
 
 /**
@@ -458,6 +460,8 @@ async function tellingReportsSafely(size: number, now: Date, accepts: readonly s
         handed: [],
         givenBack: false,
         ...(one.kind === 'paused' && one.why ? { pausedWhy: one.why } : {}),
+        // The pause took the screen back from the person (section 7): the held-screen line is said in place of the usual pause line
+        ...(one.kind === 'paused' && one.heldScreen ? { heldScreen: true } : {}),
       });
     }
     return out;

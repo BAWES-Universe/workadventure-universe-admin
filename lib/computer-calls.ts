@@ -391,14 +391,13 @@ async function holdsItsRoom(jobId: string, callId: string, personId: string, now
 /**
  * Ends the job a call was refused for (computer.ts owns how a job ends; it is loaded when asked, as it reads this file). A refusal is answered whatever this does: never throws; says whether the job was ended (or paused).
  * The person's month or a limit they set PAUSES the job instead (piece 3, lib/computer-limit-pause), decided under the same conditions an ending was: the call's own key still good and the owner's, no kept intent, no
- * cutoff. Only while the person holds the screen does it end as before. Our own pool's cutoff ends it as before, always.
+ * cutoff (while the person holds the screen too: it is taken back, section 7). It never ends the job for them. Our own pool's cutoff ends it as before, always.
  */
 async function endForRefusal(jobId: string, why: { reason: 'allowance' } | { reason: 'rule' | 'pool'; words: string }, now: Date, from?: { epoch: number; tokenId: string }): Promise<boolean> {
   try {
     if (why.reason !== 'pool') {
       const { pauseForLimit } = await import('@/lib/computer-limit-pause');
-      const paused = await pauseForLimit(jobId, why.reason, now, from);
-      if (paused !== 'person_holds') return paused === 'paused';
+      return (await pauseForLimit(jobId, why.reason, now, from)) === 'paused';
     }
     const { stopJobForRefusal } = await import('@/lib/computer');
     await stopJobForRefusal(jobId, why, now, from);

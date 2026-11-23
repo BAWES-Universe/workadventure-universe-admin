@@ -16,10 +16,10 @@ export const TELLING_KINDS = ['paused', 'carried_on', 'can_carry_on'] as const;
 export type TellingKind = (typeof TELLING_KINDS)[number];
 
 /** Writes one thing to tell, in the caller's transaction (which holds the job's row lock: the sequence is read and written under it). */
-export async function tellIn(tx: Prisma.TransactionClient, jobId: string, kind: TellingKind, why: 'allowance' | 'rule' | null, now: Date): Promise<number> {
+export async function tellIn(tx: Prisma.TransactionClient, jobId: string, kind: TellingKind, why: 'allowance' | 'rule' | null, now: Date, extra: { /** The pause took the screen back from the person */ heldScreen?: boolean } = {}): Promise<number> {
   const last = await tx.computerJobTelling.aggregate({ where: { jobId }, _max: { seq: true } });
   const seq = (last._max.seq ?? 0) + 1;
-  await tx.computerJobTelling.create({ data: { jobId, seq, kind, why, createdAt: now } });
+  await tx.computerJobTelling.create({ data: { jobId, seq, kind, why, heldScreen: !!extra.heldScreen, createdAt: now } });
   return seq;
 }
 
@@ -42,6 +42,8 @@ export interface Telling {
   seq: number;
   kind: TellingKind;
   why: 'allowance' | 'rule' | null;
+  /** The pause took the screen back from the person: Brick says the held-screen line in place of the usual one */
+  heldScreen: boolean;
   createdAt: Date;
 }
 
@@ -68,7 +70,7 @@ export async function tellingsToTell(limit: number, now: Date): Promise<Telling[
       await prisma.computerJobTelling.updateMany({ where: { id: one.id, toldAt: null, undeliverableAt: null, staleAt: null }, data: { staleAt: now } });
       continue;
     }
-    out.push({ jobId: one.jobId, seq: one.seq, kind: one.kind as TellingKind, why: one.why === 'allowance' || one.why === 'rule' ? one.why : null, createdAt: one.createdAt });
+    out.push({ jobId: one.jobId, seq: one.seq, kind: one.kind as TellingKind, why: one.why === 'allowance' || one.why === 'rule' ? one.why : null, heldScreen: one.heldScreen, createdAt: one.createdAt });
   }
   return out;
 }

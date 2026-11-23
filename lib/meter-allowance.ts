@@ -191,7 +191,8 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
   // A gigabyte is 10^9 bytes; rounded up in whole millionths of a dollar, and in BigInt so a very large disk cannot lose a digit
   const keptStorageMicros = storageMonthMicros(kept[0]?.bytes ?? BigInt(0), settings);
   const committedMicros = asNumber(settled._sum.costMicros);
-  const unsettledMicros = asNumber(unsettled._sum.costMicros) + lapsed;
+  // A paused stretch whose time is not in the books yet is spent and not settled with the provider: counted with the rest of that
+  const unsettledMicros = asNumber(unsettled._sum.costMicros) + lapsed + (await unbookedPauseMicros(tx, now));
   const reserveMicros = settings.reserveMicros ?? 0;
   return {
     committedMicros,
@@ -266,10 +267,32 @@ async function lockPool(tx: Tx): Promise<void> {
 }
 
 /** Whether `extra` more fits for this member and the pool; the reason it does not, or null. The member's own allowance comes first: a member who used theirs up asks for more, whatever the pool holds. */
-/** Room held for a person's steps that still counts against what they can start: held and in time, or ran out and not yet settled or released. */
-export async function heldRoom(personId: string, now: Date, db: Pick<Tx, 'meterReservation'> = prisma): Promise<number> {
+/**
+ * A paused computer job's stretch: its room is settled in the pause's own commit and its time is written to the books just after it (lib/computer-job-controls.ts).
+ * Until that write is known done (`booked_at`), the settled room is counted here, so the stretch is never counted nowhere: not by the person's month, not by
+ * the pool (a write that failed waits for the sweep). Counted in the month the pause happened in, which is the month its event is dated.
+ * Two known errors, both on the safe side (less room, never free room): between the event's write and `booked_at` being set the stretch is counted twice
+ * (its event and this room), for an instant, or until the next sweep marks it booked if that mark failed (about a minute or two); and a stretch paid from
+ * credit is counted here at its full price until it is booked (the event then counts only what the allowance paid).
+ */
+async function unbookedPauseMicros(db: Pick<Tx, '$queryRaw'>, now: Date, personId?: string): Promise<number> {
+  const month = monthOf(now);
+  const rows = personId
+    ? await db.$queryRaw<{ micros: bigint | null }[]>`
+        SELECT COALESCE(SUM(r."settled_micros"), 0)::bigint AS micros
+        FROM "computer_job_pauses" p JOIN "meter_reservations" r ON r."reservation_key" = p."room_key"
+        WHERE p."booked_at" IS NULL AND r."state" = 'settled' AND p."at" >= ${month.start} AND p."at" < ${month.end} AND r."person_key" = ${`person:${personId}`}`
+    : await db.$queryRaw<{ micros: bigint | null }[]>`
+        SELECT COALESCE(SUM(r."settled_micros"), 0)::bigint AS micros
+        FROM "computer_job_pauses" p JOIN "meter_reservations" r ON r."reservation_key" = p."room_key"
+        WHERE p."booked_at" IS NULL AND r."state" = 'settled' AND p."at" >= ${month.start} AND p."at" < ${month.end}`;
+  return asNumber(rows[0]?.micros ?? null);
+}
+
+/** Room held for a person's steps that still counts against what they can start: held and in time, or ran out and not yet settled or released; and a paused stretch not yet in the books. */
+export async function heldRoom(personId: string, now: Date, db: Pick<Tx, 'meterReservation' | '$queryRaw'> = prisma): Promise<number> {
   const held = await db.meterReservation.aggregate({ where: { personKey: `person:${personId}`, ...stillCounts(now) }, _sum: { amountMicros: true } });
-  return asNumber(held._sum.amountMicros);
+  return asNumber(held._sum.amountMicros) + (await unbookedPauseMicros(db, now, personId));
 }
 
 async function fits(tx: Tx, personId: string, extraMicros: number, now: Date, settings: MeterSettings, opts: { newJob: boolean }): Promise<NoRoom | null> {

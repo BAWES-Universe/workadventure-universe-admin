@@ -28,7 +28,7 @@ import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
 import { GET as getPaidBy } from '@/app/api/bots/[id]/paid-by/route';
 import { POST as postJob } from '@/app/api/bots/[id]/computer-jobs/route';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { finishJob, giveComputer, renewJob, startJob, sweepComputers, takeOver } from '@/lib/computer';
+import { finishJob, giveComputer, renewJob, startJob, stopJobForRefusal, sweepComputers } from '@/lib/computer';
 import { recordFaults } from '@/lib/computer-faults';
 import { reportsToTell } from '@/lib/computer-report';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_LATEST_MS } from '@/lib/computer-file-cards';
@@ -1130,7 +1130,8 @@ run('rules said in chat and task receipts, in a real database', () => {
     });
 
     describe('what the payer reads on the receipt of a job stopped at their spending rule (GPT observation 2)', () => {
-      /** A job that ran, then stopped at a rule the person said, with its receipt closed the way the bot server closes it ("done"). A rule ENDS a job only while the person holds the screen (no pause is offered then); otherwise it pauses. */
+      /** A job that ran, then stopped at a rule the person said, with its receipt closed the way the bot server closes it ("done"). A rule now PAUSES a running job; a job ended at a rule (before that, or by the
+       * refusal's ending path) still reads this way, so it is ended here through that path directly. */
       async function stoppedAtRule(title: string) {
         const sara = await person('sara');
         await giveComputer(sara.brickId, sara.id);
@@ -1141,8 +1142,7 @@ run('rules said in chat and task receipts, in a real database', () => {
         await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: started.job.id, title, category: 'computer' }, NOW);
         await prisma.meterReservation.updateMany({ where: { jobId: started.job.id }, data: { createdAt: NOW } });
         expect(await renewJob(started.job.id, new Date(NOW.getTime() + 60_000))).toMatchObject({ ok: true });
-        expect((await takeOver(sara.brickId, sara.id, new Date(NOW.getTime() + 120_000))).ok).toBe(true);
-        expect(await renewJob(started.job.id, new Date(NOW.getTime() + 600_000))).toMatchObject({ ok: false, reason: 'rule' });
+        await stopJobForRefusal(started.job.id, { reason: 'rule', words: 'No more than $0.10 a month' }, new Date(NOW.getTime() + 600_000));
         expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'rule', startedAt: expect.any(Date) });
         await closeReceipt({ botId: sara.brickId, taskKey: started.job.id, personId: sara.id, state: 'done' }, new Date(NOW.getTime() + 601_000));
         return { sara, jobId: started.job.id };

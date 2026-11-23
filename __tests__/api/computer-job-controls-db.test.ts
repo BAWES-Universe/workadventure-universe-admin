@@ -31,7 +31,7 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import * as meterModule from '@/lib/meter';
-import { memberAllowance } from '@/lib/meter-allowance';
+import { currentEnvelope, heldRoom, memberAllowance } from '@/lib/meter-allowance';
 import * as allowanceModule from '@/lib/meter-allowance';
 import * as capabilityPause from '@/lib/capability-pause';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
@@ -575,6 +575,114 @@ run('computer job controls: pause, resume, do this next, cancel one job (piece 1
       }
       expect(await computerTimeInBooks(sara.brickId, minutes(7))).toBe(true);
       expect((await eventsOf(jobId)).map((event) => event.eventId)).toEqual([pauseEventId(jobId, 1)]);
+    });
+  });
+
+  describe('Opus read of piece 1: T2 and T3', () => {
+    it('T2: a job that had already counted time before this stretch (it waited once) is charged each second once: the pause takes the time so far, the ending only what ran after the resume', async () => {
+      const { sara, jobId } = await running('o-t2');
+      // 120 seconds already counted by an earlier stretch; this stretch started at minute 2
+      await prisma.computerJob.update({ where: { id: jobId }, data: { secondsRun: 120, stretchStarted: minutes(2) } });
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(5));
+      await resumeJob(sara.brickId, sara.id, jobId, minutes(6));
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', secondsRun: 0, secondsBilled: 300 });
+      await stopJobFor(sara.brickId, sara.id, minutes(11));
+      await sweepComputers(minutes(30));
+      const events = await eventsOf(jobId);
+      expect(events.map((event) => [event.eventId, Number(event.quantity)])).toEqual([
+        [`computer:${jobId}:time`, 300],
+        [pauseEventId(jobId, 1), 300],
+      ]);
+      // 120 before, 180 in the stretch, 300 after the resume
+      expect(events.reduce((sum, event) => sum + Number(event.quantity), 0)).toBe(600);
+    });
+
+    it('T3: a pause right after a first turn was sent with no response id puts the machine under the turn hold: the next job does not start until the machine is proved asleep', async () => {
+      const { sara, jobId } = await running('o-t3');
+      const next = await another(sara, 'Next one', minutes(1));
+      await prisma.computerJob.update({ where: { id: jobId }, data: { firstTurnSentAt: minutes(2), agentResponseId: null } });
+      const ref = `fake-${sara.brickId}`;
+      fake.stuckAwake.add(ref);
+      try {
+        expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(3))).toMatchObject({ ok: true });
+        expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).turnUnprovenSince).not.toBeNull();
+        expect(await jobOf(next)).toMatchObject({ status: 'queued' });
+        await sweepComputers(minutes(4));
+        expect(await jobOf(next)).toMatchObject({ status: 'queued' });
+        fake.stuckAwake.delete(ref);
+        await sweepComputers(minutes(5));
+        expect(await jobOf(next)).toMatchObject({ status: 'running' });
+        expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).turnUnprovenSince).toBeNull();
+      } finally {
+        fake.stuckAwake.delete(ref);
+      }
+      // CONTROL: a pause with no unnamed first turn holds nothing; the next job starts at once
+      const b = await running('o-t3-control');
+      const nextB = await another(b.sara, 'Next one', minutes(1));
+      await pauseJob(b.sara.brickId, b.sara.id, b.jobId, minutes(3));
+      expect(await jobOf(nextB)).toMatchObject({ status: 'running' });
+    });
+  });
+
+  describe('Opus P1-1: a paused stretch is counted between the pause and its write to the books', () => {
+    const failWrites = () =>
+      recordMeterEvent.mockImplementation(async () => {
+        throw new Error('the books did not answer');
+      });
+    const workingWrites = () => recordMeterEvent.mockImplementation((...args: unknown[]) => jest.requireActual('@/lib/meter').recordMeterEvent(...args));
+
+    it('the write fails: a resume 30 s later is refused by the month (the stretch is counted through its settled room); CONTROL: with the write working, refused the same way', async () => {
+      for (const writes of ['failing', 'working'] as const) {
+        await setUp({ memberAllowanceMicros: 80_000 });
+        const { sara, jobId } = await running(`m-p11-${writes}`);
+        if (writes === 'failing') failWrites();
+        try {
+          expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(5))).toMatchObject({ ok: true });
+          expect(await eventsOf(jobId)).toHaveLength(writes === 'failing' ? 0 : 1);
+          // 80,000 less the 30,000 stretch leaves 50,000: not enough for a 10 minute room (60,000)
+          expect(await resumeJob(sara.brickId, sara.id, jobId, new Date(minutes(5).getTime() + 30_000))).toEqual({ ok: false, reason: 'allowance' });
+          expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', reservationKey: null });
+          expect(await prisma.meterReservation.count({ where: { jobId, state: 'held' } })).toBe(0);
+        } finally {
+          workingWrites();
+        }
+      }
+    });
+
+    it('the write fails: a resume is refused by the person’s own spending limit the same way (the rule counts the stretch once); CONTROL: with the write working', async () => {
+      for (const writes of ['failing', 'working'] as const) {
+        const { sara, jobId } = await running(`m-p11-rule-${writes}`);
+        await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 80_000 });
+        if (writes === 'failing') failWrites();
+        try {
+          await pauseJob(sara.brickId, sara.id, jobId, minutes(5));
+          expect(await eventsOf(jobId)).toHaveLength(writes === 'failing' ? 0 : 1);
+          expect(await resumeJob(sara.brickId, sara.id, jobId, new Date(minutes(5).getTime() + 30_000))).toEqual({ ok: false, reason: 'rule' });
+          expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule' });
+        } finally {
+          workingWrites();
+        }
+      }
+    });
+
+    it('while the write is missing, the month and the pool count the stretch once through its room; once the sweep writes it, they count it once through its event (never twice, never not at all)', async () => {
+      const { sara, jobId } = await running('m-p11-once');
+      failWrites();
+      try {
+        await pauseJob(sara.brickId, sara.id, jobId, minutes(5));
+      } finally {
+        workingWrites();
+      }
+      const at = minutes(5);
+      const settings = await getMeterSettings();
+      const used = async (when: Date) => ((await memberAllowance(sara.id, when, settings))?.usedMicros ?? 0) + (await heldRoom(sara.id, when));
+      expect(await used(at)).toBe(5 * PER_MINUTE);
+      const before = (await currentEnvelope(at)).unsettledMicros;
+      await sweepComputers(minutes(7));
+      expect(await eventsOf(jobId)).toHaveLength(1);
+      expect(await used(minutes(7))).toBe(5 * PER_MINUTE);
+      // The pool: the room's 30,000 moved from "not in the books" to an event (unsettled with the provider either way), never both
+      expect((await currentEnvelope(minutes(7))).unsettledMicros).toBe(before);
     });
   });
 
