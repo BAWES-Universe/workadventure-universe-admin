@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { WAITING_FOR, EFFECT_KINDS, FINISH_CAUSES } from '@/lib/computer-values';
-import { claimJob, finishJobUnder, getJob, planEffect, recordFinishIntent, renewJob, reportProgressAs, requestHandoverAs, settleEffectAs } from '@/lib/computer';
+import { beatJob, claimJob, finishJobUnder, getJob, planEffect, recordFinishIntent, releaseJob, renewJob, reportProgressAs, requestHandoverAs, settleEffectAs } from '@/lib/computer';
 import { SUPERSEDED } from '@/lib/computer-owner';
 import { notesSent, pendingNotes } from '@/lib/computer-job-notes';
 
@@ -18,6 +18,9 @@ const epochSchema = z.number().int().min(0).max(2_000_000_000).nullable().option
 const actionSchema = z.discriminatedUnion('action', [
   // The runner takes up a job: it names the owner epoch it last saw (`GET`'s `ownerEpoch`) and wins only if that is still the job's
   z.object({ action: z.literal('claim'), run: runSchema.nullable().optional(), seen: z.number().int().min(0).max(2_000_000_000) }),
+  /** The owner says it is still there (every 30 s, in every state it holds the job), so nobody else may claim it; `release` lets it go at once on a graceful stop. */
+  z.object({ action: z.literal('beat'), epoch: epochSchema }),
+  z.object({ action: z.literal('release'), epoch: epochSchema }),
   z.object({ action: z.literal('progress'), epoch: epochSchema, stepDone: z.number().int().min(0), stepTotal: z.number().int().min(1).nullable().optional(), label: z.string().max(200).nullable().optional() }),
   z.object({ action: z.literal('renew'), epoch: epochSchema, /** The run the runner is in (the one it prepares with): a renewal from a run that was replaced answers `stale` and holds nothing. Left out, as before. */ run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional() }),
   z.object({
@@ -94,9 +97,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         const job = await getJob(jobId);
         if (claimed.ok) return NextResponse.json({ ok: true, epoch: claimed.epoch, job });
         if (claimed.reason === 'superseded') return NextResponse.json({ ...SUPERSEDED, ownerEpoch: claimed.ownerEpoch, job });
+        // A healthy owner holds it: wait until `until` and look again (never claim in a loop), and never end the job meanwhile
+        if (claimed.reason === 'held') return NextResponse.json({ ok: false, reason: 'held', until: claimed.until, job });
         if (claimed.reason === 'not_found') return NextResponse.json({ error: 'Job not found' }, { status: 404 });
         return NextResponse.json({ ok: false, reason: claimed.reason, ...(claimed.reason === 'finish_pending' ? { finishPending: job?.finishPending ?? null } : {}), job });
       }
+      case 'beat': {
+        // `{ ok: true, until }` (the hold stands until then: beat again well before it), or `{ ok: false, reason: 'stale', run: 'superseded' }` (not the owner: exit), `{ ok: false, reason: 'over' }`
+        const beaten = await beatJob(jobId, new Date(), { epoch: body.epoch });
+        if (!beaten.ok && 'reason' in beaten && beaten.reason === 'not_found') return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+        return NextResponse.json(beaten);
+      }
+      case 'release':
+        // Sent on a graceful stop (SIGTERM, a rolling deploy, the person taking the machine), so a replacement claims the job at once instead of waiting out the hold. Ownership itself is not given up: a late request of this worker is still refused
+        return NextResponse.json(await releaseJob(jobId, { epoch: body.epoch }));
       case 'progress': {
         const done = await reportProgressAs(jobId, { stepDone: body.stepDone, stepTotal: body.stepTotal, label: body.label }, { epoch: body.epoch });
         return NextResponse.json(done.superseded ? { ...SUPERSEDED, job: done.job } : { job: done.job });

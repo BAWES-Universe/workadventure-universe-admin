@@ -74,6 +74,8 @@ async function running(name: string) {
 
 const jobOf = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
 const claimed = async (jobId: string, runName: string, at: Date = NOW): Promise<number> => {
+  // A job that already has an owner is claimed only once that owner stopped beating (GPT round 6, finding 3): the hold is let go first, as it runs out by itself 90 s after the owner's last beat
+  await prisma.computerJob.updateMany({ where: { id: jobId, NOT: { ownerLeaseUntil: null } }, data: { ownerLeaseUntil: null } });
   const won = await claimJob(jobId, { run: runName, seen: (await jobOf(jobId)).ownerEpoch }, at);
   if (!won.ok) throw new Error(`the claim was refused: ${won.reason}`);
   return won.epoch;

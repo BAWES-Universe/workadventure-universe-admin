@@ -36,6 +36,7 @@ import { carryOnPaused, pauseForLimit } from '@/lib/computer-limit-pause';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
 import { createGiftFor } from '@/lib/grants-admin';
 import { callInLastStretch } from '@/lib/computer-stretch';
+import * as profiles from '@/lib/computer-browser-profile';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -82,6 +83,8 @@ const timeEvents = (jobId: string) => prisma.meterEvent.findMany({ where: { jobI
 const liveKeys = (jobId: string) => prisma.computerJobToken.count({ where: { jobId, revokedAt: null } });
 const tellings = (jobId: string) => prisma.computerJobTelling.findMany({ where: { jobId }, orderBy: { seq: 'asc' } });
 const claimed = async (jobId: string, runName: string, at: Date = NOW): Promise<number> => {
+  // A job that already has an owner is claimed only once that owner stopped beating (GPT round 6, finding 3): the hold is let go first, as it runs out by itself 90 s after the owner's last beat
+  await prisma.computerJob.updateMany({ where: { id: jobId, NOT: { ownerLeaseUntil: null } }, data: { ownerLeaseUntil: null } });
   const won = await claimJob(jobId, { run: runName, seen: (await jobOf(jobId)).ownerEpoch }, at);
   if (!won.ok) throw new Error(`the claim was refused: ${won.reason}`);
   return won.epoch;
@@ -593,6 +596,73 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:time` } })).personKey).toBe('unknown');
       expect((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:c1` } })).personKey).toBe('unknown');
       expect((await prisma.computerRefundObligation.findMany({ where: { jobId } })).map((one) => one.holdKey)).toEqual([`computer:credit:computer:${jobId}:call:c1`]);
+    });
+  });
+
+  describe('GPT round 6, finding 3b: the outcome of ONE start lands only on that start’s own try', () => {
+    it('a bring-up that fails AFTER the job was paused, carried on and claimed again ends nothing: the replacement runs on, its own room and browser are untouched, and the machine is not marked broken', async () => {
+      const { sara, jobId } = await running('g6-3b');
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      const keys: Array<string | null> = [];
+      let first = true;
+      // The first try waits here for the machine to come ready. While it waits, the person pauses the job and carries it on: another try takes the job, with a room of its own, and another runner claims it
+      const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+        if (!first) return;
+        first = false;
+        keys.push((await jobOf(jobId)).reservationKey);
+        expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(3))).ok).toBe(true);
+        expect((await resumeJob(sara.brickId, sara.id, jobId, minutes(4))).ok).toBe(true);
+        keys.push((await jobOf(jobId)).reservationKey);
+        await claimed(jobId, 'rB', minutes(4));
+        // ...and only now does the first try's bring-up fail
+        throw new Error('the machine never came ready');
+      });
+      try {
+        await resumeJob(sara.brickId, sara.id, jobId, minutes(2));
+      } finally {
+        spy.mockRestore();
+      }
+      // Two tries, two rooms
+      expect(keys[0]).not.toBeNull();
+      expect(keys[1]).not.toBe(keys[0]);
+      // The job that runs now is the second try's, and the first try's failure landed on nothing
+      const after = await jobOf(jobId);
+      expect(after).toMatchObject({ status: 'running', endedBy: null, reservationKey: keys[1] });
+      expect(after.pauses).toBe(2);
+      // The browser of the stretch that really started was brought back by its own try, with its time
+      expect(await prisma.computerJobPause.findFirstOrThrow({ where: { jobId, n: 2 }, select: { resumedAt: true } })).toEqual({ resumedAt: minutes(4) });
+      // ...and the first try marked nothing for the stretch IT was starting: that stretch was never carried on, it was paused again
+      expect(await prisma.computerJobPause.findFirstOrThrow({ where: { jobId, n: 1 }, select: { resumedAt: true } })).toEqual({ resumedAt: null });
+      // ...and the machine the replacement is on is not rewritten under it
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { machine: true } })).toEqual({ machine: 'working' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+    });
+  });
+
+  describe('GPT round 6, finding 3b (second half): a start that SUCCEEDS late writes nothing for the stretch that moved on without it', () => {
+    it('the browser of a resumed stretch is brought back once, by the try that really started it: a late try whose job was paused and carried on meanwhile marks nothing and restores nothing', async () => {
+      const { sara, jobId } = await running('g6-3b-late');
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      (profiles.restoreProfile as jest.Mock).mockClear();
+      let first = true;
+      // The first try's machine comes ready LATE: by then the person has paused the job and carried it on, so another try is the one that started this stretch
+      const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+        if (!first) return;
+        first = false;
+        expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(3))).ok).toBe(true);
+        expect((await resumeJob(sara.brickId, sara.id, jobId, minutes(4))).ok).toBe(true);
+        await claimed(jobId, 'rB', minutes(4));
+      });
+      try {
+        await resumeJob(sara.brickId, sara.id, jobId, minutes(2));
+      } finally {
+        spy.mockRestore();
+      }
+      // The browser was brought back ONCE, by the second try (the first try's would have put the wrong stretch's browser on the machine)
+      expect((profiles.restoreProfile as jest.Mock).mock.calls).toHaveLength(1);
+      expect(await prisma.computerJobPause.findFirstOrThrow({ where: { jobId, n: 2 }, select: { resumedAt: true } })).toEqual({ resumedAt: minutes(4) });
+      expect(await prisma.computerJobPause.findFirstOrThrow({ where: { jobId, n: 1 }, select: { resumedAt: true } })).toEqual({ resumedAt: null });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null, pauses: 2 });
     });
   });
 

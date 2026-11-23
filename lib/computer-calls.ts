@@ -7,6 +7,7 @@ import { revokeJobTokens, verifyJobToken } from '@/lib/computer-token';
 import { givenBackJob } from '@/lib/computer-values';
 import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
 import { CALL_IN_LAST_STRETCH, callInLastStretch } from '@/lib/computer-stretch';
+import { leaseUntil } from '@/lib/computer-owner';
 import { routeIsPaused } from '@/lib/computer-route-pause';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { tellSentry } from '@/lib/computer-alerts';
@@ -379,6 +380,8 @@ async function authorizedPastCutoff(jobId: string, callId: string, token: string
       // The call belongs to the stretch it is admitted in: written HERE, under the lock a pause takes, so the order of an admission and a pause is exact (never two clocks), and the first admission decides (an
       // answer given again keeps it). A give-back after a pause reads it (lib/computer-stretch)
       await tx.$executeRaw`UPDATE "meter_reservations" SET "job_stretch" = (SELECT "pauses" FROM "computer_jobs" WHERE "id" = ${jobId}) WHERE "reservation_key" = ${callRoomKey(jobId, callId)} AND "job_stretch" IS NULL`;
+      // A call admitted on the owner's own key is a beat: the owner is plainly there, so its hold on the job stands another 90 s and nobody else may claim it while it works (GPT round 6, finding 3)
+      await tx.$executeRaw`UPDATE "computer_jobs" SET "owner_lease_until" = ${leaseUntil(clock())} WHERE "id" = ${jobId}`;
       return true;
     },
     { timeout: 15_000, maxWait: 15_000 },

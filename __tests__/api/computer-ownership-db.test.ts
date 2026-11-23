@@ -24,7 +24,7 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { ackStart, claimJob, completeFinishIntents, finishJobUnder, giveComputer, planEffect, recordFinishIntent, renewJob, reportProgressAs, requestHandoverAs, settleEffect, settleEffectAs, startJob, startedJobFor, sweepComputers } from '@/lib/computer';
+import { ackStart, beatJob, claimJob, completeFinishIntents, finishJobUnder, giveComputer, handBack, planEffect, recordFinishIntent, releaseJob, renewJob, reportProgressAs, requestHandoverAs, settleEffect, settleEffectAs, startJob, startedJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
 import { Agent37Error } from '@/lib/agent37/client';
 import * as calls from '@/lib/computer-calls';
@@ -79,10 +79,23 @@ const heldCalls = (jobId: string) => prisma.meterReservation.count({ where: { jo
 const liveKeys = (jobId: string) => prisma.computerJobToken.count({ where: { jobId, revokedAt: null } });
 
 /** A runner takes up the job as the game does: GET for the epoch it saw, then claim with it. Answers the epoch it owns by. */
+/**
+ * A runner takes the job up. A job that already has an owner is claimed only once that owner stopped beating (GPT round 6, finding 3: a claim never takes a job from a HEALTHY owner), which is
+ * what every "a worker was replaced" case here stands for: the first worker died. The hold is let go first, as it runs out by itself 90 s after the owner's last beat.
+ */
 const claimed = async (jobId: string, runName: string, at: Date = NOW): Promise<number> => {
+  await prisma.computerJob.updateMany({ where: { id: jobId, NOT: { ownerLeaseUntil: null } }, data: { ownerLeaseUntil: null } });
   const won = await claimJob(jobId, { run: runName, seen: (await jobOf(jobId)).ownerEpoch }, at);
   if (!won.ok) throw new Error(`the claim was refused: ${won.reason}`);
   return won.epoch;
+};
+/**
+ * B takes the job over because A stopped beating: its hold lapsed (90 s with no beat), which is what every "A's request was in flight when B claimed" case below stands for. A claim never takes a
+ * job from a healthy owner (GPT round 6, finding 3), so the hold is let go first, exactly as time would.
+ */
+const takeOverClaim = async (jobId: string, run: string, seen: number, at: Date) => {
+  await prisma.computerJob.updateMany({ where: { id: jobId, NOT: { ownerLeaseUntil: null } }, data: { ownerLeaseUntil: null } });
+  return claimJob(jobId, { run, seen }, at);
 };
 const keyFor = async (jobId: string, epoch: number, at: Date = NOW) => ((await mintJobToken(jobId, 'model', at, { generation: 0 }, { epoch })) as { ok: true; token: string }).token;
 const ask = (token: string, callId: string, over: Partial<Parameters<typeof authorizeModelCall>[0]> = {}, at: Date = NOW) => authorizeModelCall({ token, callId, estimateMicros: 5_000, payer: 'universe', turn: 1, run: 'rA', ...over }, at);
@@ -189,7 +202,7 @@ run('one owner per computer job: every write is decided in the write that lands 
     let asked: Promise<T> = Promise.resolve(undefined as T);
     try {
       await holder.ready;
-      claim = claimJob(jobId, { run: 'rB', seen: fromEpoch }, minutes(1));
+      claim = takeOverClaim(jobId, 'rB', fromEpoch, minutes(1));
       expect(await waitForWaiters(cutoffLockKey(jobId), 1)).toBe(true);
       asked = request();
       expect(await waitForWaiters(cutoffLockKey(jobId), 2)).toBe(true);
@@ -260,7 +273,7 @@ run('one owner per computer job: every write is decided in the write that lands 
       const real = actualMeter.reserveRoom;
       const spy = jest.mocked(meter.reserveRoom).mockImplementationOnce((async (...args: Parameters<typeof real>) => {
         const room = await real(...args);
-        const won = await claimJob(jobId, { run: 'rB', seen: ea }, minutes(1));
+        const won = await takeOverClaim(jobId, 'rB', ea, minutes(1));
         if (!won.ok) throw new Error(`B's claim was refused: ${won.reason}`);
         return room;
       }) as never);
@@ -928,7 +941,7 @@ run('one owner per computer job: every write is decided in the write that lands 
         const first = arrived === 1;
         while (arrived < 2) await pause(10);
         if (first) {
-          const won = await claimJob(jobId, { run: 'rB', seen: ea }, minutes(1));
+          const won = await takeOverClaim(jobId, 'rB', ea, minutes(1));
           if (!won.ok) throw new Error('B’s claim was refused');
           claimDone = true;
         } else {
@@ -1064,6 +1077,94 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect((await jobOf(jobId)).agentResponseId).toBe('resp-B');
     });
   });
+  describe('GPT round 6, finding 3a: a claim never takes a job from a HEALTHY owner (the owner holds it by beating, and lets it go on purpose)', () => {
+    const HELD_UNTIL = new Date(NOW.getTime() + 90_000);
+
+    it('the claim holds the job for 90 seconds: a second worker that saw the right epoch is refused with `held` and the time to look again, and nothing at all is written', async () => {
+      const { jobId } = await running('s-lease-held');
+      const won = await claimJob(jobId, { run: 'rA', seen: 0 }, NOW);
+      expect(won).toEqual({ ok: true, epoch: 1 });
+      expect(await jobOf(jobId)).toMatchObject({ ownerEpoch: 1, ownerRun: 'rA', ownerLeaseUntil: HELD_UNTIL });
+      const before = await jobOf(jobId);
+      // A second server with the current epoch: refused, and told when to look again
+      expect(await claimJob(jobId, { run: 'rB', seen: 1 }, new Date(NOW.getTime() + 89_000))).toEqual({ ok: false, reason: 'held', until: HELD_UNTIL });
+      const after = await jobOf(jobId);
+      expect([after.ownerEpoch, after.ownerRun, after.leaseVersion]).toEqual([before.ownerEpoch, before.ownerRun, before.leaseVersion]);
+      expect(after.ownerLeaseUntil).toEqual(HELD_UNTIL);
+      // The owner's keys are untouched by a refused claim
+      expect(await liveKeys(jobId)).toBe(await liveKeys(jobId));
+      // Once the hold has run out (the owner stopped beating) the next worker takes it
+      expect(await claimJob(jobId, { run: 'rB', seen: 1 }, new Date(NOW.getTime() + 91_000))).toEqual({ ok: true, epoch: 2 });
+    });
+
+    it('a beat from the owner holds it another 90 seconds, so a claim that would have won is refused; a beat from a worker that was replaced is superseded and holds nothing', async () => {
+      const { jobId } = await running('s-lease-beat');
+      const ea = await claimed(jobId, 'rA');
+      // The owner beats at 60 s: the hold stands to 150 s, so the claim that would have won at 91 s is refused
+      expect(await beatJob(jobId, new Date(NOW.getTime() + 60_000), { epoch: ea })).toEqual({ ok: true, until: new Date(NOW.getTime() + 150_000) });
+      expect(await claimJob(jobId, { run: 'rB', seen: ea }, new Date(NOW.getTime() + 91_000))).toMatchObject({ ok: false, reason: 'held' });
+      // A worker that was replaced beats nothing: the hold is left exactly as the owner's own beat left it
+      const eb = await claimed(jobId, 'rB', new Date(NOW.getTime() + 151_000));
+      const held = (await jobOf(jobId)).ownerLeaseUntil;
+      expect(await beatJob(jobId, new Date(NOW.getTime() + 200_000), { epoch: ea })).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toEqual(held);
+      // ...and the owner's own beat lands
+      expect(await beatJob(jobId, new Date(NOW.getTime() + 200_000), { epoch: eb })).toMatchObject({ ok: true });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toEqual(new Date(NOW.getTime() + 290_000));
+    });
+
+    it('`release` lets the job go at once (a graceful stop), so a replacement claims it without waiting the hold out; a release from a worker that was replaced releases nothing', async () => {
+      const { jobId } = await running('s-lease-release');
+      const ea = await claimed(jobId, 'rA');
+      expect(await releaseJob(jobId, { epoch: ea })).toEqual({ ok: true });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toBeNull();
+      const eb = await claimJob(jobId, { run: 'rB', seen: ea }, new Date(NOW.getTime() + 1_000));
+      expect(eb).toEqual({ ok: true, epoch: ea + 1 });
+      // The old worker's release does not let go of the new owner's hold
+      expect(await releaseJob(jobId, { epoch: ea })).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+      expect((await jobOf(jobId)).ownerLeaseUntil).not.toBeNull();
+    });
+
+    it('a renewal and an admitted model call are beats too: the owner at work never loses the job to a claim', async () => {
+      for (const work of ['renew', 'call'] as const) {
+        const { jobId } = await running(`s-lease-${work}`);
+        const ea = await claimed(jobId, 'rA');
+        const at = new Date(NOW.getTime() + 60_000);
+        if (work === 'renew') expect(await renewJob(jobId, at, { epoch: ea })).toMatchObject({ ok: true });
+        else expect(await ask(await keyFor(jobId, ea), 'c1', {}, at)).toMatchObject({ ok: true });
+        expect((await jobOf(jobId)).ownerLeaseUntil).toEqual(new Date(at.getTime() + 90_000));
+        expect(await claimJob(jobId, { run: 'rB', seen: ea }, new Date(NOW.getTime() + 91_000))).toMatchObject({ ok: false, reason: 'held' });
+      }
+    });
+
+    it('the hold ends when Orbit itself ends the worker’s authority: the person taking the machine and giving it back, and a pause, each leave the job free to claim at once', async () => {
+      const { sara, jobId } = await running('s-lease-control');
+      const ea = await claimed(jobId, 'rA');
+      expect((await jobOf(jobId)).ownerLeaseUntil).not.toBeNull();
+      expect((await takeOver(sara.brickId, sara.id, new Date(NOW.getTime() + 10_000))).ok).toBe(true);
+      expect((await jobOf(jobId)).ownerLeaseUntil).toBeNull();
+      expect((await handBack(sara.brickId, sara.id)).ok).toBe(true);
+      // The runner that picks the job up after the hand-back claims it at once, with no wait
+      const eb = await claimJob(jobId, { run: 'rB', seen: (await jobOf(jobId)).ownerEpoch }, new Date(NOW.getTime() + 20_000));
+      expect(eb).toMatchObject({ ok: true });
+      void ea;
+      // A pause ends the worker's authority too (its epoch moves): the job that carries on is claimed at once
+      const controls = await import('@/lib/computer-job-controls');
+      expect((await controls.pauseJob(sara.brickId, sara.id, jobId, new Date(NOW.getTime() + 30_000))).ok).toBe(true);
+      expect((await jobOf(jobId)).ownerLeaseUntil).toBeNull();
+    });
+
+    it('a job nobody has claimed is free (epoch 0 holds nothing), and a beat or a release for a job that is over writes nothing', async () => {
+      const { jobId } = await running('s-lease-fresh');
+      expect((await jobOf(jobId)).ownerLeaseUntil).toBeNull();
+      expect(await claimJob(jobId, { run: 'rA', seen: 0 }, NOW)).toEqual({ ok: true, epoch: 1 });
+      const over = await running('s-lease-over');
+      const ec = await claimed(over.jobId, 'rA');
+      await finishJobUnder(over.jobId, null, 'done', minutes(1), null, null, null, 'rA', ec);
+      expect(await beatJob(over.jobId, minutes(2), { epoch: ec })).toEqual({ ok: false, reason: 'over' });
+      expect(await beatJob('does-not-exist', minutes(2), { epoch: 1 })).toEqual({ ok: false, reason: 'not_found' });
+    });
+  });
   describe('CodeRabbit on #1025: effects outside the computer are the owner’s, a handover is decided under the job’s row, a start is let go only by the request that made it', () => {
     const SUPERSEDED_ANSWER = { ok: false, reason: 'stale', run: 'superseded' };
 
@@ -1097,7 +1198,7 @@ run('one owner per computer job: every write is decided in the write that lands 
       const spy = jest.spyOn(prisma.computerEffect, 'findUnique').mockImplementation(((args: unknown) => {
         if (claimedNow) return real(args);
         claimedNow = true;
-        return claimJob(jobId, { run: 'rB', seen: ea }, minutes(1)).then(() => real(args));
+        return takeOverClaim(jobId, 'rB', ea, minutes(1)).then(() => real(args));
       }) as never);
       let answer: unknown;
       try {

@@ -164,6 +164,8 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
       ...(heldScreen ? { control: 'brick' } : {}),
       ownerEpoch: { increment: 1 },
       leaseVersion: { increment: 1 },
+      // The worker that held the job holds it no longer: its keys end here, so the hold that kept other workers out ends with them and the runner that carries the job on claims it at once (GPT round 6, finding 3)
+      ownerLeaseUntil: null,
     },
   });
   await revokeJobTokens(jobId, now, undefined, tx);

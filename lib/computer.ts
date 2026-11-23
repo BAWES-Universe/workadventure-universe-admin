@@ -41,7 +41,7 @@ import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
 import { hasFinishIntent, hasPoolCutoff, hasTurnAdmitted, lockCutoff, lockRelayReach } from '@/lib/computer-faults';
-import { epochMatches, lockJob, lockJobRow, noEndingWhere, ownerWhere, SUPERSEDED, type EpochSaid } from '@/lib/computer-owner';
+import { epochMatches, leaseUntil, lockJob, lockJobRow, noEndingWhere, ownerWhere, SUPERSEDED, type EpochSaid } from '@/lib/computer-owner';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { recordRefundObligationsForBrick, sweepRefundObligations } from '@/lib/computer-refunds';
 import { decidePendingForPurge, decideRunnerFinish, lockPerson, readGiveBackLimits, writeDecision, writeOrbitDecision, markDeliveredLate, noteEffectSettled, sweepGiveBackDecisions, sweepLateEvidence, type Verdict } from '@/lib/computer-giveback';
@@ -997,13 +997,19 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
     throw error;
   }
 
+  /**
+   * Whether the job is still on THIS try's room (GPT round 6, finding 3b). Every write this try makes after a wait is conditional on it, in the write itself where it can be, and read through
+   * this where a provider call stands between: a pause and a resume in between give the job another room, and the outcome of this try must then land on nothing, never on the job that runs now.
+   */
+  const stillThisTry = async (): Promise<boolean> => (await prisma.computerJob.findUnique({ where: { id: job.id }, select: { reservationKey: true } }))?.reservationKey === key;
+
   // The person may have taken over at the same moment: a job that began now joins them rather than run under Brick's hands. Their
   // take over looks again for running jobs after it ends the ones it saw, so one of the two always sees the other.
   if ((await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: 'waiting', control: 'person' } })) > 0) {
-    await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running' }, data: { status: 'waiting', waitingFor: null, control: 'person', stretchStarted: now, readyWhat: null, readyWhere: null, leaseVersion: { increment: 1 } } });
+    await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', reservationKey: key }, data: { status: 'waiting', waitingFor: null, control: 'person', stretchStarted: now, readyWhat: null, readyWhere: null, leaseVersion: { increment: 1 } } });
     // The person may have handed back in between: with nobody else holding the machine for them there is nothing to join, so it runs as it was
     if ((await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: 'waiting', control: 'person' } })) === 0) {
-      await prisma.computerJob.updateMany({ where: { id: job.id, status: 'waiting', control: 'person' }, data: { status: 'running', control: 'brick', waitingFor: null, leaseVersion: { increment: 1 } } });
+      await prisma.computerJob.updateMany({ where: { id: job.id, status: 'waiting', control: 'person', reservationKey: key }, data: { status: 'running', control: 'brick', waitingFor: null, leaseVersion: { increment: 1 } } });
     }
   }
 
@@ -1011,7 +1017,7 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
   // running job before it removes anything) goes on; the job is brought a computer from cold storage when its turn comes
   const taken = await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { machine: true } });
   if (taken?.machine === 'packing') {
-    const back = await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running' }, data: { status: 'queued', queuedFor: 'busy', reservationKey: null, startedAt: null, stretchStarted: null } });
+    const back = await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', reservationKey: key }, data: { status: 'queued', queuedFor: 'busy', reservationKey: null, startedAt: null, stretchStarted: null } });
     if (back.count === 1) {
       await releaseRoom({ key }, now);
       await dropDiskRoom();
@@ -1022,7 +1028,7 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
   // The Brick may have been deleted after the claim: deletion marks it first, then stops the jobs it can see, so this sees the mark
   const brick = await prisma.bot.findUnique({ where: { id: job.botId }, select: { deletedAt: true } });
   if (!brick || brick.deletedAt !== null) {
-    await endJob(job.id, 'stopped', 'deleted', now);
+    await endJob(job.id, 'stopped', 'deleted', now, true, undefined, true, null, false, { reservation: key });
     await dropDiskRoom();
     return 'gone';
   }
@@ -1038,6 +1044,9 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
     // Another job holds this machine (it is waking it, or working on it): its state is theirs, and this failure does not rewrite it.
     // Only when this job was the only one asking is the machine marked, so a failed second start never breaks a machine that works
     // and never resets one that is still being made.
+    // A pause and a resume (or another try) gave the job another room while the machine was being made or woken: this try's failure is not the job's. The job that runs now is not ended, and the
+    // machine's state is not rewritten under it: the replacement is on that machine (GPT round 6, finding 3b)
+    if (!(await stillThisTry())) return 'gone';
     const others = await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } } });
     if (others === 0) {
       // A machine that was never made is not "broken": it is still just not made, and the next job tries again
@@ -1047,7 +1056,7 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
     }
     // The line does not move on from a start that broke: the jobs behind it stay queued for the next sweep, so one broken start is one
     // failed job and never every job in line failing one after another
-    await endJob(job.id, 'failed', 'error', now, false);
+    await endJob(job.id, 'failed', 'error', now, false, undefined, true, null, false, { reservation: key });
     return 'failed';
   }
   // Turned off, deleted or stopped while the machine was being made or woken: the job is over and nobody holds the machine, so it
@@ -1058,10 +1067,11 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
     return 'gone';
   }
   // A job that was paused gets its own browser back (and never the one of a job that ran in between) before its runner takes it up
-  if (job.pauses > 0) await prisma.computerJobPause.updateMany({ where: { jobId: job.id, n: job.pauses, resumedAt: null }, data: { resumedAt: now } }).catch(() => undefined);
-  if (job.pauses > 0) await restoreProfile(job.botId, job.id, now).catch((error) => console.error('[Computer] Could not bring back a resumed job’s browser:', error instanceof Error ? error.message : 'unknown'));
+  // Each of these is this try's own: a job that was paused and resumed again while the machine came up is on another room, and this try marks nothing for it (finding 3b)
+  if (job.pauses > 0) await prisma.computerJobPause.updateMany({ where: { jobId: job.id, n: job.pauses, resumedAt: null, job: { reservationKey: key } }, data: { resumedAt: now } }).catch(() => undefined);
+  if (job.pauses > 0 && (await stillThisTry())) await restoreProfile(job.botId, job.id, now).catch((error) => console.error('[Computer] Could not bring back a resumed job’s browser:', error instanceof Error ? error.message : 'unknown'));
   // What is on the machine before this job works on it: only so the message can name files the job saved outside its own output folder (those are never handed over)
-  if (job.writes) await takeBaseline(job.id, job.botId, provider);
+  if (job.writes) await takeBaseline(job.id, job.botId, provider, key);
   return 'running';
 }
 
@@ -1069,13 +1079,13 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
  * The list of files on the machine as the job begins, kept on the job. Best effort: a list that could not be taken is left empty, and then nothing is
  * attributed to the job (nothing can be proved), never a wrong file handed over. It never holds up the start for long (one quick command).
  */
-async function takeBaseline(jobId: string, botId: string, provider: Provider): Promise<void> {
+async function takeBaseline(jobId: string, botId: string, provider: Provider, /** The start's own room key: the list is kept only while that try is still the job's (finding 3b). */ reservation?: string): Promise<void> {
   try {
     const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true } });
     if (!row?.providerRef) return;
     const listed = await provider.exec(row.providerRef, 'universe-files', { timeoutMs: 20_000 });
     if (listed.exitCode !== 0 || listed.truncated) return;
-    await prisma.computerJob.updateMany({ where: { id: jobId }, data: { startFiles: parseFilesList(listed.stdout, new Date()) as unknown as Prisma.InputJsonValue } });
+    await prisma.computerJob.updateMany({ where: { id: jobId, ...(reservation ? { reservationKey: reservation } : {}) }, data: { startFiles: parseFilesList(listed.stdout, new Date()) as unknown as Prisma.InputJsonValue } });
   } catch (error) {
     console.error('[Computer] Could not list the files a job began with:', error instanceof Error ? error.message : 'unknown');
   }
@@ -1307,7 +1317,8 @@ export async function renewJob(
       if (room.ok) {
         // The lease is renewed, so the keys of the owner's epoch are too (one that ended is not brought back, another epoch's is not this owner's)
         await renewJobTokens(jobId, now, job.ownerEpoch, tx);
-        await tx.$executeRaw`UPDATE "computer_jobs" SET "lease_version" = "lease_version" + 1 WHERE "id" = ${jobId}`;
+        // A renewal from the owner is a beat too: the hold on the job stands another 90 s, written here so a busy runner never loses the job to a claim while it works (GPT round 6, finding 3)
+        await tx.$executeRaw`UPDATE "computer_jobs" SET "lease_version" = "lease_version" + 1, "owner_lease_until" = ${leaseUntil(now)} WHERE "id" = ${jobId}`;
         return { kind: 'ok' as const, epoch: job.ownerEpoch };
       }
       // The person's month or a limit they set: the job PAUSES and waits (piece 3), decided right here, in the same transaction and under the same locks as the refusal (the owner, no kept intent, no cutoff: all read
@@ -1596,6 +1607,8 @@ interface EndGuard {
   personStop?: boolean;
   /** When the job that comes next in line STARTS, if that is not the time of this ending (a sweep that completes a finish intent ends the job as of the intent's time, its own accounting, but the next job starts now: its room, lease and checks begin at its real start). */
   startNextAt?: Date;
+  /** One start's own room key: an ending decided while bringing the machine up lands only while that try's room is still the job's (GPT round 6, finding 3b). A pause and resume in between gave the job another room, so the old try's outcome lands on nothing and the job that runs now is left alone. */
+  reservation?: string;
 }
 
 /** What an ending found: it wrote the end (`ended`), found the generation moved (`stale`), found the person in control (`notBrick`), or found a finish intent kept first (`intent`: the caller ends it with the intent's own words). */
@@ -1710,7 +1723,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // An ending Orbit saw itself is always given back; it is kept in the same record
     const orbitSeen = runner === null && (endedBy === 'error' || endedBy === 'pool') && job.startedAt !== null;
     const turnHold = held && !!job.firstTurnSentAt && !job.agentResponseId;
-    const where = { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted, ...(guard.generation !== undefined && guard.generation !== null ? { controlGeneration: guard.generation } : {}), ...(guard.brick ? { control: 'brick' as const } : {}), ...(guard.owner ? { ownerEpoch: guard.owner.epoch ?? 0 } : {}), ...(guard.observed ? { control: guard.observed.control, controlGeneration: guard.observed.controlGeneration, ownerEpoch: guard.observed.ownerEpoch, leaseVersion: guard.observed.leaseVersion, handoverSeq: guard.observed.handoverSeq } : {}), agentResponseId: job.agentResponseId };
+    const where = { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted, ...(guard.reservation ? { reservationKey: guard.reservation } : {}), ...(guard.generation !== undefined && guard.generation !== null ? { controlGeneration: guard.generation } : {}), ...(guard.brick ? { control: 'brick' as const } : {}), ...(guard.owner ? { ownerEpoch: guard.owner.epoch ?? 0 } : {}), ...(guard.observed ? { control: guard.observed.control, controlGeneration: guard.observed.controlGeneration, ownerEpoch: guard.observed.ownerEpoch, leaseVersion: guard.observed.leaseVersion, handoverSeq: guard.observed.handoverSeq } : {}), agentResponseId: job.agentResponseId };
     // Written under the cutoff lock: a finish (it honors a decided cutoff and a kept intent), a refusal (the finalizer owns the ending once an intent is kept or a cutoff is decided) and the finalizer of a decided cutoff (only while the decision stands)
     const locked = finish || !!guard.refusal || !!guard.cutoffRequired || personStop;
     // What is read under the cutoff lock, before anything is written: null = go on and write; else why nothing is written (an intent is kept first, a cutoff decided for a finish, or an intent, a cutoff, a key that ended or a finalizer's missing decision for the others)
@@ -2616,7 +2629,8 @@ async function keepWorkingMachinesAwake(now: Date, batch: number): Promise<numbe
 async function fenceControl(botId: string, now: Date = new Date()): Promise<void> {
   const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } });
   for (const job of jobs) {
-    await prisma.computerJob.updateMany({ where: { id: job.id }, data: { controlGeneration: { increment: 1 }, leaseVersion: { increment: 1 } } });
+    // The runner's hold on the job ends with its keys: the person has the machine (or just gave it back), so the runner that picks the job up next claims it at once instead of waiting the hold out (GPT round 6, finding 3)
+    await prisma.computerJob.updateMany({ where: { id: job.id }, data: { controlGeneration: { increment: 1 }, leaseVersion: { increment: 1 }, ownerLeaseUntil: null } });
     await revokeJobTokens(job.id, now);
   }
 }
@@ -3218,7 +3232,17 @@ export async function getJob(jobId: string): Promise<(JobView & { botId: string;
  * answers `superseded` with the current one (someone claimed since this runner looked: a DELAYED claim always lands here, so it can never take the job back); otherwise the epoch moves up by one, `run` is noted, the lease version moves, the prepare claim is let go
  * and EVERY live key of the job ends in the same commit (the new owner prepares its own). From then on every request the old owner makes meets the new epoch where it takes effect and does nothing.
  */
-export async function claimJob(jobId: string, input: { run: string | null; seen: number }, now: Date = new Date()): Promise<{ ok: true; epoch: number } | { ok: false; reason: 'not_found' | 'over' | 'not_running' | 'finish_pending' | 'cutoff' } | { ok: false; reason: 'superseded'; ownerEpoch: number }> {
+export async function claimJob(
+  jobId: string,
+  input: { run: string | null; seen: number },
+  now: Date = new Date(),
+): Promise<
+  | { ok: true; epoch: number }
+  | { ok: false; reason: 'not_found' | 'over' | 'not_running' | 'finish_pending' | 'cutoff' }
+  | { ok: false; reason: 'superseded'; ownerEpoch: number }
+  /** A healthy owner holds the job: nothing was written. The asker waits until `until` and looks again, never in a loop (GPT round 6, finding 3). */
+  | { ok: false; reason: 'held'; until: Date }
+> {
   return prisma.$transaction(
     async (tx) => {
       const job = await lockJob(tx, jobId);
@@ -3228,12 +3252,38 @@ export async function claimJob(jobId: string, input: { run: string | null; seen:
       if (await hasFinishIntent(tx, jobId)) return { ok: false as const, reason: 'finish_pending' as const };
       if (await hasPoolCutoff(tx, jobId)) return { ok: false as const, reason: 'cutoff' as const };
       if (job.ownerEpoch !== input.seen) return { ok: false as const, reason: 'superseded' as const, ownerEpoch: job.ownerEpoch };
-      await tx.$executeRaw`UPDATE "computer_jobs" SET "owner_epoch" = "owner_epoch" + 1, "owner_run" = ${input.run}, "lease_version" = "lease_version" + 1, "prepare_claimed_at" = NULL WHERE "id" = ${jobId}`;
+      // A job with a LIVE owner is not taken from it, even by a worker that saw the right epoch: a second worker beside a healthy first one is what every fence below is there to prevent (GPT round 6, finding 3).
+      // Read here, under the job's row lock, so a beat that is landing is never missed. Free to claim: a job nobody owns (epoch 0), one whose owner stopped beating (90 s), and one the owner let go (`release`)
+      if (job.ownerEpoch !== 0 && job.ownerLeaseUntil && job.ownerLeaseUntil > now) return { ok: false as const, reason: 'held' as const, until: job.ownerLeaseUntil };
+      await tx.$executeRaw`UPDATE "computer_jobs" SET "owner_epoch" = "owner_epoch" + 1, "owner_run" = ${input.run}, "lease_version" = "lease_version" + 1, "prepare_claimed_at" = NULL, "owner_lease_until" = ${leaseUntil(now)} WHERE "id" = ${jobId}`;
       await revokeJobTokens(jobId, now, undefined, tx);
       return { ok: true as const, epoch: job.ownerEpoch + 1 };
     },
     { timeout: 15_000, maxWait: 15_000 },
   );
+}
+
+/**
+ * The owner says it is still there (every 30 s, in every state it holds the job: running, waiting, between turns), so nobody else may claim it. Epoch-conditional: a worker that was replaced renews nothing
+ * (`superseded`), and a job that is over has nothing to hold. A successful renewal or admitted model call holds it too, in their own writes, so a busy runner rarely needs this.
+ */
+export async function beatJob(jobId: string, now: Date = new Date(), owner: { epoch?: EpochSaid } = {}): Promise<{ ok: true; until: Date } | { ok: false; reason: 'over' | 'not_found' } | typeof SUPERSEDED> {
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, ownerEpoch: true } });
+  if (!job) return { ok: false, reason: 'not_found' };
+  if (isOver(job.status) || job.status === 'queued') return { ok: false, reason: 'over' };
+  const until = leaseUntil(now);
+  const done = await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] }, ...ownerWhere(owner.epoch) }, data: { ownerLeaseUntil: until } });
+  if (done.count === 0) return SUPERSEDED;
+  return { ok: true, until };
+}
+
+/**
+ * The owner lets the job go on purpose (SIGTERM, a rolling deploy, the person taking the machine): the hold ends at once, so a replacement claims it without waiting out the 90 s. Epoch-conditional:
+ * a worker that was replaced releases nothing. Ownership itself is NOT given up (the epoch stands, so a late request of this worker is still refused); only the hold that kept others out.
+ */
+export async function releaseJob(jobId: string, owner: { epoch?: EpochSaid } = {}): Promise<{ ok: boolean } | typeof SUPERSEDED> {
+  const done = await prisma.computerJob.updateMany({ where: { id: jobId, ...ownerWhere(owner.epoch) }, data: { ownerLeaseUntil: null } });
+  return done.count === 0 ? SUPERSEDED : { ok: true };
 }
 
 /** What a runner that committed to ending a job said it will finish with: `outcome` and `run` as the finish will send them, the control generation it was said under and when. */

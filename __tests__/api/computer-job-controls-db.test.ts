@@ -77,6 +77,8 @@ const roomOf = (key: string) => prisma.meterReservation.findUniqueOrThrow({ wher
 const eventsOf = (jobId: string) => prisma.meterEvent.findMany({ where: { jobId, kind: 'computer_time' }, orderBy: { eventId: 'asc' } });
 const liveKeys = (jobId: string) => prisma.computerJobToken.count({ where: { jobId, revokedAt: null } });
 const claimed = async (jobId: string, runName: string, at: Date = NOW): Promise<number> => {
+  // A job that already has an owner is claimed only once that owner stopped beating (GPT round 6, finding 3): the hold is let go first, as it runs out by itself 90 s after the owner's last beat
+  await prisma.computerJob.updateMany({ where: { id: jobId, NOT: { ownerLeaseUntil: null } }, data: { ownerLeaseUntil: null } });
   const won = await claimJob(jobId, { run: runName, seen: (await jobOf(jobId)).ownerEpoch }, at);
   if (!won.ok) throw new Error(`the claim was refused: ${won.reason}`);
   return won.epoch;

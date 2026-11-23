@@ -627,6 +627,8 @@ run('the runner’s committed word that a job is to end, in a real database', ()
     const held = (jobId: string) => prisma.meterReservation.count({ where: { jobId, reservationKey: { startsWith: callRoomKey(jobId, '') }, state: 'held' } });
     /** A runner takes up the job: it names the epoch it last saw (the way the runner does after its GET) and wins only if that is still the job's. Answers the epoch it owns by. */
     const claimed = async (jobId: string, run: string, at: Date = NOW): Promise<number> => {
+      // A job that already has an owner is claimed only once that owner stopped beating (GPT round 6, finding 3): the hold is let go first, as it runs out by itself 90 s after the owner's last beat
+      await prisma.computerJob.updateMany({ where: { id: jobId, NOT: { ownerLeaseUntil: null } }, data: { ownerLeaseUntil: null } });
       const seen = (await jobOf(jobId)).ownerEpoch;
       const won = await claimJob(jobId, { run, seen }, at);
       if (!won.ok) throw new Error(`the claim was refused: ${won.reason}`);
@@ -865,7 +867,9 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       // A claim that looked at the job before this one (it saw 0) is superseded, and tells the epoch to claim with
       expect(await claimJob(jobId, { run: 'rLate', seen: 0 }, minutes(2))).toEqual({ ok: false, reason: 'superseded', ownerEpoch: 1 });
       expect(await jobOf(jobId)).toMatchObject({ ownerEpoch: 1, ownerRun: 'rA' });
-      expect(await claimJob(jobId, { run: 'rB', seen: 1 }, minutes(2))).toEqual({ ok: true, epoch: 2 });
+      // ...and a claim of the current epoch wins once A's hold has run out (90 s after its claim, with no beat since): finding 3
+      expect(await claimJob(jobId, { run: 'rB', seen: 1 }, minutes(2))).toMatchObject({ ok: false, reason: 'held' });
+      expect(await claimJob(jobId, { run: 'rB', seen: 1 }, minutes(3))).toEqual({ ok: true, epoch: 2 });
       expect(await claimJob('does-not-exist', { run: 'rB', seen: 0 })).toEqual({ ok: false, reason: 'not_found' });
       const intent = await running('s-own-claim-intent');
       await recordFinishIntent(intent.jobId, { outcome: 'done' }, minutes(1));
@@ -918,14 +922,15 @@ run('the runner’s committed word that a job is to end, in a real database', ()
         let stop: Promise<unknown> = Promise.resolve();
         try {
           await holder.ready;
+          // B claims at minutes(2), when A's hold on the job has run out (90 s with no beat): a claim never takes a job from a healthy owner (GPT round 6, finding 3)
           if (order === 'claim-first') {
-            claim = claimJob(jobId, { run: 'rB', seen: ea }, minutes(1));
+            claim = claimJob(jobId, { run: 'rB', seen: ea }, minutes(2));
             expect(await waitForWaiters(cutoffLockKey(jobId), 1)).toBe(true);
             stop = recordFinishIntent(jobId, { ...POOL, run: 'rA', epoch: ea }, minutes(1));
           } else {
             stop = recordFinishIntent(jobId, { ...POOL, run: 'rA', epoch: ea }, minutes(1));
             expect(await waitForWaiters(cutoffLockKey(jobId), 1)).toBe(true);
-            claim = claimJob(jobId, { run: 'rB', seen: ea }, minutes(1));
+            claim = claimJob(jobId, { run: 'rB', seen: ea }, minutes(2));
           }
           expect(await waitForWaiters(cutoffLockKey(jobId), 2)).toBe(true);
           holder.release();

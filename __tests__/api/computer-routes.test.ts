@@ -679,6 +679,34 @@ describe('the bot server’s calls', () => {
     expect(await (await jobAction(asBot('/x', { body: { action: 'settle-effect', key: 'pr-1', state: 'done', evidence: 'pull request 12' } }), jobParams)).json()).toEqual({ ok: true });
   });
 
+  it('GPT round 6, finding 3: a claim refused because the owner still holds the job answers `held` with the time to look again, and `beat` and `release` are the owner’s own', async () => {
+    const until = new Date('2026-11-23T10:01:30.000Z');
+    lib.getJob.mockResolvedValue({ ...job, finishPending: null } as never);
+    lib.claimJob.mockResolvedValueOnce({ ok: false, reason: 'held', until } as never);
+    const held = await jobAction(asBot('/x', { body: { action: 'claim', seen: 1 } }), jobParams);
+    expect(held.status).toBe(200);
+    expect(await held.json()).toEqual({ ok: false, reason: 'held', until: until.toISOString(), job: expect.objectContaining({ id: JOB }) });
+    // The beat: the owner's epoch goes with it, and a worker that was replaced is answered the game's superseded shape as business
+    lib.beatJob.mockResolvedValueOnce({ ok: true, until } as never);
+    const beaten = await jobAction(asBot('/x', { body: { action: 'beat', epoch: 4 } }), jobParams);
+    expect(beaten.status).toBe(200);
+    expect(await beaten.json()).toEqual({ ok: true, until: until.toISOString() });
+    expect(lib.beatJob).toHaveBeenLastCalledWith(JOB, expect.any(Date), { epoch: 4 });
+    lib.beatJob.mockResolvedValueOnce({ ok: false, reason: 'stale', run: 'superseded' } as never);
+    expect(await (await jobAction(asBot('/x', { body: { action: 'beat', epoch: 3 } }), jobParams)).json()).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+    lib.beatJob.mockResolvedValueOnce({ ok: false, reason: 'not_found' } as never);
+    expect((await jobAction(asBot('/x', { body: { action: 'beat', epoch: 3 } }), jobParams)).status).toBe(404);
+    // The release, on a graceful stop
+    lib.releaseJob.mockResolvedValueOnce({ ok: true } as never);
+    const released = await jobAction(asBot('/x', { body: { action: 'release', epoch: 4 } }), jobParams);
+    expect(released.status).toBe(200);
+    expect(await released.json()).toEqual({ ok: true });
+    expect(lib.releaseJob).toHaveBeenLastCalledWith(JOB, { epoch: 4 });
+    const beats = lib.beatJob.mock.calls.length;
+    for (const epoch of ['4', -1, 1.5]) expect((await jobAction(asBot('/x', { body: { action: 'beat', epoch } }), jobParams)).status).toBe(400);
+    expect(lib.beatJob.mock.calls.length).toBe(beats);
+  });
+
   it('plan-effect and settle-effect name the epoch the worker owns the job by; a replaced worker is answered `superseded` as business (HTTP 200), and the epoch must be a whole number', async () => {
     lib.getJob.mockResolvedValue(job as never);
     lib.planEffect.mockResolvedValueOnce({ ok: false, reason: 'stale', run: 'superseded' });
