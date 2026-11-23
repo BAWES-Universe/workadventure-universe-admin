@@ -2304,7 +2304,7 @@ run('a Brick’s computer, in a real database', () => {
       // The first job is still waking the machine when the second one asks and its wake breaks
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'waking' } });
       // ...a wake older than a start can take (no start is behind it any more), so the second start wakes the machine itself
-      await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = NOW() - INTERVAL '10 minutes' WHERE "bot_id" = ${sara.brickId}`;
+      await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = (NOW() AT TIME ZONE 'UTC') - INTERVAL '10 minutes' WHERE "bot_id" = ${sara.brickId}`;
       provider.failNext.wake = true;
       const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, minutes(1));
       expect(second).toEqual({ ok: false, reason: 'broken_start' });

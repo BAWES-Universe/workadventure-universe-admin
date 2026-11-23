@@ -391,13 +391,13 @@ async function stopMachine(botId: string, ref: string, provider: Provider, only?
 async function claimStop(botId: string, ref: string, only?: string[], ticket?: number): Promise<boolean> {
   const states = only ? Prisma.sql`AND "machine" = ANY(${only}::text[])` : Prisma.empty;
   const epoch = ticket !== undefined ? Prisma.sql`AND "wake_epoch" = ${ticket}` : Prisma.empty;
-  const taken = await prisma.$executeRaw(Prisma.sql`UPDATE "brick_computers" SET "machine" = 'stopping', "rest_claimed_at" = NULL, "updated_at" = NOW() WHERE "bot_id" = ${botId} AND "provider_ref" = ${ref} ${states} ${epoch}`);
+  const taken = await prisma.$executeRaw(Prisma.sql`UPDATE "brick_computers" SET "machine" = 'stopping', "rest_claimed_at" = NULL, "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "provider_ref" = ${ref} ${states} ${epoch}`);
   return taken === 1;
 }
 
 /** The wake ticket (round 8, B1): the write that sets the machine waking or restoring takes the next number, and the number is this start's. A failure of this start stops the machine, and a late success marks it working, only while the ticket is still the Brick's. */
 async function takeWakeTicket(botId: string, machine: 'waking' | 'restoring', from: string): Promise<number | null> {
-  const rows = await prisma.$queryRaw<Array<{ wake_epoch: number }>>`UPDATE "brick_computers" SET "machine" = ${machine}, "wake_epoch" = "wake_epoch" + 1, "updated_at" = NOW() WHERE "bot_id" = ${botId} AND "machine" = ${from} RETURNING "wake_epoch"`;
+  const rows = await prisma.$queryRaw<Array<{ wake_epoch: number }>>`UPDATE "brick_computers" SET "machine" = ${machine}, "wake_epoch" = "wake_epoch" + 1, "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "machine" = ${from} RETURNING "wake_epoch"`;
   return rows.length === 1 ? rows[0].wake_epoch : null;
 }
 
@@ -657,7 +657,7 @@ async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>
   const alias = 'aliasAttemptId' in by ? by.aliasAttemptId : null;
   const written = await db.$executeRaw`
     INSERT INTO "computer_start_attempts" ("id", "bot_id", "person_id", "start_key", "state", "job_id", "alias_attempt_id", "beat_at", "created_at")
-    VALUES (${randomUUID()}, ${key.botId}, ${key.personId}, ${key.startKey}, 'answered', ${jobId}, ${alias}, NOW(), NOW())
+    VALUES (${randomUUID()}, ${key.botId}, ${key.personId}, ${key.startKey}, 'answered', ${jobId}, ${alias}, (NOW() AT TIME ZONE 'UTC'), (NOW() AT TIME ZONE 'UTC'))
     ON CONFLICT ("bot_id", "person_id", "start_key") DO UPDATE SET "state" = 'answered', "job_id" = EXCLUDED."job_id", "alias_attempt_id" = EXCLUDED."alias_attempt_id"
     WHERE "computer_start_attempts"."state" IN ('open', 'expired')`;
   return written > 0;
@@ -1811,7 +1811,7 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
     const mine = ticket;
     // The beat of the wake: only this ticket's, so a start that was replaced never keeps a wake alive that is no longer its own
     const beat = setInterval(() => {
-      void prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = NOW() WHERE "bot_id" = ${botId} AND "wake_epoch" = ${mine}`.catch(() => undefined);
+      void prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "wake_epoch" = ${mine}`.catch(() => undefined);
     }, wakeTiming.beatMs);
     beat.unref?.();
     try {

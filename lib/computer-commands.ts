@@ -51,7 +51,7 @@ type Db = Pick<Prisma.TransactionClient, '$queryRaw'>;
 export async function claimCommandIn(db: Db, command: Command, row: { botId: string; personId: string; jobId: string | null; kind: CommandKind; argsHash: string; stretch?: number | null }, initial: StoredOutcome | null = null): Promise<Claimed> {
   const inserted = await db.$queryRaw<Array<{ command_id: string }>>`
     INSERT INTO "computer_job_commands" ("command_id", "bot_id", "job_id", "person_id", "kind", "args_hash", "outcome", "stretch", "created_at")
-    VALUES (${command.id}::uuid, ${row.botId}, ${row.jobId}, ${row.personId}, ${row.kind}, ${row.argsHash}, ${initial === null ? null : JSON.stringify(initial)}::jsonb, ${row.stretch ?? null}, NOW())
+    VALUES (${command.id}::uuid, ${row.botId}, ${row.jobId}, ${row.personId}, ${row.kind}, ${row.argsHash}, ${initial === null ? null : JSON.stringify(initial)}::jsonb, ${row.stretch ?? null}, (NOW() AT TIME ZONE 'UTC'))
     ON CONFLICT ("command_id") DO NOTHING
     RETURNING "command_id"`;
   if (inserted.length === 1) return { fresh: true };

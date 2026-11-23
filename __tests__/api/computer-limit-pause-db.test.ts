@@ -79,7 +79,7 @@ const wipe = async () => {
 };
 
 /** The wake of this Brick's machine that is in flight is older than a start can take (no start is behind it any more): another start wakes the machine itself instead of waiting for it (round 8, B1). */
-const ageWake = (botId: string) => prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = NOW() - INTERVAL '10 minutes' WHERE "bot_id" = ${botId}`;
+const ageWake = (botId: string) => prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = (NOW() AT TIME ZONE 'UTC') - INTERVAL '10 minutes' WHERE "bot_id" = ${botId}`;
 const jobOf = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
 const timeEvents = (jobId: string) => prisma.meterEvent.findMany({ where: { jobId, kind: 'computer_time' }, orderBy: { eventId: 'asc' } });
 const liveKeys = (jobId: string) => prisma.computerJobToken.count({ where: { jobId, revokedAt: null } });
@@ -966,7 +966,7 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         expect(ry.ok && ry.job.status).toBe('running');
         expect((await machineOf(sara.brickId)).machine).toBe('working');
         // A cleanup of the browser holds the machine as the first start's readiness comes in; it is let go a little later
-        await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NOW() WHERE "bot_id" = ${sara.brickId}`;
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${sara.brickId}`;
         setTimeout(() => {
           releasedAt = Date.now();
           void prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NULL WHERE "bot_id" = ${sara.brickId}`.then(() => undefined);
@@ -984,6 +984,36 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
 
     describe('the wake is a heartbeat, not a length of time', () => {
       afterEach(() => setWakeTimingForTests(null));
+
+      // These tests run in the UTC run and in the Kuwait run (a database whose time zone is Kuwait): `updated_at` is a timestamp without a time zone that is read against the server's clock, so every raw write of it is UTC (`NOW() AT TIME ZONE 'UTC'`: the ticket, the beat and the stop claim; the stop claim's value is overwritten by the write that follows it, so it is not read here)
+      it('the ticket and the beat write `updated_at` as UTC: each lands within seconds of the server’s clock whatever the database’s time zone', async () => {
+        setWakeTimingForTests({ beatMs: 100, staleMs: 700 });
+        const sara = await sleepingBrick('b1-utc');
+        const skew = async () => Math.abs(Date.now() - (await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { updatedAt: true } })).updatedAt.getTime());
+        await ageWake(sara.brickId);
+        expect(await skew()).toBeGreaterThan(5 * 60_000);
+        // The ticket
+        expect(await takeWakeTicketForTests(sara.brickId, 'waking', 'stopped')).not.toBeNull();
+        expect(await skew()).toBeLessThan(10_000);
+        // The beat of a wake in flight
+        await ageWake(sara.brickId);
+        const a = gate();
+        const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+          await a.opened;
+        });
+        try {
+          const x = readerOf(sara, 'X', minutes(10));
+          await until(async () => (await machineOf(sara.brickId)).machine === 'waking');
+          await ageWake(sara.brickId);
+          await sleep(400);
+          expect(await skew()).toBeLessThan(10_000);
+          a.open();
+          await x;
+        } finally {
+          a.open();
+          spy.mockRestore();
+        }
+      });
 
       it('a readiness that takes longer than the stale time but keeps beating is not taken over: one wake, one ticket, and both starts run on it', async () => {
         setWakeTimingForTests({ beatMs: 100, staleMs: 700 });
@@ -1097,7 +1127,7 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         });
         await sleep(600);
         // A cleanup of the browser holds the machine as it comes up, and is let go a little later
-        await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NOW() WHERE "bot_id" = ${sara.brickId}`;
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${sara.brickId}`;
         setTimeout(() => {
           releasedAt = Date.now();
           // (a Prisma raw query runs only when it is awaited or chained)
