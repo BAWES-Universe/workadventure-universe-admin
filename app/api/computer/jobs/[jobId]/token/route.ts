@@ -23,7 +23,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
   try {
     const { jobId } = await params;
-    const parsed = bodySchema.safeParse(await request.json().catch(() => ({})));
+    // An EMPTY body is the legacy runner (no epoch named); a body that is there but cannot be read is a bad request, never an empty one: a cut-off `{"epoch":` must not mint a key for an epoch-zero job (CodeRabbit on #1025)
+    const text = await request.text();
+    let body: unknown = {};
+    if (text.trim() !== '') {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
+      }
+    }
+    const parsed = bodySchema.safeParse(body);
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
     const minted = await mintJobToken(jobId, 'model', new Date(), undefined, { epoch: parsed.data.epoch ?? null });
     if (!minted.ok) return minted.reason === 'superseded' ? NextResponse.json(refusalBody('superseded'), { status: 409 }) : NextResponse.json({ error: minted.reason }, { status: minted.reason === 'not_found' ? 404 : 409 });

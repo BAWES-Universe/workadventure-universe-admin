@@ -59,6 +59,17 @@ describe('the job key route', () => {
     }
   });
 
+  it('a body that is there but is not readable JSON is a bad request and mints nothing; an EMPTY body is still the legacy runner', async () => {
+    const cut = (text: string) => new NextRequest('http://localhost:3333/x', { method: 'POST', headers: { Authorization: `Bearer ${SERVICE_TOKEN}` }, body: text });
+    for (const text of ['{"epoch":', '{epoch: 1}', 'epoch=1', '[']) expect((await token(cut(text), params)).status).toBe(400);
+    expect(lib.mintJobToken).not.toHaveBeenCalled();
+    lib.mintJobToken.mockResolvedValueOnce({ ok: true, token: 'k-3', expiresAt: new Date('2026-11-15T12:15:00Z'), epoch: 0 } as never);
+    expect((await token(cut(''), params)).status).toBe(200);
+    // Only blanks counts as empty too
+    lib.mintJobToken.mockResolvedValueOnce({ ok: true, token: 'k-4', expiresAt: new Date('2026-11-15T12:15:00Z'), epoch: 0 } as never);
+    expect((await token(cut('   '), params)).status).toBe(200);
+  });
+
   it('refuses a bad epoch or anything extra before asking', async () => {
     for (const bad of [{ epoch: -1 }, { epoch: 1.5 }, { epoch: '1' }, { other: 1 }]) expect((await token(req(bad), params)).status).toBe(400);
     expect(lib.mintJobToken).not.toHaveBeenCalled();

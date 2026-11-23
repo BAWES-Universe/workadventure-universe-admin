@@ -221,12 +221,18 @@ describe('the owner’s epoch on every broker route (GPT round 5)', () => {
     expect(streamed.status).toBe(409);
     expect(await streamed.json()).toEqual(SUPERSEDED);
     expect(lib.reattachJobTurn).toHaveBeenLastCalledWith('job-1', expect.any(AbortSignal), { epoch: 2 });
-    // A stream that names no epoch (or a bad one) names none
+    // A stream that names no epoch is served as before (it names none), and `epoch=0` is the epoch zero
     lib.reattachJobTurn.mockResolvedValue({ ok: false, reason: 'no_turn' });
-    for (const query of ['', '?epoch=', '?epoch=-1', '?epoch=1.5', '?epoch=abc', '?epoch=99999999999']) {
-      await stream(req('GET', undefined, SERVICE_TOKEN, query), params);
-      expect(lib.reattachJobTurn).toHaveBeenLastCalledWith('job-1', expect.any(AbortSignal), { epoch: null });
+    await stream(req('GET', undefined, SERVICE_TOKEN, ''), params);
+    expect(lib.reattachJobTurn).toHaveBeenLastCalledWith('job-1', expect.any(AbortSignal), { epoch: null });
+    await stream(req('GET', undefined, SERVICE_TOKEN, '?epoch=0'), params);
+    expect(lib.reattachJobTurn).toHaveBeenLastCalledWith('job-1', expect.any(AbortSignal), { epoch: 0 });
+    // An epoch that is NAMED but is not a whole number in range is a bad request, never read as "names none" (a legacy reconnect): nothing is asked
+    lib.reattachJobTurn.mockClear();
+    for (const query of ['?epoch=', '?epoch=-1', '?epoch=1.5', '?epoch=abc', '?epoch=99999999999']) {
+      expect((await stream(req('GET', undefined, SERVICE_TOKEN, query), params)).status).toBe(400);
     }
+    expect(lib.reattachJobTurn).not.toHaveBeenCalled();
   });
 
   it('a cancel that names another turn is answered 200 `not_current` (nothing cancelled); a bad epoch or response is refused before anything is asked', async () => {

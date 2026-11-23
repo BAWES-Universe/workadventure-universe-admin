@@ -22,6 +22,7 @@ import * as computer from '@/lib/computer';
 import * as visitsLib from '@/lib/computer-visits';
 import * as notesLib from '@/lib/computer-job-notes';
 import * as spend from '@/lib/spend-rules';
+import * as profiles from '@/lib/computer-browser-profile';
 import { START_REFUSALS, startStateOf } from '@/lib/computer-values';
 
 jest.mock('@/lib/db', () => ({ prisma: { user: { findUnique: jest.fn() } } }));
@@ -31,6 +32,7 @@ jest.mock('@/lib/computer');
 jest.mock('@/lib/computer-visits');
 jest.mock('@/lib/computer-job-notes');
 jest.mock('@/lib/spend-rules');
+jest.mock('@/lib/computer-browser-profile');
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
 const db = prisma as unknown as { user: { findUnique: jest.Mock } };
@@ -307,7 +309,7 @@ describe('the bot server’s calls', () => {
       reason: 'rule',
       rule: { id: 'r1', why: 'cap', leftMicros: 0, words: 'No more than $1.00 a month from your credit for Brick' },
     });
-    expect(rules.ownerSpendAllowed).toHaveBeenCalledWith(BRICK, 'u-sara', 'computer', expect.any(Date), null, null);
+    expect(rules.ownerSpendAllowed).toHaveBeenCalledWith(BRICK, 'u-sara', 'computer', expect.any(Date), null, null, null);
     expect(lib.startJob).not.toHaveBeenCalled();
   });
 
@@ -494,7 +496,7 @@ describe('the bot server’s calls', () => {
       expect((await startRoute(asBot('/x', { body, headers: { 'X-Computer-Start-Attempt': KEY } }), params)).status).toBe(200);
       expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ botId: BRICK, personId: 'u-sara', startKey: KEY }));
       // The spend check before the start knows the key too, so a retry of a start that used the allowance up reaches the start and finds its job
-      expect(rules.ownerSpendAllowed).toHaveBeenLastCalledWith(BRICK, 'u-sara', 'computer', expect.any(Date), null, KEY);
+      expect(rules.ownerSpendAllowed).toHaveBeenLastCalledWith(BRICK, 'u-sara', 'computer', expect.any(Date), null, KEY, null);
       lib.startJob.mockClear();
       for (const bad of ['no', 'has space in it', 'a'.repeat(65), '']) {
         expect((await startRoute(asBot('/x', { body, headers: { 'X-Computer-Start-Attempt': bad } }), params)).status).toBe(400);
@@ -826,5 +828,17 @@ describe('the bot server’s calls', () => {
   it('sweeps', async () => {
     lib.sweepComputers.mockResolvedValue({ stopped: 1, released: 0, started: 2 });
     expect(await (await sweepRoute(asBot('/x'))).json()).toEqual({ stopped: 1, released: 0, started: 2 });
+    expect(profiles.sweepPausedSignIns).toHaveBeenCalledTimes(1);
+  });
+
+  it('the cleanup of expired sign-ins still runs when the main sweep fails, and the main sweep’s failure is still the answer (500)', async () => {
+    lib.sweepComputers.mockRejectedValue(new Error('a query rejected'));
+    const mute = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      expect((await sweepRoute(asBot('/x'))).status).toBe(500);
+    } finally {
+      mute.mockRestore();
+    }
+    expect(profiles.sweepPausedSignIns).toHaveBeenCalledTimes(1);
   });
 });

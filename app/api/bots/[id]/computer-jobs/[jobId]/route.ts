@@ -22,7 +22,9 @@ const actionSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('beat'), epoch: epochSchema }),
   z.object({ action: z.literal('release'), epoch: epochSchema }),
   z.object({ action: z.literal('progress'), epoch: epochSchema, stepDone: z.number().int().min(0), stepTotal: z.number().int().min(1).nullable().optional(), label: z.string().max(200).nullable().optional() }),
-  z.object({ action: z.literal('renew'), epoch: epochSchema, /** The run the runner is in (the one it prepares with): a renewal from a run that was replaced answers `stale` and holds nothing. Left out, as before. */ run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional() }),
+  // A renewal is fenced by the EPOCH alone: the handler passes only `epoch` to `renewJob`, and a worker that was replaced answers `stale` because its epoch is no longer the job's. `run` is a compatibility field of the
+  // earlier runners: it is accepted and not read, and does not fence anything (CodeRabbit on #1025)
+  z.object({ action: z.literal('renew'), epoch: epochSchema, /** Compatibility only: accepted, never read. The epoch is what fences a renewal. */ run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional() }),
   z.object({
     action: z.literal('handover'),
     epoch: epochSchema,
@@ -118,7 +120,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         return NextResponse.json(done.superseded ? { ...SUPERSEDED, job: done.job } : { job: done.job });
       }
       case 'renew':
-        // `{ ok: true, renewInSeconds }`, or `{ ok: false, reason }`: allowance, pool, closed, over, unanswered, rule (the job has saved and stopped), `ending` (a finish intent is kept or a pool cutoff is decided: no room was added, the finalizer ends the job: abort the turn, read the job, complete the finish), `paused` with `why` (allowance | rule: the person's month or a limit they set PAUSED the job, it is not over: abort the turn, send NO cancel and NO finish, do not count it as a bad turn, and exit on the moved epoch), or `stale` with `run: 'superseded'` (not the owner: exit)
+        // `{ ok: true, renewInSeconds }`, or `{ ok: false, reason }`. A refusal is one of two kinds, and they are told apart by the reason:
+        //  - the job is NOT over and its owner is told to stop working on it: `paused` with `why` (`allowance` | `rule`: the person's month or a limit they set PAUSED it; it carries on by itself when more arrives): abort the turn, send NO cancel
+        //    and NO finish, do not count it as a bad turn, and exit on the moved epoch; `ending` (a finish intent is kept or a pool cutoff is decided: no room was added, the finalizer ends the job: abort the turn, read the job, complete the finish);
+        //    `stale` with `run: 'superseded'` (not the owner: exit);
+        //  - the job is over (a terminal stop): `pool`, `closed`, `over`, `unanswered`, and the legacy `allowance` / `rule` of a job an older Orbit ended (it has saved and stopped).
+        // The epoch alone fences the request (`run` is not read)
         return NextResponse.json(await renewJob(jobId, new Date(), { epoch: body.epoch }));
       case 'handover': {
         const done = await requestHandoverAs(jobId, body.waitingFor, new Date(), body.ready, { epoch: body.epoch, generation: body.generation, responseId: body.responseId });

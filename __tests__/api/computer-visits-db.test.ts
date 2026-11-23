@@ -154,9 +154,9 @@ run('where a job’s computer browsed, in a real database', () => {
     it('a resumed stretch that cannot be read at all says `unread` even though the first stretch was kept `complete`, and deletes no row', async () => {
       const { sara, id } = await resumed('unread');
       const real = provider.exec.bind(provider);
-      const spy = jest.spyOn(provider, 'exec').mockImplementation(async (ref, command, options) => {
+      const spy = jest.spyOn(provider, 'exec').mockImplementation(async (ref: string, command: string) => {
         if (command.startsWith('universe-visits read')) throw new Error('machine unreachable');
-        return real(ref, command, options);
+        return real(ref, command);
       });
       const mute = jest.spyOn(console, 'error').mockImplementation(() => undefined);
       try {

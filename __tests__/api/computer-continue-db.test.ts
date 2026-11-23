@@ -30,6 +30,7 @@ import { continuableEnding, CONTINUES_AFTER } from '@/lib/computer-values';
 import { GET, POST } from '@/app/api/bots/[id]/computer-jobs/route';
 import { pauseCapability, resumeCapability } from '@/lib/capability-pause';
 import { cancelJob } from '@/lib/computer-job-controls';
+import { ownerSpendAllowed } from '@/lib/spend-rules';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -555,5 +556,28 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
       const theirs = await (await GET(new NextRequest(`http://orbit.test/api/bots/${sara.brickId}/computer-jobs?userId=${encodeURIComponent(stranger.uuid)}&retry=1`), { params: Promise.resolve({ id: sara.brickId }) })).json();
       expect(theirs.retry).toBeNull();
     });
+  });
+
+  it('a "try again" that was already carried on is not refused by a spending rule the continuation used up: the new-spend check is skipped for it and kept for a request that would make a new job (CodeRabbit on #1025)', async () => {
+    const { sara, jobId } = await failedAsOurs('spend-before-replay');
+    const second = await tryAgain(sara, jobId, minutes(6), { startKey: key() });
+    if (!second.ok) throw new Error(`the continuation did not start: ${JSON.stringify(second)}`);
+    // The rule says no more than a tenth of a cent a day, which the continuation's room already used
+    await prisma.spendRule.create({ data: { ruleKey: `r-${randomUUID()}`, ownerPersonId: sara.id, scope: 'bot', botId: sara.brickId, period: 'day', capMicros: BigInt(1), words: 'Never more than this a day', createdById: sara.id } });
+    try {
+      // Retried under a NEW key (the game forgot the first): the continuation that exists is the answer, so the check is not made
+      expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', minutes(7), null, key(), jobId)).toEqual({ ok: true });
+      // CONTROL: the same retry with no continuation named is a request for a new job, and the rule says no
+      expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', minutes(7), null, key(), null)).toMatchObject({ ok: false });
+      // CONTROL: naming a job nobody carried on is not exempt either, and nor is another Brick's or person's
+      const other = await failedAsOurs('spend-before-replay-other');
+      expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', minutes(7), null, key(), other.jobId)).toMatchObject({ ok: false });
+      // ...and another person's job that WAS carried on is not an exemption for this person (the continuation must be this person's on this Brick)
+      const theirs = await tryAgain(other.sara, other.jobId, minutes(6), { startKey: key() });
+      if (!theirs.ok) throw new Error(`the other continuation did not start: ${JSON.stringify(theirs)}`);
+      expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', minutes(7), null, key(), other.jobId)).toMatchObject({ ok: false });
+    } finally {
+      await prisma.spendRule.deleteMany({ where: { ownerPersonId: sara.id } });
+    }
   });
 });

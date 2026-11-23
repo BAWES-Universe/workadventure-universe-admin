@@ -16,9 +16,17 @@ export const runtime = 'nodejs';
 export async function POST(request: NextRequest) {
   try {
     requireServiceToken(request);
-    const swept = await sweepComputers();
+    // The two are isolated: a transient failure of the main sweep (a query that rejects) must not stop the cleanup of sign-ins kept too long on awake machines. The main sweep's failure is still the answer (500)
+    let swept: Awaited<ReturnType<typeof sweepComputers>> | null = null;
+    let failure: unknown = null;
+    try {
+      swept = await sweepComputers();
+    } catch (error) {
+      failure = error;
+    }
     // Paused jobs' kept browser sign-ins past the time they are kept are removed from awake machines (never throws, never wakes a machine)
     await sweepPausedSignIns();
+    if (failure) throw failure;
     return NextResponse.json(swept);
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized: Invalid service token') {
