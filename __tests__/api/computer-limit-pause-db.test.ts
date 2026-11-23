@@ -857,6 +857,23 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect((await claimJob(jobId, { run: 'rB', seen: after.ownerEpoch }, minutes(5))).ok).toBe(true);
     });
 
+    it('CodeRabbit A12: a job that pauses again while its restore is in flight keeps the new pause’s marker: the old restore settles nothing and clears nothing', async () => {
+      const { sara, jobId } = await running('a12-again');
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      // The second pause is cut short before its park (the server stopped), so it leaves its marker on the machine, for the same job id
+      (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => {
+        throw new Error('the server stopped');
+      });
+      (profiles.restoreProfile as jest.Mock).mockImplementationOnce(async () => {
+        expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(2))).ok).toBe(true);
+        return { state: 'restored', reason: null };
+      });
+      await resumeJob(sara.brickId, sara.id, jobId, minutes(2));
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', pauses: 2 });
+      // The old restore's settlement matched no row, so it is not "ready" and let go of nothing: the machine still waits for the second pause's browser
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: jobId });
+    });
+
     it('a job that carries on and still has a browser of its own waits for the machine instead of running in another job’s browser: its park is untouched and it holds no room, and it starts when the machine is free', async () => {
       const { sara, jobId } = await running('g6-7-wait-alone');
       expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);

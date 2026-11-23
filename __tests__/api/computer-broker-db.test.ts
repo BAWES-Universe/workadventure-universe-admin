@@ -783,7 +783,10 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         let start: Promise<unknown> = Promise.resolve();
         try {
           await lock.held;
-          start = startTurn(jobId, 'carry on').then((started) => (started.ok ? drain(started.events).then(() => started) : started));
+          start = startTurn(jobId, 'carry on').then(async (started) => {
+            if (started.ok) await drain(started.events);
+            return started;
+          });
           expect(await waitingOnJob()).toBe(true);
           // The claim is held and the admission is waiting: nothing is marked
           expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ firstTurnSentAt: null });

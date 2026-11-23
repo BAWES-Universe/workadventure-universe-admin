@@ -12,10 +12,11 @@ jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
+import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 import { createBrick } from '@/lib/brick-create';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests, type ExecOptions } from '@/lib/computer-provider';
-import { dropProfile, finishPendingParks, resetPendingCursorForTests, resetRecoveryCursorForTests, needsSignInAgain, parkProfile, parkWorthWaitingFor, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settlePark, settleResumedBrowser, signInsKept, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
+import { clearParkPending, dropProfile, finishPendingParks, resetPendingCursorForTests, resetRecoveryCursorForTests, needsSignInAgain, parkProfile, parkWorthWaitingFor, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settlePark, settleResumedBrowser, signInsKept, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -38,6 +39,8 @@ interface Sent {
 let sent: Sent[] = [];
 /** What the pretend machine answers for each action (the command's own answer line). */
 let answers: Record<string, string> = {};
+/** Run when the machine is sent a command, before it answers: a test uses it to let something else happen WHILE the command runs. */
+let during: ((action: string) => Promise<void>) | null = null;
 
 async function person(name: string): Promise<{ id: string; brickId: string }> {
   const unique = `${name}-${tag}-${++made}`;
@@ -86,12 +89,14 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
     provider = new FakeComputerProvider();
     setComputerProviderForTests(provider);
     sent = [];
+    during = null;
     answers = { park: 'parked=1 cookies=4 pages=2', restore: 'restored=1 cookies=4 pages=2', drop: 'dropped=1', clear: 'cleared=1', prune: 'pruned=1' };
     const exec = provider.exec.bind(provider);
     jest.spyOn(provider, 'exec').mockImplementation(async (ref: string, command: string, options?: ExecOptions) => {
       const action = /ACTION="([a-z]+)"/.exec(command)?.[1] ?? '?';
       sent.push({ action, ref, job: /JOB="([^"]*)"/.exec(command)?.[1] ?? '', keep: (/KEEP="([^"]*)"/.exec(command)?.[1] ?? '').split(' ').filter(Boolean), user: options?.user });
       provider.execAnswer = () => ({ stdout: `${answers[action] ?? ''}\n` });
+      if (during) await during(action);
       return exec(ref, command);
     });
     resetSignInsSweepForTests();
@@ -590,6 +595,14 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       expect(await finishPendingParks(minutes(2), 2)).toEqual({ looked: 2, parked: 0, wiped: 2 });
       // The second pass reached the other two Bricks, not the same two again
       expect(new Set([...first, ...sent.map((one) => one.ref)]).size).toBe(4);
+      // The cursor is NOT reset here (CodeRabbit C24): the end-of-scan pass finds nothing after the last Brick, looks at none, and sends the cursor back to the start
+      sent = [];
+      answers.clear = 'cleared=1';
+      expect(await finishPendingParks(minutes(3), 2)).toEqual({ looked: 0, parked: 0, wiped: 0 });
+      expect(sent).toEqual([]);
+      // The next sweep, with no reset, revisits the markers the first pass left (a cursor that moved on correctly but never wrapped would look at none for ever)
+      expect(await finishPendingParks(minutes(4), 2)).toEqual({ looked: 2, parked: 0, wiped: 2 });
+      expect(new Set(sent.map((one) => one.ref))).toEqual(new Set(first));
       resetPendingCursorForTests();
     });
 
@@ -650,6 +663,317 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       await machine(sara.brickId, 'resting');
       expect(await wipeLiveProfile(sara.brickId, visa.id, NOW)).toMatchObject({ state: 'left', reason: 'not_awake' });
       expect(await wipeLiveProfile(sara.brickId, 'not an id; rm -rf /', NOW)).toMatchObject({ state: 'left', reason: 'not_a_job' });
+    });
+  });
+
+  describe('CodeRabbit pass on #1025 (A5, A6, A7, A8, A9, B/C19): the races between a pause, a restore and a settlement', () => {
+    const prepOf = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId }, select: { prepState: true } });
+    const markOf = (botId: string) => prisma.brickComputer.findUniqueOrThrow({ where: { botId }, select: { parkPendingJobId: true, parkPendingWipe: true } });
+    const keptOf = async (jobId: string) => (await prisma.computerJobPause.findMany({ where: { jobId }, orderBy: { n: 'asc' }, select: { n: true, signInsKept: true } })).map((one) => [one.n, one.signInsKept]);
+
+    /**
+     * Holds the Brick's machine row (and runs `inside` in the same open transaction) until `release` is called, so whatever claims the machine meanwhile is shown waiting for that row in pg_stat_activity: a test stands at the exact wait
+     * it means to test. `release` is safe to call twice, and the transaction is joined on every path.
+     */
+    async function holdMachineRow(botId: string, inside: (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]) => Promise<void>) {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let held: () => void = () => undefined;
+      const open = new Promise<void>((resolve) => (held = resolve));
+      const tx = prisma.$transaction(
+        async (inner) => {
+          await inner.$queryRaw`SELECT 1 FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
+          await inner.$queryRaw`SELECT 1 FROM "computer_jobs" WHERE "bot_id" = ${botId} FOR UPDATE`;
+          await inside(inner);
+          held();
+          await gate;
+        },
+        { timeout: 30_000, maxWait: 30_000 },
+      );
+      tx.catch(() => undefined);
+      await Promise.race([open, tx]);
+      return { release, done: async () => { release(); await tx; } };
+    }
+
+    it('A5: a second pause that commits after the park read the wipe flag and before the claim counted the jobs beside is seen: nothing is put away under the first job’s name', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const first = await job(sara, { pausedMinutesAgo: 0 });
+      const second = await job(sara, { status: 'running', pausedMinutesAgo: null, writes: false });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: first.id } });
+      // The second pause: it writes the flag and leaves the held states in one commit, and has not committed yet
+      const pause = await holdMachineRow(sara.brickId, async (tx) => {
+        await tx.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingWipe: true } });
+        await tx.computerJob.update({ where: { id: second.id }, data: { status: 'queued', queuedFor: 'paused', pauses: 1, pausedAt: NOW } });
+      });
+      let parking: ReturnType<typeof parkProfile> | undefined;
+      try {
+        // The park reads the flag (not set: the pause has not committed) and then stands at the claim, waiting for the machine row the pause holds
+        parking = parkProfile(sara.brickId, first.id, NOW);
+        await waitUntilBlockedOnLock(1);
+        await pause.done();
+        // The pause committed. The jobs beside are now none, and the flag is set: the park is refused, and no command is sent
+        expect(await parking).toMatchObject({ state: 'left', reason: 'wipe_pending' });
+        expect(sent).toEqual([]);
+      } finally {
+        await Promise.allSettled([pause.done(), ...(parking ? [parking] : [])]);
+      }
+      // Control: with no flag the same park goes through
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingWipe: false } });
+      expect(await parkProfile(sara.brickId, first.id, NOW)).toMatchObject({ state: 'parked' });
+      expect(sent.map((one) => one.action)).toEqual(['park']);
+    });
+
+    it('A6: a recovery attempt holding a `fresh` result does not empty the browser of a job that another attempt made ready while it waited for the claim', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover', reservationKey: 'room-1' } });
+      // The faster attempt settles the job (ready) in the very commit that lets the claim go
+      const faster = await holdMachineRow(sara.brickId, async (tx) => {
+        await tx.computerJob.update({ where: { id: visa.id }, data: { prepState: null } });
+      });
+      let late: ReturnType<typeof settleResumedBrowser> | undefined;
+      try {
+        late = settleResumedBrowser(visa.id, sara.brickId, { state: 'fresh', reason: 'none', cookies: 0, pages: 0 }, NOW, 'room-1', 'recover');
+        await waitUntilBlockedOnLock(1);
+        await faster.done();
+        // Not ready (nothing of this attempt was written), and the ready job's browser was never emptied
+        expect(await late).toBe('recover');
+        expect(sent).toEqual([]);
+        expect(await prepOf(visa.id)).toEqual({ prepState: null });
+      } finally {
+        await Promise.allSettled([faster.done(), ...(late ? [late] : [])]);
+      }
+      // Control: an attempt that still owns the job (same room, still `recover`) does empty the browser and settles it
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover' } });
+      expect(await settleResumedBrowser(visa.id, sara.brickId, { state: 'fresh', reason: 'none', cookies: 0, pages: 0 }, NOW, 'room-1', 'recover')).toBe('ready');
+      expect(sent.map((one) => one.action)).toEqual(['clear']);
+      // A job on another room is not this attempt's either
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover', reservationKey: 'room-2' } });
+      sent = [];
+      expect(await settleResumedBrowser(visa.id, sara.brickId, { state: 'fresh', reason: 'none', cookies: 0, pages: 0 }, NOW, 'room-1', 'recover')).toBe('recover');
+      expect(sent).toEqual([]);
+      expect(await prepOf(visa.id)).toEqual({ prepState: 'recover' });
+    });
+
+    it('A7: two sweeps that read the same `recover` job do not both restore it: the later one finds it settled under the claim and sends nothing', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover', reservationKey: 'room-1' } });
+      resetRecoveryCursorForTests();
+      const hold = await holdMachineRow(sara.brickId, async () => undefined);
+      let both: Promise<Array<{ looked: number; ready: number }>> | undefined;
+      try {
+        // Both have read the job (it is `recover`) and both stand at the claim
+        both = Promise.all([recoverResumedBrowsers(minutes(1)), recoverResumedBrowsers(minutes(1))]);
+        await waitUntilBlockedOnLock(2);
+        await hold.done();
+        const answers2 = await both;
+        // One restore, once: the second sweep did not send another (which would have found nothing parked, emptied the live browser, and lost the restored sign-ins)
+        expect(sent.map((one) => one.action)).toEqual(['restore']);
+        expect(answers2.map((one) => one.looked)).toEqual([1, 1]);
+        expect(answers2.map((one) => one.ready).sort()).toEqual([0, 1]);
+      } finally {
+        await Promise.allSettled([hold.done(), ...(both ? [both] : [])]);
+      }
+      expect(await prepOf(visa.id)).toEqual({ prepState: null });
+      resetRecoveryCursorForTests();
+    });
+
+    it('A7: the settlement is written under the claim of the restore: while the first sweep’s write is still pending, a second sweep that read the same job sends nothing', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover', reservationKey: 'room-1' } });
+      resetRecoveryCursorForTests();
+      // While the first restore runs, the job's row is held by someone else's write, so the first sweep's settlement has to wait for it
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let lock: Promise<void> | undefined;
+      during = async (action) => {
+        if (action !== 'restore' || lock) return;
+        let held: () => void = () => undefined;
+        const taken = new Promise<void>((resolve) => (held = resolve));
+        lock = prisma.$transaction(
+          async (tx) => {
+            await tx.$queryRaw`SELECT 1 FROM "computer_jobs" WHERE "id" = ${visa.id} FOR UPDATE`;
+            held();
+            await gate;
+          },
+          { timeout: 30_000, maxWait: 30_000 },
+        );
+        lock.catch(() => undefined);
+        await taken;
+      };
+      let first: ReturnType<typeof recoverResumedBrowsers> | undefined;
+      let second: ReturnType<typeof recoverResumedBrowsers> | undefined;
+      try {
+        first = recoverResumedBrowsers(minutes(1));
+        await waitUntilBlockedOnLock(1);
+        // The restore is done and its write is waiting. A second sweep reads the job (still `recover`) and wants the machine: the claim is still the first sweep's
+        second = recoverResumedBrowsers(minutes(1));
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        expect(sent.map((one) => one.action)).toEqual(['restore']);
+      } finally {
+        release();
+        await Promise.allSettled([...(lock ? [lock] : []), ...(first ? [first] : []), ...(second ? [second] : [])]);
+      }
+      expect(await first).toEqual({ looked: 1, ready: 1 });
+      expect(await second).toEqual({ looked: 1, ready: 0 });
+      expect(sent.map((one) => one.action)).toEqual(['restore']);
+      expect(await prepOf(visa.id)).toEqual({ prepState: null });
+      resetRecoveryCursorForTests();
+    });
+
+    it('A7: a restore for a job that is not `restoring` or `recover` on its own room any more sends nothing', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: null, reservationKey: 'room-1' } });
+      expect(await restoreProfile(sara.brickId, visa.id, NOW, { reservation: 'room-1', from: 'recover' })).toMatchObject({ state: 'left', reason: 'superseded' });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover', reservationKey: 'room-2' } });
+      expect(await restoreProfile(sara.brickId, visa.id, NOW, { reservation: 'room-1', from: 'recover' })).toMatchObject({ state: 'left', reason: 'superseded' });
+      expect(sent).toEqual([]);
+      expect(await restoreProfile(sara.brickId, visa.id, NOW, { reservation: 'room-2', from: 'recover' })).toMatchObject({ state: 'restored' });
+      expect(sent.map((one) => one.action)).toEqual(['restore']);
+    });
+
+    it('A8: while a job’s own restore is unresolved its marker and the wipe it carries stay; when it is settled they go', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id, parkPendingWipe: true } });
+      for (const state of ['restoring', 'recover']) {
+        await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: state } });
+        expect(await settlePark(sara.brickId, visa.id, null, NOW)).toBe('waiting');
+        expect(await finishPendingParks(minutes(1))).toMatchObject({ looked: 1, parked: 0, wiped: 0 });
+        expect(await markOf(sara.brickId)).toEqual({ parkPendingJobId: visa.id, parkPendingWipe: true });
+      }
+      expect(sent).toEqual([]);
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: null } });
+      expect(await settlePark(sara.brickId, visa.id, null, NOW)).toBe('settled');
+      expect(await markOf(sara.brickId)).toEqual({ parkPendingJobId: null, parkPendingWipe: false });
+    });
+
+    it('A9: a park that waited for the claim while its job paused again puts nothing away, clears nothing of the later pause and writes nothing onto it', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
+      // While the park waits for the claim: the job starts again and pauses again (its second pause row, the marker the same job id)
+      const again = await holdMachineRow(sara.brickId, async (tx) => {
+        await tx.computerJob.update({ where: { id: visa.id }, data: { pauses: 2 } });
+        await tx.computerJobPause.create({ data: { jobId: visa.id, n: 2, why: 'person', seconds: 60, at: NOW } });
+      });
+      let parking: ReturnType<typeof parkProfile> | undefined;
+      try {
+        parking = parkProfile(sara.brickId, visa.id, NOW, 1);
+        await waitUntilBlockedOnLock(1);
+        await again.done();
+        expect(await parking).toMatchObject({ state: 'left', reason: 'not_paused' });
+      } finally {
+        await Promise.allSettled([again.done(), ...(parking ? [parking] : [])]);
+      }
+      expect(sent).toEqual([]);
+      expect(await markOf(sara.brickId)).toEqual({ parkPendingJobId: visa.id, parkPendingWipe: false });
+      expect(await keptOf(visa.id)).toEqual([[1, null], [2, null]]);
+      // Its settlement is the later pause's to make: the stale one clears and wipes nothing
+      expect(await settlePark(sara.brickId, visa.id, { state: 'left', reason: 'not_paused', cookies: 0, pages: 0 }, NOW, 1)).toBe('waiting');
+      // Even with a park that went through: it is not reported as the settled pause (the marker is not its to let go of)
+      expect(await settlePark(sara.brickId, visa.id, { state: 'parked', reason: null, cookies: 1, pages: 1 }, NOW, 1)).toBe('waiting');
+      expect(sent).toEqual([]);
+      expect(await markOf(sara.brickId)).toEqual({ parkPendingJobId: visa.id, parkPendingWipe: false });
+    });
+
+    it('A9: a park whose job pauses again WHILE the command runs records and clears only for its own pause', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
+      during = async (action) => {
+        if (action !== 'park') return;
+        await prisma.computerJob.update({ where: { id: visa.id }, data: { pauses: 2 } });
+        await prisma.computerJobPause.create({ data: { jobId: visa.id, n: 2, why: 'person', seconds: 60, at: NOW } });
+      };
+      expect(await parkProfile(sara.brickId, visa.id, NOW, 1)).toMatchObject({ state: 'parked' });
+      // Pause 1 kept its browser; pause 2 is not told it did, and its marker is still there
+      expect(await keptOf(visa.id)).toEqual([[1, true], [2, null]]);
+      expect(await markOf(sara.brickId)).toEqual({ parkPendingJobId: visa.id, parkPendingWipe: false });
+    });
+
+    it('A9, A12: the marker is let go only for the pause (and room) that was settled, and never while another write holds the job', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { reservationKey: 'room-1' } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id, parkPendingWipe: true } });
+      // A pause is in flight: it holds the job's row and has moved the pause count. The clear is not made on a guess, and not after the pause commits either
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let locked: () => void = () => undefined;
+      const lockedIt = new Promise<void>((resolve) => (locked = resolve));
+      const pause = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 FROM "computer_jobs" WHERE "id" = ${visa.id} FOR UPDATE`;
+          await tx.computerJob.update({ where: { id: visa.id }, data: { pauses: 2, status: 'queued', queuedFor: 'paused' } });
+          locked();
+          await gate;
+        },
+        { timeout: 30_000, maxWait: 30_000 },
+      );
+      pause.catch(() => undefined);
+      try {
+        await lockedIt;
+        await clearParkPending(sara.brickId, visa.id, { pauses: 1, reservation: 'room-1' });
+        expect(await markOf(sara.brickId)).toEqual({ parkPendingJobId: visa.id, parkPendingWipe: true });
+      } finally {
+        release();
+        await Promise.allSettled([pause]);
+      }
+      // The pause committed: the old settlement (pause 1, room-1) finds another pause and clears nothing
+      await clearParkPending(sara.brickId, visa.id, { pauses: 1, reservation: 'room-1' });
+      expect(await markOf(sara.brickId)).toEqual({ parkPendingJobId: visa.id, parkPendingWipe: true });
+      await clearParkPending(sara.brickId, visa.id, { pauses: 2 });
+      expect(await markOf(sara.brickId)).toEqual({ parkPendingJobId: null, parkPendingWipe: false });
+      // A start's clear also needs the job on the room it carried on from (and on the machine)
+      const carried = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: carried.id }, data: { reservationKey: 'room-3' } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: carried.id } });
+      await clearParkPending(sara.brickId, carried.id, { pauses: 1, reservation: 'room-2' });
+      expect((await markOf(sara.brickId)).parkPendingJobId).toBe(carried.id);
+      await clearParkPending(sara.brickId, carried.id, { pauses: 1, reservation: 'room-3' });
+      expect((await markOf(sara.brickId)).parkPendingJobId).toBeNull();
+    });
+
+    it('B/C19: a recovery counts as ready only when its state write landed on a row', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring', reservationKey: 'room-1' } });
+      const restored = { state: 'restored' as const, reason: null, cookies: 1, pages: 1 };
+      // The write fails: the restore worked, but the job is still `restoring` and claimJob refuses it, so it is not ready
+      const write = jest.spyOn(prisma.computerJob, 'updateMany').mockRejectedValueOnce(new Error('the database went away'));
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        expect(await settleResumedBrowser(visa.id, sara.brickId, restored, NOW, 'room-1', 'restoring')).toBe('recover');
+      } finally {
+        write.mockRestore();
+        quiet.mockRestore();
+      }
+      expect(await prepOf(visa.id)).toEqual({ prepState: 'restoring' });
+      // The write matches nothing (the job is on another room): not ready either, and nothing is written
+      expect(await settleResumedBrowser(visa.id, sara.brickId, restored, NOW, 'room-other', 'restoring')).toBe('recover');
+      expect(await prepOf(visa.id)).toEqual({ prepState: 'restoring' });
+      // The job paused again: not running, so nothing is written and it is not ready
+      const paused = await job(sara, { pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: paused.id }, data: { prepState: 'restoring', reservationKey: 'room-1' } });
+      expect(await settleResumedBrowser(paused.id, sara.brickId, restored, NOW, 'room-1', 'restoring')).toBe('recover');
+      expect(await prepOf(paused.id)).toEqual({ prepState: 'restoring' });
+      // Control: the write lands
+      expect(await settleResumedBrowser(visa.id, sara.brickId, restored, NOW, 'room-1', 'restoring')).toBe('ready');
+      expect(await prepOf(visa.id)).toEqual({ prepState: null });
     });
   });
 

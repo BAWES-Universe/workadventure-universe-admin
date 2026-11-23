@@ -1362,12 +1362,14 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
   if (job.pauses > 0) await prisma.computerJobPause.updateMany({ where: { jobId: job.id, n: job.pauses, resumedAt: null, job: { reservationKey: key } }, data: { resumedAt: now } }).catch(() => undefined);
   if (job.pauses > 0 && (await stillThisTry())) {
     // What the browser came back as decides whether the job may be worked on: its own back, or a clean one proved clean, is ready; anything else leaves it `recover` for the sweep (finding 7)
-    const back = await restoreProfile(job.botId, job.id, now).catch((error) => {
+    // The restore and the settlement are this try's own: the command is run only while the job is still on this room and `restoring`, and the settlement writes only while that is true (a job that paused again meanwhile is no longer this try's)
+    const back = await restoreProfile(job.botId, job.id, now, { reservation: key, from: 'restoring' }).catch((error) => {
       console.error('[Computer] Could not bring back a resumed job’s browser:', error instanceof Error ? error.message : 'unknown');
       return { state: 'failed' as const, reason: 'error', cookies: 0, pages: 0 };
     });
-    // Its own browser is back (or a clean one is proved clean): the machine waits for nobody's park any more
-    if ((await settleResumedBrowser(job.id, job.botId, back, now, key, 'restoring')) === 'ready') await clearParkPending(job.botId, job.id);
+    // Its own browser is back (or a clean one is proved clean): the machine waits for nobody's park any more. Only when this try's own settlement was written (a settlement that matched no row is not "ready"), and only for the pause and
+    // the room this try carried on from: a later pause of the same job leaves its own marker, and that one is never cleared from here (CodeRabbit A12)
+    if ((await settleResumedBrowser(job.id, job.botId, back, now, key, 'restoring')) === 'ready') await clearParkPending(job.botId, job.id, { pauses: job.pauses, reservation: key });
   }
   // What is on the machine before this job works on it: only so the message can name files the job saved outside its own output folder (those are never handed over)
   if (job.writes) await takeBaseline(job.id, job.botId, provider, key);
