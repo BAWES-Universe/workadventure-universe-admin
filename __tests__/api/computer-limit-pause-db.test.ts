@@ -646,27 +646,54 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
       let first = true;
       let held: Promise<void> = Promise.resolve();
+      let poll: Promise<void> = Promise.resolve();
+      let letGo: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (letGo = resolve));
+      let resumeEnded = false;
+      let waited = false;
       const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
         if (!first) return;
         first = false;
         // Another request holds the job's row and gives it another room, but has not committed when this try's bring-up fails: the failed try waits for it at the machine write and then finds the room moved
+        let pid = 0;
         let locked: () => void = () => undefined;
         const gotLock = new Promise<void>((resolve) => (locked = resolve));
-        held = prisma.$transaction(async (tx) => {
-          await tx.$queryRaw`SELECT 1 AS one FROM "computer_jobs" WHERE "id" = ${jobId} FOR UPDATE`;
-          locked();
-          await new Promise((resolve) => setTimeout(resolve, 600));
-          await tx.computerJob.update({ where: { id: jobId }, data: { reservationKey: 'cr-8-other-room' } });
-        });
-        await gotLock;
+        held = prisma.$transaction(
+          async (tx) => {
+            pid = (await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`)[0].pid;
+            await tx.$queryRaw`SELECT 1 AS one FROM "computer_jobs" WHERE "id" = ${jobId} FOR UPDATE`;
+            locked();
+            await gate;
+            await tx.computerJob.update({ where: { id: jobId }, data: { reservationKey: 'cr-8-other-room' } });
+          },
+          { timeout: 30_000, maxWait: 30_000 },
+        );
+        // A holder that fails before it takes the row ends the wait with its own error
+        await Promise.race([gotLock, held.then(() => Promise.reject(new Error('the holder ended before it took the row')))]);
+        // The row is let go when the failing resume is blocked on it (a backend the holder blocks), or when the resume ended without waiting (the test then fails on what it wrote), or at a bounded deadline
+        poll = (async () => {
+          for (let tries = 0; tries < 250 && !waited && !resumeEnded; tries += 1) {
+            waited = (await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`)[0].n >= 1;
+            if (!waited) await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          letGo();
+        })();
         throw new Error('the machine never came ready');
       });
       try {
-        await resumeJob(sara.brickId, sara.id, jobId, minutes(2));
+        await resumeJob(sara.brickId, sara.id, jobId, minutes(2)).finally(() => {
+          resumeEnded = true;
+        });
+        await poll;
+        await held;
+        // The failing resume really waited for the row the other request held
+        expect(waited).toBe(true);
       } finally {
         spy.mockRestore();
+        resumeEnded = true;
+        letGo();
+        await Promise.allSettled([poll, held]);
       }
-      await held;
       expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null, reservationKey: 'cr-8-other-room' });
       // (the machine is in whatever state the waking left it: never "broken", which is what a failure that wrote it would leave)
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { machine: true } })).machine).not.toBe('broken');

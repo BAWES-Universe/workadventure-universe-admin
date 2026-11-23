@@ -47,6 +47,43 @@ let fake: FakeComputerProvider;
 const command = () => ({ id: randomUUID() });
 const notesOf = (jobId: string) => prisma.computerJobNote.findMany({ where: { jobId }, orderBy: { seq: 'asc' }, select: { seq: true, text: true } });
 const commandOf = (id: string) => prisma.computerJobCommand.findUnique({ where: { commandId: id } });
+/**
+ * Watches the reads of a stored command: `seen` resolves when one of them finds the command still pending (what a copy of a control does while it waits for the first request's answer). A request that has not
+ * finished does not prove it got there, so the tests below wait for this signal, and fail if the copy ends without it (`reached`).
+ */
+const watchPendingReads = () => {
+  let found: () => void = () => undefined;
+  const seen = new Promise<void>((resolve) => (found = resolve));
+  const real = prisma.$queryRaw as unknown as (...args: unknown[]) => unknown;
+  // Not bound to the root client: a transaction's client inherits the method and runs it on itself
+  const spy = jest.spyOn(prisma, '$queryRaw').mockImplementation(function (this: unknown, ...args: unknown[]) {
+    const result = real.apply(this, args);
+    const first = args[0];
+    const text = Array.isArray(first) ? first.join('?') : '';
+    if (!text.includes('"args_hash"') || !text.includes('FROM "computer_job_commands"')) return result;
+    return Promise.resolve(result).then((rows) => {
+      if ((rows as Array<{ outcome?: { pending?: boolean } | null }>)[0]?.outcome?.pending === true) found();
+      return rows;
+    });
+  } as never);
+  return {
+    stop: () => spy.mockRestore(),
+    /** Resolves when the copy has read the pending command; rejects when the copy ended first (its own failure, or an answer given without having waited for the first request). */
+    reached: (copy: Promise<unknown>) =>
+      Promise.race([seen, copy.then(() => Promise.reject(new Error('the copy answered before it read the pending command')))]),
+  };
+};
+/** Whether a session is blocked (bounded wait) on this advisory lock: a barrier that proves a request reached the lock, never a delay. `ended` lets a request that ended without reaching it fail the wait. */
+const waitingOnLock = async (key: string, ended: () => Error | null = () => null): Promise<boolean> => {
+  for (let tries = 0; tries < 250; tries += 1) {
+    const failure = ended();
+    if (failure) throw failure;
+    const rows = await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(${key}, 0)`;
+    if (rows[0].n > 0) return true;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return false;
+};
 
 async function person(name: string) {
   const unique = `${name}-${tag}-${++made}`;
@@ -301,13 +338,19 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       });
       const old = resumeWait.ms;
       resumeWait.ms = 10_000;
+      const watch = watchPendingReads();
+      let first: Promise<unknown> = Promise.resolve();
+      let copy: Promise<unknown> = Promise.resolve();
       try {
         const r = command();
-        const first = resumeJob(sara.brickId, sara.id, jobId, minutes(10), r);
+        first = resumeJob(sara.brickId, sara.id, jobId, minutes(10), r);
+        first.catch(() => undefined);
         await started;
         let copyAnswer: unknown = 'still waiting';
-        const copy = resumeJob(sara.brickId, sara.id, jobId, minutes(10), r).then((answer) => (copyAnswer = answer));
-        // The copy has had every chance to answer: it has not (the stored answer is still pending)
+        copy = resumeJob(sara.brickId, sara.id, jobId, minutes(10), r).then((answer) => (copyAnswer = answer));
+        copy.catch(() => undefined);
+        // The copy has read the stored command and found it pending (it did not end before), and has had a moment to answer: it has not
+        await watch.reached(copy);
         await new Promise((resolve) => setTimeout(resolve, 500));
         expect(copyAnswer).toBe('still waiting');
         // The month refuses the start
@@ -321,7 +364,9 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       } finally {
         resumeWait.ms = old;
         go();
+        watch.stop();
         spy.mockRestore();
+        await Promise.allSettled([first, copy]);
       }
     });
 
@@ -469,10 +514,13 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
         // A job asked for after the Stop starts on its own and is not the Stop's
         const later = await startJob({ botId: sara.brickId, personId: sara.id, title: 'After the Stop' }, minutes(3));
         if (!later.ok) throw new Error('the job was not made');
+        const movesBeforeRetry = moves;
         const retried = await stopAll(sara.brickId, sara.id, minutes(4), s);
         expect(retried).toMatchObject({ ok: true });
         expect(await jobOf(later.job.id)).toMatchObject({ status: 'running' });
         expect((await commandOf(s.id))?.outcome).toEqual({ ok: true, targets: [jobId] });
+        // The retry moved the line (it looked for the next job in line: the one the first request stopped before)
+        expect(moves).toBeGreaterThan(movesBeforeRetry);
         const movedBefore = moves;
         expect(await stopAll(sara.brickId, sara.id, minutes(5), s)).toMatchObject({ ok: true });
         expect(moves).toBe(movedBefore);
@@ -515,21 +563,34 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       const { sara, jobId } = await running('cr-51');
       const c = command();
       const gate = gatedPark({ state: 'parked', reason: null });
-      const first = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c);
-      await gate.wasEntered;
-      expect((await commandOf(c.id))?.outcome).toMatchObject({ ok: true, pending: true });
-      let copyAnswered = false;
-      const copy = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c).then((answer) => {
-        copyAnswered = true;
-        return answer;
-      });
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      expect(copyAnswered).toBe(false);
-      gate.release();
-      expect(await first).toMatchObject({ ok: true, signInsKept: true });
-      expect(await copy).toMatchObject({ ok: true, signInsKept: true });
-      expect((await commandOf(c.id))?.outcome).toEqual({ ok: true, signInsKept: true });
-      expect(await pausesOf(jobId)).toBe(1);
+      const watch = watchPendingReads();
+      let first: Promise<unknown> = Promise.resolve();
+      let copy: Promise<unknown> = Promise.resolve();
+      try {
+        first = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c);
+        first.catch(() => undefined);
+        await gate.wasEntered;
+        expect((await commandOf(c.id))?.outcome).toMatchObject({ ok: true, pending: true });
+        let copyAnswered = false;
+        copy = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c).then((answer) => {
+          copyAnswered = true;
+          return answer;
+        });
+        copy.catch(() => undefined);
+        // The copy has read the stored command and found it pending (it did not end before), and has had a moment to answer: it has not
+        await watch.reached(copy);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        expect(copyAnswered).toBe(false);
+        gate.release();
+        expect(await first).toMatchObject({ ok: true, signInsKept: true });
+        expect(await copy).toMatchObject({ ok: true, signInsKept: true });
+        expect((await commandOf(c.id))?.outcome).toEqual({ ok: true, signInsKept: true });
+        expect(await pausesOf(jobId)).toBe(1);
+      } finally {
+        gate.release();
+        watch.stop();
+        await Promise.allSettled([first, copy]);
+      }
     });
 
     it('CodeRabbit on #1025 (51): when the first Pause never finishes putting the sign-ins away, the copy settles the answer once (kept: false), and the first one then returns that same answer', async () => {
@@ -538,8 +599,10 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       const old = resumeWait.ms;
       resumeWait.ms = 300;
       const gate = gatedPark({ state: 'parked', reason: null });
+      let first: Promise<unknown> = Promise.resolve();
       try {
-        const first = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c);
+        first = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c);
+        first.catch(() => undefined);
         await gate.wasEntered;
         expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(2), c)).toMatchObject({ ok: true, signInsKept: false });
         expect((await commandOf(c.id))?.outcome).toEqual({ ok: true, signInsKept: false });
@@ -547,6 +610,8 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
         expect(await first).toMatchObject({ ok: true, signInsKept: false });
       } finally {
         resumeWait.ms = old;
+        gate.release();
+        await Promise.allSettled([first]);
       }
       expect(await pausesOf(jobId)).toBe(1);
     });
@@ -556,20 +621,33 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       const taxi = await another(sara, 'Taxi', minutes(1));
       const c = command();
       const gate = gatedPark({ state: 'parked', reason: null });
-      const first = moveJobFirst(sara.brickId, sara.id, taxi, { pauseRunning: true }, minutes(2), c);
-      await gate.wasEntered;
-      expect((await commandOf(c.id))?.outcome).toMatchObject({ ok: true, pending: true, targets: [jobId] });
-      let copyAnswered = false;
-      const copy = moveJobFirst(sara.brickId, sara.id, taxi, { pauseRunning: true }, minutes(2), c).then((answer) => {
-        copyAnswered = true;
-        return answer;
-      });
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      expect(copyAnswered).toBe(false);
-      gate.release();
-      expect(await first).toMatchObject({ ok: true, signInsKept: true });
-      expect(await copy).toMatchObject({ ok: true, signInsKept: true });
-      expect((await commandOf(c.id))?.outcome).toEqual({ ok: true, signInsKept: true });
+      const watch = watchPendingReads();
+      let first: Promise<unknown> = Promise.resolve();
+      let copy: Promise<unknown> = Promise.resolve();
+      try {
+        first = moveJobFirst(sara.brickId, sara.id, taxi, { pauseRunning: true }, minutes(2), c);
+        first.catch(() => undefined);
+        await gate.wasEntered;
+        expect((await commandOf(c.id))?.outcome).toMatchObject({ ok: true, pending: true, targets: [jobId] });
+        let copyAnswered = false;
+        copy = moveJobFirst(sara.brickId, sara.id, taxi, { pauseRunning: true }, minutes(2), c).then((answer) => {
+          copyAnswered = true;
+          return answer;
+        });
+        copy.catch(() => undefined);
+        // The copy has read the stored command and found it pending (it did not end before), and has had a moment to answer: it has not
+        await watch.reached(copy);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        expect(copyAnswered).toBe(false);
+        gate.release();
+        expect(await first).toMatchObject({ ok: true, signInsKept: true });
+        expect(await copy).toMatchObject({ ok: true, signInsKept: true });
+        expect((await commandOf(c.id))?.outcome).toEqual({ ok: true, signInsKept: true });
+      } finally {
+        gate.release();
+        watch.stop();
+        await Promise.allSettled([first, copy]);
+      }
     });
 
     it('CodeRabbit on #1025 (51): a Pause of a job that only waited in line is answered in its own transaction (final, nothing pending)', async () => {
@@ -587,17 +665,28 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       await prisma.computerJob.update({ where: { id: jobId }, data: { status: 'queued', queuedFor: 'turn', reservationKey: null, stretchStarted: null, startedAt: null } });
       const seenDuring: string[] = [];
       let late: Promise<unknown> = Promise.resolve();
-      // The moment the command has its locks (the holders it will pause were read under the line lock), the first job tries to start
-      beforeLockOf(target, async () => {
-        late = controlInternals.tryStart(jobId, minutes(2));
-        await new Promise((resolve) => setTimeout(resolve, 800));
-        seenDuring.push((await jobOf(jobId)).status);
-      });
-      const answer = await moveJobFirst(sara.brickId, sara.id, target, { pauseRunning: true }, minutes(2), command());
-      expect(answer).toMatchObject({ ok: true });
-      // Held back by the line lock for the whole command
-      expect(seenDuring).toEqual(['queued']);
-      await late;
+      try {
+        // The moment the command has its locks (the holders it will pause were read under the line lock), the first job tries to start
+        beforeLockOf(target, async () => {
+          let ended: Error | null = null;
+          late = controlInternals.tryStart(jobId, minutes(2));
+          // Observed from the moment it starts: a start that ends (or fails) before it reaches the lock fails the wait, whichever way it ended
+          late.then(
+            () => (ended = new Error('the competing start ended without waiting on the line lock')),
+            (error) => (ended = error instanceof Error ? error : new Error(String(error))),
+          );
+          // The start is waiting on THIS Brick's line lock, which the command holds: only then does the command go on
+          expect(await waitingOnLock(`computer:line:${sara.brickId}`, () => ended)).toBe(true);
+          seenDuring.push((await jobOf(jobId)).status);
+        });
+        const answer = await moveJobFirst(sara.brickId, sara.id, target, { pauseRunning: true }, minutes(2), command());
+        expect(answer).toMatchObject({ ok: true });
+        // Held back by the line lock for the whole command
+        expect(seenDuring).toEqual(['queued']);
+        await late;
+      } finally {
+        await Promise.allSettled([late]);
+      }
     });
 
     it('a Stop’s command id used again on the owner’s OTHER Brick is `command_reused`, and stops nothing there', async () => {

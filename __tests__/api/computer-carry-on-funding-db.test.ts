@@ -171,8 +171,11 @@ run('finding 5 (GPT round 6): carrying on only when what was refused fits, in a 
       await setUp();
       const real = jest.requireActual('@/lib/meter-allowance').roomWouldFit as typeof allowanceModule.roomWouldFit;
       // While the funding is being looked at, the job is resumed and paused again by a limit (its pause number moves on)
+      let estimated: unknown = 'not asked';
       (allowanceModule.roomWouldFit as jest.Mock).mockImplementationOnce(async (...args: Parameters<typeof real>) => {
         const answer = await real(...args);
+        // The funding look itself passed (null: it would fit): the refusal below can only be the pause number
+        estimated = answer;
         const first = await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId, n: 1 } } });
         // ...a second pause of the same kind is on record, with a bigger refused call than the first one's estimate
         await prisma.computerJobPause.create({ data: { jobId, n: 2, why: 'allowance', seconds: 0, at: first.at, grantsPrint: first.grantsPrint, heldScreen: false, blockedKind: 'call', blockedMicros: BigInt(5_000_000), blockedMonth: first.blockedMonth } });
@@ -180,7 +183,9 @@ run('finding 5 (GPT round 6): carrying on only when what was refused fits, in a 
         return answer;
       });
       expect(await carryOnPaused(minutes(6))).toBe(0);
-      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', carryOnPending: false });
+      expect(estimated).toBeNull();
+      // The second pause is the one that is stored: the sweep did not stop at an unrelated refusal before the estimate
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', carryOnPending: false, pauses: 2 });
     });
 
     it('CodeRabbit on #1025 (56): a start that rejects after the carry-on committed still leaves the `back_in_line` telling (the job stays in line with its mark set, and nothing else would tell)', async () => {

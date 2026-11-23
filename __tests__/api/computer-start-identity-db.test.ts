@@ -295,12 +295,14 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     const tom = await owner('r12');
     const [KEY_A, KEY_B, KEY_C] = [key(), key(), key()];
     const old = new Date(Date.now() - 9 * 24 * 60 * 60_000);
+    // A job of the same person and Brick as the attempts that follow it, as the start workflow only ever links attempts of one person's one Brick. It is made through a start of its own (made first: a start
+    // forgets old marks), whose attempt row is then taken out so the three links below are the only ones left
+    const made = await post(tom, key(), 'Visa');
+    await prisma.computerStartAttempt.deleteMany({ where: { jobId: made.job.id } });
     const a = await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_A, state: 'open', beatAt: old } });
     const b = await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_B, state: 'answered', aliasAttemptId: a.id, beatAt: old } });
     await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_C, state: 'answered', aliasAttemptId: b.id, beatAt: old } });
     // The answering start then makes its job (as a late start does)
-    const sara = await owner('r12-job');
-    const made = await post(sara, key(), 'Visa');
     await prisma.computerStartAttempt.update({ where: { id: a.id }, data: { state: 'made', jobId: made.job.id, beatAt: old } });
     await forgetOldStartMarks(new Date());
     expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(3);

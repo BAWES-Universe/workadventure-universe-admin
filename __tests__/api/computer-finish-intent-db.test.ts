@@ -1367,8 +1367,15 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea }, minutes(1))).toMatchObject({ ok: true });
       // Stop's read of what is on the computer saw this job in line (it has started and committed since)
       const original = prisma.computerJob.findMany.bind(prisma.computerJob) as unknown as (args: { where?: { status?: { in?: string[] } } }) => Promise<Array<{ id: string; status: string }>>;
-      const spy = jest.spyOn(prisma.computerJob, 'findMany').mockImplementation(((args: { where?: { status?: { in?: string[] } } }) =>
-        args?.where?.status?.in?.includes('queued') && args.where.status.in.includes('running') ? Promise.resolve([{ id: jobId, status: 'queued' }]) : original(args)) as never);
+      // The stale snapshot is served once, to Stop's own read: the view built after it reads the rows as they are
+      let served = 0;
+      const spy = jest.spyOn(prisma.computerJob, 'findMany').mockImplementation(((args: { where?: { status?: { in?: string[] } } }) => {
+        if (served === 0 && args?.where?.status?.in?.includes('queued') && args.where.status.in.includes('running')) {
+          served++;
+          return Promise.resolve([{ id: jobId, status: 'queued' }]);
+        }
+        return original(args);
+      }) as never);
       try {
         await stopJobFor(sara.brickId, sara.id, minutes(2));
       } finally {
@@ -1387,18 +1394,20 @@ run('the runner’s committed word that a job is to end, in a real database', ()
         await revokeJobTokens(jobId, minutes(1), undefined, tx);
       });
       let cancelling: Promise<unknown> = Promise.resolve();
+      let lockWait: Promise<unknown> = Promise.resolve(false);
       try {
         await holder.ready;
         cancelling = cancelJob(sara.brickId, sara.id, jobId, minutes(2));
-        // A rejection is observed from the start (never unhandled), and ends the wait with its own error: a Cancel that fails or ends before it reaches the lock is not polled for
+        // A rejection is observed from the start (never unhandled). The race ends when the Cancel ends, but the poll goes on until its own deadline, so it is joined below
         cancelling.catch(() => undefined);
-        expect(await Promise.race([waitingOn(cutoffLockKey(jobId)), cancelling.then(() => false)])).toBe(true);
+        lockWait = waitingOn(cutoffLockKey(jobId));
+        expect(await Promise.race([lockWait, cancelling.then(() => false)])).toBe(true);
         holder.release();
         await holder.done;
         await cancelling;
       } finally {
         holder.release();
-        await Promise.allSettled([holder.done, cancelling]);
+        await Promise.allSettled([holder.done, cancelling, lockWait]);
       }
       expect(await jobOf(jobId)).toMatchObject({ status: 'failed', endedBy: 'error' });
       expect(await decisionOf(jobId)).toMatchObject({ state: 'given', causeHint: 'ours' });
