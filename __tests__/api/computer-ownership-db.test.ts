@@ -566,8 +566,9 @@ run('one owner per computer job: every write is decided in the write that lands 
       // An earlier try reserved room and stopped before its claim: its room is still held, in the past now, and the job is claimed under another key
       const mine = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: current } });
       const oldKey = `computer:job:${made.jobId}:earlier-try`;
-      const { id: _id, ...rest } = mine;
-      await prisma.meterReservation.create({ data: { ...rest, reservationKey: oldKey, state: 'held', expiresAt: minutes(5), settledMicros: null, closedAt: null } as never });
+      await prisma.meterReservation.create({
+        data: { reservationKey: oldKey, personKey: mine.personKey, personId: mine.personId, botId: mine.botId, jobId: mine.jobId, amountMicros: mine.amountMicros, state: 'held', expiresAt: minutes(5), terms: mine.terms ?? undefined },
+      });
       const before = (await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: current } })).amountMicros;
       await sweepComputers(minutes(7));
       expect(await jobOf(made.jobId)).toMatchObject({ status: 'running', endedBy: null, reservationKey: current });

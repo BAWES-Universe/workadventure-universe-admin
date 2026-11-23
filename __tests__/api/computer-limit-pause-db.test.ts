@@ -952,4 +952,65 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect(await told(minutes(8))).toEqual([]);
     });
   });
+
+  describe('N14: a paused job cannot be started or un-paused by a server of the version before this (a trigger, for the mixed-version window)', () => {
+    /** A job paused by the person, in line with `queued_for = 'paused'` and a reason, as the new code leaves it. */
+    async function paused(name: string, why: 'person' | 'limit' = 'person') {
+      const made = await running(name);
+      if (why === 'person') expect((await pauseJob(made.sara.brickId, made.sara.id, made.jobId, minutes(2))).ok).toBe(true);
+      else {
+        // The month runs out at a renewal: the job pauses for the allowance (as C5.1)
+        await setUp({ memberAllowanceMicros: 1_000 });
+        expect(await renewJob(made.jobId, minutes(5), { epoch: made.epoch })).toEqual({ ok: false, reason: 'paused', why: 'allowance' });
+        await setUp();
+      }
+      expect(await jobOf(made.jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: why === 'person' ? 'person' : 'allowance' });
+      return made;
+    }
+
+    it('an old-style claim (queued to running with no paused filter, as the version before wrote it) on a paused job writes 0 rows and the job stays paused', async () => {
+      const { jobId } = await paused('n14-claim');
+      const done = await prisma.computerJob.updateMany({ where: { id: jobId, status: 'queued' }, data: { status: 'running', queuedFor: null, startedAt: minutes(3), stretchStarted: minutes(3) } });
+      expect(done.count).toBe(0);
+      const waiting = await prisma.computerJob.updateMany({ where: { id: jobId, status: 'queued' }, data: { status: 'waiting' } });
+      expect(waiting.count).toBe(0);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'person' });
+    });
+
+    it('an old-style `queued_for = busy` write on a paused job (a limit pause too) writes 0 rows and it is still paused', async () => {
+      for (const why of ['person', 'limit'] as const) {
+        const { jobId } = await paused(`n14-busy-${why}`, why);
+        const done = await prisma.computerJob.updateMany({ where: { id: jobId, status: 'queued' }, data: { queuedFor: 'busy' } });
+        expect(done.count).toBe(0);
+        expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused' });
+      }
+    });
+
+    it('resume, the carry-on by itself, cancel and Stop of a paused job still work: the trigger blocks no new-code path and never an ending', async () => {
+      // Resume (clears the reason in the same write that moves it off `paused`)
+      const resumed = await paused('n14-resume');
+      expect((await resumeJob(resumed.sara.brickId, resumed.sara.id, resumed.jobId, minutes(4))).ok).toBe(true);
+      expect(await jobOf(resumed.jobId)).toMatchObject({ status: 'running', pausedWhy: null });
+      // The carry-on by itself of a job the month paused
+      const limited = await paused('n14-carry', 'limit');
+      await prisma.meterEvent.deleteMany({});
+      expect(await carryOnPaused(minutes(6))).toBeGreaterThanOrEqual(1);
+      expect(await jobOf(limited.jobId)).toMatchObject({ status: expect.stringMatching(/running|queued/), pausedWhy: null });
+      expect((await jobOf(limited.jobId)).queuedFor).not.toBe('paused');
+      // Cancel of one paused job, and the person's Stop of another
+      const cancelled = await paused('n14-cancel');
+      expect((await cancelJob(cancelled.sara.brickId, cancelled.sara.id, cancelled.jobId, minutes(4))).ok).toBe(true);
+      expect(await jobOf(cancelled.jobId)).toMatchObject({ status: 'stopped', endedBy: 'person' });
+      const stopped = await paused('n14-stop');
+      await stopJobFor(stopped.sara.brickId, stopped.sara.id, minutes(4));
+      expect(await jobOf(stopped.jobId)).toMatchObject({ status: 'stopped' });
+    });
+
+    it('an ending of a paused job is never blocked, whatever else the write moves (a purge or an admin ending included)', async () => {
+      const { jobId } = await paused('n14-end');
+      const ended = await prisma.computerJob.updateMany({ where: { id: jobId }, data: { status: 'stopped', queuedFor: 'busy', endedAt: minutes(5), endedBy: 'off' } });
+      expect(ended.count).toBe(1);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'off' });
+    });
+  });
 });
