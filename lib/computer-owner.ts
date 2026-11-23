@@ -34,14 +34,7 @@ export interface OwnedRow {
   prepState: string | null;
 }
 
-/**
- * How long one beat from the owner holds the job for. A runner beats every 30 s, so two beats may be lost before anyone else may take it; a worker that died is taken over within this, plus the sweep.
- * Short enough that a crash does not strand a job for long, long enough that a slow turn, a garbage collection or a rolling deploy never makes two workers run one job.
- */
-export const OWNER_LEASE_MS = 90_000;
-
-/** When the owner's hold stands until, from a beat (or a claim) at `now`. */
-export const leaseUntil = (now: Date): Date => new Date(now.getTime() + OWNER_LEASE_MS);
+export { OWNER_LEASE_MS, leaseUntil } from '@/lib/computer-lease';
 
 /** Reads the job's row and locks it (`FOR UPDATE`). Call it AFTER the job's cutoff lock (and the person's give-back lock, when one is taken): the order used everywhere. */
 export async function lockJobRow(tx: Pick<Prisma.TransactionClient, '$queryRaw'>, jobId: string): Promise<OwnedRow | null> {

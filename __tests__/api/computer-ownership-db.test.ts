@@ -1197,6 +1197,55 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect((await jobOf(jobId)).ownerLeaseUntil).not.toBeNull();
     });
 
+    it('CodeRabbit on #1025 (41): a beat that was read before a renewal and lands after it never moves the hold back; the owner is still told it owns the job', async () => {
+      const { jobId } = await running('s-lease-back');
+      const ea = await claimed(jobId, 'rA');
+      expect(await beatJob(jobId, new Date(NOW.getTime() + 60_000), { epoch: ea })).toEqual({ ok: true, until: new Date(NOW.getTime() + 150_000) });
+      // A beat that started at 10 s lands now: its deadline (100 s) is earlier than the hold that stands (150 s)
+      const late = await beatJob(jobId, new Date(NOW.getTime() + 10_000), { epoch: ea });
+      expect(late).toEqual({ ok: true, until: new Date(NOW.getTime() + 150_000), held: true });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toEqual(new Date(NOW.getTime() + 150_000));
+      // The same rule for a renewal and an admitted call that were read earlier
+      expect(await renewJob(jobId, new Date(NOW.getTime() + 20_000), { epoch: ea })).toMatchObject({ ok: true });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toEqual(new Date(NOW.getTime() + 150_000));
+      expect(await ask(await keyFor(jobId, ea), 'cb1', {}, new Date(NOW.getTime() + 30_000))).toMatchObject({ ok: true });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toEqual(new Date(NOW.getTime() + 150_000));
+      // A hold that LAPSED (nobody claimed) is brought back by the owner's next beat: it was only late
+      expect(await beatJob(jobId, new Date(NOW.getTime() + 400_000), { epoch: ea })).toEqual({ ok: true, until: new Date(NOW.getTime() + 490_000) });
+    });
+
+    it('CodeRabbit on #1025 (7, 42): after the owner let the job go, a beat, a renewal and a call admitted on a key made before cannot bring the hold back: the replacement claims at once', async () => {
+      const { jobId } = await running('s-lease-after-release');
+      const ea = await claimed(jobId, 'rA');
+      const key = await keyFor(jobId, ea);
+      expect(await releaseJob(jobId, { epoch: ea })).toEqual({ ok: true });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toBeNull();
+      // The beat that was in flight lands after the release: the owner is told it is still the owner but nothing holds the job
+      expect(await beatJob(jobId, new Date(NOW.getTime() + 1_000), { epoch: ea })).toMatchObject({ ok: true, held: false });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toBeNull();
+      expect(await renewJob(jobId, new Date(NOW.getTime() + 2_000), { epoch: ea })).toMatchObject({ ok: true });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toBeNull();
+      // A key made before the release still works for a call (it is the epoch's key), and its admission holds nothing
+      expect(await ask(key, 'cr1', {}, new Date(NOW.getTime() + 3_000))).toMatchObject({ ok: true });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toBeNull();
+      expect(await ask(key, 'cr2', { payer: 'own-key' }, new Date(NOW.getTime() + 4_000))).toMatchObject({ ok: true });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toBeNull();
+      expect(await claimJob(jobId, { run: 'rB', seen: ea }, new Date(NOW.getTime() + 5_000))).toEqual({ ok: true, epoch: ea + 1 });
+    });
+
+    it('CodeRabbit on #1025 (25): a call admitted on the owner’s own key is a beat; one that was refused renews nothing', async () => {
+      const { jobId } = await running('s-lease-own-key');
+      const ea = await claimed(jobId, 'rA');
+      const at = new Date(NOW.getTime() + 60_000);
+      expect(await ask(await keyFor(jobId, ea), 'ck1', { payer: 'own-key' }, at)).toMatchObject({ ok: true });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toEqual(new Date(at.getTime() + 90_000));
+      expect(await claimJob(jobId, { run: 'rB', seen: ea }, new Date(NOW.getTime() + 91_000))).toMatchObject({ ok: false, reason: 'held' });
+      // A refused one (a bad key) writes nothing
+      const before = (await jobOf(jobId)).ownerLeaseUntil;
+      expect(await ask('not-a-key', 'ck2', { payer: 'own-key' }, new Date(NOW.getTime() + 80_000))).toMatchObject({ ok: false });
+      expect((await jobOf(jobId)).ownerLeaseUntil).toEqual(before);
+    });
+
     it('a renewal and an admitted model call are beats too: the owner at work never loses the job to a claim', async () => {
       for (const work of ['renew', 'call'] as const) {
         const { jobId } = await running(`s-lease-${work}`);

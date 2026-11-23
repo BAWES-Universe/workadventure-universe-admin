@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
+import { extendHoldIn, leaseUntil } from '@/lib/computer-lease';
 
 /**
  * What the game relay saw go wrong on a computer job's model calls, kept by Orbit (table computer_job_faults) so that Orbit, and not the memory of one
@@ -405,6 +406,8 @@ export async function authorizeOwnKeyCall(jobId: string, at: Date = new Date(), 
       await recordOwnKeyCall(tx, jobId, at);
       // The admission for its turn, in the same transaction and under the same lock: the marker, the turn and the decision never part, so a call refused after the marker is impossible (there is no look after this commit)
       await recordTurnAdmitted(tx, jobId, { turn: admitted?.turn, run: admitted?.run, at });
+      // A call admitted on the owner's own key is a beat too: the hold stands another 90 s, so a replacement never claims the job while it works (a refused call returned above and renews nothing; CodeRabbit on #1025)
+      await extendHoldIn(tx, jobId, leaseUntil(at));
       return true;
     },
     { timeout: 15_000, maxWait: 15_000 },

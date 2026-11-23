@@ -1309,6 +1309,34 @@ run('what a computer may ask of Orbit, in a real database', () => {
             expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(0);
           });
 
+          it('CodeRabbit on #1025 (24): a replay whose room is gone is refused before anything is written: no admission, no stretch stamp, no renewal of the owner’s hold', async () => {
+            const { jobId } = await running();
+            const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+            expect((await call(token, 'c1')).ok).toBe(true);
+            const heldUntil = new Date(NOW.getTime() + 10_000);
+            await prisma.computerJob.update({ where: { id: jobId }, data: { ownerLeaseUntil: heldUntil } });
+            // The first request's admission is forgotten and its room has run out, as it would have by the time the replay gets the lock
+            await prisma.computerJobFault.deleteMany({ where: { jobId, callId: { startsWith: 'orbit:admit:' } } });
+            await prisma.meterReservation.update({ where: { reservationKey: callRoomKey(jobId, 'c1') }, data: { expiresAt: new Date(NOW.getTime() - 1_000), jobStretch: null } });
+            expect(await call(token, 'c1')).toEqual({ ok: false, reason: 'refused' });
+            expect(await prisma.computerJobFault.count({ where: { jobId, callId: { startsWith: 'orbit:admit:' } } })).toBe(0);
+            expect((await roomOf(jobId, 'c1'))?.jobStretch).toBeNull();
+            expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).ownerLeaseUntil).toEqual(heldUntil);
+          });
+
+          it('CodeRabbit on #1025 (24): a replay whose room still stands is admitted once and keeps the first admission’s stretch number', async () => {
+            const { jobId } = await running();
+            const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+            expect((await call(token, 'c1')).ok).toBe(true);
+            const stretch = (await roomOf(jobId, 'c1'))?.jobStretch;
+            expect(stretch).not.toBeNull();
+            await prisma.computerJob.update({ where: { id: jobId }, data: { ownerLeaseUntil: new Date(NOW.getTime() + 10_000) } });
+            expect((await call(token, 'c1')).ok).toBe(true);
+            expect((await roomOf(jobId, 'c1'))?.jobStretch).toBe(stretch);
+            expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(1);
+            expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).ownerLeaseUntil).toEqual(new Date(NOW.getTime() + 90_000));
+          });
+
           it('a request that asks again and waits for the call’s lock while the person takes the machine is refused: its key was checked before the wait, and the room is left as it was (CodeRabbit)', async () => {
             const { sara, jobId } = await running();
             const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
@@ -1379,8 +1407,8 @@ run('what a computer may ask of Orbit, in a real database', () => {
                         findUnique: async (args: never) => {
                           const row = await (target as { computerJobToken: { findUnique: (a: never) => Promise<unknown> } }).computerJobToken.findUnique(args);
                           looks += 1;
-                          // The first look is the admission's final check (under the cutoff lock); the second is the replay's own, under the call's lock: that is where the room runs out
-                          if (looks === 2) await prisma.meterReservation.update({ where: { reservationKey: callRoomKey(jobId, 'c1') }, data: { expiresAt: new Date() } });
+                          // The one look is the admission's, under the cutoff lock and the call's lock: the room runs out right after it, and the time read after it finds the room gone
+                          if (looks === 1) await prisma.meterReservation.update({ where: { reservationKey: callRoomKey(jobId, 'c1') }, data: { expiresAt: new Date() } });
                           return row;
                         },
                       };
@@ -1395,7 +1423,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
             } finally {
               spy.mockRestore();
             }
-            expect(looks).toBe(2);
+            expect(looks).toBe(1);
             expect(answer).toEqual({ ok: false, reason: 'refused' });
             expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(0);
           });

@@ -41,6 +41,7 @@ import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
 import { hasFinishIntent, hasPoolCutoff, hasTurnAdmitted, lockCutoff, lockRelayReach } from '@/lib/computer-faults';
+import { extendHoldIn } from '@/lib/computer-lease';
 import { epochMatches, leaseUntil, lockJob, lockJobRow, noEndingWhere, ownerWhere, SUPERSEDED, type EpochSaid } from '@/lib/computer-owner';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { recordRefundObligationsForBrick, sweepRefundObligations } from '@/lib/computer-refunds';
@@ -1562,7 +1563,8 @@ export async function renewJob(
         // The lease is renewed, so the keys of the owner's epoch are too (one that ended is not brought back, another epoch's is not this owner's)
         await renewJobTokens(jobId, now, job.ownerEpoch, tx);
         // A renewal from the owner is a beat too: the hold on the job stands another 90 s, written here so a busy runner never loses the job to a claim while it works (GPT round 6, finding 3)
-        await tx.$executeRaw`UPDATE "computer_jobs" SET "lease_version" = "lease_version" + 1, "owner_lease_until" = ${leaseUntil(now)} WHERE "id" = ${jobId}`;
+        await tx.$executeRaw`UPDATE "computer_jobs" SET "lease_version" = "lease_version" + 1 WHERE "id" = ${jobId}`;
+        await extendHoldIn(tx, jobId, leaseUntil(now));
         return { kind: 'ok' as const, epoch: job.ownerEpoch };
       }
       // The person's month or a limit they set: the job PAUSES and waits (piece 3), decided right here, in the same transaction and under the same locks as the refusal (the owner, no kept intent, no cutoff: all read
@@ -3568,14 +3570,20 @@ export async function claimJob(
  * The owner says it is still there (every 30 s, in every state it holds the job: running, waiting, between turns), so nobody else may claim it. Epoch-conditional: a worker that was replaced renews nothing
  * (`superseded`), and a job that is over has nothing to hold. A successful renewal or admitted model call holds it too, in their own writes, so a busy runner rarely needs this.
  */
-export async function beatJob(jobId: string, now: Date = new Date(), owner: { epoch?: EpochSaid } = {}): Promise<{ ok: true; until: Date } | { ok: false; reason: 'over' | 'not_found' } | typeof SUPERSEDED> {
+export async function beatJob(jobId: string, now: Date = new Date(), owner: { epoch?: EpochSaid } = {}): Promise<{ ok: true; until: Date; /** False: the owner is the owner, but no hold stands (it was let go, or lapsed): nothing was written. */ held?: boolean } | { ok: false; reason: 'over' | 'not_found' } | typeof SUPERSEDED> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, ownerEpoch: true } });
   if (!job) return { ok: false, reason: 'not_found' };
   if (isOver(job.status) || job.status === 'queued') return { ok: false, reason: 'over' };
   const until = leaseUntil(now);
-  const done = await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] }, ...ownerWhere(owner.epoch) }, data: { ownerLeaseUntil: until } });
-  if (done.count === 0) return SUPERSEDED;
-  return { ok: true, until };
+  // Extends a hold that exists and ends sooner (never backwards, never out of nothing: a hold that was let go stays let go; CodeRabbit on #1025). Done in the statement that checks the owner
+  const done = await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] }, ...ownerWhere(owner.epoch), ownerLeaseUntil: { not: null, lt: until } }, data: { ownerLeaseUntil: until } });
+  if (done.count === 1) return { ok: true, until };
+  // Nothing was written: tell why. The owner of the epoch is still the owner (never `superseded` for a hold that already stands later, or one that was let go); a worker that is not the owner, or a job that ended meanwhile, is told so
+  const now_ = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, ownerEpoch: true, ownerLeaseUntil: true } });
+  if (!now_) return { ok: false, reason: 'not_found' };
+  if (isOver(now_.status) || now_.status === 'queued') return { ok: false, reason: 'over' };
+  if (!epochMatches(now_.ownerEpoch, owner.epoch)) return SUPERSEDED;
+  return { ok: true, until: now_.ownerLeaseUntil && now_.ownerLeaseUntil > now ? now_.ownerLeaseUntil : now, held: now_.ownerLeaseUntil !== null && now_.ownerLeaseUntil > now };
 }
 
 /**

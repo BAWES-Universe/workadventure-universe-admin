@@ -7,7 +7,7 @@ import { revokeJobTokens, verifyJobToken } from '@/lib/computer-token';
 import { givenBackJob } from '@/lib/computer-values';
 import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
 import { CALL_IN_LAST_STRETCH, callInLastStretch } from '@/lib/computer-stretch';
-import { leaseUntil } from '@/lib/computer-owner';
+import { extendHoldIn, leaseUntil } from '@/lib/computer-lease';
 import { routeIsPaused } from '@/lib/computer-route-pause';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
 import { tellSentry } from '@/lib/computer-alerts';
@@ -107,7 +107,7 @@ export async function authorizeModelCall(
     // moment either counted this room (and did not stop the job) or won (the key is no longer good): the room goes back, never both. A look that FAILS is the same answer as one that says no: the call is refused and
     // the room goes back, never held for a call that was not authorized
     // The key is looked at again by `authorizedPastCutoff`, with the time read after the room's wait for the pool's lock (and after the cutoff's, when there is one): a key that ran out meanwhile is no longer good
-    const stands = await authorizedPastCutoff(base.jobId, input.callId, input.token, verified.generation, clock, { turn: input.turn, run: input.run }).catch((error) => {
+    const stands = await authorizedPastCutoff(base.jobId, input.callId, input.token, verified.generation, clock, { turn: input.turn, run: input.run }, room.created ? null : base.personId).catch((error) => {
       console.error('[Computer] Could not look again at a call that was authorized:', error instanceof Error ? error.message : 'unknown');
       return false;
     });
@@ -117,9 +117,6 @@ export async function authorizeModelCall(
       if (room.created) await giveBackUnusedRoom(base.jobId, input.callId, clock);
       return { ok: false, reason: 'refused' };
     }
-    // Asked again for a call whose room an earlier request took: that request may still be deciding whether the call stands, and would give the room back. This answer is kept under the call's lock before it is
-    // given (and only while the room is still held), so the room is never released from under a call that was authorized; a room already given back is not authorized again
-    if (!room.created && !(await admitAgain(base.jobId, input.callId, base.personId, input.token, verified.generation, clock))) return { ok: false, reason: 'refused' };
     // Capacity is back: what was refused before it stops deciding the turns that come after
     await retirePoolRefusals(prisma, base.jobId).catch((error) => console.error('[Computer] Could not retire a recovered pool refusal:', error instanceof Error ? error.message : 'unknown'));
     return { ok: true, ...base, reservedMicros: room.reservation.amountMicros };
@@ -174,34 +171,6 @@ async function giveBackUnusedRoom(jobId: string, callId: string, clock: () => Da
 
 /** How many times the release of an unused room is tried before it is left to lapse. */
 const GIVE_BACK_ATTEMPTS = 3;
-
-/**
- * Answers a request that asks again for a call whose room is already held: under the call's lock, the key must still be good (a takeover while this request waited for the lock ends it) and the room must still be held and
- * unexpired by the clock AFTER the wait (the request that took it may have given it back, or it may have lapsed), and the answer is kept before it is given, so that request's rollback leaves the room alone. False
- * (refused, nothing changed) when any of them fails or this could not be kept.
- */
-async function admitAgain(jobId: string, callId: string, personId: string, token: string, generation: number, clock: () => Date): Promise<boolean> {
-  try {
-    return await prisma.$transaction(
-      async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${admitLockKey(jobId, callId)}, 0))`;
-        // Every read is made through this transaction (a read through the pool while it holds a connection could wait for a second one that other requests in the same state hold: they would all wait for each other).
-        // The key and the control generation are looked at again now that the lock is held: the check made before the wait says nothing about what happened during it
-        const still = await verifyJobToken(token, 'model', clock(), tx);
-        if (!still.ok || still.generation !== generation) return false;
-        // The time is read AFTER the look at the key, so a room that ran out while it was being made is not admitted
-        const at = clock();
-        if (!(await holdsItsRoom(jobId, callId, personId, at, tx))) return false;
-        await recordCallAdmission(tx, jobId, callId, at);
-        return true;
-      },
-      { timeout: 15_000, maxWait: 15_000 },
-    );
-  } catch (error) {
-    console.error('[Computer] Could not keep that a call was authorized again, so it is not:', error instanceof Error ? error.message : 'unknown');
-    return false;
-  }
-}
 
 /** How often Sentry is told that the meter's controls are not set up: once, and again only after this long (every call of every job is refused for it, so a call each would flood it). */
 const NOT_SET_ALERT_EVERY_MS = 15 * 60_000;
@@ -367,10 +336,12 @@ export { cutoffLockKey };
  * moment is waited for: if it won, the call is refused (its keys ended with it) and its room goes back; if this won, the stop finds the admission and answers stale. A wait that fails is a failed check (a no), never a
  * call authorized past a stop that may have won.
  */
-async function authorizedPastCutoff(jobId: string, callId: string, token: string, generation: number, clock: () => Date, admitted: { turn?: number | null; run?: string | null } = {}): Promise<boolean> {
+async function authorizedPastCutoff(jobId: string, callId: string, token: string, generation: number, clock: () => Date, admitted: { turn?: number | null; run?: string | null } = {}, replayOf: string | null = null): Promise<boolean> {
   return prisma.$transaction(
     async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
+      // A replay takes the call's own lock next (the one order: the job's cutoff lock, then the call's), BEFORE it looks at anything: the key, the cutoff and the room are all read after that wait
+      if (replayOf !== null) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${admitLockKey(jobId, callId)}, 0))`;
       if (await hasPoolCutoff(tx, jobId)) return false;
       if (await hasFinishIntent(tx, jobId)) return false;
       // A job that carried on is not worked on until its own browser is back: while `prep_state` is set every call is refused, under the same lock the claim and the settle write through, so no call can ever run against
@@ -380,12 +351,19 @@ async function authorizedPastCutoff(jobId: string, callId: string, token: string
       // The key is looked at with the time read AFTER whatever this call waited for (a lock, the pool), inside the lock a stop revokes the keys under
       const after = await verifyJobToken(token, 'model', clock(), tx);
       if (!after.ok || after.generation !== generation) return false;
+      // Asked again for a call whose room an earlier request took (`replayOf` is the person who holds it): that request may still be deciding whether the call stands, and would give the room back. The room is looked at HERE,
+      // under the call's own lock (taken above, after the job's cutoff lock), with the time read after the waits, BEFORE anything is written: a replay whose room is gone (given back, settled, lapsed) is refused and leaves
+      // no admission, no stretch and no renewal of the hold behind. Its answer is kept under that lock, so the room is never released from under a call that was authorized (CodeRabbit on #1025)
+      if (replayOf !== null) {
+        if (!(await holdsItsRoom(jobId, callId, replayOf, clock(), tx))) return false;
+        await recordCallAdmission(tx, jobId, callId, clock());
+      }
       await recordTurnAdmitted(tx, jobId, { turn: admitted.turn, run: admitted.run, at: clock() });
       // The call belongs to the stretch it is admitted in: written HERE, under the lock a pause takes, so the order of an admission and a pause is exact (never two clocks), and the first admission decides (an
       // answer given again keeps it). A give-back after a pause reads it (lib/computer-stretch)
       await tx.$executeRaw`UPDATE "meter_reservations" SET "job_stretch" = (SELECT "pauses" FROM "computer_jobs" WHERE "id" = ${jobId}) WHERE "reservation_key" = ${callRoomKey(jobId, callId)} AND "job_stretch" IS NULL`;
       // A call admitted on the owner's own key is a beat: the owner is plainly there, so its hold on the job stands another 90 s and nobody else may claim it while it works (GPT round 6, finding 3)
-      await tx.$executeRaw`UPDATE "computer_jobs" SET "owner_lease_until" = ${leaseUntil(clock())} WHERE "id" = ${jobId}`;
+      await extendHoldIn(tx, jobId, leaseUntil(clock()));
       return true;
     },
     { timeout: 15_000, maxWait: 15_000 },
