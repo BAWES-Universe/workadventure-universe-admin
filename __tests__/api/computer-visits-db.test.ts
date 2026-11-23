@@ -170,6 +170,18 @@ run('where a job’s computer browsed, in a real database', () => {
     });
   });
 
+  it('CodeRabbit on #1025 (30): a resumed job that ends while its machine is no longer awake says `unread` over the `complete` its first stretch kept, and keeps the rows', async () => {
+    const sara = await person('cr30');
+    const id = await jobFor(sara);
+    await prisma.computerJobPause.create({ data: { jobId: id, n: 1, why: 'person', seconds: 100, at: seconds(300) } });
+    await prisma.computerJob.update({ where: { id }, data: { pauses: 1, startedAt: seconds(360), visitsState: 'complete' } });
+    await prisma.computerJobVisit.create({ data: { jobId: id, kind: 'visit', at: seconds(245), by: 'brick', method: 'GET', host: 'shop.example', path: '/first-stretch', count: 1, failed: false, form: false } });
+    await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
+    await finishJob(id, 'done', seconds(500));
+    expect((await prisma.computerJob.findUniqueOrThrow({ where: { id } })).visitsState).toBe('unread');
+    expect((await prisma.computerJobVisit.findMany({ where: { jobId: id, kind: 'visit' } })).map((row) => row.path)).toEqual(['/first-stretch']);
+  });
+
   it('says complete for a clean read, and the computer is read before its browser is cleared', async () => {
     const sara = await person('sara');
     const id = await jobFor(sara);

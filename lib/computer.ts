@@ -1807,7 +1807,8 @@ async function recordJobVisits(job: { id: string; botId: string; startedAt: Date
     const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
     const provider = providerFor(row);
     if (!row?.providerRef || !provider || row.machine !== 'working') {
-      await prisma.computerJob.updateMany({ where: { id: job.id, visitsState: null }, data: { visitsState: 'unread' } });
+      // Said whatever the state was (as a failed read says it): a job whose first stretch kept `complete` and whose last stretch could not be read is no longer a complete record. Rows kept earlier stay (CodeRabbit on #1025, 30)
+      await prisma.computerJob.updateMany({ where: { id: job.id, OR: [{ visitsState: null }, { visitsState: { not: 'unread' } }] }, data: { visitsState: 'unread' } });
       return;
     }
     await recordVisits(job, provider, row.providerRef, endedAt);
