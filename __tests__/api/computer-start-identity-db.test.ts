@@ -310,6 +310,29 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(0);
   });
 
+  it('CodeRabbit D9: an alias chain of ten links answers the job at its end, and the sweep of old marks keeps every link of it past the week (no cap on the hops)', async () => {
+    const sara = await owner('d9');
+    const old = new Date(Date.now() - 9 * 24 * 60 * 60_000);
+    const first = key();
+    const made = await post(sara, first, 'Visa');
+    const keys = [first];
+    let follows = (await attemptOf(sara, first)).id as string;
+    for (let hop = 1; hop <= 10; hop++) {
+      const next = key();
+      keys.push(next);
+      // Each link is an answered start with no job, made earlier than the one after it
+      const row = await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: next, state: 'answered', aliasAttemptId: follows, beatAt: old, createdAt: new Date(Date.now() - (100 - hop) * 1_000) } });
+      follows = row.id;
+    }
+    // The last key is ten links from the job: its replay answers the job, and makes no second one
+    expect(await post(sara, keys[10], 'Visa')).toMatchObject({ ok: false, reason: 'earlier', job: { id: made.job.id } });
+    expect(await jobsOf(sara)).toHaveLength(1);
+    // And the old-marks sweep keeps the whole chain
+    await forgetOldStartMarks(new Date());
+    expect(await prisma.computerStartAttempt.count({ where: { personId: sara.id } })).toBe(11);
+    expect(await post(sara, keys[10], 'Visa')).toMatchObject({ ok: false, reason: 'earlier', job: { id: made.job.id } });
+  });
+
   it('1c the game’s expired-key retry (its record gone, hours later, after the sweep of old marks): the kept answer survives the sweep and the retry makes no second job', async () => {
     const sara = await owner('r1c');
     const KEY_A = key();

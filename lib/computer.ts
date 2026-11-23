@@ -608,8 +608,8 @@ async function attemptAnswer(botId: string, personId: string, startKey: string, 
   let row = await prisma.computerStartAttempt.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select });
   // Only a start that was answered with another (`answered`, or `superseded` by a job made after it began) is answered from its row. Its own open, made or expired attempt is decided as before
   if (!row || (row.state !== 'answered' && row.state !== 'superseded')) return null;
-  // The chain is followed a few links at most (an alias of an alias): it always ends at a job, a start still going on, or one that ended with no job
-  for (let hop = 0; hop < 8 && row; hop++) {
+  // The chain is followed through any number of links (an alias of an alias). Its order is acyclic (an alias is only ever set to an open start made earlier than the one answered), so it ends at a job, a start still going on, or one that ended with no job
+  for (let hop = 0; row; hop++) {
     if (row.jobId) {
       const job = await prisma.computerJob.findUnique({ where: { id: row.jobId }, select: { id: true, status: true, startKey: true, startAckedAt: true } });
       return job ? { job } : { expired: true };
@@ -714,7 +714,7 @@ export async function forgetOldStartMarks(now: Date = new Date(), olderThanMs: n
       WITH RECURSIVE walk("id", "next", "depth") AS (
         SELECT "id", "alias_attempt_id", 1 FROM "computer_start_attempts" WHERE "job_id" IS NULL AND "alias_attempt_id" IS NOT NULL
         UNION ALL
-        SELECT walk."id", t."alias_attempt_id", walk."depth" + 1 FROM walk JOIN "computer_start_attempts" t ON t."id" = walk."next" WHERE t."job_id" IS NULL AND t."alias_attempt_id" IS NOT NULL AND walk."depth" < 8
+        SELECT walk."id", t."alias_attempt_id", walk."depth" + 1 FROM walk JOIN "computer_start_attempts" t ON t."id" = walk."next" WHERE t."job_id" IS NULL AND t."alias_attempt_id" IS NOT NULL
       )
       SELECT walk."id" FROM walk JOIN "computer_start_attempts" t ON t."id" = walk."next" WHERE t."job_id" IS NOT NULL
     )`;

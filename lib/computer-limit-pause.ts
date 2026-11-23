@@ -128,6 +128,8 @@ async function carryOnOne(job: { id: string; botId: string; personId: string }, 
       if (!locked || locked.status !== 'queued') return 'waits' as const;
       const current = await tx.computerJob.findUniqueOrThrow({ where: { id: job.id }, select: { queuedFor: true, pausedWhy: true, pausedAt: true, pauses: true } });
       if (current.queuedFor !== 'paused' || (current.pausedWhy !== 'allowance' && current.pausedWhy !== 'rule')) return 'waits' as const;
+      // The estimate above belongs to ONE pause: a job that paused again since is judged by its own pause's estimate on a later sweep, never by this one (no question is asked and nothing is written for it here)
+      if (current.pauses !== funded.pauses) return 'waits' as const;
       // Read in this same transaction, with the job locked: anything that changed while it waited
       const changed = await changedSincePause(tx, job.id, job.botId, current.pauses);
       if (changed) {
