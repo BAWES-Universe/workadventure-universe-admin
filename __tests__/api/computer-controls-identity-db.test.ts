@@ -325,30 +325,122 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       }
     });
 
-    it('CodeRabbit on #1025 (23): a Resume whose request stopped after its commit (the start never finished) is settled by its copy, once, from the job as it stands; the start is not tried again, and every later copy answers the same', async () => {
+    it('CodeRabbit on #1025 (23): a Resume whose request stopped after its commit (the start never finished) is settled by its copy, once, from the job as it stands once a try has decided it; the start is not tried again by the copy, and every later copy answers the same', async () => {
       const { sara, jobId } = await running('cr-23');
       await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      const realStart = controlInternals.tryStart;
       const spy = jest.spyOn(controlInternals, 'tryStart').mockImplementation(async () => {
         throw new Error('the server stopped');
       });
-      const old = resumeWait.ms;
+      const old = { ...resumeWait };
       resumeWait.ms = 300;
+      resumeWait.capMs = 900;
       try {
         const r = command();
         await expect(resumeJob(sara.brickId, sara.id, jobId, minutes(10), r)).rejects.toThrow('the server stopped');
         // The resume was taken (the job is first in line) and its answer is still pending
         expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'turn' });
         expect(await commandOf(r.id)).toMatchObject({ outcome: { ok: true, pending: true } });
-        const copy = await resumeJob(sara.brickId, sara.id, jobId, minutes(11), r);
-        expect(copy).toMatchObject({ ok: true });
-        expect(spy).toHaveBeenCalledTimes(1);
+        // No try has decided it yet: the copy stores nothing (it is not a success the start may still turn into a refusal) and says the job is not ready
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(11), r)).toEqual({ ok: false, reason: 'not_ready' });
+        expect(await commandOf(r.id)).toMatchObject({ outcome: { ok: true, pending: true } });
+        // The line tries it (the sweep): once that has decided it, the copy settles the command from the job as it stands
+        spy.mockImplementation(realStart);
+        expect(await controlInternals.tryStart(jobId, minutes(12), { quiet: true })).toBe('running');
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(13), r)).toMatchObject({ ok: true });
         expect(await commandOf(r.id)).toMatchObject({ outcome: { ok: true } });
         expect((await commandOf(r.id))?.outcome).not.toHaveProperty('pending');
-        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(12), r)).toMatchObject({ ok: true });
-        expect(spy).toHaveBeenCalledTimes(1);
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(14), r)).toMatchObject({ ok: true });
+        expect(spy).toHaveBeenCalledTimes(2);
       } finally {
-        resumeWait.ms = old;
+        Object.assign(resumeWait, old);
         spy.mockRestore();
+      }
+    });
+
+    it('CodeRabbit A10: a copy of a Resume past its wait never stores or returns success while the first request’s start has not reached its decision: when the month then refuses that start, both answer the refusal and the job stays paused', async () => {
+      const { sara, jobId } = await running('cr-a10');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      const realStart = controlInternals.tryStart;
+      let inStart: () => void = () => undefined;
+      const started = new Promise<void>((resolve) => (inStart = resolve));
+      let go: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (go = resolve));
+      const spy = jest.spyOn(controlInternals, 'tryStart').mockImplementation(async (...args: Parameters<typeof realStart>) => {
+        inStart();
+        await gate;
+        return realStart(...args);
+      });
+      const old = { ...resumeWait };
+      resumeWait.ms = 300;
+      resumeWait.capMs = 1_200;
+      try {
+        const r = command();
+        const first = resumeJob(sara.brickId, sara.id, jobId, minutes(10), r);
+        await started;
+        // The copy is past its wait and the start (a cold machine, say) is still on its way to a decision: nothing is stored, and the copy does not answer success
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(10), r)).toEqual({ ok: false, reason: 'not_ready' });
+        expect(await commandOf(r.id)).toMatchObject({ outcome: { ok: true, pending: true } });
+        // The month refuses the start
+        await saveMeterSettings({ memberAllowanceMicros: 1_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+        go();
+        expect(await first).toEqual({ ok: false, reason: 'allowance' });
+        expect(await commandOf(r.id)).toMatchObject({ outcome: { ok: false, reason: 'allowance' } });
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(11), r)).toEqual({ ok: false, reason: 'allowance' });
+        expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance' });
+      } finally {
+        Object.assign(resumeWait, old);
+        go();
+        spy.mockRestore();
+      }
+    });
+
+    it('CodeRabbit A14: a "do this first" aimed at a paused job is its resume: when its request stopped after the start paused the job for the month, the copy settles it as a Resume (the refusal), never as a Pause that kept nothing (success)', async () => {
+      const { sara, jobId } = await running('cr-a14');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      const spy = jest.spyOn(controlInternals, 'tryStart').mockImplementation(async () => {
+        // The start committed the month's pause, and the request stopped before it kept its answer
+        await prisma.computerJob.update({ where: { id: jobId }, data: { queuedFor: 'paused', pausedWhy: 'allowance', pausedAt: minutes(10) } });
+        throw new Error('the server stopped');
+      });
+      const old = { ...resumeWait };
+      resumeWait.ms = 200;
+      try {
+        const f = command();
+        await expect(moveJobFirst(sara.brickId, sara.id, jobId, {}, minutes(10), f)).rejects.toThrow('the server stopped');
+        expect(await commandOf(f.id)).toMatchObject({ outcome: { ok: true, pending: true } });
+        expect(await moveJobFirst(sara.brickId, sara.id, jobId, {}, minutes(11), f)).toEqual({ ok: false, reason: 'allowance' });
+        expect(await commandOf(f.id)).toMatchObject({ outcome: { ok: false, reason: 'allowance' } });
+        expect(await moveJobFirst(sara.brickId, sara.id, jobId, {}, minutes(12), f)).toEqual({ ok: false, reason: 'allowance' });
+      } finally {
+        Object.assign(resumeWait, old);
+        spy.mockRestore();
+      }
+    });
+
+    it('CodeRabbit D10: a pending Pause remembers the number of the pause it took: a copy that settles it reads exactly that pause’s row, not a later pause of the same job', async () => {
+      const { sara, jobId } = await running('cr-d10');
+      const c = command();
+      const old = { ...resumeWait };
+      resumeWait.ms = 300;
+      const gate = gatedPark({ state: 'parked', reason: null });
+      try {
+        const first = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c);
+        await gate.wasEntered;
+        expect((await commandOf(c.id))?.outcome).toMatchObject({ ok: true, pending: true, targets: [jobId], held: [{ jobId, n: 1 }] });
+        // This pause put its sign-ins away; a LATER pause of the same job (recorded before the copy settles) did not
+        const row = await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId, n: 1 } } });
+        await prisma.computerJobPause.update({ where: { jobId_n: { jobId, n: 1 } }, data: { signInsKept: true } });
+        const { id: _unused, ...rest } = row;
+        void _unused;
+        await prisma.computerJobPause.create({ data: { ...rest, n: 2, signInsKept: false } });
+        expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(2), c)).toMatchObject({ ok: true, signInsKept: true });
+        expect((await commandOf(c.id))?.outcome).toEqual({ ok: true, signInsKept: true });
+        gate.release();
+        await first;
+      } finally {
+        Object.assign(resumeWait, old);
+        gate.release();
       }
     });
 

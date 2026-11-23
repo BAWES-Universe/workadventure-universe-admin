@@ -1081,7 +1081,8 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
     return 'gone';
   }
   // Never over a pause that landed since this try looked (it would undo the pause)
-  const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor } });
+  // ...and marks the try as DECIDED (`lastTriedAt`): a Resume's copy reads a job still queued with no try on record as one whose start has not reached its decision yet (CodeRabbit on #1025)
+  const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor, lastTriedAt: now } });
 
   // The team paused computers: a job in line stays in line with its work saved, and starts by itself when they are back
   if (await computersArePaused()) {
@@ -1276,7 +1277,7 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
   // running job before it removes anything) goes on; the job is brought a computer from cold storage when its turn comes
   const taken = await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { machine: true } });
   if (taken?.machine === 'packing') {
-    const back = await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', reservationKey: key }, data: { status: 'queued', queuedFor: 'busy', reservationKey: null, startedAt: null, stretchStarted: null, prepState: null, ...(carriedOnSeq !== null ? { carryOnPending: true } : {}) } });
+    const back = await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', reservationKey: key }, data: { status: 'queued', queuedFor: 'busy', lastTriedAt: now, reservationKey: null, startedAt: null, stretchStarted: null, prepState: null, ...(carriedOnSeq !== null ? { carryOnPending: true } : {}) } });
     if (back.count === 1) {
       // It did not carry on after all: the `carried_on` this try wrote is not said (it is told again when it really runs)
       if (carriedOnSeq !== null) await prisma.computerJobTelling.updateMany({ where: { jobId: job.id, seq: carriedOnSeq, toldAt: null }, data: { staleAt: now } });
