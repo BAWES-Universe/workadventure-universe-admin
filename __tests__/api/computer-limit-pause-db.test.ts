@@ -640,6 +640,39 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
     });
   });
 
+  describe('CodeRabbit on #1025 (8): the machine is written under the job row, with the room checked there', () => {
+    it('a bring-up that fails while another request is giving the job a new room (its row is locked and changed) does not mark the machine broken, and ends nothing', async () => {
+      const { sara, jobId } = await running('cr-8');
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      let first = true;
+      let held: Promise<void> = Promise.resolve();
+      const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+        if (!first) return;
+        first = false;
+        // Another request holds the job's row and gives it another room, but has not committed when this try's bring-up fails: the failed try waits for it at the machine write and then finds the room moved
+        let locked: () => void = () => undefined;
+        const gotLock = new Promise<void>((resolve) => (locked = resolve));
+        held = prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "computer_jobs" WHERE "id" = ${jobId} FOR UPDATE`;
+          locked();
+          await new Promise((resolve) => setTimeout(resolve, 600));
+          await tx.computerJob.update({ where: { id: jobId }, data: { reservationKey: 'cr-8-other-room' } });
+        });
+        await gotLock;
+        throw new Error('the machine never came ready');
+      });
+      try {
+        await resumeJob(sara.brickId, sara.id, jobId, minutes(2));
+      } finally {
+        spy.mockRestore();
+      }
+      await held;
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null, reservationKey: 'cr-8-other-room' });
+      // (the machine is in whatever state the waking left it: never "broken", which is what a failure that wrote it would leave)
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { machine: true } })).machine).not.toBe('broken');
+    });
+  });
+
   describe('GPT round 6, finding 3b (second half): a start that SUCCEEDS late writes nothing for the stretch that moved on without it', () => {
     it('the browser of a resumed stretch is brought back once, by the try that really started it: a late try whose job was paused and carried on meanwhile marks nothing and restores nothing', async () => {
       const { sara, jobId } = await running('g6-3b-late');

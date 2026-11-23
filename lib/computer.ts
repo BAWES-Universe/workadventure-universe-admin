@@ -1284,14 +1284,20 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
     // and never resets one that is still being made.
     // A pause and a resume (or another try) gave the job another room while the machine was being made or woken: this try's failure is not the job's. The job that runs now is not ended, and the
     // machine's state is not rewritten under it: the replacement is on that machine (GPT round 6, finding 3b)
-    if (!(await stillThisTry())) return 'gone';
-    const others = await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } } });
-    if (others === 0) {
-      // A machine that was never made is not "broken": it is still just not made, and the next job tries again
-      // A computer that is cold, being packed away or being brought back is in its own hands: a failed start does not rewrite it
-      await prisma.brickComputer.updateMany({ where: { botId: job.botId, NOT: { providerRef: null }, machine: { notIn: ['stopping', 'packing', 'cold'] }, OR: [{ packStage: null }, { packStage: { not: 'returning' } }] }, data: { machine: 'broken' } });
-      await prisma.brickComputer.updateMany({ where: { botId: job.botId, providerRef: null, machine: { notIn: ['cold', 'packing', 'restoring'] } }, data: { machine: 'none' } });
-    }
+    // The job's row is locked while the machine is written, so a pause and a resume cannot give the job another room between the look at its room and the write (CodeRabbit on #1025, 8)
+    const mine = await prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ reservation_key: string | null }>>`SELECT "reservation_key" FROM "computer_jobs" WHERE "id" = ${job.id} FOR UPDATE`;
+      if (rows[0]?.reservation_key !== key) return false;
+      const others = await tx.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } } });
+      if (others === 0) {
+        // A machine that was never made is not "broken": it is still just not made, and the next job tries again
+        // A computer that is cold, being packed away or being brought back is in its own hands: a failed start does not rewrite it
+        await tx.brickComputer.updateMany({ where: { botId: job.botId, NOT: { providerRef: null }, machine: { notIn: ['stopping', 'packing', 'cold'] }, OR: [{ packStage: null }, { packStage: { not: 'returning' } }] }, data: { machine: 'broken' } });
+        await tx.brickComputer.updateMany({ where: { botId: job.botId, providerRef: null, machine: { notIn: ['cold', 'packing', 'restoring'] } }, data: { machine: 'none' } });
+      }
+      return true;
+    });
+    if (!mine) return 'gone';
     // The line does not move on from a start that broke: the jobs behind it stay queued for the next sweep, so one broken start is one
     // failed job and never every job in line failing one after another
     await endJob(job.id, 'failed', 'error', now, false, undefined, true, null, false, { reservation: key });
