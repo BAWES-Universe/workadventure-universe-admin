@@ -151,6 +151,20 @@ run('where a job’s computer browsed, in a real database', () => {
       expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: loneId } })).visitsState).toBe('none');
     });
 
+    it('CodeRabbit on #1025 (40): a first stretch that had no recorder (`none`) and a resumed stretch that reads well is `partial`; `none` beside `none` stays `none`', async () => {
+      const { sara, id } = await resumed('cr40');
+      await prisma.computerJob.update({ where: { id }, data: { visitsState: 'none' } });
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? reading([visit(370, { p: '/second-stretch' })]) : {});
+      expect(await recordVisits({ id, startedAt: seconds(360) }, provider, `fake-${sara.brickId}`, seconds(500))).toBe('complete');
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id } })).visitsState).toBe('partial');
+      // CONTROL: no recorder on either stretch is still `none`
+      const both = await resumed('cr40-both');
+      await prisma.computerJob.update({ where: { id: both.id }, data: { visitsState: 'none' } });
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? { exitCode: 127, stderr: 'universe-visits: not found' } : {});
+      await recordVisits({ id: both.id, startedAt: seconds(360) }, provider, `fake-${both.sara.brickId}`, seconds(500));
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: both.id } })).visitsState).toBe('none');
+    });
+
     it('a resumed stretch that cannot be read at all says `unread` even though the first stretch was kept `complete`, and deletes no row', async () => {
       const { sara, id } = await resumed('unread');
       const real = provider.exec.bind(provider);

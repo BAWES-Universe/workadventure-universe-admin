@@ -258,6 +258,9 @@ async function save(jobId: string, rows: VisitRow[], state: VisitsState, since: 
     if (kept && SHORT_BY[kept] !== undefined && SHORT_BY[kept] > SHORT_BY[state]) state = kept;
     // This stretch could not be recorded at all (`none`) but an earlier one was: the record is partial, never "none" over rows that exist
     else if (state === 'none' && (kept === 'complete' || kept === 'partial')) state = 'partial';
+    // ...and the other way round: an earlier stretch had no recorder (`none`) and this one was read: the record missed that stretch, so it is partial, never `complete` (CodeRabbit on #1025, 40). `none` beside `none` stays `none`,
+    // and an unread or partial stretch keeps what it said
+    else if (kept === 'none' && state === 'complete') state = 'partial';
   } else {
     since = new Date(0);
   }
