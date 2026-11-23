@@ -206,24 +206,37 @@ run('what a computer may ask of Orbit, in a real database', () => {
     it('GPT round 6, finding 8: the stretch it belongs to is stamped on its room INSIDE the transaction that checked the key, under the job’s cutoff lock (never after it, where a pause could land between the two)', async () => {
       const { jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
-      // Every statement the admission sends, in order, with the start and the end of each transaction marked around it
-      const log: string[] = [];
+      // Every statement the admission sends, in order, with the transaction it was sent on (CodeRabbit on #1025, 27): the client handed to each transaction's callback is wrapped, and its own raw calls are logged under that
+      // transaction's number and forwarded to the original method bound to that same client, so nothing is rebound to the root client. 
+      type Entry = { tx: number; what: string };
+      const log: Entry[] = [];
+      let transactions = 0;
       const realTx = prisma.$transaction.bind(prisma) as unknown as (...args: unknown[]) => Promise<unknown>;
-      const realRaw = prisma.$executeRaw.bind(prisma) as unknown as (...args: unknown[]) => Promise<unknown>;
-      const sql = (statement: unknown): string => (statement && typeof statement === 'object' && 'strings' in statement ? (statement as { strings: string[] }).strings.join('?') : String(statement));
-      const raw = jest.spyOn(prisma, '$executeRaw').mockImplementation(((...args: unknown[]) => {
-        log.push(sql(args[0]));
-        return realRaw(...args);
-      }) as never);
+      const sql = (statement: unknown): string => (Array.isArray(statement) ? statement.join('?') : statement && typeof statement === 'object' && 'strings' in statement ? (statement as { strings: string[] }).strings.join('?') : String(statement));
+      // (The root client's own `$executeRaw` is NOT spied on: a transaction's client inherits it, so a spy there would be reached by the transaction's calls and run them on the root client.) A stamp sent on the root client
+      // is never logged under a transaction, so it is found by no transaction below
       const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
         const first = args[0];
         if (typeof first !== 'function') return realTx(...args);
-        const wrapped = async (tx: unknown) => {
-          log.push('BEGIN');
+        const wrapped = async (tx: object) => {
+          const id = ++transactions;
+          log.push({ tx: id, what: 'BEGIN' });
+          const client = new Proxy(tx, {
+            get(target, property) {
+              const value = Reflect.get(target, property, target) as unknown;
+              if ((property === '$executeRaw' || property === '$queryRaw') && typeof value === 'function') {
+                return (...raws: unknown[]) => {
+                  log.push({ tx: id, what: sql(raws[0]) });
+                  return (value as (...inner: unknown[]) => unknown).apply(target, raws);
+                };
+              }
+              return value;
+            },
+          });
           try {
-            return await (first as (client: unknown) => Promise<unknown>)(tx);
+            return await (first as (client: unknown) => Promise<unknown>)(client);
           } finally {
-            log.push('END');
+            log.push({ tx: id, what: 'END' });
           }
         };
         return realTx(wrapped, ...args.slice(1));
@@ -232,19 +245,20 @@ run('what a computer may ask of Orbit, in a real database', () => {
         expect(await call(token, 'c1', 5_000)).toMatchObject({ ok: true });
       } finally {
         spy.mockRestore();
-        raw.mockRestore();
       }
-      expect(log.filter((entry) => entry.includes('"job_stretch"'))).toHaveLength(1);
-      const stampAt = log.findIndex((entry) => entry.includes('"job_stretch"'));
-      const openedAt = log.lastIndexOf('BEGIN', stampAt);
-      expect(openedAt).toBeGreaterThan(-1);
-      const sameTransaction = log.slice(openedAt + 1, stampAt);
-      // Nothing closed between that start and the stamp, so the stamp is in that very transaction...
-      expect(sameTransaction).not.toContain('END');
-      // ...which took the job's cutoff lock before it (the lock a pause takes, so an admission and a pause are ordered exactly, never by two clocks)...
-      expect(sameTransaction.some((entry) => entry.includes('pg_advisory_xact_lock'))).toBe(true);
-      // ...and the stamp is written before it commits
-      expect(log.indexOf('END', stampAt)).toBeGreaterThan(stampAt);
+      const stamps = log.filter((entry) => entry.what.includes('"job_stretch"'));
+      expect(stamps).toHaveLength(1);
+      const stamp = stamps[0];
+      // The stamp was sent on a transaction's own client, never on the root client...
+      expect(stamp.tx).toBeGreaterThan(0);
+      const stampAt = log.indexOf(stamp);
+      const inThatTransaction = log.slice(0, stampAt).filter((entry) => entry.tx === stamp.tx);
+      expect(inThatTransaction[0]).toEqual({ tx: stamp.tx, what: 'BEGIN' });
+      // ...which took the job's cutoff lock before it, on the same transaction (the lock a pause takes, so an admission and a pause are ordered exactly, never by two clocks)...
+      expect(inThatTransaction.some((entry) => entry.what.includes('pg_advisory_xact_lock'))).toBe(true);
+      expect(inThatTransaction.some((entry) => entry.what === 'END')).toBe(false);
+      // ...and the stamp is written before that transaction commits
+      expect(log.findIndex((entry) => entry.tx === stamp.tx && entry.what === 'END')).toBeGreaterThan(stampAt);
       expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'c1') }, select: { jobStretch: true } })).toEqual({ jobStretch: 0 });
     });
 
