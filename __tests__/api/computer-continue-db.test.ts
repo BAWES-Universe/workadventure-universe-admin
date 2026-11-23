@@ -589,6 +589,23 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
       expect(ruled).toMatchObject({ ok: false, reason: 'rule' });
     });
 
+    it('CodeRabbit A1: a replay of a start key that already made its job answers with that job even when the job it continued was deleted since (never `cannot_continue`); CONTROL: a NEW key naming the deleted job is still `cannot_continue`', async () => {
+      const { sara, jobId: old } = await failedAsOurs('c-route-replay');
+      const user = await prisma.user.findUniqueOrThrow({ where: { id: sara.id } });
+      const same = key();
+      const headers = { 'x-computer-continues': old, 'x-computer-start-attempt': same, 'x-computer-start-acks': '1' };
+      const first = await (await post(sara.brickId, { userId: user.uuid, title: 'Visa form' }, headers)).json();
+      expect(first).toMatchObject({ ok: true, continued: true });
+      // The source job goes (the successor outlives it: its link is set to nothing)
+      await prisma.computerJob.delete({ where: { id: old } });
+      expect((await jobOf(first.job.id)).continuesJobId).toBeNull();
+      const replay = await (await post(sara.brickId, { userId: user.uuid, title: 'Visa form' }, headers)).json();
+      expect(replay).toMatchObject({ ok: true, job: { id: first.job.id } });
+      expect(await prisma.computerJob.count({ where: { personId: sara.id } })).toBe(1);
+      const other = await (await post(sara.brickId, { userId: user.uuid, title: 'Visa form' }, { 'x-computer-continues': old, 'x-computer-start-attempt': key() })).json();
+      expect(other).toMatchObject({ ok: false, reason: 'cannot_continue', why: 'not_found' });
+    });
+
     it('GET with retry=1 names the job "try again" would carry on (and only then)', async () => {
       const { sara, jobId: old } = await failedAsOurs('c-route-get');
       const user = await prisma.user.findUniqueOrThrow({ where: { id: sara.id } });

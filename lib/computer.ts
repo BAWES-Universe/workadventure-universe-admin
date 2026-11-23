@@ -772,6 +772,11 @@ export async function startJob(input: StartInput, now: Date = new Date()): Promi
   return tryNewJob(input, now, begun.created);
 }
 
+/** Whether a job already exists that THIS start key made (a replay of the key: the start answers with that job, whatever became of the job it continued). */
+export async function startKeyHasJob(botId: string, personId: string, startKey: string): Promise<boolean> {
+  return !!(await prisma.computerJob.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select: { id: true } }));
+}
+
 /** Everything a start does before its job exists, and the saving of the job: the part its mark covers. */
 async function beginJob(input: StartInput, now: Date): Promise<Begun> {
   // Finding 1: a key that was answered with another start's job is answered from its row before anything else: never a job of its own, after acknowledgement, ending or the game forgetting its key
