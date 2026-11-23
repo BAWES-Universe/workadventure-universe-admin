@@ -67,6 +67,7 @@ import {
 } from '@/lib/computer-values';
 import { dropProfile, restoreProfile } from '@/lib/computer-browser-profile';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
+import { claimCommandIn, commandRow, keepOutcome, seenCommand, type Command } from '@/lib/computer-commands';
 
 /**
  * A Brick's computer, and the jobs on it (game #2000, Brick 9).
@@ -1595,17 +1596,59 @@ export async function finishJobUnder(
 
 /** Stop: from the person's tap. The work so far is kept. Null when it is not their Brick. */
 export async function stopJobFor(botId: string, ownerId: string, now: Date = new Date()): Promise<ComputerView | null> {
-  if (!(await brickOf(botId, ownerId))) return null;
+  const stopped = await stopAll(botId, ownerId, now);
+  return stopped.ok ? stopped.view : null;
+}
+
+/** What Stop came to: the computer as it stands after, or why not (not the owner's Brick; a command id already used for another control). */
+export type Stopped = { ok: true; view: ComputerView } | { ok: false; reason: 'not_found' | 'command_reused' };
+
+/**
+ * Stop everything on the computer, under the tap's (or Brick's tool call's) command id when it has one (finding 4): the command's row is committed FIRST, naming the jobs that are on the computer at that moment, then those
+ * jobs end through the finalizer's own transactions. The same id again answers what it came to, or, while the first request did not keep that (it stopped half way), finishes ending THOSE jobs: never one that was
+ * started after the Stop. Without a command (the 0.4.3 game's Stop) it ends what is there now, as before.
+ */
+export async function stopAll(botId: string, ownerId: string, now: Date = new Date(), command?: Command): Promise<Stopped> {
+  if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  let targets: string[] | null = null;
+  if (command) {
+    const row = commandRow(botId, ownerId, null, 'stop');
+    const seen = await seenCommand(command, row);
+    const claimed =
+      seen ??
+      (await prisma.$transaction(async (tx) => {
+        const live = (await tx.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting', 'queued'] } }, select: { id: true }, orderBy: { id: 'asc' } })).map((job) => job.id);
+        const got = await claimCommandIn(tx, command, row, { ok: true, pending: true, targets: live });
+        return 'fresh' in got ? { live } : got;
+      }, { timeout: 15_000, maxWait: 15_000 }));
+    if ('reused' in claimed) return { ok: false, reason: 'command_reused' };
+    if ('replay' in claimed && claimed.replay) {
+      const view = await computerView(botId, ownerId, now);
+      return view ? { ok: true, view } : { ok: false, reason: 'not_found' };
+    }
+    targets = 'live' in claimed ? claimed.live : (claimed.targets ?? []);
+  }
+  await endEverything(botId, now, targets);
+  if (command) {
+    await keepOutcome(prisma, command, { ok: true, targets: targets ?? [] });
+    // A job asked for after the Stop is not the Stop's: it was left in line, and the line moves for it now that the Stop's jobs are over
+    await startNext(botId, now);
+  }
+  const view = await computerView(botId, ownerId, now);
+  return view ? { ok: true, view } : { ok: false, reason: 'not_found' };
+}
+
+/** Ends what is on the Brick's computer (with `only`, only those jobs, whatever they are now). */
+async function endEverything(botId: string, now: Date, only: string[] | null): Promise<void> {
   // Stop ends what is running or waiting for them, and what is in line too (a job waiting for the allowance must not start later)
   // The ones in line end FIRST: ending the running one starts the next in line, and that must not start a job that is about to be stopped
-  const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting', 'queued'] } }, select: { id: true, status: true } });
+  const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting', 'queued'] }, ...(only ? { id: { in: only } } : {}) }, select: { id: true, status: true } });
   const inLine = jobs.filter((job) => job.status === 'queued');
   const held = jobs.filter((job) => job.status !== 'queued');
   // Nothing in line may start while this Stop ends everything, so no end of a job in it moves the line
   for (const job of inLine) await endJob(job.id, 'stopped', 'person', now, false);
   // A job that holds the machine ends as the ending already committed for it says, when there is one (a runner's kept intent, a decided pool cutoff): the person's Stop never makes a fault of ours their own stop
   for (const job of held) await endJob(job.id, 'stopped', 'person', now, false, undefined, true, null, false, { personStop: true });
-  return computerView(botId, ownerId, now);
 }
 
 /**

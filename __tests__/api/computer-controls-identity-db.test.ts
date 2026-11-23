@@ -26,8 +26,10 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { claimJob, giveComputer, recordFinishIntent, startJob } from '@/lib/computer';
-import { moveJobFirst } from '@/lib/computer-job-controls';
+import { claimJob, giveComputer, recordFinishIntent, startJob, stopAll } from '@/lib/computer';
+import { cancelJob, moveJobFirst, pauseJob, resumeJob } from '@/lib/computer-job-controls';
+import { addJobNote } from '@/lib/computer-job-notes';
+import { claimCommand, commandRow } from '@/lib/computer-commands';
 import * as owner from '@/lib/computer-owner';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -40,6 +42,10 @@ let made = 0;
 const env = process.env.COMPUTER_PROVIDER;
 const realLockJob = jest.requireActual('@/lib/computer-owner').lockJob as typeof owner.lockJob;
 const lockJob = owner.lockJob as jest.MockedFunction<typeof owner.lockJob>;
+let fake: FakeComputerProvider;
+const command = () => ({ id: randomUUID() });
+const notesOf = (jobId: string) => prisma.computerJobNote.findMany({ where: { jobId }, orderBy: { seq: 'asc' }, select: { seq: true, text: true } });
+const commandOf = (id: string) => prisma.computerJobCommand.findUnique({ where: { commandId: id } });
 
 async function person(name: string) {
   const unique = `${name}-${tag}-${++made}`;
@@ -102,7 +108,8 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
     await wipe();
     await seedGiveBackLimits();
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
-    setComputerProviderForTests(new FakeComputerProvider());
+    fake = new FakeComputerProvider();
+    setComputerProviderForTests(fake);
     lockJob.mockImplementation(realLockJob);
     await setUp();
   });
@@ -160,6 +167,186 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       expect(await jobOf(taxi)).toMatchObject({ status: 'running' });
       expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'turn', pauses: 1, secondsBilled: 300 });
       expect(await eventsOf(jobId)).toHaveLength(1);
+    });
+  });
+  describe('finding 4: one control, one effect', () => {
+    it('REPRO 4a: a note replayed after a new worker and a new turn keeps its number and cancels nothing new', async () => {
+      const { sara, jobId } = await running('f4-note');
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-1' } });
+      const c = command();
+      expect(await addJobNote(sara.brickId, sara.id, jobId, 'Use 12 March', minutes(2), c)).toMatchObject({ ok: true, note: { seq: 1, delivery: 'now' } });
+      expect(fake.cancelledTurns).toEqual(['resp-1']);
+      // A new worker claims the job and the agent is on a new turn when the same tool call is retried
+      await claimed(jobId, 'rB', minutes(3));
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-2' } });
+      expect(await addJobNote(sara.brickId, sara.id, jobId, 'Use 12 March', minutes(4), c)).toMatchObject({ ok: true, note: { seq: 1, delivery: 'now' } });
+      expect(await notesOf(jobId)).toEqual([{ seq: 1, text: 'Use 12 March' }]);
+      expect(await jobOf(jobId)).toMatchObject({ noteSeq: 1, agentResponseId: 'resp-2' });
+      expect(fake.cancelledTurns).toEqual(['resp-1']);
+      expect(await commandOf(c.id)).toMatchObject({ kind: 'note', jobId, turnResponseId: 'resp-1' });
+    });
+
+    it('two copies of one note at once (a retried tool call racing the first): one note, one number, one cancel', async () => {
+      const { sara, jobId } = await running('f4-note-race');
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-1' } });
+      const c = command();
+      const [a, b] = await Promise.all([addJobNote(sara.brickId, sara.id, jobId, 'Use 12 March', minutes(2), c), addJobNote(sara.brickId, sara.id, jobId, 'Use 12 March', minutes(2), c)]);
+      expect(a).toMatchObject({ ok: true, note: { seq: 1 } });
+      expect(b).toMatchObject({ ok: true, note: { seq: 1 } });
+      expect(await notesOf(jobId)).toEqual([{ seq: 1, text: 'Use 12 March' }]);
+      expect(await jobOf(jobId)).toMatchObject({ noteSeq: 1 });
+      expect(fake.cancelledTurns).toEqual(['resp-1']);
+    });
+
+    it('4d: a second identical note the person really sends (a new command) is a second note', async () => {
+      const { sara, jobId } = await running('f4-note-twice');
+      expect(await addJobNote(sara.brickId, sara.id, jobId, 'Skip the hotel', minutes(2), command())).toMatchObject({ ok: true, note: { seq: 1 } });
+      expect(await addJobNote(sara.brickId, sara.id, jobId, 'Skip the hotel', minutes(3), command())).toMatchObject({ ok: true, note: { seq: 2 } });
+      expect(await notesOf(jobId)).toEqual([
+        { seq: 1, text: 'Skip the hotel' },
+        { seq: 2, text: 'Skip the hotel' },
+      ]);
+    });
+
+    it('REPRO 4b: Pause, Resume, then the first Pause replayed: no second pause, stretch or time event, and the job keeps running', async () => {
+      const { sara, jobId } = await running('f4-pause');
+      const p = command();
+      expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(5), p)).toMatchObject({ ok: true });
+      expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(6), command())).toMatchObject({ ok: true });
+      const resumed = await jobOf(jobId);
+      expect(resumed).toMatchObject({ status: 'running', pauses: 1 });
+      expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(9), p)).toMatchObject({ ok: true });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', pauses: 1, ownerEpoch: resumed.ownerEpoch, secondsBilled: resumed.secondsBilled });
+      expect(await pausesOf(jobId)).toBe(1);
+      expect(await eventsOf(jobId)).toHaveLength(1);
+    });
+
+    it('two copies of one Pause at once: one pause, one event, the same answer', async () => {
+      const { sara, jobId } = await running('f4-pause-race');
+      const p = command();
+      const [a, b] = await Promise.all([pauseJob(sara.brickId, sara.id, jobId, minutes(5), p), pauseJob(sara.brickId, sara.id, jobId, minutes(5), p)]);
+      expect([a.ok, b.ok]).toEqual([true, true]);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pauses: 1 });
+      expect(await pausesOf(jobId)).toBe(1);
+      expect(await eventsOf(jobId)).toHaveLength(1);
+    });
+
+    it('REPRO 4c: a delayed Resume replayed after the job was paused again leaves it paused', async () => {
+      const { sara, jobId } = await running('f4-resume');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      const r = command();
+      expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(3), r)).toMatchObject({ ok: true });
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(6), command());
+      const pausedAgain = await jobOf(jobId);
+      expect(pausedAgain).toMatchObject({ status: 'queued', queuedFor: 'paused', pauses: 2 });
+      expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(8), r)).toMatchObject({ ok: true });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pauses: 2, ownerEpoch: pausedAgain.ownerEpoch, queueRank: pausedAgain.queueRank });
+      expect(await eventsOf(jobId)).toHaveLength(2);
+    });
+
+    it('REPRO 4c: a delayed "do this first" replayed after its job was paused leaves it paused (and pauses nothing else)', async () => {
+      const { sara, jobId } = await running('f4-first');
+      const taxi = await another(sara, 'Taxi', minutes(1));
+      const f = command();
+      expect(await moveJobFirst(sara.brickId, sara.id, taxi, { pauseRunning: true }, minutes(3), f)).toMatchObject({ ok: true });
+      expect(await jobOf(taxi)).toMatchObject({ status: 'running' });
+      await pauseJob(sara.brickId, sara.id, taxi, minutes(5), command());
+      const visa = await jobOf(jobId);
+      expect(await moveJobFirst(sara.brickId, sara.id, taxi, { pauseRunning: true }, minutes(7), f)).toMatchObject({ ok: true });
+      expect(await jobOf(taxi)).toMatchObject({ status: 'queued', queuedFor: 'paused', pauses: 1 });
+      expect(await jobOf(jobId)).toMatchObject({ status: visa.status, pauses: visa.pauses, ownerEpoch: visa.ownerEpoch });
+      expect(await eventsOf(jobId)).toHaveLength(1);
+      expect(await eventsOf(taxi)).toHaveLength(1);
+    });
+
+    it('a "do this first" refused under its locks keeps the refusal: the same command answers it again, and nothing moved', async () => {
+      const { sara, jobId, epoch } = await running('f4-first-refused');
+      const taxi = await another(sara, 'Taxi', minutes(1));
+      const rankBefore = (await jobOf(taxi)).queueRank;
+      beforeLockOf(jobId, () => recordFinishIntent(jobId, { outcome: 'done', epoch }, minutes(2)));
+      const f = command();
+      expect(await moveJobFirst(sara.brickId, sara.id, taxi, { pauseRunning: true }, minutes(3), f)).toEqual({ ok: false, reason: 'ending' });
+      expect(await commandOf(f.id)).toMatchObject({ outcome: { ok: false, reason: 'ending' } });
+      expect(await moveJobFirst(sara.brickId, sara.id, taxi, { pauseRunning: true }, minutes(4), f)).toEqual({ ok: false, reason: 'ending' });
+      expect(await jobOf(taxi)).toMatchObject({ status: 'queued', queueRank: rankBefore });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', pauses: 0 });
+    });
+
+    it('REPRO 4c: a Cancel replayed answers what it came to (done), not "over"', async () => {
+      const { sara } = await running('f4-cancel');
+      const taxi = await another(sara, 'Taxi', minutes(1));
+      const c = command();
+      expect(await cancelJob(sara.brickId, sara.id, taxi, minutes(2), c)).toMatchObject({ ok: true });
+      const ended = await jobOf(taxi);
+      expect(ended).toMatchObject({ status: 'stopped', endedBy: 'person' });
+      expect(await cancelJob(sara.brickId, sara.id, taxi, minutes(4), c)).toMatchObject({ ok: true });
+      expect(await jobOf(taxi)).toMatchObject({ status: 'stopped', endedAt: ended.endedAt });
+    });
+
+    it('a Cancel whose first request stopped half way: the same command finishes ending THAT job only', async () => {
+      const { sara, jobId } = await running('f4-cancel-half');
+      const taxi = await another(sara, 'Taxi', minutes(1));
+      const c = command();
+      await claimCommand(c, commandRow(sara.brickId, sara.id, taxi, 'cancel'), { ok: true, pending: true, targets: [taxi] });
+      expect(await cancelJob(sara.brickId, sara.id, taxi, minutes(2), c)).toMatchObject({ ok: true });
+      expect(await jobOf(taxi)).toMatchObject({ status: 'stopped' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+      expect(await commandOf(c.id)).toMatchObject({ outcome: { ok: true, targets: [taxi] } });
+    });
+
+    it('REPRO: a Stop replayed never ends a job started after it', async () => {
+      const { sara, jobId } = await running('f4-stop');
+      const s = command();
+      expect(await stopAll(sara.brickId, sara.id, minutes(2), s)).toMatchObject({ ok: true });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'stopped' });
+      const later = await another(sara, 'Hotel', minutes(3));
+      expect(await jobOf(later)).toMatchObject({ status: 'running' });
+      expect(await stopAll(sara.brickId, sara.id, minutes(4), s)).toMatchObject({ ok: true });
+      expect(await jobOf(later)).toMatchObject({ status: 'running' });
+    });
+
+    it('a Stop whose first request stopped half way: the same command ends the jobs it named, never one started after it', async () => {
+      const { sara, jobId } = await running('f4-stop-half');
+      const s = command();
+      await claimCommand(s, commandRow(sara.brickId, sara.id, null, 'stop'), { ok: true, pending: true, targets: [jobId] });
+      const later = await another(sara, 'Hotel', minutes(1));
+      expect(await jobOf(later)).toMatchObject({ status: 'queued' });
+      expect(await stopAll(sara.brickId, sara.id, minutes(2), s)).toMatchObject({ ok: true });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'stopped' });
+      expect(await jobOf(later)).toMatchObject({ status: 'running' });
+    });
+
+    it('CONTROL: a Stop without a command (the 0.4.3 game) ends everything there now, as before', async () => {
+      const { sara, jobId } = await running('f4-stop-old');
+      const later = await another(sara, 'Hotel', minutes(1));
+      expect(await stopAll(sara.brickId, sara.id, minutes(2))).toMatchObject({ ok: true });
+      expect((await jobOf(jobId)).status).toBe('stopped');
+      expect((await jobOf(later)).status).toBe('stopped');
+    });
+
+    it('the same command id for another control is refused (`command_reused`) and writes nothing', async () => {
+      const { sara, jobId } = await running('f4-reused');
+      const taxi = await another(sara, 'Taxi', minutes(1));
+      const c = command();
+      expect(await pauseJob(sara.brickId, sara.id, taxi, minutes(2), c)).toMatchObject({ ok: true });
+      expect(await cancelJob(sara.brickId, sara.id, taxi, minutes(3), c)).toEqual({ ok: false, reason: 'command_reused' });
+      expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(3), c)).toEqual({ ok: false, reason: 'command_reused' });
+      expect(await stopAll(sara.brickId, sara.id, minutes(3), c)).toEqual({ ok: false, reason: 'command_reused' });
+      const n = command();
+      await addJobNote(sara.brickId, sara.id, jobId, 'Use 12 March', minutes(4), n);
+      expect(await addJobNote(sara.brickId, sara.id, jobId, 'Use 13 March', minutes(5), n)).toEqual({ ok: false, reason: 'command_reused' });
+      expect(await jobOf(taxi)).toMatchObject({ status: 'queued', queuedFor: 'paused' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', pauses: 0, noteSeq: 1 });
+      expect(await notesOf(jobId)).toEqual([{ seq: 1, text: 'Use 12 March' }]);
+    });
+
+    it('CONTROL: the controls without a command id work as before', async () => {
+      const { sara, jobId } = await running('f4-none');
+      expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(2))).toMatchObject({ ok: true });
+      expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(3))).toMatchObject({ ok: true });
+      expect(await addJobNote(sara.brickId, sara.id, jobId, 'Use 12 March', minutes(4))).toMatchObject({ ok: true, note: { seq: 1 } });
+      expect(await addJobNote(sara.brickId, sara.id, jobId, 'Use 12 March', minutes(5))).toMatchObject({ ok: true, note: { seq: 2 } });
+      expect(await prisma.computerJobCommand.count({ where: { botId: sara.brickId } })).toBe(0);
     });
   });
 });

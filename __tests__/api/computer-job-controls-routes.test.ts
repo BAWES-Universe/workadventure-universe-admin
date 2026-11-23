@@ -23,7 +23,10 @@ const BRICK = 'brick-1';
 const JOB = 'job-1';
 const jobParams = { params: Promise.resolve({ id: BRICK, jobId: JOB }) };
 const view = { available: true, on: true, machine: 'working', job: null, queued: [], month: null, files: { bytes: 0, savedAt: null, list: null }, restoredFrom: null, olderCopyUsed: false, packedAt: null, notice: null } as never;
-const post = (verb: string, body?: string) => new NextRequest(`http://localhost:3333/api/bricks/${BRICK}/computer/jobs/${JOB}/${verb}`, { method: 'POST', ...(body === undefined ? {} : { body }) });
+const CMD = '6f1c2b8e-3d4a-4c5b-9e6f-7a8b9c0d1e2f';
+const post = (verb: string, body?: string, command: string | null = CMD) =>
+  new NextRequest(`http://localhost:3333/api/bricks/${BRICK}/computer/jobs/${JOB}/${verb}`, { method: 'POST', ...(body === undefined ? {} : { body }), ...(command ? { headers: { 'x-computer-command': command } } : {}) });
+const asked = [expect.any(Date), { id: CMD }] as const;
 
 beforeEach(() => {
   jest.resetAllMocks();
@@ -41,7 +44,28 @@ describe('job control routes', () => {
     const res = await route(post(verb), jobParams);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ computer: view });
-    expect(lib[fn]).toHaveBeenCalledWith(BRICK, 'u-sara', JOB);
+    expect(lib[fn]).toHaveBeenCalledWith(BRICK, 'u-sara', JOB, ...asked);
+  });
+
+  it.each([
+    ['pause', pauseRoute, 'pauseJob'],
+    ['resume', resumeRoute, 'resumeJob'],
+    ['cancel', cancelRoute, 'cancelJob'],
+    ['first', firstRoute, 'moveJobFirst'],
+  ] as const)('finding 4: %s without its command id (or with one that is not a uuid) is 400 `command_missing`, and nothing is asked of the library', async (verb, route, fn) => {
+    for (const command of [null, 'not-a-uuid']) {
+      const res = await route(post(verb, undefined, command), jobParams);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ reason: 'command_missing' });
+    }
+    expect(lib[fn]).not.toHaveBeenCalled();
+  });
+
+  it('finding 4: a command id used for another control is 400 `command_reused`', async () => {
+    lib.pauseJob.mockResolvedValue({ ok: false, reason: 'command_reused' });
+    const res = await pauseRoute(post('pause'), jobParams);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ reason: 'command_reused' });
   });
 
   it('a refusal is 409 with its reason; not the owner’s is 404', async () => {
@@ -70,11 +94,11 @@ describe('job control routes', () => {
   it('first: no body, `{}` and `{ pauseRunning: false }` move it only; `{ pauseRunning: true }` pauses what runs; a body that is not JSON or a pauseRunning that is not a boolean is 400', async () => {
     lib.moveJobFirst.mockResolvedValue({ ok: true, view });
     expect((await firstRoute(post('first'), jobParams)).status).toBe(200);
-    expect(lib.moveJobFirst).toHaveBeenLastCalledWith(BRICK, 'u-sara', JOB, { pauseRunning: false });
+    expect(lib.moveJobFirst).toHaveBeenLastCalledWith(BRICK, 'u-sara', JOB, { pauseRunning: false }, ...asked);
     await firstRoute(post('first', '{}'), jobParams);
-    expect(lib.moveJobFirst).toHaveBeenLastCalledWith(BRICK, 'u-sara', JOB, { pauseRunning: false });
+    expect(lib.moveJobFirst).toHaveBeenLastCalledWith(BRICK, 'u-sara', JOB, { pauseRunning: false }, ...asked);
     await firstRoute(post('first', JSON.stringify({ pauseRunning: true })), jobParams);
-    expect(lib.moveJobFirst).toHaveBeenLastCalledWith(BRICK, 'u-sara', JOB, { pauseRunning: true });
+    expect(lib.moveJobFirst).toHaveBeenLastCalledWith(BRICK, 'u-sara', JOB, { pauseRunning: true }, ...asked);
     lib.moveJobFirst.mockClear();
     expect((await firstRoute(post('first', 'nope'), jobParams)).status).toBe(400);
     expect((await firstRoute(post('first', JSON.stringify({ pauseRunning: 'yes' })), jobParams)).status).toBe(400);

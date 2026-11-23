@@ -2,7 +2,8 @@ import { NextRequest } from 'next/server';
 import { brickJson } from '@/lib/brick-api';
 import { asOwner, notFound, optionsFor } from '@/lib/computer-api';
 import { moveJobFirst } from '@/lib/computer-job-controls';
-import { controlAnswer, jobIdOk } from '@/lib/computer-job-controls-api';
+import { NextResponse } from 'next/server';
+import { controlAnswer, jobIdOk, needCommand } from '@/lib/computer-job-controls-api';
 
 export const runtime = 'nodejs';
 export const OPTIONS = optionsFor;
@@ -17,6 +18,8 @@ export const POST = (request: NextRequest, { params }: { params: Promise<{ id: s
   asOwner(request, params, async (id, ownerId) => {
     const { jobId } = await params;
     if (!jobIdOk(jobId)) return notFound(request);
+    const command = needCommand(request);
+    if (command instanceof NextResponse) return command;
     const text = await request.text().catch(() => '');
     let body: { pauseRunning?: unknown } | null = null;
     if (text.trim()) {
@@ -27,5 +30,5 @@ export const POST = (request: NextRequest, { params }: { params: Promise<{ id: s
       }
     }
     if (body && body.pauseRunning !== undefined && typeof body.pauseRunning !== 'boolean') return brickJson(request, { error: 'pauseRunning is true or false' }, 400);
-    return controlAnswer(request, await moveJobFirst(id, ownerId, jobId, { pauseRunning: body?.pauseRunning === true }));
+    return controlAnswer(request, await moveJobFirst(id, ownerId, jobId, { pauseRunning: body?.pauseRunning === true }, new Date(), command));
   });

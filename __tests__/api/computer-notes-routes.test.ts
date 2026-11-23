@@ -24,7 +24,9 @@ const steps = stepsLib as jest.Mocked<typeof stepsLib>;
 const BRICK = 'brick-1';
 const JOB = 'job-1';
 const jobParams = { params: Promise.resolve({ id: BRICK, jobId: JOB }) };
-const req = (path: string, method: string, body?: unknown) => new NextRequest(`http://localhost:3333${path}`, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+const CMD = '6f1c2b8e-3d4a-4c5b-9e6f-7a8b9c0d1e2f';
+const req = (path: string, method: string, body?: unknown, command: string | null = CMD) =>
+  new NextRequest(`http://localhost:3333${path}`, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }), ...(command ? { headers: { 'x-computer-command': command } } : {}) });
 const notePath = `/api/bricks/${BRICK}/computer/jobs/${JOB}/note`;
 const activityPath = `/api/bricks/${BRICK}/computer/jobs/${JOB}/activity`;
 
@@ -49,7 +51,7 @@ describe('a note to one job', () => {
     const ok = await noteRoute(req(notePath, 'POST', { text: '  use 12 March ' }), jobParams);
     expect(ok.status).toBe(200);
     expect(await ok.json()).toEqual({ computer: { job: { id: JOB } }, note: { seq: 2, delivery: 'now' } });
-    expect(notes.addJobNote).toHaveBeenLastCalledWith(BRICK, 'u-sara', JOB, 'use 12 March');
+    expect(notes.addJobNote).toHaveBeenLastCalledWith(BRICK, 'u-sara', JOB, 'use 12 March', expect.any(Date), { id: CMD });
     notes.addJobNote.mockResolvedValue({ ok: false, reason: 'not_found' });
     expect((await noteRoute(req(notePath, 'POST', { text: 'x' }), jobParams)).status).toBe(404);
     for (const reason of ['over', 'ending'] as const) {
@@ -61,6 +63,19 @@ describe('a note to one job', () => {
     notes.addJobNote.mockClear();
     for (const body of [{ text: '   ' }, {}, { text: 'x', more: 1 }, { text: 'x'.repeat(4001) }]) expect((await noteRoute(req(notePath, 'POST', body), jobParams)).status).toBe(400);
     expect(notes.addJobNote).not.toHaveBeenCalled();
+  });
+
+  it('finding 4: a note without its command id is 400 `command_missing` (nothing kept); one whose id was used for another control is 400 `command_reused`', async () => {
+    for (const command of [null, 'nope']) {
+      const res = await noteRoute(req(notePath, 'POST', { text: 'x' }, command), jobParams);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ reason: 'command_missing' });
+    }
+    expect(notes.addJobNote).not.toHaveBeenCalled();
+    notes.addJobNote.mockResolvedValue({ ok: false, reason: 'command_reused' });
+    const reused = await noteRoute(req(notePath, 'POST', { text: 'x' }), jobParams);
+    expect(reused.status).toBe(400);
+    expect(await reused.json()).toMatchObject({ reason: 'command_reused' });
   });
 });
 

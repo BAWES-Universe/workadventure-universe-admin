@@ -5,6 +5,8 @@ import { ownersJob } from '@/lib/computer-job-access';
 import { hasFinishIntent, hasPoolCutoff } from '@/lib/computer-faults';
 import { epochMatches, lockJob, SUPERSEDED, type EpochSaid } from '@/lib/computer-owner';
 import { isOver } from '@/lib/computer-values';
+import type { Prisma } from '@prisma/client';
+import { claimCommandIn, commandRow, keepOutcome, seenCommand, type Claimed, type Command } from '@/lib/computer-commands';
 
 /**
  * Telling a job something new after it started (computers full plan, piece 2): "use 12 March instead", "skip the hotel", or the answer to the
@@ -27,6 +29,10 @@ import { isOver } from '@/lib/computer-values';
  *  - over: nothing is kept (`over`). Ending (a finish intent kept or a pool cutoff decided): nothing is kept (`ending`), the finaliser owns it.
  *
  * Notes are the person's own words: given to the agent of that job only, shown back to the person alone in the job's Activity, and gone with the job.
+ *
+ * One note, one number (finding 4, GPT round 6): a note given with a command id (the panel's send, or Brick's tool call) keeps its row under the job's locks in the write that numbers it, with its number, where it went
+ * and the one turn it cancels. The same id again answers that and writes nothing: no second number, no second note, no cancel (the turn is cancelled once, by the request that kept the note). A second identical
+ * note the person really sends comes with a new id, and is a second note.
  */
 
 /** Where a kept note goes next, so Brick (or the panel) can say it plainly. */
@@ -34,7 +40,7 @@ export type NoteDelivery = 'now' | 'answer' | 'after_hand_back' | 'when_it_start
 
 export type Noted =
   | { ok: true; view: ComputerView; note: { seq: number; delivery: NoteDelivery } }
-  | { ok: false; reason: 'not_found' | 'empty' | 'over' | 'ending' };
+  | { ok: false; reason: 'not_found' | 'empty' | 'over' | 'ending' | 'command_reused' };
 
 /** The longest note kept, in characters: the column's width (the same as a job's brief). A longer one is refused at the route, never cut silently there. */
 export const NOTE_MAX = 4000;
@@ -42,22 +48,63 @@ export const NOTE_MAX = 4000;
 type Decided =
   | { kind: 'over' }
   | { kind: 'ending' }
-  | { kind: 'kept'; seq: number; delivery: NoteDelivery; cancel: { responseId: string } | null };
+  | { kind: 'kept'; seq: number; delivery: NoteDelivery; cancel: { responseId: string } | null }
+  | { kind: 'seen'; seen: Exclude<Claimed, { fresh: true }> };
 
 /**
  * The person (the Brick's owner) tells one job of that Brick something new. See the file's comment for what it does in each state. Answers the
  * computer view as it stands after, and the note's number and where it goes next.
  */
-export async function addJobNote(botId: string, ownerId: string, jobId: string, text: string, now: Date = new Date()): Promise<Noted> {
+export async function addJobNote(botId: string, ownerId: string, jobId: string, text: string, now: Date = new Date(), command?: Command): Promise<Noted> {
   const job = await ownersJob(botId, ownerId, jobId);
   if (!job) return { ok: false, reason: 'not_found' };
   const words = text.trim();
   if (!words) return { ok: false, reason: 'empty' };
   const kept = Array.from(words).slice(0, NOTE_MAX).join('');
+  const under = command ? { command, row: commandRow(botId, ownerId, jobId, 'note', { text: kept }) } : null;
+  if (under) {
+    const seen = await seenCommand(under.command, under.row);
+    if (seen) return notedOf(botId, ownerId, seen, now);
+  }
   const decided: Decided = await prisma.$transaction(
     async (tx) => {
       const row = await lockJob(tx, jobId);
-      if (!row || isOver(row.status)) return { kind: 'over' as const };
+      if (!row) return { kind: 'over' as const };
+      // The command's row after the job's locks: a copy of this note waits for the first, then finds its row (and its number)
+      if (under) {
+        const claimed = await claimCommandIn(tx, under.command, under.row);
+        if (!('fresh' in claimed)) return { kind: 'seen' as const, seen: claimed };
+      }
+      const out = await noteIn(tx, jobId, row, kept, now);
+      if (under) await keepOutcome(tx, under.command, out.kind === 'kept' ? { ok: true, note: { seq: out.seq, delivery: out.delivery } } : { ok: false, reason: out.kind }, { turnResponseId: out.kind === 'kept' ? (out.cancel?.responseId ?? null) : null });
+      return out;
+    },
+    { timeout: 15_000, maxWait: 15_000 },
+  );
+  if (decided.kind === 'seen') return notedOf(botId, ownerId, decided.seen, now);
+  if (decided.kind === 'over') return { ok: false, reason: 'over' };
+  if (decided.kind === 'ending') return { ok: false, reason: 'ending' };
+  // After the write, outside any lock, and only for the turn that write read (Rule C)
+  if (decided.cancel) await cancelTurnFor(botId, decided.cancel.responseId);
+  const view = await computerView(botId, ownerId, now);
+  if (!view) return { ok: false, reason: 'not_found' };
+  return { ok: true, view, note: { seq: decided.seq, delivery: decided.delivery } };
+}
+
+/** A note's command seen before: what it came to (its number and where it went), with the computer as it stands now. Nothing is written and no turn is cancelled. */
+async function notedOf(botId: string, ownerId: string, seen: Exclude<Claimed, { fresh: true }>, now: Date): Promise<Noted> {
+  if ('reused' in seen) return { ok: false, reason: 'command_reused' };
+  const outcome = seen.replay;
+  if (outcome && !outcome.ok) return { ok: false, reason: outcome.reason as 'over' | 'ending' };
+  const view = await computerView(botId, ownerId, now);
+  if (!view) return { ok: false, reason: 'not_found' };
+  if (!outcome?.note) return { ok: false, reason: 'over' };
+  return { ok: true, view, note: { seq: outcome.note.seq, delivery: outcome.note.delivery as NoteDelivery } };
+}
+
+/** The note itself, under the job's locks (see the file's comment). */
+async function noteIn(tx: Prisma.TransactionClient, jobId: string, row: NonNullable<Awaited<ReturnType<typeof lockJob>>>, kept: string, now: Date): Promise<Exclude<Decided, { kind: 'seen' }>> {
+      if (isOver(row.status)) return { kind: 'over' as const };
       if ((await hasFinishIntent(tx, jobId)) || (await hasPoolCutoff(tx, jobId))) return { kind: 'ending' as const };
       const detail = await tx.computerJob.findUnique({ where: { id: jobId }, select: { waitingFor: true } });
       const numbered = await tx.$queryRaw<Array<{ note_seq: number }>>`UPDATE "computer_jobs" SET "note_seq" = "note_seq" + 1 WHERE "id" = ${jobId} RETURNING "note_seq"`;
@@ -85,16 +132,6 @@ export async function addJobNote(botId: string, ownerId: string, jobId: string, 
       }
       if (row.status === 'waiting') return { kind: 'kept' as const, seq, delivery: 'after_hand_back' as const, cancel: null };
       return { kind: 'kept' as const, seq, delivery: 'when_it_starts' as const, cancel: null };
-    },
-    { timeout: 15_000, maxWait: 15_000 },
-  );
-  if (decided.kind === 'over') return { ok: false, reason: 'over' };
-  if (decided.kind === 'ending') return { ok: false, reason: 'ending' };
-  // After the write, outside any lock, and only for the turn that write read (Rule C)
-  if (decided.cancel) await cancelTurnFor(botId, decided.cancel.responseId);
-  const view = await computerView(botId, ownerId, now);
-  if (!view) return { ok: false, reason: 'not_found' };
-  return { ok: true, view, note: { seq: decided.seq, delivery: decided.delivery } };
 }
 
 /** Cancels exactly one turn of the agent on a Brick's machine. Best effort: a turn already over, or a machine that does not answer, is not an error. Never throws. */

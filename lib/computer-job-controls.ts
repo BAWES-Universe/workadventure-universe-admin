@@ -15,6 +15,10 @@
  *
  * Resume puts the job first in line and tries it at once: it runs again with a NEW reservation through the normal start (a computer that is cold is brought back), and its runner claims it afresh (a new epoch).
  * If it cannot start now it stays first in line. If the person's month or a limit they set does not let it start, it stays paused and says why (`allowance` / `rule`).
+ *
+ * One control, one effect (GPT round 6, finding 4; lib/computer-commands): every control given with a command id keeps it in `computer_job_commands` with what it came to. Pause, Resume and "do this first" write the
+ * row under the job's locks in the transaction that decides them (after the locks, the order used everywhere), so the same id again answers what the first decided and writes nothing, whatever the job did since.
+ * Cancel commits its row first, naming its job, and ends it through the finalizer's own transactions. The library still takes a control without one (its own callers); every route asks for it.
  */
 import { createHash } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
@@ -30,10 +34,11 @@ import { dropProfile, parkProfile, signInsKept } from '@/lib/computer-browser-pr
 import { grantsPrintIn, tellIn } from '@/lib/computer-tellings';
 import { releaseIfUnheld } from '@/lib/computer-control';
 import type { ComputerProvider as Provider } from '@/lib/computer-provider';
+import { claimCommand, claimCommandIn, commandRow, keepOutcome, refuseUnder, seenCommand, type Claimed, type Command, type CommandKind, type CommandRow, type StoredOutcome } from '@/lib/computer-commands';
 
 /** Why a control was not done. `not_found`: not the owner's Brick, or no such job on it. `over`: the job already ended. `taken_over`: the person has the screen. `ending`: its ending is already decided. `not_paused` / `not_queued`: the job is not in the state the tap was for. `allowance` / `rule`: a resume the person's month, or a limit they set, does not let start (the job stays paused). */
-export type ControlRefusal = 'not_found' | 'over' | 'taken_over' | 'ending' | 'not_paused' | 'not_queued' | 'allowance' | 'rule';
-/** `signInsKept` is said only when a job that held the machine was paused: false when its sign-ins could not be put away (it will need them again when it carries on). */
+export type ControlRefusal = 'not_found' | 'over' | 'taken_over' | 'ending' | 'not_paused' | 'not_queued' | 'allowance' | 'rule' | 'command_reused';
+/** `command_reused`: the control's command id was already used for another control (another job, kind or argument): refused, nothing written (finding 4). `signInsKept` is said only when a job that held the machine was paused: false when its sign-ins could not be put away (it will need them again when it carries on). */
 export type Controlled = { ok: true; view: ComputerView; signInsKept?: boolean } | { ok: false; reason: ControlRefusal };
 
 const SECOND = 1000;
@@ -57,6 +62,36 @@ async function viewOf(botId: string, ownerId: string, now: Date): Promise<Contro
   const view = await computerView(botId, ownerId, now);
   return view ? { ok: true, view } : { ok: false, reason: 'not_found' };
 }
+
+/** A command seen before (finding 4): its stored outcome, with the computer as it stands NOW; nothing is written. `command_reused` for an id used for another control. */
+async function answerOf(botId: string, ownerId: string, seen: Exclude<Claimed, { fresh: true }>, now: Date): Promise<Controlled> {
+  if ('reused' in seen) return { ok: false, reason: 'command_reused' };
+  const outcome = seen.replay;
+  if (outcome && !outcome.ok) return { ok: false, reason: outcome.reason as ControlRefusal };
+  const view = await viewOf(botId, ownerId, now);
+  return view.ok && outcome?.ok && outcome.signInsKept !== undefined ? { ...view, signInsKept: outcome.signInsKept } : view;
+}
+
+/** What a refusal is kept as. */
+const refusalOutcome = (reason: ControlRefusal): StoredOutcome => ({ ok: false, reason });
+
+/** A refusal found before the control's transaction, kept under its command (when it has one) so the same command always answers the same; a copy that got there first answers instead. */
+async function refused(botId: string, ownerId: string, under: { command: Command; row: CommandRow } | null, reason: ControlRefusal, now: Date): Promise<Controlled> {
+  if (!under) return { ok: false, reason };
+  const claimed = await refuseUnder(under.command, under.row, reason);
+  return 'fresh' in claimed ? { ok: false, reason } : answerOf(botId, ownerId, claimed, now);
+}
+
+/** The command of a control, and the row it is kept under. */
+const underOf = (command: Command | undefined, botId: string, ownerId: string, jobId: string, kind: CommandKind, args: Record<string, unknown> = {}, stretch: number | null = null) =>
+  command ? { command, row: commandRow(botId, ownerId, jobId, kind, args, stretch) } : null;
+
+/** What a pause decided, as its command keeps it (the person's own Pause: the same words `pauseJob` answers). */
+const decisionOutcome = (decided: PauseDecision): StoredOutcome => {
+  if (decided.kind === 'held' || decided.kind === 'queued' || decided.kind === 'already') return { ok: true };
+  if (decided.kind === 'not_found' || decided.kind === 'over' || decided.kind === 'taken_over' || decided.kind === 'ending') return refusalOutcome(decided.kind);
+  return refusalOutcome('ending');
+};
 
 export type PauseResult =
   | { ok: true; kind: 'held'; n: number; signInsKept: boolean }
@@ -273,14 +308,37 @@ const refusalOf = (result: PauseResult): Controlled | null => {
   return { ok: false, reason: result.reason === 'superseded' ? 'ending' : result.reason };
 };
 
-/** Pause: the owner's tap or words. A job running or waiting for them (Brick in control) is paused with its time so far charged; a job in line just leaves the line until resumed. */
-export async function pauseJob(botId: string, ownerId: string, jobId: string, now: Date = new Date()): Promise<Controlled> {
+/**
+ * Pause: the owner's tap or words. A job running or waiting for them (Brick in control) is paused with its time so far charged; a job in line just leaves the line until resumed.
+ * `command` (finding 4): the tap's own id. Its row is written under the job's locks, in the transaction that decides the pause, with what it decided: the same id again answers that and writes nothing (no second
+ * pause, stretch or time event, even after the job was resumed in between).
+ */
+export async function pauseJob(botId: string, ownerId: string, jobId: string, now: Date = new Date(), command?: Command): Promise<Controlled> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
   const job = await jobOnBrick(botId, jobId);
   if (!job) return { ok: false, reason: 'not_found' };
-  const result = await pauseJobAs(jobId, 'person', now);
-  const refused = refusalOf(result);
-  if (refused) return refused;
+  const under = underOf(command, botId, ownerId, jobId, 'pause', {}, job.pauses);
+  let result: PauseResult;
+  if (under) {
+    const seen = await seenCommand(under.command, under.row);
+    if (seen) return answerOf(botId, ownerId, seen, now);
+    // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
+    const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId } }));
+    const done = await prisma.$transaction(async (tx) => {
+      // The job's locks first (the order used everywhere), then the command's row: a copy of this tap waits here for the first, then finds its row
+      if (!(await lockJob(tx, jobId))) return { decided: { kind: 'not_found' } as PauseDecision };
+      const claimed = await claimCommandIn(tx, under.command, under.row);
+      if (!('fresh' in claimed)) return { seen: claimed };
+      const decided = await decidePauseIn(tx, jobId, 'person', now, provider);
+      await keepOutcome(tx, under.command, decisionOutcome(decided));
+      return { decided };
+    }, TX);
+    if (done.seen) return answerOf(botId, ownerId, done.seen, now);
+    result = await afterPause(jobId, done.decided, now);
+    if (result.ok && result.kind === 'held') await keepOutcome(prisma, under.command, { ok: true, signInsKept: result.signInsKept });
+  } else result = await pauseJobAs(jobId, 'person', now);
+  const refusal = refusalOf(result);
+  if (refusal) return refusal;
   const view = await viewOf(botId, ownerId, now);
   return view.ok && result.ok && result.kind === 'held' ? { ...view, signInsKept: result.signInsKept } : view;
 }
@@ -289,26 +347,46 @@ export async function pauseJob(botId: string, ownerId: string, jobId: string, no
  * Resume: the paused job goes first in line and is tried at once, with a new reservation. It stays first in line when something else holds the computer. When the person's month, or a limit they set, does not let it
  * start, it stays paused and the answer says why (`allowance` / `rule`): it is the start that is refused, never the job.
  */
-export async function resumeJob(botId: string, ownerId: string, jobId: string, now: Date = new Date()): Promise<Controlled> {
+export async function resumeJob(botId: string, ownerId: string, jobId: string, now: Date = new Date(), command?: Command, as: { kind: CommandKind; args?: Record<string, unknown> } = { kind: 'resume' }): Promise<Controlled> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
   const job = await jobOnBrick(botId, jobId);
   if (!job) return { ok: false, reason: 'not_found' };
+  const under = underOf(command, botId, ownerId, jobId, as.kind, as.args ?? {}, job.pauses);
+  if (under) {
+    const seen = await seenCommand(under.command, under.row);
+    if (seen) return answerOf(botId, ownerId, seen, now);
+  }
   const moved = await prisma.$transaction(async (tx) => {
     const row = await lockJob(tx, jobId);
     if (!row) return 'not_found' as const;
-    if (isOver(row.status)) return 'over' as const;
-    const current = await tx.computerJob.findUniqueOrThrow({ where: { id: jobId }, select: { status: true, queuedFor: true } });
-    if (current.status !== 'queued' || current.queuedFor !== 'paused') return 'not_paused' as const;
-    const rank = (await topRank(tx, botId)) + 1;
-    await tx.computerJob.update({ where: { id: jobId }, data: { queuedFor: 'turn', pausedAt: null, pausedWhy: null, queueRank: rank, lastTriedAt: null, leaseVersion: { increment: 1 } } });
-    return 'ok' as const;
+    // The command's row after the job's locks, in the transaction that decides the resume (finding 4): a copy finds it and answers what this one decided
+    if (under) {
+      const claimed = await claimCommandIn(tx, under.command, under.row);
+      if (!('fresh' in claimed)) return { seen: claimed };
+    }
+    const decided = isOver(row.status) ? ('over' as const) : await resumeIn(tx, botId, jobId);
+    if (under) await keepOutcome(tx, under.command, decided === 'ok' ? { ok: true } : refusalOutcome(decided));
+    return decided;
   }, TX);
+  if (typeof moved === 'object') return answerOf(botId, ownerId, moved.seen, now);
   if (moved !== 'ok') return { ok: false, reason: moved };
   await controlInternals.tryStart(jobId, now, { quiet: true });
   // The month or a limit refused its start: tryStart put a job that ran before back as paused, with the reason
   const after = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, pausedWhy: true } });
-  if (after?.status === 'queued' && after.queuedFor === 'paused' && (after.pausedWhy === 'allowance' || after.pausedWhy === 'rule')) return { ok: false, reason: after.pausedWhy };
+  if (after?.status === 'queued' && after.queuedFor === 'paused' && (after.pausedWhy === 'allowance' || after.pausedWhy === 'rule')) {
+    if (under) await keepOutcome(prisma, under.command, refusalOutcome(after.pausedWhy));
+    return { ok: false, reason: after.pausedWhy };
+  }
   return viewOf(botId, ownerId, now);
+}
+
+/** The resume itself, under the job's locks: only a paused job, put first in line. */
+async function resumeIn(tx: Prisma.TransactionClient, botId: string, jobId: string): Promise<'ok' | 'not_paused'> {
+  const current = await tx.computerJob.findUniqueOrThrow({ where: { id: jobId }, select: { status: true, queuedFor: true } });
+  if (current.status !== 'queued' || current.queuedFor !== 'paused') return 'not_paused';
+  const rank = (await topRank(tx, botId)) + 1;
+  await tx.computerJob.update({ where: { id: jobId }, data: { queuedFor: 'turn', pausedAt: null, pausedWhy: null, queueRank: rank, lastTriedAt: null, leaseVersion: { increment: 1 } } });
+  return 'ok';
 }
 
 /** A refusal decided inside a control's transaction: thrown so the whole transaction rolls back (nothing it wrote stays), then answered. */
@@ -329,22 +407,63 @@ const lockLine = (tx: Prisma.TransactionClient, botId: string) => tx.$executeRaw
  * holding the computer is checked under those locks (the person's screen, a kept intent, a decided cutoff), then the target is ranked and each one is paused in the same transaction. Any refusal rolls ALL of it back:
  * the order and the stretches are as they were. The steps after a pause (Rule C) run only after the commit.
  */
-export async function moveJobFirst(botId: string, ownerId: string, jobId: string, options: { pauseRunning?: boolean } = {}, now: Date = new Date()): Promise<Controlled> {
+export async function moveJobFirst(botId: string, ownerId: string, jobId: string, options: { pauseRunning?: boolean } = {}, now: Date = new Date(), command?: Command): Promise<Controlled> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
   const job = await jobOnBrick(botId, jobId);
   if (!job) return { ok: false, reason: 'not_found' };
-  if (isOver(job.status)) return { ok: false, reason: 'over' };
-  if (job.status === 'queued' && job.queuedFor === 'paused') return resumeJob(botId, ownerId, jobId, now);
-  if (job.status !== 'queued') return { ok: false, reason: 'not_queued' };
+  // One command, one answer (finding 4): the same id is answered from its row FIRST, whatever the job is now (a replay after the job started is still the first request's answer)
+  const args = { pauseRunning: options.pauseRunning === true };
+  const under = underOf(command, botId, ownerId, jobId, 'first', args, job.pauses);
+  if (under) {
+    const seen = await seenCommand(under.command, under.row);
+    if (seen) return answerOf(botId, ownerId, seen, now);
+  }
+  if (isOver(job.status)) return refused(botId, ownerId, under, 'over', now);
+  if (job.status === 'queued' && job.queuedFor === 'paused') return resumeJob(botId, ownerId, jobId, now, command, { kind: 'first', args });
+  if (job.status !== 'queued') return refused(botId, ownerId, under, 'not_queued', now);
   // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
   const provider = options.pauseRunning ? providerFor(await prisma.brickComputer.findUnique({ where: { botId } })) : null;
-  let paused: Array<{ id: string; decided: PauseDecision }>;
-  try {
-    paused = await prisma.$transaction(async (tx) => {
-      await lockLine(tx, botId);
-      const holding = options.pauseRunning ? (await tx.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } })).map((held) => held.id) : [];
-      const rows = new Map<string, Awaited<ReturnType<typeof lockJob>>>();
-      for (const id of [...new Set([jobId, ...holding])].sort()) rows.set(id, await lockJob(tx, id));
+  type FirstDecided = { seen: Exclude<Claimed, { fresh: true }> } | { refused: ControlRefusal } | { paused: Array<{ id: string; decided: PauseDecision }> };
+  const decided = await prisma.$transaction(async (tx): Promise<FirstDecided> => {
+    await lockLine(tx, botId);
+    const holding = options.pauseRunning ? (await tx.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } })).map((held) => held.id) : [];
+    const rows = new Map<string, Awaited<ReturnType<typeof lockJob>>>();
+    for (const id of [...new Set([jobId, ...holding])].sort()) rows.set(id, await lockJob(tx, id));
+    // The command's row after every lock (finding 4); a copy of this request waits on the line, then finds it
+    if (under) {
+      const claimed = await claimCommandIn(tx, under.command, under.row);
+      if (!('fresh' in claimed)) return { seen: claimed };
+    }
+    // Everything after this point is undone by a refusal (finding 11), and the refusal itself is kept as the command's outcome
+    await tx.$executeRaw`SAVEPOINT "do_this_first"`;
+    try {
+      const paused = await firstIn(tx, botId, jobId, holding, rows, provider, now);
+      if (under) await keepOutcome(tx, under.command, { ok: true });
+      return { paused };
+    } catch (error) {
+      if (!(error instanceof ControlRefused)) throw error;
+      await tx.$executeRaw`ROLLBACK TO SAVEPOINT "do_this_first"`;
+      if (under) await keepOutcome(tx, under.command, refusalOutcome(error.reason));
+      return { refused: error.reason };
+    }
+  }, TX);
+  if ('seen' in decided) return answerOf(botId, ownerId, decided.seen, now);
+  if ('refused' in decided) return { ok: false, reason: decided.refused };
+  const paused = decided.paused;
+  // Rule C: only after the commit, for each pause it made
+  let kept: boolean | undefined;
+  for (const one of paused) {
+    const after = await afterPause(one.id, one.decided, now, { advance: false });
+    if (after.ok && after.kind === 'held') kept = (kept ?? true) && after.signInsKept;
+  }
+  await controlInternals.startNext(botId, now);
+  if (under && kept !== undefined) await keepOutcome(prisma, under.command, { ok: true, signInsKept: kept });
+  const view = await viewOf(botId, ownerId, now);
+  return view.ok && kept !== undefined ? { ...view, signInsKept: kept } : view;
+}
+
+/** "Do this first" itself, under the line's and every job's locks: refused by throwing `ControlRefused` (the caller undoes everything it wrote). */
+async function firstIn(tx: Prisma.TransactionClient, botId: string, jobId: string, holding: string[], rows: Map<string, Awaited<ReturnType<typeof lockJob>>>, provider: Provider | null, now: Date): Promise<Array<{ id: string; decided: PauseDecision }>> {
       const target = rows.get(jobId);
       if (!target || target.botId !== botId) throw new ControlRefused('not_found');
       if (isOver(target.status)) throw new ControlRefused('over');
@@ -369,31 +488,28 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
         out.push({ id, decided });
       }
       return out;
-    }, TX);
-  } catch (error) {
-    if (error instanceof ControlRefused) return { ok: false, reason: error.reason };
-    throw error;
-  }
-  // Rule C: only after the commit, for each pause it made
-  let kept: boolean | undefined;
-  for (const one of paused) {
-    const after = await afterPause(one.id, one.decided, now, { advance: false });
-    if (after.ok && after.kind === 'held') kept = (kept ?? true) && after.signInsKept;
-  }
-  await controlInternals.startNext(botId, now);
-  const view = await viewOf(botId, ownerId, now);
-  return view.ok && kept !== undefined ? { ...view, signInsKept: kept } : view;
 }
 
 /**
  * Cancel ONE job: running or waiting, it ends as the person's own Stop of that job only (charged the time it used, never given back) and the line moves on; waiting in line or paused, it leaves the line and nothing
  * is charged (a pause already wrote its own time). Every other job is left as it is.
  */
-export async function cancelJob(botId: string, ownerId: string, jobId: string, now: Date = new Date()): Promise<Controlled> {
+export async function cancelJob(botId: string, ownerId: string, jobId: string, now: Date = new Date(), command?: Command): Promise<Controlled> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
   const first = await jobOnBrick(botId, jobId);
   if (!first) return { ok: false, reason: 'not_found' };
-  if (isOver(first.status)) return { ok: false, reason: 'over' };
+  // The command (finding 4): its row is committed FIRST, naming this job, and the ending runs in the finalizer's own transactions. The same id again answers what it came to, or, while the first request did not
+  // keep that (it stopped half way), finishes ending THIS job, which ends a job once whoever asks.
+  const under = underOf(command, botId, ownerId, jobId, 'cancel', {}, first.pauses);
+  if (under) {
+    let seen = await seenCommand(under.command, under.row);
+    if (!seen) {
+      if (isOver(first.status)) return refused(botId, ownerId, under, 'over', now);
+      seen = await claimed(claimCommand(under.command, under.row, { ok: true, pending: true, targets: [jobId] }));
+    }
+    // Answered before (or another control's id); a first request that stopped half way leaves it pending: this one finishes ending the job
+    if (seen && ('reused' in seen || seen.replay !== null)) return answerOf(botId, ownerId, seen, now);
+  } else if (isOver(first.status)) return { ok: false, reason: 'over' };
   // The job can change between the look and the ending (a job in line can start): the ending is asked again on what it is now
   for (let attempt = 0; attempt < 3; attempt++) {
     const job = await jobOnBrick(botId, jobId);
@@ -404,5 +520,12 @@ export async function cancelJob(botId: string, ownerId: string, jobId: string, n
   }
   const after = await jobOnBrick(botId, jobId);
   if (after && after.pauses > 0) await dropProfile(botId, jobId, now).catch((error) => console.error('[Computer] Could not drop a cancelled job’s browser:', error instanceof Error ? error.message : 'unknown'));
+  if (under) await keepOutcome(prisma, under.command, { ok: true, targets: [jobId] });
   return viewOf(botId, ownerId, now);
+}
+
+/** A claim in a transaction of its own, as a seen command (or null when it is this request's). */
+async function claimed(claim: Promise<Claimed>): Promise<Exclude<Claimed, { fresh: true }> | null> {
+  const got = await claim;
+  return 'fresh' in got ? null : got;
 }
