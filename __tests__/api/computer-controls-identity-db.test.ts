@@ -351,6 +351,43 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       }
     });
 
+    it('CodeRabbit on #1025 (31): a Stop whose request stopped before the line moved keeps its answer pending; its retry moves the line, ends nothing asked for after the Stop, and then answers as a replay (without moving it again)', async () => {
+      const { sara, jobId } = await running('cr-31');
+      const s = command();
+      const real = prisma.computerJob.findFirst.bind(prisma.computerJob) as unknown as (args: { where?: { status?: string }; orderBy?: unknown }) => Promise<unknown>;
+      let moves = 0;
+      let failOnce = true;
+      const spy = jest.spyOn(prisma.computerJob, 'findFirst').mockImplementation(((args: { where?: { status?: string }; orderBy?: unknown }) => {
+        // The look of "which job is next in line" (the line moving)
+        if (args?.where?.status === 'queued' && Array.isArray(args.orderBy)) {
+          moves++;
+          if (failOnce) {
+            failOnce = false;
+            return Promise.reject(new Error('the server stopped'));
+          }
+        }
+        return real(args);
+      }) as never);
+      try {
+        await expect(stopAll(sara.brickId, sara.id, minutes(2), s)).rejects.toThrow('the server stopped');
+        expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'person' });
+        // Nothing final is kept: the line has not moved yet
+        expect(await commandOf(s.id)).toMatchObject({ outcome: { ok: true, pending: true, targets: [jobId] } });
+        // A job asked for after the Stop starts on its own and is not the Stop's
+        const later = await startJob({ botId: sara.brickId, personId: sara.id, title: 'After the Stop' }, minutes(3));
+        if (!later.ok) throw new Error('the job was not made');
+        const retried = await stopAll(sara.brickId, sara.id, minutes(4), s);
+        expect(retried).toMatchObject({ ok: true });
+        expect(await jobOf(later.job.id)).toMatchObject({ status: 'running' });
+        expect((await commandOf(s.id))?.outcome).toEqual({ ok: true, targets: [jobId] });
+        const movedBefore = moves;
+        expect(await stopAll(sara.brickId, sara.id, minutes(5), s)).toMatchObject({ ok: true });
+        expect(moves).toBe(movedBefore);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('a Stop’s command id used again on the owner’s OTHER Brick is `command_reused`, and stops nothing there', async () => {
       const { sara, jobId } = await running('f4-stop-two-bricks');
       const second = await createBrick({ ownerId: sara.id, name: 'Second Brick' });

@@ -1772,9 +1772,10 @@ export async function stopAll(botId: string, ownerId: string, now: Date = new Da
   }
   await endEverything(botId, now, targets);
   if (command) {
-    await keepOutcome(prisma, command, { ok: true, targets: targets ?? [] });
-    // A job asked for after the Stop is not the Stop's: it was left in line, and the line moves for it now that the Stop's jobs are over
+    // A job asked for after the Stop is not the Stop's: it was left in line, and the line moves for it now that the Stop's jobs are over. The Stop's answer is kept only AFTER the line has moved: a request that
+    // stopped between the two leaves it pending, and its retry ends the same jobs again (those are over already) and moves the line, never adding a later job to the Stop (CodeRabbit on #1025, 31)
     await startNext(botId, now);
+    await keepOutcome(prisma, command, { ok: true, targets: targets ?? [] });
   }
   const view = await computerView(botId, ownerId, now);
   return view ? { ok: true, view } : { ok: false, reason: 'not_found' };
