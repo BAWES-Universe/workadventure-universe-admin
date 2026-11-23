@@ -32,7 +32,7 @@ import { authorizeModelCall, callRoomKey, settleModelCall } from '@/lib/computer
 import { mintJobToken } from '@/lib/computer-token';
 import { recordPoolCutoff } from '@/lib/computer-faults';
 import { cancelJob, pauseEventId, pauseJob, resumeJob } from '@/lib/computer-job-controls';
-import { carryOnPaused, pauseForLimit } from '@/lib/computer-limit-pause';
+import { carryOnPaused, pauseForLimit, resetCarryOnScanForTests } from '@/lib/computer-limit-pause';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
 import { createGiftFor } from '@/lib/grants-admin';
 import { callInLastStretch } from '@/lib/computer-stretch';
@@ -950,6 +950,39 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       await setUp();
       expect(await carryOnPaused(minutes(7))).toBe(0);
       expect(await told(minutes(8))).toEqual([]);
+    });
+  });
+
+  describe('CodeRabbit on #1025: the carry-on scan advances past jobs that still cannot carry on', () => {
+    it('a page of jobs held by a spending rule does not hold up a later job whose month has recovered: the scan goes on from where the last sweep stopped, and starts again once past the end', async () => {
+      resetCarryOnScanForTests();
+      // Four jobs held by a rule they keep hitting (older), then one the month paused and that can carry on now (newer). A batch of 1 reads 4 jobs a page
+      const blocked: string[] = [];
+      const heldBricks: string[] = [];
+      for (const [i, at] of [5, 6, 7, 8].entries()) {
+        const held = await running(`scan-rule-${i}`);
+        await rule(held.sara, 1_000);
+        await renewJob(held.jobId, minutes(at), { epoch: held.epoch });
+        expect(await jobOf(held.jobId)).toMatchObject({ queuedFor: 'paused', pausedWhy: 'rule' });
+        blocked.push(held.jobId);
+        heldBricks.push(held.sara.brickId);
+      }
+      const free = await running('scan-free');
+      await setUp({ memberAllowanceMicros: 1_000 });
+      await renewJob(free.jobId, minutes(9), { epoch: free.epoch });
+      await setUp();
+      expect(await jobOf(free.jobId)).toMatchObject({ queuedFor: 'paused', pausedWhy: 'allowance' });
+      // The first sweep reads the four held jobs and carries none on; the SAME four would be read at every sweep without a cursor
+      expect(await carryOnPaused(minutes(20), 1)).toBe(0);
+      expect(await jobOf(free.jobId)).toMatchObject({ queuedFor: 'paused' });
+      // The next sweep starts after them and reaches the job that can carry on
+      expect(await carryOnPaused(minutes(21), 1)).toBe(1);
+      expect(await jobOf(free.jobId)).toMatchObject({ status: 'running', pausedWhy: null });
+      // Past the end the scan starts again from the oldest AT ONCE (a page shorter than a full one is the end of the list): the oldest held job's rule is lifted, and the very next sweep carries it on
+      await prisma.spendRule.deleteMany({ where: { botId: heldBricks[0] } });
+      expect(await carryOnPaused(minutes(22), 1)).toBe(1);
+      expect(await jobOf(blocked[0])).toMatchObject({ pausedWhy: null });
+      for (const jobId of blocked.slice(1)) expect(await jobOf(jobId)).toMatchObject({ queuedFor: 'paused', pausedWhy: 'rule' });
     });
   });
 

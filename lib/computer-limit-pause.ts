@@ -57,15 +57,36 @@ type Changed = 'unknown_step' | 'apps' | 'computer' | 'held_screen' | null;
  * The sweep's part: for each person, the oldest job their month or a limit paused that now has room carries on by itself (one per person per sweep; the next one in a later sweep, once this one holds its room), or
  * Brick asks about it once when something about it changed. Returns how many carried on. Never throws.
  */
+/** Where the last sweep stopped: the next one starts AFTER it, so jobs that still cannot carry on never hold up the ones behind them. Null = from the oldest. */
+let scanAfter: { pausedAt: Date; id: string } | null = null;
+
+/** For tests: start the scan again from the oldest paused job. */
+export function resetCarryOnScanForTests(): void {
+  scanAfter = null;
+}
+
 export async function carryOnPaused(now: Date = new Date(), batch = 50): Promise<number> {
   let carried = 0;
   try {
+    const page = Math.max(1, batch) * 4;
+    // A page of jobs that are still over their limits would be the same page at every sweep, and a newer job whose allowance has recovered would never be looked at. The scan carries a cursor from sweep to sweep
+    // (paused-at order, then id) and starts again from the oldest once it has gone past the last one (CodeRabbit on #1025, lib/computer-limit-pause.ts:66)
+    const after = scanAfter;
     const paused = await prisma.computerJob.findMany({
-      where: { status: 'queued', queuedFor: 'paused', pausedWhy: { in: ['allowance', 'rule'] }, bot: { deletedAt: null } },
+      where: {
+        status: 'queued',
+        queuedFor: 'paused',
+        pausedWhy: { in: ['allowance', 'rule'] },
+        bot: { deletedAt: null },
+        ...(after ? { OR: [{ pausedAt: { gt: after.pausedAt } }, { pausedAt: after.pausedAt, id: { gt: after.id } }] } : {}),
+      },
       orderBy: [{ pausedAt: 'asc' }, { id: 'asc' }],
-      take: Math.max(1, batch) * 4,
-      select: { id: true, botId: true, personId: true },
+      take: page,
+      select: { id: true, botId: true, personId: true, pausedAt: true },
     });
+    const last = paused[paused.length - 1];
+    // A short page is the end of the list: the next sweep starts again from the oldest
+    scanAfter = paused.length >= page && last?.pausedAt ? { pausedAt: last.pausedAt, id: last.id } : null;
     const settings = await getMeterSettings();
     const done = new Set<string>();
     for (const job of paused) {
