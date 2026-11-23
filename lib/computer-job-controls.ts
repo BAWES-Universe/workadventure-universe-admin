@@ -181,7 +181,9 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   // The job's sign-ins are not put away yet: that happens after this commit (`afterPause`). From this very commit the machine carries the job's id as a park that has not finished, so a crash between the two
   // cannot let another job start on a browser that still holds this one's sign-ins: `tryStart` of any other job on this machine stays queued (`busy`) while it is set. `parkProfile` clears it, and the sweep
   // finishes a park nobody finished (GPT round 6, finding 7)
-  await tx.brickComputer.updateMany({ where: { botId: job.botId }, data: { parkPendingJobId: jobId } });
+  // Another pause still waits for its browser to be put away (one command that pauses a writer and a looker): the browser is then NEVER put away under either name, it is emptied. The first pointer stays
+  await tx.brickComputer.updateMany({ where: { botId: job.botId, parkPendingJobId: null }, data: { parkPendingJobId: jobId } });
+  await tx.brickComputer.updateMany({ where: { botId: job.botId, NOT: [{ parkPendingJobId: null }, { parkPendingJobId: jobId }] }, data: { parkPendingWipe: true } });
   await tx.computerJob.update({
     where: { id: jobId },
     data: {

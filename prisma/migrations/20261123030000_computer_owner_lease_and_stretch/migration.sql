@@ -13,6 +13,11 @@ ALTER TABLE "computer_jobs" ADD CONSTRAINT "computer_jobs_prep_state_check" CHEC
 -- The job whose pause is committed and whose browser is not put away yet (finding 7): while it is set, no other job starts on that machine, so a job never gets
 -- another job's sign-ins. The park clears it, and the sweep wipes and clears it for a machine that cannot be reached.
 ALTER TABLE "brick_computers" ADD COLUMN "park_pending_job_id" VARCHAR(40);
+-- Set when a second pause lands while one is still waiting for its browser to be put away (one command that pauses a writer and a looker): the browser is then never put away under either job's name,
+-- it is emptied (CodeRabbit on #1025). Cleared with the pointer.
+ALTER TABLE "brick_computers" ADD COLUMN "park_pending_wipe" BOOLEAN NOT NULL DEFAULT false;
+-- Whether a pause really put a browser away (true), or found nothing to put away (false: the job has no browser of its own to wait for). Null: not known (the park has not answered yet, or it failed).
+ALTER TABLE "computer_job_pauses" ADD COLUMN "sign_ins_kept" BOOLEAN;
 
 -- Which stretch of its job a charge belongs to, written when the call was ADMITTED (finding 8): the job's number of pauses then, under the job's cutoff lock, which is
 -- the lock a pause takes. Every ruling about a pause compares these numbers instead of two clocks. Null on every row of before this, and on room that is not a
@@ -40,3 +45,17 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER "computer_jobs_hold_pause" BEFORE UPDATE ON "computer_jobs" FOR EACH ROW WHEN (OLD."queued_for" = 'paused') EXECUTE FUNCTION "computer_jobs_hold_pause"();
+
+-- No job starts on a Brick while a pause on it still has its browser to put away, whichever server writes the start (CodeRabbit on #1025): a server of the version before this does not read `park_pending_job_id`, so for the
+-- minutes of a rolling deploy it could put a job on the browser that still holds the paused job's sign-ins. The start (queued -> running or waiting) is SKIPPED (the writer sees 0 rows, a lost race to every server), except for
+-- the paused job's own resume. The pause itself (running -> queued) and every ending pass. TO BE REMOVED with computer_jobs_hold_pause in the release after 0.5.0.
+CREATE OR REPLACE FUNCTION "computer_jobs_hold_park"() RETURNS trigger AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM "brick_computers" b WHERE b."bot_id" = NEW."bot_id" AND b."park_pending_job_id" IS NOT NULL AND b."park_pending_job_id" <> NEW."id") THEN
+    RETURN NULL;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "computer_jobs_hold_park" BEFORE UPDATE ON "computer_jobs" FOR EACH ROW WHEN (OLD."status" = 'queued' AND NEW."status" IN ('running', 'waiting')) EXECUTE FUNCTION "computer_jobs_hold_park"();

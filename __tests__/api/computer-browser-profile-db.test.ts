@@ -15,7 +15,7 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests, type ExecOptions } from '@/lib/computer-provider';
-import { dropProfile, finishPendingParks, needsSignInAgain, parkProfile, parkWorthWaitingFor, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settlePark, settleResumedBrowser, signInsKept, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
+import { dropProfile, finishPendingParks, resetPendingCursorForTests, resetRecoveryCursorForTests, needsSignInAgain, parkProfile, parkWorthWaitingFor, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settlePark, settleResumedBrowser, signInsKept, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -482,6 +482,135 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
       expect(await dropProfile(sara.brickId, visa.id, minutes(1))).toMatchObject({ state: 'dropped' });
       expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: null });
+    });
+
+    const markOf = async (botId: string) => prisma.brickComputer.findUniqueOrThrow({ where: { botId }, select: { parkPendingJobId: true, parkPendingWipe: true } });
+
+    it('CodeRabbit on #1025: a pause that is OLD (the park cannot say it was on the machine) is never released without proof: the live browser is emptied first, and the marker stays if that fails', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 30 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
+      answers.clear = 'failed=1 reason=busy';
+      expect(await finishPendingParks(minutes(1))).toEqual({ looked: 1, parked: 0, wiped: 0 });
+      expect((await markOf(sara.brickId)).parkPendingJobId).toBe(visa.id);
+      expect(sent.map((one) => one.action)).toEqual(['clear']);
+      answers.clear = 'cleared=1';
+      expect(await finishPendingParks(minutes(2))).toEqual({ looked: 1, parked: 0, wiped: 1 });
+      expect((await markOf(sara.brickId)).parkPendingJobId).toBeNull();
+    });
+
+    it('a pause that found nothing to put away, or a park that was already made, lets the marker go with no wipe; a browser a job beside uses is left alone', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
+      answers.park = 'parked=0 reason=nothing';
+      expect(await finishPendingParks(minutes(1))).toEqual({ looked: 1, parked: 1, wiped: 0 });
+      expect(sent.map((one) => one.action)).toEqual(['park']);
+      // The pause's row says it kept nothing: the job has no browser of its own to wait for
+      expect((await prisma.computerJobPause.findFirstOrThrow({ where: { jobId: visa.id } })).signInsKept).toBe(false);
+      expect(await parkWorthWaitingFor(sara.brickId, visa.id, NOW)).toBe(false);
+      // A job running beside it uses the browser: it is not emptied under it, and the marker goes
+      const omar = await person('Omar');
+      await machine(omar.brickId);
+      const gone = await job(omar, { pausedMinutesAgo: 30 });
+      await job(omar, { status: 'running', pausedMinutesAgo: null });
+      await prisma.brickComputer.update({ where: { botId: omar.brickId }, data: { parkPendingJobId: gone.id } });
+      sent = [];
+      expect(await finishPendingParks(minutes(1))).toMatchObject({ looked: 1, wiped: 1 });
+      expect(sent.map((one) => one.action)).not.toContain('clear');
+      expect((await markOf(omar.brickId)).parkPendingJobId).toBeNull();
+    });
+
+    it('two pauses that left their marks together: the browser is emptied, never put away under either name', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const writer = await job(sara, { pausedMinutesAgo: 0 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: writer.id, parkPendingWipe: true } });
+      expect(await finishPendingParks(minutes(1))).toEqual({ looked: 1, parked: 0, wiped: 1 });
+      expect(sent.map((one) => one.action)).toEqual(['clear']);
+      expect(await markOf(sara.brickId)).toEqual({ parkPendingJobId: null, parkPendingWipe: false });
+    });
+
+    it('a job that is on the machine again owns the live browser: its stale marker goes with no wipe', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
+      expect(await finishPendingParks(minutes(1))).toEqual({ looked: 1, parked: 1, wiped: 0 });
+      expect(sent).toEqual([]);
+    });
+
+    it('machines that keep failing never hold up a healthy one behind them: the sweep goes on past them, and starts again at the end', async () => {
+      resetPendingCursorForTests();
+      const bricks: string[] = [];
+      for (let i = 0; i < 4; i++) {
+        const who = await person(`Cursor${i}`);
+        await machine(who.brickId);
+        const visa = await job(who, { pausedMinutesAgo: 0 });
+        await prisma.brickComputer.update({ where: { botId: who.brickId }, data: { parkPendingJobId: visa.id } });
+        bricks.push(who.brickId);
+      }
+      bricks.sort();
+      answers.park = 'failed=1 reason=busy';
+      answers.clear = 'failed=1 reason=busy';
+      expect(await finishPendingParks(minutes(1), 2)).toEqual({ looked: 2, parked: 0, wiped: 0 });
+      const first = sent.map((one) => one.ref);
+      sent = [];
+      answers.clear = 'cleared=1';
+      expect(await finishPendingParks(minutes(2), 2)).toEqual({ looked: 2, parked: 0, wiped: 2 });
+      // The second pass reached the other two Bricks, not the same two again
+      expect(new Set([...first, ...sent.map((one) => one.ref)]).size).toBe(4);
+      resetPendingCursorForTests();
+    });
+
+    it('throwing the browser away (an ending, a cancel) lets the machine go only once the LIVE browser is proved empty', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
+      answers.clear = 'failed=1 reason=busy';
+      expect(await dropProfile(sara.brickId, visa.id, minutes(1))).toMatchObject({ state: 'dropped' });
+      expect((await markOf(sara.brickId)).parkPendingJobId).toBe(visa.id);
+      answers.clear = 'cleared=1';
+      expect(await dropProfile(sara.brickId, visa.id, minutes(2))).toMatchObject({ state: 'dropped' });
+      expect((await markOf(sara.brickId)).parkPendingJobId).toBeNull();
+    });
+
+    it('recovery goes on past jobs whose commands keep failing, in a stable order, and a late second attempt never undoes a settled job', async () => {
+      resetRecoveryCursorForTests();
+      const ids: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const who = await person(`Recover${i}`);
+        await machine(who.brickId);
+        const visa = await job(who, { status: 'running', pausedMinutesAgo: 5 });
+        await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover' } });
+        ids.push(visa.id);
+      }
+      answers.restore = 'failed=1 reason=busy';
+      expect(await recoverResumedBrowsers(minutes(7), 2)).toEqual({ looked: 2, ready: 0 });
+      answers.restore = 'restored=1 cookies=1 pages=1';
+      expect(await recoverResumedBrowsers(minutes(8), 2)).toEqual({ looked: 1, ready: 1 });
+      resetRecoveryCursorForTests();
+      // A late attempt that read `recover` finds the job already settled: it writes nothing
+      const settled = ids.sort()[0];
+      await prisma.computerJob.update({ where: { id: settled }, data: { prepState: null } });
+      const late = await settleResumedBrowser(settled, (await prisma.computerJob.findUniqueOrThrow({ where: { id: settled } })).botId, { state: 'failed', reason: 'busy', cookies: 0, pages: 0 }, minutes(9), undefined, 'recover');
+      expect(late).toBe('recover');
+      expect(await prepOf(settled)).toEqual({ prepState: null });
+    });
+
+    it('an expired recovery leaves a browser that a running sibling uses exactly as it is, and the job is ready', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 30 * 60 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover' } });
+      await job(sara, { status: 'running', pausedMinutesAgo: null, writes: false });
+      resetRecoveryCursorForTests();
+      expect(await recoverResumedBrowsers(minutes(7))).toEqual({ looked: 1, ready: 1 });
+      expect(sent.map((one) => one.action)).not.toContain('clear');
+      expect(await prepOf(visa.id)).toEqual({ prepState: null });
     });
 
     it('emptying the live browser needs the cleanup claim and lets go of it, and does nothing on a machine that is not awake', async () => {

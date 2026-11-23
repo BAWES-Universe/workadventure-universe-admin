@@ -71,10 +71,11 @@ import {
   dropProfile,
   finishPendingParks,
   parkWorthWaitingFor,
+  parkProfile,
   recoverResumedBrowsers,
   restoreProfile,
+  settlePark,
   settleResumedBrowser,
-  wipeLiveProfile,
 } from '@/lib/computer-browser-profile';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
 import { claimCommandIn, commandRow, keepOutcome, seenCommand, type Command } from '@/lib/computer-commands';
@@ -977,6 +978,47 @@ async function runIsTheirs(botId: string, personId: string, runId: string): Prom
   return !!run && run.item.botId === botId && run.item.ownerId === personId;
 }
 
+/**
+ * The claim that puts a job on the machine, decided in ONE transaction under the Brick's line lock (the one "do this first" takes) and the machine's own row (a command on the browser takes it to write its claim): nothing is still being
+ * done to the browser, a job that must have the browser alone has no other job beside it, and no job beside it is still waiting for its browser (the restore replaces the browser: nobody starts under it, and it starts under nobody).
+ * `count` is 0 when the job was claimed by another try meanwhile, as before.
+ */
+async function claimMachineFor(job: { id: string; botId: string }, key: string, now: Date, options: { restoring: boolean; exclusive: boolean }): Promise<{ ok: true; count: number } | { ok: false }> {
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`computer:line:${job.botId}`}, 0))`;
+      const rows = await tx.$queryRaw<Array<{ claimed: Date | null }>>`SELECT "clean_claimed_at" AS claimed FROM "brick_computers" WHERE "bot_id" = ${job.botId} FOR UPDATE`;
+      const claimed = rows[0]?.claimed ?? null;
+      if (claimed && now.getTime() - claimed.getTime() < CLEAN_CLAIM_STALE_MS && Date.now() - claimed.getTime() < CLEAN_CLAIM_STALE_MS) return { ok: false as const };
+      const beside = await tx.computerJob.findMany({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } }, select: { prepState: true } });
+      if (beside.some((other) => other.prepState !== null) || (options.exclusive && beside.length > 0)) return { ok: false as const };
+      const done = await tx.computerJob.updateMany({
+        where: { id: job.id, status: 'queued', ...NOT_PAUSED },
+        // A job that carries on is not ready to be worked on until its own browser is back (or a clean one is proved clean): `prep_state` keeps it out of the runnable list, refuses a claim and refuses every call until then (GPT round 6, finding 7)
+        data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: now, ...(options.restoring ? { prepState: 'restoring' as const } : {}) },
+      });
+      return { ok: true as const, count: done.count };
+    },
+    { timeout: 15_000, maxWait: 15_000 },
+  );
+}
+
+/**
+ * A pause left its mark and the machine is not awake: the machine is woken for it (no job holds it), the paused job's browser is put away first, or emptied with proof, and only then is the mark let go. False when the machine cannot be
+ * woken or the browser cannot be settled (the mark stays, the machine is put to rest again when nothing holds it, and the job waits in line: the sweep settles it once the machine can be reached).
+ */
+async function settleAsleepPark(botId: string, provider: Provider, markJobId: string, now: Date): Promise<boolean> {
+  try {
+    await bringUp(botId, provider, now);
+    const settled = await settlePark(botId, markJobId, await parkProfile(botId, markJobId, now), now);
+    if (settled !== 'waiting') return true;
+  } catch (error) {
+    console.error('[Computer] Could not wake a machine to put a paused job’s browser away:', error instanceof Error ? error.message : 'unknown');
+  }
+  await restIfUnheld(botId, now).catch(() => false);
+  return false;
+}
+
 type Tried = 'running' | 'queued' | 'failed' | 'not_set' | 'gone' | { rule: string };
 
 /** One try to put a queued job on the machine. Safe to ask again: a job that is no longer queued is left as it is. */
@@ -1041,20 +1083,25 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
 
   // A pause whose park never ran leaves the paused job's own browser live on the machine: nothing else starts there until it is put away or emptied (the sweep does it), so no job ever
   // inherits another's sign-ins (GPT round 6, finding 7)
-  // Only while the machine is AWAKE: there the pause's own park, or the sweep, puts it right and the line moves on. A machine that is not awake (waking, resting, restarted) can be put right by nobody until it is woken, so a job
-  // that waits for it would wait for ever: the job wakes it, and the live browser is emptied before the job (or anyone) works on it (below, `wipePendingPark`)
+  // Another job's pause still has its browser to put away. On an AWAKE machine the pause's own park, or the sweep, settles it and the line moves on (this job waits). On a machine that is NOT awake (waking, resting, restarted)
+  // nobody can settle it until it is woken, and a job waiting for that would wait for ever: this job wakes it, the browser is put away (or emptied, proved) FIRST, and only then does this job go on to take the machine.
+  // Never by letting the pointer go because the machine sleeps: a sleeping machine still holds the paused job's sign-ins on its disk (Opus, 23 Nov)
   const parking = await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { parkPendingJobId: true } });
-  if (parking?.parkPendingJobId && parking.parkPendingJobId !== job.id && row.machine === 'working') {
-    await queue('busy');
-    return 'queued';
+  if (parking?.parkPendingJobId && parking.parkPendingJobId !== job.id) {
+    if (row.machine === 'working' || !(await settleAsleepPark(job.botId, provider, parking.parkPendingJobId, now))) {
+      await queue('busy');
+      return 'queued';
+    }
   }
 
   // A job that carries on and still has a browser of its own to get back does not start BESIDE another job: it would have to run in that job's browser, and its own sign-ins would be thrown
   // away to let it. It waits for the machine alone (nothing reserved, its park untouched) and the line starts it when the other job is done. A job that kept nothing runs beside another as any
   // new job does (GPT round 6, finding 7, Opus's ruling 23 Nov)
+  const beforeClaim = { exclusive: false };
   if (job.pauses > 0) {
+    beforeClaim.exclusive = await parkWorthWaitingFor(job.botId, job.id, now);
     const beside = await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } } });
-    if (beside > 0 && (await parkWorthWaitingFor(job.botId, job.id, now))) {
+    if (beside > 0 && beforeClaim.exclusive) {
       await queue('busy');
       return 'queued';
     }
@@ -1121,11 +1168,17 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
   // Take the writer's place. The database lets only one writing job hold it; a second one arriving at the same moment queues.
   let carriedOnSeq: number | null = null;
   try {
-    const claimed = await prisma.computerJob.updateMany({
-      where: { id: job.id, status: 'queued', ...NOT_PAUSED },
-      // A job that carries on is not ready to be worked on until its own browser is back (or a clean one is proved clean): `prep_state` keeps it out of the runnable list, refuses a claim and refuses every call until then (GPT round 6, finding 7)
-      data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: now, ...(job.pauses > 0 ? { prepState: 'restoring' as const } : {}) },
-    });
+    // A cleanup of the browser is waited out first (as before); the claim below then DECIDES, in one transaction under the Brick's line lock and the machine's row, whether anything is still on the browser (CodeRabbit on #1025)
+    if (row.machine === 'working') await untilCleaned(job.botId);
+    const taking = await claimMachineFor(job, key, now, { restoring: job.pauses > 0, exclusive: job.pauses > 0 && beforeClaim.exclusive });
+    if (!taking.ok) {
+      // Something is still being done to the browser (a command, another job's restore, a job that waits for its browser) or the job would have to share a browser it must have alone: this one goes back in line with nothing held
+      await releaseRoom({ key }, now);
+      await dropDiskRoom();
+      await queue('busy');
+      return 'queued';
+    }
+    const claimed = { count: taking.count };
     // A job its month or a limit paused that was put back in line by itself is told `carried_on` right as it takes the machine, once (finding 5, GPT round 6): never while it still waits in line. The mark is
     // cleared and the telling written in one conditional write on the job that is now running (UPDATE ... RETURNING), so it is said once however many tries race
     if (claimed.count === 1 && job.carryOnPending) {
@@ -1232,23 +1285,6 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
     await restIfUnheld(job.botId, now);
     return 'gone';
   }
-  // A pause that could not put its job's browser away because the machine was not awake left its mark: the machine is awake now, and no job works on it before that browser is emptied (the paused job's sign-ins are
-  // never live in front of another job). Never with another job on the machine (that one's browser is its own and is not emptied for this): this job goes back in line, and the line starts it once the mark is settled
-  const mark = (await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { parkPendingJobId: true } }))?.parkPendingJobId ?? null;
-  if (mark && mark !== job.id) {
-    const beside = await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } } });
-    const emptied = beside === 0 && (await wipeLiveProfile(job.botId, mark, now)).state === 'cleared';
-    if (emptied) await clearParkPending(job.botId, mark);
-    else {
-      const back = await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', reservationKey: key }, data: { status: 'queued', queuedFor: 'busy', reservationKey: null, startedAt: null, stretchStarted: null, prepState: null, ...(carriedOnSeq !== null ? { carryOnPending: true } : {}) } });
-      if (back.count === 1) {
-        if (carriedOnSeq !== null) await prisma.computerJobTelling.updateMany({ where: { jobId: job.id, seq: carriedOnSeq, toldAt: null }, data: { staleAt: now } });
-        await releaseRoom({ key }, now);
-        return 'queued';
-      }
-      return 'gone';
-    }
-  }
   // A job that was paused gets its own browser back (and never the one of a job that ran in between) before its runner takes it up
   // Each of these is this try's own: a job that was paused and resumed again while the machine came up is on another room, and this try marks nothing for it (finding 3b)
   if (job.pauses > 0) await prisma.computerJobPause.updateMany({ where: { jobId: job.id, n: job.pauses, resumedAt: null, job: { reservationKey: key } }, data: { resumedAt: now } }).catch(() => undefined);
@@ -1259,7 +1295,7 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
       return { state: 'failed' as const, reason: 'error', cookies: 0, pages: 0 };
     });
     // Its own browser is back (or a clean one is proved clean): the machine waits for nobody's park any more
-    if ((await settleResumedBrowser(job.id, job.botId, back, now, key)) === 'ready') await clearParkPending(job.botId, job.id);
+    if ((await settleResumedBrowser(job.id, job.botId, back, now, key, 'restoring')) === 'ready') await clearParkPending(job.botId, job.id);
   }
   // What is on the machine before this job works on it: only so the message can name files the job saved outside its own output folder (those are never handed over)
   if (job.writes) await takeBaseline(job.id, job.botId, provider, key);

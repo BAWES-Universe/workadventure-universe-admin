@@ -372,6 +372,59 @@ run('bringing a job’s browser back, and never into another job', () => {
     expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(false);
   });
 
+  it('CodeRabbit on #1025 (20): a saved session that cannot be read is kept and reported incomplete, never taken for an empty one', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    writeFileSync(join(parked(JOB_A), 'session.json'), '{ this is not a session');
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=0 reason=no_answer/);
+    expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(true);
+    // A valid EMPTY session still completes at once (nothing to put back)
+    writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [], pages: [] }));
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
+    expect(existsSync(parked(JOB_A))).toBe(false);
+  });
+
+  it('planted bug: a replay that takes an unreadable session for an empty one loses it', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    writeFileSync(join(parked(JOB_A), 'session.json'), '{ this is not a session');
+    act('restore', JOB_A, [JOB_A], (script) => script.replace('    print("cookies=0 pages=0 answer=0")\n    sys.exit(0)\n', '    saved = {}\n'));
+    expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(false);
+  });
+
+  it('CodeRabbit on #1025 (21): a try that stopped right after the profile was moved into place never wipes it on the next try', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    // Cut off after the move, before the note that it happened
+    act('restore', JOB_A, [JOB_A], (script) => script.replace('  [ -d "$JOBDIR" ] && : > "$JOBDIR/moved" 2>/dev/null\n', '  exit 1\n'));
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+    expect(existsSync(join(parked(JOB_A), 'profile'))).toBe(false);
+    const next = act('restore', JOB_A, [JOB_A]);
+    expect(next.out).toMatch(/restored=1/);
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+    expect(statSync(join(profile(), 'Default', 'Cookies')).uid).toBe(agentUid);
+    expect(existsSync(parked(JOB_A))).toBe(false);
+  });
+
+  it('a try that stopped BEFORE the profile left the park folder still moves it (the note alone is not taken for a move)', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    act('restore', JOB_A, [JOB_A], (script) => script.replace('    mv "$JOBDIR/profile" "$PROFILE" &&', '    exit 1\n    mv "$JOBDIR/profile" "$PROFILE" &&'));
+    expect(existsSync(join(parked(JOB_A), 'moving'))).toBe(true);
+    expect(existsSync(join(parked(JOB_A), 'profile', 'Default', 'Cookies'))).toBe(true);
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+    expect(existsSync(parked(JOB_A))).toBe(false);
+  });
+
+  it('planted bug: a retry that does not know the move happened wipes the profile it was given', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    act('restore', JOB_A, [JOB_A], (script) => script.replace('  [ -d "$JOBDIR" ] && : > "$JOBDIR/moved" 2>/dev/null\n', '  exit 1\n'));
+    act('restore', JOB_A, [JOB_A], (script) => script.replace('  if [ -f "$JOBDIR/moving" ] && [ ! -f "$JOBDIR/moved" ]', '  if [ -f "$JOBDIR/never" ] && [ ! -f "$JOBDIR/moved" ]'));
+    expect(existsSync(join(profile(), 'Default', 'Cookies'))).toBe(false);
+  });
+
   it('hands the profile back without following a link inside it to a file the agent does not own', () => {
     const rootFile = join(root, 'root-only');
     writeFileSync(rootFile, 'root');
@@ -516,6 +569,36 @@ runWithBrowser('a real browser’s sign-ins and open pages', () => {
     expect(context.pages().map((one) => one.url())).toContain(`${site}/visa-form`);
     await live.close().catch(() => undefined);
   }, 120_000);
+
+  it('CodeRabbit on #1025 (20): a replay that cannot put everything back keeps the saved session, and a retry opens no page twice', async () => {
+    startBrowser();
+    const live = await browser();
+    await live.close().catch(() => undefined);
+    act('park', JOB_A, [JOB_A]);
+    // A good cookie, one the browser will not take, and one page
+    const good = { name: 'sid', value: 'signed-in-as-A', domain: '127.0.0.1', path: '/' };
+    const bad = { name: '__Host-nope', value: 'x', domain: 'example.test', path: '/' };
+    writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [good, bad], pages: [`${site}/visa-form`] }));
+    const first = act('restore', JOB_A, [JOB_A]);
+    expect(first.out).toMatch(/restored=0 reason=no_answer/);
+    expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(true);
+    // The retry (the move is already noted, so only the replay is done again): the page that already came back is not opened a second time
+    const second = act('restore', JOB_A, [JOB_A]);
+    expect(second.out).toMatch(/restored=0 reason=no_answer/);
+    let again = await browser();
+    let context = again.contexts()[0];
+    for (let i = 0; i < 50 && !context.pages().some((one) => one.url() === `${site}/visa-form`); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(context.pages().filter((one) => one.url() === `${site}/visa-form`)).toHaveLength(1);
+    await again.close().catch(() => undefined);
+    // Once the session is whole the replay finishes and the saved session goes
+    writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [good], pages: [`${site}/visa-form`] }));
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
+    expect(existsSync(parked(JOB_A))).toBe(false);
+    again = await browser();
+    context = again.contexts()[0];
+    expect(context.pages().filter((one) => one.url() === `${site}/visa-form`)).toHaveLength(1);
+    await again.close().catch(() => undefined);
+  }, 180_000);
 
   it('B resumed after A was paused gets an empty browser, not A’s sign-ins', async () => {
     startBrowser();

@@ -789,14 +789,16 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       });
       expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
       expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: jobId });
+      // The machine is awake (the pause rested it, and something woke it again): the park or the sweep settles the mark, and until then no other job starts
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'working' } });
       // Another job of the person's on that machine does not start: its browser would be the paused job's
       const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second' }, minutes(2));
       if (!next.ok) throw new Error('not queued');
       expect(await jobOf(next.job.id)).toMatchObject({ status: 'queued', queuedFor: 'busy' });
       // ...and the sweep does not start it either, while the park is unfinished
-      (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'failed', reason: 'busy' }));
-      (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'failed', reason: 'busy' }));
-      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: jobId } });
+      // The sweep runs while the mark is set and the park cannot be done (the fake machine does not answer the commands): the mark stays and the job stays queued
+      await sweepComputers(minutes(4));
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: jobId });
       expect(await jobOf(next.job.id)).toMatchObject({ status: 'queued' });
       // The park is finished: the machine stops waiting and the job behind it starts
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: null } });
@@ -807,58 +809,77 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
 
   describe('Sentry on #1025: a pause on a machine that is not awake never locks the Brick out', () => {
     for (const state of ['resting', 'waking'] as const) {
-      it(`a job paused while its machine is ${state}: the next job wakes the machine and starts, after the live browser is emptied (the paused job's sign-ins are never shown to it); the mark is let go`, async () => {
+      it(`a job paused while its machine is ${state}: the next job wakes the machine, the paused job's browser is put away FIRST, and only then does the mark go and the job take the machine (its sign-ins never reach the new job)`, async () => {
         const { sara, jobId } = await running(`s1025-${state}`);
         // The machine is not awake when the pause lands (a pause in the preparing window, an idle rest, a restart): the park cannot reach it and the settle cannot either
         await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: state } });
         (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'left', reason: 'not_awake' }));
         expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
         expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: jobId });
-        const wiped: string[] = [];
-        (profiles.wipeLiveProfile as jest.Mock).mockImplementationOnce(async (_bot: string, job: string) => {
-          wiped.push(job);
-          // The machine is awake by now (the start woke it), and the browser is emptied before the job is let through
-          expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { machine: true } })).machine).toBe('working');
-          return { state: 'cleared', reason: null };
+        const seen: Array<{ job: string; machine: string; starts: number }> = [];
+        (profiles.parkProfile as jest.Mock).mockImplementationOnce(async (_bot: string, job: string) => {
+          seen.push({
+            job,
+            machine: (await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { machine: true } })).machine,
+            // No job holds the machine while its browser is put away
+            starts: await prisma.computerJob.count({ where: { botId: sara.brickId, status: { in: ['running', 'waiting'] } } }),
+          });
+          return { state: 'parked', reason: null };
         });
         const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second' }, minutes(2));
         if (!next.ok) throw new Error('not started');
+        expect(seen).toEqual([{ job: jobId, machine: 'working', starts: 0 }]);
         expect(await jobOf(next.job.id)).toMatchObject({ status: 'running', queuedFor: null });
-        expect(wiped).toEqual([jobId]);
         expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: null });
       });
     }
 
-    it('a browser that cannot be emptied after the wake sends the job back in line with nothing held, and the mark stays for the sweep (never a job on a browser that may hold another job’s sign-ins)', async () => {
-      const { sara, jobId } = await running('s1025-wipe-fails');
+    it('a browser that cannot be put away or emptied after the wake leaves the mark and keeps the job in line (never a job on a browser that may hold another job’s sign-ins); the machine rests again', async () => {
+      const { sara, jobId } = await running('s1025-cannot');
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
       (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'left', reason: 'not_awake' }));
       expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
-      (profiles.wipeLiveProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'failed', reason: 'busy' }));
+      (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'failed', reason: 'busy' }));
       const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second' }, minutes(2));
       if (!next.ok) throw new Error('not started');
       expect(await jobOf(next.job.id)).toMatchObject({ status: 'queued', queuedFor: 'busy', reservationKey: null, startedAt: null });
       expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: jobId });
-      // The machine is awake now: once the park is finished (the pointer goes) the job behind it starts
-      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: jobId });
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId, status: { in: ['running', 'waiting'] } } })).toBe(0);
+      // Once the park is finished the job behind it starts
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: null } });
       await sweepComputers(minutes(5));
       expect(await jobOf(next.job.id)).toMatchObject({ status: 'running' });
     });
 
-    it('CONTROL: with the machine awake the pointer still holds every other job back (the park or the sweep settles it, the line moves on after)', async () => {
+    it('CONTROL: with the machine awake the mark still holds every other job back, and the start does not touch the browser (the pause’s own park or the sweep settles it)', async () => {
       const { sara, jobId } = await running('s1025-awake');
       (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => {
         throw new Error('the server stopped');
       });
       expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
-      // The pause rested the machine (nothing held it); the machine is awake again, as when another job's wake or the sweep's check found it, and only what the START does is looked at
+      // The pause rested the machine (nothing held it); the machine is awake again, as when another job's wake or the sweep's check found it
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'working' } });
-      (profiles.wipeLiveProfile as jest.Mock).mockClear();
+      (profiles.parkProfile as jest.Mock).mockClear();
       const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second' }, minutes(2));
       if (!next.ok) throw new Error('not started');
       expect(await jobOf(next.job.id)).toMatchObject({ status: 'queued', queuedFor: 'busy' });
-      expect((profiles.wipeLiveProfile as jest.Mock).mock.calls).toHaveLength(0);
+      expect((profiles.parkProfile as jest.Mock).mock.calls).toHaveLength(0);
+    });
+
+    it('the database itself refuses a start on a Brick while a pause has its browser to put away, whichever server writes it (the trigger of migration 195)', async () => {
+      const { sara, jobId } = await running('s1025-trigger');
+      (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => {
+        throw new Error('the server stopped');
+      });
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      const other = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Old server', writes: false, route: 'computer', expectedMicros: BigInt(0) } });
+      // An older server writes the start straight away: the row is skipped (0 rows), as for a lost race
+      const wrote = await prisma.computerJob.updateMany({ where: { id: other.id, status: 'queued' }, data: { status: 'running', startedAt: new Date() } });
+      expect(wrote.count).toBe(0);
+      expect(await jobOf(other.id)).toMatchObject({ status: 'queued' });
+      // The paused job's own resume is not refused by it, and once the mark is gone the other job starts
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: null } });
+      expect((await prisma.computerJob.updateMany({ where: { id: other.id, status: 'queued' }, data: { status: 'running', startedAt: new Date() } })).count).toBe(1);
     });
   });
 

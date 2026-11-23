@@ -1258,8 +1258,13 @@ run('a Brick’s computer, in a real database', () => {
       expect(provider.commands.filter((entry) => entry.command === 'universe-clean')).toHaveLength(0);
       const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
       if (!second.ok) throw new Error('no');
+      // CodeRabbit on #1025 (14): a start never takes the machine while another cleanup holds it, even after its wait: the job stays in line
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: second.job.id } })).toMatchObject({ status: 'queued' });
       await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { cleanClaimedAt: new Date(Date.now() - 10 * 60_000) } });
-      await finishJob(second.job.id, 'done', minutes(3));
+      // A claim nobody let go is taken over: the line starts the job, and its own ending cleans
+      await sweepComputers(minutes(3));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: second.job.id } })).toMatchObject({ status: 'running' });
+      await finishJob(second.job.id, 'done', minutes(4));
       expect(provider.commands.filter((entry) => entry.command === 'universe-clean')).toHaveLength(1);
     });
   });
@@ -1412,21 +1417,21 @@ run('a Brick’s computer, in a real database', () => {
       const { sara, jobId } = await waitingJob();
       await requestHandover(jobId, 'details', minutes(1));
       const originalCount = prisma.computerJob.count.bind(prisma.computerJob);
-      const originalUpdate = prisma.computerJob.updateMany.bind(prisma.computerJob);
+      const originalTransaction = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
       // Only the job starting is looked at: the take over and the hand back the test makes in between look at the same rows themselves
       let acting = false;
       let tookOver = false;
-      const update = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation((async (...args: Parameters<typeof originalUpdate>) => {
-        const arg = args[0] as { where?: { status?: string }; data?: { status?: string } } | undefined;
-        // The job is just about to take its place on the machine: the person takes over now (so the job's own check for them came too early)
-        if (!acting && !tookOver && arg?.where?.status === 'queued' && arg?.data?.status === 'running') {
+      // The job has just taken its place on the machine (its claim committed, one job claimed): the person takes over now, so the job's own check for them came too early
+      const update = jest.spyOn(prisma, '$transaction').mockImplementation((async (...args: unknown[]) => {
+        const out = (await originalTransaction(...args)) as { ok?: boolean; count?: number } | null;
+        if (!acting && !tookOver && out && out.ok === true && out.count === 1) {
           tookOver = true;
           acting = true;
           await takeOver(sara.brickId, sara.id, minutes(2));
           acting = false;
         }
-        return originalUpdate(...args);
-      }) as unknown as typeof prisma.computerJob.updateMany);
+        return out;
+      }) as unknown as typeof prisma.$transaction);
       let handedBack = false;
       const count = jest.spyOn(prisma.computerJob, 'count').mockImplementation(((...args: Parameters<typeof originalCount>) => {
         const where = (args[0]?.where ?? {}) as { status?: string; control?: string };

@@ -3381,6 +3381,8 @@ model BrickComputer {
   /// The job whose pause committed and whose browser (its sign-ins) is not put away yet (GPT round 6, finding 7): while it is set no other job starts on this machine, so a job never gets another's sign-ins. The
   /// park clears it; a machine that cannot be reached is wiped by the sweep, which clears it too.
   parkPendingJobId  String?   @map("park_pending_job_id") @db.VarChar(40)
+  /// Set when a second pause lands while one still waits for its browser to be put away: the browser is then emptied, never put away under either job's name (CodeRabbit on #1025). Cleared with the pointer.
+  parkPendingWipe   Boolean   @default(false) @map("park_pending_wipe")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
   noticeDismissedJobId String? @map("notice_dismissed_job_id") @db.VarChar(40)
   // Cold storage (the machine is packed into our own storage after idle days and made again on the next use): when it was packed, and how a
@@ -3738,6 +3740,8 @@ model ComputerJobPause {
   /// The month (YYYY-MM, UTC) it was refused in, and a digest of the person's own limits then (support only: the room check decides).
   blockedMonth   String? @map("blocked_month") @db.VarChar(7)
   blockedRuleRev String? @map("blocked_rule_rev") @db.VarChar(64)
+  /// Whether this pause really put a browser away (true) or found nothing to put away (false: the job has no browser of its own to wait for); null while not known.
+  signInsKept    Boolean? @map("sign_ins_kept")
 
   job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 

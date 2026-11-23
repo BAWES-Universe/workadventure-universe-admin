@@ -515,6 +515,22 @@ run('computer job controls: pause, resume, do this next, cancel one job (piece 1
       await stopJobFor(sara.brickId, sara.id, minutes(10));
       expect(profile.dropProfile).toHaveBeenCalledWith(sara.brickId, jobId, minutes(10));
     });
+
+    it('a pause on a machine that already waits for another pause\'s browser keeps the first mark and sets the wipe flag (the browser is emptied, never put away under either name)', async () => {
+      const { sara, jobId } = await running('s-two-pauses');
+      const earlier = await another(sara, 'Earlier', minutes(1));
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: earlier } });
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2));
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true, parkPendingWipe: true } })).toEqual({ parkPendingJobId: earlier, parkPendingWipe: true });
+    });
+
+    it('a pause on a machine that waits for nothing sets no wipe flag, and its own mark goes once the park is proved', async () => {
+      const { sara, jobId } = await running('s-one-pause');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2));
+      const mark = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true, parkPendingWipe: true } });
+      expect(mark).toEqual({ parkPendingJobId: null, parkPendingWipe: false });
+      expect(jobId).toBeTruthy();
+    });
   });
 
   describe('a spending limit the person set reads a paused stretch once', () => {

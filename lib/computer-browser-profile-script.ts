@@ -307,8 +307,12 @@ if mode == "save":
 try:
     with open(path) as handle:
         saved = json.load(handle)
+    if not isinstance(saved, dict):
+        raise ValueError("not a snapshot")
 except Exception:
-    saved = {}
+    # A snapshot that cannot be read is NOT an empty one: it is kept and the replay is said to be incomplete (CodeRabbit on #1025)
+    print("cookies=0 pages=0 answer=0")
+    sys.exit(0)
 cookies = [item for item in saved.get("cookies") or [] if isinstance(item, dict) and item.get("name") is not None]
 pages = [url for url in saved.get("pages") or [] if isinstance(url, str) and url.startswith(("http://", "https://"))]
 # Nothing was saved to put back (the park found no browser answering either): there is nothing a browser could lose, so the restore is not
@@ -328,6 +332,7 @@ if connection is None:
     print("cookies=0 pages=0 answer=0")
     sys.exit(0)
 put = 0
+complete = True
 if cookies:
     ready = []
     for item in cookies:
@@ -345,15 +350,25 @@ if cookies:
                 connection.send("Storage.setCookies", {"cookies": [one]})
                 put += 1
             except Exception:
-                pass
+                complete = False
+# A retry after a partial replay opens only the pages that are not open yet (a page that already came back is never opened twice)
+try:
+    already = set(str(item.get("url", "")) for item in http("GET", "/json/list") or [] if item.get("type") == "page")
+except Exception:
+    already = set()
 opened = 0
 for url in pages:
+    if url in already:
+        opened += 1
+        continue
     try:
         http("PUT", "/json/new?" + urllib.parse.quote(url, safe=""))
         opened += 1
+        already.add(url)
     except Exception:
-        pass
-print("cookies=%d pages=%d" % (put, opened))
+        complete = False
+# Only a replay that put back EVERY cookie and page is a finished one: the saved session is kept until then
+print("cookies=%d pages=%d answer=%d" % (put, opened, 1 if complete else 0))
 PYEND
 }
 
@@ -390,6 +405,12 @@ restore)
   # A try before this one already moved this job's profile into place and the browser never answered the session replay (the "moved" note). The profile
   # on the machine is this job's OWN, so nothing is wiped and nothing is moved: only the replay that failed is done again. Wiping here would
   # throw away the very profile the earlier try restored
+  # A try that stopped between the move and its note: the move began ("moving") and the parked profile is no longer in the park folder, so it is already in place and is this job's own
+  if [ -f "$JOBDIR/moving" ] && [ ! -f "$JOBDIR/moved" ] && [ ! -e "$JOBDIR/profile" ] && [ ! -L "$JOBDIR/profile" ] && [ -d "$PROFILE" ] && [ ! -L "$PROFILE" ]; then
+    chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }
+    : > "$JOBDIR/moved" 2>/dev/null
+    rm -f "$JOBDIR/moving"
+  fi
   if [ -f "$JOBDIR/moved" ]; then
     start_browser
     loaded=""
@@ -407,12 +428,15 @@ restore)
   had=0
   if [ -d "$JOBDIR/profile" ] && [ ! -L "$JOBDIR/profile" ]; then
     mkdir -p "$(dirname "$PROFILE")" && chown -h "$NODE_USER": "$(dirname "$PROFILE")" 2>/dev/null
+    # The move is noted BEFORE it is made: a try that stops anywhere after this knows whether the profile left the park folder (see above) and never wipes the one that did
+    : > "$JOBDIR/moving" || { say "0 reason=move"; exit 1; }
     mv "$JOBDIR/profile" "$PROFILE" && chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }
     had=1
   fi
   [ -f "$JOBDIR/session.json" ] && had=1
   # From here the live profile IS this job's own: a try that stops after this must not wipe it (the folder is root's alone, so this note is root's alone)
   [ -d "$JOBDIR" ] && : > "$JOBDIR/moved" 2>/dev/null
+  rm -f "$JOBDIR/moving"
   unmark
   unlock
   start_browser
