@@ -84,12 +84,11 @@ export async function carryOnPaused(now: Date = new Date(), batch = 50): Promise
       take: page,
       select: { id: true, botId: true, personId: true, pausedAt: true },
     });
-    const last = paused[paused.length - 1];
-    // A short page is the end of the list: the next sweep starts again from the oldest
-    scanAfter = paused.length >= page && last?.pausedAt ? { pausedAt: last.pausedAt, id: last.id } : null;
     const settings = await getMeterSettings();
     const done = new Set<string>();
+    let examined: (typeof paused)[number] | undefined;
     for (const job of paused) {
+      examined = job;
       if (done.has(job.personId)) continue;
       try {
         const outcome = await carryOnOne(job, settings.renewMinutes, now);
@@ -100,6 +99,9 @@ export async function carryOnPaused(now: Date = new Date(), batch = 50): Promise
       }
       if (done.size >= batch) break;
     }
+    // The cursor is the last job the loop LOOKED AT: when it stopped early (the batch was full), the jobs after that one are the next sweep's, never skipped. A short page is the end of the list: the next sweep starts again from the oldest
+    // (CodeRabbit on #1025, 33)
+    scanAfter = paused.length >= page && examined?.pausedAt ? { pausedAt: examined.pausedAt, id: examined.id } : null;
   } catch (error) {
     console.error('[Computer] Could not look for paused jobs to carry on:', error instanceof Error ? error.message : 'unknown');
   }

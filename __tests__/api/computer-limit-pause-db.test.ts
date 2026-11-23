@@ -1098,6 +1098,30 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
     });
   });
 
+  describe('CodeRabbit on #1025 (33): the scan cursor is the last job the sweep looked at', () => {
+    it('a sweep that stops because its batch is full leaves the jobs after the one it carried on to the next sweep, in order (none is skipped)', async () => {
+      resetCarryOnScanForTests();
+      // Five jobs the month paused (older to newer), all able to carry on now. A batch of 1 reads a page of 4 and carries on the first
+      const jobs: string[] = [];
+      for (const [i, at] of [5, 6, 7, 8, 9].entries()) {
+        const made = await running(`cr33-${i}`);
+        await setUp({ memberAllowanceMicros: 1_000 });
+        await renewJob(made.jobId, minutes(at), { epoch: made.epoch });
+        expect(await jobOf(made.jobId)).toMatchObject({ queuedFor: 'paused', pausedWhy: 'allowance' });
+        await setUp();
+        jobs.push(made.jobId);
+      }
+      const statuses = async () => Promise.all(jobs.map(async (id) => (await jobOf(id)).status));
+      expect(await carryOnPaused(minutes(20), 1)).toBe(1);
+      expect(await statuses()).toEqual(['running', 'queued', 'queued', 'queued', 'queued']);
+      // The next sweep goes on with the SECOND job, not past the page that was read to the fifth
+      expect(await carryOnPaused(minutes(21), 1)).toBe(1);
+      expect(await statuses()).toEqual(['running', 'running', 'queued', 'queued', 'queued']);
+      expect(await carryOnPaused(minutes(22), 1)).toBe(1);
+      expect(await statuses()).toEqual(['running', 'running', 'running', 'queued', 'queued']);
+    });
+  });
+
   describe('N14: a paused job cannot be started or un-paused by a server of the version before this (a trigger, for the mixed-version window)', () => {
     /** A job paused by the person, in line with `queued_for = 'paused'` and a reason, as the new code leaves it. */
     async function paused(name: string, why: 'person' | 'limit' = 'person') {
