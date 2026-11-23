@@ -559,6 +559,28 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect(await jobOf(lapsed.jobId)).toMatchObject({ status: 'stopped', endedBy: 'error' });
     });
 
+    it('N18: an OLD room that lapses ends nothing: a job claimed under a newer key keeps running and the old room is released with nothing charged; CONTROL: a lapse of the job’s own current room still ends it', async () => {
+      const made = await running('n18-old-room');
+      await claimed(made.jobId, 'rA');
+      const current = (await jobOf(made.jobId)).reservationKey!;
+      // An earlier try reserved room and stopped before its claim: its room is still held, in the past now, and the job is claimed under another key
+      const mine = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: current } });
+      const oldKey = `computer:job:${made.jobId}:earlier-try`;
+      const { id: _id, ...rest } = mine;
+      await prisma.meterReservation.create({ data: { ...rest, reservationKey: oldKey, state: 'held', expiresAt: minutes(5), settledMicros: null, closedAt: null } as never });
+      const before = (await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: current } })).amountMicros;
+      await sweepComputers(minutes(7));
+      expect(await jobOf(made.jobId)).toMatchObject({ status: 'running', endedBy: null, reservationKey: current });
+      // The old room is let go, and nothing was charged for it; the current room is as it was
+      expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: oldKey } })).toMatchObject({ state: 'released' });
+      expect(await prisma.meterEvent.count({ where: { eventId: { startsWith: `computer:${made.jobId}:time` } } })).toBe(0);
+      expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: current } })).toMatchObject({ state: 'held', amountMicros: before });
+      // CONTROL: the job's own current room lapsing still ends it as ours
+      await prisma.meterReservation.update({ where: { reservationKey: current }, data: { expiresAt: minutes(5) } });
+      await sweepComputers(minutes(8));
+      expect(await jobOf(made.jobId)).toMatchObject({ status: 'stopped', endedBy: 'error' });
+    });
+
     it('a job with an intent or a decided cutoff is the finalizer’s: the unanswered and lapsed-lease passes skip it (the finalizer ends it as the intent or the pool says)', async () => {
       const { jobId, ea } = await waitingPastLimit('s-e5-fin');
       await recordFinishIntent(jobId, { outcome: 'done', epoch: ea }, minutes(1));

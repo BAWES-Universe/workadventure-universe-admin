@@ -1945,6 +1945,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         if (lease) {
           const held = await tx.meterReservation.findUnique({ where: { reservationKey: lease.key }, select: { state: true, expiresAt: true } });
           if (!held || held.state !== 'held' || held.expiresAt.getTime() !== lease.expiresAt.getTime() || held.expiresAt.getTime() > now.getTime()) return { cutoffDecided: false, intent: null, deferred: true };
+          // ...and it is still THE job's room: a job claimed under a newer key is not ended by an older room lapsing (the terminal write repeats this in its WHERE)
+          if ((await tx.computerJob.findUnique({ where: { id: jobId }, select: { reservationKey: true } }))?.reservationKey !== lease.key) return { cutoffDecided: false, intent: null, deferred: true };
         }
         if (guard.refusal.key && (await tx.computerJobToken.count({ where: { id: guard.refusal.key, jobId, revokedAt: null, expiresAt: { gt: now } } })) === 0) return { cutoffDecided: false, intent: null, deferred: true };
         return null;
@@ -2418,7 +2420,9 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   const lapsed = await prisma.meterReservation.findMany({ where: { state: 'held', expiresAt: { lte: now }, jobId: { not: null }, reservationKey: { startsWith: 'computer:job:' } }, take: 200 });
   for (const reservation of lapsed) {
     const job = reservation.jobId ? await prisma.computerJob.findUnique({ where: { id: reservation.jobId } }) : null;
-    if (job && !isOver(job.status) && HOLDS_MACHINE.includes(job.status as never)) {
+    // Only the job's CURRENT room may end it: a try that reserved room and stopped before its claim leaves a room that lapses later, after the job was claimed under a new key (a resumed job, a second try).
+    // That old room ends nothing; it is released below with nothing charged (CodeRabbit N18 on #1025, Opus's ruling 23 Nov)
+    if (job && !isOver(job.status) && HOLDS_MACHINE.includes(job.status as never) && job.reservationKey === reservation.reservationKey) {
       // A runner that committed to ending this job (its intent) has the last word: the lease running out does not replace it. It is ended as the intent said (while Brick has the job: a take-over that wins keeps the
       // old ending below, as a lease that ran out always had), and a job with no intent is ended as before
       const kept = await prisma.computerFinishIntent.findUnique({ where: { jobId: job.id } });
@@ -2428,7 +2432,7 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
       }
       // Ended only as it was selected: the reservation must still be held and expired as it was seen, and the job must not have moved (a renewal, a claim, an answer, a take-over, a hand-over leave it to the next pass)
       const report: EndReport = {};
-      await endJob(job.id, 'stopped', 'error', now, true, undefined, true, null, false, { refusal: {}, observed: { status: job.status, control: job.control, controlGeneration: job.controlGeneration, ownerEpoch: job.ownerEpoch, leaseVersion: job.leaseVersion, handoverSeq: job.handoverSeq, lease: { key: reservation.reservationKey, expiresAt: reservation.expiresAt } } }, report);
+      await endJob(job.id, 'stopped', 'error', now, true, undefined, true, null, false, { refusal: {}, reservation: reservation.reservationKey, observed: { status: job.status, control: job.control, controlGeneration: job.controlGeneration, ownerEpoch: job.ownerEpoch, leaseVersion: job.leaseVersion, handoverSeq: job.handoverSeq, lease: { key: reservation.reservationKey, expiresAt: reservation.expiresAt } } }, report);
       if (report.ended) stopped++;
     } else if (job && isOver(job.status) && job.startedAt && job.reservationKey === reservation.reservationKey) {
       // A job that ran and ended, whose room was left held (its settlement did not get through): the room is settled at what it ran, never given back, so the
