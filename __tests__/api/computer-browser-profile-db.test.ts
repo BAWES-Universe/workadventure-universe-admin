@@ -170,14 +170,20 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { cleanClaimedAt: cleanup } });
       const release = () => prisma.brickComputer.updateMany({ where: { botId: sara.brickId, cleanClaimedAt: cleanup }, data: { cleanClaimedAt: null } });
       let parking: ReturnType<typeof parkProfile> | undefined;
+      let failing = false;
       try {
         parking = parkProfile(sara.brickId, visa.id, NOW);
         // Held, the claim keeps every command off the machine: nothing is sent while it is held, however long the park has been looking (CodeRabbit on #1025)
         await new Promise((resolve) => setTimeout(resolve, 800));
         expect(sent).toEqual([]);
+      } catch (error) {
+        failing = true;
+        throw error;
       } finally {
-        // Released in every case (a failed check above included), and observed here, so a failure of the release is this test's and never an unhandled rejection
-        await release();
+        // Released in every case (a failed check above included), and the park is joined on BOTH paths, so it never sends a command into the next test; a failure of the release itself does not hide the first failure (CodeRabbit on #1025, 47)
+        const released = await Promise.allSettled([release()]);
+        const joined = await Promise.allSettled(parking ? [parking] : []);
+        for (const one of [...released, ...joined]) if (one.status === 'rejected' && !failing) throw one.reason;
       }
       expect((await parking).state).toBe('parked');
       expect(sent.map((one) => one.action)).toEqual(['park']);

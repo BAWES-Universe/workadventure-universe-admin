@@ -829,8 +829,11 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       if (!next.ok) throw new Error('not queued');
       expect(await jobOf(next.job.id)).toMatchObject({ status: 'queued', queuedFor: 'busy' });
       // ...and the sweep does not start it either, while the park is unfinished
-      // The sweep runs while the mark is set and the park cannot be done (the fake machine does not answer the commands): the mark stays and the job stays queued
+      // The sweep runs while the mark is set and the park cannot be done (it answers `failed`, CodeRabbit on #1025, 48): the sweep tries it, the mark stays and the job stays queued
+      // (the sweep's own park runs the real one against the fake machine, which answers nothing: it fails, and the commands it sent prove it was tried)
+      const sentBefore = fake.commands.length;
       await sweepComputers(minutes(4));
+      expect(fake.commands.length).toBeGreaterThan(sentBefore);
       expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: jobId });
       expect(await jobOf(next.job.id)).toMatchObject({ status: 'queued' });
       // The park is finished: the machine stops waiting and the job behind it starts

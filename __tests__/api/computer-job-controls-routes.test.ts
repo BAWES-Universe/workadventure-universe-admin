@@ -93,11 +93,16 @@ describe('job control routes', () => {
 
   it('first: no body, `{}` and `{ pauseRunning: false }` move it only; `{ pauseRunning: true }` pauses what runs; a body that is not JSON or a pauseRunning that is not a boolean is 400', async () => {
     lib.moveJobFirst.mockResolvedValue({ ok: true, view });
+    // Each request adds exactly one call (a request that returned without dispatching would leave the last call of the one before it to satisfy the check: CodeRabbit on #1025, 49)
+    lib.moveJobFirst.mockClear();
     expect((await firstRoute(post('first'), jobParams)).status).toBe(200);
+    expect(lib.moveJobFirst).toHaveBeenCalledTimes(1);
     expect(lib.moveJobFirst).toHaveBeenLastCalledWith(BRICK, 'u-sara', JOB, { pauseRunning: false }, ...asked);
     await firstRoute(post('first', '{}'), jobParams);
+    expect(lib.moveJobFirst).toHaveBeenCalledTimes(2);
     expect(lib.moveJobFirst).toHaveBeenLastCalledWith(BRICK, 'u-sara', JOB, { pauseRunning: false }, ...asked);
     await firstRoute(post('first', JSON.stringify({ pauseRunning: true })), jobParams);
+    expect(lib.moveJobFirst).toHaveBeenCalledTimes(3);
     expect(lib.moveJobFirst).toHaveBeenLastCalledWith(BRICK, 'u-sara', JOB, { pauseRunning: true }, ...asked);
     lib.moveJobFirst.mockClear();
     expect((await firstRoute(post('first', 'nope'), jobParams)).status).toBe(400);
