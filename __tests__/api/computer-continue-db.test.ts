@@ -9,6 +9,11 @@ import { randomUUID } from 'node:crypto';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
+// The decision a start reads (carryOnFrom) is the real one, behind a jest.fn: one test makes two starts read it before either writes, to reach the unique index itself
+jest.mock('@/lib/computer-continue', () => {
+  const actual = jest.requireActual('@/lib/computer-continue');
+  return { ...actual, carryOnFrom: jest.fn((...args: unknown[]) => actual.carryOnFrom(...args)) };
+});
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn(), getClient: jest.fn(() => undefined), flush: jest.fn(async () => true) }));
 
 import { NextRequest } from 'next/server';
@@ -200,6 +205,25 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
       expect(await prisma.computerJob.count({ where: { personId: sara.id } })).toBe(2);
     });
 
+    it('two asks that both read "carry on" before either writes meet at the unique index: the second finds the job the first made, and nothing else is made or reserved', async () => {
+      const { sara, jobId: old } = await failedAsOurs('c-index-race');
+      const actual = jest.requireActual('@/lib/computer-continue') as typeof import('@/lib/computer-continue');
+      const read = await actual.carryOnFrom(sara.brickId, sara.id, old);
+      expect(read).toEqual({ link: { continuesJobId: old, agentSessionId: 'sess-Visa form' } });
+      // Both asks read the record while nothing carries the job on yet (as two asks a moment apart would)
+      jest.mocked(carryOnFrom).mockClear();
+      jest.mocked(carryOnFrom).mockResolvedValueOnce(read).mockResolvedValueOnce(read);
+      const first = await tryAgain(sara, old, minutes(6), { startKey: key() });
+      const second = await tryAgain(sara, old, minutes(6), { startKey: key() });
+      if (!first.ok || !second.ok) throw new Error(`a start was refused: ${JSON.stringify([first, second])}`);
+      expect(second.job.id).toBe(first.job.id);
+      expect(second.continued).toBe(true);
+      expect(jest.mocked(carryOnFrom)).toHaveBeenCalledTimes(2);
+      expect(await prisma.computerJob.count({ where: { continuesJobId: old } })).toBe(1);
+      expect(await prisma.computerJob.count({ where: { personId: sara.id } })).toBe(2);
+      expect(await roomsOf(first.job.id)).toHaveLength(1);
+    });
+
     it('the database itself refuses a second job that carries on the same one', async () => {
       const { sara, jobId: old } = await failedAsOurs('c-index');
       const first = await tryAgain(sara, old);
@@ -250,6 +274,19 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
       if (!again.ok) throw new Error('no job');
       expect(again.continued).toBeUndefined();
       expect(await jobOf(again.job.id)).toMatchObject({ continuesJobId: null, agentSessionId: null });
+    });
+
+    it('the same person’s job on ANOTHER of their Bricks is never carried on: the conversation never crosses Bricks', async () => {
+      const { sara, jobId: old } = await failedAsOurs('c-other-brick');
+      const other = await createBrick({ ownerId: sara.id, name: 'Sara’s second Brick' });
+      await giveComputer(other.id, sara.id);
+      expect(await carryOnFrom(other.id, sara.id, old)).toEqual({ fresh: 'not_theirs' });
+      const again = await tryAgain({ id: sara.id, brickId: other.id }, old);
+      if (!again.ok) throw new Error(`no job: ${JSON.stringify(again)}`);
+      expect(again.continued).toBeUndefined();
+      expect(await jobOf(again.job.id)).toMatchObject({ botId: other.id, continuesJobId: null, agentSessionId: null });
+      expect(await prisma.computerJob.count({ where: { continuesJobId: old } })).toBe(0);
+      expect(await retryCandidate(other.id, sara.id)).toBeNull();
     });
 
     it('a job that is still going on is never carried on (asked for one, the start is a fresh job beside it in line)', async () => {
