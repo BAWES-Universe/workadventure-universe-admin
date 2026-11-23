@@ -173,7 +173,7 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     const KEY_A = key();
     const KEY_B = key();
     // A reached Orbit and is still deciding (open, beating, no job)
-    const aAttempt = await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: KEY_A, state: 'open', beatAt: new Date() } });
+    const aAttempt = await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: KEY_A, state: 'open', beatAt: new Date(), createdAt: new Date(Date.now() - 1_000) } });
     expect(await viaLib(sara, KEY_B, 'Visa please')).toEqual({ ok: false, reason: 'earlier', job: { id: null, status: null, state: 'starting', attempt: KEY_A } });
     expect(await attemptOf(sara, KEY_B)).toMatchObject({ state: 'answered', jobId: null, aliasAttemptId: aAttempt.id });
     // The look for B: A is still going on
@@ -186,7 +186,7 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     expect(await jobsOf(sara)).toHaveLength(1);
     // Another person: A ended with no job (it stopped beating and was let go)
     const tom = await owner('r1-alias-dead');
-    const deadA = await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_A, state: 'open', beatAt: new Date() } });
+    const deadA = await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_A, state: 'open', beatAt: new Date(), createdAt: new Date(Date.now() - 1_000) } });
     await viaLib(tom, KEY_B, 'Visa please');
     await prisma.computerStartAttempt.update({ where: { id: deadA.id }, data: { state: 'expired' } });
     expect(await viaLib(tom, KEY_B, 'Visa please')).toEqual({ ok: false, reason: 'expired' });
@@ -212,7 +212,7 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     const tom = await owner('r1-dead-sweep');
     const KEY_A = key();
     const KEY_B = key();
-    const deadA = await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_A, state: 'open', beatAt: new Date() } });
+    const deadA = await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_A, state: 'open', beatAt: new Date(), createdAt: new Date(Date.now() - 1_000) } });
     await viaLib(tom, KEY_B, 'Visa please');
     expect(await attemptOf(tom, KEY_B)).toMatchObject({ state: 'answered', aliasAttemptId: deadA.id });
     await prisma.computerStartAttempt.update({ where: { id: deadA.id }, data: { state: 'expired' } });
@@ -327,7 +327,7 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     expect(await roomsOf(sara)).toHaveLength(1);
     // An alias of an attempt that made no job is kept too (its answer is still `expired`, never a fresh job under the old key)
     const tom = await owner('r1c-alias');
-    const deadA = await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_A, state: 'open', beatAt: new Date() } });
+    const deadA = await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_A, state: 'open', beatAt: new Date(), createdAt: new Date(Date.now() - 1_000) } });
     await viaLib(tom, KEY_B, 'Visa please');
     await prisma.computerStartAttempt.update({ where: { id: deadA.id }, data: { state: 'expired', beatAt: minutes(-120) } });
     await prisma.computerStartAttempt.update({ where: { botId_personId_startKey: { botId: tom.brickId, personId: tom.id, startKey: KEY_B } }, data: { beatAt: minutes(-120) } });

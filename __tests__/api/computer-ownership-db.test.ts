@@ -686,8 +686,8 @@ run('one owner per computer job: every write is decided in the write that lands 
     const start = (sara: { id: string; brickId: string }, startKey: string, title = 'Visa form') => startJob({ botId: sara.brickId, personId: sara.id, title, startKey, acks: true }, NOW);
     const jobsOf = (sara: { id: string }) => prisma.computerJob.count({ where: { personId: sara.id } });
     const roomsOf = (sara: { id: string }) => prisma.meterReservation.count({ where: { personId: sara.id } });
-    /** Request A reached Orbit and was held before its job: its attempt is open, beating `agoMs` ago. */
-    const pausedA = (sara: { id: string; brickId: string }, agoMs: number) => prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: KEY_A, state: 'open', beatAt: new Date(Date.now() - agoMs) } });
+    /** Request A reached Orbit and was held before its job: its attempt is open, beating `agoMs` ago, and was made before any attempt of B (never the same millisecond: the order of two attempts is their creation time). */
+    const pausedA = (sara: { id: string; brickId: string }, agoMs: number) => prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: KEY_A, state: 'open', beatAt: new Date(Date.now() - agoMs), createdAt: new Date(Date.now() - agoMs - 1_000) } });
     const setUpBrick = async (name: string) => {
       const sara = await person(name);
       await giveComputer(sara.brickId, sara.id);
