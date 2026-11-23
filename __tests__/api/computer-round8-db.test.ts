@@ -281,6 +281,28 @@ run('GPT seventh note (round 8): Orbit side of A, C and D2, in a real database',
       expect(await post(sara, recent, 'Fill the visa form')).toMatchObject({ ok: true });
     });
 
+    it('Opus’s survivor M6: an attempt that ended with no job (expired, or open but no longer beating) whose key was issued 6 h + 1 min ago is NOT reopened: `stale_consent`, no job, nothing reserved', async () => {
+      const sara = await owner('a2-ended-stale');
+      const issuedAt = new Date(Date.now() - 6 * 3_600_000 - 60_000);
+      for (const state of ['expired', 'open'] as const) {
+        const OLD = `t${issuedAt.getTime().toString(36)}-${randomUUID().replace(/-/g, '')}`;
+        // Its start began right after the message, and stopped beating long ago
+        await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: OLD, state, beatAt: new Date(issuedAt.getTime() + 60_000), createdAt: new Date(issuedAt.getTime() + 1_000), issuedAt } });
+        expect(await post(sara, OLD, 'Fill the visa form')).toEqual({ ok: false, reason: 'stale_consent' });
+        expect(await post(sara, OLD, 'Fill the visa form')).toEqual({ ok: false, reason: 'stale_consent' });
+        // Left as it was: never reopened
+        expect(await prisma.computerStartAttempt.findUniqueOrThrow({ where: { botId_personId_startKey: { botId: sara.brickId, personId: sara.id, startKey: OLD } } })).toMatchObject({ state, jobId: null });
+      }
+      expect(await jobsOf(sara)).toHaveLength(0);
+      expect(await roomJobsOf(sara)).toEqual([]);
+      // CONTROL: the same ended attempt with a key issued 5 h 59 min ago is reopened and makes its job
+      const recentAt = new Date(Date.now() - 6 * 3_600_000 + 60_000);
+      const RECENT = `t${recentAt.getTime().toString(36)}-${randomUUID().replace(/-/g, '')}`;
+      await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: RECENT, state: 'expired', beatAt: new Date(recentAt.getTime() + 60_000), createdAt: new Date(recentAt.getTime() + 1_000), issuedAt: recentAt } });
+      expect(await post(sara, RECENT, 'Fill the visa form')).toMatchObject({ ok: true });
+      expect(await jobsOf(sara)).toHaveLength(1);
+    });
+
     it('a key that carries no issue time, or one from the future, is refused (400) on a start that acks', async () => {
       const sara = await owner('a2-untimed');
       const untimed = await POST(
