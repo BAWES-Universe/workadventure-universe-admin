@@ -282,4 +282,5 @@ the statements it sends keep working against the new columns, which are all null
 192. `20261123000000_computer_job_controls`
 193. `20261123010000_computer_limit_pauses`
 194. `20261123020000_computer_job_continues`
+195. `20261123030000_computer_owner_lease_and_stretch`
 <!-- migrations:end -->

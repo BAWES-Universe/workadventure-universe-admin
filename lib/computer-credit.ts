@@ -3,6 +3,7 @@ import { ensureIssued } from '@/lib/credit-issue';
 import { currentRules, personFacts, usableLots, type Db, type LotRow } from '@/lib/credit-store';
 import { holdCredit, settleHold } from '@/lib/credit-spend';
 import { settleRefundObligations } from '@/lib/computer-refunds';
+import { stretchOfCharge } from '@/lib/computer-stretch';
 import { pickBase, reaches } from '@/lib/credit-values';
 
 /**
@@ -114,6 +115,9 @@ export async function drawComputerCredit(
     if (!Number.isSafeInteger(input.costMicros) || input.costMicros <= 0) return 0;
     if (!(await computerCreditMayExist(prisma))) return 0;
     await issueComputerCredit(input.personId, now);
+    // The draw carries the stretch of the charge it pays for (a model call the one it was admitted in, a pause its own, the job's time the one it is in now), so a give-back for a fault of ours
+    // touches that stretch's credit and no earlier stretch's (lib/computer-stretch)
+    const jobStretch = input.jobId ? await stretchOfCharge(input.jobId, input.eventId) : null;
     let want = input.costMicros;
     for (let attempt = 0; attempt < 2; attempt++) {
       const { availableMicros } = await computerCredit(prisma, input.personId, now);
@@ -128,6 +132,7 @@ export async function drawComputerCredit(
           chargeClass: input.chargeClass,
           botId: input.botId,
           jobKey: input.jobId,
+          jobStretch,
           effectKey: input.eventId,
           provider: 'universe',
           route: 'computer',

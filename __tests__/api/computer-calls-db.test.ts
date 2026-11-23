@@ -203,6 +203,51 @@ run('what a computer may ask of Orbit, in a real database', () => {
     const lookFails = () => atNextLook(() => Promise.reject(new Error('the database went away')));
     const call = (token: string, callId: string, estimateMicros = 5_000) => authorizeSettled({ token, callId, estimateMicros, payer: 'universe' }, NOW);
 
+    it('GPT round 6, finding 8: the stretch it belongs to is stamped on its room INSIDE the transaction that checked the key, under the job’s cutoff lock (never after it, where a pause could land between the two)', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      // Every statement the admission sends, in order, with the start and the end of each transaction marked around it
+      const log: string[] = [];
+      const realTx = prisma.$transaction.bind(prisma) as unknown as (...args: unknown[]) => Promise<unknown>;
+      const realRaw = prisma.$executeRaw.bind(prisma) as unknown as (...args: unknown[]) => Promise<unknown>;
+      const sql = (statement: unknown): string => (statement && typeof statement === 'object' && 'strings' in statement ? (statement as { strings: string[] }).strings.join('?') : String(statement));
+      const raw = jest.spyOn(prisma, '$executeRaw').mockImplementation(((...args: unknown[]) => {
+        log.push(sql(args[0]));
+        return realRaw(...args);
+      }) as never);
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
+        const first = args[0];
+        if (typeof first !== 'function') return realTx(...args);
+        const wrapped = async (tx: unknown) => {
+          log.push('BEGIN');
+          try {
+            return await (first as (client: unknown) => Promise<unknown>)(tx);
+          } finally {
+            log.push('END');
+          }
+        };
+        return realTx(wrapped, ...args.slice(1));
+      }) as never);
+      try {
+        expect(await call(token, 'c1', 5_000)).toMatchObject({ ok: true });
+      } finally {
+        spy.mockRestore();
+        raw.mockRestore();
+      }
+      expect(log.filter((entry) => entry.includes('"job_stretch"'))).toHaveLength(1);
+      const stampAt = log.findIndex((entry) => entry.includes('"job_stretch"'));
+      const openedAt = log.lastIndexOf('BEGIN', stampAt);
+      expect(openedAt).toBeGreaterThan(-1);
+      const sameTransaction = log.slice(openedAt + 1, stampAt);
+      // Nothing closed between that start and the stamp, so the stamp is in that very transaction...
+      expect(sameTransaction).not.toContain('END');
+      // ...which took the job's cutoff lock before it (the lock a pause takes, so an admission and a pause are ordered exactly, never by two clocks)...
+      expect(sameTransaction.some((entry) => entry.includes('pg_advisory_xact_lock'))).toBe(true);
+      // ...and the stamp is written before it commits
+      expect(log.indexOf('END', stampAt)).toBeGreaterThan(stampAt);
+      expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'c1') }, select: { jobStretch: true } })).toEqual({ jobStretch: 0 });
+    });
+
     it('takes room before it is sent, and settles to what it cost: the books and the room agree', async () => {
       const { sara, jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };

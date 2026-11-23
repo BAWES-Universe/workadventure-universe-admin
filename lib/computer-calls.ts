@@ -378,7 +378,7 @@ async function authorizedPastCutoff(jobId: string, callId: string, token: string
       await recordTurnAdmitted(tx, jobId, { turn: admitted.turn, run: admitted.run, at: clock() });
       // The call belongs to the stretch it is admitted in: written HERE, under the lock a pause takes, so the order of an admission and a pause is exact (never two clocks), and the first admission decides (an
       // answer given again keeps it). A give-back after a pause reads it (lib/computer-stretch)
-      await tx.$executeRaw`UPDATE "meter_reservations" SET "stretch" = (SELECT "pauses" FROM "computer_jobs" WHERE "id" = ${jobId}) WHERE "reservation_key" = ${callRoomKey(jobId, callId)} AND "stretch" IS NULL`;
+      await tx.$executeRaw`UPDATE "meter_reservations" SET "job_stretch" = (SELECT "pauses" FROM "computer_jobs" WHERE "id" = ${jobId}) WHERE "reservation_key" = ${callRoomKey(jobId, callId)} AND "job_stretch" IS NULL`;
       return true;
     },
     { timeout: 15_000, maxWait: 15_000 },

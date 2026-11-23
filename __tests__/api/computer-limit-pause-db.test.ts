@@ -481,6 +481,27 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       }
     });
 
+    it('GPT round 6, finding 8b: a paused stretch whose event is in the books is counted ONCE whether or not its `booked_at` mark landed: 69,000 for the month, 6,000 used, and the 60,000 the next stretch asks for still fits', async () => {
+      for (const mark of ['failed', 'written'] as const) {
+        const { sara, jobId, epoch } = await running(`g6-8b-${mark}`);
+        await setUp({ memberAllowanceMicros: 1_000 });
+        expect(await renewJob(jobId, minutes(1), { epoch })).toEqual({ ok: false, reason: 'paused', why: 'allowance' });
+        // The stretch's own event is in the books...
+        expect(await prisma.meterEvent.count({ where: { eventId: pauseEventId(jobId, 1) } })).toBe(1);
+        // ...and the mark that follows that write either landed or did not (the server stopped between the two)
+        if (mark === 'failed') await prisma.computerJobPause.updateMany({ where: { jobId, n: 1 }, data: { bookedAt: null } });
+        expect((await prisma.computerJobPause.findFirstOrThrow({ where: { jobId, n: 1 } })).bookedAt === null).toBe(mark === 'failed');
+        await setUp({ memberAllowanceMicros: 69_000 });
+        // Counted once, by its event: 6,000 of the month used and nothing held beside it (counted twice, the stretch would stand in the person's own way)
+        expect([(await memberAllowance(sara.id, minutes(2), await getMeterSettings()))!.usedMicros, await heldRoom(sara.id, minutes(2))]).toEqual([PER_MINUTE, 0]);
+        // 63,000 is left, so the 60,000 the next stretch asks for fits and the job carries on (counted twice, 57,000 would refuse it)
+        expect(await carryOnPaused(minutes(2))).toBe(1);
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running', queuedFor: null, pausedWhy: null });
+        await stopJobFor(sara.brickId, sara.id, minutes(3));
+        await setUp();
+      }
+    });
+
     it('C6.5 a fault of ours after the job carried on gives back only the faulty stretch: its time, its calls and the credit they drew; the stretch before the pause stays charged, calls and credit included', async () => {
       const { sara, jobId, epoch } = await running('c6-fault');
       await gift(sara.id, 10_000_000);

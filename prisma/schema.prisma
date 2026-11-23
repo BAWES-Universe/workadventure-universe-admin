@@ -2161,9 +2161,9 @@ model MeterReservation {
   settledMicros  BigInt?   @map("settled_micros")
   createdAt      DateTime  @default(now()) @map("created_at")
   closedAt       DateTime? @map("closed_at")
-  /// The stretch of its job a computer model call was ADMITTED in: the job's number of pauses at the moment the call was admitted, written under the job's cutoff lock (the lock a pause takes), so a pause and an
-  /// admission are ordered exactly and never by two clocks. A give-back after a pause reads this (lib/computer-stretch). Null = not admitted under a stretch yet, or a row of before this: read by time.
-  stretch        Int?
+  /// Which stretch of its job a computer charge belongs to (GPT round 6, finding 8): the job's number of pauses at the moment the call was ADMITTED, written in the transaction that admitted it, under the job's
+  /// cutoff lock (the lock a pause takes). Every ruling about a pause reads this number, never two clocks (lib/computer-stretch). Null = a row of before this, and any room that is not a computer call's: read as 0.
+  jobStretch     Int?      @map("job_stretch")
 
   @@index([personKey, state])
   @@index([state, expiresAt])
@@ -2566,6 +2566,9 @@ model CreditHold {
   createdAt          DateTime  @default(now()) @map("created_at")
   closedAt           DateTime? @map("closed_at")
   detail             Json?
+  /// Which stretch of a computer job this draw belongs to (GPT round 6, finding 8): the job's number of pauses when the call it pays for was admitted, or when the pause's own time was drawn. Null = a row of
+  /// before this, or a draw that is not a computer job's: read as 0.
+  jobStretch         Int?      @map("job_stretch")
 
   allocations CreditAllocation[]
 
@@ -3374,6 +3377,9 @@ model BrickComputer {
   humanInputUntil   DateTime? @map("human_input_until")
   // Set when a job ended while its first turn (marked as sent, never named) may still run on this machine: no job or turn starts here until the machine is proved asleep, and the sweep keeps trying
   turnUnprovenSince DateTime? @map("turn_unproven_since")
+  /// The job whose pause committed and whose browser (its sign-ins) is not put away yet (GPT round 6, finding 7): while it is set no other job starts on this machine, so a job never gets another's sign-ins. The
+  /// park clears it; a machine that cannot be reached is wiped by the sweep, which clears it too.
+  parkPendingJobId  String?   @map("park_pending_job_id") @db.VarChar(40)
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
   noticeDismissedJobId String? @map("notice_dismissed_job_id") @db.VarChar(40)
   // Cold storage (the machine is packed into our own storage after idle days and made again on the next use): when it was packed, and how a
@@ -3641,6 +3647,12 @@ model ComputerJob {
   continuesJobId String?   @unique @map("continues_job_id")
   /// The last sequence number given to a note the person sent to this job (computer_job_notes): notes are numbered 1, 2, 3 per job.
   noteSeq        Int       @default(0) @map("note_seq")
+  /// How long the worker that owns this job (its `ownerEpoch`) holds it without beating (GPT round 6, finding 3): while this is in the future nobody else may claim the job, however fresh the epoch they name.
+  /// The owner renews it with `beat`, with every renewal and admission of its own, and lets it go with `release`. Null = no live owner (a job nobody claimed, or one whose owner let it go).
+  ownerLeaseUntil DateTime? @map("owner_lease_until")
+  /// A job that is getting ready and may not be worked on yet (GPT round 6, finding 7): `restoring` while its browser is being brought back after a pause, `recover` when that could not be settled. Such a job is
+  /// not offered to a runner, cannot be claimed and authorizes no call. Null = ready (the usual).
+  prepState      String?   @map("prep_state") @db.VarChar(10)
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
