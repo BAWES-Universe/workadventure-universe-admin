@@ -539,6 +539,28 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       expect(await markOf(sara.brickId)).toEqual({ parkPendingJobId: null, parkPendingWipe: false });
     });
 
+    it('Opus on slice 1 (S1-a): the SECOND job of a two-pause command settling FIRST never parks the shared browser under its own name: only a clear is sent, the pointer and flag go, and its resume finds nothing kept', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const writer = await job(sara, { pausedMinutesAgo: 0 });
+      const looker = await job(sara, { pausedMinutesAgo: 0, writes: false });
+      // The writer's pause set the pointer and the flag; the looker's pause found the pointer taken and set the flag
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: writer.id, parkPendingWipe: true } });
+      expect(await parkProfile(sara.brickId, looker.id, minutes(1))).toMatchObject({ state: 'left', reason: 'wipe_pending' });
+      expect(sent).toEqual([]);
+      expect(await settlePark(sara.brickId, looker.id, { state: 'left', reason: 'wipe_pending', cookies: 0, pages: 0 }, minutes(1))).toBe('wiped');
+      expect(sent.map((one) => one.action)).toEqual(['clear']);
+      // The pointer stands on the writer until the writer's own settle (nothing starts before it)
+      expect(await markOf(sara.brickId)).toEqual({ parkPendingJobId: writer.id, parkPendingWipe: true });
+      expect(await parkWorthWaitingFor(sara.brickId, looker.id, NOW)).toBe(false);
+      // The writer's settle then also only clears: the pointer and flag go, and it has no browser of its own to wait for either
+      expect(await parkProfile(sara.brickId, writer.id, minutes(1))).toMatchObject({ state: 'left', reason: 'wipe_pending' });
+      expect(await settlePark(sara.brickId, writer.id, { state: 'left', reason: 'wipe_pending', cookies: 0, pages: 0 }, minutes(1))).toBe('wiped');
+      expect(sent.map((one) => one.action)).toEqual(['clear', 'clear']);
+      expect(await markOf(sara.brickId)).toEqual({ parkPendingJobId: null, parkPendingWipe: false });
+      expect(await parkWorthWaitingFor(sara.brickId, writer.id, NOW)).toBe(false);
+    });
+
     it('a job that is on the machine again owns the live browser: its stale marker goes with no wipe', async () => {
       const sara = await person('Sara');
       await machine(sara.brickId);

@@ -156,8 +156,9 @@ export async function parkProfile(botId: string, jobId: string, now: Date = new 
     const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { botId: true, status: true, writes: true } });
     if (!job || job.botId !== botId) return result('left', 'not_this_brick');
     if (job.status !== 'queued') return result('left', 'not_paused');
-    // Two pauses left their marks together: the browser is part of both jobs, so it is never put away under either name; `settlePark` empties it
-    const marked = await prisma.brickComputer.findFirst({ where: { botId, parkPendingJobId: jobId, parkPendingWipe: true }, select: { botId: true } });
+    // Two pauses left their marks together: the browser is part of both jobs, so it is never put away under either name; `settlePark` empties it. The pointer holds only the FIRST job's id, so the flag
+    // is read for the whole Brick: the second job's settle, if it runs first, must not park the shared browser under its own name either (Opus on slice 1, S1-a)
+    const marked = await prisma.brickComputer.findFirst({ where: { botId, parkPendingWipe: true }, select: { botId: true } });
     if (marked) return result('left', 'wipe_pending');
     // Only a job that was just on the machine: one paused while it waited in line never had the browser, and parking would take someone else's
     const paused = await lastPausedFromRunning(jobId);
@@ -420,6 +421,8 @@ export async function settlePark(botId: string, jobId: string, outcome: SignInsR
   }
   const cleared = await wipeLiveProfile(botId, jobId, now);
   if (cleared.state !== 'cleared' && !(cleared.state === 'left' && cleared.reason === 'shared')) return 'waiting';
+  // The browser was emptied: this pause kept nothing, so the job has no browser of its own to wait for when it carries on
+  if (cleared.state === 'cleared') await recordKept(jobId, false);
   await clearParkPending(botId, jobId);
   return 'wiped';
 }
