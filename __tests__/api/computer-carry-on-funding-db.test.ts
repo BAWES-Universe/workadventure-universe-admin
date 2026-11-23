@@ -359,5 +359,26 @@ run('finding 5 (GPT round 6): carrying on only when what was refused fits, in a 
       await carryOnPaused(minutes(6));
       expect((await told(minutes(8))).filter((one) => one.jobId === still.jobId).map((one) => one.kind)).toEqual(['carried_on']);
     });
+
+    it('CodeRabbit on #1025 (57): a `carried_on` that was not told yet is let go by the person’s Pause, so a manual Resume afterwards (into a busy queue or onto the computer) never makes it say the job is carrying on', async () => {
+      const { sara, jobId, epoch } = await running('cr57');
+      await setUp({ memberAllowanceMicros: 1_000 });
+      await renewJob(jobId, minutes(5), { epoch });
+      await setUp();
+      await carryOnPaused(minutes(6));
+      expect((await tellings(jobId)).map((one) => one.kind)).toEqual(['paused', 'carried_on']);
+      await claimed(jobId, 'rB', minutes(6));
+      // The person pauses before the telling is polled, and resumes by hand: the computer is busy with another job of theirs, so this one waits in line
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(7))).ok).toBe(true);
+      expect((await prisma.computerJobTelling.findFirstOrThrow({ where: { jobId, kind: 'carried_on' } })).staleAt).not.toBeNull();
+      const other = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Other', writes: true }, minutes(7));
+      if (!other.ok) throw new Error('the other job was not made');
+      expect((await resumeJob(sara.brickId, sara.id, jobId, minutes(8))).ok).toBe(true);
+      expect((await told(minutes(9))).filter((one) => one.jobId === jobId)).toEqual([]);
+      // ...and a `carried_on` is never told of a job that waits in line, whatever its row says
+      await prisma.computerJobTelling.updateMany({ where: { jobId, kind: 'carried_on' }, data: { staleAt: null } });
+      await prisma.computerJob.update({ where: { id: jobId }, data: { status: 'queued', queuedFor: 'busy', pausedAt: null, pausedWhy: null } });
+      expect((await told(minutes(10))).filter((one) => one.jobId === jobId && one.kind === 'carried_on')).toEqual([]);
+    });
   });
 });

@@ -74,7 +74,9 @@ export async function tellingsToTell(limit: number, now: Date, kinds?: readonly 
     const inLine = job.status === 'queued' && job.queuedFor !== 'paused';
     // `carried_on` is untrue for EVERY pause, not only the month's or a limit's: a person who pauses the job again after it went back in line makes no newer telling, and "I'm carrying on" must not be said of a job they just paused (CodeRabbit on #1025)
     const pausedNow = job.status === 'queued' && job.queuedFor === 'paused';
-    const stillTrue = !ended && newer === 0 && (one.kind === 'carried_on' ? !pausedNow : one.kind === 'back_in_line' ? inLine : limitPaused && !!job.pausedAt && job.pausedAt.getTime() <= one.createdAt.getTime());
+    // ...and it is told only of a job that is running or waiting: one back in line (a person's manual restart into a busy queue, a start that did not take) is not carrying on yet (CodeRabbit on #1025, 57)
+    const onTheMachine = job.status === 'running' || job.status === 'waiting';
+    const stillTrue = !ended && newer === 0 && (one.kind === 'carried_on' ? onTheMachine && !pausedNow : one.kind === 'back_in_line' ? inLine : limitPaused && !!job.pausedAt && job.pausedAt.getTime() <= one.createdAt.getTime());
     if (!stillTrue) {
       await prisma.computerJobTelling.updateMany({ where: { id: one.id, toldAt: null, undeliverableAt: null, staleAt: null }, data: { staleAt: now } });
       continue;

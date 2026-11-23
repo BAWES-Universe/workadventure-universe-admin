@@ -162,6 +162,11 @@ export interface PauseInOptions extends PauseOptions {
   blocked?: { kind: 'call' | 'renewal'; micros: number };
 }
 
+/** A pause makes an unsaid `carried_on` untrue for good: it is let go in the pause's own transaction, so a manual restart never makes it say "carrying on" of a job the person paused in between (CodeRabbit on #1025, 57). */
+async function staleCarriedOn(tx: Prisma.TransactionClient, jobId: string, now: Date): Promise<void> {
+  await tx.computerJobTelling.updateMany({ where: { jobId, kind: 'carried_on', toldAt: null, undeliverableAt: null, staleAt: null }, data: { staleAt: now } });
+}
+
 /**
  * The pause itself, inside the caller's transaction (Rule A): the job's cutoff lock and row lock are taken here (taken again when the caller already holds them, which Postgres allows), everything is read under them, and every
  * write lands in this one commit: the stretch counted and its room settled at that room's own terms, the pause row, the job back in line holding nothing, its owner epoch and lease version moved, every model key ended,
@@ -184,6 +189,7 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
     }
     // Never started (or waiting again): nothing is held, so nothing is counted; it only leaves the line until resumed
     await tx.computerJob.update({ where: { id: jobId }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, leaseVersion: { increment: 1 }, carryOnPending: false } });
+    await staleCarriedOn(tx, jobId, now);
     return { kind: 'queued' };
   }
   // Rule A: the person holding the screen hands it back first (their own Pause is not offered then); the month or a limit takes the screen back and pauses (section 7)
@@ -258,6 +264,7 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   // What the month or a limit refused (finding 5): the sweep carries the job on only once that much fits again, so unchanged funds restart nothing
   const blocked = (why === 'allowance' || why === 'rule') && options.blocked ? { blockedKind: options.blocked.kind, blockedMicros: BigInt(Math.max(0, Math.round(options.blocked.micros))), blockedMonth: now.toISOString().slice(0, 7), blockedRuleRev: await ruleRevIn(tx, row.personId) } : {};
   await tx.computerJobPause.create({ data: { jobId, n, why, roomKey: job.reservationKey, seconds, startedAt: job.startedAt, at: now, grantsPrint, heldScreen, ...blocked } });
+  await staleCarriedOn(tx, jobId, now);
   // The month or a limit: Brick tells the person once, from this very commit (their own tap is never told back to them); a screen taken back says so, in place of the usual line
   if (!options.backInLine && (why === 'allowance' || why === 'rule')) await tellIn(tx, jobId, 'paused', why, now, { heldScreen });
   return { kind: 'held', n, botId: job.botId, responseId: job.agentResponseId, turnHold, heldScreen };
