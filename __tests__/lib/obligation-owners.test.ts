@@ -34,7 +34,7 @@ const countIn = (file: string, pattern: RegExp): number => (files.find((one) => 
 const OWNERS: Array<[string, string, string[], string]> = [
   ['instantRun', 'instant_runs', ['lib/instant/executor.ts'], 'an Instant run: its holds, its send, its settlement (one advisory lock per run)'],
   ['instantRefund', 'instant_refunds', ['lib/instant/executor.ts'], 'an Instant give-back owed (a unique key per give-back; retried until the books confirm)'],
-  ['meterReservation', 'meter_reservations', ['lib/meter-allowance.ts'], 'a lease on someone’s allowance (a unique key per lease; the pool lock is held to take, renew, settle or release it)'],
+  ['meterReservation', 'meter_reservations', ['lib/meter-allowance.ts', 'lib/computer-calls.ts'], 'a lease on someone’s allowance (a unique key per lease; the pool lock is held to take, renew, settle or release it; lib/computer-calls writes only the stretch a call was admitted in, once, under the job’s cutoff lock)'],
   ['taskReceipt', 'task_receipts', ['lib/brick-purge.ts', 'lib/task-receipts.ts'], 'a receipt that must always settle (a lock per task, a lease and a generation; a purged Brick’s open receipts are ended by its purge)'],
   ['appKeyRequest', 'app_key_requests', ['lib/app-direct/connect.ts', 'lib/brick-purge.ts'], 'tries on a key form (the form row and its reserved epoch; a purged Brick’s forms are removed by its purge)'],
   ['appPageOrder', 'app_page_orders', ['lib/app-direct/pay.ts'], 'a checkout order (one order per page, buyer and wish; moves recorded in order events)'],

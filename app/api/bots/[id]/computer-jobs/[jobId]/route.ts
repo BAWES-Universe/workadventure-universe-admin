@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { WAITING_FOR, EFFECT_KINDS, FINISH_CAUSES } from '@/lib/computer-values';
-import { claimJob, finishJobUnder, getJob, planEffect, recordFinishIntent, renewJob, reportProgressAs, requestHandoverAs, settleEffect } from '@/lib/computer';
+import { claimJob, finishJobUnder, getJob, planEffect, recordFinishIntent, renewJob, reportProgressAs, requestHandoverAs, settleEffectAs } from '@/lib/computer';
 import { SUPERSEDED } from '@/lib/computer-owner';
 import { notesSent, pendingNotes } from '@/lib/computer-job-notes';
 
@@ -33,10 +33,10 @@ const actionSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('finish'), epoch: epochSchema, outcome: z.enum(['done', 'failed']), /** Who a failure is down to (`ours` is given back, `agent` is the person's); left out, it is the person's. */ cause: z.enum(FINISH_CAUSES).nullable().optional(), /** The turns the runner judged failed: Orbit decides a give-back from the relay's rows for them (the cause is only a hint). */ turns: z.array(z.number().int().min(0).max(100_000)).max(200).nullable().optional(), /** The runner's run (a restart makes a new run that numbers turns again): where the failure's turns were numbered, and which run is finishing. A finish from a run that was replaced (another run prepared since) answers `stale` and ends nothing. Send it with EVERY finish. */ run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional(), /** The computer's one sentence about why it could not go on; cleaned before it is kept. */ why: z.string().max(2000).nullable().optional(), /** The control generation the runner acts under (from `GET`): a finish from an older one is `stale` and does nothing. Left out, as before. */ generation: z.number().int().min(0).nullable().optional() }),
   // The runner's committed word that this job is to end, kept BEFORE it gives up (what the finish will say, as the finish says it)
   z.object({ action: z.literal('finish-intent'), epoch: epochSchema, outcome: z.enum(['done', 'failed']), cause: z.enum(FINISH_CAUSES).nullable().optional(), turns: z.array(z.number().int().min(0).max(100_000)).max(200).nullable().optional(), run: z.string().min(1).max(40).regex(/^[0-9A-Za-z._:-]+$/).nullable().optional(), why: z.string().max(2000).nullable().optional(), generation: z.number().int().min(0).nullable().optional(), /** What the stop rests on: `pool` = the runner gives up only because the pool refused its calls. A stop on that basis is stale once a call was admitted for its turn (or a later one) of the run. */ basis: z.enum(['pool']).nullable().optional() }),
-  z.object({ action: z.literal('plan-effect'), key: z.string().min(1).max(255), kind: z.enum(EFFECT_KINDS), evidence: z.string().max(500).nullable().optional() }),
+  z.object({ action: z.literal('plan-effect'), epoch: epochSchema, key: z.string().min(1).max(255), kind: z.enum(EFFECT_KINDS), evidence: z.string().max(500).nullable().optional() }),
   // The runner gave the agent every pending note up to `through` (the highest `seq` it sent): marked sent once, by the job's owner only
   z.object({ action: z.literal('notes-sent'), epoch: epochSchema, through: z.number().int().min(1).max(2_000_000_000) }),
-  z.object({ action: z.literal('settle-effect'), key: z.string().min(1).max(255), state: z.enum(['done', 'failed']), evidence: z.string().max(500).nullable().optional() }),
+  z.object({ action: z.literal('settle-effect'), epoch: epochSchema, key: z.string().min(1).max(255), state: z.enum(['done', 'failed']), evidence: z.string().max(500).nullable().optional() }),
 ]);
 
 function guard(request: NextRequest): NextResponse | null {
@@ -124,13 +124,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         return NextResponse.json({ ok: false, reason: kept.reason, ...(kept.run ? { run: kept.run } : {}), job: await getJob(jobId) });
       }
       case 'plan-effect':
-        return NextResponse.json(await planEffect(jobId, { key: body.key, kind: body.kind, evidence: body.evidence }));
+        // A worker that was replaced (another runner claimed the job since) plans nothing: `{ ok: false, reason: 'stale', run: 'superseded' }`, HTTP 200, as everywhere else
+        return NextResponse.json(await planEffect(jobId, { key: body.key, kind: body.kind, evidence: body.evidence }, { epoch: body.epoch }));
       case 'notes-sent': {
         // `{ ok: true, sent }` (sent = how many were marked now; 0 when said again), `{ ok: false, reason: 'stale', run: 'superseded' }` (not the owner: exit), `{ ok: false, reason: 'over' }`
         return NextResponse.json(await notesSent(jobId, { through: body.through, epoch: body.epoch }));
       }
-      case 'settle-effect':
-        return NextResponse.json({ ok: await settleEffect(jobId, body.key, body.state, body.evidence) });
+      case 'settle-effect': {
+        // `{ ok }` (true when an effect that was planned is settled now), or `{ ok: false, reason: 'stale', run: 'superseded' }` for a worker that was replaced: it settles nothing
+        const settled = await settleEffectAs(jobId, body.key, body.state, body.evidence, { epoch: body.epoch });
+        return NextResponse.json(settled.superseded ? SUPERSEDED : { ok: settled.ok });
+      }
     }
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });

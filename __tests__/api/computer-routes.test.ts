@@ -650,7 +650,7 @@ describe('the bot server’s calls', () => {
     lib.requestHandoverAs.mockResolvedValue({ job: { id: JOB }, refused: null } as never);
     lib.finishJobUnder.mockResolvedValue({ job: { id: JOB }, stale: false } as never);
     lib.planEffect.mockResolvedValue({ ok: false, reason: 'look_up', evidence: 'draft pull request' });
-    lib.settleEffect.mockResolvedValue(true);
+    lib.settleEffectAs.mockResolvedValue({ ok: true, superseded: false });
     await jobAction(asBot('/x', { body: { action: 'progress', stepDone: 2, stepTotal: 5, label: 'Your visa form' } }), jobParams);
     expect(lib.reportProgressAs).toHaveBeenCalledWith(JOB, { stepDone: 2, stepTotal: 5, label: 'Your visa form' }, { epoch: undefined });
     expect(await (await jobAction(asBot('/x', { body: { action: 'renew' } }), jobParams)).json()).toEqual({ ok: false, reason: 'allowance' });
@@ -677,6 +677,25 @@ describe('the bot server’s calls', () => {
     expect((await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'failed', cause: 'theirs' } }), jobParams)).status).toBe(400);
     expect(await (await jobAction(asBot('/x', { body: { action: 'plan-effect', key: 'pr-1', kind: 'publish' } }), jobParams)).json()).toEqual({ ok: false, reason: 'look_up', evidence: 'draft pull request' });
     expect(await (await jobAction(asBot('/x', { body: { action: 'settle-effect', key: 'pr-1', state: 'done', evidence: 'pull request 12' } }), jobParams)).json()).toEqual({ ok: true });
+  });
+
+  it('plan-effect and settle-effect name the epoch the worker owns the job by; a replaced worker is answered `superseded` as business (HTTP 200), and the epoch must be a whole number', async () => {
+    lib.getJob.mockResolvedValue(job as never);
+    lib.planEffect.mockResolvedValueOnce({ ok: false, reason: 'stale', run: 'superseded' });
+    const planned = await jobAction(asBot('/x', { body: { action: 'plan-effect', epoch: 4, key: 'pr-1', kind: 'publish' } }), jobParams);
+    expect(planned.status).toBe(200);
+    expect(await planned.json()).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+    expect(lib.planEffect).toHaveBeenLastCalledWith(JOB, { key: 'pr-1', kind: 'publish', evidence: undefined }, { epoch: 4 });
+    lib.settleEffectAs.mockResolvedValueOnce({ ok: false, superseded: true });
+    const settled = await jobAction(asBot('/x', { body: { action: 'settle-effect', epoch: 4, key: 'pr-1', state: 'done' } }), jobParams);
+    expect(settled.status).toBe(200);
+    expect(await settled.json()).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+    expect(lib.settleEffectAs).toHaveBeenLastCalledWith(JOB, 'pr-1', 'done', undefined, { epoch: 4 });
+    // CONTROL: the owner's settle answers `{ ok }`; a worker that names no epoch is passed on as one that knows none
+    lib.settleEffectAs.mockResolvedValueOnce({ ok: true, superseded: false });
+    expect(await (await jobAction(asBot('/x', { body: { action: 'settle-effect', key: 'pr-1', state: 'done' } }), jobParams)).json()).toEqual({ ok: true });
+    expect(lib.settleEffectAs).toHaveBeenLastCalledWith(JOB, 'pr-1', 'done', undefined, { epoch: undefined });
+    for (const epoch of ['4', -1, 1.5]) expect((await jobAction(asBot('/x', { body: { action: 'plan-effect', epoch, key: 'pr-1', kind: 'publish' } }), jobParams)).status).toBe(400);
   });
 
   it('says a finish from an older control generation is stale as business (HTTP 200), and passes the generation it was given', async () => {

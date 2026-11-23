@@ -563,13 +563,19 @@ async function startIsGoingOn(fence: string, now: Date, key?: { botId: string; p
 /** How long a start's attempt counts without a beat: three beats. A start that stopped beating can no longer make a job (a delayed request of it finds its attempt expired, or superseded by the job another start made). */
 const attemptLifeMs = (): number => startMarkTiming.beatMs * 3;
 
-/** Opens the start's attempt BEFORE it reads anything, durably, so a start exists before its job row does. The same key again (a retry, a redelivery) that finds its attempt open keeps it beating; one already made, expired or superseded is left as it is (its answer is decided in the transaction that makes the job). Throws when it could not be kept. */
-async function openAttempt(botId: string, personId: string, startKey: string): Promise<void> {
+/**
+ * Opens the start's attempt BEFORE it reads anything, durably, so a start exists before its job row does. The same key again (a retry, a redelivery) that finds its attempt open keeps it beating; one already made, expired or superseded is
+ * left as it is (its answer is decided in the transaction that makes the job). Throws when it could not be kept. Answers whether THIS request made the attempt: only the request that made it lets it go when it fails (the same key said
+ * twice shares one attempt, and the second request's own trouble must never end the first one's start).
+ */
+async function openAttempt(botId: string, personId: string, startKey: string): Promise<boolean> {
   try {
     await prisma.computerStartAttempt.create({ data: { botId, personId, startKey, state: 'open', beatAt: new Date() } });
+    return true;
   } catch (error) {
     if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) throw error;
     await prisma.computerStartAttempt.updateMany({ where: { botId, personId, startKey, state: 'open' }, data: { beatAt: new Date() } });
+    return false;
   }
 }
 
@@ -616,10 +622,12 @@ export async function startJob(input: StartInput, now: Date = new Date()): Promi
   // A start with a key keeps a mark from before its first read until its job is saved, or it ends without one, so the look for it (`startedJobFor`) can say it is still going on. A start with no key is never asked about
   const mark = input.startKey ? await markStart(startFenceOf(input.botId, input.personId, input.startKey)) : null;
   // ...and so does its attempt, committed BEFORE the job exists and kept beating with the mark: a delayed request of this start can never make a job after a reworded retry of it made one (decided in the transaction that makes the job)
-  if (input.startKey) await openAttempt(input.botId, input.personId, input.startKey).catch(async (error) => {
-    if (mark) await forgetStartMark(mark);
-    throw error;
-  });
+  const opened = input.startKey
+    ? await openAttempt(input.botId, input.personId, input.startKey).catch(async (error) => {
+        if (mark) await forgetStartMark(mark);
+        throw error;
+      })
+    : false;
   // The mark is renewed for as long as the start is going on, so a start that takes longer than the mark's life (a slow database, a pool that is busy) is still found to be going on by the look for it,
   // never read as "no job can still reach Orbit". The beat is a timer, not a wait: it never holds the start, and it ends with the start, before the mark is removed
   const beat = mark ? setInterval(() => void Promise.all([renewStartMark(mark), input.startKey ? beatAttempt(input.botId, input.personId, input.startKey) : undefined]), startMarkTiming.beatMs) : null;
@@ -628,8 +636,9 @@ export async function startJob(input: StartInput, now: Date = new Date()): Promi
   try {
     begun = await beginJob(input, now);
   } catch (error) {
-    // A start that failed before its job was saved can make none: its attempt goes (the start is asked again under a key of its own)
-    if (input.startKey) await closeAttempt(input.botId, input.personId, input.startKey);
+    // A start that failed before its job was saved can make none: its attempt goes (the start is asked again under a key of its own). Only when THIS request made the attempt: the same key said twice shares one, and a
+    // second request that met a trouble of its own (a read that failed) must not end the start of the first, which is still going on
+    if (input.startKey && opened) await closeAttempt(input.botId, input.personId, input.startKey);
     throw error;
   } finally {
     if (beat) clearInterval(beat);
@@ -637,7 +646,7 @@ export async function startJob(input: StartInput, now: Date = new Date()): Promi
   }
   if ('done' in begun) {
     // No job was made by this start (refused, found one that was made earlier, or told it is `earlier`/`expired`): its attempt is over
-    if (input.startKey && !(begun.done.ok)) await closeAttempt(input.botId, input.personId, input.startKey);
+    if (input.startKey && opened && !(begun.done.ok)) await closeAttempt(input.botId, input.personId, input.startKey);
     return begun.done;
   }
   return tryNewJob(input, now, begun.created);
@@ -1397,7 +1406,7 @@ const saidByIntent = (intent: { outcome: string; why: string | null; cause: stri
  * before it (read under the cutoff lock in that write: when one was, the job ends as the intent said, never as this finish says). Answers whether the generation had moved (`stale`), whether THIS call wrote the ending (`ended`), whether
  * the person had the job (`notBrick`, nothing written), and the job as it stands.
  */
-async function finishWith(jobId: string, said: Said, guard: Pick<EndGuard, 'generation' | 'brick' | 'intentFirst' | 'owner'>): Promise<{ stale: boolean; superseded: boolean; ended: boolean; notBrick: boolean; job: JobView | null }> {
+async function finishWith(jobId: string, said: Said, guard: Pick<EndGuard, 'generation' | 'brick' | 'intentFirst' | 'owner' | 'startNextAt'>): Promise<{ stale: boolean; superseded: boolean; ended: boolean; notBrick: boolean; job: JobView | null }> {
   const report: EndReport = {};
   // At most one turn of "an intent was kept first": the intent's own words are never judged against another intent
   for (let round = 0; round < 2; round++) {
@@ -1415,7 +1424,7 @@ async function finishWith(jobId: string, said: Said, guard: Pick<EndGuard, 'gene
       // The run the runner reported is carried whatever else it named: it is where the relay's arrival is looked for (never another run's). Which fault rows are read does not follow it (no turn named: every row of the job)
       const runner = mine.outcome !== 'failed' ? null : { turns: mine.turns ?? null, run: mine.run ?? null, hint: ours ? ('ours' as const) : mine.cause === 'agent' ? ('agent' as const) : ('none' as const) };
       // A finish honors a pool cutoff Orbit decided for this job (`finish`): such a job ends as `pool` (ours, given back), never as the outcome the runner reports after its keys were ended for our own capacity
-      await endJob(jobId, mine.outcome, ours ? 'error' : null, mine.now, true, undefined, true, runner, true, { generation: guard.generation, brick: guard.brick, intentFirst: guard.intentFirst && round === 0, owner: round === 0 ? guard.owner : undefined, note }, report);
+      await endJob(jobId, mine.outcome, ours ? 'error' : null, mine.now, true, undefined, true, runner, true, { generation: guard.generation, brick: guard.brick, intentFirst: guard.intentFirst && round === 0, owner: round === 0 ? guard.owner : undefined, note, startNextAt: guard.startNextAt }, report);
     }
     if (!report.intent) break;
   }
@@ -1576,6 +1585,8 @@ interface EndGuard {
   observed?: { status: string; control: string; controlGeneration: number; ownerEpoch: number; leaseVersion: number; handoverSeq: number; unansweredBefore?: Date; lease?: { key: string; expiresAt: Date } };
   /** The runner's sentence about why it could not go on: written in the very write that ends the job, so a take-over that wins leaves no note behind. */
   note?: string | null;
+  /** When the job that comes next in line STARTS, if that is not the time of this ending (a sweep that completes a finish intent ends the job as of the intent's time, its own accounting, but the next job starts now: its room, lease and checks begin at its real start). */
+  startNextAt?: Date;
 }
 
 /** What an ending found: it wrote the end (`ended`), found the generation moved (`stale`), found the person in control (`notBrick`), or found a finish intent kept first (`intent`: the caller ends it with the intent's own words). */
@@ -1850,7 +1861,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   // Everything this ending does is finished: only now may Brick tell the person how it went (its time is in the books, its files are listed)
   await prisma.computerJob.updateMany({ where: { id: jobId }, data: { endClosedAt: new Date(), ...(endFiles ? { endFiles: endFiles as unknown as Prisma.InputJsonValue } : {}) } }).catch((error) => console.error('[Computer] Could not mark an ending closed:', error instanceof Error ? error.message : 'unknown'));
   // The turn passes to the next job in line, except while a Stop is ending everything
-  if (advance && endedBy !== 'off' && endedBy !== 'deleted') await startNext(job.botId, now);
+  if (advance && endedBy !== 'off' && endedBy !== 'deleted') await startNext(job.botId, guard.startNextAt ?? now);
 }
 
 /**
@@ -2166,7 +2177,7 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
       // old ending below, as a lease that ran out always had), and a job with no intent is ended as before
       const kept = await prisma.computerFinishIntent.findUnique({ where: { jobId: job.id } });
       if (kept && job.control === 'brick') {
-        if (await completeIntent(kept, kept.createdAt).catch(() => false)) stopped++;
+        if (await completeIntent(kept, kept.createdAt, now).catch(() => false)) stopped++;
         continue;
       }
       // Ended only as it was selected: the reservation must still be held and expired as it was seen, and the job must not have moved (a renewal, a claim, an answer, a take-over, a hand-over leave it to the next pass)
@@ -2436,8 +2447,6 @@ export async function requestHandoverAs(
   owner: { epoch?: EpochSaid; generation?: number | null; responseId?: string | null } = {},
 ): Promise<{ job: JobView | null; /** `superseded`: another worker owns the job; `stale`: the control generation moved; `not_current`: the turn named is not the job's. Nothing was written. */ refused: 'superseded' | 'stale' | 'not_current' | null }> {
   const readyData = waitingFor === 'details' && ready ? { readyWhat: cleanDetail(ready.what) || null, readyWhere: cleanDetail(ready.where) || null } : { readyWhat: null, readyWhere: null };
-  const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
-  if (!job) return { job: null, refused: null };
   // The write that lands the wait names everything the worker says it acts under: the owner, the control generation, the turn, and no ending decided (the finalizer owns the ending then)
   const acts = {
     ...ownerWhere(owner.epoch),
@@ -2445,20 +2454,29 @@ export async function requestHandoverAs(
     ...(typeof owner.responseId === 'string' ? { agentResponseId: owner.responseId } : {}),
     ...noEndingWhere,
   };
-  let landed = 0;
-  if (job.status === 'running') {
-    // The stretch so far is counted, and the machine stays awake for them
-    const stretch = job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
-    const done = await prisma.computerJob.updateMany({
-      where: { id: jobId, status: 'running', control: 'brick', ...acts },
-      // A new wait is one more thing to tell the person, once (the report back); asked again while it waits it is the same wait
-      data: { status: 'waiting', waitingFor, control: 'brick', secondsRun: job.secondsRun + stretch, stretchStarted: now, handoverSeq: { increment: 1 }, leaseVersion: { increment: 1 }, handoverUntold: true, ...readyData },
-    });
-    landed = done.count;
-  } else if (job.status === 'waiting') {
-    const done = await prisma.computerJob.updateMany({ where: { id: jobId, status: 'waiting', control: 'brick', ...acts }, data: { waitingFor, ...readyData } });
-    landed = done.count;
-  }
+  // The job's row is locked FIRST and everything is read and written under that lock: a finish intent that was kept while this waited for the row is seen by the write (it refuses), and the stretch read here is the
+  // stored one. The write names the very `secondsRun` and `stretchStarted` it read, so a delayed handover can never land over a newer one (a second asking, a note that put the job back to running) or count seconds twice
+  const found = await prisma.$transaction(async (tx) => {
+    if (!(await lockJobRow(tx, jobId))) return null;
+    const job = await tx.computerJob.findUniqueOrThrow({ where: { id: jobId } });
+    let landed = 0;
+    if (job.status === 'running') {
+      // The stretch so far is counted, and the machine stays awake for them
+      const stretch = job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
+      const done = await tx.computerJob.updateMany({
+        where: { id: jobId, status: 'running', control: 'brick', secondsRun: job.secondsRun, stretchStarted: job.stretchStarted, ...acts },
+        // A new wait is one more thing to tell the person, once (the report back); asked again while it waits it is the same wait
+        data: { status: 'waiting', waitingFor, control: 'brick', secondsRun: job.secondsRun + stretch, stretchStarted: now, handoverSeq: { increment: 1 }, leaseVersion: { increment: 1 }, handoverUntold: true, ...readyData },
+      });
+      landed = done.count;
+    } else if (job.status === 'waiting') {
+      const done = await tx.computerJob.updateMany({ where: { id: jobId, status: 'waiting', control: 'brick', secondsRun: job.secondsRun, stretchStarted: job.stretchStarted, ...acts }, data: { waitingFor, ...readyData } });
+      landed = done.count;
+    }
+    return { landed };
+  });
+  if (!found) return { job: null, refused: null };
+  const landed = found.landed;
   const after = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   let refused: 'superseded' | 'stale' | 'not_current' | null = null;
   if (landed === 0 && after && (after.status === 'running' || after.status === 'waiting')) {
@@ -2976,7 +2994,9 @@ export type Planned =
   | { ok: false; reason: 'person_only' }
   /** Details and uploads wait until the person has taken over and asked. */
   | { ok: false; reason: 'hand_over_first' }
-  | { ok: false; reason: 'job_over' | 'not_found' };
+  | { ok: false; reason: 'job_over' | 'not_found' }
+  /** Not the owner: another runner claimed the job since (the game reads `run: 'superseded'` and exits). Nothing was written. */
+  | typeof SUPERSEDED;
 
 /**
  * The job means to do something outside its computer (send, publish, put details in, upload, pay, submit): written BEFORE it is
@@ -2984,9 +3004,16 @@ export type Planned =
  * job must look it up and settle it, never repeat it. Brick never pays or submits itself, and puts details in or uploads only
  * after the person has taken over and asked it to.
  */
-export async function planEffect(jobId: string, input: { key: string; kind: EffectKind; evidence?: string | null }): Promise<Planned> {
+export async function planEffect(
+  jobId: string,
+  input: { key: string; kind: EffectKind; evidence?: string | null },
+  /** Who asks: the epoch the worker owns the job by (none = a worker that knows none: only while the job has none). Left out altogether = Orbit's own trusted path, which no worker's epoch fences. */
+  owner?: { epoch?: EpochSaid },
+): Promise<Planned> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (!job) return { ok: false, reason: 'not_found' };
+  // A worker that does not own the job is told so before anything is read for it (decided again, in the write that plans, below, under the job's row lock)
+  if (owner && !epochMatches(job.ownerEpoch, owner.epoch)) return SUPERSEDED;
   // Only a job that holds the machine can mean to do something outside it: one still in line has no room and no machine yet
   if (job.status !== 'running' && job.status !== 'waiting') return { ok: false, reason: 'job_over' };
   const existing = await prisma.computerEffect.findUnique({ where: { jobId_effectKey: { jobId, effectKey: input.key } } });
@@ -3006,6 +3033,10 @@ export async function planEffect(jobId: string, input: { key: string; kind: Effe
     // Details and uploads are claimed from "approved" only: a tap is spent once, so one that failed needs a new tap, never a second claim
     const states = AFTER_TAKE_OVER.includes(input.kind) ? ['approved'] : ['approved', 'failed'];
     const claimed = await prisma.$transaction(async (tx) => {
+      // The job's row first, held to the end of this claim: the owner is decided HERE, in the write that plans, never in the read above (a runner that replaced this one may have claimed since)
+      const row = await lockJobRow(tx, jobId);
+      if (!row || (row.status !== 'running' && row.status !== 'waiting')) return 'over' as const;
+      if (owner && !epochMatches(row.ownerEpoch, owner.epoch)) return 'superseded' as const;
       // The person's hands: checked again here, with the job held so a hand-back (or the end of the job) waits for this claim. The read
       // above may be old by now, and a tap is only ever spent while the person still has the machine
       if (AFTER_TAKE_OVER.includes(input.kind)) {
@@ -3017,11 +3048,22 @@ export async function planEffect(jobId: string, input: { key: string; kind: Effe
       }
       return (await tx.computerEffect.updateMany({ where: { id: existing.id, state: { in: states } }, data: { state: 'planned', settledAt: null } })).count;
     });
+    if (claimed === 'over') return { ok: false, reason: 'job_over' };
+    if (claimed === 'superseded') return SUPERSEDED;
     if (claimed === 'hand_over_first') return { ok: false, reason: 'hand_over_first' };
     return claimed === 1 ? { ok: true, already: false } : { ok: false, reason: 'look_up', evidence: existing.evidence };
   }
   try {
-    await prisma.computerEffect.create({ data: { jobId, effectKey: input.key.slice(0, 255), kind: input.kind, state: 'planned', evidence: input.evidence?.slice(0, 500) ?? null } });
+    const made = await prisma.$transaction(async (tx) => {
+      // The same rule as the claim above: the job's row is locked, the owner and the job's state are looked at, and the effect is written, all in one transaction
+      const row = await lockJobRow(tx, jobId);
+      if (!row || (row.status !== 'running' && row.status !== 'waiting')) return 'over' as const;
+      if (owner && !epochMatches(row.ownerEpoch, owner.epoch)) return 'superseded' as const;
+      await tx.computerEffect.create({ data: { jobId, effectKey: input.key.slice(0, 255), kind: input.kind, state: 'planned', evidence: input.evidence?.slice(0, 500) ?? null } });
+      return 'planned' as const;
+    });
+    if (made === 'over') return { ok: false, reason: 'job_over' };
+    if (made === 'superseded') return SUPERSEDED;
   } catch (error) {
     // Two tries at the same moment: the first wrote it, the second finds it and must look up what happened
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return { ok: false, reason: 'look_up', evidence: null };
@@ -3030,30 +3072,45 @@ export async function planEffect(jobId: string, input: { key: string; kind: Effe
   return { ok: true, already: false };
 }
 
-/** What happened to an effect, confirmed: done (with where it went, as proof) or failed (confirmed not done, so it may be tried again). */
-export async function settleEffect(jobId: string, key: string, state: 'done' | 'failed', evidence?: string | null): Promise<boolean> {
+/**
+ * What happened to an effect, confirmed: done (with where it went, as proof) or failed (confirmed not done, so it may be tried again). A worker names the epoch it owns the job by: one that was replaced
+ * (another runner claimed the job since) settles nothing, in the write itself under the job's row lock. `owner` left out is Orbit's own trusted path (a reconciliation after a worker is gone), which no epoch fences.
+ */
+export async function settleEffectAs(jobId: string, key: string, state: 'done' | 'failed', evidence?: string | null, owner?: { epoch?: EpochSaid }): Promise<{ ok: boolean; superseded: boolean }> {
   // The effect's own change and the fact that a give-back already made was for work that turned out delivered commit TOGETHER: a flag that cannot be written leaves the
   // effect planned, and the settle is asked again (the charge is never touched either way)
   // Under the person's give-back lock, taken BEFORE the effect is touched (the same order a decision made again takes it: lock first, then the effects). A retry that read
   // this effect as planned and grants goodwill then either finishes first, and this settlement flags that give-back as delivered late, or comes after, and sees the effect done
-  const owner = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { personId: true } });
-  const count = await prisma.$transaction(async (tx) => {
-    if (owner) await lockPerson(tx, owner.personId);
+  const first = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { personId: true, ownerEpoch: true } });
+  if (first && owner && !epochMatches(first.ownerEpoch, owner.epoch)) return { ok: false, superseded: true };
+  const done = await prisma.$transaction(async (tx) => {
+    if (first) await lockPerson(tx, first.personId);
+    // The job's row after the person's lock (the order everywhere), held to the end: the owner is decided HERE, in the write that settles
+    if (first && owner) {
+      const row = await lockJobRow(tx, jobId);
+      if (!row || !epochMatches(row.ownerEpoch, owner.epoch)) return { count: 0, superseded: true, kind: null as string | null };
+    }
     const changed = await tx.computerEffect.updateMany({
       where: { jobId, effectKey: key, state: 'planned' },
       data: { state, settledAt: new Date(), ...(evidence !== undefined ? { evidence: evidence === null ? null : evidence.slice(0, 500) } : {}) },
     });
     if (changed.count > 0 && state === 'done') await markDeliveredLate(tx, jobId);
-    return changed.count;
-  });
-  if (count > 0) {
     // What Brick named is put in (or confirmed not): the tap is spent, and the next hand-over names its own
-    const effect = await prisma.computerEffect.findUnique({ where: { jobId_effectKey: { jobId, effectKey: key } }, select: { kind: true } });
-    if (effect?.kind === 'details') await prisma.computerJob.updateMany({ where: { id: jobId }, data: { readyWhat: null, readyWhere: null } });
+    const effect = changed.count > 0 ? await tx.computerEffect.findUnique({ where: { jobId_effectKey: { jobId, effectKey: key } }, select: { kind: true } }) : null;
+    return { count: changed.count, superseded: false, kind: effect?.kind ?? null };
+  });
+  if (done.superseded) return { ok: false, superseded: true };
+  if (done.count > 0) {
+    if (done.kind === 'details') await prisma.computerJob.updateMany({ where: { id: jobId, ...(owner ? ownerWhere(owner.epoch) : {}) }, data: { readyWhat: null, readyWhere: null } });
     // A give-back that was held for this effect is decided now
     await noteEffectSettled(jobId).catch((error) => console.error('[Computer] Could not note a settled effect:', error instanceof Error ? error.message : 'unknown'));
   }
-  return count > 0;
+  return { ok: done.count > 0, superseded: false };
+}
+
+/** `settleEffectAs` on Orbit's own trusted path (no worker's epoch): true when an effect that was planned is settled now. */
+export async function settleEffect(jobId: string, key: string, state: 'done' | 'failed', evidence?: string | null): Promise<boolean> {
+  return (await settleEffectAs(jobId, key, state, evidence)).ok;
 }
 
 /** The job, for the bot server. Null when it is not there. */
@@ -3232,8 +3289,8 @@ export async function recordFinishIntent(jobId: string, input: FinishIntentInput
  * Ends a job as its kept intent said, only while Brick has it (checked in the very write that lands the ending: a take-over that wins leaves the intent pending, for a later pass after the hand-back), as of the moment the
  * runner committed (`at`: the wait for this pass is not the person's time). True only when THIS call wrote the ending (two passes that select the same intent never both count it). Safe to say twice.
  */
-async function completeIntent(intent: { jobId: string; outcome: string; why: string | null; cause: string | null; turns: number[]; run: string | null }, at: Date): Promise<boolean> {
-  const done = await finishWith(intent.jobId, saidByIntent(intent, at), { brick: true });
+async function completeIntent(intent: { jobId: string; outcome: string; why: string | null; cause: string | null; turns: number[]; run: string | null }, at: Date, startNextAt?: Date): Promise<boolean> {
+  const done = await finishWith(intent.jobId, saidByIntent(intent, at), { brick: true, startNextAt });
   return done.ended;
 }
 
@@ -3255,7 +3312,7 @@ export async function completeFinishIntents(now: Date, batch: number): Promise<n
   let finished = 0;
   for (const intent of due) {
     try {
-      if (await completeIntent(intent, intent.createdAt)) finished += 1;
+      if (await completeIntent(intent, intent.createdAt, now)) finished += 1;
     } catch (error) {
       console.error('[Computer] Could not complete a finish the runner committed to:', error instanceof Error ? error.message : 'unknown');
     }

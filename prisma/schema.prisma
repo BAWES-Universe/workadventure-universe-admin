@@ -2161,6 +2161,9 @@ model MeterReservation {
   settledMicros  BigInt?   @map("settled_micros")
   createdAt      DateTime  @default(now()) @map("created_at")
   closedAt       DateTime? @map("closed_at")
+  /// The stretch of its job a computer model call was ADMITTED in: the job's number of pauses at the moment the call was admitted, written under the job's cutoff lock (the lock a pause takes), so a pause and an
+  /// admission are ordered exactly and never by two clocks. A give-back after a pause reads this (lib/computer-stretch). Null = not admitted under a stretch yet, or a row of before this: read by time.
+  stretch        Int?
 
   @@index([personKey, state])
   @@index([state, expiresAt])

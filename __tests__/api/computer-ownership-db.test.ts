@@ -24,7 +24,7 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { ackStart, claimJob, completeFinishIntents, finishJobUnder, giveComputer, recordFinishIntent, renewJob, reportProgressAs, requestHandoverAs, startJob, startedJobFor, sweepComputers } from '@/lib/computer';
+import { ackStart, claimJob, completeFinishIntents, finishJobUnder, giveComputer, planEffect, recordFinishIntent, renewJob, reportProgressAs, requestHandoverAs, settleEffect, settleEffectAs, startJob, startedJobFor, sweepComputers } from '@/lib/computer';
 import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
 import { Agent37Error } from '@/lib/agent37/client';
 import * as calls from '@/lib/computer-calls';
@@ -115,6 +115,42 @@ run('one owner per computer job: every write is decided in the write that lands 
   const waitForWaiters = async (key: string, n: number): Promise<boolean> => {
     for (let tries = 0; tries < 250; tries += 1) {
       if ((await waiters(key)) >= n) return true;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return false;
+  };
+  /** The job's row held (`FOR UPDATE`) by a transaction that then does `work` and commits when released: another request that needs the row waits for it. */
+  const holdRow = (jobId: string, work: (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]) => Promise<unknown> = async () => undefined) => {
+    let release: () => void = () => undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked: () => void = () => undefined;
+    let failed: (error: unknown) => void = () => undefined;
+    const lockTaken = new Promise<void>((resolve, reject) => {
+      locked = resolve;
+      failed = reject;
+    });
+    const done = prisma
+      .$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT "id" FROM "computer_jobs" WHERE "id" = ${jobId} FOR UPDATE`;
+          locked();
+          await released;
+          await work(tx);
+        },
+        { timeout: 30_000 },
+      )
+      .catch((error) => {
+        failed(error);
+        throw error;
+      });
+    return { locked: lockTaken, release, done };
+  };
+  /** Whether some request is waiting for a row lock (a transaction waiting for another to finish). */
+  const waitForRowWaiter = async (): Promise<boolean> => {
+    for (let tries = 0; tries < 250; tries += 1) {
+      if ((await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'transactionid' AND NOT granted`)[0].n >= 1) return true;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     return false;
@@ -935,25 +971,16 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect((await jobOf(jobId)).prepareClaimedAt?.getTime()).toBe(held.getTime());
       await prisma.computerJob.update({ where: { id: jobId }, data: { prepareClaimedAt: null } });
       const faults = await prisma.computerJobFault.count({ where: { jobId } });
-      // The check inside the unreachable-relay branch: A's epoch went stale AFTER the first look (B claims as the claim is taken)
-      const real = prisma.computerJob.findUnique.bind(prisma.computerJob) as unknown as (args: unknown) => Promise<unknown>;
-      let claimedNow = false;
-      const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: { select?: { ownerEpoch?: boolean; status?: boolean } }) => {
-        const second = args?.select?.status && args?.select?.ownerEpoch && !claimedNow;
-        if (second) {
-          claimedNow = true;
-          return claimJob(jobId, { run: 'rC', seen: eb }, minutes(3)).then(() => real(args));
-        }
-        return real(args);
-      }) as never);
-      let answer: unknown;
-      try {
-        answer = await prepareJob(jobId, RELAY, minutes(3), { run: 'rB', epoch: eb, relayReached: false, relayStatus: 404 });
-      } finally {
-        spy.mockRestore();
-      }
-      expect(claimedNow).toBe(true);
-      expect(answer).toEqual({ ok: false, reason: 'superseded' });
+      // The look and the write are ONE transaction under the job's row lock: a claim that commits while the prepare waits for the row is met by the write, and no fault is recorded for a job that is no longer this worker's
+      const holder = holdRow(jobId, async (tx) => {
+        await tx.computerJob.update({ where: { id: jobId }, data: { ownerEpoch: { increment: 1 } } });
+      });
+      await holder.locked;
+      const waiting = prepareJob(jobId, RELAY, minutes(3), { run: 'rB', epoch: eb, relayReached: false, relayStatus: 404 });
+      expect(await waitForRowWaiter()).toBe(true);
+      holder.release();
+      await holder.done;
+      expect(await waiting).toEqual({ ok: false, reason: 'superseded' });
       expect(await prisma.computerJobFault.count({ where: { jobId } })).toBe(faults);
     });
 
@@ -1035,6 +1062,231 @@ run('one owner per computer job: every write is decided in the write that lands 
         spy.mockRestore();
       }
       expect((await jobOf(jobId)).agentResponseId).toBe('resp-B');
+    });
+  });
+  describe('CodeRabbit on #1025: effects outside the computer are the owner’s, a handover is decided under the job’s row, a start is let go only by the request that made it', () => {
+    const SUPERSEDED_ANSWER = { ok: false, reason: 'stale', run: 'superseded' };
+
+    it('N2: a worker that was replaced plans nothing (a new key, or an approved or failed one); the owner, and a worker that knows no epoch on a job nobody claimed, still plan', async () => {
+      const { jobId } = await running('s-n2');
+      const ea = await claimed(jobId, 'rA');
+      const eb = await claimed(jobId, 'rB', minutes(1));
+      expect(await planEffect(jobId, { key: 'send-1', kind: 'send' }, { epoch: ea })).toEqual(SUPERSEDED_ANSWER);
+      expect(await prisma.computerEffect.count({ where: { jobId } })).toBe(0);
+      // A key the new owner tried and confirmed not done: the old worker may not claim it again
+      await prisma.computerEffect.create({ data: { jobId, effectKey: 'send-2', kind: 'send', state: 'failed' } });
+      expect(await planEffect(jobId, { key: 'send-2', kind: 'send' }, { epoch: ea })).toEqual(SUPERSEDED_ANSWER);
+      expect((await prisma.computerEffect.findUniqueOrThrow({ where: { jobId_effectKey: { jobId, effectKey: 'send-2' } } })).state).toBe('failed');
+      // A worker that names no epoch is not the owner of a claimed job either
+      expect(await planEffect(jobId, { key: 'send-3', kind: 'send' }, { epoch: null })).toEqual(SUPERSEDED_ANSWER);
+      // CONTROL: the owner plans (a new key, and the failed one again), and says it twice
+      expect(await planEffect(jobId, { key: 'send-1', kind: 'send' }, { epoch: eb })).toEqual({ ok: true, already: false });
+      expect(await planEffect(jobId, { key: 'send-2', kind: 'send' }, { epoch: eb })).toEqual({ ok: true, already: false });
+      expect(await planEffect(jobId, { key: 'send-1', kind: 'send' }, { epoch: eb })).toMatchObject({ ok: false, reason: 'look_up' });
+      // CONTROL: a job nobody claimed, and a worker that names no epoch
+      const legacy = await running('s-n2-legacy');
+      expect(await planEffect(legacy.jobId, { key: 'k', kind: 'send' }, { epoch: null })).toEqual({ ok: true, already: false });
+      expect(await planEffect(legacy.jobId, { key: 'k2', kind: 'send' }, { epoch: 3 })).toEqual(SUPERSEDED_ANSWER);
+    });
+
+    it('N2: the owner is decided in the write that plans, not in the read before it: B claims between the two, and A’s plan is superseded with nothing written', async () => {
+      const { jobId } = await running('s-n2-race');
+      const ea = await claimed(jobId, 'rA');
+      const real = prisma.computerEffect.findUnique.bind(prisma.computerEffect) as unknown as (args: unknown) => Promise<unknown>;
+      let claimedNow = false;
+      const spy = jest.spyOn(prisma.computerEffect, 'findUnique').mockImplementation(((args: unknown) => {
+        if (claimedNow) return real(args);
+        claimedNow = true;
+        return claimJob(jobId, { run: 'rB', seen: ea }, minutes(1)).then(() => real(args));
+      }) as never);
+      let answer: unknown;
+      try {
+        answer = await planEffect(jobId, { key: 'send-1', kind: 'send' }, { epoch: ea });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(claimedNow).toBe(true);
+      expect(answer).toEqual(SUPERSEDED_ANSWER);
+      expect(await prisma.computerEffect.count({ where: { jobId } })).toBe(0);
+    });
+
+    it('N3: a worker that was replaced settles nothing (the effect stays planned, no give-back is flagged late); the owner settles it, and Orbit’s own trusted path still can', async () => {
+      const { jobId } = await running('s-n3');
+      const ea = await claimed(jobId, 'rA');
+      expect(await planEffect(jobId, { key: 'send-1', kind: 'send' }, { epoch: ea })).toEqual({ ok: true, already: false });
+      expect(await planEffect(jobId, { key: 'send-2', kind: 'send' }, { epoch: ea })).toEqual({ ok: true, already: false });
+      const eb = await claimed(jobId, 'rB', minutes(1));
+      expect(await settleEffectAs(jobId, 'send-1', 'done', 'sent', { epoch: ea })).toEqual({ ok: false, superseded: true });
+      expect((await prisma.computerEffect.findUniqueOrThrow({ where: { jobId_effectKey: { jobId, effectKey: 'send-1' } } })).state).toBe('planned');
+      expect(await settleEffectAs(jobId, 'send-1', 'done', 'sent', { epoch: null })).toEqual({ ok: false, superseded: true });
+      // CONTROL: the owner settles it, once
+      expect(await settleEffectAs(jobId, 'send-1', 'done', 'sent', { epoch: eb })).toEqual({ ok: true, superseded: false });
+      expect(await settleEffectAs(jobId, 'send-1', 'done', 'sent', { epoch: eb })).toEqual({ ok: false, superseded: false });
+      // CONTROL: the trusted reconciliation path (no worker named) settles what a worker that is gone left planned
+      expect(await settleEffect(jobId, 'send-2', 'failed', 'not sent')).toBe(true);
+      expect((await prisma.computerEffect.findUniqueOrThrow({ where: { jobId_effectKey: { jobId, effectKey: 'send-2' } } })).state).toBe('failed');
+    });
+
+    it('N3: the owner is decided in the write that settles: B claims while A’s settle waits for the job’s row, and the effect stays planned', async () => {
+      const { jobId } = await running('s-n3-race');
+      const ea = await claimed(jobId, 'rA');
+      expect(await planEffect(jobId, { key: 'send-1', kind: 'send' }, { epoch: ea })).toEqual({ ok: true, already: false });
+      const holder = holdRow(jobId, async (tx) => {
+        await tx.computerJob.update({ where: { id: jobId }, data: { ownerEpoch: { increment: 1 } } });
+      });
+      await holder.locked;
+      const waiting = settleEffectAs(jobId, 'send-1', 'done', 'sent', { epoch: ea });
+      expect(await waitForRowWaiter()).toBe(true);
+      holder.release();
+      await holder.done;
+      expect(await waiting).toEqual({ ok: false, superseded: true });
+      expect((await prisma.computerEffect.findUniqueOrThrow({ where: { jobId_effectKey: { jobId, effectKey: 'send-1' } } })).state).toBe('planned');
+    });
+
+    it('N4: a worker that says the relay was unreachable records the fault only while the job still is what it found: a job that is no longer Brick’s, or another owner’s, keeps none; the owner’s is kept once', async () => {
+      const { jobId } = await running('s-n4');
+      const ea = await claimed(jobId, 'rA');
+      await prisma.computerJob.update({ where: { id: jobId }, data: { status: 'waiting', waitingFor: 'signin', control: 'person' } });
+      expect(await prepareJob(jobId, RELAY, minutes(1), { run: 'rA', epoch: ea, relayReached: false, relayStatus: 404 })).toEqual({ ok: false, reason: 'person_has_it' });
+      expect(await prisma.computerJobFault.count({ where: { jobId } })).toBe(0);
+      await prisma.computerJob.update({ where: { id: jobId }, data: { status: 'running', waitingFor: null, control: 'brick' } });
+      const eb = await claimed(jobId, 'rB', minutes(2));
+      expect(await prepareJob(jobId, RELAY, minutes(3), { run: 'rA', epoch: ea, relayReached: false, relayStatus: 404 })).toEqual({ ok: false, reason: 'superseded' });
+      expect(await prisma.computerJobFault.count({ where: { jobId } })).toBe(0);
+      // CONTROL: the owner's is kept, once
+      expect(await prepareJob(jobId, RELAY, minutes(4), { run: 'rB', epoch: eb, relayReached: false, relayStatus: 404 })).toEqual({ ok: false, reason: 'relay_unreachable' });
+      expect(await prepareJob(jobId, RELAY, minutes(5), { run: 'rB', epoch: eb, relayReached: false, relayStatus: 404 })).toEqual({ ok: false, reason: 'relay_unreachable' });
+      expect(await prisma.computerJobFault.count({ where: { jobId, reason: 'relay_unreachable' } })).toBe(1);
+    });
+
+    it('the turn a stream cleared when its start never named one (and the one it cleared when the turn was found over) is the worker’s own: after B claims, A’s clears leave B’s turn', async () => {
+      // The clear that follows `activeTurn` finding no turn
+      const { jobId } = await running('s-clear-1');
+      const ea = await claimed(jobId, 'rA');
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-A', agentSessionId: 'sess-A' } });
+      const active = jest.spyOn(fake, 'activeTurn').mockImplementation(async () => {
+        await claimed(jobId, 'rB', minutes(2));
+        return null;
+      });
+      try {
+        await startTurn(jobId, 'carry on', new AbortController().signal, { epoch: ea });
+      } finally {
+        active.mockRestore();
+      }
+      // `claimJob` keeps the response id it moves to the new epoch: A's clear (made under A's epoch) must not match it
+      expect((await jobOf(jobId)).agentResponseId).toBe('resp-A');
+    });
+
+    it('handover (E4): a handover reads the job under its row lock, so one that waited behind a newer stretch counts that stretch (never the one it would have read before waiting) and no second is counted twice; with no interleaving it lands', async () => {
+      const { jobId } = await running('s-handover-stale');
+      const ea = await claimed(jobId, 'rA');
+      // While the handover waits for the row, a newer handover and a note move the job: it has run 90 s before a stretch that began at minute 2
+      const holder = holdRow(jobId, async (tx) => {
+        await tx.computerJob.update({ where: { id: jobId }, data: { secondsRun: 90, stretchStarted: minutes(2), handoverSeq: { increment: 1 } } });
+      });
+      await holder.locked;
+      const waiting = requestHandoverAs(jobId, 'signin', minutes(5), null, { epoch: ea });
+      expect(await waitForRowWaiter()).toBe(true);
+      holder.release();
+      await holder.done;
+      const landed = await waiting;
+      expect(landed.refused).toBeNull();
+      // 90 s already counted + the 3 minutes since the stretch the job is in began (read AFTER the wait, never the 5 minutes of the stretch read before it)
+      expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', waitingFor: 'signin', secondsRun: 90 + 180 });
+      // CONTROL: asked again while it waits, it is the same wait (nothing counted twice)
+      const again = await requestHandoverAs(jobId, 'upload', minutes(6), null, { epoch: ea });
+      expect(again.refused).toBeNull();
+      expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', waitingFor: 'upload', secondsRun: 90 + 180 });
+    });
+
+    it('handover: the write that lands the wait names the very `secondsRun` and `stretchStarted` it read (behind the row lock: belt and braces against a delayed worker)', async () => {
+      const { jobId } = await running('s-handover-where');
+      const ea = await claimed(jobId, 'rA');
+      const before = await jobOf(jobId);
+      const wheres: Array<Record<string, unknown>> = [];
+      const realTx = prisma.$transaction.bind(prisma) as unknown as (...args: unknown[]) => Promise<unknown>;
+      // The handover writes on its transaction client: each `updateMany` it sends there is recorded, with the condition it names
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
+        const first = args[0];
+        if (typeof first !== 'function') return realTx(...args);
+        const wrapped = async (tx: { computerJob: { updateMany: (input: { where?: Record<string, unknown> }) => Promise<unknown> } }) => {
+          const inner = tx.computerJob.updateMany.bind(tx.computerJob);
+          tx.computerJob.updateMany = ((input: { where?: Record<string, unknown> }) => {
+            if (input?.where) wheres.push(input.where);
+            return inner(input);
+          }) as never;
+          return (first as (client: unknown) => Promise<unknown>)(tx);
+        };
+        return realTx(wrapped, ...args.slice(1));
+      }) as never);
+      try {
+        expect((await requestHandoverAs(jobId, 'signin', minutes(5), null, { epoch: ea })).refused).toBeNull();
+      } finally {
+        spy.mockRestore();
+      }
+      const landing = wheres.find((where) => where.status === 'running' && where.control === 'brick');
+      expect(landing).toBeDefined();
+      expect(landing).toMatchObject({ secondsRun: before.secondsRun, stretchStarted: before.stretchStarted, ownerEpoch: ea });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', waitingFor: 'signin' });
+    });
+
+    it('handover: a finish intent that commits while the handover waits for the job’s row is seen by its write, so the job is not put to waiting', async () => {
+      const { jobId } = await running('s-handover-intent');
+      const ea = await claimed(jobId, 'rA');
+      const holder = holdRow(jobId, async (tx) => {
+        await tx.computerFinishIntent.create({ data: { jobId, outcome: 'done', turns: [] } });
+      });
+      await holder.locked;
+      const waiting = requestHandoverAs(jobId, 'signin', minutes(2), null, { epoch: ea });
+      expect(await waitForRowWaiter()).toBe(true);
+      holder.release();
+      await holder.done;
+      await waiting;
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', waitingFor: null });
+    });
+
+    it('N13: the same start key said twice shares one attempt: the second request’s trouble does not let the first one’s attempt go, and the first still makes its job', async () => {
+      const sara = await person('s-n13');
+      await giveComputer(sara.brickId, sara.id);
+      const key = `key-${randomUUID()}`;
+      // The first request opened the attempt and is still going on (its attempt stays open); the second finds it and meets a read that fails
+      await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: key, state: 'open', beatAt: new Date() } });
+      const spy = jest.spyOn(prisma.brickComputer, 'findUnique').mockRejectedValueOnce(new Error('a read failed'));
+      try {
+        await expect(startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey: key }, NOW)).rejects.toThrow('a read failed');
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await prisma.computerStartAttempt.findUniqueOrThrow({ where: { botId_personId_startKey: { botId: sara.brickId, personId: sara.id, startKey: key } } })).state).toBe('open');
+      // CONTROL: a request that made its own attempt and failed lets it go
+      const own = `key-${randomUUID()}`;
+      const spy2 = jest.spyOn(prisma.brickComputer, 'findUnique').mockRejectedValueOnce(new Error('a read failed'));
+      try {
+        await expect(startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', startKey: own }, NOW)).rejects.toThrow('a read failed');
+      } finally {
+        spy2.mockRestore();
+      }
+      expect((await prisma.computerStartAttempt.findUniqueOrThrow({ where: { botId_personId_startKey: { botId: sara.brickId, personId: sara.id, startKey: own } } })).state).toBe('expired');
+    });
+
+    it('a sweep that completes a finish intent starts the next job at its real start, not at the intent’s time: its room, lease and expiry begin now', async () => {
+      const { sara, jobId } = await running('s-successor');
+      await giveComputer(sara.brickId, sara.id);
+      const ea = await claimed(jobId, 'rA');
+      const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Next' }, minutes(1));
+      expect(next.ok && next.job.status).toBe('queued');
+      expect(await recordFinishIntent(jobId, { outcome: 'done', epoch: ea, turns: [] })).toMatchObject({ ok: true });
+      // The intent was kept at minute 3; the sweep that completes it runs 30 minutes later
+      const intentAt = minutes(3);
+      await prisma.computerFinishIntent.update({ where: { jobId }, data: { createdAt: intentAt } });
+      const sweptAt = new Date(intentAt.getTime() + 30 * 60_000);
+      expect(await completeFinishIntents(sweptAt, 10)).toBe(1);
+      const started = await prisma.computerJob.findUniqueOrThrow({ where: { id: next.ok ? next.job.id : '' } });
+      expect(started.status).toBe('running');
+      const room = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: started.reservationKey! } });
+      // The successor's lease starts when it started (the sweep's time), not 30 minutes earlier at the intent's
+      expect(room.createdAt.getTime()).toBe(sweptAt.getTime());
+      expect(room.expiresAt.getTime()).toBeGreaterThan(sweptAt.getTime());
     });
   });
 });

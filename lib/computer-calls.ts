@@ -106,7 +106,7 @@ export async function authorizeModelCall(
     // moment either counted this room (and did not stop the job) or won (the key is no longer good): the room goes back, never both. A look that FAILS is the same answer as one that says no: the call is refused and
     // the room goes back, never held for a call that was not authorized
     // The key is looked at again by `authorizedPastCutoff`, with the time read after the room's wait for the pool's lock (and after the cutoff's, when there is one): a key that ran out meanwhile is no longer good
-    const stands = await authorizedPastCutoff(base.jobId, input.token, verified.generation, clock, { turn: input.turn, run: input.run }).catch((error) => {
+    const stands = await authorizedPastCutoff(base.jobId, input.callId, input.token, verified.generation, clock, { turn: input.turn, run: input.run }).catch((error) => {
       console.error('[Computer] Could not look again at a call that was authorized:', error instanceof Error ? error.message : 'unknown');
       return false;
     });
@@ -366,7 +366,7 @@ export { cutoffLockKey };
  * moment is waited for: if it won, the call is refused (its keys ended with it) and its room goes back; if this won, the stop finds the admission and answers stale. A wait that fails is a failed check (a no), never a
  * call authorized past a stop that may have won.
  */
-async function authorizedPastCutoff(jobId: string, token: string, generation: number, clock: () => Date, admitted: { turn?: number | null; run?: string | null } = {}): Promise<boolean> {
+async function authorizedPastCutoff(jobId: string, callId: string, token: string, generation: number, clock: () => Date, admitted: { turn?: number | null; run?: string | null } = {}): Promise<boolean> {
   return prisma.$transaction(
     async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
@@ -376,6 +376,9 @@ async function authorizedPastCutoff(jobId: string, token: string, generation: nu
       const after = await verifyJobToken(token, 'model', clock(), tx);
       if (!after.ok || after.generation !== generation) return false;
       await recordTurnAdmitted(tx, jobId, { turn: admitted.turn, run: admitted.run, at: clock() });
+      // The call belongs to the stretch it is admitted in: written HERE, under the lock a pause takes, so the order of an admission and a pause is exact (never two clocks), and the first admission decides (an
+      // answer given again keeps it). A give-back after a pause reads it (lib/computer-stretch)
+      await tx.$executeRaw`UPDATE "meter_reservations" SET "stretch" = (SELECT "pauses" FROM "computer_jobs" WHERE "id" = ${jobId}) WHERE "reservation_key" = ${callRoomKey(jobId, callId)} AND "stretch" IS NULL`;
       return true;
     },
     { timeout: 15_000, maxWait: 15_000 },

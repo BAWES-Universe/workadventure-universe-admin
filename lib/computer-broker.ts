@@ -1,8 +1,8 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { agentCannotRun, providerFor, fenceMachine, finishJob, settleTurnHold, underTurnHold, wakeIfStopped } from '@/lib/computer';
-import { hasFinishIntent, recordRelayUnreachable } from '@/lib/computer-faults';
-import { epochMatches, type EpochSaid } from '@/lib/computer-owner';
+import { hasFinishIntent, lockRelayReach, recordRelayUnreachable } from '@/lib/computer-faults';
+import { epochMatches, lockJobRow, type EpochSaid } from '@/lib/computer-owner';
 import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
 import { agentMayAct } from '@/lib/computer-control';
 import { jobTagOf } from '@/lib/computer-values';
@@ -129,13 +129,18 @@ export async function prepareJob(jobId: string, relay: unknown, now: Date = new 
     // The bot server itself found that the address answers something that is not the relay: a confirmed fault of ours, kept (once per run) and told at once, with no key made for a relay that is not there
     if (options.relayReached === false) {
       // Only for a job that is running under Brick's control: a job in line (no machine yet), over, or the person's keeps no such fault (a row with no run named would apply to every later run of the job)
-      const now_ = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, control: true, ownerEpoch: true } });
-      if (!now_) return { ok: false, reason: 'not_found' };
-      if (!epochMatches(now_.ownerEpoch, options.epoch)) return { ok: false, reason: 'superseded' };
-      if (now_.status === 'waiting' && now_.control === 'person') return { ok: false, reason: 'person_has_it' };
-      if (now_.status !== 'running' || now_.control !== 'brick') return { ok: false, reason: 'not_running' };
-      await recordRelayUnreachable(prisma, jobId, { run: options.run ?? null, status: options.relayStatus ?? null, at: now });
-      return { ok: false, reason: 'relay_unreachable' };
+      // The look and the write are ONE transaction under the lock a relay-reach write takes and the job's row lock: the fault is recorded only while the job still is what the look found (this worker's, running, Brick's)
+      const recorded = await prisma.$transaction(async (tx) => {
+        await lockRelayReach(tx, jobId);
+        const now_ = await lockJobRow(tx, jobId);
+        if (!now_) return { ok: false as const, reason: 'not_found' as const };
+        if (!epochMatches(now_.ownerEpoch, options.epoch)) return { ok: false as const, reason: 'superseded' as const };
+        if (now_.status === 'waiting' && now_.control === 'person') return { ok: false as const, reason: 'person_has_it' as const };
+        if (now_.status !== 'running' || now_.control !== 'brick') return { ok: false as const, reason: 'not_running' as const };
+        await recordRelayUnreachable(tx, jobId, { run: options.run ?? null, status: options.relayStatus ?? null, at: now });
+        return { ok: false as const, reason: 'relay_unreachable' as const };
+      });
+      return recorded;
     }
     return await prepareClaimed(jobId, address, now, claim, options.run ?? null, options.epoch);
   } finally {
@@ -326,7 +331,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     if (unsure) return { ok: false, reason: 'failed' };
     if (active) return { ok: false, reason: 'busy', responseId: active };
     // The turn we kept is over (the stream was lost before its end reached us): it is cleared and this one goes ahead
-    await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: job.responseId }, data: { agentResponseId: null } });
+    await prisma.computerJob.updateMany({ where: { id: job.jobId, ownerEpoch: job.ownerEpoch, agentResponseId: job.responseId }, data: { agentResponseId: null } });
   }
   // Only one turn is started at a time on a job: it is claimed before the agent is asked, so two starts at the same moment never both open
   // one. The claim is let go when the turn's id is kept (or the start fails); one nobody released lapses by itself.
@@ -618,7 +623,7 @@ async function* keeping(
     await letGoOfClaim();
     // The stream is let go of: the turn itself goes on on the machine unless it ended
     await events.return(undefined).catch(() => undefined);
-    if (responseId && over) await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: responseId }, data: { agentResponseId: null } }).catch(() => undefined);
+    if (responseId && over) await prisma.computerJob.updateMany({ where: { id: job.jobId, ownerEpoch: job.ownerEpoch, agentResponseId: responseId }, data: { agentResponseId: null } }).catch(() => undefined);
   }
 }
 

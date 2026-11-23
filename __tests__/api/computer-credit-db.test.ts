@@ -1153,6 +1153,34 @@ run('credit for computers, on the real books', () => {
       expect((await prisma.creditHold.findMany({ where: { jobKey: jobId } })).map((hold) => [Number(hold.customerMicros), Number(hold.refundedMicros)]).sort((x, y) => x[0] - y[0])).toEqual([[12_000, 0], [20_000, 20_000], [30_000, 0]]);
     });
 
+    it('N10: a call admitted BEFORE a pause belongs to the earlier stretch even when its own time is later than the pause’s (the pause took its time before it got the lock): only the call admitted after the resume is given back', async () => {
+      const sara = await running();
+      const { jobId, token } = await job(sara);
+      await gift([sara.id], 'computers', 1_000_000);
+      // Admitted and settled first, at a time LATER than the pause's own (the pause read its clock, then waited for the lock this call held)
+      await call(token, 'a', 50_000, 30_000, at(3));
+      expect((await pauseJob(sara.brickId, sara.id, jobId, at(2))).ok).toBe(true);
+      expect((await resumeJob(sara.brickId, sara.id, jobId, at(4))).ok).toBe(true);
+      const claim = await claimJob(jobId, { run: 'carried-on', seen: (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).ownerEpoch }, at(4));
+      if (!claim.ok) throw new Error(`the claim was refused: ${claim.reason}`);
+      const minted = (await mintJobToken(jobId, 'model', at(4), undefined, { epoch: claim.epoch })) as { ok: true; token: string };
+      expect(await call(minted.token, 'b', 50_000, 20_000, at(5))).toMatchObject({ ok: true });
+      // The stretch each call was admitted in is on its room
+      const stretches = await prisma.meterReservation.findMany({ where: { jobId, reservationKey: { startsWith: 'computer:call:' } }, select: { reservationKey: true, stretch: true }, orderBy: { reservationKey: 'asc' } });
+      expect(stretches.map((one) => one.stretch)).toEqual([0, 1]);
+      (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(async () => {
+        throw new Error('books unreachable');
+      });
+      const mute = quiet();
+      try {
+        await failedOnOurSide(jobId, at(10));
+      } finally {
+        mute.mockRestore();
+      }
+      expect((await prisma.computerRefundObligation.findMany({ where: { jobId } })).map((one) => Number(one.amountMicros))).toEqual([20_000]);
+      expect((await refundStatesFor([jobId])).get(jobId)).toEqual({ returnedMicros: 0, pendingMicros: 20_000 });
+    });
+
     it('control: a job that was never paused reads exactly as before (every hold), and a last-stretch obligation not yet acknowledged is still pending', async () => {
       const sara = await running();
       const { jobId, token } = await job(sara);
