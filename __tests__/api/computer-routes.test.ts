@@ -245,6 +245,7 @@ describe('the bot server’s calls', () => {
       if (reason === 'cheaper_route') lib.startJob.mockResolvedValue({ ok: false, reason, app: 'Gmail' });
       else if (reason === 'rule') lib.startJob.mockResolvedValue({ ok: false, reason, words: 'No more than $1.00 a month' });
       else if (reason === 'not_set') lib.startJob.mockResolvedValue({ ok: false, reason });
+      else if (reason === 'cannot_continue') lib.startJob.mockResolvedValue({ ok: false, reason, why: 'not_continuable', job: { title: 'Visa form', status: 'stopped', endedBy: 'person' } });
       else lib.startJob.mockResolvedValue({ ok: false, reason });
       const response = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' } }), params);
       expect(response.status).toBe(200);

@@ -648,7 +648,12 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect(a).toMatchObject({ ok: true });
       expect(await jobsOf(sara)).toBe(1);
       expect(await roomsOf(sara)).toBe(1);
-      expect((await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: KEY_B } })).state).toBe('expired');
+      // B's answer is kept (GPT round 6, finding 1): it waits on A's attempt, and a retry of B is answered with A's job, never one of its own
+      const bRow = await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: KEY_B } });
+      const aRow = await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: KEY_A } });
+      expect(bRow).toMatchObject({ state: 'answered', aliasAttemptId: aRow.id });
+      expect(await start(sara, KEY_B, 'Fill the visa form')).toMatchObject({ ok: false, reason: 'earlier', job: { id: (a as { job: { id: string } }).job.id, attempt: KEY_A } });
+      expect(await jobsOf(sara)).toBe(1);
     });
 
     it('A paused and EXPIRED (it stopped beating), B reworded: B creates the one job; A then refuses, naming B’s job (`earlier`), and makes none. Postgres ends with ONE job and ONE reservation', async () => {

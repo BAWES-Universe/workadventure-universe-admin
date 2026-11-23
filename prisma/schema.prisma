@@ -942,6 +942,7 @@ model Bot {
   metBy           BrickMet[]
   computer        BrickComputer?
   computerJobs    ComputerJob[]
+  computerCommands ComputerJobCommand[]
   home            BrickHome?
   brickItems      BrickItem[]
   template        BrickTemplate?
@@ -3641,6 +3642,8 @@ model ComputerJob {
   continuesJobId String?   @unique @map("continues_job_id")
   /// The last sequence number given to a note the person sent to this job (computer_job_notes): notes are numbered 1, 2, 3 per job.
   noteSeq        Int       @default(0) @map("note_seq")
+  /// Finding 5 (GPT round 6): the month or a limit paused this job and it was put back in line by itself, and it has not run since: `carried_on` is told in the write that sets it running, once.
+  carryOnPending Boolean   @default(false) @map("carry_on_pending")
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
@@ -3653,6 +3656,8 @@ model ComputerJob {
   steps   ComputerJobStep[]
   pauseRows ComputerJobPause[]
   tellings  ComputerJobTelling[]
+  commands  ComputerJobCommand[]
+  startAttempts ComputerStartAttempt[] @relation("StartAttemptJob")
   /// "Try again" (piece 8): the ended job this one carries on from, and the one job that carries this one on (one at most: the unique index).
   continues    ComputerJob? @relation("JobContinues", fields: [continuesJobId], references: [id], onDelete: SetNull)
   continuedBy  ComputerJob? @relation("JobContinues")
@@ -3715,6 +3720,12 @@ model ComputerJobPause {
   grantsPrint String? @map("grants_print") @db.VarChar(64)
   /// The month or a limit was reached while the person held the screen: the screen was taken back; it never carries on by itself, and asks the person again on resume
   heldScreen  Boolean @default(false) @map("held_screen")
+  /// Finding 5 (GPT round 6): what the month or a limit refused when it paused the job: a model call (`call`, its estimate) or the renewal of its room (`renewal`, that room). It carries on by itself only once that much fits. Null for the person's own pause.
+  blockedKind    String? @map("blocked_kind") @db.VarChar(10)
+  blockedMicros  BigInt? @map("blocked_micros")
+  /// The month (YYYY-MM, UTC) it was refused in, and a digest of the person's own limits then (support only: the room check decides).
+  blockedMonth   String? @map("blocked_month") @db.VarChar(7)
+  blockedRuleRev String? @map("blocked_rule_rev") @db.VarChar(64)
 
   job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
@@ -4140,6 +4151,28 @@ model ComputerJobToken {
 /// One start the person asked for, kept BEFORE its job row exists (GPT round 5, S2): a delayed writer whose attempt was settled (made, expired or superseded) can never make a second job, and a reworded retry
 /// under another key finds the attempt that is still open and is answered `earlier`. open: being made (its beat is fresh); made: it made `jobId`; expired: nothing was made and its beat ran out (or it was refused);
 /// superseded: a newer attempt of the same person and Brick settled the question while it was open and stale.
+/// One control the person gave a computer job (finding 4, GPT round 6): a click on the panel or one tool call of Brick's, by its own id. Written in the transaction that applies it, before its effect:
+/// the same id again answers `outcome` and writes nothing; the same id with other arguments is refused. A note keeps the turn it was bound to; only that turn is cancelled for it, once.
+model ComputerJobCommand {
+  commandId      String   @id @map("command_id") @db.Uuid
+  botId          String   @map("bot_id")
+  jobId          String?  @map("job_id")
+  personId       String   @map("person_id")
+  kind           String   @db.VarChar(10)
+  argsHash       String   @map("args_hash") @db.VarChar(64)
+  outcome        Json?
+  turnResponseId String?  @map("turn_response_id") @db.VarChar(255)
+  stretch        Int?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  bot Bot          @relation(fields: [botId], references: [id], onDelete: Cascade)
+  job ComputerJob? @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+  @@index([botId, createdAt])
+  @@map("computer_job_commands")
+}
+
 model ComputerStartAttempt {
   id        String   @id @default(uuid())
   botId     String   @map("bot_id")
@@ -4149,9 +4182,18 @@ model ComputerStartAttempt {
   jobId     String?  @map("job_id")
   beatAt    DateTime @default(now()) @map("beat_at")
   createdAt DateTime @default(now()) @map("created_at")
+  /// Finding 1 (GPT round 6): a start answered with another start that had no job yet waits for THAT attempt (state `answered`); a retry under this key is answered from it.
+  aliasAttemptId String? @map("alias_attempt_id")
+
+  /// The job this start made or was answered with: the attempt lives as long as the job (never swept by age).
+  job     ComputerJob?           @relation("StartAttemptJob", fields: [jobId], references: [id], onDelete: Cascade)
+  alias   ComputerStartAttempt?  @relation("StartAttemptAlias", fields: [aliasAttemptId], references: [id], onDelete: Cascade)
+  aliases ComputerStartAttempt[] @relation("StartAttemptAlias")
 
   @@unique([botId, personId, startKey])
   @@index([botId, personId, state])
+  @@index([jobId])
+  @@index([aliasAttemptId])
   @@map("computer_start_attempts")
 }
 

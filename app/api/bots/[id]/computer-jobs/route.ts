@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
-import { ackStart, computerView, earlierUnconfirmedStart, startJob, startedJobFor } from '@/lib/computer';
+import { ackStart, computerView, earlierUnconfirmedStart, startAnsweredBefore, startJob, startedJobFor, type Started } from '@/lib/computer';
 import { startStateOf } from '@/lib/computer-values';
 import { ownerSpendAllowed } from '@/lib/spend-rules';
 import { retryCandidate } from '@/lib/computer-continue';
@@ -106,8 +106,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  * it answers `{ ok: false, reason: 'cheaper_route', app }` and starts nothing.
  *
  * With the header `X-Computer-Continues: <job id>` ("try again", piece 8) the new job carries on in that ended job's agent conversation when Orbit's record says it may (it failed, ours or the agent's own, or we ended it, it has a
- * conversation, and nothing carries it on yet), and the answer says `continued: true`. Otherwise it is an ordinary fresh start. A job that already carries it on is the answer (one per ended job, ever). It is a NEW job
- * either way: its own reservation, receipt, key and attempt, and every guard of a start applies.
+ * conversation, and nothing carries it on yet), and the answer says `continued: true`. A job that already carries it on is the answer (one per ended job, ever). It is a NEW job: its own reservation, receipt, key and
+ * attempt, and every guard of a start applies. When the named job cannot be carried on, NOTHING is made or reserved (GPT round 6, finding 6): `{ ok: false, reason: 'cannot_continue', why, job? }`, `why` one of
+ * not_found, not_theirs, live, not_continuable, no_conversation, and `job` = `{ title, status, endedBy }` of the person's own named job (never for not_found / not_theirs). Brick says why and offers "Start a new job":
+ * an ordinary start under a NEW key without this header.
  *
  * With the header `X-Computer-Start-Acks: 1` (and a key) the start says the game confirms it got the answer: the job is made unconfirmed, and until the game confirms it (`POST /api/bots/:id/computer-jobs` { action: 'start-ack', userId, isGuest?, attempt } -> 200 { ok: true, acked }, `acked` = that key has a job of this person on this Brick, now confirmed; idempotent; an unknown key, another person's or another Brick's changes nothing; a keyed look never confirms) a start under ANOTHER key for this person on this Brick makes nothing and answers HTTP 200 `{ ok: false, reason: 'earlier', job: { id, status, state, attempt } }` naming the OLDEST such job and the key it was made under (decided under the person's lock in the transaction that makes the job). `earlier` is not in `START_REFUSALS`: it is the job the game asked for earlier, not a refusal of this ask, and it confirms nothing. A start without the header is confirmed when it is made, as before.
  *
@@ -149,6 +151,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // A start that says the game confirms its answers, retried under a NEW key while an earlier start of this person on this Brick is still unconfirmed, is answered with that job BEFORE the spend rule is asked: the earlier job may
     // have used what a chat-stated rule leaves, and the answer the game is owed is the job it asked for, never a false `rule`. (The decision that makes or refuses a job is still the one under the person's lock in `startJob`.)
     const acking = attempt?.success === true && request.headers.get(START_ACKS_HEADER) === '1';
+    // Finding 1 (GPT round 6): a key that was answered before with another start's job gets that same answer again, first: after the job was acknowledged, ended, or the game forgot the key, never a job of its own
+    if (attempt?.success) {
+      const answered = await startAnsweredBefore(id, person.personId, attempt.data);
+      if (answered) return NextResponse.json(bodyOf(answered));
+    }
     if (acking && attempt?.success) {
       const earlier = await earlierUnconfirmedStart(id, person.personId, attempt.data);
       if (earlier) return NextResponse.json({ ok: false, reason: 'earlier', job: earlier });
@@ -157,18 +164,25 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const ruled = await ownerSpendAllowed(id, person.personId, 'computer', new Date(), parsed.data.runId ?? null, attempt?.success ? attempt.data : null);
     if (!ruled.ok) return NextResponse.json({ ok: false, reason: 'rule', rule: { id: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words } });
     const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, brief: parsed.data.brief, writes: parsed.data.writes, runId: parsed.data.runId, startKey: attempt?.success ? attempt.data : undefined, acks: attempt?.success === true && request.headers.get(START_ACKS_HEADER) === '1', plan: parsed.data.plan, origin: parsed.data.origin ?? null, continuesJobId: continues?.success ? continues.data : null });
-    // `continued`: the job carries on in the conversation of the job the header named ("try again"); absent, it is a fresh job (the named one did not qualify, or none was named)
-    if (started.ok) return NextResponse.json({ ok: true, job: started.job, restoredFrom: started.restoredFrom, ...(started.continued ? { continued: true } : {}) });
-    // A rule that stopped it on the try itself (the pre-check only asks for a first millionth): the same shape as above, with the rule's words
-    if (started.reason === 'rule') return NextResponse.json({ ok: false, reason: 'rule', rule: { id: null, why: null, leftMicros: null, words: started.words } });
-    // A connected app would do it for less: nothing was started, and the Brick is told which one to use
-    if (started.reason === 'cheaper_route') return NextResponse.json({ ok: false, reason: 'cheaper_route', app: started.app });
-    // An earlier start of this person on this Brick that the game has not confirmed: nothing was made. It is not a refusal of the ask (it is the job the game asked for earlier): the oldest such job and the key it was made under. It acks nothing
-    if (started.reason === 'earlier') return NextResponse.json({ ok: false, reason: 'earlier', job: started.job });
-    return NextResponse.json({ ok: false, reason: started.reason });
+    return NextResponse.json(bodyOf(started));
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });
     console.error('[Computer] Could not start a job:', error instanceof Error ? error.message : 'unknown');
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
+}
+
+/** The answer body of a start, as the bot server reads it (every refusal is HTTP 200 `{ ok: false, reason }`). */
+function bodyOf(started: Started): Record<string, unknown> {
+  // `continued`: the job carries on in the conversation of the job the header named ("try again"); absent, it is a fresh job (none was named)
+  if (started.ok) return { ok: true, job: started.job, restoredFrom: started.restoredFrom, ...(started.continued ? { continued: true } : {}) };
+  // A rule that stopped it on the try itself (the pre-check only asks for a first millionth): the same shape as above, with the rule's words
+  if (started.reason === 'rule') return { ok: false, reason: 'rule', rule: { id: null, why: null, leftMicros: null, words: started.words } };
+  // A connected app would do it for less: nothing was started, and the Brick is told which one to use
+  if (started.reason === 'cheaper_route') return { ok: false, reason: 'cheaper_route', app: started.app };
+  // An earlier start of this person on this Brick that the game has not confirmed: nothing was made. It is not a refusal of the ask (it is the job the game asked for earlier): the oldest such job and the key it was made under. It acks nothing
+  if (started.reason === 'earlier') return { ok: false, reason: 'earlier', job: started.job };
+  // "Try again" of a job that cannot be carried on: nothing was made (finding 6). Why, and the person's own named job, so Brick can say it and offer "Start a new job"
+  if (started.reason === 'cannot_continue') return { ok: false, reason: 'cannot_continue', why: started.why, ...(started.job ? { job: started.job } : {}) };
+  return { ok: false, reason: started.reason };
 }

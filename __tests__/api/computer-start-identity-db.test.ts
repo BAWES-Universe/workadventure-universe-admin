@@ -1,0 +1,248 @@
+/**
+ * GPT round 6, finding 1 (Rule D, identity): a start answered with another start's job (`earlier`) keeps that answer durably, so a retry of it is answered with the SAME job after the job was acknowledged,
+ * ended, or the game forgot its key; an older start that was not visible yet loses to the job made after it began; a deliberate second start under a new key still makes its own job. Each case asserts the job
+ * ids, the reservations and the answer. Against a real database, through the real POST route where the game would come in. Runs only with ROLES_DB_TEST=yes and a DATABASE_URL to a migrated THROWAWAY database:
+ *
+ *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/computer-start-identity-db.test.ts --runInBand
+ */
+import { randomUUID } from 'node:crypto';
+
+jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
+jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn(), getClient: jest.fn(() => undefined), flush: jest.fn(async () => true) }));
+
+import { NextRequest } from 'next/server';
+import { prisma } from '@/lib/db';
+import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
+import { createBrick } from '@/lib/brick-create';
+import { saveMeterSettings } from '@/lib/meter';
+import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
+import { ackStart, finishJob, forgetOldStartMarks, giveComputer, startJob, startedJobFor } from '@/lib/computer';
+import { GET, POST } from '@/app/api/bots/[id]/computer-jobs/route';
+
+const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
+
+const tag = randomUUID().slice(0, 8);
+// The real clock: a start's attempt beats on it
+const NOW = new Date();
+const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
+const people: string[] = [];
+let made = 0;
+const env = process.env.COMPUTER_PROVIDER;
+
+async function owner(name: string) {
+  const unique = `${name}-${tag}-${++made}`;
+  const user = await prisma.user.create({ data: { uuid: unique, email: `${unique}@example.test`, name } });
+  people.push(user.id);
+  const brick = await createBrick({ ownerId: user.id, name: `${name}'s Brick` });
+  await giveComputer(brick.id, user.id);
+  return { id: user.id, uuid: unique, brickId: brick.id };
+}
+type Owner = Awaited<ReturnType<typeof owner>>;
+
+const setUp = () => saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+
+const wipe = async () => {
+  await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
+  await prisma.computerStartAttempt.deleteMany({ where: { personId: { in: people } } });
+  await prisma.meterEvent.deleteMany({});
+  await prisma.meterReservation.deleteMany({});
+  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
+};
+
+const key = () => `k_${randomUUID().replace(/-/g, '')}`;
+const jobsOf = (sara: Owner) => prisma.computerJob.findMany({ where: { personId: sara.id }, orderBy: { createdAt: 'asc' }, select: { id: true, startKey: true, startAckedAt: true, status: true } });
+const roomsOf = (sara: Owner) => prisma.meterReservation.findMany({ where: { personId: sara.id }, select: { reservationKey: true, jobId: true } });
+const attemptOf = (sara: Owner, startKey: string) => prisma.computerStartAttempt.findUniqueOrThrow({ where: { botId_personId_startKey: { botId: sara.brickId, personId: sara.id, startKey } } });
+
+/** One start through the real route, as the game makes it when it acks (key + acks headers). */
+const post = async (sara: Owner, startKey: string, title: string, extra: Record<string, string> = {}) =>
+  (await POST(
+    new NextRequest(`http://orbit.test/api/bots/${sara.brickId}/computer-jobs`, {
+      method: 'POST',
+      body: JSON.stringify({ userId: sara.uuid, title, origin: { kind: 'dm', ref: `!chat-${tag}:example.test` } }),
+      headers: { 'content-type': 'application/json', 'x-computer-start-attempt': startKey, 'x-computer-start-acks': '1', ...extra },
+    }),
+    { params: Promise.resolve({ id: sara.brickId }) },
+  )).json();
+const look = async (sara: Owner, startKey: string) =>
+  (await GET(new NextRequest(`http://orbit.test/api/bots/${sara.brickId}/computer-jobs?userId=${encodeURIComponent(sara.uuid)}&attempt=${startKey}`), { params: Promise.resolve({ id: sara.brickId }) })).json();
+const viaLib = (sara: Owner, startKey: string, title: string) => startJob({ botId: sara.brickId, personId: sara.id, title, startKey, acks: true, origin: { kind: 'dm', ref: `!chat-${tag}:example.test` } }, NOW);
+
+run('finding 1 (GPT round 6): one request, one job, through every retry, in a real database', () => {
+  beforeAll(() => {
+    process.env.COMPUTER_PROVIDER = 'fake';
+  });
+  beforeEach(async () => {
+    await wipe();
+    await seedGiveBackLimits();
+    setComputerProviderForTests(new FakeComputerProvider());
+    await setUp();
+  });
+  afterAll(async () => {
+    await wipe();
+    await clearGiveBackLimits();
+    setComputerProviderForTests(null);
+    process.env.COMPUTER_PROVIDER = env;
+    await prisma.user.deleteMany({ where: { id: { in: people } } });
+    await prisma.$disconnect();
+  });
+
+  it('1a REPRO through the route pre-check: B gets `earlier A`; A is acknowledged and finished; B is resent with the SAME key: no second job, one reservation, B answers A’s job', async () => {
+    const sara = await owner('r1a');
+    const KEY_A = key();
+    const KEY_B = key();
+    const a = await post(sara, KEY_A, 'Fill the visa form');
+    expect(a).toMatchObject({ ok: true, job: { status: 'running' } });
+    const b = await post(sara, KEY_B, 'Please do the visa form');
+    expect(b).toEqual({ ok: false, reason: 'earlier', job: { id: a.job.id, status: 'running', state: 'live', attempt: KEY_A } });
+    // Kept before it was answered (on the route's pre-check, before any job): B is answered by A's job, and it acknowledged nothing (1e)
+    expect(await attemptOf(sara, KEY_B)).toMatchObject({ state: 'answered', jobId: a.job.id, aliasAttemptId: null });
+    expect((await jobsOf(sara))[0].startAckedAt).toBeNull();
+    expect(await ackStart(sara.brickId, sara.id, KEY_A)).toBe(true);
+    await finishJob(a.job.id, 'done', minutes(3));
+    // The game's short-lived record of B is gone; its redelivery comes with the same key
+    const again = await post(sara, KEY_B, 'Please do the visa form');
+    expect(again).toMatchObject({ ok: true, job: { id: a.job.id, status: 'done' } });
+    const jobs = await jobsOf(sara);
+    expect(jobs.map((job) => job.id)).toEqual([a.job.id]);
+    const rooms = await roomsOf(sara);
+    expect(rooms).toHaveLength(1);
+    expect(rooms[0].jobId).toBe(a.job.id);
+    // The keyed look says the same job for B (never "no job": the game would start afresh)
+    expect((await look(sara, KEY_B)).started).toMatchObject({ id: a.job.id, status: 'done', attempt: KEY_B });
+  });
+
+  it('1a through the transaction (the route pre-check passed while A was still deciding): B is answered under the person lock and kept; resent after A’s ack and ending, still A’s job', async () => {
+    const sara = await owner('r1a-tx');
+    const KEY_A = key();
+    const KEY_B = key();
+    const a = await viaLib(sara, KEY_A, 'Fill the visa form');
+    if (!a.ok) throw new Error(JSON.stringify(a));
+    expect(await viaLib(sara, KEY_B, 'Please do the visa form')).toMatchObject({ ok: false, reason: 'earlier', job: { id: a.job.id, attempt: KEY_A } });
+    expect(await attemptOf(sara, KEY_B)).toMatchObject({ state: 'answered', jobId: a.job.id });
+    await ackStart(sara.brickId, sara.id, KEY_A);
+    await finishJob(a.job.id, 'failed', minutes(3), null, 'ours');
+    expect(await viaLib(sara, KEY_B, 'Please do the visa form')).toMatchObject({ ok: false, reason: 'broken_start' });
+    expect((await jobsOf(sara)).map((job) => job.id)).toEqual([a.job.id]);
+    expect(await roomsOf(sara)).toHaveLength(1);
+  });
+
+  it('1a while A is still unconfirmed: B’s retry is `earlier A` again (never a job), and its ack confirms nothing of A’s (1e)', async () => {
+    const sara = await owner('r1a-unacked');
+    const KEY_A = key();
+    const KEY_B = key();
+    const a = await post(sara, KEY_A, 'Visa');
+    await post(sara, KEY_B, 'Visa please');
+    expect(await post(sara, KEY_B, 'Visa please')).toMatchObject({ ok: false, reason: 'earlier', job: { id: a.job.id, attempt: KEY_A } });
+    expect(await ackStart(sara.brickId, sara.id, KEY_B)).toBe(false);
+    expect((await jobsOf(sara))[0]).toMatchObject({ id: a.job.id, startAckedAt: null });
+    expect(await jobsOf(sara)).toHaveLength(1);
+  });
+
+  it('1b REPRO (second order): A began before B but its attempt was not visible when B decided; B is made and acknowledged; A goes on: A is superseded by B’s job and answers it. One job, one reservation', async () => {
+    const sara = await owner('r1b');
+    const KEY_A = key();
+    const KEY_B = key();
+    const b = await post(sara, KEY_B, 'Please do the visa form');
+    expect(b).toMatchObject({ ok: true });
+    await ackStart(sara.brickId, sara.id, KEY_B);
+    // A's attempt committed AFTER B decided, though A began first (its row says it began before B's job): it is open and still beating
+    const bJob = await prisma.computerJob.findUniqueOrThrow({ where: { id: b.job.id } });
+    await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: KEY_A, state: 'open', beatAt: new Date(), createdAt: new Date(bJob.createdAt.getTime() - 1_000) } });
+    const a = await post(sara, KEY_A, 'Fill the visa form');
+    expect(a).toMatchObject({ ok: true, job: { id: b.job.id } });
+    expect(await attemptOf(sara, KEY_A)).toMatchObject({ state: 'superseded', jobId: b.job.id });
+    expect((await jobsOf(sara)).map((job) => job.id)).toEqual([b.job.id]);
+    expect(await roomsOf(sara)).toHaveLength(1);
+    // While B is still unconfirmed the same order answers `earlier B` (it acknowledges nothing)
+    const tom = await owner('r1b-unacked');
+    const KEY_C = key();
+    const KEY_D = key();
+    const c = await post(tom, KEY_C, 'Hotel');
+    const cJob = await prisma.computerJob.findUniqueOrThrow({ where: { id: c.job.id } });
+    await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_D, state: 'open', beatAt: new Date(), createdAt: new Date(cJob.createdAt.getTime() - 1_000) } });
+    expect(await post(tom, KEY_D, 'Book the hotel')).toMatchObject({ ok: false, reason: 'earlier', job: { id: c.job.id, attempt: KEY_C } });
+    expect(await jobsOf(tom)).toHaveLength(1);
+    expect((await jobsOf(tom))[0].startAckedAt).toBeNull();
+  });
+
+  it('a start answered while the earlier one had NO job yet waits on THAT attempt: answered with its job once it makes one, and `expired` if it ended with none (the game then starts afresh)', async () => {
+    const sara = await owner('r1-alias');
+    const KEY_A = key();
+    const KEY_B = key();
+    // A reached Orbit and is still deciding (open, beating, no job)
+    const aAttempt = await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: KEY_A, state: 'open', beatAt: new Date() } });
+    expect(await viaLib(sara, KEY_B, 'Visa please')).toEqual({ ok: false, reason: 'earlier', job: { id: null, status: null, state: 'starting', attempt: KEY_A } });
+    expect(await attemptOf(sara, KEY_B)).toMatchObject({ state: 'answered', jobId: null, aliasAttemptId: aAttempt.id });
+    // The look for B: A is still going on
+    expect(await startedJobFor(sara.brickId, sara.id, KEY_B)).toEqual({ inProgress: true });
+    const a = await viaLib(sara, KEY_A, 'Visa');
+    if (!a.ok) throw new Error(JSON.stringify(a));
+    expect(await viaLib(sara, KEY_B, 'Visa please')).toMatchObject({ ok: false, reason: 'earlier', job: { id: a.job.id, attempt: KEY_A } });
+    await ackStart(sara.brickId, sara.id, KEY_A);
+    expect(await viaLib(sara, KEY_B, 'Visa please')).toMatchObject({ ok: true, job: { id: a.job.id } });
+    expect(await jobsOf(sara)).toHaveLength(1);
+    // Another person: A ended with no job (it stopped beating and was let go)
+    const tom = await owner('r1-alias-dead');
+    const deadA = await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_A, state: 'open', beatAt: new Date() } });
+    await viaLib(tom, KEY_B, 'Visa please');
+    await prisma.computerStartAttempt.update({ where: { id: deadA.id }, data: { state: 'expired' } });
+    expect(await viaLib(tom, KEY_B, 'Visa please')).toEqual({ ok: false, reason: 'expired' });
+    expect(await jobsOf(tom)).toHaveLength(0);
+  });
+
+  it('1c the game’s expired-key retry (its record gone, hours later, after the sweep of old marks): the kept answer survives the sweep and the retry makes no second job', async () => {
+    const sara = await owner('r1c');
+    const KEY_A = key();
+    const KEY_B = key();
+    const a = await post(sara, KEY_A, 'Visa');
+    await post(sara, KEY_B, 'Visa please');
+    await ackStart(sara.brickId, sara.id, KEY_A);
+    await finishJob(a.job.id, 'done', minutes(3));
+    // The sweep runs as if a day had passed: attempts bound to a job (made, answered) stay as long as the job
+    await forgetOldStartMarks(minutes(24 * 60));
+    expect(await attemptOf(sara, KEY_B)).toMatchObject({ state: 'answered', jobId: a.job.id });
+    expect(await attemptOf(sara, KEY_A)).toMatchObject({ state: 'made', jobId: a.job.id });
+    expect(await post(sara, KEY_B, 'Visa please')).toMatchObject({ ok: true, job: { id: a.job.id } });
+    expect(await jobsOf(sara)).toHaveLength(1);
+    expect(await roomsOf(sara)).toHaveLength(1);
+    // An alias of an attempt that made no job is kept too (its answer is still `expired`, never a fresh job under the old key)
+    const tom = await owner('r1c-alias');
+    const deadA = await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: KEY_A, state: 'open', beatAt: new Date() } });
+    await viaLib(tom, KEY_B, 'Visa please');
+    await prisma.computerStartAttempt.update({ where: { id: deadA.id }, data: { state: 'expired', beatAt: minutes(-120) } });
+    await prisma.computerStartAttempt.update({ where: { botId_personId_startKey: { botId: tom.brickId, personId: tom.id, startKey: KEY_B } }, data: { beatAt: minutes(-120) } });
+    await forgetOldStartMarks(new Date());
+    expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(2);
+    expect(await post(tom, KEY_B, 'Visa please')).toEqual({ ok: false, reason: 'expired' });
+    expect(await jobsOf(tom)).toHaveLength(0);
+    // CONTROL: a lone attempt that made nothing and answers nothing is still swept by age
+    await prisma.computerStartAttempt.create({ data: { botId: tom.brickId, personId: tom.id, startKey: key(), state: 'expired', beatAt: minutes(-120) } });
+    await forgetOldStartMarks(new Date());
+    expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(2);
+  });
+
+  it('1d CONTROL: a deliberate second start with the SAME title after the first was acknowledged makes a second job with its own reservation', async () => {
+    const sara = await owner('r1d');
+    const first = await post(sara, key(), 'Visa form');
+    expect(first).toMatchObject({ ok: true });
+    await ackStart(sara.brickId, sara.id, (await jobsOf(sara))[0].startKey as string);
+    await finishJob(first.job.id, 'done', minutes(3));
+    const second = await post(sara, key(), 'Visa form');
+    expect(second).toMatchObject({ ok: true, job: { status: 'running' } });
+    expect(second.job.id).not.toBe(first.job.id);
+    const rooms = await roomsOf(sara);
+    expect(rooms.map((room) => room.jobId).sort()).toEqual([first.job.id, second.job.id].sort());
+  });
+
+  it('an attempt bound to a job goes WITH the job (never orphaned): a job taken away removes its attempts and the answers that point at it', async () => {
+    const sara = await owner('r1-cascade');
+    const KEY_A = key();
+    const KEY_B = key();
+    const a = await post(sara, KEY_A, 'Visa');
+    await post(sara, KEY_B, 'Visa please');
+    await prisma.computerJob.delete({ where: { id: a.job.id } });
+    expect(await prisma.computerStartAttempt.count({ where: { personId: sara.id } })).toBe(0);
+  });
+});

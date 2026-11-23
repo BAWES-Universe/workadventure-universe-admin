@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
@@ -66,7 +66,7 @@ import {
   type PausedWhy,
 } from '@/lib/computer-values';
 import { dropProfile, restoreProfile } from '@/lib/computer-browser-profile';
-import { carryOnFrom } from '@/lib/computer-continue';
+import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
 
 /**
  * A Brick's computer, and the jobs on it (game #2000, Brick 9).
@@ -461,7 +461,12 @@ export type Started =
   /** A rule the person said in chat does not let this job take room: nothing is left behind, and the rule's own words come with it. */
   | { ok: false; reason: 'rule'; words: string }
   /** This start was delayed past its life (it stopped beating) and no job may be made for it now: the game starts afresh under a new key. */
-  | { ok: false; reason: 'expired' };
+  | { ok: false; reason: 'expired' }
+  /**
+   * "Try again" named a job that cannot be carried on (GPT round 6, finding 6): NOTHING was made or reserved. `why` says which (lib/computer-continue `FreshBecause`); `job` is the named job's title and how it stands
+   * (only the asker's own: never for not_found / not_theirs). Brick says so and offers "Start a new job" as its own choice: an ordinary start under a new key, with no continuation header.
+   */
+  | { ok: false; reason: 'cannot_continue'; why: FreshBecause; job?: NamedJob };
 
 /** Room is asked for once for each try to run a job: room that was released stays closed, so a later try asks under a new key. */
 /** The longest a disk's room is kept for a job that is still starting its machine (the job's own room renews each few minutes, this one does not). */
@@ -502,7 +507,13 @@ export async function startedJobFor(botId: string, personId: string, startKey: s
   // (or nothing) the answer, and a start that finished in between has saved its job before it removed its mark, so the look made after the mark is gone sees it. The key alone says which start: never a job of the
   // same chat or title, however recent
   if (await startIsGoingOn(startFenceOf(botId, personId, startKey), now, { botId, personId, startKey })) return { inProgress: true };
-  return prisma.computerJob.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select: { id: true, status: true } });
+  const own = await prisma.computerJob.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select: { id: true, status: true } });
+  if (own) return own;
+  // Finding 1 (GPT round 6): a start that was answered with another start's job (`earlier`) is answered with THAT job, for as long as it exists: the look never says "no job" for a request a job answered
+  const answered = await attemptAnswer(botId, personId, startKey, now);
+  if (answered && 'job' in answered) return { id: answered.job.id, status: answered.job.status };
+  if (answered && 'starting' in answered) return { inProgress: true };
+  return null;
 }
 
 /**
@@ -534,12 +545,71 @@ export async function earlierUnconfirmedStart(botId: string, personId: string, s
     const going = await prisma.computerStartAttempt.findFirst({
       where: { botId, personId, state: 'open', jobId: null, beatAt: { gt: new Date(Date.now() - attemptLifeMs()) }, id: { not: mine.id }, OR: [{ createdAt: { lt: mine.createdAt } }, { createdAt: mine.createdAt, id: { lt: mine.id } }] },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      select: { startKey: true },
+      select: { id: true, startKey: true },
     });
-    if (going) return { id: null, status: null, state: 'starting', attempt: going.startKey };
+    if (going) {
+      // Finding 1: the answer is kept BEFORE it is given, so a retry of this key is answered with that start (whatever it comes to), never makes a job of its own
+      await answerAttemptIn(prisma, { botId, personId, startKey }, { aliasAttemptId: going.id });
+      return { id: null, status: null, state: 'starting', attempt: going.startKey };
+    }
   }
   const earlier = await prisma.computerJob.findFirst({ where: { botId, personId, startAckedAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true, status: true, startKey: true } });
-  return earlier ? { id: earlier.id, status: earlier.status, state: startStateOf(earlier.status), attempt: earlier.startKey } : null;
+  if (!earlier) return null;
+  // Finding 1: kept before it is answered (it acknowledges nothing: the earlier job stays unconfirmed until ITS key is acknowledged)
+  await answerAttemptIn(prisma, { botId, personId, startKey }, { jobId: earlier.id });
+  return { id: earlier.id, status: earlier.status, state: startStateOf(earlier.status), attempt: earlier.startKey };
+}
+
+/**
+ * Keeps, durably, that the start under `key` was answered with another start (finding 1, GPT round 6): state `answered`, with the job that answered it, or the attempt it waits for while that one has no job yet.
+ * Written before the answer is given. It never touches a start that made its own job (`made`) or was superseded, and it acknowledges nothing: the answering job's `start_acked_at` is left as it is.
+ */
+async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>, key: { botId: string; personId: string; startKey: string }, by: { jobId: string } | { aliasAttemptId: string }): Promise<void> {
+  const jobId = 'jobId' in by ? by.jobId : null;
+  const alias = 'aliasAttemptId' in by ? by.aliasAttemptId : null;
+  await db.$executeRaw`
+    INSERT INTO "computer_start_attempts" ("id", "bot_id", "person_id", "start_key", "state", "job_id", "alias_attempt_id", "beat_at", "created_at")
+    VALUES (${randomUUID()}, ${key.botId}, ${key.personId}, ${key.startKey}, 'answered', ${jobId}, ${alias}, NOW(), NOW())
+    ON CONFLICT ("bot_id", "person_id", "start_key") DO UPDATE SET "state" = 'answered', "job_id" = EXCLUDED."job_id", "alias_attempt_id" = EXCLUDED."alias_attempt_id"
+    WHERE "computer_start_attempts"."state" IN ('open', 'expired', 'answered')`;
+}
+
+/** What a start's own attempt row says it was answered with (finding 1): a job, an older start still going on (its key), or a start that ended with no job (`expired`). Null when the row decides nothing (none, open, made, expired on its own). */
+type AttemptAnswer = { job: { id: string; status: string; startKey: string | null; startAckedAt: Date | null } } | { starting: string } | { expired: true };
+
+async function attemptAnswer(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<AttemptAnswer | null> {
+  const select = { id: true, state: true, jobId: true, aliasAttemptId: true, startKey: true, beatAt: true } as const;
+  let row = await prisma.computerStartAttempt.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select });
+  // Only a start that was answered with another (`answered`, or `superseded` by a job made after it began) is answered from its row. Its own open, made or expired attempt is decided as before
+  if (!row || (row.state !== 'answered' && row.state !== 'superseded')) return null;
+  // The chain is followed a few links at most (an alias of an alias): it always ends at a job, a start still going on, or one that ended with no job
+  for (let hop = 0; hop < 8 && row; hop++) {
+    if (row.jobId) {
+      const job = await prisma.computerJob.findUnique({ where: { id: row.jobId }, select: { id: true, status: true, startKey: true, startAckedAt: true } });
+      return job ? { job } : { expired: true };
+    }
+    if (row.aliasAttemptId) {
+      row = await prisma.computerStartAttempt.findUnique({ where: { id: row.aliasAttemptId }, select });
+      continue;
+    }
+    if (hop > 0 && row.state === 'open' && row.beatAt.getTime() > now.getTime() - attemptLifeMs()) return { starting: row.startKey };
+    return { expired: true };
+  }
+  return { expired: true };
+}
+
+/**
+ * A start under a key that was ANSWERED before (finding 1): the same answer again, before anything else, whatever happened since (the answering job was acknowledged, ended, or the game forgot its key).
+ * While the answering job is unconfirmed it is `earlier` (acknowledging nothing); once it is confirmed it is that job, as a repeated start of it would be. Null when the key's row decides nothing.
+ */
+export async function startAnsweredBefore(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<Started | null> {
+  const answered = await attemptAnswer(botId, personId, startKey, now);
+  if (!answered) return null;
+  if ('expired' in answered) return { ok: false, reason: 'expired' };
+  if ('starting' in answered) return { ok: false, reason: 'earlier', job: { id: null, status: null, state: 'starting', attempt: answered.starting } };
+  const { job } = answered;
+  if (!job.startAckedAt) return { ok: false, reason: 'earlier', job: { id: job.id, status: job.status, state: startStateOf(job.status), attempt: job.startKey } };
+  return (await reuseJob(botId, { id: job.id }, now)) ?? { ok: false, reason: 'expired' };
 }
 
 /** What a start with a key is for: the sha-256 of the Brick, the person and the key. */
@@ -604,8 +674,9 @@ async function forgetStartMark(id: string): Promise<void> {
 
 /** Marks that were never removed (their process died) are deleted. Returns how many. */
 export async function forgetOldStartMarks(now: Date = new Date(), olderThanMs: number = 60 * 60_000): Promise<number> {
-  // The attempts of starts that are long over go with them (a made one keeps its job's key by the job itself)
-  await prisma.computerStartAttempt.deleteMany({ where: { beatAt: { lt: new Date(now.getTime() - olderThanMs) } } });
+  // The attempts of starts that are long over go with them. An attempt bound to a job (made, superseded or answered by it) lives as long as that job (the foreign key deletes it with the job), and so does one
+  // another start's answer waits on or that waits on another: a retry of either is answered from them after the game forgot its key (finding 1)
+  await prisma.computerStartAttempt.deleteMany({ where: { beatAt: { lt: new Date(now.getTime() - olderThanMs) }, jobId: null, aliasAttemptId: null, aliases: { none: {} } } });
   return (await prisma.computerStartMark.deleteMany({ where: { startedAt: { lt: new Date(now.getTime() - olderThanMs) } } })).count;
 }
 
@@ -619,15 +690,16 @@ type StartInput = { botId: string; /** The start says the game acks it (header `
 type Begun = { done: Started } | { created: { id: string } };
 
 export async function startJob(input: StartInput, now: Date = new Date()): Promise<Started> {
-  // A start with a key keeps a mark from before its first read until its job is saved, or it ends without one, so the look for it (`startedJobFor`) can say it is still going on. A start with no key is never asked about
-  const mark = input.startKey ? await markStart(startFenceOf(input.botId, input.personId, input.startKey)) : null;
-  // ...and so does its attempt, committed BEFORE the job exists and kept beating with the mark: a delayed request of this start can never make a job after a reworded retry of it made one (decided in the transaction that makes the job)
-  const opened = input.startKey
-    ? await openAttempt(input.botId, input.personId, input.startKey).catch(async (error) => {
-        if (mark) await forgetStartMark(mark);
+  // A start with a key opens its attempt FIRST, in one statement, before anything else is written or read (finding 1, GPT round 6): there is no moment where only its mark is visible, so a reworded retry that
+  // decides while this one is held sees it (and waits for it), and a job another start made after this one began supersedes it (decided in the transaction that makes the job). Kept beating with the mark
+  const opened = input.startKey ? await openAttempt(input.botId, input.personId, input.startKey) : false;
+  // ...then its mark, from before its first read until its job is saved, or it ends without one, so the look for it (`startedJobFor`) can say it is still going on. A start with no key is never asked about
+  const mark = input.startKey
+    ? await markStart(startFenceOf(input.botId, input.personId, input.startKey)).catch(async (error) => {
+        if (input.startKey && opened) await closeAttempt(input.botId, input.personId, input.startKey);
         throw error;
       })
-    : false;
+    : null;
   // The mark is renewed for as long as the start is going on, so a start that takes longer than the mark's life (a slow database, a pool that is busy) is still found to be going on by the look for it,
   // never read as "no job can still reach Orbit". The beat is a timer, not a wait: it never holds the start, and it ends with the start, before the mark is removed
   const beat = mark ? setInterval(() => void Promise.all([renewStartMark(mark), input.startKey ? beatAttempt(input.botId, input.personId, input.startKey) : undefined]), startMarkTiming.beatMs) : null;
@@ -654,6 +726,11 @@ export async function startJob(input: StartInput, now: Date = new Date()): Promi
 
 /** Everything a start does before its job exists, and the saving of the job: the part its mark covers. */
 async function beginJob(input: StartInput, now: Date): Promise<Begun> {
+  // Finding 1: a key that was answered with another start's job is answered from its row before anything else: never a job of its own, after acknowledgement, ending or the game forgetting its key
+  if (input.startKey) {
+    const answered = await startAnsweredBefore(input.botId, input.personId, input.startKey, now);
+    if (answered) return { done: answered };
+  }
   const bot = await brickOf(input.botId, input.personId);
   if (!bot) return { done: { ok: false, reason: 'not_owner' } };
   const row = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
@@ -683,6 +760,8 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
       if (again) return { done: again };
     }
   }
+  // Finding 6: a "try again" that cannot carry on makes nothing at all. It never falls back to a fresh paid job: the person chooses "Start a new job" separately (an ordinary start, under its own key)
+  if (carry && 'fresh' in carry) return { done: { ok: false, reason: 'cannot_continue', why: carry.fresh, ...(carry.job ? { job: carry.job } : {}) } };
   const link = carry && 'link' in carry ? carry.link : null;
   // The way: a connected app that would do this for less is used instead, before anything is made, woken or reserved
   const routed = await routeJob({ botId: input.botId, personId: input.personId, plan: input.plan, awakeMicrosPerMinute: providerFor(row)?.microsPerMinute() ?? null, hasMachine: !!row.providerRef }, now);
@@ -705,6 +784,22 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
           const mine = await tx.computerStartAttempt.findUnique({ where: { botId_personId_startKey: { botId: input.botId, personId: input.personId, startKey: input.startKey as string } } });
           const asked = new Date();
           const alive = (beat: Date) => beat.getTime() > asked.getTime() - attemptLifeMs();
+          const ownKey = { botId: input.botId, personId: input.personId, startKey: input.startKey as string };
+          // Answered meanwhile (another request of this same key was answered with an earlier start while this one waited): the same answer, decided from the row after the lock
+          if (mine && mine.state === 'answered') return { reanswer: true as const };
+          // Finding 1 (GPT's second order): an OLDER open attempt loses to a job another keyed start made after it began. That start could not see this one (it was not committed yet when it decided),
+          // so this one is superseded by that job now and answers it: never a second job for one request
+          if (mine && mine.state === 'open') {
+            const after = await tx.computerJob.findFirst({
+              where: { botId: input.botId, personId: input.personId, runId: null, startKey: { not: null }, NOT: { startKey: input.startKey as string }, createdAt: { gte: mine.createdAt } },
+              orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+              select: { id: true },
+            });
+            if (after) {
+              await tx.computerStartAttempt.updateMany({ where: { id: mine.id, state: 'open' }, data: { state: 'superseded', jobId: after.id } });
+              return { reanswer: true as const };
+            }
+          }
           if (mine && mine.state === 'superseded' && mine.jobId) {
             const by = await tx.computerJob.findUnique({ where: { id: mine.jobId }, select: { id: true, status: true, startKey: true } });
             if (by) return { earlier: { id: by.id, status: by.status, state: startStateOf(by.status), attempt: by.startKey } };
@@ -718,12 +813,20 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
             const older = await tx.computerStartAttempt.findFirst({
               where: { botId: input.botId, personId: input.personId, state: 'open', jobId: null, beatAt: { gt: new Date(asked.getTime() - attemptLifeMs()) }, id: { not: mine.id }, OR: [{ createdAt: { lt: mine.createdAt } }, { createdAt: mine.createdAt, id: { lt: mine.id } }] },
               orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-              select: { startKey: true },
+              select: { id: true, startKey: true },
             });
-            if (older) return { earlier: { id: null, status: null, state: 'starting' as const, attempt: older.startKey } };
+            if (older) {
+              // Finding 1: kept before it is answered, in this same transaction
+              await answerAttemptIn(tx, ownKey, { aliasAttemptId: older.id });
+              return { earlier: { id: null, status: null, state: 'starting' as const, attempt: older.startKey } };
+            }
           }
           const earlier = await tx.computerJob.findFirst({ where: { botId: input.botId, personId: input.personId, startAckedAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true, status: true, startKey: true } });
-          if (earlier) return { earlier: { id: earlier.id, status: earlier.status, state: startStateOf(earlier.status), attempt: earlier.startKey } };
+          if (earlier) {
+            // Finding 1: kept before it is answered; it acknowledges nothing (the earlier job stays unconfirmed until its own key is acknowledged)
+            await answerAttemptIn(tx, ownKey, { jobId: earlier.id });
+            return { earlier: { id: earlier.id, status: earlier.status, state: startStateOf(earlier.status), attempt: earlier.startKey } };
+          }
           const made = await tx.computerJob.create({ data: { ...data, startAckedAt: null } });
           // The attempt is made, and every older attempt of this person on this Brick that stopped beating is superseded by this job (a delayed request of it will be answered with it, and can make none of its own)
           if (mine) await tx.computerStartAttempt.updateMany({ where: { id: mine.id }, data: { state: 'made', jobId: made.id } });
@@ -733,6 +836,7 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
         { timeout: 15_000, maxWait: 15_000 },
       );
       if ('expired' in decided) return { done: { ok: false, reason: 'expired' } };
+      if ('reanswer' in decided) return { done: (await startAnsweredBefore(input.botId, input.personId, input.startKey, now)) ?? { ok: false, reason: 'expired' } };
       if ('earlier' in decided && decided.earlier) return { done: { ok: false, reason: 'earlier', job: decided.earlier } };
       if ('same' in decided) {
         const winner = await reuseJob(input.botId, { botId_personId_startKey: { botId: input.botId, personId: input.personId, startKey: input.startKey } }, now);
