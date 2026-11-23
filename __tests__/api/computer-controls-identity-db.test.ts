@@ -388,6 +388,23 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       }
     });
 
+    it('CodeRabbit on #1025 (53): a Cancel whose ending lost its race on every try keeps its answer pending (the job still holds the machine), and its retry under the same id ends it and then answers as a replay', async () => {
+      const { sara, jobId } = await running('cr-53');
+      const c = command();
+      const spy = jest.spyOn(controlInternals, 'endByPerson').mockImplementation(async () => undefined);
+      try {
+        expect(await cancelJob(sara.brickId, sara.id, jobId, minutes(2), c)).toMatchObject({ ok: true });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+      expect(await commandOf(c.id)).toMatchObject({ outcome: { ok: true, pending: true, targets: [jobId] } });
+      // The same command again runs the ending again
+      expect(await cancelJob(sara.brickId, sara.id, jobId, minutes(3), c)).toMatchObject({ ok: true });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'person' });
+      expect((await commandOf(c.id))?.outcome).toEqual({ ok: true, targets: [jobId] });
+    });
+
     it('a Stop’s command id used again on the owner’s OTHER Brick is `command_reused`, and stops nothing there', async () => {
       const { sara, jobId } = await running('f4-stop-two-bricks');
       const second = await createBrick({ ownerId: sara.id, name: 'Second Brick' });

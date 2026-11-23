@@ -575,7 +575,9 @@ export async function cancelJob(botId: string, ownerId: string, jobId: string, n
   }
   const after = await jobOnBrick(botId, jobId);
   if (after && after.pauses > 0) await dropProfile(botId, jobId, now).catch((error) => console.error('[Computer] Could not drop a cancelled job’s browser:', error instanceof Error ? error.message : 'unknown'));
-  if (under) await keepOutcome(prisma, under.command, { ok: true, targets: [jobId] });
+  // The answer is kept only once the job is over: an ending that lost its race on every try (a concurrent write moved the job each time) leaves the command pending, and a retry under the same id ends it again, instead of
+  // answering the stored success forever while the job still holds the machine (CodeRabbit on #1025, 53)
+  if (under && (!after || isOver(after.status))) await keepOutcome(prisma, under.command, { ok: true, targets: [jobId] });
   return viewOf(botId, ownerId, now);
 }
 
