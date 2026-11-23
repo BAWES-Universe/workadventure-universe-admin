@@ -27,6 +27,7 @@ import { pinnedMicrosPerMinute } from '@/lib/spend-rules-values';
 import { costOfSeconds, isOver, type PausedWhy } from '@/lib/computer-values';
 import { dropProfile, parkProfile, signInsKept } from '@/lib/computer-browser-profile';
 import { grantsPrintIn, tellIn } from '@/lib/computer-tellings';
+import { releaseIfUnheld } from '@/lib/computer-control';
 import type { ComputerProvider as Provider } from '@/lib/computer-provider';
 
 /** Why a control was not done. `not_found`: not the owner's Brick, or no such job on it. `over`: the job already ended. `taken_over`: the person has the screen. `ending`: its ending is already decided. `not_paused` / `not_queued`: the job is not in the state the tap was for. `allowance` / `rule`: a resume the person's month, or a limit they set, does not let start (the job stays paused). */
@@ -73,13 +74,19 @@ export interface PauseOptions {
 /** What a pause decided inside its transaction: nothing (and why), or the pause of a job that held the machine, with what the steps after the commit need. */
 export type PauseDecision =
   | { kind: 'not_found' | 'over' | 'superseded' | 'taken_over' | 'ending' | 'already' | 'queued' | 'key_gone' }
-  | { kind: 'held'; n: number; botId: string; responseId: string | null; turnHold: boolean };
+  | { kind: 'held'; n: number; botId: string; responseId: string | null; turnHold: boolean; /** The person held the screen: it was taken back in this write (released after the commit) */ heldScreen: boolean };
 
 export interface PauseInOptions extends PauseOptions {
   /** A pause decided for a refused model call: only while that call's key is still good and was made under the owner epoch the job has now (a delayed call of a worker that was replaced pauses nothing: `key_gone`). */
   key?: string;
   /** The person's own tap may pause a job waiting in line; a pause for the month or a limit is only ever for a job that holds the machine (one in line is left to the line). */
   heldOnly?: boolean;
+  /**
+   * The month or a limit only (Fable's ruling of 23 Nov, section 7): a job the person holds the screen of is paused too, never ended. The screen is taken back in the same write (the job is Brick's again, and the
+   * computer goes back to Brick's once no job is left in the person's hands, as an ending does), the pause is marked `heldScreen`, it never carries on by itself, and on resume it asks the person for that step again.
+   * Without it (the person's own Pause), a job whose screen the person holds is not paused (`taken_over`, decision 3a).
+   */
+  heldScreen?: boolean;
 }
 
 /**
@@ -102,8 +109,9 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
     await tx.computerJob.update({ where: { id: jobId }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, leaseVersion: { increment: 1 } } });
     return { kind: 'queued' };
   }
-  // Rule A: the person holding the screen hands it back first (a pause is not offered then)
-  if (row.control !== 'brick') return { kind: 'taken_over' };
+  // Rule A: the person holding the screen hands it back first (their own Pause is not offered then); the month or a limit takes the screen back and pauses (section 7)
+  const heldScreen = row.control !== 'brick';
+  if (heldScreen && !(options.heldScreen && (why === 'allowance' || why === 'rule'))) return { kind: 'taken_over' };
   // Rule B: a kept finish or a decided cutoff owns the ending
   if ((await hasFinishIntent(tx, jobId)) || (await hasPoolCutoff(tx, jobId))) return { kind: 'ending' };
   // E3: a refused call pauses the job only while its own key is still good and is the current owner's (a key of before the epochs counts as epoch 0)
@@ -152,6 +160,8 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
       readyWhere: null,
       handoverUntold: false,
       lastTriedAt: null,
+      // The screen is taken back: the job is Brick's again (the computer itself goes back to Brick's after the commit, once no job is left in the person's hands)
+      ...(heldScreen ? { control: 'brick' } : {}),
       ownerEpoch: { increment: 1 },
       leaseVersion: { increment: 1 },
     },
@@ -159,10 +169,10 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   await revokeJobTokens(jobId, now, undefined, tx);
   // What the Brick's Apps were at this pause: the month or a limit carries the job on by itself only while they are the same (lib/computer-limit-pause)
   const grantsPrint = await grantsPrintIn(tx, job.botId);
-  await tx.computerJobPause.create({ data: { jobId, n, why, roomKey: job.reservationKey, seconds, startedAt: job.startedAt, at: now, grantsPrint } });
-  // The month or a limit: Brick tells the person once, from this very commit (their own tap is never told back to them)
-  if (!options.backInLine && (why === 'allowance' || why === 'rule')) await tellIn(tx, jobId, 'paused', why, now);
-  return { kind: 'held', n, botId: job.botId, responseId: job.agentResponseId, turnHold };
+  await tx.computerJobPause.create({ data: { jobId, n, why, roomKey: job.reservationKey, seconds, startedAt: job.startedAt, at: now, grantsPrint, heldScreen } });
+  // The month or a limit: Brick tells the person once, from this very commit (their own tap is never told back to them); a screen taken back says so, in place of the usual line
+  if (!options.backInLine && (why === 'allowance' || why === 'rule')) await tellIn(tx, jobId, 'paused', why, now, { heldScreen });
+  return { kind: 'held', n, botId: job.botId, responseId: job.agentResponseId, turnHold, heldScreen };
 }
 
 /**
@@ -185,6 +195,8 @@ export async function afterPause(jobId: string, decided: PauseDecision, now: Dat
     console.error('[Computer] Could not put away a paused job’s browser:', error instanceof Error ? error.message : 'unknown');
     return null;
   });
+  // A screen taken back: the computer goes back to Brick's once no job is left in the person's hands, exactly as when a job the person held ends (the screen link ends with it)
+  if (decided.heldScreen) await releaseIfUnheld(botId).catch((error) => console.error('[Computer] Could not take the screen back at a pause:', error instanceof Error ? error.message : 'unknown'));
   if (decided.turnHold) await settleTurnHold(botId);
   else await controlInternals.restIfUnheld(botId, now);
   if (options.advance !== false) await controlInternals.startNext(botId, now);

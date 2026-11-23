@@ -3707,6 +3707,8 @@ model ComputerJobPause {
   resumedAt DateTime? @map("resumed_at")
   /// A digest of the Apps the Brick had at this pause (never the Apps themselves): a job the month or a limit paused carries on by itself only while they are the same. Null = not known (Brick asks first).
   grantsPrint String? @map("grants_print") @db.VarChar(64)
+  /// The month or a limit was reached while the person held the screen: the screen was taken back; it never carries on by itself, and asks the person again on resume
+  heldScreen  Boolean @default(false) @map("held_screen")
 
   job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
@@ -3725,6 +3727,8 @@ model ComputerJobTelling {
   kind            String    @db.VarChar(16)
   /// allowance | rule (for `paused`); null otherwise
   why             String?   @db.VarChar(10)
+  /// The pause took the screen back from the person (Brick says the held-screen line instead of the usual one)
+  heldScreen      Boolean   @default(false) @map("held_screen")
   createdAt       DateTime  @map("created_at")
   toldAt          DateTime? @map("told_at")
   undeliverableAt DateTime? @map("undeliverable_at")

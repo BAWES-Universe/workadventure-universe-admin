@@ -1285,9 +1285,10 @@ export async function renewJob(
         return { kind: 'ok' as const, epoch: job.ownerEpoch };
       }
       // The person's month or a limit they set: the job PAUSES and waits (piece 3), decided right here, in the same transaction and under the same locks as the refusal (the owner, no kept intent, no cutoff: all read
-      // above). Its time so far is charged and the unused room released in this commit; it carries on by itself when more arrives. Not while the person holds the screen: that ends as before
-      if ((room.reason === 'allowance' || room.reason === 'rule') && job.control === 'brick') {
-        const paused = await controls.decidePauseIn(tx, jobId, room.reason, now, provider, { ownerEpoch: job.ownerEpoch, heldOnly: true });
+      // above). Its time so far is charged and the unused room released in this commit; it carries on by itself when more arrives. While the person holds the screen it pauses too: the screen is taken back in
+      // the same write and it never carries on by itself (Fable's ruling of 23 Nov, section 7)
+      if (room.reason === 'allowance' || room.reason === 'rule') {
+        const paused = await controls.decidePauseIn(tx, jobId, room.reason, now, provider, { ownerEpoch: job.ownerEpoch, heldOnly: true, heldScreen: true });
         if (paused.kind === 'held') return { kind: 'paused' as const, paused, why: room.reason };
       }
       return { kind: 'refused' as const, room, epoch: job.ownerEpoch };
@@ -3101,11 +3102,11 @@ export async function runnableJobs(limit = 50): Promise<RunnableJob[]> {
   return (await runnableJobsPage(limit)).jobs;
 }
 
-export async function getJob(jobId: string): Promise<(JobView & { botId: string; personId: string; /** The control generation the job is on now (it moves each time the person takes the machine and each time it is handed back): what a runner says it acts under. */ controlGeneration: number; /** Who owns the job: the epoch of the worker that last claimed it (0 = nobody ever did), and that worker's run. A runner claims with the epoch it saw here. */ ownerEpoch: number; ownerRun: string | null; /** Set only while the job is still on and its runner has committed to ending it (the finish still to be completed); null otherwise, an ended job included. */ finishPending: FinishPending | null; /** The job was paused before: its runner carries on in the same agent conversation, starting with the resume words. */ resumed: boolean }) | null> {
+export async function getJob(jobId: string): Promise<(JobView & { botId: string; personId: string; /** The control generation the job is on now (it moves each time the person takes the machine and each time it is handed back): what a runner says it acts under. */ controlGeneration: number; /** Who owns the job: the epoch of the worker that last claimed it (0 = nobody ever did), and that worker's run. A runner claims with the epoch it saw here. */ ownerEpoch: number; ownerRun: string | null; /** Set only while the job is still on and its runner has committed to ending it (the finish still to be completed); null otherwise, an ended job included. */ finishPending: FinishPending | null; /** The job was paused before: its runner carries on in the same agent conversation, starting with the resume words. */ resumed: boolean; /** Its last pause took the screen back from the person in the middle of their step: on resume the runner asks the person for that step again (as a paused waiting job does). */ askAgain: boolean }) | null> {
   const row = await prisma.computerJob.findUnique({ where: { id: jobId }, include: { ...JOB_INCLUDE, finishIntent: true } });
   if (!row) return null;
   const pending = row.finishIntent && !isOver(row.status) ? pendingOf(row.finishIntent) : null;
-  return { ...jobView(row), botId: row.botId, personId: row.personId, controlGeneration: row.controlGeneration, ownerEpoch: row.ownerEpoch, ownerRun: row.ownerRun, finishPending: pending, resumed: row.pauses > 0 };
+  return { ...jobView(row), botId: row.botId, personId: row.personId, controlGeneration: row.controlGeneration, ownerEpoch: row.ownerEpoch, ownerRun: row.ownerRun, finishPending: pending, resumed: row.pauses > 0, askAgain: row.pauses > 0 && !!(await prisma.computerJobPause.findUnique({ where: { jobId_n: { jobId: row.id, n: row.pauses } }, select: { heldScreen: true } }))?.heldScreen };
 }
 
 /**

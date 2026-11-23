@@ -22,7 +22,7 @@ import { createBrick } from '@/lib/brick-create';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { memberAllowance } from '@/lib/meter-allowance';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { claimJob, computerTimeInBooks, finishJobUnder, giveComputer, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { claimJob, computerTimeInBooks, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { authorizeModelCall, callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { mintJobToken } from '@/lib/computer-token';
 import { recordPoolCutoff } from '@/lib/computer-faults';
@@ -250,14 +250,79 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect(await prisma.computerJobFault.count({ where: { jobId, callId: { contains: 'c-after' } } })).toBe(0);
     });
 
-    it('the person holds the screen: a pause is not offered, so the month ends the job as before (control for the brick-only pause)', async () => {
+    it('C5.8 the person holds the screen (section 7): the month takes the screen back and PAUSES the job, marked held; Brick says the held-screen line once; it never carries on by itself (Brick asks once); on Resume it asks the person again', async () => {
       const { sara, jobId, epoch } = await running('c5-person');
-      await takeOver(sara.brickId, sara.id, minutes(1));
+      expect((await takeOver(sara.brickId, sara.id, minutes(1))).ok).toBe(true);
       const held = await jobOf(jobId);
-      expect(held).toMatchObject({ control: 'person' });
+      expect(held).toMatchObject({ control: 'person', status: 'waiting' });
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).controlState).toBe('human_ready');
       await setUp({ memberAllowanceMicros: 1_000 });
-      expect(await renewJob(jobId, minutes(5), { epoch: held.ownerEpoch })).toMatchObject({ ok: false, reason: 'allowance' });
-      expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'allowance', pauses: 0 });
+      expect(await renewJob(jobId, minutes(5), { epoch: held.ownerEpoch })).toEqual({ ok: false, reason: 'paused', why: 'allowance' });
+      // One write: paused (never ended), Brick's again, its stretch charged on its own event, nothing held, every key ended, the owner moved
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance', endedBy: null, control: 'brick', pauses: 1, reservationKey: null, ownerEpoch: held.ownerEpoch + 1 });
+      expect(await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId, n: 1 } } })).toMatchObject({ why: 'allowance', heldScreen: true });
+      expect(await prisma.meterEvent.count({ where: { eventId: pauseEventId(jobId, 1) } })).toBe(1);
+      expect(await liveKeys(jobId)).toBe(0);
+      // The screen is taken back: the computer is no longer the person's (on its way back to Brick's, as when a job they held ends)
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).controlState).not.toBe('human_ready');
+      // Told once, with the held-screen mark (the game says the held-screen line in place of the usual one)
+      const said = (await told(minutes(6))).filter((one) => one.jobId === jobId);
+      expect(said).toEqual([expect.objectContaining({ kind: 'paused', pausedWhy: 'allowance', heldScreen: true, seq: 1 })]);
+      await keepReportTold(jobId, 'paused', 1);
+      // More arrives: it does not carry on by itself; Brick asks once, and only once
+      await setUp();
+      expect(await carryOnPaused(minutes(7))).toBe(0);
+      expect(await carryOnPaused(minutes(8))).toBe(0);
+      await sweepComputers(minutes(9));
+      expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance' });
+      expect((await tellings(jobId)).map((one) => one.kind)).toEqual(['paused', 'can_carry_on']);
+      expect((await told(minutes(10))).filter((one) => one.jobId === jobId).map((one) => [one.kind, one.heldScreen])).toEqual([['can_carry_on', undefined]]);
+      // The person says yes (Resume): it runs again on a new room, and its runner is told to ask the person for their step again
+      expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(11))).toMatchObject({ ok: true });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', control: 'brick' });
+      expect(await getJob(jobId)).toMatchObject({ resumed: true, askAgain: true });
+      expect(epoch).toBeGreaterThan(0);
+    });
+
+    it('C5.8 a spending limit while the person holds the screen pauses too (rule, held); a kept intent still wins over it; the pool still ENDS; CONTROL: a pause with the screen not held is not marked and asks nothing again', async () => {
+      const ruled = await running('c5-person-rule');
+      await takeOver(ruled.sara.brickId, ruled.sara.id, minutes(1));
+      await rule(ruled.sara, 10);
+      expect(await renewJob(ruled.jobId, minutes(5), { epoch: (await jobOf(ruled.jobId)).ownerEpoch })).toEqual({ ok: false, reason: 'paused', why: 'rule' });
+      expect(await jobOf(ruled.jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule', control: 'brick' });
+      expect((await tellings(ruled.jobId)).map((one) => [one.kind, one.why, one.heldScreen])).toEqual([['paused', 'rule', true]]);
+      // Rule B: an intent kept while the person holds the screen owns the ending; nothing is paused
+      const intent = await running('c5-person-intent');
+      const ie = (await jobOf(intent.jobId)).ownerEpoch;
+      expect(await recordFinishIntent(intent.jobId, { outcome: 'done', why: null, cause: null, turns: [], run: 'rA', epoch: ie } as never, minutes(1))).toMatchObject({ ok: true });
+      await takeOver(intent.sara.brickId, intent.sara.id, minutes(1));
+      await setUp({ memberAllowanceMicros: 1_000 });
+      expect(await renewJob(intent.jobId, minutes(5), { epoch: (await jobOf(intent.jobId)).ownerEpoch })).toEqual({ ok: false, reason: 'ending' });
+      expect(await prisma.computerJobPause.count({ where: { jobId: intent.jobId } })).toBe(0);
+      await setUp();
+      // Our pool is full while the person holds the screen: it ends, given back, as before
+      const pool = await running('c5-person-pool');
+      await takeOver(pool.sara.brickId, pool.sara.id, minutes(1));
+      await setUp({ poolCeilingMicros: 1 });
+      expect(await renewJob(pool.jobId, minutes(5), { epoch: (await jobOf(pool.jobId)).ownerEpoch })).toMatchObject({ ok: false, reason: 'pool' });
+      expect(await jobOf(pool.jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool', pauses: 0 });
+      await setUp();
+      // CONTROL: a month pause with Brick in control is not marked, and on resume nothing is asked again
+      const plain = await running('c5-plain');
+      await setUp({ memberAllowanceMicros: 1_000 });
+      await renewJob(plain.jobId, minutes(5), { epoch: plain.epoch });
+      expect(await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId: plain.jobId, n: 1 } } })).toMatchObject({ heldScreen: false });
+      expect((await tellings(plain.jobId)).map((one) => one.heldScreen)).toEqual([false]);
+      await setUp();
+      await resumeJob(plain.sara.brickId, plain.sara.id, plain.jobId, minutes(6));
+      expect(await getJob(plain.jobId)).toMatchObject({ resumed: true, askAgain: false });
+    });
+
+    it('the person’s own Pause is still not offered while they hold the screen (decision 3a)', async () => {
+      const { sara, jobId, epoch } = await running('c5-person-own');
+      await takeOver(sara.brickId, sara.id, minutes(1));
+      expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(2))).toMatchObject({ ok: false, reason: 'taken_over' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', control: 'person', pauses: 0 });
       expect(epoch).toBeGreaterThan(0);
       // A model call refused just as the person takes the screen never pauses the job
       await setUp();

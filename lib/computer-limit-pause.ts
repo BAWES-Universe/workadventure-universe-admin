@@ -17,7 +17,8 @@ import { roomFor } from '@/lib/computer-values';
  *  - What it does: what a person's pause does (lib/computer-job-controls): the stretch so far is charged under its own event at its own room's terms, the unused room goes back at once, nothing is held while it
  *    waits, the epoch and lease version move and every key ends, the provider's turn is cancelled after the commit (Rule C). `paused_why` says `allowance` or `rule`. Nothing is given back: a pause is not a fault.
  *  - Our own pool being full is NOT this: it ends the job as ours, given back, exactly as before.
- *  - While the person holds the screen a pause is not offered (decision 3a), so a limit then ends the job as before.
+ *  - While the person holds the screen it pauses too (Fable's ruling of 23 Nov, section 7): the screen is taken back in the same write, the pause is marked `heldScreen`, and it never carries on by itself (Brick asks).
+ *    In practice a model call is not let through while the person holds the screen (their take over ends the keys), so this is the renewal's case.
  *  - Brick tells the person once, from the same commit (lib/computer-tellings `paused`).
  *
  * Carrying on (`carryOnPaused`, every sweep): when more arrives (extra usage, a top-up, a new month, the person raising their own limit) the oldest job of each person that their month or a limit paused carries on
@@ -26,12 +27,12 @@ import { roomFor } from '@/lib/computer-values';
  * A job the person paused themselves never carries on by itself.
  */
 
-export type LimitPaused = 'paused' | 'not' | 'person_holds';
+export type LimitPaused = 'paused' | 'not';
 
 /**
  * A model call of a running job was refused for the person's month or a limit they set: the job pauses, under the conditions an ending had (above). `from`: the refused call's key and the epoch it was made under
- * (none: a worker that knows no epoch, good only for a job nobody claimed). `person_holds`: the person has the screen, so the caller ends the job as before. `not`: nothing changed (another owner, a key that ended,
- * a kept intent or cutoff, a job already paused or over): only the call is refused. Never throws.
+ * (none: a worker that knows no epoch, good only for a job nobody claimed). `not`: nothing changed (another owner, a key that ended, a kept intent or cutoff, a job already paused or over): only the call is
+ * refused. It never ends the job (the month and a limit only ever pause). Never throws.
  */
 export async function pauseForLimit(jobId: string, why: 'allowance' | 'rule', now: Date = new Date(), from?: { epoch: number; tokenId: string }): Promise<LimitPaused> {
   try {
@@ -39,8 +40,7 @@ export async function pauseForLimit(jobId: string, why: 'allowance' | 'rule', no
     if (!first) return 'not';
     // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
     const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId: first.botId } }));
-    const decided = await prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, now, provider, { ownerEpoch: from ? from.epoch : 0, key: from?.tokenId, heldOnly: true }), { timeout: 15_000, maxWait: 15_000 });
-    if (decided.kind === 'taken_over') return 'person_holds';
+    const decided = await prisma.$transaction((tx) => decidePauseIn(tx, jobId, why, now, provider, { ownerEpoch: from ? from.epoch : 0, key: from?.tokenId, heldOnly: true, heldScreen: true }), { timeout: 15_000, maxWait: 15_000 });
     if (decided.kind !== 'held') return 'not';
     await afterPause(jobId, decided, now);
     return 'paused';
@@ -51,7 +51,7 @@ export async function pauseForLimit(jobId: string, why: 'allowance' | 'rule', no
 }
 
 /** Why a job paused by its month or a limit does not carry on by itself even though more arrived: something about it changed while it waited. Null when it may. */
-type Changed = 'unknown_step' | 'apps' | 'computer' | null;
+type Changed = 'unknown_step' | 'apps' | 'computer' | 'held_screen' | null;
 
 /**
  * The sweep's part: for each person, the oldest job their month or a limit paused that now has room carries on by itself (one per person per sweep; the next one in a later sweep, once this one holds its room), or
@@ -132,7 +132,9 @@ async function changedSincePause(tx: Parameters<Parameters<typeof prisma.$transa
   if (!computer?.enabled) return 'computer';
   // A job that never held the machine has nothing to compare: it carries on as it is. One that did compares with its last pause (a print not known asks first)
   if (pauses > 0) {
-    const last = await tx.computerJobPause.findUnique({ where: { jobId_n: { jobId, n: pauses } }, select: { grantsPrint: true } });
+    const last = await tx.computerJobPause.findUnique({ where: { jobId_n: { jobId, n: pauses } }, select: { grantsPrint: true, heldScreen: true } });
+    // The person was in the middle of their own step when the screen was taken back: like a step whose outcome is not known, it never carries on by itself (section 7)
+    if (last?.heldScreen) return 'held_screen';
     if (!last?.grantsPrint || last.grantsPrint !== (await grantsPrintIn(tx, botId))) return 'apps';
   }
   return null;
