@@ -4200,6 +4200,8 @@ model ComputerStartAttempt {
   createdAt DateTime @default(now()) @map("created_at")
   /// Finding 1 (GPT round 6): a start answered with another start that had no job yet waits for THAT attempt (state `answered`); a retry under this key is answered from it.
   aliasAttemptId String? @map("alias_attempt_id")
+  outcome   Json?     @map("outcome")
+  issuedAt  DateTime? @map("issued_at")
 
   /// The job this start made or was answered with. The attempt stays with no job when the job goes (it is the record that the key was answered); a job-less attempt is let go after a week.
   job     ComputerJob?           @relation("StartAttemptJob", fields: [jobId], references: [id], onDelete: SetNull)
