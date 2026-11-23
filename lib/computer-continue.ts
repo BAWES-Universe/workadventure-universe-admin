@@ -72,6 +72,30 @@ export async function retryCandidate(botId: string, personId: string, db: Db = p
   return { id: latest.id, title: latest.title, how: latest.endedBy ?? 'agent', endedAt: latest.endedAt, toldAt: latest.endToldAt };
 }
 
+/** One of the person's ended jobs, as the game lists them to ask "Which job?" (round 8, E). `continuable`: "try again" would carry it on (the same test as `carryOnFrom`). */
+export interface EndedJob {
+  id: string;
+  title: string;
+  how: string;
+  endedAt: Date | null;
+  continuable: boolean;
+}
+
+/** The most ended jobs one look lists. */
+export const ENDED_MAX = 5;
+
+/** The person's ended jobs on this Brick, newest first (the order `retryCandidate` reads), at most `ENDED_MAX`. Reads only. */
+export async function endedJobs(botId: string, personId: string, count: number, db: Db = prisma): Promise<EndedJob[]> {
+  const take = Math.max(1, Math.min(ENDED_MAX, Math.floor(count)));
+  const rows = await db.computerJob.findMany({
+    where: { botId, personId, status: { in: ['done', 'failed', 'stopped'] } },
+    orderBy: [{ endedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }, { id: 'desc' }],
+    take,
+    select: { id: true, title: true, status: true, endedBy: true, endedAt: true, agentSessionId: true, continuedBy: { select: { id: true } } },
+  });
+  return rows.map((row) => ({ id: row.id, title: row.title, how: row.endedBy ?? 'agent', endedAt: row.endedAt, continuable: !row.continuedBy && !!row.agentSessionId && continuableEnding(row.status, row.endedBy) }));
+}
+
 /**
  * The jobs a job carries on from, nearest first (its old job, that one's old job, and so on), by id. Their turns are in the same agent conversation, so the machine's model address may
  * find their tag in a call (it reads the FIRST tagged message of the conversation): the prepare of a continuation writes this job's key under their ids too, so every call of the

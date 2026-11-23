@@ -3,11 +3,11 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
-import { ackStart, computerView, earlierUnconfirmedStart, refuseAttempt, registerStart, startAnsweredBefore, startJob, startedJobFor, type Registration } from '@/lib/computer';
+import { ackStart, computerView, earlierUnconfirmedStart, refuseAttempt, registerStart, retireStartKey, startAnsweredBefore, startJob, startedJobFor, type Registration } from '@/lib/computer';
 import { ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { startStateOf } from '@/lib/computer-values';
 import { ownerSpendAllowed } from '@/lib/spend-rules';
-import { carryOnFrom, retryCandidate } from '@/lib/computer-continue';
+import { carryOnFrom, endedJobs, ENDED_MAX, retryCandidate } from '@/lib/computer-continue';
 import { prisma } from '@/lib/db';
 
 export const runtime = 'nodejs';
@@ -28,6 +28,8 @@ const jobIdSchema = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/);
 
 // The game confirms it has the answer of a start (an `action` of the same URL, so the start's own body stays strict): `{ action: 'start-ack', userId, isGuest?, attempt }`
 const ackSchema = z.object({ action: z.literal('start-ack'), userId: z.string().min(1).max(255), isGuest: z.boolean().optional(), attempt: startKeySchema }).strict();
+// Round 8 (Opus's ruling on CodeRabbit's pass of game 24dea75c): the game gives up on a key of an earlier, DIFFERENT ask that Orbit never answered: `{ action: 'start-retire', userId, isGuest?, attempt }`
+const retireSchema = z.object({ action: z.literal('start-retire'), userId: z.string().min(1).max(255), isGuest: z.boolean().optional(), attempt: startKeySchema }).strict();
 
 const bodySchema = z
   .object({
@@ -56,6 +58,8 @@ const bodySchema = z
  * Answers { available, on, busy } (busy: a job holds it or waits in line). With `attempt` (the key the game sent with a start, as the header `X-Computer-Start-Attempt`) it also answers `started: { id, status, state, attempt } | null` (`attempt` is the one asked, echoed; `state` is the one shared reading of `status`: live, done or ended): the job THAT start made, for as long as the job exists (the key is kept on the job itself: there is no time after which it is forgotten), or null when that start made none. The key alone says
  * which start, so a job of the same chat or title is never answered for it. While a start with that key is still going on (its job is not saved yet) the answer is 503 `{ retry: true, inProgress: true }`, and so when who it was for could not be
  * looked up just now (503 `{ retry: true }`): never `started: null`, which says no job was made. The caller treats both as "not known" and asks again (a start repeated with the same key never makes a second job). A caller that sends no `attempt` gets no `started`.
+ * With `ended=N` (1 to 5; more is read as 5) it also answers `ended: [{ id, title, how, endedAt, continuable }]`: the person's ended jobs on this Brick, newest first, `continuable` when "try again" would carry it on
+ * (the same test as the start's, lib/computer-continue), so Brick can ask "Which job?" (round 8, E). Someone else's Brick or a guest: `ended: []`. Anything else as `ended` is 400.
  * With `retry=1` it also answers `retry: { id, title, how, endedAt, toldAt } | null`: the person's latest ended job on this Brick that "try again" would carry on in its own conversation (piece 8, lib/computer-continue), or null. The game names it back with the start (header `X-Computer-Continues`), and the start decides again.
  * Auth: service token only.
  */
@@ -73,6 +77,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const startKey = request.nextUrl.searchParams.get('attempt');
     const asked = startKey === null ? null : startKeySchema.safeParse(startKey);
     if (asked && !asked.success) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
+    // Round 8, E: how many ended jobs to list (`ended=N`)
+    const endedRaw = request.nextUrl.searchParams.get('ended');
+    const endedCount = endedRaw === null ? null : /^[1-9][0-9]{0,2}$/.test(endedRaw) ? Math.min(ENDED_MAX, Number(endedRaw)) : NaN;
+    if (endedCount !== null && Number.isNaN(endedCount)) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
     const person = await resolveUsagePerson(userId, request.nextUrl.searchParams.get('isGuest') === 'true');
     // Who this was for could not be looked up just now: "no job reached Orbit" is NOT known, and answering it would let the caller think nothing was made. The same word as the meter's events: nothing is answered
     // but `retry` (503), and the caller treats it as unknown, never as a miss
@@ -85,7 +93,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     // A start with this key is still going on (it holds its mark until its job is saved): no job has reached Orbit YET and one still can, so this is not a miss either. The same word as a failed lookup: ask again
     if (started && 'inProgress' in started) return NextResponse.json({ error: 'A start of this job is still going on, ask again', retry: true, inProgress: true }, { status: 503 });
     const wantsRetry = request.nextUrl.searchParams.get('retry') === '1';
-    const extra = { ...(started === undefined ? {} : { started }), ...(wantsRetry ? { retry: view && person.personId ? await retryCandidate(id, person.personId) : null } : {}) };
+    const extra = {
+      ...(started === undefined ? {} : { started }),
+      ...(wantsRetry ? { retry: view && person.personId ? await retryCandidate(id, person.personId) : null } : {}),
+      ...(endedCount !== null ? { ended: view && person.personId ? await endedJobs(id, person.personId, endedCount) : [] } : {}),
+    };
     if (!view) return NextResponse.json({ available: false, on: false, busy: false, ...extra });
     return NextResponse.json({ available: view.available, on: view.on, busy: view.job !== null || view.queued.length > 0, ...extra });
   } catch (error) {
@@ -117,6 +129,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  *
  * Every refusal is HTTP 200 `{ ok: false, reason }` with a reason from `START_REFUSALS` (lib/computer-values): Orbit never answers a start with 429 or another error status for a refusal, so a 429 is an intermediary's and the outcome of the start is not known (look it up by its key).
  *
+ * `POST { action: 'start-retire', userId, isGuest?, attempt }` (round 8): the game gives up on a key of an earlier, DIFFERENT ask that it holds open and Orbit never answered. Under the person's lock a key with no attempt, or
+ * whose start came to nothing, is retired: 200 `{ ok: true, retired: true }`, and every later send of it is `{ ok: false, reason: 'retired_by_game' }` (nothing is made). A key Orbit did see: 200
+ * `{ ok: true, retired: false, answer }`, the answer a send of it would get now (read only): the game follows that start.
+ *
  * Round 8 (GPT's seventh note, Opus's design A1/A2), for a start with `X-Computer-Start-Acks: 1`:
  *  - The key MUST carry its issue time (`t<ms base36>-<rest>`, the moment of the person's message): 400 without one, or one more than 5 minutes in the future.
  *  - The start is REGISTERED (its attempt, with the request's own moment) before anything else is asked, the spending rule included: a later request under another key that decides meanwhile waits for it, and a look for
@@ -142,6 +158,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const { id } = await params;
     const raw = await request.json().catch(() => null);
+    // The game gives up on a key it holds open for an earlier, different ask (round 8): retired, or the answer Orbit has for it
+    if (raw !== null && typeof raw === 'object' && (raw as { action?: unknown }).action === 'start-retire') {
+      const asked = retireSchema.safeParse(raw);
+      if (!asked.success) return NextResponse.json({ error: 'Invalid input data', details: asked.error.issues }, { status: 400 });
+      const who = await resolveUsagePerson(asked.data.userId, asked.data.isGuest);
+      if (who.lookupFailed) return NextResponse.json({ error: 'Could not tell who this was for, ask again', retry: true }, { status: 503 });
+      // A guest has no Brick computer and no start: there is nothing to follow
+      if (!who.personId) return NextResponse.json({ ok: true, retired: true });
+      return NextResponse.json({ ok: true, ...(await retireStartKey(id, who.personId, asked.data.attempt)) });
+    }
     // The game confirms it has the answer of a start it made: told apart by its `action`
     if (raw !== null && typeof raw === 'object' && (raw as { action?: unknown }).action !== undefined) {
       const acked = ackSchema.safeParse(raw);

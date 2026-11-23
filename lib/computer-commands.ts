@@ -26,7 +26,7 @@ export interface Command {
 }
 
 /** What a control came to, as it is kept and replayed (the computer view is read fresh on a replay: it is how things stand now). */
-export type StoredOutcome = { ok: true; signInsKept?: boolean; note?: { seq: number; delivery: string }; targets?: string[]; /** Stop all with a confirmed set (round 8, D2): the live jobs not in the set, left alone. */ left?: string[]; pending?: true } | { ok: false; reason: string };
+export type StoredOutcome = { ok: true; signInsKept?: boolean; note?: { seq: number; delivery: string }; targets?: string[]; /** Stop all with a confirmed set (round 8, D2): the live jobs not in the set, left alone, newest first. */ left?: Array<{ id: string; title: string }>; pending?: true } | { ok: false; reason: string };
 
 export type Claimed =
   /** First time: apply the effect (and keep its outcome). */

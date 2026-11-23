@@ -726,14 +726,17 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect(await roomsOf(sara)).toBe(1);
     });
 
-    it('a start whose own attempt stopped beating answers `expired` and makes nothing (the game starts afresh); one that ends with no job (refused) lets its attempt go', async () => {
+    it('a start whose own attempt stopped beating answers `expired` and makes nothing (the game starts afresh); one that ends with no job (refused) keeps that refusal on its key (round 8)', async () => {
       const sara = await setUpBrick('s-s2-expired-own');
       await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: KEY_A, state: 'expired', beatAt: new Date() } });
       expect(await start(sara, KEY_A)).toEqual({ ok: false, reason: 'expired' });
       expect(await jobsOf(sara)).toBe(0);
       const off = await person('s-s2-off');
       expect(await start(off, KEY_B)).toMatchObject({ ok: false, reason: 'off' });
-      expect((await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: off.id, startKey: KEY_B } })).state).toBe('expired');
+      // Round 8, A1 (Opus): a refusal is kept on the key (state `refused`, its answer in `outcome`), so a retry of it is the same answer
+      expect(await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: off.id, startKey: KEY_B } })).toMatchObject({ state: 'refused', outcome: { ok: false, reason: 'off' } });
+      // ... the library hands back the kept answer, which the route gives as it was
+      expect(await start(off, KEY_B)).toEqual({ ok: false, reason: 'kept', body: { ok: false, reason: 'off' } });
     });
 
     it('B first, A later (both arrival orders): one job, one reservation; the same key given twice at once, and again later, in this process (a same-key library replay: no router is restarted and no Redis is cleared here): one job, one reservation', async () => {

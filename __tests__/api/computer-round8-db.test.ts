@@ -46,6 +46,7 @@ import { mintJobToken } from '@/lib/computer-token';
 import { carryOnPaused, resetCarryOnScanForTests } from '@/lib/computer-limit-pause';
 import { GET, POST } from '@/app/api/bots/[id]/computer-jobs/route';
 import { POST as CONTROL } from '@/app/api/bots/[id]/computer-jobs/control/route';
+import { POST as RETIRE } from '@/app/api/bots/[id]/computer-jobs/start-retire/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -353,10 +354,10 @@ run('GPT seventh note (round 8): Orbit side of A, C and D2, in a real database',
       const command = randomUUID();
       const stopped = await control(sara, { action: 'stop_all', confirmedJobIds: confirmed }, command);
       expect(stopped.status).toBe(200);
-      expect(stopped.body).toMatchObject({ ok: true, stopped: [a.job.id], left: [b.job.id] });
+      expect(stopped.body).toMatchObject({ ok: true, stopped: [a.job.id], left: [{ id: b.job.id, title: 'Taxi booking' }] });
       // The same command again: the same outcome, nothing more ended
       const replay = await control(sara, { action: 'stop_all', confirmedJobIds: confirmed }, command);
-      expect(replay.body).toMatchObject({ ok: true, stopped: [a.job.id], left: [b.job.id] });
+      expect(replay.body).toMatchObject({ ok: true, stopped: [a.job.id], left: [{ id: b.job.id, title: 'Taxi booking' }] });
       // The same command id with ANOTHER set is a conflict, and ends nothing
       const other = await control(sara, { action: 'stop_all', confirmedJobIds: [b.job.id] }, command);
       expect(other.status).toBe(409);
@@ -366,6 +367,19 @@ run('GPT seventh note (round 8): Orbit side of A, C and D2, in a real database',
       const bAfter = after.find((job) => job.id === b.job.id);
       expect(bAfter?.endedBy).not.toBe('person');
       expect(['queued', 'running']).toContain(bAfter?.status);
+    });
+
+    it('`left` names every live job not in the set, newest first, with its title; the panel’s stop route takes the same set', async () => {
+      const sara = await owner('d2-left');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' });
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Taxi booking' }, new Date(Date.now() + 1_000));
+      const c = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Hotel' }, new Date(Date.now() + 2_000));
+      if (!a.ok || !b.ok || !c.ok) throw new Error('jobs were not made');
+      const stopped = await control(sara, { action: 'stop_all', confirmedJobIds: [a.job.id] });
+      expect(stopped.body.left).toEqual([
+        { id: c.job.id, title: 'Hotel' },
+        { id: b.job.id, title: 'Taxi booking' },
+      ]);
     });
 
     it('confirmed ids that are already over or unknown are skipped; `stop` with the set behaves as `stop_all`', async () => {
@@ -393,6 +407,106 @@ run('GPT seventh note (round 8): Orbit side of A, C and D2, in a real database',
       const sara = await owner('d2-invalid');
       expect((await control(sara, { action: 'stop_all' })).status).toBe(400);
       expect((await control(sara, { action: 'stop_all', confirmedJobIds: Array.from({ length: 51 }, () => randomUUID()) })).status).toBe(400);
+    });
+  });
+
+  describe('start-retire: the game gives up on a key Orbit never answered (Opus’s ruling on CodeRabbit’s pass of game 24dea75c)', () => {
+    const retire = async (sara: Owner, attempt: string) =>
+      (await POST(
+        new NextRequest(`http://orbit.test/api/bots/${sara.brickId}/computer-jobs`, { method: 'POST', body: JSON.stringify({ action: 'start-retire', userId: sara.uuid, attempt }), headers: { 'content-type': 'application/json' } }),
+        { params: Promise.resolve({ id: sara.brickId }) },
+      )).json();
+
+    it('a key Orbit never saw is retired; its start arriving late (it never registered) makes nothing and is answered `retired_by_game` from then on', async () => {
+      const sara = await owner('retire-unseen');
+      const OLD = key();
+      expect(await retire(sara, OLD)).toEqual({ ok: true, retired: true });
+      expect(await retire(sara, OLD)).toMatchObject({ ok: true, retired: false, answer: { ok: false, reason: 'retired_by_game' } });
+      expect(await post(sara, OLD, 'Visa form')).toEqual({ ok: false, reason: 'retired_by_game' });
+      expect(await jobsOf(sara)).toHaveLength(0);
+      // The new, different ask goes on under its own key
+      expect(await post(sara, key(), 'Book a taxi')).toMatchObject({ ok: true });
+      expect(await jobsOf(sara)).toHaveLength(1);
+    });
+
+    it('a key Orbit saw is NOT retired: the answer a send would get (a job, or a kept refusal), and nothing changes', async () => {
+      const sara = await owner('retire-seen');
+      const MADE = key();
+      const made = await post(sara, MADE, 'Visa form');
+      await ackStart(sara.brickId, sara.id, MADE);
+      expect(await retire(sara, MADE)).toMatchObject({ ok: true, retired: false, answer: { ok: true, job: { id: made.job.id } } });
+      await finishJob(made.job.id, 'done', new Date());
+      // A refused key: its kept refusal
+      const tom = await owner('retire-refused');
+      await prisma.brickComputer.update({ where: { botId: tom.brickId }, data: { enabled: false } });
+      const REFUSED = key();
+      expect(await post(tom, REFUSED, 'Visa form')).toEqual({ ok: false, reason: 'off' });
+      expect(await retire(tom, REFUSED)).toEqual({ ok: true, retired: false, answer: { ok: false, reason: 'off' } });
+      expect(await jobsOf(tom)).toHaveLength(0);
+    });
+
+    it('the same through its own path (`/computer-jobs/start-retire` with `startKey`)', async () => {
+      const sara = await owner('retire-path');
+      const OLD = key();
+      const call = async (body: Record<string, unknown>) => {
+        const res = await RETIRE(new NextRequest(`http://orbit.test/api/bots/${sara.brickId}/computer-jobs/start-retire`, { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }), { params: Promise.resolve({ id: sara.brickId }) });
+        return { status: res.status, body: await res.json() };
+      };
+      expect(await call({ userId: sara.uuid, startKey: OLD })).toEqual({ status: 200, body: { ok: true, retired: true } });
+      expect(await post(sara, OLD, 'Visa form')).toEqual({ ok: false, reason: 'retired_by_game' });
+      expect((await call({ userId: sara.uuid, startKey: 'no' })).status).toBe(400);
+      expect(await jobsOf(sara)).toHaveLength(0);
+    });
+
+    it('a key whose start came to nothing (expired) is retired, and is never reopened after', async () => {
+      const sara = await owner('retire-expired');
+      const OLD = key();
+      await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: OLD, state: 'expired', beatAt: new Date(Date.now() - 60_000), createdAt: new Date(Date.now() - 60_000) } });
+      expect(await retire(sara, OLD)).toEqual({ ok: true, retired: true });
+      expect(await post(sara, OLD, 'Visa form')).toEqual({ ok: false, reason: 'retired_by_game' });
+      expect(await jobsOf(sara)).toHaveLength(0);
+    });
+
+    it('a start of the key that is still going on is not retired: the answer names that key, to be looked up', async () => {
+      const sara = await owner('retire-going');
+      const OLD = key();
+      const hold = holdAfterSpendCheck(OLD);
+      const pending = post(sara, OLD, 'Visa form');
+      await hold.reached;
+      expect(await retire(sara, OLD)).toEqual({ ok: true, retired: false, answer: { ok: false, reason: 'earlier', job: { id: null, status: null, state: 'starting', attempt: OLD } } });
+      hold.letGo();
+      expect(await pending).toMatchObject({ ok: true });
+    });
+  });
+
+  describe('GET ended=N: the person’s ended jobs for "Which job?" (round 8, E)', () => {
+    const ended = async (sara: Owner, n: string, who: string = sara.uuid) => {
+      const res = await GET(new NextRequest(`http://orbit.test/api/bots/${sara.brickId}/computer-jobs?userId=${encodeURIComponent(who)}&ended=${n}`), { params: Promise.resolve({ id: sara.brickId }) });
+      return { status: res.status, body: await res.json() };
+    };
+
+    it('newest first, at most 5, with `continuable` as the start’s own test; nonsense is 400; someone else gets none', async () => {
+      const sara = await owner('ended');
+      const ids: string[] = [];
+      for (let n = 0; n < 7; n++) {
+        const job = await startJob({ botId: sara.brickId, personId: sara.id, title: `Job ${n}` });
+        if (!job.ok) throw new Error('no job');
+        ids.push(job.job.id);
+        // The odd ones reached their agent and failed on our side (they carry on); the even ones were done
+        if (n % 2 === 1) await prisma.computerJob.update({ where: { id: job.job.id }, data: { agentSessionId: `s-${n}` } });
+        await finishJob(job.job.id, n % 2 === 1 ? 'failed' : 'done', new Date(Date.now() + n * 1_000), null, n % 2 === 1 ? 'ours' : null);
+      }
+      const all = await ended(sara, '9');
+      expect(all.status).toBe(200);
+      expect(all.body.ended.map((job: { id: string }) => job.id)).toEqual([ids[6], ids[5], ids[4], ids[3], ids[2]]);
+      expect(all.body.ended[0]).toMatchObject({ title: 'Job 6', continuable: false });
+      expect(all.body.ended[1]).toMatchObject({ title: 'Job 5', continuable: true });
+      expect((await ended(sara, '2')).body.ended).toHaveLength(2);
+      expect((await ended(sara, 'x')).status).toBe(400);
+      expect((await ended(sara, '0')).status).toBe(400);
+      // Not the owner: nothing is listed
+      const tom = await owner('ended-other');
+      expect((await ended(sara, '3', tom.uuid)).body.ended).toEqual([]);
     });
   });
 });
