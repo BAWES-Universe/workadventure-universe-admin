@@ -82,6 +82,41 @@ async function refused(botId: string, ownerId: string, under: { command: Command
   return 'fresh' in claimed ? { ok: false, reason } : answerOf(botId, ownerId, claimed, now);
 }
 
+/** How long a copy of a Resume waits for the first request's own answer before it settles the command itself (the first request may have stopped after its commit). Exported for the tests. */
+export const resumeWait = { ms: 20_000, stepMs: 100 };
+
+/** What a Resume came to, from the job as it stands after its start was tried: the refusal the month or a limit made of the start, a browser that could not be settled, or success (a job that stays in line is a success: the resume was taken). */
+async function resumeOutcomeOf(jobId: string): Promise<StoredOutcome> {
+  const after = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, pausedWhy: true, prepState: true } });
+  if (after?.status === 'queued' && after.queuedFor === 'paused' && (after.pausedWhy === 'allowance' || after.pausedWhy === 'rule')) return refusalOutcome(after.pausedWhy);
+  if (after?.prepState !== null && after?.prepState !== undefined) return refusalOutcome('not_ready');
+  return { ok: true };
+}
+
+/** Keeps the Resume's final outcome over its pending mark, once: the first write wins (a copy that settled the command meanwhile, or the request itself), and the stored outcome is what is returned. */
+async function settleResume(command: Command, outcome: StoredOutcome): Promise<StoredOutcome> {
+  const written = await prisma.$executeRaw`UPDATE "computer_job_commands" SET "outcome" = ${JSON.stringify(outcome)}::jsonb WHERE "command_id" = ${command.id}::uuid AND "outcome"->>'pending' = 'true'`;
+  if (written === 1) return outcome;
+  const rows = await prisma.$queryRaw<Array<{ outcome: StoredOutcome | null }>>`SELECT "outcome" FROM "computer_job_commands" WHERE "command_id" = ${command.id}::uuid`;
+  return rows[0]?.outcome ?? outcome;
+}
+
+/**
+ * A copy of a Resume seen while the first request has not kept its answer (the start is still being tried): it never answers success for a start that may still be refused, and never starts anything itself. It waits for the
+ * first request's answer; if none comes in time (the first request stopped after its commit), it settles the command from the job as it stands, once, and answers that (CodeRabbit on #1025, 16 and 23).
+ */
+async function answerPendingResume(botId: string, ownerId: string, under: { command: Command; row: CommandRow }, jobId: string, now: Date): Promise<Controlled> {
+  const deadline = Date.now() + resumeWait.ms;
+  for (;;) {
+    const seen = await seenCommand(under.command, under.row);
+    if (!seen || 'reused' in seen || seen.replay !== null) return seen ? answerOf(botId, ownerId, seen, now) : viewOf(botId, ownerId, now);
+    if (Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, resumeWait.stepMs));
+  }
+  const outcome = await settleResume(under.command, await resumeOutcomeOf(jobId));
+  return answerOf(botId, ownerId, { replay: outcome, targets: null }, now);
+}
+
 /** The command of a control, and the row it is kept under. */
 const underOf = (command: Command | undefined, botId: string, ownerId: string, jobId: string, kind: CommandKind, args: Record<string, unknown> = {}, stretch: number | null = null) =>
   command ? { command, row: commandRow(botId, ownerId, jobId, kind, args, stretch) } : null;
@@ -365,35 +400,31 @@ export async function resumeJob(botId: string, ownerId: string, jobId: string, n
   const under = underOf(command, botId, ownerId, jobId, as.kind, as.args ?? {}, job.pauses);
   if (under) {
     const seen = await seenCommand(under.command, under.row);
-    if (seen) return answerOf(botId, ownerId, seen, now);
+    if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingResume(botId, ownerId, under, jobId, now);
   }
   const moved = await prisma.$transaction(async (tx) => {
     const row = await lockJob(tx, jobId);
     if (!row) return 'not_found' as const;
-    // The command's row after the job's locks, in the transaction that decides the resume (finding 4): a copy finds it and answers what this one decided
+    // The command's row after the job's locks, in the transaction that decides the resume (finding 4): a copy finds it and answers what this one decided. A resume that was taken is kept PENDING until its start has been tried: a copy
+    // never reads a success the start may still turn into a refusal (CodeRabbit on #1025, 16 and 23)
     if (under) {
-      const claimed = await claimCommandIn(tx, under.command, under.row);
+      const claimed = await claimCommandIn(tx, under.command, under.row, { ok: true, pending: true });
       if (!('fresh' in claimed)) return { seen: claimed };
     }
     const decided = isOver(row.status) ? ('over' as const) : await resumeIn(tx, botId, jobId);
-    if (under) await keepOutcome(tx, under.command, decided === 'ok' ? { ok: true } : refusalOutcome(decided));
+    if (under && decided !== 'ok') await keepOutcome(tx, under.command, refusalOutcome(decided));
     return decided;
   }, TX);
-  if (typeof moved === 'object') return answerOf(botId, ownerId, moved.seen, now);
+  if (typeof moved === 'object') return 'reused' in moved.seen || moved.seen.replay !== null ? answerOf(botId, ownerId, moved.seen, now) : answerPendingResume(botId, ownerId, under!, jobId, now);
   if (moved !== 'ok') return { ok: false, reason: moved };
   await controlInternals.tryStart(jobId, now, { quiet: true });
-  // The month or a limit refused its start: tryStart put a job that ran before back as paused, with the reason
-  const after = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, pausedWhy: true, prepState: true } });
-  if (after?.status === 'queued' && after.queuedFor === 'paused' && (after.pausedWhy === 'allowance' || after.pausedWhy === 'rule')) {
-    if (under) await keepOutcome(prisma, under.command, refusalOutcome(after.pausedWhy));
-    return { ok: false, reason: after.pausedWhy };
-  }
-  // The start brings the job's own browser back before it answers, so a resume that got here has it: unless it could not be settled (`recover`), and then the person is told so plainly. The sweep tries the
-  // restore again and empties the browser after the hours sign-ins are kept; until one of those works the job holds its room and its place but is worked on by nobody (GPT round 6, finding 7)
-  if (after?.prepState !== null) {
-    if (under) await keepOutcome(prisma, under.command, refusalOutcome('not_ready'));
-    return { ok: false, reason: 'not_ready' };
-  }
+  // The month or a limit refused its start: tryStart put a job that ran before back as paused, with the reason. The start brings the job's own browser back before it answers, so a resume that got here has it: unless it could not
+  // be settled (`recover`), and then the person is told so plainly. The sweep tries the restore again and empties the browser after the hours sign-ins are kept; until one of those works the job holds its room and its
+  // place but is worked on by nobody (GPT round 6, finding 7)
+  const outcome = await resumeOutcomeOf(jobId);
+  // The answer is kept once (over the pending mark): a copy that settled the command while this waited for its start has decided it, and that is what this returns too
+  const final = under ? await settleResume(under.command, outcome) : outcome;
+  if (!final.ok) return { ok: false, reason: final.reason as ControlRefusal };
   return viewOf(botId, ownerId, now);
 }
 

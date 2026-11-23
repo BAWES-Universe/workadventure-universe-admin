@@ -1366,7 +1366,7 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', 'rA')]);
       expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea })).toMatchObject({ ok: true });
       // Stop's read of what is on the computer saw this job in line (it has started and committed since)
-      const original = prisma.computerJob.findMany.bind(prisma.computerJob) as (args: { where?: { status?: { in?: string[] } } }) => Promise<Array<{ id: string; status: string }>>;
+      const original = prisma.computerJob.findMany.bind(prisma.computerJob) as unknown as (args: { where?: { status?: { in?: string[] } } }) => Promise<Array<{ id: string; status: string }>>;
       const spy = jest.spyOn(prisma.computerJob, 'findMany').mockImplementation(((args: { where?: { status?: { in?: string[] } } }) =>
         args?.where?.status?.in?.includes('queued') && args.where.status.in.includes('running') ? Promise.resolve([{ id: jobId, status: 'queued' }]) : original(args)) as never);
       try {

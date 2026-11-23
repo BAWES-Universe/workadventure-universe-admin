@@ -26,8 +26,8 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { claimJob, giveComputer, recordFinishIntent, startJob, stopAll } from '@/lib/computer';
-import { cancelJob, moveJobFirst, pauseJob, resumeJob } from '@/lib/computer-job-controls';
+import { claimJob, controlInternals, giveComputer, recordFinishIntent, startJob, stopAll } from '@/lib/computer';
+import { cancelJob, moveJobFirst, pauseJob, resumeJob, resumeWait } from '@/lib/computer-job-controls';
 import { addJobNote } from '@/lib/computer-job-notes';
 import { claimCommand, commandRow } from '@/lib/computer-commands';
 import * as owner from '@/lib/computer-owner';
@@ -283,6 +283,72 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       expect(await commandOf(r.id)).toMatchObject({ outcome: { ok: false, reason: 'allowance' } });
       expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(11), r)).toEqual({ ok: false, reason: 'allowance' });
       expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance' });
+    });
+
+    it('CodeRabbit on #1025 (16): a copy of a Resume that arrives WHILE its start is being tried does not answer ok: it waits for the first request’s answer, and both say `allowance`; the start is tried once', async () => {
+      const { sara, jobId } = await running('cr-16');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      const realStart = controlInternals.tryStart;
+      let inStart: () => void = () => undefined;
+      const started = new Promise<void>((resolve) => (inStart = resolve));
+      let go: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (go = resolve));
+      const spy = jest.spyOn(controlInternals, 'tryStart').mockImplementation(async (...args: Parameters<typeof realStart>) => {
+        inStart();
+        await gate;
+        return realStart(...args);
+      });
+      const old = resumeWait.ms;
+      resumeWait.ms = 10_000;
+      try {
+        const r = command();
+        const first = resumeJob(sara.brickId, sara.id, jobId, minutes(10), r);
+        await started;
+        let copyAnswer: unknown = 'still waiting';
+        const copy = resumeJob(sara.brickId, sara.id, jobId, minutes(10), r).then((answer) => (copyAnswer = answer));
+        // The copy has had every chance to answer: it has not (the stored answer is still pending)
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        expect(copyAnswer).toBe('still waiting');
+        // The month refuses the start
+        await saveMeterSettings({ memberAllowanceMicros: 1_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+        go();
+        expect(await first).toEqual({ ok: false, reason: 'allowance' });
+        await copy;
+        expect(copyAnswer).toEqual({ ok: false, reason: 'allowance' });
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(await commandOf(r.id)).toMatchObject({ outcome: { ok: false, reason: 'allowance' } });
+      } finally {
+        resumeWait.ms = old;
+        go();
+        spy.mockRestore();
+      }
+    });
+
+    it('CodeRabbit on #1025 (23): a Resume whose request stopped after its commit (the start never finished) is settled by its copy, once, from the job as it stands; the start is not tried again, and every later copy answers the same', async () => {
+      const { sara, jobId } = await running('cr-23');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      const spy = jest.spyOn(controlInternals, 'tryStart').mockImplementation(async () => {
+        throw new Error('the server stopped');
+      });
+      const old = resumeWait.ms;
+      resumeWait.ms = 300;
+      try {
+        const r = command();
+        await expect(resumeJob(sara.brickId, sara.id, jobId, minutes(10), r)).rejects.toThrow('the server stopped');
+        // The resume was taken (the job is first in line) and its answer is still pending
+        expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'turn' });
+        expect(await commandOf(r.id)).toMatchObject({ outcome: { ok: true, pending: true } });
+        const copy = await resumeJob(sara.brickId, sara.id, jobId, minutes(11), r);
+        expect(copy).toMatchObject({ ok: true });
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(await commandOf(r.id)).toMatchObject({ outcome: { ok: true } });
+        expect((await commandOf(r.id))?.outcome).not.toHaveProperty('pending');
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(12), r)).toMatchObject({ ok: true });
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally {
+        resumeWait.ms = old;
+        spy.mockRestore();
+      }
     });
 
     it('a Stop’s command id used again on the owner’s OTHER Brick is `command_reused`, and stops nothing there', async () => {
