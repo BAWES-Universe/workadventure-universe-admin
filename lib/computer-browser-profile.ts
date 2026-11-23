@@ -374,7 +374,7 @@ export async function settlePark(botId: string, jobId: string, outcome: SignInsR
 }
 
 /** The machine no longer waits for this job's browser to be put away: whatever was to be done on it is done (or was never there to do). */
-async function clearParkPending(botId: string, jobId: string): Promise<void> {
+export async function clearParkPending(botId: string, jobId: string): Promise<void> {
   await prisma.brickComputer.updateMany({ where: { botId, parkPendingJobId: jobId }, data: { parkPendingJobId: null } }).catch((error) => console.error('[Computer] Could not let go of a park that is done:', error instanceof Error ? error.message : 'unknown'));
 }
 

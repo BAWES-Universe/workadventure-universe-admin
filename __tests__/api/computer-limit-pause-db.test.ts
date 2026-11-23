@@ -17,7 +17,7 @@ jest.mock('@/lib/meter', () => {
 });
 jest.mock('@/lib/computer-browser-profile', () => {
   const actual = jest.requireActual('@/lib/computer-browser-profile');
-  return { ...actual, parkProfile: jest.fn(async () => ({ state: 'parked', reason: null })), restoreProfile: jest.fn(async () => ({ state: 'restored', reason: null })), dropProfile: jest.fn(async () => ({ state: 'dropped', reason: null })) };
+  return { ...actual, parkProfile: jest.fn(async () => ({ state: 'parked', reason: null })), restoreProfile: jest.fn(async () => ({ state: 'restored', reason: null })), dropProfile: jest.fn(async () => ({ state: 'dropped', reason: null })), wipeLiveProfile: jest.fn((...args: unknown[]) => actual.wipeLiveProfile(...args)) };
 });
 
 import { prisma } from '@/lib/db';
@@ -802,6 +802,63 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: null } });
       await sweepComputers(minutes(5));
       expect(await jobOf(next.job.id)).toMatchObject({ status: 'running', queuedFor: null });
+    });
+  });
+
+  describe('Sentry on #1025: a pause on a machine that is not awake never locks the Brick out', () => {
+    for (const state of ['resting', 'waking'] as const) {
+      it(`a job paused while its machine is ${state}: the next job wakes the machine and starts, after the live browser is emptied (the paused job's sign-ins are never shown to it); the mark is let go`, async () => {
+        const { sara, jobId } = await running(`s1025-${state}`);
+        // The machine is not awake when the pause lands (a pause in the preparing window, an idle rest, a restart): the park cannot reach it and the settle cannot either
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: state } });
+        (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'left', reason: 'not_awake' }));
+        expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+        expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: jobId });
+        const wiped: string[] = [];
+        (profiles.wipeLiveProfile as jest.Mock).mockImplementationOnce(async (_bot: string, job: string) => {
+          wiped.push(job);
+          // The machine is awake by now (the start woke it), and the browser is emptied before the job is let through
+          expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { machine: true } })).machine).toBe('working');
+          return { state: 'cleared', reason: null };
+        });
+        const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second' }, minutes(2));
+        if (!next.ok) throw new Error('not started');
+        expect(await jobOf(next.job.id)).toMatchObject({ status: 'running', queuedFor: null });
+        expect(wiped).toEqual([jobId]);
+        expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: null });
+      });
+    }
+
+    it('a browser that cannot be emptied after the wake sends the job back in line with nothing held, and the mark stays for the sweep (never a job on a browser that may hold another job’s sign-ins)', async () => {
+      const { sara, jobId } = await running('s1025-wipe-fails');
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
+      (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'left', reason: 'not_awake' }));
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      (profiles.wipeLiveProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'failed', reason: 'busy' }));
+      const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second' }, minutes(2));
+      if (!next.ok) throw new Error('not started');
+      expect(await jobOf(next.job.id)).toMatchObject({ status: 'queued', queuedFor: 'busy', reservationKey: null, startedAt: null });
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: jobId });
+      // The machine is awake now: once the park is finished (the pointer goes) the job behind it starts
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: jobId });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: null } });
+      await sweepComputers(minutes(5));
+      expect(await jobOf(next.job.id)).toMatchObject({ status: 'running' });
+    });
+
+    it('CONTROL: with the machine awake the pointer still holds every other job back (the park or the sweep settles it, the line moves on after)', async () => {
+      const { sara, jobId } = await running('s1025-awake');
+      (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => {
+        throw new Error('the server stopped');
+      });
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      // The pause rested the machine (nothing held it); the machine is awake again, as when another job's wake or the sweep's check found it, and only what the START does is looked at
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'working' } });
+      (profiles.wipeLiveProfile as jest.Mock).mockClear();
+      const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second' }, minutes(2));
+      if (!next.ok) throw new Error('not started');
+      expect(await jobOf(next.job.id)).toMatchObject({ status: 'queued', queuedFor: 'busy' });
+      expect((profiles.wipeLiveProfile as jest.Mock).mock.calls).toHaveLength(0);
     });
   });
 

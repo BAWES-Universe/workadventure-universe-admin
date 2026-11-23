@@ -67,12 +67,14 @@ import {
   CLEAN_CLAIM_STALE_MS,
 } from '@/lib/computer-values';
 import {
+  clearParkPending,
   dropProfile,
   finishPendingParks,
   parkWorthWaitingFor,
   recoverResumedBrowsers,
   restoreProfile,
   settleResumedBrowser,
+  wipeLiveProfile,
 } from '@/lib/computer-browser-profile';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
 import { claimCommandIn, commandRow, keepOutcome, seenCommand, type Command } from '@/lib/computer-commands';
@@ -1039,8 +1041,10 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
 
   // A pause whose park never ran leaves the paused job's own browser live on the machine: nothing else starts there until it is put away or emptied (the sweep does it), so no job ever
   // inherits another's sign-ins (GPT round 6, finding 7)
+  // Only while the machine is AWAKE: there the pause's own park, or the sweep, puts it right and the line moves on. A machine that is not awake (waking, resting, restarted) can be put right by nobody until it is woken, so a job
+  // that waits for it would wait for ever: the job wakes it, and the live browser is emptied before the job (or anyone) works on it (below, `wipePendingPark`)
   const parking = await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { parkPendingJobId: true } });
-  if (parking?.parkPendingJobId && parking.parkPendingJobId !== job.id) {
+  if (parking?.parkPendingJobId && parking.parkPendingJobId !== job.id && row.machine === 'working') {
     await queue('busy');
     return 'queued';
   }
@@ -1228,6 +1232,23 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
     await restIfUnheld(job.botId, now);
     return 'gone';
   }
+  // A pause that could not put its job's browser away because the machine was not awake left its mark: the machine is awake now, and no job works on it before that browser is emptied (the paused job's sign-ins are
+  // never live in front of another job). Never with another job on the machine (that one's browser is its own and is not emptied for this): this job goes back in line, and the line starts it once the mark is settled
+  const mark = (await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { parkPendingJobId: true } }))?.parkPendingJobId ?? null;
+  if (mark && mark !== job.id) {
+    const beside = await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } } });
+    const emptied = beside === 0 && (await wipeLiveProfile(job.botId, mark, now)).state === 'cleared';
+    if (emptied) await clearParkPending(job.botId, mark);
+    else {
+      const back = await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', reservationKey: key }, data: { status: 'queued', queuedFor: 'busy', reservationKey: null, startedAt: null, stretchStarted: null, prepState: null, ...(carriedOnSeq !== null ? { carryOnPending: true } : {}) } });
+      if (back.count === 1) {
+        if (carriedOnSeq !== null) await prisma.computerJobTelling.updateMany({ where: { jobId: job.id, seq: carriedOnSeq, toldAt: null }, data: { staleAt: now } });
+        await releaseRoom({ key }, now);
+        return 'queued';
+      }
+      return 'gone';
+    }
+  }
   // A job that was paused gets its own browser back (and never the one of a job that ran in between) before its runner takes it up
   // Each of these is this try's own: a job that was paused and resumed again while the machine came up is on another room, and this try marks nothing for it (finding 3b)
   if (job.pauses > 0) await prisma.computerJobPause.updateMany({ where: { jobId: job.id, n: job.pauses, resumedAt: null, job: { reservationKey: key } }, data: { resumedAt: now } }).catch(() => undefined);
@@ -1237,7 +1258,8 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
       console.error('[Computer] Could not bring back a resumed job’s browser:', error instanceof Error ? error.message : 'unknown');
       return { state: 'failed' as const, reason: 'error', cookies: 0, pages: 0 };
     });
-    await settleResumedBrowser(job.id, job.botId, back, now, key);
+    // Its own browser is back (or a clean one is proved clean): the machine waits for nobody's park any more
+    if ((await settleResumedBrowser(job.id, job.botId, back, now, key)) === 'ready') await clearParkPending(job.botId, job.id);
   }
   // What is on the machine before this job works on it: only so the message can name files the job saved outside its own output folder (those are never handed over)
   if (job.writes) await takeBaseline(job.id, job.botId, provider, key);
