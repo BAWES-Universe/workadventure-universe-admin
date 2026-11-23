@@ -25,6 +25,7 @@ import { createBrick } from '@/lib/brick-create';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { memberAllowance } from '@/lib/meter-allowance';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
+import { machineDoesSignIns } from '../helpers/working-signins';
 import { claimJob, finishJob, giveComputer, renewJob, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
 import { mintJobToken } from '@/lib/computer-token';
 import { recordFaults } from '@/lib/computer-faults';
@@ -148,7 +149,10 @@ run('credit for computers, on the real books', () => {
     await wipe();
     await seedGiveBackLimits();
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
-    setComputerProviderForTests(new FakeComputerProvider());
+    const fake = new FakeComputerProvider();
+    // The pretend machine does its browser work (park, restore, empty): this suite is about the money, not about a machine that refuses
+    machineDoesSignIns(fake);
+    setComputerProviderForTests(fake);
     await setUp();
   });
   afterAll(async () => {

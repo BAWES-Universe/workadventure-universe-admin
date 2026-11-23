@@ -68,6 +68,7 @@ import {
 import {
   dropProfile,
   finishPendingParks,
+  parkWorthWaitingFor,
   recoverResumedBrowsers,
   restoreProfile,
   settleResumedBrowser,
@@ -924,6 +925,17 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
   if (parking?.parkPendingJobId && parking.parkPendingJobId !== job.id) {
     await queue('busy');
     return 'queued';
+  }
+
+  // A job that carries on and still has a browser of its own to get back does not start BESIDE another job: it would have to run in that job's browser, and its own sign-ins would be thrown
+  // away to let it. It waits for the machine alone (nothing reserved, its park untouched) and the line starts it when the other job is done. A job that kept nothing runs beside another as any
+  // new job does (GPT round 6, finding 7, Opus's ruling 23 Nov)
+  if (job.pauses > 0) {
+    const beside = await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } } });
+    if (beside > 0 && (await parkWorthWaitingFor(job.botId, job.id, now))) {
+      await queue('busy');
+      return 'queued';
+    }
   }
 
   const settings = await getMeterSettings();

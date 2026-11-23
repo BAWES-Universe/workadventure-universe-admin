@@ -35,6 +35,7 @@ import { currentEnvelope, heldRoom, memberAllowance } from '@/lib/meter-allowanc
 import * as allowanceModule from '@/lib/meter-allowance';
 import * as capabilityPause from '@/lib/capability-pause';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
+import { machineDoesSignIns } from '../helpers/working-signins';
 import { claimJob, computerTimeInBooks, computerView, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver, controlInternals, turnOffComputer, stopComputerWork, startWindDown, liftWindDown } from '@/lib/computer';
 import { recordPoolCutoff } from '@/lib/computer-faults';
 import * as profile from '@/lib/computer-browser-profile';
@@ -108,6 +109,8 @@ run('computer job controls: pause, resume, do this next, cancel one job (piece 1
     await seedGiveBackLimits();
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
     fake = new FakeComputerProvider();
+    // The pretend machine does its browser work (park, restore, empty): this suite is about the controls, not about a machine that refuses
+    machineDoesSignIns(fake);
     setComputerProviderForTests(fake);
     recordMeterEvent.mockClear();
     jest.mocked(profile.parkProfile).mockClear();

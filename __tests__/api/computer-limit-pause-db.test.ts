@@ -31,7 +31,7 @@ import { claimJob, computerTimeInBooks, finishJobUnder, getJob, giveComputer, re
 import { authorizeModelCall, callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { mintJobToken } from '@/lib/computer-token';
 import { recordPoolCutoff } from '@/lib/computer-faults';
-import { pauseEventId, pauseJob, resumeJob } from '@/lib/computer-job-controls';
+import { cancelJob, pauseEventId, pauseJob, resumeJob } from '@/lib/computer-job-controls';
 import { carryOnPaused, pauseForLimit } from '@/lib/computer-limit-pause';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
 import { createGiftFor } from '@/lib/grants-admin';
@@ -740,6 +740,44 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect(after).toMatchObject({ status: 'running', prepState: null, endedBy: null, reservationKey: stuck.reservationKey, pauses: 1 });
       expect((await runnableJobsPage(50)).jobs.map((one) => one.jobId)).toContain(jobId);
       expect((await claimJob(jobId, { run: 'rB', seen: after.ownerEpoch }, minutes(5))).ok).toBe(true);
+    });
+
+    it('a job that carries on and still has a browser of its own waits for the machine instead of running in another job’s browser: its park is untouched and it holds no room, and it starts when the machine is free', async () => {
+      const { sara, jobId } = await running('g6-7-wait-alone');
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      // Another job of the person’s takes the machine while this one is paused. It only LOOKS, so the two could share the machine (a writer would make this one wait in line anyway)
+      const other = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Other', writes: false }, minutes(2));
+      if (!other.ok) throw new Error('not started');
+      expect(await jobOf(other.job.id)).toMatchObject({ status: 'running' });
+      (profiles.restoreProfile as jest.Mock).mockClear();
+      // Its Resume leaves it waiting in line, with nothing held and nothing asked of the machine: it would have to run in the other job’s browser, and its own sign-ins would be thrown away for that
+      expect((await resumeJob(sara.brickId, sara.id, jobId, minutes(3))).ok).toBe(true);
+      const waiting = await jobOf(jobId);
+      expect(waiting).toMatchObject({ status: 'queued', queuedFor: 'busy', prepState: null, pauses: 1, reservationKey: null });
+      expect((profiles.restoreProfile as jest.Mock).mock.calls).toHaveLength(0);
+      // Its park is where the pause left it, so it will get its OWN sign-ins back and not the other job’s
+      expect(await prisma.computerJobPause.findFirstOrThrow({ where: { jobId, n: 1 }, select: { resumedAt: true } })).toEqual({ resumedAt: null });
+      // The other job ends: the line starts this one, with its own browser brought back
+      expect((await cancelJob(sara.brickId, sara.id, other.job.id, minutes(4))).ok).toBe(true);
+      await sweepComputers(minutes(5));
+      const after = await jobOf(jobId);
+      expect(after).toMatchObject({ status: 'running', queuedFor: null, prepState: null, endedBy: null });
+      expect(after.reservationKey).not.toBeNull();
+      expect((profiles.restoreProfile as jest.Mock).mock.calls).toHaveLength(1);
+    });
+
+    it('a job that carries on with NOTHING of its own kept runs beside another job as any new job does: a shared browser it signs in to again', async () => {
+      const { sara, jobId } = await running('g6-7-expired');
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      const other = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Other', writes: false }, minutes(2));
+      if (!other.ok) throw new Error('not started');
+      // Its park is past the hours sign-ins are kept: there is nothing of its own to wait for
+      await prisma.computerJobPause.updateMany({ where: { jobId, n: 1 }, data: { at: new Date(NOW.getTime() - 30 * 3600_000) } });
+      (profiles.restoreProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'fresh', reason: 'shared' }));
+      expect((await resumeJob(sara.brickId, sara.id, jobId, minutes(3))).ok).toBe(true);
+      // It runs, beside the other job, ready: a browser it shares and signs in to again is valid
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', prepState: null, endedBy: null });
+      expect(await jobOf(other.job.id)).toMatchObject({ status: 'running' });
     });
 
     it('a crash between a pause and putting its browser away stops every other job on that machine until the park is finished', async () => {

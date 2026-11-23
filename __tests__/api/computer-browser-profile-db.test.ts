@@ -15,7 +15,7 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests, type ExecOptions } from '@/lib/computer-provider';
-import { dropProfile, finishPendingParks, parkProfile, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settleResumedBrowser, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
+import { dropProfile, finishPendingParks, parkProfile, parkWorthWaitingFor, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settleResumedBrowser, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -236,13 +236,16 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       await prisma.bot.update({ where: { id: sara.brickId }, data: { ownerId: sara.id } });
     });
 
-    it('another job on the machine: the kept browser is dropped, never shown to it, and the browser it uses is left alone', async () => {
+    it('another job on the machine: nothing is brought back and the shared browser is left alone, and the kept browser is LEFT WHERE IT IS (it is the person’s, and this job is allowed it)', async () => {
       const sara = await person('Sara');
       await machine(sara.brickId);
       await job(sara, { status: 'running', writes: false });
       const visa = await job(sara, { status: 'running', pausedMinutesAgo: 10 });
       expect(await restoreProfile(sara.brickId, visa.id, NOW)).toMatchObject({ state: 'fresh', reason: 'shared' });
-      expect(sent.map((one) => one.action)).toEqual(['drop']);
+      // Nothing is run on the machine at all: the job that is on it keeps its browser, and this job keeps its park for when it has the machine to itself (GPT round 6, finding 7)
+      expect(sent).toEqual([]);
+      // ...and a job whose park it is still allowed waits for the machine instead of coming here at all
+      expect(await parkWorthWaitingFor(sara.brickId, visa.id, NOW)).toBe(true);
     });
 
     it('does nothing for a job of another Brick, a job that is not running, or on a machine that is not awake', async () => {
@@ -387,8 +390,8 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       expect(back).toMatchObject({ state: 'fresh', reason: 'shared' });
       expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW)).toBe('ready');
       expect(await prepOf(visa.id)).toEqual({ prepState: null });
-      // Its own kept browser is thrown away (it is never shown beside another job's), and the SHARED live browser is not emptied under the job that is using it
-      expect(sent.map((one) => one.action)).toEqual(['drop']);
+      // Nothing is run on the machine: the SHARED live browser is not emptied under the job using it, and this job's own park is not thrown away to let it run in that browser
+      expect(sent).toEqual([]);
       expect(looker.id).not.toBe(visa.id);
     });
 
@@ -401,8 +404,13 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       expect(await recoverResumedBrowsers(minutes(1))).toEqual({ looked: 0, ready: 0 });
       expect(await prepOf(visa.id)).toEqual({ prepState: 'restoring' });
       expect(sent).toEqual([]);
-      // Past the longest one command may take, no try is still working on it: the sweep settles the browser and the job can be worked on again
-      expect(await recoverResumedBrowsers(minutes(6))).toEqual({ looked: 1, ready: 1 });
+      // Past the longest one command may take, no try is still working on it. What that try left is an UNKNOWN result, so the sweep never reads it as ready: it writes `recover` and runs
+      // nothing on the machine on this pass
+      expect(await recoverResumedBrowsers(minutes(6))).toEqual({ looked: 1, ready: 0 });
+      expect(await prepOf(visa.id)).toEqual({ prepState: 'recover' });
+      expect(sent).toEqual([]);
+      // The recover path then settles it, the same way as any other: the restore is tried and the job can be worked on again
+      expect(await recoverResumedBrowsers(minutes(7))).toEqual({ looked: 1, ready: 1 });
       expect(await prepOf(visa.id)).toEqual({ prepState: null });
       expect(sent.map((one) => one.action)).toEqual(['restore']);
     });
