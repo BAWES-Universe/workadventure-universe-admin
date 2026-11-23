@@ -120,6 +120,7 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
     await wipe();
     await seedGiveBackLimits();
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
+    resetCarryOnScanForTests();
     fake = new FakeComputerProvider();
     setComputerProviderForTests(fake);
     await setUp();
