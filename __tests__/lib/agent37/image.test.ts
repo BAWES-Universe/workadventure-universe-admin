@@ -117,8 +117,11 @@ describe('what is in the image', () => {
   it('clears the browser under the same lock as the supervisor and proves it gone before the profile is removed', () => {
     const clean = imageFiles().find((file) => file.name === 'universe-clean')!.text;
     expect(clean).toContain('up.lock');
-    expect(clean.indexOf('pgrep -x chromium')).toBeLessThan(clean.indexOf('rm -rf'));
-    expect(clean.indexOf('rm -rf')).toBeLessThan(clean.indexOf('universe-up --child'));
+    // The first `rm -rf` clears a stale mark folder (it is not the profile): the one that removes the profile comes after the browser is proved gone
+    const profileRemoval = clean.indexOf('rm -rf "$HOME_DIR/.config/universe-chromium"');
+    expect(profileRemoval).toBeGreaterThan(-1);
+    expect(clean.indexOf('pgrep -x chromium')).toBeLessThan(profileRemoval);
+    expect(profileRemoval).toBeLessThan(clean.indexOf('universe-up --child'));
   });
 });
 
@@ -149,8 +152,10 @@ describe('what the scripts the fence keeps may run', () => {
     const clean = script('universe-clean');
     expect(clean.indexOf('profile.dirty')).toBeLessThan(clean.indexOf('pkill -x chromium'));
     expect(clean).toContain('reason=profile_not_removed');
-    expect(clean.indexOf('reason=profile_not_removed')).toBeLessThan(clean.indexOf('rm -f "$STATE/profile.dirty"'));
-    expect(clean.indexOf('rm -f "$STATE/profile.dirty"')).toBeLessThan(clean.indexOf('universe-up --child'));
+    // The mark folder is cleared once before it is made (a stale one) and once, last, when the profile is proved gone: the last one is the "unmark"
+    const unmark = clean.lastIndexOf('rm -rf "$STATE/profile.dirty"');
+    expect(clean.indexOf('reason=profile_not_removed')).toBeLessThan(unmark);
+    expect(unmark).toBeLessThan(clean.indexOf('universe-up --child'));
     const up = script('universe-up');
     expect(up).toContain('reason=profile_not_cleared');
     // done before the browser is started
