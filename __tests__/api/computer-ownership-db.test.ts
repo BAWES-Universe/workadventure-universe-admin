@@ -968,6 +968,46 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect(await liveKeys(jobId)).toBe(0);
     });
 
+    it('a turn’s id is recorded only for the worker that still owns the job: A opens a turn, B claims, then A’s `created` arrives: A’s response id is NOT recorded and A’s turn is cancelled by its own id; CONTROL: the owner’s own `created` is recorded and nothing is cancelled', async () => {
+      const drain = async (events: AsyncGenerator<{ type: string }>) => {
+        const seen: Array<{ type: string; code?: string }> = [];
+        for await (const event of events) seen.push(event as { type: string; code?: string });
+        return seen;
+      };
+      // A: the turn is opened as the owner, and B claims while the agent is accepting it (before the id arrives)
+      const { jobId } = await running('s-turn-record');
+      const ea = await claimed(jobId, 'rA');
+      fake.turns = [[{ type: 'created', id: 'resp-A', sessionId: 'sess-A' }, { type: 'text', text: 'Working' }, { type: 'completed', outputText: 'Working', usage: null }]];
+      const original = FakeComputerProvider.prototype.openTurn.bind(fake);
+      const open = jest.spyOn(fake, 'openTurn').mockImplementationOnce((async (ref: string, input: { text: string; sessionId: string | null }, signal?: AbortSignal) => {
+        await claimed(jobId, 'rB', minutes(1));
+        return original(ref, input, signal);
+      }) as never);
+      let seen: Array<{ type: string; code?: string }>;
+      try {
+        const started = await startTurn(jobId, 'carry on', new AbortController().signal, { epoch: ea });
+        if (!started.ok) throw new Error(`the dispatch is the only seam this test crosses (${started.reason})`);
+        seen = await drain(started.events);
+      } finally {
+        open.mockRestore();
+      }
+      expect(seen[0]).toMatchObject({ type: 'failed', code: 'fenced' });
+      expect(await jobOf(jobId)).toMatchObject({ agentResponseId: null, ownerEpoch: ea + 1, status: 'running' });
+      expect(fake.cancelledTurns).toEqual(['resp-A']);
+      // CONTROL: the owner's own `created` is recorded while the turn runs, cleared when it ends, and nothing is cancelled
+      const own = await running('s-turn-record-own');
+      const eo = await claimed(own.jobId, 'rA');
+      fake.cancelledTurns.length = 0;
+      fake.turns = [[{ type: 'created', id: 'resp-O', sessionId: 'sess-O' }, { type: 'text', text: 'Working' }, { type: 'completed', outputText: 'Working', usage: null }]];
+      const started = await startTurn(own.jobId, 'carry on', new AbortController().signal, { epoch: eo });
+      if (!started.ok) throw new Error('the owner’s turn was not started');
+      for await (const event of started.events) {
+        if (event.type === 'created') expect(await jobOf(own.jobId)).toMatchObject({ agentResponseId: 'resp-O', agentSessionId: 'sess-O' });
+      }
+      expect(await jobOf(own.jobId)).toMatchObject({ agentResponseId: null });
+      expect(fake.cancelledTurns).toEqual([]);
+    });
+
     it('a reconnect that finds its turn gone clears the turn it read, never another worker’s: B takes the job and sets its own turn meanwhile; B’s turn stays', async () => {
       const { jobId } = await running('s-broker-reattach');
       const ea = await claimed(jobId, 'rA');
