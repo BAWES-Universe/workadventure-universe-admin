@@ -17,7 +17,7 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { ackStart, finishJob, forgetOldStartMarks, giveComputer, startJob, startedJobFor } from '@/lib/computer';
+import { ackStart, earlierUnconfirmedStart, finishJob, forgetOldStartMarks, giveComputer, startJob, startedJobFor } from '@/lib/computer';
 import { purgeBrick } from '@/lib/brick-purge';
 import { GET, POST } from '@/app/api/bots/[id]/computer-jobs/route';
 
@@ -308,6 +308,22 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     await prisma.computerStartAttempt.update({ where: { id: a.id }, data: { state: 'expired', jobId: null } });
     await forgetOldStartMarks(new Date());
     expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(0);
+  });
+
+  it('CodeRabbit A11: the first answer stored for a start key stays: a later request that would answer the key with a different earlier job is handed the stored answer, and the row is not rewritten', async () => {
+    const sara = await owner('a11');
+    const [KEY_A, KEY_B, KEY_C] = [key(), key(), key()];
+    const a = await post(sara, KEY_A, 'Visa');
+    // B is answered by A, and that answer is kept
+    expect(await post(sara, KEY_B, 'Visa please')).toMatchObject({ ok: false, reason: 'earlier', job: { id: a.job.id } });
+    expect(await attemptOf(sara, KEY_B)).toMatchObject({ state: 'answered', jobId: a.job.id });
+    // A is acknowledged, and another start (C) makes a job that is not: it is now the oldest unconfirmed one
+    await ackStart(sara.brickId, sara.id, KEY_A);
+    const c = await post(sara, KEY_C, 'Another');
+    expect(c).toMatchObject({ ok: true });
+    // The second request under key B (the route's look before the spend rule) finds C the earlier one: the stored answer, A, is what it returns, and the row keeps A
+    expect(await earlierUnconfirmedStart(sara.brickId, sara.id, KEY_B)).toMatchObject({ id: a.job.id });
+    expect(await attemptOf(sara, KEY_B)).toMatchObject({ state: 'answered', jobId: a.job.id });
   });
 
   it('CodeRabbit D9: an alias chain of ten links answers the job at its end, and the sweep of old marks keeps every link of it past the week (no cap on the hops)', async () => {

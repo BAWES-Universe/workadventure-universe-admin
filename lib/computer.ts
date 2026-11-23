@@ -587,7 +587,7 @@ async function keptAnswerOf(botId: string, personId: string, startKey: string): 
 
 /**
  * Keeps, durably, that the start under `key` was answered with another start (finding 1, GPT round 6): state `answered`, with the job that answered it, or the attempt it waits for while that one has no job yet.
- * Written before the answer is given. It never touches a start that made its own job (`made`) or was superseded, and it acknowledges nothing: the answering job's `start_acked_at` is left as it is.
+ * Written before the answer is given. The FIRST answer stored for a key stays: it never touches a start that made its own job (`made`), was superseded or was already answered (a caller that gets `false` reads the stored answer and gives that one: two requests that chose different earlier jobs must not hand the caller two answers), and it acknowledges nothing: the answering job's `start_acked_at` is left as it is.
  */
 async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>, key: { botId: string; personId: string; startKey: string }, by: { jobId: string } | { aliasAttemptId: string }): Promise<boolean> {
   const jobId = 'jobId' in by ? by.jobId : null;
@@ -596,8 +596,14 @@ async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>
     INSERT INTO "computer_start_attempts" ("id", "bot_id", "person_id", "start_key", "state", "job_id", "alias_attempt_id", "beat_at", "created_at")
     VALUES (${randomUUID()}, ${key.botId}, ${key.personId}, ${key.startKey}, 'answered', ${jobId}, ${alias}, NOW(), NOW())
     ON CONFLICT ("bot_id", "person_id", "start_key") DO UPDATE SET "state" = 'answered', "job_id" = EXCLUDED."job_id", "alias_attempt_id" = EXCLUDED."alias_attempt_id"
-    WHERE "computer_start_attempts"."state" IN ('open', 'expired', 'answered')`;
+    WHERE "computer_start_attempts"."state" IN ('open', 'expired')`;
   return written > 0;
+}
+
+/** Whether the key's attempt row already holds an answer (state `answered`), read in the caller's transaction after an answer write stored nothing. */
+async function storedAnswerIn(tx: Pick<Prisma.TransactionClient, 'computerStartAttempt'>, key: { botId: string; personId: string; startKey: string }): Promise<boolean> {
+  const row = await tx.computerStartAttempt.findUnique({ where: { botId_personId_startKey: key }, select: { state: true } });
+  return row?.state === 'answered';
 }
 
 /** What a start's own attempt row says it was answered with (finding 1): a job, an older start still going on (its key), or a start that ended with no job (`expired`). Null when the row decides nothing (none, open, made, expired on its own). */
@@ -862,14 +868,14 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
             });
             if (older) {
               // Finding 1: kept before it is answered, in this same transaction
-              await answerAttemptIn(tx, ownKey, { aliasAttemptId: older.id });
+              if (!(await answerAttemptIn(tx, ownKey, { aliasAttemptId: older.id })) && (await storedAnswerIn(tx, ownKey))) return { reanswer: true as const };
               return { earlier: { id: null, status: null, state: 'starting' as const, attempt: older.startKey } };
             }
           }
           const earlier = await tx.computerJob.findFirst({ where: { botId: input.botId, personId: input.personId, startAckedAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true, status: true, startKey: true } });
           if (earlier) {
             // Finding 1: kept before it is answered; it acknowledges nothing (the earlier job stays unconfirmed until its own key is acknowledged)
-            await answerAttemptIn(tx, ownKey, { jobId: earlier.id });
+            if (!(await answerAttemptIn(tx, ownKey, { jobId: earlier.id })) && (await storedAnswerIn(tx, ownKey))) return { reanswer: true as const };
             return { earlier: { id: earlier.id, status: earlier.status, state: startStateOf(earlier.status), attempt: earlier.startKey } };
           }
           const made = await tx.computerJob.create({ data: { ...data, startAckedAt: null } });
