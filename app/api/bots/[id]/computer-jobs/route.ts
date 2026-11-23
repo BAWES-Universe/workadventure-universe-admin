@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
-import { ackStart, computerView, earlierUnconfirmedStart, refuseAttempt, registerStart, retireStartKey, startAnsweredBefore, startJob, startedJobFor, type Registration } from '@/lib/computer';
+import { ackStart, computerView, earlierUnconfirmedStart, refuseAttempt, registerStart, retireStartKey, startAnsweredBefore, startJob, startKeyHasJob, startedJobFor, type Registration } from '@/lib/computer';
 import { ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { startStateOf } from '@/lib/computer-values';
 import { ownerSpendAllowed } from '@/lib/spend-rules';
@@ -219,7 +219,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }
     // "Try again" is resolved FIRST: a named job that cannot be carried on is `cannot_continue` (with the way to start a fresh job), whatever the person's spending rule leaves; one already carried on keeps its earlier answer
     // (the spend look below lets it through); only a continuation that would be MADE is held to the rule (CodeRabbit on #1025, 35). A start that names a run is answered by the run's own job first, so it is left to the start
-    if (continues?.success && !parsed.data.runId) {
+    // A replay of a key that already made its job is not a new "try again": the job it made answers it (in `startJob`), even when the job it continued has been deleted since (CodeRabbit on #1025)
+    if (continues?.success && !parsed.data.runId && !(attempt?.success && (await startKeyHasJob(id, person.personId, attempt.data)))) {
       const carry = await carryOnFrom(id, person.personId, continues.data);
       if ('fresh' in carry) return refused({ ok: false, reason: 'cannot_continue', why: carry.fresh, ...(carry.job ? { job: carry.job } : {}) });
     }

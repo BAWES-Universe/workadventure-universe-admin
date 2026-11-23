@@ -31,7 +31,7 @@ import { cleanStepLabel } from '@/lib/computer-redact';
 import { appendStep } from '@/lib/computer-job-steps';
 import { CALL_IN_LAST_STRETCH, HOLD_IN_LAST_STRETCH } from '@/lib/computer-stretch';
 import { tellIn } from '@/lib/computer-tellings';
-import { callRoomKey, endIfCutoffDecided, endStuckCutoffs, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
+import { callRoomKey, endIfCutoffDecided, endStuckCutoffs, giveBackModelCalls, releaseUnadmittedCallRoom, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { reconcileComputers } from '@/lib/computer-reconcile';
 import { bringBackFromCold, coldStep, dropColdCopiesIfNewer } from '@/lib/computer-cold';
@@ -41,7 +41,7 @@ import { computersArePaused } from '@/lib/capability-pause';
 import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
-import { hasCallAdmission, hasFinishIntent, hasPoolCutoff, hasTurnAdmitted, lockCutoff, lockRelayReach } from '@/lib/computer-faults';
+import { hasFinishIntent, hasPoolCutoff, hasTurnAdmitted, lockCutoff, lockRelayReach } from '@/lib/computer-faults';
 import { extendHoldIn } from '@/lib/computer-lease';
 import { epochMatches, leaseUntil, lockJob, lockJobRow, noEndingWhere, ownerWhere, SUPERSEDED, type EpochSaid } from '@/lib/computer-owner';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
@@ -595,7 +595,7 @@ async function keptAnswerOf(botId: string, personId: string, startKey: string): 
 
 /**
  * Keeps, durably, that the start under `key` was answered with another start (finding 1, GPT round 6): state `answered`, with the job that answered it, or the attempt it waits for while that one has no job yet.
- * Written before the answer is given. It never touches a start that made its own job (`made`) or was superseded, and it acknowledges nothing: the answering job's `start_acked_at` is left as it is.
+ * Written before the answer is given. The FIRST answer stored for a key stays: it never touches a start that made its own job (`made`), was superseded or was already answered (a caller that gets `false` reads the stored answer and gives that one: two requests that chose different earlier jobs must not hand the caller two answers), and it acknowledges nothing: the answering job's `start_acked_at` is left as it is.
  */
 async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>, key: { botId: string; personId: string; startKey: string }, by: { jobId: string } | { aliasAttemptId: string }): Promise<boolean> {
   const jobId = 'jobId' in by ? by.jobId : null;
@@ -604,8 +604,14 @@ async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>
     INSERT INTO "computer_start_attempts" ("id", "bot_id", "person_id", "start_key", "state", "job_id", "alias_attempt_id", "beat_at", "created_at")
     VALUES (${randomUUID()}, ${key.botId}, ${key.personId}, ${key.startKey}, 'answered', ${jobId}, ${alias}, NOW(), NOW())
     ON CONFLICT ("bot_id", "person_id", "start_key") DO UPDATE SET "state" = 'answered', "job_id" = EXCLUDED."job_id", "alias_attempt_id" = EXCLUDED."alias_attempt_id"
-    WHERE "computer_start_attempts"."state" IN ('open', 'expired', 'answered')`;
+    WHERE "computer_start_attempts"."state" IN ('open', 'expired')`;
   return written > 0;
+}
+
+/** Whether the key's attempt row already holds an answer (state `answered`), read in the caller's transaction after an answer write stored nothing. */
+async function storedAnswerIn(tx: Pick<Prisma.TransactionClient, 'computerStartAttempt'>, key: { botId: string; personId: string; startKey: string }): Promise<boolean> {
+  const row = await tx.computerStartAttempt.findUnique({ where: { botId_personId_startKey: key }, select: { state: true } });
+  return row?.state === 'answered';
 }
 
 /** What a start's own attempt row says it was answered with (finding 1): a job, an older start still going on (its key), or a start that ended with no job (`expired`). Null when the row decides nothing (none, open, made, expired on its own). */
@@ -616,8 +622,8 @@ async function attemptAnswer(botId: string, personId: string, startKey: string, 
   let row = await prisma.computerStartAttempt.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select });
   // Only a start that was answered with another (`answered`, or `superseded` by a job made after it began) is answered from its row. Its own open, made or expired attempt is decided as before
   if (!row || (row.state !== 'answered' && row.state !== 'superseded')) return null;
-  // The chain is followed a few links at most (an alias of an alias): it always ends at a job, a start still going on, or one that ended with no job
-  for (let hop = 0; hop < 8 && row; hop++) {
+  // The chain is followed through any number of links (an alias of an alias). Its order is acyclic (an alias is only ever set to an open start made earlier than the one answered), so it ends at a job, a start still going on, or one that ended with no job
+  for (let hop = 0; row; hop++) {
     // Round 8, A2: an answer that names neither a job nor a start any more: the job that answered it was removed (the foreign key cleared it). The request already ran: never reopened as a fresh start
     if (!row.jobId && !row.aliasAttemptId && (row.state === 'answered' || row.state === 'superseded')) return { retired: true };
     if (row.jobId) {
@@ -886,7 +892,7 @@ export async function forgetOldStartMarks(now: Date = new Date(), olderThanMs: n
       WITH RECURSIVE walk("id", "next", "depth") AS (
         SELECT "id", "alias_attempt_id", 1 FROM "computer_start_attempts" WHERE "job_id" IS NULL AND "alias_attempt_id" IS NOT NULL
         UNION ALL
-        SELECT walk."id", t."alias_attempt_id", walk."depth" + 1 FROM walk JOIN "computer_start_attempts" t ON t."id" = walk."next" WHERE t."job_id" IS NULL AND t."alias_attempt_id" IS NOT NULL AND walk."depth" < 8
+        SELECT walk."id", t."alias_attempt_id", walk."depth" + 1 FROM walk JOIN "computer_start_attempts" t ON t."id" = walk."next" WHERE t."job_id" IS NULL AND t."alias_attempt_id" IS NOT NULL
       )
       SELECT walk."id" FROM walk JOIN "computer_start_attempts" t ON t."id" = walk."next" WHERE t."job_id" IS NOT NULL
     )`;
@@ -940,6 +946,11 @@ export async function startJob(input: StartInput, now: Date = new Date()): Promi
     return begun.done;
   }
   return tryNewJob(input, now, begun.created);
+}
+
+/** Whether a job already exists that THIS start key made (a replay of the key: the start answers with that job, whatever became of the job it continued). */
+export async function startKeyHasJob(botId: string, personId: string, startKey: string): Promise<boolean> {
+  return !!(await prisma.computerJob.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select: { id: true } }));
 }
 
 /** Everything a start does before its job exists, and the saving of the job: the part its mark covers. */
@@ -1042,14 +1053,14 @@ async function beginJob(input: StartInput, now: Date): Promise<Begun> {
             });
             if (older) {
               // Finding 1: kept before it is answered, in this same transaction
-              await answerAttemptIn(tx, ownKey, { aliasAttemptId: older.id });
+              if (!(await answerAttemptIn(tx, ownKey, { aliasAttemptId: older.id })) && (await storedAnswerIn(tx, ownKey))) return { reanswer: true as const };
               return { earlier: { id: null, status: null, state: 'starting' as const, attempt: older.startKey } };
             }
           }
           const earlier = await tx.computerJob.findFirst({ where: { botId: input.botId, personId: input.personId, startAckedAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { id: true, status: true, startKey: true } });
           if (earlier) {
             // Finding 1: kept before it is answered; it acknowledges nothing (the earlier job stays unconfirmed until its own key is acknowledged)
-            await answerAttemptIn(tx, ownKey, { jobId: earlier.id });
+            if (!(await answerAttemptIn(tx, ownKey, { jobId: earlier.id })) && (await storedAnswerIn(tx, ownKey))) return { reanswer: true as const };
             return { earlier: { id: earlier.id, status: earlier.status, state: startStateOf(earlier.status), attempt: earlier.startKey } };
           }
           const made = await tx.computerJob.create({ data: { ...data, startAckedAt: null } });
@@ -1258,7 +1269,8 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
     return 'gone';
   }
   // Never over a pause that landed since this try looked (it would undo the pause)
-  const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor } });
+  // ...and marks the try as DECIDED (`lastTriedAt`): a Resume's copy reads a job still queued with no try on record as one whose start has not reached its decision yet (CodeRabbit on #1025)
+  const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor, lastTriedAt: now } });
 
   // The team paused computers: a job in line stays in line with its work saved, and starts by itself when they are back
   if (await computersArePaused()) {
@@ -1458,7 +1470,7 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
   // running job before it removes anything) goes on; the job is brought a computer from cold storage when its turn comes
   const taken = await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { machine: true } });
   if (taken?.machine === 'packing') {
-    const back = await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', reservationKey: key }, data: { status: 'queued', queuedFor: 'busy', reservationKey: null, startedAt: null, stretchStarted: null, prepState: null, ...(carriedOnSeq !== null ? { carryOnPending: true } : {}) } });
+    const back = await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', reservationKey: key }, data: { status: 'queued', queuedFor: 'busy', lastTriedAt: now, reservationKey: null, startedAt: null, stretchStarted: null, prepState: null, ...(carriedOnSeq !== null ? { carryOnPending: true } : {}) } });
     if (back.count === 1) {
       // It did not carry on after all: the `carried_on` this try wrote is not said (it is told again when it really runs)
       if (carriedOnSeq !== null) await prisma.computerJobTelling.updateMany({ where: { jobId: job.id, seq: carriedOnSeq, toldAt: null }, data: { staleAt: now } });
@@ -2847,10 +2859,14 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   for (const reservation of lapsedCalls) {
     const callId = reservation.jobId && reservation.reservationKey.startsWith(callRoomKey(reservation.jobId, '')) ? reservation.reservationKey.slice(callRoomKey(reservation.jobId, '').length) : null;
     // A room whose call was never admitted (its refusal could not give the room back) is released, not written as usage the person is charged for: only an admitted call that never reported is unknown usage
-    if (reservation.jobId && callId && !(await hasCallAdmission(prisma, reservation.jobId, callId).catch(() => true))) {
-      await releaseRoom({ key: reservation.reservationKey }, now);
-      released++;
-      continue;
+    if (reservation.jobId && callId) {
+      const look = await releaseUnadmittedCallRoom(reservation.jobId, callId, reservation.reservationKey, now);
+      // A look that failed leaves the room for the next sweep: an unread call is neither released nor booked as usage
+      if (look === 'unknown') continue;
+      if (look === 'released') {
+        released++;
+        continue;
+      }
     }
     const settled =
       reservation.jobId && callId

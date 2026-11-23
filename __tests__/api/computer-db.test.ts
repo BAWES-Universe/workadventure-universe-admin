@@ -1011,6 +1011,8 @@ run('a Brick’s computer, in a real database', () => {
         if (!q.ok) throw new Error('no');
         blocked.push(q.job.id);
       }
+      // The line's try at each Q (when it was made) is on record; these Bricks have not been looked at by a sweep yet, as the lone Brick below has not
+      await prisma.computerJob.updateMany({ where: { id: { in: blocked } }, data: { lastTriedAt: null } });
       const free = await person('free');
       await giveComputer(free.brickId, free.id);
       const lone = await prisma.computerJob.create({ data: { botId: free.brickId, personId: free.id, title: 'F', status: 'queued', queuedFor: 'busy', createdAt: new Date(Date.now() + 60_000) } });

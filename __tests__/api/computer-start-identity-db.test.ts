@@ -17,7 +17,7 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { ackStart, finishJob, forgetOldStartMarks, giveComputer, startJob, startedJobFor } from '@/lib/computer';
+import { ackStart, earlierUnconfirmedStart, finishJob, forgetOldStartMarks, giveComputer, startJob, startedJobFor } from '@/lib/computer';
 import { purgeBrick } from '@/lib/brick-purge';
 import { GET, POST } from '@/app/api/bots/[id]/computer-jobs/route';
 
@@ -309,6 +309,45 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     await prisma.computerStartAttempt.update({ where: { id: a.id }, data: { state: 'expired', jobId: null } });
     await forgetOldStartMarks(new Date());
     expect(await prisma.computerStartAttempt.count({ where: { personId: tom.id } })).toBe(0);
+  });
+
+  it('CodeRabbit A11: the first answer stored for a start key stays: a later request that would answer the key with a different earlier job is handed the stored answer, and the row is not rewritten', async () => {
+    const sara = await owner('a11');
+    const [KEY_A, KEY_B, KEY_C] = [key(), key(), key()];
+    const a = await post(sara, KEY_A, 'Visa');
+    // B is answered by A, and that answer is kept
+    expect(await post(sara, KEY_B, 'Visa please')).toMatchObject({ ok: false, reason: 'earlier', job: { id: a.job.id } });
+    expect(await attemptOf(sara, KEY_B)).toMatchObject({ state: 'answered', jobId: a.job.id });
+    // A is acknowledged, and another start (C) makes a job that is not: it is now the oldest unconfirmed one
+    await ackStart(sara.brickId, sara.id, KEY_A);
+    const c = await post(sara, KEY_C, 'Another');
+    expect(c).toMatchObject({ ok: true });
+    // The second request under key B (the route's look before the spend rule) finds C the earlier one: the stored answer, A, is what it returns, and the row keeps A
+    expect(await earlierUnconfirmedStart(sara.brickId, sara.id, KEY_B)).toMatchObject({ id: a.job.id });
+    expect(await attemptOf(sara, KEY_B)).toMatchObject({ state: 'answered', jobId: a.job.id });
+  });
+
+  it('CodeRabbit D9: an alias chain of ten links answers the job at its end, and the sweep of old marks keeps every link of it past the week (no cap on the hops)', async () => {
+    const sara = await owner('d9');
+    const old = new Date(Date.now() - 9 * 24 * 60 * 60_000);
+    const first = key();
+    const made = await post(sara, first, 'Visa');
+    const keys = [first];
+    let follows = (await attemptOf(sara, first)).id as string;
+    for (let hop = 1; hop <= 10; hop++) {
+      const next = key();
+      keys.push(next);
+      // Each link is an answered start with no job, made earlier than the one after it
+      const row = await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: next, state: 'answered', aliasAttemptId: follows, beatAt: old, createdAt: new Date(Date.now() - (100 - hop) * 1_000) } });
+      follows = row.id;
+    }
+    // The last key is ten links from the job: its replay answers the job, and makes no second one
+    expect(await post(sara, keys[10], 'Visa')).toMatchObject({ ok: false, reason: 'earlier', job: { id: made.job.id } });
+    expect(await jobsOf(sara)).toHaveLength(1);
+    // And the old-marks sweep keeps the whole chain
+    await forgetOldStartMarks(new Date());
+    expect(await prisma.computerStartAttempt.count({ where: { personId: sara.id } })).toBe(11);
+    expect(await post(sara, keys[10], 'Visa')).toMatchObject({ ok: false, reason: 'earlier', job: { id: made.job.id } });
   });
 
   it('1c the game’s expired-key retry (its record gone, hours later, after the sweep of old marks): the kept answer survives the sweep and the retry makes no second job', async () => {

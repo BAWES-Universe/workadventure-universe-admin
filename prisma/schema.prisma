@@ -3381,6 +3381,8 @@ model BrickComputer {
   /// The job whose pause committed and whose browser (its sign-ins) is not put away yet (GPT round 6, finding 7): while it is set no other job starts on this machine, so a job never gets another's sign-ins. The
   /// park clears it; a machine that cannot be reached is wiped by the sweep, which clears it too.
   parkPendingJobId  String?   @map("park_pending_job_id") @db.VarChar(40)
+  /// The wake ticket (round 8, B1): every write that sets the machine waking or restoring takes the next number, and an external stop or a late success counts only while its own number is still the Brick's.
+  wakeEpoch         Int       @default(0) @map("wake_epoch")
   /// Set when a second pause lands while one still waits for its browser to be put away: the browser is then emptied, never put away under either job's name (CodeRabbit on #1025). Cleared with the pointer.
   parkPendingWipe   Boolean   @default(false) @map("park_pending_wipe")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
@@ -4200,8 +4202,10 @@ model ComputerStartAttempt {
   createdAt DateTime @default(now()) @map("created_at")
   /// Finding 1 (GPT round 6): a start answered with another start that had no job yet waits for THAT attempt (state `answered`); a retry under this key is answered from it.
   aliasAttemptId String? @map("alias_attempt_id")
-  outcome   Json?     @map("outcome")
-  issuedAt  DateTime? @map("issued_at")
+  /// Round 8, A1: what a start that ended with no job answered (state `refused`), kept so a retry of the key and an alias waiting on it are answered with the same outcome.
+  outcome Json?
+  /// Round 8, A2: the moment the key was issued (the person gave their consent), read from the key; a key older than the consent window is not accepted for a new start.
+  issuedAt DateTime? @map("issued_at")
 
   /// The job this start made or was answered with. The attempt stays with no job when the job goes (it is the record that the key was answered); a job-less attempt is let go after a week.
   job     ComputerJob?           @relation("StartAttemptJob", fields: [jobId], references: [id], onDelete: SetNull)

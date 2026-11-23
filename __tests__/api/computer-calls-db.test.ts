@@ -19,7 +19,7 @@ import { prisma } from '@/lib/db';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
-import { currentEnvelope, heldRoom, poolStatusNow, USUAL_CALL_ROOM_MICROS } from '@/lib/meter-allowance';
+import { currentEnvelope, heldRoom, poolStatusNow, releaseRoom, USUAL_CALL_ROOM_MICROS } from '@/lib/meter-allowance';
 import { computerReadiness, poolCheck } from '@/lib/computer-readiness';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { computerView, finishJob, giveComputer, handBack, renewJob, requestHandover, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
@@ -739,6 +739,46 @@ run('what a computer may ask of Orbit, in a real database', () => {
         const good = (await mintJobToken(third.jobId, 'model', NOW)) as { token: string };
         expect(await authorizeModelCall({ token: good.token, callId: 'own-1', estimateMicros: 1, payer: 'own-key' }, NOW)).toMatchObject({ ok: true, reservedMicros: null });
         expect(await hasOwnKeyCall(prisma, third.jobId)).toBe(true);
+      });
+
+      it('CodeRabbit B4 (own key): while the job’s browser is being restored or its sign-ins are unproven (prepState set), a call on the person’s own key is refused and leaves no marker, no admission and no renewal of the hold, as a funded call is', async () => {
+        for (const state of ['recover', 'restoring']) {
+          const { jobId } = await running(`prep-${state}`);
+          const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+          await prisma.computerJob.update({ where: { id: jobId }, data: { prepState: state, ownerLeaseUntil: new Date(NOW.getTime() + 10_000) } });
+          expect(await authorizeModelCall({ token, callId: 'own-1', estimateMicros: 1, payer: 'own-key' }, NOW)).toEqual({ ok: false, reason: 'refused' });
+          expect(await hasOwnKeyCall(prisma, jobId)).toBe(false);
+          expect(await prisma.computerJobFault.count({ where: { jobId, callId: { startsWith: 'orbit:admit:' } } })).toBe(0);
+          expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).ownerLeaseUntil).toEqual(new Date(NOW.getTime() + 10_000));
+          // Once the state is cleared the same call is authorized
+          await prisma.computerJob.update({ where: { id: jobId }, data: { prepState: null } });
+          expect(await authorizeModelCall({ token, callId: 'own-1', estimateMicros: 1, payer: 'own-key' }, NOW)).toMatchObject({ ok: true, reservedMicros: null });
+          expect(await hasOwnKeyCall(prisma, jobId)).toBe(true);
+        }
+      });
+
+      it('CodeRabbit D11 (own key): the hold an own-key call renews runs 90 s from the time read AFTER the waits for the locks, not from the time the request began', async () => {
+        const { jobId } = await running('hal');
+        const { token } = (await mintJobToken(jobId, 'model')) as { token: string };
+        await prisma.computerJob.update({ where: { id: jobId }, data: { ownerLeaseUntil: new Date(Date.now() + 10_000) } });
+        const cutoff = holdCutoffLock(jobId, async () => undefined);
+        let call: Promise<unknown> = Promise.resolve();
+        const began = Date.now();
+        try {
+          await cutoff.ready;
+          call = observe(authorizeModelCall({ token, callId: 'own-1', estimateMicros: 1, payer: 'own-key' }));
+          expect(await waitingOnCutoffLock(jobId)).toBe(true);
+          await sleep(400);
+          cutoff.release();
+          await cutoff.done;
+          expect(await call).toMatchObject({ ok: true, reservedMicros: null });
+        } finally {
+          cutoff.release();
+          await Promise.allSettled([cutoff.done, call]);
+        }
+        const lease = (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).ownerLeaseUntil as Date;
+        // 90 s after the wait ended (at least began + the 400 ms waited), not 90 s after the request began
+        expect(lease.getTime()).toBeGreaterThanOrEqual(began + 400 + 90_000);
       });
 
       // The key stays good through the fixture and the request's first look; only once the request is seen waiting at its lock does it run out (after the request began, and before the time it reads after the lock is let go)
@@ -1878,6 +1918,133 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'admitted') } })).state).toBe('settled');
       expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:admitted` } })).toMatchObject({ basis: 'unknown', costMicros: null });
       void sara;
+    });
+
+    it('CodeRabbit on #1025 (D7): a NEW room that was released between its reservation and its admission is not admitted: the room is looked at under the pool lock for every call, the answer is `refused`, and no admission is left', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      const realTx = prisma.$transaction.bind(prisma) as unknown as (...args: unknown[]) => Promise<unknown>;
+      let fired = false;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
+        const first = args[0];
+        if (typeof first !== 'function') return realTx(...args);
+        const wrapped = (tx: object) =>
+          (first as (client: unknown) => Promise<unknown>)(
+            new Proxy(tx, {
+              get(target, property) {
+                const value = Reflect.get(target, property, target) as unknown;
+                if (property !== '$executeRaw' || typeof value !== 'function') return value;
+                return async (...raws: unknown[]) => {
+                  // The admission's own transaction starts with the job's cutoff lock: the room is given back by someone else at that very moment (a release that committed before the admission looked)
+                  if (!fired && raws.slice(1).includes(cutoffLockKey(jobId))) {
+                    fired = true;
+                    await releaseRoom({ key: callRoomKey(jobId, 'late-new') }, minutes(1));
+                  }
+                  return (value as (...inner: unknown[]) => unknown).apply(target, raws);
+                };
+              },
+            }),
+          );
+        return realTx(wrapped, ...args.slice(1));
+      }) as never);
+      let answer: unknown;
+      try {
+        answer = await call(token, 'late-new', 5_000);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(fired).toBe(true);
+      expect(answer).toMatchObject({ ok: false, reason: 'refused' });
+      expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:late-new' } })).toBe(0);
+      expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'late-new') } })).state).toBe('released');
+    });
+
+    it('CodeRabbit on #1025 (A13): a lapsed room whose admission could not be READ is left for the next sweep: neither released nor booked as the person’s unknown usage; the next sweep, reading it, decides', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await call(token, 'unread', 9_000);
+      // Not admitted (its refusal could not give the room back)
+      await prisma.computerJobFault.deleteMany({ where: { jobId, callId: 'orbit:admit:unread' } });
+      const realTx = prisma.$transaction.bind(prisma) as unknown as (...args: unknown[]) => Promise<unknown>;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
+        const first = args[0];
+        if (typeof first !== 'function') return realTx(...args);
+        const wrapped = (tx: object) =>
+          (first as (client: unknown) => Promise<unknown>)(
+            new Proxy(tx, {
+              get(target, property) {
+                const value = Reflect.get(target, property, target) as unknown;
+                if (property !== 'computerJobFault') return value;
+                return new Proxy(value as object, {
+                  get(model, method) {
+                    const original = Reflect.get(model, method, model) as unknown;
+                    if (method !== 'count') return original;
+                    return (where: { where?: { callId?: unknown } }) =>
+                      typeof where?.where?.callId === 'string' && where.where.callId.startsWith('orbit:admit:') ? Promise.reject(new Error('the admission could not be read')) : (original as (a: unknown) => unknown).call(model, where);
+                  },
+                });
+              },
+            }),
+          );
+        return realTx(wrapped, ...args.slice(1));
+      }) as never);
+      try {
+        await sweepComputers(minutes(30));
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'unread') } })).state).toBe('held');
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${jobId}:call:unread` } })).toBe(0);
+      // The next sweep reads it: never admitted, so the room goes back and nothing is booked
+      await sweepComputers(minutes(31));
+      expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'unread') } })).state).toBe('released');
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${jobId}:call:unread` } })).toBe(0);
+    });
+
+    it('CodeRabbit on #1025 (D6): an admission that commits while the sweep decides to release a lapsed room is seen: the sweep waits on the call’s admission lock, finds the admission, and settles the room as the usage it is (never released from under an admitted call)', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await call(token, 'racy', 9_000);
+      await prisma.computerJobFault.deleteMany({ where: { jobId, callId: 'orbit:admit:racy' } });
+      // Another request is admitting this call right now: it holds the call's admission lock
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const holder = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${admitLockKey(jobId, 'racy')}, 0))`;
+        locked();
+        await gate;
+        await recordCallAdmission(tx, jobId, 'racy', minutes(29));
+      });
+      const holderEnded = holder.then(
+        () => undefined,
+        () => undefined,
+      );
+      let sweeping: Promise<unknown> = Promise.resolve();
+      try {
+        await Promise.race([lockTaken, holder]);
+        sweeping = sweepComputers(minutes(30));
+        sweeping.catch(() => undefined);
+        // The sweep reaches the call's lock and waits for it (a bounded wait for that checkpoint)
+        let waiting = false;
+        for (let tries = 0; tries < 250 && !waiting; tries += 1) {
+          const rows = await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(${admitLockKey(jobId, 'racy')}, 0)`;
+          waiting = rows[0].n > 0;
+          if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(waiting).toBe(true);
+        expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'racy') } })).state).toBe('held');
+      } finally {
+        release();
+        await Promise.allSettled([holderEnded, sweeping]);
+      }
+      expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'racy') } })).state).toBe('settled');
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:racy` } })).toMatchObject({ basis: 'unknown', costMicros: null });
     });
 
     it('a report that comes after the sweep wrote the call as unknown replaces the unknown figure, and never a figure that was written', async () => {

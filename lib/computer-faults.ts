@@ -392,7 +392,7 @@ export const lockCutoff = (tx: Pick<Prisma.TransactionClient, '$executeRaw'>, jo
  * go on; throws when it could not be kept (a call is not authorized without it). The admission for the call's turn is written in the same transaction as the marker, and nothing is looked at after it commits: a call is
  * refused with no trace, or authorized with both.
  */
-export async function authorizeOwnKeyCall(jobId: string, at: Date = new Date(), stillGood?: (tx: Prisma.TransactionClient) => Promise<boolean>, admitted?: { turn?: number | null; run?: string | null }): Promise<boolean> {
+export async function authorizeOwnKeyCall(jobId: string, at: Date = new Date(), stillGood?: (tx: Prisma.TransactionClient) => Promise<boolean>, admitted?: { turn?: number | null; run?: string | null }, clock?: () => Date): Promise<boolean> {
   return prisma.$transaction(
     async (tx) => {
       await lockCutoff(tx, jobId);
@@ -400,14 +400,17 @@ export async function authorizeOwnKeyCall(jobId: string, at: Date = new Date(), 
       if (await hasPoolCutoff(tx, jobId)) return false;
       // The runner committed to ending this job: no call is authorized from then on, and no marker is kept for one that is refused
       if (await hasFinishIntent(tx, jobId)) return false;
-      const job = await tx.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
+      const job = await tx.computerJob.findUnique({ where: { id: jobId }, select: { status: true, prepState: true } });
       if (!job || (job.status !== 'running' && job.status !== 'waiting')) return false;
+      // While the job's browser is being restored or its sign-ins are unproven, no call is authorized, whatever key it holds (as a funded call is refused: `authorizedPastCutoff`), under this same lock (CodeRabbit on #1025)
+      if (job.prepState !== null) return false;
       if (stillGood && !(await stillGood(tx))) return false;
       await recordOwnKeyCall(tx, jobId, at);
       // The admission for its turn, in the same transaction and under the same lock: the marker, the turn and the decision never part, so a call refused after the marker is impossible (there is no look after this commit)
       await recordTurnAdmitted(tx, jobId, { turn: admitted?.turn, run: admitted?.run, at });
       // A call admitted on the owner's own key is a beat too: the hold stands another 90 s, so a replacement never claims the job while it works (a refused call returned above and renews nothing; CodeRabbit on #1025)
-      await extendHoldIn(tx, jobId, leaseUntil(at));
+      // ...for 90 s from the moment it is admitted: the time is read after the waits for the locks (a long wait must not shorten the hold the owner is promised), and a hold that stands longer is never moved back
+      await extendHoldIn(tx, jobId, leaseUntil(clock ? clock() : at));
       return true;
     },
     { timeout: 15_000, maxWait: 15_000 },

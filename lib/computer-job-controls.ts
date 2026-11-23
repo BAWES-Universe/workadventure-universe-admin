@@ -83,14 +83,25 @@ async function refused(botId: string, ownerId: string, under: { command: Command
 }
 
 /** How long a copy of a Resume waits for the first request's own answer before it settles the command itself (the first request may have stopped after its commit). Exported for the tests. */
-export const resumeWait = { ms: 20_000, stepMs: 100 };
+export const resumeWait = { ms: 20_000, stepMs: 100, /** The longest a copy waits in all for a start that has not reached its decision; after that it answers `not_ready` and stores nothing (the same command asked again decides it). */ capMs: 5 * 60_000 };
 
-/** What a Resume came to, from the job as it stands after its start was tried: the refusal the month or a limit made of the start, a browser that could not be settled, or success (a job that stays in line is a success: the resume was taken). */
+/** What a Resume came to, from the job as it stands after ITS OWN start was tried: the refusal the month or a limit made of the start, a browser that could not be settled, or success (a job that stays in line is a success: the resume was taken). */
 async function resumeOutcomeOf(jobId: string): Promise<StoredOutcome> {
   const after = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, pausedWhy: true, prepState: true } });
   if (after?.status === 'queued' && after.queuedFor === 'paused' && (after.pausedWhy === 'allowance' || after.pausedWhy === 'rule')) return refusalOutcome(after.pausedWhy);
   if (after?.prepState !== null && after?.prepState !== undefined) return refusalOutcome('not_ready');
   return { ok: true };
+}
+
+/**
+ * The same, read by a COPY of a Resume whose first request has not answered: null while the first request's start has not reached its decision (the job is in line with no try on record, or its browser is being restored),
+ * because a success stored then could be a start that the month refuses a moment later, and a refusal stored then could be one that succeeds (CodeRabbit on #1025, A10). A start that is decided is read as above.
+ */
+async function resumeDecidedOf(jobId: string): Promise<StoredOutcome | null> {
+  const after = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, lastTriedAt: true, prepState: true } });
+  if (after?.status === 'queued' && after.queuedFor !== 'paused' && after.lastTriedAt === null) return null;
+  if (after?.prepState === 'restoring') return null;
+  return resumeOutcomeOf(jobId);
 }
 
 /** Keeps the Resume's final outcome over its pending mark, once: the first write wins (a copy that settled the command meanwhile, or the request itself), and the stored outcome is what is returned. */
@@ -106,27 +117,37 @@ async function settleResume(command: Command, outcome: StoredOutcome): Promise<S
  * into a refusal or lose its sign-ins, and never does anything itself. It waits for the first request's answer; if none comes in time (the first request stopped after its commit), it settles the command from `settleFrom`,
  * once, and answers that (CodeRabbit on #1025, 16, 23 and 51).
  */
-async function answerPendingCommand(botId: string, ownerId: string, under: { command: Command; row: CommandRow }, settleFrom: () => Promise<StoredOutcome>, now: Date): Promise<Controlled> {
-  const deadline = Date.now() + resumeWait.ms;
+async function answerPendingCommand(botId: string, ownerId: string, under: { command: Command; row: CommandRow }, settleFrom: () => Promise<StoredOutcome | null>, now: Date): Promise<Controlled> {
+  const began = Date.now();
   for (;;) {
     const seen = await seenCommand(under.command, under.row);
     if (!seen || 'reused' in seen || seen.replay !== null) return seen ? answerOf(botId, ownerId, seen, now) : viewOf(botId, ownerId, now);
-    if (Date.now() >= deadline) break;
+    if (Date.now() >= began + resumeWait.ms) {
+      // The first request has not answered in time: the command is settled from what the job came to, once. A start that has not reached its decision settles nothing: the copy goes on waiting, and past the cap it answers
+      // that the job is not ready yet and stores nothing (the same command asked again reads it again)
+      const from = await settleFrom();
+      if (from) return answerOf(botId, ownerId, { replay: await settleResume(under.command, from), targets: null }, now);
+      if (Date.now() >= began + resumeWait.capMs) return { ok: false, reason: 'not_ready' };
+    }
     await new Promise((resolve) => setTimeout(resolve, resumeWait.stepMs));
   }
-  const outcome = await settleResume(under.command, await settleFrom());
-  return answerOf(botId, ownerId, { replay: outcome, targets: null }, now);
 }
 
-/** What a Pause that was taken (its jobs listed in the pending mark) came to once the sign-ins were put away: what each pause kept of them, false where it never said (they are then needed again when the job carries on). */
-async function pausedOutcomeOf(command: Command): Promise<StoredOutcome> {
+/**
+ * What a command that is still pending came to. A Pause (or "do this first") that paused jobs lists them in its pending mark, each with the number of the pause it took: what each of those pauses kept of the sign-ins is read
+ * from exactly that row (false where it never said: they are needed again when the job carries on). A command with no jobs listed is a Resume (a "do this first" aimed at a paused job is its resume): it is read as one.
+ */
+async function pendingOutcomeOf(command: Command, jobId: string): Promise<StoredOutcome | null> {
   const rows = await prisma.$queryRaw<Array<{ outcome: StoredOutcome | null }>>`SELECT "outcome" FROM "computer_job_commands" WHERE "command_id" = ${command.id}::uuid`;
   const outcome = rows[0]?.outcome;
-  const ids = outcome && outcome.ok && outcome.targets ? outcome.targets : [];
+  const listed = outcome && outcome.ok && outcome.targets && outcome.targets.length > 0 ? outcome : null;
+  if (!listed) return resumeDecidedOf(jobId);
+  const pauses = listed.held ?? [];
+  const wanted = pauses.length > 0 ? pauses : (listed.targets ?? []).map((id) => ({ jobId: id, n: null as number | null }));
   let kept: boolean | undefined;
-  for (const id of ids) {
-    const last = await prisma.computerJobPause.findFirst({ where: { jobId: id }, orderBy: { n: 'desc' }, select: { signInsKept: true } });
-    kept = (kept ?? true) && last?.signInsKept === true;
+  for (const one of wanted) {
+    const row = one.n === null ? await prisma.computerJobPause.findFirst({ where: { jobId: one.jobId }, orderBy: { n: 'desc' }, select: { signInsKept: true } }) : await prisma.computerJobPause.findUnique({ where: { jobId_n: { jobId: one.jobId, n: one.n } }, select: { signInsKept: true } });
+    kept = (kept ?? true) && row?.signInsKept === true;
   }
   return kept === undefined ? { ok: true } : { ok: true, signInsKept: kept };
 }
@@ -388,7 +409,7 @@ export async function pauseJob(botId: string, ownerId: string, jobId: string, no
   let result: PauseResult;
   if (under) {
     const seen = await seenCommand(under.command, under.row);
-    if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingCommand(botId, ownerId, under, () => pausedOutcomeOf(under.command), now);
+    if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingCommand(botId, ownerId, under, () => pendingOutcomeOf(under.command, jobId), now);
     // The provider's price is read before the transaction opens (a read that fails inside it would leave the transaction aborted)
     const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId } }));
     const done = await prisma.$transaction(async (tx) => {
@@ -399,10 +420,10 @@ export async function pauseJob(botId: string, ownerId: string, jobId: string, no
       const decided = await decidePauseIn(tx, jobId, 'person', now, provider);
       // A pause of a job that held the machine is kept PENDING until its sign-ins are put away (after this commit): a copy never reads a success that does not yet say whether they were kept (CodeRabbit on #1025, 51). A pause that
       // only moved a job out of the line, or was refused, has nothing more to do: its answer is final here
-      await keepOutcome(tx, under.command, decided.kind === 'held' ? { ok: true, pending: true, targets: [jobId] } : decisionOutcome(decided));
+      await keepOutcome(tx, under.command, decided.kind === 'held' ? { ok: true, pending: true, targets: [jobId], held: [{ jobId, n: decided.n }] } : decisionOutcome(decided));
       return { decided };
     }, TX);
-    if (done.seen) return 'reused' in done.seen || done.seen.replay !== null ? answerOf(botId, ownerId, done.seen, now) : answerPendingCommand(botId, ownerId, under, () => pausedOutcomeOf(under.command), now);
+    if (done.seen) return 'reused' in done.seen || done.seen.replay !== null ? answerOf(botId, ownerId, done.seen, now) : answerPendingCommand(botId, ownerId, under, () => pendingOutcomeOf(under.command, jobId), now);
     result = await afterPause(jobId, done.decided, now);
     if (result.ok && result.kind === 'held') {
       // Kept once over the pending mark: a copy that settled the command meanwhile has decided it, and that is what this returns too
@@ -427,7 +448,7 @@ export async function resumeJob(botId: string, ownerId: string, jobId: string, n
   const under = underOf(command, botId, ownerId, jobId, as.kind, as.args ?? {}, job.pauses);
   if (under) {
     const seen = await seenCommand(under.command, under.row);
-    if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingCommand(botId, ownerId, under, () => resumeOutcomeOf(jobId), now);
+    if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingCommand(botId, ownerId, under, () => resumeDecidedOf(jobId), now);
   }
   const moved = await prisma.$transaction(async (tx) => {
     const row = await lockJob(tx, jobId);
@@ -442,7 +463,7 @@ export async function resumeJob(botId: string, ownerId: string, jobId: string, n
     if (under && decided !== 'ok') await keepOutcome(tx, under.command, refusalOutcome(decided));
     return decided;
   }, TX);
-  if (typeof moved === 'object') return 'reused' in moved.seen || moved.seen.replay !== null ? answerOf(botId, ownerId, moved.seen, now) : answerPendingCommand(botId, ownerId, under!, () => resumeOutcomeOf(jobId), now);
+  if (typeof moved === 'object') return 'reused' in moved.seen || moved.seen.replay !== null ? answerOf(botId, ownerId, moved.seen, now) : answerPendingCommand(botId, ownerId, under!, () => resumeDecidedOf(jobId), now);
   if (moved !== 'ok') return { ok: false, reason: moved };
   await controlInternals.tryStart(jobId, now, { quiet: true });
   // The month or a limit refused its start: tryStart put a job that ran before back as paused, with the reason. The start brings the job's own browser back before it answers, so a resume that got here has it: unless it could not
@@ -491,7 +512,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
   const under = underOf(command, botId, ownerId, jobId, 'first', args, job.pauses);
   if (under) {
     const seen = await seenCommand(under.command, under.row);
-    if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingCommand(botId, ownerId, under, () => pausedOutcomeOf(under.command), now);
+    if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingCommand(botId, ownerId, under, () => pendingOutcomeOf(under.command, jobId), now);
   }
   if (isOver(job.status)) return refused(botId, ownerId, under, 'over', now);
   if (job.status === 'queued' && job.queuedFor === 'paused') return resumeJob(botId, ownerId, jobId, now, command, { kind: 'first', args });
@@ -514,7 +535,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
     try {
       const paused = await firstIn(tx, botId, jobId, holding, rows, provider, now);
       // What was paused has its sign-ins put away only after this commit: the answer stays pending until then (CodeRabbit on #1025, 51)
-      if (under) await keepOutcome(tx, under.command, paused.length > 0 ? { ok: true, pending: true, targets: paused.map((one) => one.id) } : { ok: true });
+      if (under) await keepOutcome(tx, under.command, paused.length > 0 ? { ok: true, pending: true, targets: paused.map((one) => one.id), held: paused.flatMap((one) => (one.decided.kind === 'held' ? [{ jobId: one.id, n: one.decided.n }] : [])) } : { ok: true });
       return { paused };
     } catch (error) {
       if (!(error instanceof ControlRefused)) throw error;
@@ -523,7 +544,7 @@ export async function moveJobFirst(botId: string, ownerId: string, jobId: string
       return { refused: error.reason };
     }
   }, TX);
-  if ('seen' in decided) return 'reused' in decided.seen || decided.seen.replay !== null ? answerOf(botId, ownerId, decided.seen, now) : answerPendingCommand(botId, ownerId, under!, () => pausedOutcomeOf(under!.command), now);
+  if ('seen' in decided) return 'reused' in decided.seen || decided.seen.replay !== null ? answerOf(botId, ownerId, decided.seen, now) : answerPendingCommand(botId, ownerId, under!, () => pendingOutcomeOf(under!.command, jobId), now);
   if ('refused' in decided) return { ok: false, reason: decided.refused };
   const paused = decided.paused;
   // Rule C: only after the commit, for each pause it made

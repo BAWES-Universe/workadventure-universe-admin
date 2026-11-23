@@ -1043,6 +1043,47 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect(await jobOf(apps.jobId)).toMatchObject({ status: 'running' });
     });
 
+    it('CodeRabbit D8: a job that paused AGAIN after the sweep read its blocked call is judged by that pause on a later sweep: nothing is asked or written for it from the first pause’s estimate; CONTROL: the same job with no second pause is asked', async () => {
+      const again = await running('c7-again');
+      const once = await running('c7-once');
+      await setUp({ memberAllowanceMicros: 1_000 });
+      await renewJob(again.jobId, minutes(5), { epoch: again.epoch });
+      await renewJob(once.jobId, minutes(5), { epoch: once.epoch });
+      for (const jobId of [again.jobId, once.jobId]) await prisma.computerEffect.create({ data: { jobId, effectKey: 'send-1', kind: 'send', state: 'planned' } });
+      await setUp();
+      // Between the sweep's read of the estimate and the job's locked read, the job is paused a second time
+      const original = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+      let fired = false;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options?: unknown) => {
+        if (typeof fn !== 'function') return original(fn, options);
+        return original(async (tx: Record<string, unknown>) => {
+          const jobs = tx.computerJob as { findUniqueOrThrow: (args: unknown) => Promise<unknown>; update: (args: unknown) => Promise<unknown> };
+          const wrapped = new Proxy(jobs, {
+            get: (target, name) =>
+              name === 'findUniqueOrThrow'
+                ? async (args: { where: { id: string } }) => {
+                    if (!fired && args.where.id === again.jobId) {
+                      fired = true;
+                      await target.update({ where: { id: again.jobId }, data: { pauses: { increment: 1 } } });
+                    }
+                    return target.findUniqueOrThrow(args);
+                  }
+                : Reflect.get(target, name),
+          });
+          return (fn as (client: unknown) => unknown)(new Proxy(tx, { get: (target, name) => (name === 'computerJob' ? wrapped : Reflect.get(target, name)) }));
+        }, options);
+      }) as unknown as typeof prisma.$transaction);
+      try {
+        expect(await carryOnPaused(minutes(6))).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(fired).toBe(true);
+      expect((await tellings(again.jobId)).map((one) => one.kind)).toEqual(['paused']);
+      expect(await jobOf(again.jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pauses: 2 });
+      expect((await tellings(once.jobId)).map((one) => one.kind)).toEqual(['paused', 'can_carry_on']);
+    });
+
     it('C7.4 two sweeps racing the same flip start it once: one reservation, one message', async () => {
       const { jobId, epoch } = await running('c7-race');
       await setUp({ memberAllowanceMicros: 1_000 });
