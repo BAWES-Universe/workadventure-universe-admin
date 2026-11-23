@@ -1246,6 +1246,9 @@ run('credit for computers, on the real books', () => {
       expect(await call(minted.token, 'b', 50_000, 20_000, at(2))).toMatchObject({ ok: true });
       const rooms = await prisma.meterReservation.findMany({ where: { jobId, reservationKey: { startsWith: 'computer:call:' } }, select: { jobStretch: true, createdAt: true }, orderBy: { reservationKey: 'asc' } });
       expect(rooms.map((one) => one.jobStretch)).toEqual([0, 1]);
+      // The tie this case claims is enforced: both rooms were made at the very moment the pause was taken (CodeRabbit on #1025, 59)
+      const pause = await prisma.computerJobPause.findFirstOrThrow({ where: { jobId } });
+      expect(rooms.map((one) => one.createdAt.getTime())).toEqual([pause.at.getTime(), pause.at.getTime()]);
       (creditSpend.refundHold as jest.Mock).mockReset().mockImplementation(async () => {
         throw new Error('books unreachable');
       });
