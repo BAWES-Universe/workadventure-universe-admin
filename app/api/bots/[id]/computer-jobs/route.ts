@@ -6,7 +6,7 @@ import { resolveUsagePerson } from '@/lib/usage-person';
 import { ackStart, computerView, earlierUnconfirmedStart, startAnsweredBefore, startJob, startedJobFor, type Started } from '@/lib/computer';
 import { startStateOf } from '@/lib/computer-values';
 import { ownerSpendAllowed } from '@/lib/spend-rules';
-import { retryCandidate } from '@/lib/computer-continue';
+import { carryOnFrom, retryCandidate } from '@/lib/computer-continue';
 
 export const runtime = 'nodejs';
 
@@ -159,6 +159,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (acking && attempt?.success) {
       const earlier = await earlierUnconfirmedStart(id, person.personId, attempt.data);
       if (earlier) return NextResponse.json({ ok: false, reason: 'earlier', job: earlier });
+    }
+    // "Try again" is resolved FIRST: a named job that cannot be carried on is `cannot_continue` (with the way to start a fresh job), whatever the person's spending rule leaves; one already carried on keeps its earlier answer
+    // (the spend look below lets it through); only a continuation that would be MADE is held to the rule (CodeRabbit on #1025, 35). A start that names a run is answered by the run's own job first, so it is left to the start
+    if (continues?.success && !parsed.data.runId) {
+      const carry = await carryOnFrom(id, person.personId, continues.data);
+      if ('fresh' in carry) return NextResponse.json({ ok: false, reason: 'cannot_continue', why: carry.fresh, ...(carry.job ? { job: carry.job } : {}) });
     }
     // A rule the person said in chat ("no more than $1 a month", "only my own accounts") is held before a job exists, so Brick can say so at once
     const ruled = await ownerSpendAllowed(id, person.personId, 'computer', new Date(), parsed.data.runId ?? null, attempt?.success ? attempt.data : null, continues?.success ? continues.data : null);

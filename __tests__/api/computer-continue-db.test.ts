@@ -578,6 +578,17 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
       expect(await roomsOf(fresh.job.id)).toHaveLength(1);
     });
 
+    it('CodeRabbit on #1025 (35): a "try again" naming a job that cannot be carried on is `cannot_continue` even when the owner’s spending rule leaves no room; a continuation that would be made is still held to the rule', async () => {
+      const { sara, jobId: old } = await failedAsOurs('c-route-rule');
+      const user = await prisma.user.findUniqueOrThrow({ where: { id: sara.id } });
+      await prisma.spendRule.create({ data: { ruleKey: `r-${randomUUID()}`, ownerPersonId: sara.id, scope: 'bot', botId: sara.brickId, period: 'day', capMicros: BigInt(0), words: 'Never more than this a day', createdById: sara.id } });
+      const missing = await (await post(sara.brickId, { userId: user.uuid, title: 'Visa form' }, { 'x-computer-continues': `j_${randomUUID().replace(/-/g, '')}`, 'x-computer-start-attempt': key() })).json();
+      expect(missing).toEqual({ ok: false, reason: 'cannot_continue', why: 'not_found' });
+      // CONTROL: a job that can be carried on is held to the rule, as before
+      const ruled = await (await post(sara.brickId, { userId: user.uuid, title: 'Visa form' }, { 'x-computer-continues': old, 'x-computer-start-attempt': key() })).json();
+      expect(ruled).toMatchObject({ ok: false, reason: 'rule' });
+    });
+
     it('GET with retry=1 names the job "try again" would carry on (and only then)', async () => {
       const { sara, jobId: old } = await failedAsOurs('c-route-get');
       const user = await prisma.user.findUniqueOrThrow({ where: { id: sara.id } });
