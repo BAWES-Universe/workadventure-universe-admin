@@ -174,8 +174,8 @@
     }
   ],
   "shipping": {
-    "lastMigration": "20261123060000_computer_round8_fences",
-    "count": 198,
+    "lastMigration": "20261123070000_computer_round8_stretch_check",
+    "count": 199,
     "migrations": [
       "20251205145742_init",
       "20251207200516_add_wam_url_and_auth_to_rooms_remove_from_worlds",
@@ -374,7 +374,8 @@
       "20261123030000_computer_owner_lease_and_stretch",
       "20261123040000_computer_commands_and_start_aliases",
       "20261123050000_computer_park_hold_repair",
-      "20261123060000_computer_round8_fences"
+      "20261123060000_computer_round8_fences",
+      "20261123070000_computer_round8_stretch_check"
     ]
   }
 }

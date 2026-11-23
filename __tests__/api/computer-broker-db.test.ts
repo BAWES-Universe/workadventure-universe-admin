@@ -389,6 +389,8 @@ run('the broker, the fence and keep-awake, in a real database', () => {
 
     it('a delayed prepare of one job, run after another job wrote the key last written, changes nothing at all: not its own file, and not relay.json or relay.gen', async () => {
       const { sara, jobId: a } = await running();
+      // Only jobs that read run side by side (a job that may sign in has the machine alone): the first one only looks too
+      await prisma.computerJob.update({ where: { id: a }, data: { writes: false } });
       const readerStarted = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second', writes: false }, NOW);
       if (!readerStarted.ok) throw new Error('the second job did not start');
       const b = readerStarted.job.id;
@@ -419,6 +421,8 @@ run('the broker, the fence and keep-awake, in a real database', () => {
 
     it('CodeRabbit on #1025 (C10): a delayed prepare of an OLDER job never puts its key over relay.json a newer claim of ANOTHER job wrote; its own file is still written, and a newer claim still replaces relay.json', async () => {
       const { sara, jobId: a } = await running();
+      // Only jobs that read run side by side (a job that may sign in has the machine alone): the first one only looks too
+      await prisma.computerJob.update({ where: { id: a }, data: { writes: false } });
       const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second', writes: false }, NOW);
       if (!second.ok) throw new Error('the second job did not start');
       const b = second.job.id;
@@ -1530,8 +1534,10 @@ run('the broker, the fence and keep-awake, in a real database', () => {
 
         const readerAndWriter = async () => {
           const { sara, jobId } = await running();
+          // Only jobs that read run side by side (a job that may sign in has the machine alone): the first one only looks too
+          await prisma.computerJob.update({ where: { id: jobId }, data: { writes: false } });
           const accepted = await acceptedAndLost(jobId);
-          // A read-only job holds the machine beside the writer, and a second one keeps it held when the writer ends
+          // A read-only job holds the machine beside the first, and a second one keeps it held when the first ends
           const readerId = await waitingJob(sara, false);
           expect((await jobRow(readerId)).status).toBe('running');
           const other = await waitingJob(sara, false);

@@ -204,8 +204,10 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       expect(await mintJobToken(jobId, 'model', NOW)).toEqual({ ok: false, reason: 'not_running' });
     });
 
-    it('a read-only job alongside the writer is the person’s too: nothing runs under Brick’s hands, and both come back together', async () => {
+    it('a read-only job alongside another one is the person’s too: nothing runs under Brick’s hands, and both come back together', async () => {
       const { sara, jobId } = await running();
+      // Only jobs that read run side by side (a job that may sign in has the machine alone): the first one only looks too
+      await prisma.computerJob.update({ where: { id: jobId }, data: { writes: false } });
       const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, NOW);
       if (!reader.ok) throw new Error('no reader');
       expect((await takeOver(sara.brickId, sara.id, NOW)).ok).toBe(true);
@@ -219,7 +221,8 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
     });
 
     it('a job asked for while the fence is pending waits in line, and runs after the hand back', async () => {
-      const { sara } = await running();
+      const { sara, jobId } = await running();
+      await prisma.computerJob.update({ where: { id: jobId }, data: { writes: false } });
       const release = slowFence();
       const first = takeOver(sara.brickId, sara.id, NOW);
       await until(() => fences() === 1);

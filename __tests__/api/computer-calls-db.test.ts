@@ -762,7 +762,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
         for (const state of ['recover', 'restoring']) {
           const { jobId } = await running(`prep-${state}`);
           const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
-          await prisma.computerJob.update({ where: { id: jobId }, data: { prepState: state, ownerLeaseUntil: new Date(NOW.getTime() + 10_000) } });
+          await prisma.computerJob.update({ where: { id: jobId }, data: { prepState: state, stretchStarted: null, ownerLeaseUntil: new Date(NOW.getTime() + 10_000) } });
           expect(await authorizeModelCall({ token, callId: 'own-1', estimateMicros: 1, payer: 'own-key' }, NOW)).toEqual({ ok: false, reason: 'refused' });
           expect(await hasOwnKeyCall(prisma, jobId)).toBe(false);
           expect(await prisma.computerJobFault.count({ where: { jobId, callId: { startsWith: 'orbit:admit:' } } })).toBe(0);

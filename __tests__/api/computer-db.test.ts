@@ -41,6 +41,7 @@ import { CLAIM_MS, dbImageStore } from '@/lib/agent37/image';
 import { checkScreen, openScreen, screenTicket } from '@/lib/computer-screen';
 import { CONTROL_TIMING } from '@/lib/computer-control';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
+import { pauseJob } from '@/lib/computer-job-controls';
 import {
   computerView,
   continueWindDown,
@@ -230,14 +231,71 @@ run('a Brick’s computer, in a real database', () => {
       await expect(prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'look', status: 'running', writes: false } })).resolves.toBeTruthy();
     });
 
-    it('lets a read-only job run beside the writer, on the same machine, with nothing woken twice', async () => {
+    it('F: two read-only jobs run side by side on the same machine, with nothing woken twice', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
-      await startJob({ botId: sara.brickId, personId: sara.id, title: 'write' }, NOW);
+      await startJob({ botId: sara.brickId, personId: sara.id, title: 'look one', writes: false }, NOW);
       const before = woke();
-      const look = await startJob({ botId: sara.brickId, personId: sara.id, title: 'look', writes: false }, NOW);
+      const look = await startJob({ botId: sara.brickId, personId: sara.id, title: 'look two', writes: false }, NOW);
       expect(look.ok && look.job.status).toBe('running');
       expect(woke()).toBe(before);
+    });
+
+    it('F: a reader is running and a writer is asked: the writer waits its turn in line (queued `turn`) and starts when the reader ends', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'look', writes: false }, NOW);
+      const writer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'write', writes: true }, NOW);
+      if (!reader.ok || !writer.ok) throw new Error('did not start');
+      expect(reader.job.status).toBe('running');
+      expect(writer.job.status).toBe('queued');
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: writer.job.id } })).toMatchObject({ status: 'queued', queuedFor: 'turn' });
+      await sweepComputers(minutes(1));
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: writer.job.id } })).status).toBe('queued');
+      await finishJob(reader.job.id, 'done', minutes(2));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: writer.job.id } })).toMatchObject({ status: 'running', queuedFor: null });
+    });
+
+    it('F: a writer is running and a reader is asked: the reader waits its turn in line (queued `turn`) and starts when the writer ends', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const writer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'write', writes: true }, NOW);
+      const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'look', writes: false }, NOW);
+      if (!reader.ok || !writer.ok) throw new Error('did not start');
+      expect(writer.job.status).toBe('running');
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.job.id } })).toMatchObject({ status: 'queued', queuedFor: 'turn' });
+      await sweepComputers(minutes(1));
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.job.id } })).status).toBe('queued');
+      await finishJob(writer.job.id, 'done', minutes(2));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.job.id } })).toMatchObject({ status: 'running', queuedFor: null });
+    });
+
+    it('F: two readers, one paused: nothing is put away or emptied while the other works, no job is claimed in between, and the browser is emptied once after the other ends, before the line moves', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const one = await startJob({ botId: sara.brickId, personId: sara.id, title: 'look one', writes: false }, NOW);
+      const two = await startJob({ botId: sara.brickId, personId: sara.id, title: 'look two', writes: false }, NOW);
+      if (!one.ok || !two.ok) throw new Error('did not start');
+      expect([one.job.status, two.job.status]).toEqual(['running', 'running']);
+      const actions = () => provider.commands.map((entry) => /ACTION="([a-z]+)"/.exec(entry.command)?.[1]).filter(Boolean);
+      expect((await pauseJob(sara.brickId, sara.id, one.job.id, minutes(1))).ok).toBe(true);
+      // The other keeps working untouched: no park, no clear
+      expect(actions()).toEqual([]);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: two.job.id } })).toMatchObject({ status: 'running' });
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true, parkPendingWipe: true } })).toEqual({ parkPendingJobId: one.job.id, parkPendingWipe: true });
+      expect((await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId: one.job.id, n: 1 } } })).signInsKept).toBe(false);
+      // A job asked for in the meantime is not claimed while the wipe waits
+      const three = await startJob({ botId: sara.brickId, personId: sara.id, title: 'look three', writes: false }, minutes(2));
+      expect(three.ok && three.job.status).toBe('queued');
+      await sweepComputers(minutes(2));
+      expect(actions()).toEqual([]);
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: three.ok ? three.job.id : '' } })).status).toBe('queued');
+      // The other ends: the browser is emptied once, the marker and the wipe go, and only then does the job in line start
+      provider.execAnswer = (command) => (/ACTION="clear"/.test(command) ? { stdout: 'cleared=1\n' } : {});
+      await finishJob(two.job.id, 'done', minutes(3));
+      expect(actions().filter((action) => action === 'clear')).toHaveLength(1);
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true, parkPendingWipe: true } })).toEqual({ parkPendingJobId: null, parkPendingWipe: false });
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: three.ok ? three.job.id : '' } })).status).toBe('running');
     });
 
     it('when it finishes, counts what ran once in the meter’s books, settles the room, saves the files, rests, and the next job runs', async () => {
@@ -336,7 +394,7 @@ run('a Brick’s computer, in a real database', () => {
     it('clears the browser once the last job is over, before the machine rests, and not while another job still holds it', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
-      const first = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: true }, NOW);
+      const first = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
       const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
       if (!first.ok || !second.ok) throw new Error('did not start');
       expect(second.job.status).toBe('running');
@@ -913,10 +971,10 @@ run('a Brick’s computer, in a real database', () => {
       expect((await currentEnvelope(minutes(2))).reservedMicros).toBe(0);
     });
 
-    it('taking over steps in on every job working on the machine, the reader beside the writer too: none is left running under Brick', async () => {
+    it('taking over steps in on every job working on the machine (readers run side by side): none is left running under Brick', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
-      const writer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'W' }, NOW);
+      const writer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'W', writes: false }, NOW);
       const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'R', writes: false }, NOW);
       if (!writer.ok || !reader.ok) throw new Error('no');
       expect((await takeOver(sara.brickId, sara.id, minutes(1))).ok).toBe(true);
@@ -1272,16 +1330,16 @@ run('a Brick’s computer, in a real database', () => {
   });
 
   describe('handing over', () => {
-    async function waitingJob() {
+    async function waitingJob(writes = true) {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
-      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' }, NOW);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', writes }, NOW);
       if (!job.ok) throw new Error('no');
       return { sara, jobId: job.job.id };
     }
 
     it('nothing starts under Brick’s hands while the person has the machine: a job asked for then waits until they hand back', async () => {
-      const { sara, jobId } = await waitingJob();
+      const { sara, jobId } = await waitingJob(false);
       await takeOver(sara.brickId, sara.id);
       const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, minutes(1));
       expect(reader.ok && reader.job.status).toBe('queued');
@@ -1382,11 +1440,11 @@ run('a Brick’s computer, in a real database', () => {
       expect(detailsKey('A', 'B')).toEqual(detailsKey('A', 'B'));
     });
 
-    it('with two jobs in the person’s hands after a take over, the tap goes to the one that named something: the writer, even when a read-only one is older and named nothing', async () => {
+    it('with two jobs in the person’s hands after a take over, the tap goes to the one that named something, even when an older one named nothing (readers run side by side)', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
       const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, NOW);
-      const writer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Write' }, NOW);
+      const writer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Write', writes: false }, NOW);
       if (!reader.ok || !writer.ok) throw new Error('no');
       const ready = { what: 'Your name', where: 'visa-portal.example' };
       await requestHandover(writer.job.id, 'details', minutes(1), ready);
@@ -1403,7 +1461,7 @@ run('a Brick’s computer, in a real database', () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
       const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, NOW);
-      const writer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Write' }, NOW);
+      const writer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Write', writes: false }, NOW);
       if (!reader.ok || !writer.ok) throw new Error('no');
       const first = { what: 'Your name', where: 'visa-portal.example' };
       const second = { what: 'Your passport number', where: 'other-portal.example' };
@@ -1416,7 +1474,7 @@ run('a Brick’s computer, in a real database', () => {
     });
 
     it('a job that joins the person while they hand back is not left in their hands with nobody to hand it back', async () => {
-      const { sara, jobId } = await waitingJob();
+      const { sara, jobId } = await waitingJob(false);
       await requestHandover(jobId, 'details', minutes(1));
       const originalCount = prisma.computerJob.count.bind(prisma.computerJob);
       const originalTransaction = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;

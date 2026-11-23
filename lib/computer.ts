@@ -71,8 +71,10 @@ import {
 import {
   clearParkPending,
   dropProfile,
+  finishParkOf,
   finishPendingParks,
   parkWorthWaitingFor,
+  pendingParkOf,
   parkProfile,
   recoverResumedBrowsers,
   restoreProfile,
@@ -1048,24 +1050,44 @@ async function runIsTheirs(botId: string, personId: string, runId: string): Prom
  * done to the browser, a job that must have the browser alone has no other job beside it, and no job beside it is still waiting for its browser (the restore replaces the browser: nobody starts under it, and it starts under nobody).
  * `count` is 0 when the job was claimed by another try meanwhile, as before.
  */
-async function claimMachineFor(job: { id: string; botId: string }, key: string, now: Date, options: { restoring: boolean; exclusive: boolean }): Promise<{ ok: true; count: number } | { ok: false }> {
+async function claimMachineFor(job: { id: string; botId: string; writes: boolean }, key: string, now: Date, options: { restoring: boolean; exclusive: boolean }): Promise<{ ok: true; count: number } | { ok: false; why: 'busy' | 'turn' }> {
   return prisma.$transaction(
     async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`computer:line:${job.botId}`}, 0))`;
       const rows = await tx.$queryRaw<Array<{ claimed: Date | null }>>`SELECT "clean_claimed_at" AS claimed FROM "brick_computers" WHERE "bot_id" = ${job.botId} FOR UPDATE`;
       const claimed = rows[0]?.claimed ?? null;
-      if (claimed && now.getTime() - claimed.getTime() < CLEAN_CLAIM_STALE_MS && Date.now() - claimed.getTime() < CLEAN_CLAIM_STALE_MS) return { ok: false as const };
-      const beside = await tx.computerJob.findMany({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } }, select: { prepState: true } });
-      if (beside.some((other) => other.prepState !== null) || (options.exclusive && beside.length > 0)) return { ok: false as const };
+      if (claimed && now.getTime() - claimed.getTime() < CLEAN_CLAIM_STALE_MS && Date.now() - claimed.getTime() < CLEAN_CLAIM_STALE_MS) return { ok: false as const, why: 'busy' as const };
+      const beside = await tx.computerJob.findMany({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } }, select: { prepState: true, writes: true } });
+      if (beside.some((other) => other.prepState !== null) || (options.exclusive && beside.length > 0)) return { ok: false as const, why: 'busy' as const };
+      // A job that may sign in (`writes`) has the browser alone, in both directions: it waits for every job on the machine, and every job waits for it. Jobs that only read run side by side. It is a turn in line, not a busy machine
+      // (the person sees the line they are in), and the line moves when any job ends (round 8, F)
+      if (beside.length > 0 && (job.writes || beside.some((other) => other.writes))) return { ok: false as const, why: 'turn' as const };
       const done = await tx.computerJob.updateMany({
         where: { id: job.id, status: 'queued', ...NOT_PAUSED },
-        // A job that carries on is not ready to be worked on until its own browser is back (or a clean one is proved clean): `prep_state` keeps it out of the runnable list, refuses a claim and refuses every call until then (GPT round 6, finding 7)
-        data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: now, ...(options.restoring ? { prepState: 'restoring' as const } : {}) },
+        // A job that carries on is not ready to be worked on until its own browser is back (or a clean one is proved clean): `prep_state` keeps it out of the runnable list, refuses a claim and refuses every call until then (GPT round 6, finding 7).
+        // Nothing is billable before readiness: `stretch_started` stays NULL (a stretch computed from NULL is 0 s) and is written by the ready write, never here; `started_at` stays, the restore timeout reads it (round 8, B2)
+        data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: null, ...(options.restoring ? { prepState: 'restoring' as const } : {}) },
       });
       return { ok: true as const, count: done.count };
     },
     { timeout: 15_000, maxWait: 15_000 },
   );
+}
+
+/**
+ * The ready write of a job that has no browser to bring back (round 8, B2): billable time starts here, when the machine is up and the job is still this try's, never at the claim. One conditional write: the job is on the machine
+ * (running, or waiting for the person it joined), on this try's room, with nothing left to restore and no stretch started yet. A job that is restoring gets the same write from the one that clears `prep_state` (`writePrep`).
+ */
+async function markReady(jobId: string, key: string, at: Date): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const done = await prisma.$executeRaw`UPDATE "computer_jobs" SET "stretch_started" = ${at} WHERE "id" = ${jobId} AND "status" IN ('running', 'waiting') AND "reservation_key" = ${key} AND "prep_state" IS NULL AND "stretch_started" IS NULL`;
+      return done === 1;
+    } catch (error) {
+      console.error('[Computer] Could not mark a job ready:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+  return false;
 }
 
 /**
@@ -1088,6 +1110,8 @@ type Tried = 'running' | 'queued' | 'failed' | 'not_set' | 'gone' | { rule: stri
 
 /** One try to put a queued job on the machine. Safe to ask again: a job that is no longer queued is left as it is. */
 async function tryStart(jobId: string, now: Date, options: { /** The person's own Resume: they are answered at once, so a pause for their month or a limit is not told to them again. */ quiet?: boolean } = {}): Promise<Tried> {
+  const began = Date.now();
+  const elapsed = (): Date => new Date(now.getTime() + (Date.now() - began));
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (!job || job.status !== 'queued') return job ? (job.status === 'running' ? 'running' : 'gone') : 'gone';
   // A paused job is skipped until it is resumed: a repeated ask for it, the sweep and the line never start it
@@ -1241,7 +1265,7 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
       // Something is still being done to the browser (a command, another job's restore, a job that waits for its browser) or the job would have to share a browser it must have alone: this one goes back in line with nothing held
       await releaseRoom({ key }, now);
       await dropDiskRoom();
-      await queue('busy');
+      await queue(taking.why);
       return 'queued';
     }
     const claimed = { count: taking.count };
@@ -1289,7 +1313,7 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
   // The person may have taken over at the same moment: a job that began now joins them rather than run under Brick's hands. Their
   // take over looks again for running jobs after it ends the ones it saw, so one of the two always sees the other.
   if ((await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: 'waiting', control: 'person' } })) > 0) {
-    await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', reservationKey: key }, data: { status: 'waiting', waitingFor: null, control: 'person', stretchStarted: now, readyWhat: null, readyWhere: null, leaseVersion: { increment: 1 } } });
+    await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', reservationKey: key }, data: { status: 'waiting', waitingFor: null, control: 'person', readyWhat: null, readyWhere: null, leaseVersion: { increment: 1 } } });
     // The person may have handed back in between: with nobody else holding the machine for them there is nothing to join, so it runs as it was
     if ((await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: 'waiting', control: 'person' } })) === 0) {
       await prisma.computerJob.updateMany({ where: { id: job.id, status: 'waiting', control: 'person', reservationKey: key }, data: { status: 'running', control: 'brick', waitingFor: null, leaseVersion: { increment: 1 } } });
@@ -1357,6 +1381,9 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
     await restIfUnheld(job.botId, now);
     return 'gone';
   }
+  // The machine is up: a job with no browser to bring back is ready now, and its stretch starts here. The clock is the try's own plus the time it really spent (a wake takes minutes, and none of it is the customer's). A job that is restoring is
+  // made ready, and its stretch started, by the write that clears its `prep_state` below
+  if (job.pauses === 0) await markReady(job.id, key, elapsed());
   // A job that was paused gets its own browser back (and never the one of a job that ran in between) before its runner takes it up
   // Each of these is this try's own: a job that was paused and resumed again while the machine came up is on another room, and this try marks nothing for it (finding 3b)
   if (job.pauses > 0) await prisma.computerJobPause.updateMany({ where: { jobId: job.id, n: job.pauses, resumedAt: null, job: { reservationKey: key } }, data: { resumedAt: now } }).catch(() => undefined);
@@ -1369,7 +1396,7 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
     });
     // Its own browser is back (or a clean one is proved clean): the machine waits for nobody's park any more. Only when this try's own settlement was written (a settlement that matched no row is not "ready"), and only for the pause and
     // the room this try carried on from: a later pause of the same job leaves its own marker, and that one is never cleared from here (CodeRabbit A12)
-    if ((await settleResumedBrowser(job.id, job.botId, back, now, key, 'restoring')) === 'ready') await clearParkPending(job.botId, job.id, { pauses: job.pauses, reservation: key });
+    if ((await settleResumedBrowser(job.id, job.botId, back, elapsed(), key, 'restoring')) === 'ready') await clearParkPending(job.botId, job.id, { pauses: job.pauses, reservation: key });
   }
   // What is on the machine before this job works on it: only so the message can name files the job saved outside its own output folder (those are never handed over)
   if (job.writes) await takeBaseline(job.id, job.botId, provider, key);
@@ -2246,11 +2273,18 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
 
   // The list taken as THIS job ended is kept on the job, so a later job's list can never be read as this one's; none taken (another job still held the machine) says no files
   let endFiles: FilesList | null = null;
+  const moves = advance && endedBy !== 'off' && endedBy !== 'deleted';
   if (held) {
     // Where the computer's browser went during the job is read before anything can clear it (the browser is cleared below once no job holds the machine)
     if (outside) await recordJobVisits(job, now);
     // The person's hold on the computer ends with their last job: control goes back to Brick's so the next job can start
     await releaseIfUnheld(job.botId).catch((error) => console.error('[Computer] Could not release control:', error instanceof Error ? error.message : 'unknown'));
+    // A pause beside a job that was still working left its browser to be emptied once none is left on the machine, and the machine holds every job in line until then: this ending may be the last one, so the wipe is tried now,
+    // while the machine is still awake (a job that is still on the machine makes it wait again), before the machine rests and the line moves (round 8, F)
+    if (moves) {
+      const pending = await pendingParkOf(job.botId).catch(() => null);
+      if (pending) await finishParkOf(job.botId, pending, guard.startNextAt ?? now).catch((error) => console.error('[Computer] Could not finish a paused job’s browser after a job ended:', error instanceof Error ? error.message : 'unknown'));
+    }
     if (outside) {
       endFiles = await closeOutIfUnheld(job.botId);
       // A machine under a hold (a turn of this or an earlier job may still run on it) is put to sleep and proved, not only rested
@@ -2261,7 +2295,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   // Everything this ending does is finished: only now may Brick tell the person how it went (its time is in the books, its files are listed)
   await prisma.computerJob.updateMany({ where: { id: jobId }, data: { endClosedAt: new Date(), ...(endFiles ? { endFiles: endFiles as unknown as Prisma.InputJsonValue } : {}) } }).catch((error) => console.error('[Computer] Could not mark an ending closed:', error instanceof Error ? error.message : 'unknown'));
   // The turn passes to the next job in line, except while a Stop is ending everything
-  if (advance && endedBy !== 'off' && endedBy !== 'deleted') await startNext(job.botId, guard.startNextAt ?? now);
+  if (moves) await startNext(job.botId, guard.startNextAt ?? now);
 }
 
 /**
@@ -2889,7 +2923,7 @@ export async function requestHandoverAs(
       const done = await tx.computerJob.updateMany({
         where: { id: jobId, status: 'running', control: 'brick', secondsRun: job.secondsRun, stretchStarted: job.stretchStarted, ...acts },
         // A new wait is one more thing to tell the person, once (the report back); asked again while it waits it is the same wait
-        data: { status: 'waiting', waitingFor, control: 'brick', secondsRun: job.secondsRun + stretch, stretchStarted: now, handoverSeq: { increment: 1 }, leaseVersion: { increment: 1 }, handoverUntold: true, ...readyData },
+        data: { status: 'waiting', waitingFor, control: 'brick', secondsRun: job.secondsRun + stretch, stretchStarted: job.stretchStarted ? now : null, handoverSeq: { increment: 1 }, leaseVersion: { increment: 1 }, handoverUntold: true, ...readyData },
       });
       landed = done.count;
     } else if (job.status === 'waiting') {
@@ -3095,7 +3129,7 @@ async function moveJobsToPerson(botId: string, now: Date): Promise<{ changed: nu
       const stretch = running.stretchStarted ? Math.max(0, Math.round((now.getTime() - running.stretchStarted.getTime()) / SECOND)) : 0;
       await prisma.computerJob.updateMany({
         where: { id: running.id, status: 'running' },
-        data: { status: 'waiting', waitingFor: null, control: 'person', secondsRun: running.secondsRun + stretch, stretchStarted: now, readyWhat: null, readyWhere: null, leaseVersion: { increment: 1 } },
+        data: { status: 'waiting', waitingFor: null, control: 'person', secondsRun: running.secondsRun + stretch, stretchStarted: running.stretchStarted ? now : null, readyWhat: null, readyWhere: null, leaseVersion: { increment: 1 } },
       });
     }
   }

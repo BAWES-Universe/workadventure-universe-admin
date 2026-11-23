@@ -16,7 +16,7 @@ import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 import { createBrick } from '@/lib/brick-create';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests, type ExecOptions } from '@/lib/computer-provider';
-import { clearParkPending, dropProfile, finishPendingParks, resetPendingCursorForTests, resetRecoveryCursorForTests, needsSignInAgain, parkProfile, parkWorthWaitingFor, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settlePark, settleResumedBrowser, signInsKept, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
+import { clearParkPending, dropProfile, finishParkOf, finishPendingParks, resetPendingCursorForTests, resetRecoveryCursorForTests, needsSignInAgain, parkProfile, parkWorthWaitingFor, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settlePark, settleResumedBrowser, signInsKept, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -149,22 +149,26 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       expect(sent).toEqual([]);
     });
 
-    it('a writer paused while a job that only looks stays on the machine: the shared browser is emptied, nothing of it is kept', async () => {
+    it('F: a job paused beside a job still at work puts nothing away and empties nothing: it keeps nothing, and the wipe is left for the moment none is on the machine', async () => {
       const sara = await person('Sara');
       await machine(sara.brickId);
-      await job(sara, { status: 'running', writes: false });
-      const visa = await job(sara, { pausedMinutesAgo: 0 });
-      expect(await parkProfile(sara.brickId, visa.id, NOW)).toMatchObject({ state: 'cleared', reason: 'shared' });
-      expect(sent.map((one) => one.action)).toEqual(['clear']);
-    });
-
-    it('a job that only looked, paused beside a writer still at work: the browser is the writer’s and is left alone', async () => {
-      const sara = await person('Sara');
-      await machine(sara.brickId);
-      await job(sara, { status: 'running', writes: true });
+      const working = await job(sara, { status: 'running', writes: false });
       const look = await job(sara, { pausedMinutesAgo: 0, writes: false });
-      expect(await parkProfile(sara.brickId, look.id, NOW)).toMatchObject({ state: 'left', reason: 'shared' });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: look.id } });
+      expect(await parkProfile(sara.brickId, look.id, NOW)).toMatchObject({ state: 'left', reason: 'wipe_later' });
       expect(sent).toEqual([]);
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true, parkPendingWipe: true } })).toEqual({ parkPendingJobId: look.id, parkPendingWipe: true });
+      expect((await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId: look.id, n: 1 } } })).signInsKept).toBe(false);
+      // The settlement while the other job still works changes nothing: no command, the marker and the wipe stay
+      expect(await settlePark(sara.brickId, look.id, await parkProfile(sara.brickId, look.id, NOW), NOW)).toBe('waiting');
+      expect(await finishParkOf(sara.brickId, look.id, NOW)).toBe('waiting');
+      expect(sent).toEqual([]);
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true, parkPendingWipe: true } })).toEqual({ parkPendingJobId: look.id, parkPendingWipe: true });
+      // The last job ends: the browser is emptied once, and the marker and the wipe are let go
+      await prisma.computerJob.update({ where: { id: working.id }, data: { status: 'done', queuedFor: null } });
+      expect(await finishParkOf(sara.brickId, look.id, NOW)).toBe('wiped');
+      expect(sent.map((one) => one.action)).toEqual(['clear']);
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true, parkPendingWipe: true } })).toEqual({ parkPendingJobId: null, parkPendingWipe: false });
     });
 
     it('waits while the browser is being cleared after another job, then puts this one away', async () => {
@@ -511,7 +515,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       expect((await markOf(sara.brickId)).parkPendingJobId).toBeNull();
     });
 
-    it('a pause that found nothing to put away, or a park that was already made, lets the marker go with no wipe; a browser a job beside uses is left alone', async () => {
+    it('a pause that found nothing to put away, or a park that was already made, lets the marker go with no wipe; a browser a job beside uses is left alone, and emptied once that job is over (F)', async () => {
       const sara = await person('Sara');
       await machine(sara.brickId);
       const visa = await job(sara, { pausedMinutesAgo: 0 });
@@ -522,15 +526,20 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       // The pause's row says it kept nothing: the job has no browser of its own to wait for
       expect((await prisma.computerJobPause.findFirstOrThrow({ where: { jobId: visa.id } })).signInsKept).toBe(false);
       expect(await parkWorthWaitingFor(sara.brickId, visa.id, NOW)).toBe(false);
-      // A job running beside it uses the browser: it is not emptied under it, and the marker goes
+      // A job running beside it uses the browser: it is not emptied under it, the marker (and the wipe it carries) stays, and the machine holds every other job until then
       const omar = await person('Omar');
       await machine(omar.brickId);
       const gone = await job(omar, { pausedMinutesAgo: 30 });
-      await job(omar, { status: 'running', pausedMinutesAgo: null });
+      const beside = await job(omar, { status: 'running', pausedMinutesAgo: null, writes: false });
       await prisma.brickComputer.update({ where: { botId: omar.brickId }, data: { parkPendingJobId: gone.id } });
       sent = [];
-      expect(await finishPendingParks(minutes(1))).toMatchObject({ looked: 1, wiped: 1 });
+      expect(await finishPendingParks(minutes(1))).toMatchObject({ looked: 1, wiped: 0 });
       expect(sent.map((one) => one.action)).not.toContain('clear');
+      expect((await markOf(omar.brickId)).parkPendingJobId).toBe(gone.id);
+      // The job beside is over: the browser is emptied, once, and the marker goes
+      await prisma.computerJob.update({ where: { id: beside.id }, data: { status: 'done', queuedFor: null } });
+      expect(await finishPendingParks(minutes(2))).toMatchObject({ looked: 1, wiped: 1 });
+      expect(sent.map((one) => one.action).filter((action) => action === 'clear')).toHaveLength(1);
       expect((await markOf(omar.brickId)).parkPendingJobId).toBeNull();
     });
 
@@ -750,7 +759,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       expect(await settleResumedBrowser(visa.id, sara.brickId, { state: 'fresh', reason: 'none', cookies: 0, pages: 0 }, NOW, 'room-1', 'recover')).toBe('ready');
       expect(sent.map((one) => one.action)).toEqual(['clear']);
       // A job on another room is not this attempt's either
-      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover', reservationKey: 'room-2' } });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover', stretchStarted: null, reservationKey: 'room-2' } });
       sent = [];
       expect(await settleResumedBrowser(visa.id, sara.brickId, { state: 'fresh', reason: 'none', cookies: 0, pages: 0 }, NOW, 'room-1', 'recover')).toBe('recover');
       expect(sent).toEqual([]);
@@ -833,7 +842,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
       await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: null, reservationKey: 'room-1' } });
       expect(await restoreProfile(sara.brickId, visa.id, NOW, { reservation: 'room-1', from: 'recover' })).toMatchObject({ state: 'left', reason: 'superseded' });
-      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover', reservationKey: 'room-2' } });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover', stretchStarted: null, reservationKey: 'room-2' } });
       expect(await restoreProfile(sara.brickId, visa.id, NOW, { reservation: 'room-1', from: 'recover' })).toMatchObject({ state: 'left', reason: 'superseded' });
       expect(sent).toEqual([]);
       expect(await restoreProfile(sara.brickId, visa.id, NOW, { reservation: 'room-2', from: 'recover' })).toMatchObject({ state: 'restored' });

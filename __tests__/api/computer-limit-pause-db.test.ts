@@ -900,6 +900,8 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
 
     it('a job that carries on with NOTHING of its own kept runs beside another job as any new job does: a shared browser it signs in to again', async () => {
       const { sara, jobId } = await running('g6-7-expired');
+      // Only jobs that read share a browser (a job that may sign in has it alone): this one only looks
+      await prisma.computerJob.update({ where: { id: jobId }, data: { writes: false } });
       expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
       const other = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Other', writes: false }, minutes(2));
       if (!other.ok) throw new Error('not started');
@@ -1014,6 +1016,78 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       // The paused job's own resume is not refused by it, and once the mark is gone the other job starts
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: null } });
       expect((await prisma.computerJob.updateMany({ where: { id: other.id, status: 'queued' }, data: { status: 'running', startedAt: new Date() } })).count).toBe(1);
+    });
+  });
+
+  describe('GPT seventh note, B2: nothing is billable before readiness (the stretch starts when the job is ready, never at the claim)', () => {
+    /** The seconds the person was charged across every stretch of the job (the time events in the books). */
+    const chargedSeconds = async (jobId: string) => (await timeEvents(jobId)).reduce((sum, one) => sum + Number(one.quantity), 0);
+    /** A job that ran its first minute, was paused, and was resumed into a browser that could not be brought back (`recover`). */
+    const stuckInRecovery = async (name: string) => {
+      const { sara, jobId } = await running(name);
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      (profiles.restoreProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'failed', reason: 'busy' }));
+      expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(2))).toEqual({ ok: false, reason: 'not_ready' });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', prepState: 'recover', stretchStarted: null });
+      return { sara, jobId };
+    };
+
+    it('a resume into a restore that fails, then Pause 3 minutes later: the second stretch is 0 seconds, the first minute stays booked', async () => {
+      const { sara, jobId } = await stuckInRecovery('b2-pause');
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(5))).ok).toBe(true);
+      const job = await jobOf(jobId);
+      expect(job.secondsRun + job.secondsBilled).toBe(60);
+      expect(await chargedSeconds(jobId)).toBe(60);
+      const second = (await timeEvents(jobId)).find((one) => one.eventId === pauseEventId(jobId, 2));
+      expect(second === undefined || Number(second.costMicros) === 0).toBe(true);
+    });
+
+    it('the same, ended by Cancel: the stretch that never became ready is 0 seconds', async () => {
+      const { sara, jobId } = await stuckInRecovery('b2-cancel');
+      expect((await cancelJob(sara.brickId, sara.id, jobId, minutes(5))).ok).toBe(true);
+      expect(await chargedSeconds(jobId)).toBe(60);
+      const job = await jobOf(jobId);
+      expect(job.secondsRun + job.secondsBilled).toBe(60);
+    });
+
+    it('the sweep recovers it successfully after 3 minutes, then 2 minutes of work and a Pause: about 2 minutes are booked for that stretch, on top of the first minute', async () => {
+      const { sara, jobId } = await stuckInRecovery('b2-sweep');
+      const answer = fake.execAnswer;
+      fake.execAnswer = (command: string) => (/ACTION="restore"/.test(command) ? { stdout: 'restored=1 cookies=3 pages=1\n' } : answer(command));
+      try {
+        await sweepComputers(minutes(5));
+      } finally {
+        fake.execAnswer = answer;
+      }
+      const ready = await jobOf(jobId);
+      expect(ready).toMatchObject({ status: 'running', prepState: null });
+      // Billing started at the moment the browser was ready (the sweep's own time), not at the claim 3 minutes before
+      expect(Math.abs(ready.stretchStarted!.getTime() - minutes(5).getTime())).toBeLessThan(5_000);
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(7))).ok).toBe(true);
+      const job = await jobOf(jobId);
+      expect(job.secondsRun + job.secondsBilled).toBe(60 + 120);
+      expect(await chargedSeconds(jobId)).toBe(60 + 120);
+    });
+
+    it('a job that starts with nothing to restore is billed from the moment its machine is ready, and a refused ready write leaves nothing billed (CONTROL: the plain start books its whole run)', async () => {
+      const { sara, jobId } = await running('b2-plain');
+      const first = await jobOf(jobId);
+      expect(first.stretchStarted).not.toBeNull();
+      expect(Math.abs(first.stretchStarted!.getTime() - NOW.getTime())).toBeLessThan(5_000);
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(4))).ok).toBe(true);
+      expect(await chargedSeconds(jobId)).toBe(240);
+    });
+
+    it('the database refuses a job that is restoring and has a stretch started', async () => {
+      const { jobId } = await running('b2-check');
+      await expect(prisma.$executeRaw`UPDATE "computer_jobs" SET "prep_state" = 'restoring' WHERE "id" = ${jobId}`).rejects.toThrow(/computer_jobs_prep_unbilled/);
+      expect((await jobOf(jobId)).prepState).toBeNull();
+    });
+
+    it('the person takes the machine while the job is being made ready: the job joins them with no stretch started (it is billed once it is ready)', async () => {
+      const { sara, jobId } = await stuckInRecovery('b2-person');
+      expect((await takeOver(sara.brickId, sara.id, minutes(3))).ok).toBe(true);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'waiting', control: 'person', prepState: 'recover', stretchStarted: null });
     });
   });
 

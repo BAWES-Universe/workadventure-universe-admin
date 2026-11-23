@@ -345,20 +345,21 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect(await mine([id], minutes(9 + 5 + 4 + 1))).toHaveLength(1);
   });
 
-  it('hands over the job’s own folder even while a job beside it still holds the machine, and never gives a job the folder of another', async () => {
+  it('hands over the job’s own folder, and never gives a job the folder of another: a reader asked for while the writer works waits its turn and starts when the writer ends', async () => {
     const sara = await person('sara');
     const writer = await started(sara, 'Writer');
     const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Reader', writes: false }, minutes(1));
     if (!reader.ok) throw new Error('no read-only job');
-    const readerJob = await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.job.id } });
-    expect(readerJob.status).toBe('running');
-    // Both run at once: the writer saves a file in its folder; a file lands in the reader's folder too (a job that only looks never hands anything over)
+    // A job that may sign in has the machine alone: the reader waits its turn (round 8, F)
+    expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.job.id } })).toMatchObject({ status: 'queued', queuedFor: 'turn' });
+    // The writer saves a file in its folder; a file lands in the reader's folder too (a job that only looks never hands anything over)
     out(writer, 'invoice.pdf', 'inv', 4);
     out(reader.job.id, 'stray.pdf', 'stray', 4);
-    await finishJob(reader.job.id, 'done', minutes(6));
-    expect(await prisma.computerJobFile.count({ where: { jobId: reader.job.id } })).toBe(0);
-    // The writer ends later: its own folder is handed over, and not the reader's
+    // The writer ends: its own folder is handed over, and not the reader's, and the reader then starts
     await finishJob(writer, 'done', minutes(8));
+    expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.job.id } })).status).toBe('running');
+    await finishJob(reader.job.id, 'done', minutes(9));
+    expect(await prisma.computerJobFile.count({ where: { jobId: reader.job.id } })).toBe(0);
     const [done] = await mine([writer]);
     expect(done.handed.map((card) => card.name)).toEqual(['invoice.pdf']);
     expect((await mine([reader.job.id]))[0].handed).toEqual([]);
