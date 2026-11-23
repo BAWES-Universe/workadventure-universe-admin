@@ -174,7 +174,7 @@
     }
   ],
   "shipping": {
-    "lastMigration": "20261123010000_computer_job_continues",
+    "lastMigration": "20261123020000_computer_job_continues",
     "count": 193,
     "migrations": [
       "20251205145742_init",
@@ -369,7 +369,7 @@
       "20261122140000_computer_start_ack",
       "20261122220000_computer_ownership_and_start_attempts",
       "20261123000000_computer_job_controls",
-      "20261123010000_computer_job_continues"
+      "20261123020000_computer_job_continues"
     ]
   }
 }
