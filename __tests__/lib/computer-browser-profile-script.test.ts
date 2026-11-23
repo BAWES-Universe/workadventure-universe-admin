@@ -33,6 +33,9 @@ const havePlaywright = ((): boolean => {
 const run = usable ? describe : describe.skip;
 const runWithBrowser = usable && havePlaywright ? describe : describe.skip;
 
+/** The line of the restore that notes the profile is in place ("moved"): a test cuts the command off there. */
+const MOVED_NOTE = '  if [ -d "$JOBDIR" ]; then printf \'\' > "$JOBDIR/moved" || { say "0 reason=move"; exit 1; }; fi\n';
+
 const JOB_A = '11111111-1111-4111-8111-111111111111';
 const JOB_B = '22222222-2222-4222-8222-222222222222';
 const JOB_C = '33333333-3333-4333-8333-333333333333';
@@ -368,7 +371,7 @@ run('bringing a job’s browser back, and never into another job', () => {
     fakeProfile('job A cookies');
     act('park', JOB_A, [JOB_A]);
     writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [{ name: 'sid', value: 'A', domain: 'example.test', path: '/' }], pages: [] }));
-    act('restore', JOB_A, [JOB_A], (script) => script.replace('  case "$loaded" in *answer=0*) say "0 reason=no_answer"; exit 1 ;; esac\n  rm -rf "$JOBDIR" "$JOBDIR.new"\n  if [ "$had" = "1" ]', '  rm -rf "$JOBDIR" "$JOBDIR.new"\n  if [ "$had" = "1" ]'));
+    act('restore', JOB_A, [JOB_A], (script) => script.replace('  replay || { say "0 reason=no_answer"; exit 1; }\n  rm -rf "$JOBDIR" "$JOBDIR.new"\n  if [ "$had" = "1" ]', '  replay\n  rm -rf "$JOBDIR" "$JOBDIR.new"\n  if [ "$had" = "1" ]'));
     expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(false);
   });
 
@@ -396,7 +399,7 @@ run('bringing a job’s browser back, and never into another job', () => {
     fakeProfile('job A cookies');
     act('park', JOB_A, [JOB_A]);
     // Cut off after the move, before the note that it happened
-    act('restore', JOB_A, [JOB_A], (script) => script.replace('  [ -d "$JOBDIR" ] && : > "$JOBDIR/moved" 2>/dev/null\n', '  exit 1\n'));
+    act('restore', JOB_A, [JOB_A], (script) => script.replace(MOVED_NOTE, '  exit 1\n'));
     expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
     expect(existsSync(join(parked(JOB_A), 'profile'))).toBe(false);
     const next = act('restore', JOB_A, [JOB_A]);
@@ -409,7 +412,7 @@ run('bringing a job’s browser back, and never into another job', () => {
   it('a try that stopped BEFORE the profile left the park folder still moves it (the note alone is not taken for a move)', () => {
     fakeProfile('job A cookies');
     act('park', JOB_A, [JOB_A]);
-    act('restore', JOB_A, [JOB_A], (script) => script.replace('    mv "$JOBDIR/profile" "$PROFILE" &&', '    exit 1\n    mv "$JOBDIR/profile" "$PROFILE" &&'));
+    act('restore', JOB_A, [JOB_A], (script) => script.replace('    mv "$JOBDIR/profile" "$PROFILE" ||', '    exit 1\n    mv "$JOBDIR/profile" "$PROFILE" ||'));
     expect(existsSync(join(parked(JOB_A), 'moving'))).toBe(true);
     expect(existsSync(join(parked(JOB_A), 'profile', 'Default', 'Cookies'))).toBe(true);
     expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
@@ -420,9 +423,191 @@ run('bringing a job’s browser back, and never into another job', () => {
   it('planted bug: a retry that does not know the move happened wipes the profile it was given', () => {
     fakeProfile('job A cookies');
     act('park', JOB_A, [JOB_A]);
-    act('restore', JOB_A, [JOB_A], (script) => script.replace('  [ -d "$JOBDIR" ] && : > "$JOBDIR/moved" 2>/dev/null\n', '  exit 1\n'));
+    act('restore', JOB_A, [JOB_A], (script) => script.replace(MOVED_NOTE, '  exit 1\n'));
     act('restore', JOB_A, [JOB_A], (script) => script.replace('  if [ -f "$JOBDIR/moving" ] && [ ! -f "$JOBDIR/moved" ]', '  if [ -f "$JOBDIR/never" ] && [ ! -f "$JOBDIR/moved" ]'));
     expect(existsSync(join(profile(), 'Default', 'Cookies'))).toBe(false);
+  });
+
+  /** What the image's own start-up does at the browser's start: a profile that is still marked dirty is removed (lib/agent37/image-files.ts, universe-up). It notes what it saw. */
+  function startUpLikeTheImage(): string {
+    const seen = join(root, 'mark-at-start');
+    places.start = `if [ -e "$STATE/profile.dirty" ]; then echo set > "${seen}"; rm -rf "$PROFILE"; else echo clear > "${seen}"; fi`;
+    return seen;
+  }
+  const markPath = () => join(home, '.universe', 'profile.dirty');
+  /** A command that was killed after the move: the mark is still there and the lock is left behind (the command lock is taken over after a minute). */
+  function leaveKilledTryBehind(): void {
+    mkdirSync(markPath());
+    const lock = join(home, '.universe', 'up.lock');
+    mkdirSync(lock);
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(lock, old, old);
+  }
+
+  it('CodeRabbit A3: once the profile is moved in, a failed hand-back clears the dirty mark under the lock before the lock is let go, and the next try finishes', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    const failed = act('restore', JOB_A, [JOB_A], (script) => script.replace('    chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }\n    had=1', '    false || { say "0 reason=move"; exit 1; }\n    had=1'));
+    expect(failed.code).toBe(1);
+    expect(failed.out).toMatch(/restored=0 reason=move/);
+    // The profile is in place, the mark is gone (the start-up would remove the profile if it were there), the lock is let go, the note of the move is kept
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+    expect(existsSync(markPath())).toBe(false);
+    expect(existsSync(join(home, '.universe', 'up.lock'))).toBe(false);
+    expect(existsSync(join(parked(JOB_A), 'moving'))).toBe(true);
+    const next = act('restore', JOB_A, [JOB_A]);
+    expect(next.out).toMatch(/restored=1/);
+    expect(statSync(join(profile(), 'Default', 'Cookies')).uid).toBe(agentUid);
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+  });
+
+  it('planted bug: a hand-back that fails with the mark still set leaves the moved profile to be removed by the start-up (the check above sees the mark)', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    act('restore', JOB_A, [JOB_A], (script) =>
+      script.replace('    unmark || { say "0 reason=mark"; exit 1; }\n    chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }\n    had=1', '    false || { say "0 reason=move"; exit 1; }\n    had=1'),
+    );
+    expect(existsSync(markPath())).toBe(true);
+  });
+
+  it('CodeRabbit A3: a retry on the moved branch never starts the browser while a mark left by a cut-off try is set, and the profile survives the start-up', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [{ name: 'sid', value: 'A', domain: 'example.test', path: '/' }], pages: [] }));
+    // No browser answers: the profile is back, "moved" is noted and the session is kept
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=0 reason=no_answer/);
+    expect(existsSync(join(parked(JOB_A), 'moved'))).toBe(true);
+    leaveKilledTryBehind();
+    const seen = startUpLikeTheImage();
+    // The next try (the replay is still not answered: the stand-in start-up starts no browser)
+    act('restore', JOB_A, [JOB_A]);
+    expect(spawnSync('cat', [seen], { encoding: 'utf8' }).stdout.trim()).toBe('clear');
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+    expect(existsSync(markPath())).toBe(false);
+    expect(existsSync(join(home, '.universe', 'up.lock'))).toBe(false);
+  });
+
+  it('planted bug: a moved branch that starts the browser without clearing the mark loses the profile to the start-up', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [{ name: 'sid', value: 'A', domain: 'example.test', path: '/' }], pages: [] }));
+    act('restore', JOB_A, [JOB_A]);
+    leaveKilledTryBehind();
+    const seen = startUpLikeTheImage();
+    act('restore', JOB_A, [JOB_A], (script) => script.replace('    lock\n    unmark || { say "0 reason=mark"; exit 1; }\n    unlock\n    start_browser', '    start_browser'));
+    expect(spawnSync('cat', [seen], { encoding: 'utf8' }).stdout.trim()).toBe('set');
+    expect(existsSync(join(profile(), 'Default', 'Cookies'))).toBe(false);
+  });
+
+  it('CodeRabbit A3: a try that finds the profile moved in but not noted clears a mark left behind before anything starts, and the start-up never sees it', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    act('restore', JOB_A, [JOB_A], (script) => script.replace(MOVED_NOTE, '  exit 1\n'));
+    leaveKilledTryBehind();
+    const seen = startUpLikeTheImage();
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
+    expect(spawnSync('cat', [seen], { encoding: 'utf8' }).stdout.trim()).toBe('clear');
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+    expect(existsSync(markPath())).toBe(false);
+    expect(existsSync(parked(JOB_A))).toBe(false);
+  });
+
+  it('CodeRabbit A3: a try that finds the profile moved in but not noted, and cannot hand it back, clears a mark left behind under the lock before it lets the lock go', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    act('restore', JOB_A, [JOB_A], (script) => script.replace(MOVED_NOTE, '  exit 1\n'));
+    leaveKilledTryBehind();
+    const failed = act('restore', JOB_A, [JOB_A], (script) => script.replace('    chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }\n    # "moving" stays', '    false || { say "0 reason=move"; exit 1; }\n    # "moving" stays'));
+    expect(failed.out).toMatch(/restored=0 reason=move/);
+    expect(existsSync(markPath())).toBe(false);
+    expect(existsSync(join(home, '.universe', 'up.lock'))).toBe(false);
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+  });
+
+  it('CodeRabbit A4: the note of the move stays until "moved" is written, on both paths, so the next try never wipes the profile that already moved in', () => {
+    // Path 1: the move and the note in one command. The note cannot be written (a folder is where the file goes)
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    mkdirSync(join(parked(JOB_A), 'moved'));
+    const first = act('restore', JOB_A, [JOB_A]);
+    expect(first.code).toBe(1);
+    expect(first.out).toMatch(/restored=0 reason=move/);
+    expect(existsSync(join(parked(JOB_A), 'moving'))).toBe(true);
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+    rmSync(join(parked(JOB_A), 'moved'), { recursive: true });
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+    expect(existsSync(parked(JOB_A))).toBe(false);
+    // Path 2: a try that found the profile moved in but not noted, and cannot write the note either
+    expect(act('park', JOB_A, [JOB_A]).out).toMatch(/parked=1/);
+    act('restore', JOB_A, [JOB_A], (script) => script.replace(MOVED_NOTE, '  exit 1\n'));
+    mkdirSync(join(parked(JOB_A), 'moved'));
+    const second = act('restore', JOB_A, [JOB_A]);
+    expect(second.code).toBe(1);
+    expect(second.out).toMatch(/restored=0 reason=move/);
+    expect(existsSync(join(parked(JOB_A), 'moving'))).toBe(true);
+    rmSync(join(parked(JOB_A), 'moved'), { recursive: true });
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+  });
+
+  it('planted bug: a restore that removes "moving" even when "moved" could not be written loses the profile on the next try', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    mkdirSync(join(parked(JOB_A), 'moved'));
+    act('restore', JOB_A, [JOB_A], (script) => script.replace(MOVED_NOTE, '  if [ -d "$JOBDIR" ]; then printf \'\' > "$JOBDIR/moved" 2>/dev/null; fi\n'));
+    rmSync(join(parked(JOB_A), 'moved'), { recursive: true, force: true });
+    act('restore', JOB_A, [JOB_A]);
+    expect(existsSync(join(profile(), 'Default', 'Cookies'))).toBe(false);
+  });
+
+  it('CodeRabbit B/C3: a saved session the replay cannot work through (valid JSON, wrong shape) is never taken for a replayed one, on either path, and is kept', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: 42, pages: [] }));
+    // First path: the profile is moved in now
+    const first = act('restore', JOB_A, [JOB_A]);
+    expect(first.code).toBe(1);
+    expect(first.out).toMatch(/restored=0 reason=no_answer/);
+    expect(first.out).not.toMatch(/restored=1/);
+    expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(true);
+    // Second path (already moved in): the same
+    const again = act('restore', JOB_A, [JOB_A]);
+    expect(again.code).toBe(1);
+    expect(again.out).toMatch(/restored=0 reason=no_answer/);
+    expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(true);
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+  });
+
+  it('planted bug: a restore that only looks for answer=0 deletes a session the replay never acknowledged (both paths)', () => {
+    const onlyZero = (script: string) =>
+      script
+        .replace('  loaded="$(devtools load "$JOBDIR/session.json" 2>/dev/null)" || return 1\n  [ "$(echo "$loaded" | tail -n 1 | grep -c \'^cookies=[0-9]* pages=[0-9]* answer=1$\')" = "1" ]', '  loaded="$(devtools load "$JOBDIR/session.json" 2>/dev/null)"\n  case "$loaded" in *answer=0*) return 1 ;; esac');
+    for (const cutOff of [false, true]) {
+      rmSync(places.parkRoot, { recursive: true, force: true });
+      rmSync(profile(), { recursive: true, force: true });
+      fakeProfile('job A cookies');
+      act('park', JOB_A, [JOB_A]);
+      writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: 42, pages: [] }));
+      if (cutOff) act('restore', JOB_A, [JOB_A]);
+      const done = act('restore', JOB_A, [JOB_A], onlyZero);
+      expect(done.out).toMatch(/restored=1/);
+      expect(existsSync(parked(JOB_A))).toBe(false);
+    }
+  });
+
+  it('CodeRabbit B/C3: a replay that printed answer=1 but did not exit cleanly is not an acknowledged one, and no saved session at all is still a plain restore', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [], pages: [] }));
+    const dies = (script: string) => script.replace('    print("cookies=0 pages=0 answer=1")\n    sys.exit(0)', '    print("cookies=0 pages=0 answer=1")\n    sys.exit(3)');
+    expect(act('restore', JOB_A, [JOB_A], dies).out).toMatch(/restored=0 reason=no_answer/);
+    expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(true);
+    // The no-snapshot path stays separate: nothing to replay, the profile alone is restored
+    rmSync(join(parked(JOB_A), 'session.json'));
+    const plain = act('restore', JOB_A, [JOB_A]);
+    expect(plain.out).toMatch(/restored=1/);
+    expect(existsSync(parked(JOB_A))).toBe(false);
   });
 
   it('hands the profile back without following a link inside it to a file the agent does not own', () => {
@@ -531,6 +716,13 @@ runWithBrowser('a real browser’s sign-ins and open pages', () => {
     throw new Error('The browser did not answer');
   }
 
+  /** The pages the browser has open at one address, once the browser has had a moment to show what was opened (at least one is waited for only when `wait` is set). */
+  async function pagesAt(live: CdpBrowser, url: string, wait = true): Promise<CdpPage[]> {
+    const context = live.contexts()[0];
+    for (let i = 0; wait && i < 50 && !context.pages().some((one) => one.url() === url); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    return context.pages().filter((one) => one.url() === url);
+  }
+
   function startBrowser() {
     mkdirSync(join(home, '.config'), { recursive: true });
     mkdirSync(join(home, '.cache'), { recursive: true });
@@ -582,22 +774,80 @@ runWithBrowser('a real browser’s sign-ins and open pages', () => {
     const first = act('restore', JOB_A, [JOB_A]);
     expect(first.out).toMatch(/restored=0 reason=no_answer/);
     expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(true);
+    // The first partial restore opened exactly one page (not skipped, not twice), before any retry
+    let again = await browser();
+    expect(await pagesAt(again, `${site}/visa-form`)).toHaveLength(1);
+    await again.close().catch(() => undefined);
     // The retry (the move is already noted, so only the replay is done again): the page that already came back is not opened a second time
     const second = act('restore', JOB_A, [JOB_A]);
     expect(second.out).toMatch(/restored=0 reason=no_answer/);
-    let again = await browser();
-    let context = again.contexts()[0];
-    for (let i = 0; i < 50 && !context.pages().some((one) => one.url() === `${site}/visa-form`); i++) await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(context.pages().filter((one) => one.url() === `${site}/visa-form`)).toHaveLength(1);
+    again = await browser();
+    expect(await pagesAt(again, `${site}/visa-form`)).toHaveLength(1);
     await again.close().catch(() => undefined);
     // Once the session is whole the replay finishes and the saved session goes
     writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [good], pages: [`${site}/visa-form`] }));
     expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
     expect(existsSync(parked(JOB_A))).toBe(false);
     again = await browser();
-    context = again.contexts()[0];
-    expect(context.pages().filter((one) => one.url() === `${site}/visa-form`)).toHaveLength(1);
+    expect(await pagesAt(again, `${site}/visa-form`)).toHaveLength(1);
+    expect((await again.contexts()[0].cookies()).find((cookie) => cookie.name === 'sid')?.value).toBe('signed-in-as-A');
     await again.close().catch(() => undefined);
+  }, 180_000);
+
+  it('CodeRabbit B/C17: a replay that cannot list the open tabs does not open every page again, keeps the saved session, and a later try opens only what is missing', async () => {
+    startBrowser();
+    await (await browser()).close().catch(() => undefined);
+    act('park', JOB_A, [JOB_A]);
+    const good = { name: 'sid', value: 'signed-in-as-A', domain: '127.0.0.1', path: '/' };
+    writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [good], pages: [`${site}/page-a`, `${site}/page-b`] }));
+    // A try that opened page A and then failed on page B (nothing else is said about the tabs)
+    const opened = act('restore', JOB_A, [JOB_A], (script) => script.replace("        http(\"PUT\", \"/json/new?\" + urllib.parse.quote(url, safe=\"\"))\n        opened += 1\n", "        if url.endswith('/page-b'):\n            raise IOError('planted')\n        http(\"PUT\", \"/json/new?\" + urllib.parse.quote(url, safe=\"\"))\n        opened += 1\n"));
+    expect(opened.out).toMatch(/restored=0 reason=no_answer/);
+    let live = await browser();
+    expect(await pagesAt(live, `${site}/page-a`)).toHaveLength(1);
+    expect(await pagesAt(live, `${site}/page-b`, false)).toHaveLength(0);
+    await live.close().catch(() => undefined);
+    // The retry cannot list the tabs: nothing is opened (page A is not opened a second time), the session is kept and the answer says incomplete
+    const blind = act('restore', JOB_A, [JOB_A], (script) => script.replace('def open_tabs():\n', 'def open_tabs():\n    raise IOError("planted")\n'));
+    expect(blind.out).toMatch(/restored=0 reason=no_answer/);
+    expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(true);
+    live = await browser();
+    expect(await pagesAt(live, `${site}/page-a`)).toHaveLength(1);
+    expect(await pagesAt(live, `${site}/page-b`, false)).toHaveLength(0);
+    await live.close().catch(() => undefined);
+    // The list works again: only the missing page is opened, and the replay finishes
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1 cookies=1 pages=2/);
+    expect(existsSync(parked(JOB_A))).toBe(false);
+    live = await browser();
+    expect(await pagesAt(live, `${site}/page-a`)).toHaveLength(1);
+    expect(await pagesAt(live, `${site}/page-b`)).toHaveLength(1);
+    await live.close().catch(() => undefined);
+  }, 180_000);
+
+  it('CodeRabbit B/C18: two saved tabs on one address are two tabs back, and a retry opens no more', async () => {
+    startBrowser();
+    await (await browser()).close().catch(() => undefined);
+    act('park', JOB_A, [JOB_A]);
+    const good = { name: 'sid', value: 'signed-in-as-A', domain: '127.0.0.1', path: '/' };
+    const bad = { name: '__Host-nope', value: 'x', domain: 'example.test', path: '/' };
+    writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [good, bad], pages: [`${site}/same`, `${site}/same`, `${site}/other`] }));
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=0 reason=no_answer/);
+    let live = await browser();
+    expect(await pagesAt(live, `${site}/same`)).toHaveLength(2);
+    expect(await pagesAt(live, `${site}/other`)).toHaveLength(1);
+    await live.close().catch(() => undefined);
+    // The retry finds all three there and opens none
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=0 reason=no_answer/);
+    live = await browser();
+    expect(await pagesAt(live, `${site}/same`)).toHaveLength(2);
+    expect(await pagesAt(live, `${site}/other`)).toHaveLength(1);
+    await live.close().catch(() => undefined);
+    // With one of the two already open, a whole session opens only the missing one
+    writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [good], pages: [`${site}/same`, `${site}/same`, `${site}/same`] }));
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1 cookies=1 pages=3/);
+    live = await browser();
+    expect(await pagesAt(live, `${site}/same`)).toHaveLength(3);
+    await live.close().catch(() => undefined);
   }, 180_000);
 
   it('B resumed after A was paused gets an empty browser, not A’s sign-ins', async () => {
