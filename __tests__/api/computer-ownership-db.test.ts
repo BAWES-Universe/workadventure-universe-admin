@@ -1046,6 +1046,45 @@ run('one owner per computer job: every write is decided in the write that lands 
       expect(await prepareJob(jobId, RELAY, minutes(2), { run: 'rB', epoch: eb })).toMatchObject({ ok: true });
     });
 
+    it('CodeRabbit on #1025 (2): a start whose last look waits while another worker claims is superseded BEFORE the provider hears of the turn; CONTROL: the owner’s own start opens it', async () => {
+      const { jobId } = await running('s-turn-admission');
+      const ea = await claimed(jobId, 'rA');
+      const opened = () => fake.calls.filter((call) => call.name === 'openTurn').length;
+      // Another worker is claiming (it holds the job's cutoff lock, the one the last look waits for) and its claim lands while the start waits
+      let release: () => void = () => undefined;
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const claiming = prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
+          locked();
+          await released;
+          await tx.computerJob.update({ where: { id: jobId }, data: { ownerEpoch: { increment: 1 } } });
+        },
+        { timeout: 30_000, maxWait: 30_000 },
+      );
+      await lockTaken;
+      const before = opened();
+      const start = startTurn(jobId, 'Do it', new AbortController().signal, { epoch: ea });
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      release();
+      await claiming;
+      expect(await start).toEqual({ ok: false, reason: 'superseded' });
+      expect(opened()).toBe(before);
+      // The mark the start put on the job for its first turn went with it (nothing was sent): the new owner is not told of a turn that never was
+      expect((await jobOf(jobId)).firstTurnSentAt).toBeNull();
+      // CONTROL: the owner's own start goes through
+      const eb = (await jobOf(jobId)).ownerEpoch;
+      const own = await startTurn(jobId, 'Do it', new AbortController().signal, { epoch: eb });
+      expect(own.ok).toBe(true);
+      expect(opened()).toBe(before + 1);
+    });
+
     it('a stale prepare never takes the prepare claim (the owner’s own is not held off: `superseded`, not `preparing`), and a stale prepare that says the relay was unreachable records no fault', async () => {
       const { jobId } = await running('s-broker-claim');
       const ea = await claimed(jobId, 'rA');
