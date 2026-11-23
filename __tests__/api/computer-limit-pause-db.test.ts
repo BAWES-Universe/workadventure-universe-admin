@@ -27,7 +27,7 @@ import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { heldRoom, memberAllowance } from '@/lib/meter-allowance';
 import * as meterModule from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { claimJob, computerTimeInBooks, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver, takeWakeTicketForTests } from '@/lib/computer';
+import { claimJob, computerTimeInBooks, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, runnableJobsPage, startJob, stopJobFor, setWakeTimingForTests, sweepComputers, takeOver, takeWakeTicketForTests } from '@/lib/computer';
 import { authorizeModelCall, callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { mintJobToken } from '@/lib/computer-token';
 import { recordPoolCutoff } from '@/lib/computer-faults';
@@ -863,6 +863,195 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       }
       expect(stopsOf()).toBe(stops);
       expect((await machineOf(sara.brickId)).machine).toBe('working');
+    });
+
+    it('(c) a start taken over while it was still waiting for readiness does NOT go on as ready: its job gets no stretch and no booking until the machine is working; the replacement then fails, is stopped under its own ticket, and the first start wakes the machine again and runs on it', async () => {
+      const sara = await sleepingBrick('b1-takeover');
+      const a = gate();
+      const b = gate();
+      let readies = 0;
+      const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+        const n = ++readies;
+        if (n === 1) await a.opened;
+        if (n === 2) {
+          await b.opened;
+          throw new Error('the machine never came ready');
+        }
+      });
+      const stops = stopsOf();
+      let xDone = false;
+      try {
+        const x = readerOf(sara, 'X', minutes(10)).then((result) => {
+          xDone = true;
+          return result;
+        });
+        await until(async () => readies === 1);
+        // The first wake is older than a start can take (no beat): the second start takes it over with the next ticket and runs its own readiness, which will fail
+        await ageWake(sara.brickId);
+        const y = readerOf(sara, 'Y', minutes(10));
+        await until(async () => readies === 2);
+        expect((await machineOf(sara.brickId)).wakeEpoch).toBe(1 + 2);
+        // The first start's readiness comes in while the replacement's is still going: it is not the Brick's ticket any more, so the machine is not ready for its job
+        a.open();
+        await sleep(800);
+        expect(xDone).toBe(false);
+        const xJob = await prisma.computerJob.findFirstOrThrow({ where: { botId: sara.brickId, title: 'X' } });
+        expect(xJob.stretchStarted).toBeNull();
+        expect((await timeEvents(xJob.id)).reduce((sum, one) => sum + Number(one.quantity), 0)).toBe(0);
+        expect((await machineOf(sara.brickId)).machine).toBe('waking');
+        // The replacement fails: it is stopped under its own ticket (one stop), and the first start, which waited, wakes the machine again itself
+        b.open();
+        expect(await y).toEqual({ ok: false, reason: 'broken_start' });
+        const rx = await x;
+        expect(rx.ok && rx.job.status).toBe('running');
+      } finally {
+        a.open();
+        b.open();
+        spy.mockRestore();
+      }
+      expect(stopsOf()).toBe(stops + 1);
+      expect(readies).toBe(3);
+      expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'working', wakeEpoch: 1 + 3 });
+      expect(await fake.awake((await machineOf(sara.brickId)).providerRef as string)).toBe(true);
+      const xRunning = await prisma.computerJob.findFirstOrThrow({ where: { botId: sara.brickId, title: 'X' } });
+      expect(xRunning).toMatchObject({ status: 'running', prepState: null });
+      expect(xRunning.stretchStarted).not.toBeNull();
+    });
+
+    it('(c) the first start comes ready after the replacement already made the machine working: it returns on that, with nothing woken again', async () => {
+      const sara = await sleepingBrick('b1-takeover-ok');
+      const a = gate();
+      let readies = 0;
+      const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+        if (++readies === 1) await a.opened;
+      });
+      const wakes = wakesOf();
+      try {
+        const x = readerOf(sara, 'X', minutes(10));
+        await until(async () => readies === 1);
+        await ageWake(sara.brickId);
+        const ry = await readerOf(sara, 'Y', minutes(10));
+        expect(ry.ok && ry.job.status).toBe('running');
+        expect((await machineOf(sara.brickId)).machine).toBe('working');
+        a.open();
+        const rx = await x;
+        expect(rx.ok && rx.job.status).toBe('running');
+      } finally {
+        a.open();
+        spy.mockRestore();
+      }
+      expect(wakesOf()).toBe(wakes + 2);
+      expect(readies).toBe(2);
+      expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'working', wakeEpoch: 1 + 2 });
+    });
+
+    describe('the wake is a heartbeat, not a length of time', () => {
+      afterEach(() => setWakeTimingForTests(null));
+
+      it('a readiness that takes longer than the stale time but keeps beating is not taken over: one wake, one ticket, and both starts run on it', async () => {
+        setWakeTimingForTests({ beatMs: 100, staleMs: 700 });
+        const sara = await sleepingBrick('b1-beat');
+        const a = gate();
+        let readies = 0;
+        const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+          if (++readies === 1) await a.opened;
+        });
+        const wakes = wakesOf();
+        try {
+          const x = readerOf(sara, 'X', minutes(10));
+          await until(async () => readies === 1);
+          const y = readerOf(sara, 'Y', minutes(10));
+          // Three times the stale time with the start still waking: the beat kept it alive, so nothing took it over
+          await sleep(2200);
+          expect(readies).toBe(1);
+          expect(wakesOf()).toBe(wakes + 1);
+          expect((await machineOf(sara.brickId)).wakeEpoch).toBe(1 + 1);
+          a.open();
+          const [rx, ry] = await Promise.all([x, y]);
+          expect(rx.ok && rx.job.status).toBe('running');
+          expect(ry.ok && ry.job.status).toBe('running');
+        } finally {
+          a.open();
+          spy.mockRestore();
+        }
+        expect(wakesOf()).toBe(wakes + 1);
+      });
+
+      it('a start that was replaced does not keep the replacement’s wake alive: only the Brick’s own ticket beats, so a replacement that is gone is taken over', async () => {
+        setWakeTimingForTests({ beatMs: 100, staleMs: 700 });
+        const sara = await sleepingBrick('b1-beat-own');
+        const a = gate();
+        let readies = 0;
+        const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+          if (++readies === 1) await a.opened;
+        });
+        try {
+          const x = readerOf(sara, 'X', minutes(10));
+          await until(async () => readies === 1);
+          // A replacement took the next ticket and is gone (nothing beats it); the first start is still waiting for its readiness, and still beats (its own ticket is no longer the Brick's)
+          expect(await takeWakeTicketForTests(sara.brickId, 'waking', 'waking')).toBe(1 + 2);
+          const y = readerOf(sara, 'Y', minutes(10));
+          const first = await Promise.race([y, sleep(3500).then(() => 'still waiting' as const)]);
+          expect(first).not.toBe('still waiting');
+          expect(first !== 'still waiting' && first.ok && first.job.status).toBe('running');
+          a.open();
+          await x;
+        } finally {
+          a.open();
+          spy.mockRestore();
+        }
+        expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'working' });
+      });
+
+      it('a wake whose start is gone (no beat for the stale time) is taken over by the waiting start, which wakes it itself and runs', async () => {
+        setWakeTimingForTests({ beatMs: 100, staleMs: 700 });
+        const sara = await sleepingBrick('b1-nobeat');
+        // A machine left `waking` by a start that crashed: its ticket is taken and nothing beats it
+        await takeWakeTicketForTests(sara.brickId, 'waking', 'stopped');
+        const wakes = wakesOf();
+        const started = Date.now();
+        const result = await readerOf(sara, 'Y', minutes(10));
+        expect(result.ok && result.job.status).toBe('running');
+        expect(Date.now() - started).toBeGreaterThanOrEqual(400);
+        expect(wakesOf()).toBe(wakes + 1);
+        expect(await machineOf(sara.brickId)).toMatchObject({ machine: 'working', wakeEpoch: 1 + 2 });
+      });
+    });
+
+    it('(d) a waiter that sees the wake end in `working` while a browser cleanup holds the machine waits the cleanup out before it returns', async () => {
+      const sara = await sleepingBrick('b1-clean');
+      const a = gate();
+      let readies = 0;
+      const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+        if (++readies === 1) await a.opened;
+      });
+      let releasedAt = 0;
+      let yDoneAt = 0;
+      try {
+        const x = readerOf(sara, 'X', minutes(10));
+        await until(async () => readies === 1);
+        const y = readerOf(sara, 'Y', minutes(10)).then((result) => {
+          yDoneAt = Date.now();
+          return result;
+        });
+        await sleep(600);
+        // A cleanup of the browser holds the machine as it comes up, and is let go a little later
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NOW() WHERE "bot_id" = ${sara.brickId}`;
+        setTimeout(() => {
+          releasedAt = Date.now();
+          // (a Prisma raw query runs only when it is awaited or chained)
+          void prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NULL WHERE "bot_id" = ${sara.brickId}`.then(() => undefined);
+        }, 1500);
+        a.open();
+        const ry = await y;
+        expect(ry.ok && ry.job.status).toBe('running');
+        await x;
+      } finally {
+        a.open();
+        spy.mockRestore();
+      }
+      expect(releasedAt).toBeGreaterThan(0);
+      expect(yDoneAt).toBeGreaterThanOrEqual(releasedAt);
     });
   });
 

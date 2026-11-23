@@ -404,11 +404,19 @@ async function takeWakeTicket(botId: string, machine: 'waking' | 'restoring', fr
 /** Test seam: the ticket write itself, to prove two starts that saw the same state take ONE ticket between them. */
 export const takeWakeTicketForTests = takeWakeTicket;
 
-/** The longest a wake of a machine is waited for by another start: the provider's readiness limit and a little more. A machine that has been `waking` longer than this has no start behind it any more. */
-const WAKE_IN_FLIGHT_MS = 5 * 60_000;
+/**
+ * A wake in flight is a heartbeat, not a length of time (round 8, B1, Opus): the start that holds the ticket touches the Brick row's `updated_at` every WAKE_BEAT_MS for as long as it wakes and waits for readiness, and only
+ * its own ticket's beat lands. Another start takes a wake over only when no beat has come for WAKE_STALE_MS (the beat missed several times: the start behind it is gone). A readiness check may take as long as a provider needs (an
+ * image update, a restart of the instance), so no fixed limit of that wait is assumed.
+ */
+let wakeTiming = { beatMs: 30_000, staleMs: 2 * 60_000 };
+/** Test seam: shorter beat and stale times (null restores the real ones). */
+export function setWakeTimingForTests(timing: { beatMs: number; staleMs: number } | null): void {
+  wakeTiming = timing ?? { beatMs: 30_000, staleMs: 2 * 60_000 };
+}
 const WAKE_POLL_MS = 250;
 /**
- * A machine another start is waking: waited for until it is `working` (returns `working`), or until it is in any other state, or its wake is too old to have a start behind it (returns the row as it stands, for this start to wake it). A
+ * A machine another start is waking: waited for until it is `working` (returns `working`), or until it is in any other state, or its wake has no beat any more, so no start is behind it (returns the row as it stands, for this start to wake it). A
  * machine that is in no wake is returned at once.
  */
 async function awaitWakeInFlight(botId: string, seen: Prisma.BrickComputerGetPayload<Record<string, never>>): Promise<'working' | Prisma.BrickComputerGetPayload<Record<string, never>>> {
@@ -418,7 +426,7 @@ async function awaitWakeInFlight(botId: string, seen: Prisma.BrickComputerGetPay
     if (row.machine !== 'waking' && row.machine !== 'restoring') return row;
     // A machine with no disk yet is being made, not woken: the make has its own wait
     if (!row.providerRef) return row;
-    if (Date.now() - row.updatedAt.getTime() > WAKE_IN_FLIGHT_MS) return row;
+    if (Date.now() - row.updatedAt.getTime() > wakeTiming.staleMs) return row;
     await new Promise((resolve) => setTimeout(resolve, WAKE_POLL_MS));
     row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
   }
@@ -1773,62 +1781,86 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
   // stop a machine the first start's job is already working on. If it becomes `working` this start has nothing to do; if the wake ends any other way (stopped, broken), or is older than a start can take, this start wakes it
   // with its own ticket. The ticket is taken only from the state this start saw, so a wake that began in between is seen on the next look, not stepped over
   const own = madeHere || cameBack !== null;
-  let ticket: number | null = null;
-  let restoring = false;
-  for (let spins = 0; ticket === null; spins++) {
-    if (spins >= 5) throw new Error('The computer changed under this start');
-    if (spins > 0) row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
-    if (!own || spins > 0) {
-      const settled = await awaitWakeInFlight(botId, row);
-      if (settled === 'working') {
-        await untilCleaned(botId);
-        return;
+  // The whole wake (ticket, wake, readiness, the write that says `working`) is tried again when its ticket was taken over before it could write: a start whose ticket is no longer the Brick's has NOT made the machine ready
+  // for its job (the machine the replacement is waking may still fail and be stopped), so it never returns ready on that: it looks again, as a start that arrives then would
+  let spins = 0;
+  for (;;) {
+    let ticket: number | null = null;
+    let restoring = false;
+    for (; ticket === null; spins++) {
+      if (spins >= 5) throw new Error('The computer changed under this start');
+      if (spins > 0) row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
+      if (!own || spins > 0) {
+        const settled = await awaitWakeInFlight(botId, row);
+        if (settled === 'working') {
+          await untilCleaned(botId);
+          return;
+        }
+        row = settled;
       }
-      row = settled;
+      // A machine that was to be put to sleep and is not proved asleep (another start's failure claimed it) is stopped first, as above; a machine in any state that is not one a start may wake is not touched
+      if (row.machine === 'stopping') {
+        if (!row.providerRef || !(await stopMachine(botId, row.providerRef, provider, ['stopping']))) throw new Error('The computer could not be put to sleep yet');
+        continue;
+      }
+      if (!['none', 'resting', 'stopped', 'broken', 'waking', 'restoring'].includes(row.machine)) throw new Error('The computer changed under this start');
+      // A broken machine comes back from its last saved copy, and the person is told which day that was
+      restoring = row.machine === 'broken';
+      ticket = await takeWakeTicket(botId, restoring ? 'restoring' : 'waking', row.machine);
     }
-    // A machine that was to be put to sleep and is not proved asleep (another start's failure claimed it) is stopped first, as above; a machine in any state that is not one a start may wake is not touched
-    if (row.machine === 'stopping') {
-      if (!row.providerRef || !(await stopMachine(botId, row.providerRef, provider, ['stopping']))) throw new Error('The computer could not be put to sleep yet');
-      continue;
+    const mine = ticket;
+    // The beat of the wake: only this ticket's, so a start that was replaced never keeps a wake alive that is no longer its own
+    const beat = setInterval(() => {
+      void prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = NOW() WHERE "bot_id" = ${botId} AND "wake_epoch" = ${mine}`.catch(() => undefined);
+    }, wakeTiming.beatMs);
+    beat.unref?.();
+    try {
+      await provider.wake(ref);
+      try {
+        // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready
+        await provider.ready(ref);
+      } catch (error) {
+        // Awake and not ready: no job will use it, so it is put to sleep (and tried again by the sweep until proved) instead of left running. Only while this start still holds the machine (its ticket is the Brick's
+        // number): a replacement that woke it meanwhile keeps it awake, and this start only throws its own error (the job it served is ended or left by the reservation guard as before)
+        await stopMachine(botId, ref, provider, ['waking', 'restoring'], mine);
+        throw error;
+      }
+    } finally {
+      clearInterval(beat);
     }
-    if (!['none', 'resting', 'stopped', 'broken', 'waking', 'restoring'].includes(row.machine)) throw new Error('The computer changed under this start');
-    // A broken machine comes back from its last saved copy, and the person is told which day that was
-    restoring = row.machine === 'broken';
-    ticket = await takeWakeTicket(botId, restoring ? 'restoring' : 'waking', row.machine);
-  }
-  await provider.wake(ref);
-  // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready
-  try {
-    await provider.ready(ref);
-  } catch (error) {
-    // Awake and not ready: no job will use it, so it is put to sleep (and tried again by the sweep until proved) instead of left running. Only while this start still holds the machine (its ticket is the Brick's
-    // number): a replacement that woke it meanwhile keeps it awake, and this start only throws its own error (the job it served is ended or left by the reservation guard as before)
-    await stopMachine(botId, ref, provider, ['waking', 'restoring'], ticket);
-    throw error;
-  }
-  // Back from cold storage on the older copy: the person is told which day their files are from (restoredFrom); the newest copy is no event to tell
-  let from: Date | null = restoring ? (row.filesSavedAt ?? now) : cameBack?.olderCopyUsed ? cameBack.from : null;
-  let older = cameBack?.olderCopyUsed ?? false;
-  if (!restoring && cameBack === null) {
-    // This call restored nothing: a second job that came in while the machine was waking after a return keeps what that return said, as the files on the machine are still those.
-    // It is cleared only when the files were saved after the return finished: the saved-copy date that stood when the return began (the newest copy's, which an older-copy
-    // return leaves in place) is not a save made since.
-    const kept = await prisma.brickComputer.findUniqueOrThrow({ where: { botId }, select: { restoredFrom: true, olderCopyUsed: true, filesSavedAt: true, returnedAt: true } });
-    const outOfDate = !!kept.returnedAt && !!kept.filesSavedAt && kept.filesSavedAt.getTime() > kept.returnedAt.getTime();
-    if (!outOfDate) {
-      from = kept.restoredFrom;
-      older = kept.olderCopyUsed;
+    // Back from cold storage on the older copy: the person is told which day their files are from (restoredFrom); the newest copy is no event to tell
+    let from: Date | null = restoring ? (row.filesSavedAt ?? now) : cameBack?.olderCopyUsed ? cameBack.from : null;
+    let older = cameBack?.olderCopyUsed ?? false;
+    if (!restoring && cameBack === null) {
+      // This call restored nothing: a second job that came in while the machine was waking after a return keeps what that return said, as the files on the machine are still those.
+      // It is cleared only when the files were saved after the return finished: the saved-copy date that stood when the return began (the newest copy's, which an older-copy
+      // return leaves in place) is not a save made since.
+      const kept = await prisma.brickComputer.findUniqueOrThrow({ where: { botId }, select: { restoredFrom: true, olderCopyUsed: true, filesSavedAt: true, returnedAt: true } });
+      const outOfDate = !!kept.returnedAt && !!kept.filesSavedAt && kept.filesSavedAt.getTime() > kept.returnedAt.getTime();
+      if (!outOfDate) {
+        from = kept.restoredFrom;
+        older = kept.olderCopyUsed;
+      }
     }
-  }
-  // Only while this start's ticket is still the Brick's: a start that was replaced while it waited for readiness writes nothing (the replacement marks the machine working itself)
-  await prisma.$transaction(async (tx) => {
-    const held = await tx.$queryRaw<Array<{ wake_epoch: number }>>`SELECT "wake_epoch" FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
-    if (held[0]?.wake_epoch !== ticket) return;
-    await tx.brickComputer.update({
-      where: { botId },
-      data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: older, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
+    // Only while this start's ticket is still the Brick's: a start that was replaced while it waited for readiness writes nothing
+    const wrote = await prisma.$transaction(async (tx) => {
+      const held = await tx.$queryRaw<Array<{ wake_epoch: number }>>`SELECT "wake_epoch" FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
+      if (held[0]?.wake_epoch !== mine) return false;
+      await tx.brickComputer.update({
+        where: { botId },
+        data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: older, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
+      });
+      return true;
     });
-  });
+    if (wrote) return;
+    // Replaced: the machine is the replacement's to make ready. A job runs only on a machine that is `working`: if it is, this start has nothing more to do; if it is not (the replacement's wake is still going, or it failed and the machine
+    // was stopped) the loop waits for it like any start that arrives then, and wakes it with its own ticket when no wake is in flight
+    row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
+    if (row.machine === 'working') {
+      await untilCleaned(botId);
+      return;
+    }
+  }
 }
 
 /**
