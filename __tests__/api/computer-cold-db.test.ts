@@ -158,6 +158,16 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect((await row(recent.botId)).machine).toBe('resting');
     });
 
+    it('a PAUSED job is not use: it holds nothing, so its computer is packed away (and the job comes back through the line when resumed); CONTROL: a job waiting in line still keeps it', async () => {
+      const paused = await idleBrick();
+      await prisma.computerJob.create({ data: { botId: paused.botId, personId: paused.personId, title: 'paused for weeks', status: 'queued', queuedFor: 'paused', pausedWhy: 'person', pausedAt: new Date(NOW.getTime() - 20 * DAY), createdAt: new Date(NOW.getTime() - 30 * DAY), pauses: 1 } });
+      const waiting = await idleBrick();
+      await prisma.computerJob.create({ data: { botId: waiting.botId, personId: waiting.personId, title: 'in line', status: 'queued', queuedFor: 'turn', createdAt: new Date(NOW.getTime() - 30 * DAY) } });
+      expect((await coldStep(provider, NOW)).packed).toBe(1);
+      expect((await row(paused.botId)).machine).toBe('cold');
+      expect((await row(waiting.botId)).machine).toBe('resting');
+    });
+
     it('packs only a few computers a sweep, so a first run is never one burst of spending', async () => {
       for (let i = 0; i < 4; i++) await idleBrick();
       expect((await coldStep(provider, NOW)).packed).toBe(2);

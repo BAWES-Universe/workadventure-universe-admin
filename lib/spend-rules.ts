@@ -36,7 +36,7 @@ import { givenBackJob } from '@/lib/computer-values';
  * falls back to somebody else's credit and never lifts a limit: it only ever makes the allowed amount smaller.
  */
 
-type Db = Pick<typeof prisma, 'spendRule' | 'meterEvent' | 'meterReservation' | 'creditHold' | 'appSetting' | 'computerJob'> & Partial<Pick<Prisma.TransactionClient, '$executeRaw'>>;
+type Db = Pick<typeof prisma, 'spendRule' | 'meterEvent' | 'meterReservation' | 'creditHold' | 'appSetting' | 'computerJob' | 'computerJobPause'> & Partial<Pick<Prisma.TransactionClient, '$executeRaw'>>;
 
 const toNumber = (value: bigint | number | null): number => (value === null ? 0 : Number(value));
 
@@ -347,20 +347,30 @@ function crossedShare(costMicros: bigint, occurredMs: number, startedMs: number,
 async function unreportedTime(db: Db, rooms: Prisma.MeterReservationWhereInput[], start: Date | null): Promise<number> {
   const settled = await db.meterReservation.findMany({
     where: { AND: [...rooms, { state: 'settled', jobId: { not: null }, reservationKey: { startsWith: 'computer:job:' }, ...(start ? { closedAt: { gte: start } } : {}) }] },
-    select: { jobId: true, settledMicros: true, closedAt: true, terms: true },
+    select: { reservationKey: true, jobId: true, settledMicros: true, closedAt: true, terms: true },
   });
   if (settled.length === 0) return 0;
-  const ids = settled.map((room) => room.jobId as string);
-  const written = await db.meterEvent.findMany({ where: { eventId: { in: ids.map((id) => `computer:${id}:time`) } }, select: { eventId: true } });
+  // A room a pause settled becomes the pause's own event (`computer:<job>:time:<n>`, lib/computer-job-controls), never the job's: it is reported once THAT event is there. Every other room becomes the job's event, as before
+  const pauses = await db.computerJobPause.findMany({ where: { roomKey: { in: settled.map((room) => room.reservationKey) } }, select: { roomKey: true, jobId: true, n: true, seconds: true, startedAt: true, at: true } });
+  const pauseOf = new Map(pauses.map((pause) => [pause.roomKey as string, pause]));
+  const eventOf = (room: (typeof settled)[number]): string => {
+    const pause = pauseOf.get(room.reservationKey);
+    return pause ? `computer:${pause.jobId}:time:${pause.n}` : `computer:${room.jobId}:time`;
+  };
+  const written = await db.meterEvent.findMany({ where: { eventId: { in: [...new Set(settled.map(eventOf))] } }, select: { eventId: true } });
   const have = new Set(written.map((event) => event.eventId));
-  const missing = ids.filter((id) => !have.has(`computer:${id}:time`));
-  if (missing.length === 0) return 0;
-  const jobs = await db.computerJob.findMany({ where: { id: { in: missing } }, select: { id: true, status: true, endedBy: true, startedAt: true, endedAt: true, secondsRun: true } });
+  const unwritten = settled.filter((room) => !have.has(eventOf(room)));
+  if (unwritten.length === 0) return 0;
+  const missing = [...new Set(unwritten.filter((room) => !pauseOf.has(room.reservationKey)).map((room) => room.jobId as string))];
+  const jobs = missing.length > 0 ? await db.computerJob.findMany({ where: { id: { in: missing } }, select: { id: true, status: true, endedBy: true, startedAt: true, endedAt: true, secondsRun: true } }) : [];
   const byId = new Map(jobs.map((job) => [job.id, job]));
   let total = 0;
-  for (const room of settled) {
-    const job = byId.get(room.jobId as string);
-    if (!job || room.settledMicros === null || givenBackJob(job.status, job.endedBy)) continue;
+  for (const room of unwritten) {
+    if (room.settledMicros === null) continue;
+    const pause = pauseOf.get(room.reservationKey);
+    // A pause is the person's (never given back), and its event is written at the moment of the pause, for the stretch that ran before it
+    const job = pause ? { status: 'paused', endedBy: null, startedAt: pause.startedAt, endedAt: pause.at, secondsRun: pause.seconds } : byId.get(room.jobId as string);
+    if (!job || givenBackJob(job.status, job.endedBy)) continue;
     // The event it will become is written at the moment the job ended (a sweep that settles the room later does not move it), so the period and the split
     // are read from that moment, never from when the room happened to close
     const occurred = (job.endedAt ?? room.closedAt)?.getTime();

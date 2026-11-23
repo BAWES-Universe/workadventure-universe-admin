@@ -6,7 +6,7 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { storageMonthMicros } from '@/lib/meter-allowance';
 import { recordKeptBytes } from '@/lib/computer-disk';
-import { COLD_RUN_MAX_MS, costOfSeconds } from '@/lib/computer-values';
+import { COLD_RUN_MAX_MS, NOT_PAUSED, costOfSeconds } from '@/lib/computer-values';
 import type { ComputerProvider, MachineInfo, PackInventory, RestoreResult } from '@/lib/computer-provider';
 import {
   archiveById,
@@ -644,7 +644,8 @@ async function idleCandidates(now: Date, days: number, take: number, skip: strin
   for (const row of rows) {
     if (row.packTriedAt && now.getTime() - row.packTriedAt.getTime() < backoffMs(row.packFailures)) continue;
     // Anything queued or running, or any job made or ended inside the idle days, means the Brick was used
-    if ((await prisma.computerJob.count({ where: { botId: row.botId, OR: [{ status: { in: ['queued', 'running', 'waiting'] } }, { createdAt: { gt: before } }, { endedAt: { gt: before } }] } })) > 0) continue;
+    // A paused job is not use: it holds nothing and may wait for weeks, and when it is resumed it goes through the line, which brings the computer back
+    if ((await prisma.computerJob.count({ where: { botId: row.botId, OR: [{ status: { in: ['running', 'waiting'] } }, { status: 'queued', ...NOT_PAUSED }, { createdAt: { gt: before } }, { endedAt: { gt: before } }] } })) > 0) continue;
     idle.push(row.botId);
     if (idle.length >= take) break;
   }

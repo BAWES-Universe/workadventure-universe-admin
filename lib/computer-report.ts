@@ -167,6 +167,8 @@ type JobWithEffects = {
   endedBy: string | null;
   writes: boolean;
   secondsRun: number;
+  /** What the job's pauses already wrote (its whole time is this and `secondsRun`). */
+  secondsBilled?: number;
   startedAt: Date | null;
   endedAt: Date | null;
   waitingFor: string | null;
@@ -389,7 +391,7 @@ async function lateReports(size: number, now: Date): Promise<Report[]> {
         kind: 'late',
         title: job.title,
         writes: job.writes,
-        seconds: job.secondsRun,
+        seconds: job.secondsRun + (job.secondsBilled ?? 0),
         seq: batch,
         waitingFor: null,
         ready: null,
@@ -508,7 +510,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date(), options:
       kind,
       title: job.title,
       writes: job.writes,
-      seconds: job.secondsRun,
+      seconds: job.secondsRun + (job.secondsBilled ?? 0),
       seq: null,
       waitingFor: null,
       ready: null,
@@ -531,7 +533,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date(), options:
       kind: 'needs',
       title: job.title,
       writes: job.writes,
-      seconds: job.secondsRun,
+      seconds: job.secondsRun + (job.secondsBilled ?? 0),
       seq: job.handoverSeq,
       waitingFor: job.waitingFor as WaitingFor,
       ready: job.readyWhat && job.readyWhere ? { what: job.readyWhat, where: job.readyWhere } : null,

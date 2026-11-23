@@ -463,6 +463,14 @@ export async function releaseRoomIn(tx: Tx, input: { key: string }, now: Date = 
   return closeIn(tx, input.key, 'released', now, null);
 }
 
+/**
+ * `settleRoom` inside a transaction the caller already holds (it takes the pool's lock first, like every step): for a caller that must settle a room in the same commit as the decision it settles for
+ * (a computer job's pause, under the job's cutoff lock with its row locked, so the time so far is settled exactly once and the room is never left held for a job that holds nothing).
+ */
+export async function settleRoomIn(tx: Tx, input: { key: string; settledMicros: number }, now: Date = new Date()): Promise<Reservation | null> {
+  return closeIn(tx, input.key, 'settled', now, input.settledMicros);
+}
+
 async function closeIn(tx: Tx, key: string, state: 'settled' | 'released', now: Date, settledMicros: number | null): Promise<Reservation | null> {
   await lockPool(tx);
   const row = await tx.meterReservation.findUnique({ where: { reservationKey: key } });

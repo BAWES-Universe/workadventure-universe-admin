@@ -248,9 +248,19 @@ export function shapeVisits(input: { back: ReadBack; startedAt: Date; endedAt: D
 }
 
 /** What is written for a job that ended: the rows (replacing what an earlier try wrote) and how well the record was taken. */
-async function save(jobId: string, rows: VisitRow[], state: VisitsState): Promise<void> {
+/** How far a record falls short, so the record of a job that ran in stretches (it was paused) says the worst of its stretches. */
+const SHORT_BY: Record<VisitsState, number> = { complete: 0, none: 0, partial: 1, unread: 2 };
+
+async function save(jobId: string, rows: VisitRow[], state: VisitsState, since: Date = new Date(0)): Promise<void> {
+  // A job that was paused was read once per stretch: what an earlier stretch kept (before this one began) stays, and the record says the worst of the stretches
+  if ((await prisma.computerJobPause.count({ where: { jobId } })) > 0) {
+    const kept = (await prisma.computerJob.findUnique({ where: { id: jobId }, select: { visitsState: true } }))?.visitsState as VisitsState | null | undefined;
+    if (kept && SHORT_BY[kept] !== undefined && SHORT_BY[kept] > SHORT_BY[state]) state = kept;
+  } else {
+    since = new Date(0);
+  }
   await prisma.$transaction([
-    prisma.computerJobVisit.deleteMany({ where: { jobId, kind: { in: ['visit', 'post'] } } }),
+    prisma.computerJobVisit.deleteMany({ where: { jobId, kind: { in: ['visit', 'post'] }, at: { gte: since } } }),
     prisma.computerJobVisit.createMany({
       data: rows.map((row) => ({ jobId, kind: row.kind, at: row.at, by: row.by, method: row.method, host: row.host, path: row.path, count: row.count, failed: row.failed, form: row.form })),
     }),
@@ -298,7 +308,7 @@ export async function recordVisits(job: { id: string; startedAt: Date | null }, 
     const notes = await prisma.computerJobVisit.findMany({ where: { jobId: job.id, kind: 'hands' }, select: { at: true, by: true } });
     const hands: Hands[] = notes.map((note) => ({ at: note.at, by: note.by === 'person' ? 'person' : 'brick' }));
     const shaped = shapeVisits({ back, startedAt: job.startedAt, endedAt, before, after, hands });
-    await save(job.id, shaped.rows, shaped.state);
+    await save(job.id, shaped.rows, shaped.state, new Date(since));
     return shaped.state;
   } catch (error) {
     console.error('[Computer] Could not read where a job’s computer browsed:', error instanceof Error ? error.message : 'unknown');
