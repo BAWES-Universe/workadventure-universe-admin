@@ -343,7 +343,8 @@ export async function cancelJob(botId: string, ownerId: string, jobId: string, n
     const job = await jobOnBrick(botId, jobId);
     if (!job || isOver(job.status)) break;
     if (job.status === 'queued') await controlInternals.endByPerson(jobId, now, { advance: false, only: 'queued' });
-    else await controlInternals.endByPerson(jobId, now, { advance: true });
+    // A job that holds the machine: an ending already committed for it (the runner's kept intent, a decided pool cutoff) governs instead of the person's stop, decided under the finalizer's own lock
+    else await controlInternals.endByPerson(jobId, now, { advance: true, held: true });
   }
   const after = await jobOnBrick(botId, jobId);
   if (after && after.pauses > 0) await dropProfile(botId, jobId, now).catch((error) => console.error('[Computer] Could not drop a cancelled job’s browser:', error instanceof Error ? error.message : 'unknown'));

@@ -15,12 +15,13 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { FINISH_INTENT_GRACE_MS, claimJob, completeFinishIntents, finishJob, finishJobUnder, getJob, giveComputer, handBack, recordFinishIntent, renewJob, startJob, sweepComputers, takeOver } from '@/lib/computer';
+import { FINISH_INTENT_GRACE_MS, claimJob, completeFinishIntents, finishJob, finishJobUnder, getJob, giveComputer, handBack, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { prepareJob, startTurn } from '@/lib/computer-broker';
 import { mintJobToken, revokeJobTokens, verifyJobToken } from '@/lib/computer-token';
 import { authorizeModelCall, cutoffEndsFinished, cutoffLockKey, callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { POOL_CUTOFF_CALL, hasFinishIntent, hasOwnKeyCall, recordFaults, recordPoolCutoff, type FaultInput } from '@/lib/computer-faults';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
+import { cancelJob } from '@/lib/computer-job-controls';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -1277,6 +1278,97 @@ run('the runner’s committed word that a job is to end, in a real database', ()
         await Promise.allSettled([takeover, stopping]);
       }
       expect(await hasFinishIntent(prisma, jobId)).toBe(false);
+    });
+  });
+  describe('GPT round 6, finding 2: the person’s Cancel and Stop respect an ending already committed (the committed fault decides the money, not their stop)', () => {
+    /** A runner takes up the job and answers the epoch it owns by. */
+    const claimed = async (jobId: string, run: string, at: Date = NOW): Promise<number> => {
+      const won = await claimJob(jobId, { run, seen: (await jobOf(jobId)).ownerEpoch }, at);
+      if (!won.ok) throw new Error(`the claim was refused: ${won.reason}`);
+      return won.epoch;
+    };
+
+    it('Cancel one job whose runner kept a FAILED intent of ours ends it as ours (given back), never as the person’s stop; the receipt and the give-back follow the intent, and the next job in line starts', async () => {
+      const { sara, jobId } = await running('g6-cancel-intent');
+      const ea = await claimed(jobId, 'rA');
+      const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Next' }, minutes(1));
+      if (!next.ok) throw new Error('the second job was not made');
+      // The runner commits to ending it as a fault of OURS (the relay was down in its turn 1)
+      await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', 'rA')]);
+      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea })).toMatchObject({ ok: true });
+      // The person then cancels that one job
+      expect((await cancelJob(sara.brickId, sara.id, jobId, minutes(2))).ok).toBe(true);
+      const after = await jobOf(jobId);
+      expect(after).toMatchObject({ status: 'failed', endedBy: 'error' });
+      expect(after.endedBy).not.toBe('person');
+      // The money: it is given back as ours, and the decision names the runner's committed cause, not a stop of theirs
+      expect(await decisionOf(jobId)).toMatchObject({ state: 'given', causeHint: 'ours' });
+      // Nothing ends it a second time (the sweep leaves a job that is over), and the job that was in line has the machine now
+      expect(await completeFinishIntents(minutes(60), 10)).toBe(0);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'failed', endedBy: 'error' });
+      expect(await jobOf(next.job.id)).toMatchObject({ status: 'running' });
+    });
+
+    it('Cancel one job for which a pool cutoff was decided ends it as the pool’s, ours (given back), with the words the person is told', async () => {
+      const { sara, jobId } = await running('g6-cancel-cutoff');
+      await recordPoolCutoff(prisma, jobId, minutes(1));
+      expect((await cancelJob(sara.brickId, sara.id, jobId, minutes(2))).ok).toBe(true);
+      const after = await jobOf(jobId);
+      expect(after).toMatchObject({ status: 'stopped', endedBy: 'pool', endNote: POOL_BUSY_WORDS });
+      expect(await decisionOf(jobId)).toMatchObject({ state: 'given' });
+    });
+
+    it('Stop all after an intent was kept ends the held job as the intent said, and a job of theirs with nothing committed still ends as their own stop', async () => {
+      const { sara, jobId } = await running('g6-stop-intent');
+      const ea = await claimed(jobId, 'rA');
+      const inLine = await startJob({ botId: sara.brickId, personId: sara.id, title: 'In line' }, minutes(1));
+      if (!inLine.ok) throw new Error('the second job was not made');
+      await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', 'rA')]);
+      expect(await recordFinishIntent(jobId, { outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', epoch: ea })).toMatchObject({ ok: true });
+      await stopJobFor(sara.brickId, sara.id, minutes(2));
+      expect(await jobOf(jobId)).toMatchObject({ status: 'failed', endedBy: 'error' });
+      expect(await decisionOf(jobId)).toMatchObject({ state: 'given', causeHint: 'ours' });
+      // The one in line never started, so it is their own stop, charged nothing
+      expect(await jobOf(inLine.job.id)).toMatchObject({ status: 'stopped', endedBy: 'person', secondsRun: 0 });
+      // CONTROL: a running job with nothing committed is their own stop, charged the time it used
+      const plain = await running('g6-stop-plain');
+      await stopJobFor(plain.sara.brickId, plain.sara.id, minutes(5));
+      expect(await jobOf(plain.jobId)).toMatchObject({ status: 'stopped', endedBy: 'person' });
+      expect(await decisionOf(plain.jobId)).toBeNull();
+    });
+
+    it('an intent that commits while the person’s Cancel waits for the cutoff lock still governs: the job ends as the intent said', async () => {
+      const { sara, jobId } = await running('g6-cancel-race');
+      const ea = await claimed(jobId, 'rA');
+      await recordFaults(sara.brickId, jobId, [fault(1, 'relay_down', 'rA')]);
+      const holder = holdCutoff(jobId, async (tx) => {
+        await tx.computerFinishIntent.create({ data: { jobId, outcome: 'failed', cause: 'ours', why: 'The relay was down', turns: [1], run: 'rA', createdAt: minutes(1) } });
+        await revokeJobTokens(jobId, minutes(1), undefined, tx);
+      });
+      let cancelling: Promise<unknown> = Promise.resolve();
+      try {
+        await holder.ready;
+        cancelling = cancelJob(sara.brickId, sara.id, jobId, minutes(2));
+        expect(await waitingOn(cutoffLockKey(jobId))).toBe(true);
+        holder.release();
+        await holder.done;
+        await cancelling;
+      } finally {
+        holder.release();
+        await Promise.allSettled([holder.done, cancelling]);
+      }
+      expect(await jobOf(jobId)).toMatchObject({ status: 'failed', endedBy: 'error' });
+      expect(await decisionOf(jobId)).toMatchObject({ state: 'given', causeHint: 'ours' });
+      void ea;
+    });
+
+    it('CONTROL: Cancel of a job still IN LINE is the person’s own, whatever any other job committed', async () => {
+      const { sara, jobId } = await running('g6-cancel-queued');
+      const queued = await startJob({ botId: sara.brickId, personId: sara.id, title: 'In line' }, minutes(1));
+      if (!queued.ok) throw new Error('the second job was not made');
+      expect((await cancelJob(sara.brickId, sara.id, queued.job.id, minutes(2))).ok).toBe(true);
+      expect(await jobOf(queued.job.id)).toMatchObject({ status: 'stopped', endedBy: 'person', secondsRun: 0 });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
     });
   });
 });

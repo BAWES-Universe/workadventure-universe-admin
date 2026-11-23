@@ -269,11 +269,13 @@ async function lockPool(tx: Tx): Promise<void> {
 /** Whether `extra` more fits for this member and the pool; the reason it does not, or null. The member's own allowance comes first: a member who used theirs up asks for more, whatever the pool holds. */
 /**
  * A paused computer job's stretch: its room is settled in the pause's own commit and its time is written to the books just after it (lib/computer-job-controls.ts).
- * Until that write is known done (`booked_at`), the settled room is counted here, so the stretch is never counted nowhere: not by the person's month, not by
- * the pool (a write that failed waits for the sweep). Counted in the month the pause happened in, which is the month its event is dated.
- * Two known errors, both on the safe side (less room, never free room): between the event's write and `booked_at` being set the stretch is counted twice
- * (its event and this room), for an instant, or until the next sweep marks it booked if that mark failed (about a minute or two); and a stretch paid from
- * credit is counted here at its full price until it is booked (the event then counts only what the allowance paid).
+ * Until that write is known done, the settled room is counted here, so the stretch is never counted nowhere: not by the person's month, not by the pool (a write
+ * that failed waits for the sweep). Counted in the month the pause happened in, which is the month its event is dated.
+ *
+ * The stretch is counted ONCE, never twice (GPT round 6, finding 8): a pause whose own event is already in the books is left to that event, whether or not its
+ * `booked_at` mark was set (the mark is written after the event, and a mark that failed used to count the stretch a second time until the next sweep, which
+ * refused a person who had the room). A stretch paid from credit is still counted here at its full price until its event is there (the event then counts only
+ * what the allowance paid): on the safe side, and never free room.
  */
 async function unbookedPauseMicros(db: Pick<Tx, '$queryRaw'>, now: Date, personId?: string): Promise<number> {
   const month = monthOf(now);
@@ -281,11 +283,13 @@ async function unbookedPauseMicros(db: Pick<Tx, '$queryRaw'>, now: Date, personI
     ? await db.$queryRaw<{ micros: bigint | null }[]>`
         SELECT COALESCE(SUM(r."settled_micros"), 0)::bigint AS micros
         FROM "computer_job_pauses" p JOIN "meter_reservations" r ON r."reservation_key" = p."room_key"
-        WHERE p."booked_at" IS NULL AND r."state" = 'settled' AND p."at" >= ${month.start} AND p."at" < ${month.end} AND r."person_key" = ${`person:${personId}`}`
+        WHERE p."booked_at" IS NULL AND r."state" = 'settled' AND p."at" >= ${month.start} AND p."at" < ${month.end} AND r."person_key" = ${`person:${personId}`}
+          AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || p."job_id" || ':time:' || p."n")`
     : await db.$queryRaw<{ micros: bigint | null }[]>`
         SELECT COALESCE(SUM(r."settled_micros"), 0)::bigint AS micros
         FROM "computer_job_pauses" p JOIN "meter_reservations" r ON r."reservation_key" = p."room_key"
-        WHERE p."booked_at" IS NULL AND r."state" = 'settled' AND p."at" >= ${month.start} AND p."at" < ${month.end}`;
+        WHERE p."booked_at" IS NULL AND r."state" = 'settled' AND p."at" >= ${month.start} AND p."at" < ${month.end}
+          AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || p."job_id" || ':time:' || p."n")`;
   return asNumber(rows[0]?.micros ?? null);
 }
 

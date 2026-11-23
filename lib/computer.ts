@@ -1476,7 +1476,8 @@ export async function stopJobFor(botId: string, ownerId: string, now: Date = new
   const held = jobs.filter((job) => job.status !== 'queued');
   // Nothing in line may start while this Stop ends everything, so no end of a job in it moves the line
   for (const job of inLine) await endJob(job.id, 'stopped', 'person', now, false);
-  for (const job of held) await endJob(job.id, 'stopped', 'person', now, false);
+  // A job that holds the machine ends as the ending already committed for it says, when there is one (a runner's kept intent, a decided pool cutoff): the person's Stop never makes a fault of ours their own stop
+  for (const job of held) await endJob(job.id, 'stopped', 'person', now, false, undefined, true, null, false, { personStop: true });
   return computerView(botId, ownerId, now);
 }
 
@@ -1585,6 +1586,8 @@ interface EndGuard {
   observed?: { status: string; control: string; controlGeneration: number; ownerEpoch: number; leaseVersion: number; handoverSeq: number; unansweredBefore?: Date; lease?: { key: string; expiresAt: Date } };
   /** The runner's sentence about why it could not go on: written in the very write that ends the job, so a take-over that wins leaves no note behind. */
   note?: string | null;
+  /** The person's own Cancel of one job, or their Stop, of a job that HOLDS the machine: written under the cutoff lock, and an ending already committed governs instead of theirs (GPT round 6, finding 2): a decided pool cutoff ends the job as ours, and a kept finish intent ends it as the runner's committed word said. The person's ending of a job still in line is untouched. */
+  personStop?: boolean;
   /** When the job that comes next in line STARTS, if that is not the time of this ending (a sweep that completes a finish intent ends the job as of the intent's time, its own accounting, but the next job starts now: its room, lease and checks begin at its real start). */
   startNextAt?: Date;
 }
@@ -1618,6 +1621,9 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   // `pool` instead (stopped, ours: its time given back, never counted, with the words the person is told). The decision is read first; and again under the cutoff lock in the very transaction that writes the ending,
   // because a cutoff that commits between the two would otherwise lose to a finish that has already read "not decided". A cutoff takes the same lock and only decides for a job that is still on
   let note = guard.note ?? null;
+  // The person's own Cancel or Stop of a held job reads the committed ending under the cutoff lock. Once it has been read and the ending became the pool's own, this is over: the ending is then written as the
+  // finalizer of that cutoff writes it (`orbitSeen`), and reading the decision again would only find it a second time
+  let personStop = guard.personStop === true;
   const endForPool = async (): Promise<void> => {
     const kept = cleanEndNote(POOL_BUSY_WORDS);
     if (kept) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: kept } });
@@ -1625,6 +1631,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     endedBy = 'pool';
     runner = null;
     finish = false;
+    personStop = false;
     // The words the person is told are ours (the pool's), not the runner's
     note = null;
   };
@@ -1699,7 +1706,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     const turnHold = held && !!job.firstTurnSentAt && !job.agentResponseId;
     const where = { id: jobId, status: job.status, secondsRun: job.secondsRun, stretchStarted: job.stretchStarted, ...(guard.generation !== undefined && guard.generation !== null ? { controlGeneration: guard.generation } : {}), ...(guard.brick ? { control: 'brick' as const } : {}), ...(guard.owner ? { ownerEpoch: guard.owner.epoch ?? 0 } : {}), ...(guard.observed ? { control: guard.observed.control, controlGeneration: guard.observed.controlGeneration, ownerEpoch: guard.observed.ownerEpoch, leaseVersion: guard.observed.leaseVersion, handoverSeq: guard.observed.handoverSeq } : {}), agentResponseId: job.agentResponseId };
     // Written under the cutoff lock: a finish (it honors a decided cutoff and a kept intent), a refusal (the finalizer owns the ending once an intent is kept or a cutoff is decided) and the finalizer of a decided cutoff (only while the decision stands)
-    const locked = finish || !!guard.refusal || !!guard.cutoffRequired;
+    const locked = finish || !!guard.refusal || !!guard.cutoffRequired || personStop;
     // What is read under the cutoff lock, before anything is written: null = go on and write; else why nothing is written (an intent is kept first, a cutoff decided for a finish, or an intent, a cutoff, a key that ended or a finalizer's missing decision for the others)
     const decideUnderCutoff = async (tx: Prisma.TransactionClient): Promise<{ cutoffDecided: boolean; intent: Prisma.ComputerFinishIntentGetPayload<Record<string, never>> | null; deferred: boolean } | null> => {
       const cut = await hasPoolCutoff(tx, jobId);
@@ -1719,11 +1726,22 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       }
       if (cut) return { cutoffDecided: true, intent: null, deferred: false };
       // A finish intent that committed while this finish waited is the word that stands (a cutoff for our capacity stays above it): read under the lock that protects the ending, before anything is written
-      if (guard.intentFirst) {
+      if (guard.intentFirst || personStop) {
         const kept = await tx.computerFinishIntent.findUnique({ where: { jobId } });
         if (kept) return { cutoffDecided: false, intent: kept, deferred: false };
       }
       return null;
+    };
+    /**
+     * An ending that was committed before this one is read under the cutoff lock: it governs. For the person's own Cancel or Stop that means the job ends as the runner's committed word said (a failure of ours is
+     * given back), not as their stop: the ending is completed HERE, in their request, so what they see is the real one. For a runner's finish the intent's words are applied by `finishWith`, as before.
+     */
+    const deferToIntent = async (intent: NonNullable<EndReport['intent']>): Promise<void> => {
+      report.intent = intent;
+      if (!personStop) return;
+      // The intent's own time is its accounting (the wait for this is not the person's time); the next job in line starts now
+      const done = await finishWith(jobId, saidByIntent(intent, intent.createdAt), { brick: true, startNextAt: now });
+      report.ended = done.ended;
     };
     if (runnerJudged || hintJudged || orbitSeen || turnHold) {
       // The job's first turn was sent and never named: it may still run on the machine with nothing to cancel it by. The machine carries a hold from the
@@ -1761,7 +1779,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         return;
       }
       if (result.intent) {
-        report.intent = result.intent;
+        await deferToIntent(result.intent);
         return;
       }
       if (result.cutoffDecided) {
@@ -1792,7 +1810,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       }
       if ('cutoffDecided' in written) {
         if (written.intent) {
-          report.intent = written.intent;
+          await deferToIntent(written.intent);
           return;
         }
         await endForPool();
@@ -3373,5 +3391,5 @@ export const controlInternals = {
   recordComputerTime,
   recordJobVisits,
   /** The person's own ending of ONE job (Cancel): exactly what Stop does for each job, for this one only. */
-  endByPerson: (jobId: string, now: Date, options: { advance: boolean; only?: string }) => endJob(jobId, 'stopped', 'person', now, options.advance, options.only),
+  endByPerson: (jobId: string, now: Date, options: { advance: boolean; only?: string; /** The job holds the machine: an ending already committed (a kept intent, a decided cutoff) governs instead of the person's stop. */ held?: boolean }) => endJob(jobId, 'stopped', 'person', now, options.advance, options.only, true, null, false, options.held ? { personStop: true } : {}),
 };
