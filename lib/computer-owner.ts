@@ -30,6 +30,8 @@ export interface OwnedRow {
   agentResponseId: string | null;
   /** How long the owner's hold on the job stands without another beat from it: while it is in the future nobody else may claim the job (GPT round 6, finding 3). Null = nobody holds it (never claimed, or the owner let it go). */
   ownerLeaseUntil: Date | null;
+  /** How far a job that carried on is from being ready to be worked on: null = ready, `restoring` = its browser is coming back, `recover` = it could not be settled and the sweep owns it (GPT round 6, finding 7). */
+  prepState: string | null;
 }
 
 /**
@@ -43,12 +45,12 @@ export const leaseUntil = (now: Date): Date => new Date(now.getTime() + OWNER_LE
 
 /** Reads the job's row and locks it (`FOR UPDATE`). Call it AFTER the job's cutoff lock (and the person's give-back lock, when one is taken): the order used everywhere. */
 export async function lockJobRow(tx: Pick<Prisma.TransactionClient, '$queryRaw'>, jobId: string): Promise<OwnedRow | null> {
-  const rows = await tx.$queryRaw<Array<{ id: string; bot_id: string; person_id: string; status: string; control: string; control_generation: number; owner_epoch: number; lease_version: number; agent_response_id: string | null; owner_lease_until: Date | null }>>(
-    Prisma.sql`SELECT "id", "bot_id", "person_id", "status", "control", "control_generation", "owner_epoch", "lease_version", "agent_response_id", "owner_lease_until" FROM "computer_jobs" WHERE "id" = ${jobId} FOR UPDATE`,
+  const rows = await tx.$queryRaw<Array<{ id: string; bot_id: string; person_id: string; status: string; control: string; control_generation: number; owner_epoch: number; lease_version: number; agent_response_id: string | null; owner_lease_until: Date | null; prep_state: string | null }>>(
+    Prisma.sql`SELECT "id", "bot_id", "person_id", "status", "control", "control_generation", "owner_epoch", "lease_version", "agent_response_id", "owner_lease_until", "prep_state" FROM "computer_jobs" WHERE "id" = ${jobId} FOR UPDATE`,
   );
   const row = rows[0];
   return row
-    ? { id: row.id, botId: row.bot_id, personId: row.person_id, status: row.status, control: row.control, controlGeneration: row.control_generation, ownerEpoch: row.owner_epoch, leaseVersion: row.lease_version, agentResponseId: row.agent_response_id, ownerLeaseUntil: row.owner_lease_until }
+    ? { id: row.id, botId: row.bot_id, personId: row.person_id, status: row.status, control: row.control, controlGeneration: row.control_generation, ownerEpoch: row.owner_epoch, leaseVersion: row.lease_version, agentResponseId: row.agent_response_id, ownerLeaseUntil: row.owner_lease_until, prepState: row.prep_state }
     : null;
 }
 

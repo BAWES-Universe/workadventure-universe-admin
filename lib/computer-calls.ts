@@ -373,6 +373,10 @@ async function authorizedPastCutoff(jobId: string, callId: string, token: string
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
       if (await hasPoolCutoff(tx, jobId)) return false;
       if (await hasFinishIntent(tx, jobId)) return false;
+      // A job that carried on is not worked on until its own browser is back: while `prep_state` is set every call is refused, under the same lock the claim and the settle write through, so no call can ever run against
+      // a browser that is still being restored or one whose sign-ins could not be proved to be the job's own (GPT round 6, finding 7)
+      const prep = await tx.computerJob.findUnique({ where: { id: jobId }, select: { prepState: true } });
+      if (prep?.prepState !== null) return false;
       // The key is looked at with the time read AFTER whatever this call waited for (a lock, the pool), inside the lock a stop revokes the keys under
       const after = await verifyJobToken(token, 'model', clock(), tx);
       if (!after.ok || after.generation !== generation) return false;

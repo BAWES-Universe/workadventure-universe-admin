@@ -45,6 +45,8 @@ export interface SignInsResult {
 
 /** A park follows the pause of a running job straight away: a job whose last pause from running is older than this was not on the machine just now. */
 const PARK_WINDOW_MS = 10 * 60_000;
+/** How long a start is given to bring a resumed job's browser back before the sweep takes the job over: one command on the machine, with room to spare, so a live try is never cut across. */
+const RESTORE_STALE_MS = 5 * 60_000;
 /** How long a cleanup claim is believed (the same window as lib/computer.ts): a claim older than this was left by a server that stopped. */
 const CLAIM_STALE_MS = 90_000;
 /** How long one command may take on the machine: waiting for the lock, stopping the browser, starting it again and waiting for it to answer. */
@@ -169,7 +171,10 @@ export async function parkProfile(botId: string, jobId: string, now: Date = new 
       if (answer.done === 'already') return result('left', 'already');
       return result('failed', answer.reason);
     });
-    return logged('put away', outcome ?? result('left', 'not_awake'));
+    const answer = logged('put away', outcome ?? result('left', 'not_awake'));
+    // The machine waits for no job's browser now (a park that FAILED, or a machine that was not awake, leaves the pointer: nothing else starts there until the sweep has put it right)
+    if (parkDone(answer)) await clearParkPending(botId, jobId);
+    return answer;
   } catch (error) {
     console.error('[Computer] Could not put a job’s browser sign-ins away:', error instanceof Error ? error.message : 'unknown');
     return result('failed', 'error');
@@ -218,6 +223,121 @@ export async function restoreProfile(botId: string, jobId: string, now: Date = n
   }
 }
 
+/**
+ * Empties the live browser on the machine and proves it empty. Used when a resumed job could not have its OWN browser brought back (nothing of its own was kept, or it was kept too long): a clean
+ * browser that needs signing in again is valid, one that may still hold what another job left is not. Also used by the sweep for a pause whose park never ran (GPT round 6, finding 7).
+ */
+export async function wipeLiveProfile(botId: string, jobId: string, now: Date = new Date()): Promise<SignInsResult> {
+  try {
+    if (!isSafeJobId(jobId)) return result('left', 'not_a_job');
+    const machine = await awakeMachine(botId);
+    if (!machine) return result('left', 'not_awake');
+    const hours = await keepHours();
+    const outcome = await withClaim(botId, async () => {
+      const cleared = await onMachine(machine, 'clear', jobId, await allowedToKeep(botId, now, hours), hours);
+      return cleared.done === 'dropped' ? result('cleared', null, cleared) : result('failed', cleared.reason);
+    });
+    return logged('emptied', outcome ?? result('left', 'not_awake'));
+  } catch (error) {
+    console.error('[Computer] Could not empty the live browser:', error instanceof Error ? error.message : 'unknown');
+    return result('failed', 'error');
+  }
+}
+
+/**
+ * What a resumed job's browser came back as decides whether the job may be worked on at all (GPT round 6, finding 7): its own browser back is ready, and so is a clean one (it signs in again), but
+ * only once the live browser has been emptied and proved empty — a browser whose state we cannot tell may still hold what another job left. The browser SHARED with a job that is on the machine is
+ * left exactly as it is (the sign-in rules: a looker beside a writer shares it), and is ready. Anything else leaves the job `recover`: nothing runs it, no call of it is authorized, and the sweep
+ * tries again. Written only while `reservation` is still the job's room, so a late try settles nothing for a stretch that moved on without it (finding 3b).
+ */
+export async function settleResumedBrowser(jobId: string, botId: string, back: SignInsResult, now: Date = new Date(), reservation?: string): Promise<'ready' | 'recover'> {
+  let ready = back.state === 'restored' || (back.state === 'fresh' && back.reason === 'shared');
+  if (!ready && back.state === 'fresh') ready = (await wipeLiveProfile(botId, jobId, now)).state === 'cleared';
+  await prisma.computerJob
+    .updateMany({ where: { id: jobId, ...(reservation ? { reservationKey: reservation } : {}) }, data: { prepState: ready ? null : 'recover' } })
+    .catch((error) => console.error('[Computer] Could not write whether a resumed job is ready:', error instanceof Error ? error.message : 'unknown'));
+  return ready ? 'ready' : 'recover';
+}
+
+/**
+ * The sweep: jobs whose browser could not be settled when they carried on (`prep_state` = `recover`). The restore is tried again; once the job has been paused longer than sign-ins are kept (its own
+ * browser is no longer allowed anyway) the live browser is emptied instead, which makes the job ready to sign in again. A job whose result cannot be read is left as it is for the next pass: it is
+ * never made runnable on an unknown browser. Never throws.
+ */
+export async function recoverResumedBrowsers(now: Date = new Date(), batch = 5): Promise<{ looked: number; ready: number }> {
+  let looked = 0;
+  let ready = 0;
+  try {
+    const hours = await keepHours();
+    const jobs = await prisma.computerJob.findMany({
+      where: {
+        status: { in: ['running', 'waiting'] },
+        OR: [
+          { prepState: 'recover' },
+          // A try that died between writing `restoring` and settling the browser would leave the job out of everyone's reach for good: nobody lists it, nobody claims it, no call of it is authorized. Past the
+          // longest one command may take on the machine no try is still working on it, so the sweep settles it like any other (GPT round 6, finding 7)
+          { prepState: 'restoring', startedAt: { lt: new Date(now.getTime() - RESTORE_STALE_MS) } },
+        ],
+      },
+      select: { id: true, botId: true, reservationKey: true },
+      take: batch,
+    });
+    for (const job of jobs) {
+      looked++;
+      const paused = await lastPausedFromRunning(job.id);
+      const tooOld = !paused || now.getTime() - paused.getTime() > hours * HOUR_MS;
+      // Past the hours its own browser may be kept there is nothing of its own left to bring back: a clean browser, proved clean, is what makes it ready
+      const back = tooOld ? result('fresh', 'expired') : await restoreProfile(job.botId, job.id, now);
+      if ((await settleResumedBrowser(job.id, job.botId, back, now, job.reservationKey ?? undefined)) === 'ready') ready++;
+    }
+  } catch (error) {
+    console.error('[Computer] Could not put a resumed job’s browser right:', error instanceof Error ? error.message : 'unknown');
+  }
+  return { looked, ready };
+}
+
+/**
+ * The sweep: a machine whose pause never got as far as putting the job's browser away (the server stopped between the two). While
+ * `park_pending_job_id` is set no other job starts on that machine, so the park is finished here; a machine that will not do it has its live
+ * browser emptied instead (those sign-ins are lost, never shown to another job) and the pointer let go (GPT round 6, finding 7).
+ */
+export async function finishPendingParks(now: Date = new Date(), batch = 5): Promise<{ looked: number; parked: number; wiped: number }> {
+  let looked = 0;
+  let parked = 0;
+  let wiped = 0;
+  try {
+    const waiting = await prisma.brickComputer.findMany({ where: { NOT: { parkPendingJobId: null } }, select: { botId: true, parkPendingJobId: true }, take: batch });
+    for (const machine of waiting) {
+      const jobId = machine.parkPendingJobId;
+      if (!jobId) continue;
+      looked++;
+      const done = await parkProfile(machine.botId, jobId, now);
+      if (parkDone(done)) {
+        parked++;
+        continue;
+      }
+      // The machine would not put it away: the live browser is emptied instead, so the next job on that machine never finds these sign-ins
+      const cleared = await wipeLiveProfile(machine.botId, jobId, now);
+      if (cleared.state === 'cleared') {
+        wiped++;
+        await clearParkPending(machine.botId, jobId);
+      }
+    }
+  } catch (error) {
+    console.error('[Computer] Could not finish putting a paused job’s browser away:', error instanceof Error ? error.message : 'unknown');
+  }
+  return { looked, parked, wiped };
+}
+
+/** Whether a park left the machine with nothing of this job's in the live browser: it was put away, emptied, or there was never anything there to put away. */
+const PARK_SETTLED_REASONS = ['not_a_job', 'not_this_brick', 'not_paused', 'not_on_machine', 'shared', 'already'];
+const parkDone = (outcome: SignInsResult): boolean => outcome.state === 'parked' || outcome.state === 'cleared' || (outcome.state === 'left' && PARK_SETTLED_REASONS.includes(outcome.reason ?? ''));
+
+/** The machine no longer waits for this job's browser to be put away: whatever was to be done on it is done (or was never there to do). */
+async function clearParkPending(botId: string, jobId: string): Promise<void> {
+  await prisma.brickComputer.updateMany({ where: { botId, parkPendingJobId: jobId }, data: { parkPendingJobId: null } }).catch((error) => console.error('[Computer] Could not let go of a park that is done:', error instanceof Error ? error.message : 'unknown'));
+}
+
 /** After any ending of a job that was ever paused, and after a cancel: its kept browser is thrown away (and anything else no longer allowed on that machine). */
 export async function dropProfile(botId: string, jobId: string, now: Date = new Date()): Promise<SignInsResult> {
   try {
@@ -229,6 +349,8 @@ export async function dropProfile(botId: string, jobId: string, now: Date = new 
     const hours = await keepHours();
     const keep = (await allowedToKeep(botId, now, hours)).filter((id) => id !== jobId);
     const answer = await onMachine(machine, 'drop', jobId, keep, hours);
+    // Thrown away: there is nothing left for a park to put away, so the machine stops waiting for one and the jobs behind it start at once instead of at the next sweep (GPT round 6, finding 7)
+    if (answer.done === 'dropped') await clearParkPending(botId, jobId);
     return logged('dropped', answer.done === 'dropped' ? result('dropped') : result('failed', answer.reason));
   } catch (error) {
     console.error('[Computer] Could not drop a job’s browser sign-ins:', error instanceof Error ? error.message : 'unknown');

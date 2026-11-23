@@ -27,7 +27,7 @@ import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { heldRoom, memberAllowance } from '@/lib/meter-allowance';
 import * as meterModule from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { claimJob, computerTimeInBooks, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { claimJob, computerTimeInBooks, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { authorizeModelCall, callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { mintJobToken } from '@/lib/computer-token';
 import { recordPoolCutoff } from '@/lib/computer-faults';
@@ -663,6 +663,106 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect(await prisma.computerJobPause.findFirstOrThrow({ where: { jobId, n: 2 }, select: { resumedAt: true } })).toEqual({ resumedAt: minutes(4) });
       expect(await prisma.computerJobPause.findFirstOrThrow({ where: { jobId, n: 1 }, select: { resumedAt: true } })).toEqual({ resumedAt: null });
       expect(await jobOf(jobId)).toMatchObject({ status: 'running', endedBy: null, pauses: 2 });
+    });
+  });
+
+  describe('GPT round 6, finding 7: a job that carried on is not worked on until its browser is settled', () => {
+    it('while its browser is still coming back the job is running but nobody works it: not in the runnable list, a claim answers `not_ready`, and no call of its own key is authorized', async () => {
+      const { sara, jobId, epoch } = await running('g6-7-wait');
+      // A key made while it ran: its calls must be refused while the browser is still coming back, not only after a new claim
+      const token = await keyFor(jobId, epoch);
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      let settle = (): void => undefined;
+      const waiting = new Promise<void>((resolve) => {
+        settle = () => resolve();
+      });
+      let seen: { status: string; prepState: string | null } | null = null;
+      let runnable: string[] = [];
+      let claim: unknown = null;
+      let call: unknown = null;
+      let revived: unknown = null;
+      (profiles.restoreProfile as jest.Mock).mockImplementationOnce(async () => {
+        // The job is running on its new room already; its browser is not back yet
+        const row = await jobOf(jobId);
+        seen = { status: row.status, prepState: row.prepState };
+        runnable = (await runnableJobsPage(50)).jobs.map((one) => one.jobId);
+        claim = await claimJob(jobId, { run: 'rB', seen: row.ownerEpoch }, minutes(2));
+        call = await ask(token, 'c-prep', {}, minutes(2));
+        // ...and a key that somehow outlived the pause (the pause revokes them all, so this one is revived by hand) is refused too: the browser, not the key alone, is what decides here
+        await prisma.computerJobToken.updateMany({ where: { jobId }, data: { revokedAt: null, ownerEpoch: row.ownerEpoch, expiresAt: minutes(60) } });
+        revived = await ask(token, 'c-prep-live', {}, minutes(2));
+        await waiting;
+        return { state: 'restored', reason: null };
+      });
+      const resumed = resumeJob(sara.brickId, sara.id, jobId, minutes(2));
+      // Let the restore's checks run, then let it answer
+      await new Promise((r) => setTimeout(r, 20));
+      settle();
+      const answer = await resumed;
+      expect(seen).toEqual({ status: 'running', prepState: 'restoring' });
+      // Nothing picks it up: no runner is handed it, no runner may claim it, and no call of its own key is authorized
+      expect(runnable).not.toContain(jobId);
+      expect(claim).toEqual({ ok: false, reason: 'not_ready', prep: 'restoring' });
+      expect(call).toMatchObject({ ok: false, reason: 'refused' });
+      expect(revived).toMatchObject({ ok: false, reason: 'refused' });
+      // The room that key's call took was given straight back: a call refused for the browser costs the person nothing
+      expect(await prisma.meterReservation.findUnique({ where: { reservationKey: callRoomKey(jobId, 'c-prep-live') }, select: { state: true, settledMicros: true } })).toEqual({ state: 'released', settledMicros: null });
+      // Its room was not charged for the refused call either: the call never happened
+      expect(await prisma.meterReservation.findUnique({ where: { reservationKey: callRoomKey(jobId, 'c-prep') } })).toBeNull();
+      // Its browser is back: the job is ready, claimable, and its calls are authorized again
+      expect(answer.ok).toBe(true);
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', prepState: null, endedBy: null });
+      expect((await runnableJobsPage(50)).jobs.map((one) => one.jobId)).toContain(jobId);
+      const again = await claimJob(jobId, { run: 'rB', seen: (await jobOf(jobId)).ownerEpoch }, minutes(3));
+      expect(again.ok).toBe(true);
+      expect(await ask(await keyFor(jobId, (again as { ok: true; epoch: number }).epoch, minutes(3)), 'c-after', {}, minutes(3))).toMatchObject({ ok: true });
+    });
+
+    it('its browser could not be settled: Resume answers `not_ready`, the job stays out of reach, and the sweep brings it back', async () => {
+      const { sara, jobId } = await running('g6-7-recover');
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      // The machine would not bring it back and would not empty the live browser either: its state is unknown, so the job is never run on it
+      (profiles.restoreProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'failed', reason: 'busy' }));
+      expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(2))).toEqual({ ok: false, reason: 'not_ready' });
+      const stuck = await jobOf(jobId);
+      expect(stuck).toMatchObject({ status: 'running', prepState: 'recover', endedBy: null });
+      expect((await runnableJobsPage(50)).jobs.map((one) => one.jobId)).not.toContain(jobId);
+      expect(await claimJob(jobId, { run: 'rB', seen: stuck.ownerEpoch }, minutes(3))).toEqual({ ok: false, reason: 'not_ready', prep: 'recover' });
+      // The sweep's restore works (the machine answers this time: the sweep's restore is the real one, not the stub above): the job becomes ready, keeps the room and the stretch it started on, and is claimable
+      const answer = fake.execAnswer;
+      fake.execAnswer = (command: string) => (/ACTION="restore"/.test(command) ? { stdout: 'restored=1 cookies=3 pages=1\n' } : answer(command));
+      try {
+        await sweepComputers(minutes(4));
+      } finally {
+        fake.execAnswer = answer;
+      }
+      const after = await jobOf(jobId);
+      expect(after).toMatchObject({ status: 'running', prepState: null, endedBy: null, reservationKey: stuck.reservationKey, pauses: 1 });
+      expect((await runnableJobsPage(50)).jobs.map((one) => one.jobId)).toContain(jobId);
+      expect((await claimJob(jobId, { run: 'rB', seen: after.ownerEpoch }, minutes(5))).ok).toBe(true);
+    });
+
+    it('a crash between a pause and putting its browser away stops every other job on that machine until the park is finished', async () => {
+      const { sara, jobId } = await running('g6-7-park');
+      // The pause commits and the server stops before the park runs
+      (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => {
+        throw new Error('the server stopped');
+      });
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: jobId });
+      // Another job of the person's on that machine does not start: its browser would be the paused job's
+      const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second' }, minutes(2));
+      if (!next.ok) throw new Error('not queued');
+      expect(await jobOf(next.job.id)).toMatchObject({ status: 'queued', queuedFor: 'busy' });
+      // ...and the sweep does not start it either, while the park is unfinished
+      (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'failed', reason: 'busy' }));
+      (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'failed', reason: 'busy' }));
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: jobId } });
+      expect(await jobOf(next.job.id)).toMatchObject({ status: 'queued' });
+      // The park is finished: the machine stops waiting and the job behind it starts
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: null } });
+      await sweepComputers(minutes(5));
+      expect(await jobOf(next.job.id)).toMatchObject({ status: 'running', queuedFor: null });
     });
   });
 

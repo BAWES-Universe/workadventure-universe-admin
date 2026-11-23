@@ -15,7 +15,7 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests, type ExecOptions } from '@/lib/computer-provider';
-import { dropProfile, parkProfile, resetSignInsSweepForTests, restoreProfile, sweepPausedSignIns } from '@/lib/computer-browser-profile';
+import { dropProfile, finishPendingParks, parkProfile, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settleResumedBrowser, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -297,6 +297,167 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       provider.failExec = true;
       expect(await dropProfile(sara.brickId, visa.id, NOW)).toMatchObject({ state: 'failed' });
       expect(await dropProfile(sara.brickId, 'not an id; rm -rf /', NOW)).toMatchObject({ state: 'left', reason: 'not_a_job' });
+    });
+  });
+
+  describe('GPT round 6, finding 7: a job that carried on is not worked on until its browser is settled', () => {
+    const prepOf = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId }, select: { prepState: true } });
+
+    it('its own browser back: ready at once, and nothing is emptied', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring' } });
+      const back = await restoreProfile(sara.brickId, visa.id, NOW);
+      expect(back).toMatchObject({ state: 'restored' });
+      expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW)).toBe('ready');
+      expect(await prepOf(visa.id)).toEqual({ prepState: null });
+      expect(sent.map((one) => one.action)).toEqual(['restore']);
+    });
+
+    it('nothing of its own kept: the live browser is emptied and PROVED empty before the job is ready', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring' } });
+      answers.restore = 'restored=0 reason=none';
+      const back = await restoreProfile(sara.brickId, visa.id, NOW);
+      expect(back).toMatchObject({ state: 'fresh', reason: 'none' });
+      expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW)).toBe('ready');
+      expect(await prepOf(visa.id)).toEqual({ prepState: null });
+      // Emptied, as root, for this job: a clean browser the job signs in to again is valid; one whose state we cannot tell is not
+      expect(sent.map((one) => one.action)).toEqual(['restore', 'clear']);
+      expect(sent[1]).toMatchObject({ action: 'clear', job: visa.id, user: 'root' });
+    });
+
+    it('the emptying fails: the job stays `recover`, so nothing runs it, and the sweep puts it right', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring' } });
+      answers.restore = 'restored=0 reason=none';
+      answers.clear = 'failed=1 reason=busy';
+      const back = await restoreProfile(sara.brickId, visa.id, NOW);
+      expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW)).toBe('recover');
+      expect(await prepOf(visa.id)).toEqual({ prepState: 'recover' });
+      // The sweep tries the restore again; this time the machine does it, and only then is the job ready
+      sent = [];
+      answers.restore = 'restored=1 cookies=2 pages=1';
+      expect(await recoverResumedBrowsers(minutes(1))).toEqual({ looked: 1, ready: 1 });
+      expect(await prepOf(visa.id)).toEqual({ prepState: null });
+      expect(sent.map((one) => one.action)).toEqual(['restore']);
+    });
+
+    it('a restore the machine would not do leaves it `recover`: it is NEVER made runnable on a browser whose state is unknown', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring' } });
+      answers.restore = 'failed=1 reason=busy';
+      const back = await restoreProfile(sara.brickId, visa.id, NOW);
+      expect(back).toMatchObject({ state: 'failed' });
+      expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW)).toBe('recover');
+      expect(await prepOf(visa.id)).toEqual({ prepState: 'recover' });
+      // The failure is not turned into an emptying of its own accord: the browser may hold what the job itself left
+      expect(sent.map((one) => one.action)).toEqual(['restore']);
+      // The sweep keeps it `recover` while the machine keeps refusing: never ready on an unknown answer
+      expect(await recoverResumedBrowsers(minutes(1))).toEqual({ looked: 1, ready: 0 });
+      expect(await prepOf(visa.id)).toEqual({ prepState: 'recover' });
+    });
+
+    it('past the hours sign-ins are kept the sweep empties instead of restoring: a clean browser, proved clean, makes the job ready', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      await saveServerLimits({ bricks: { pausedSignInsHours: 1 } }, 'admin');
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 * 60 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover' } });
+      expect(await recoverResumedBrowsers(NOW)).toEqual({ looked: 1, ready: 1 });
+      expect(await prepOf(visa.id)).toEqual({ prepState: null });
+      // Nothing of its own is left to bring back, so no restore is even asked for: the live browser is emptied
+      expect(sent.map((one) => one.action)).toEqual(['clear']);
+    });
+
+    it('a browser SHARED with a job that is on the machine is left exactly as it is, and the resumed job is ready', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const looker = await job(sara, { status: 'running', writes: false, pausedMinutesAgo: null });
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring' } });
+      const back = await restoreProfile(sara.brickId, visa.id, NOW);
+      expect(back).toMatchObject({ state: 'fresh', reason: 'shared' });
+      expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW)).toBe('ready');
+      expect(await prepOf(visa.id)).toEqual({ prepState: null });
+      // Its own kept browser is thrown away (it is never shown beside another job's), and the SHARED live browser is not emptied under the job that is using it
+      expect(sent.map((one) => one.action)).toEqual(['drop']);
+      expect(looker.id).not.toBe(visa.id);
+    });
+
+    it('a try that died while bringing the browser back leaves the job `restoring`: the sweep takes it over once no try can still be working on it, and never before', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring', startedAt: NOW } });
+      // A try that started moments ago may still be in its restore: it is not cut across
+      expect(await recoverResumedBrowsers(minutes(1))).toEqual({ looked: 0, ready: 0 });
+      expect(await prepOf(visa.id)).toEqual({ prepState: 'restoring' });
+      expect(sent).toEqual([]);
+      // Past the longest one command may take, no try is still working on it: the sweep settles the browser and the job can be worked on again
+      expect(await recoverResumedBrowsers(minutes(6))).toEqual({ looked: 1, ready: 1 });
+      expect(await prepOf(visa.id)).toEqual({ prepState: null });
+      expect(sent.map((one) => one.action)).toEqual(['restore']);
+    });
+
+    it('a park nobody finished: the sweep finishes it, and the machine stops waiting', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      // The pause committed and the server stopped before the park ran: the machine carries the job's id
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
+      expect(await finishPendingParks(minutes(1))).toEqual({ looked: 1, parked: 1, wiped: 0 });
+      expect(sent.map((one) => one.action)).toEqual(['park']);
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: null });
+    });
+
+    it('a park the machine will not do: the live browser is emptied instead, so the next job on that machine never finds those sign-ins', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
+      answers.park = 'failed=1 reason=busy';
+      expect(await finishPendingParks(minutes(1))).toEqual({ looked: 1, parked: 0, wiped: 1 });
+      expect(sent.map((one) => one.action)).toEqual(['park', 'clear']);
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: null });
+    });
+
+    it('a park that could be neither done nor emptied keeps the machine waiting: nothing else starts there until it is settled', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
+      answers.park = 'failed=1 reason=busy';
+      answers.clear = 'failed=1 reason=busy';
+      expect(await finishPendingParks(minutes(1))).toEqual({ looked: 1, parked: 0, wiped: 0 });
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: visa.id });
+    });
+
+    it('throwing the browser away (an ending, a cancel) lets the machine go at once: the jobs behind it do not wait for a sweep', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
+      expect(await dropProfile(sara.brickId, visa.id, minutes(1))).toMatchObject({ state: 'dropped' });
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: null });
+    });
+
+    it('emptying the live browser needs the cleanup claim and lets go of it, and does nothing on a machine that is not awake', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      expect(await wipeLiveProfile(sara.brickId, visa.id, NOW)).toMatchObject({ state: 'cleared' });
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).cleanClaimedAt).toBeNull();
+      await machine(sara.brickId, 'resting');
+      expect(await wipeLiveProfile(sara.brickId, visa.id, NOW)).toMatchObject({ state: 'left', reason: 'not_awake' });
+      expect(await wipeLiveProfile(sara.brickId, 'not an id; rm -rf /', NOW)).toMatchObject({ state: 'left', reason: 'not_a_job' });
     });
   });
 

@@ -12,6 +12,7 @@ const REFUSAL_WORDS: Record<Exclude<ControlRefusal, 'not_found'>, string> = {
   not_queued: 'That job is not waiting in line.',
   allowance: "This month's computer time is used up, so it stays paused.",
   rule: 'It reached the spending limit you set, so it stays paused.',
+  not_ready: 'Its browser could not be brought back yet. It will carry on by itself in a few minutes.',
 };
 
 /** The answer of a job control: the computer as the page shows it, 404 for a Brick or job that is not the owner's, 409 with a `reason` the game reads for every other refusal. */

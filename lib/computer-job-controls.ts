@@ -30,8 +30,8 @@ import { grantsPrintIn, tellIn } from '@/lib/computer-tellings';
 import { releaseIfUnheld } from '@/lib/computer-control';
 import type { ComputerProvider as Provider } from '@/lib/computer-provider';
 
-/** Why a control was not done. `not_found`: not the owner's Brick, or no such job on it. `over`: the job already ended. `taken_over`: the person has the screen. `ending`: its ending is already decided. `not_paused` / `not_queued`: the job is not in the state the tap was for. `allowance` / `rule`: a resume the person's month, or a limit they set, does not let start (the job stays paused). */
-export type ControlRefusal = 'not_found' | 'over' | 'taken_over' | 'ending' | 'not_paused' | 'not_queued' | 'allowance' | 'rule';
+/** Why a control was not done. `not_found`: not the owner's Brick, or no such job on it. `over`: the job already ended. `taken_over`: the person has the screen. `ending`: its ending is already decided. `not_paused` / `not_queued`: the job is not in the state the tap was for. `allowance` / `rule`: a resume the person's month, or a limit they set, does not let start (the job stays paused). `not_ready`: it carried on but its browser could not be settled, so the sweep is still working on it. */
+export type ControlRefusal = 'not_found' | 'over' | 'taken_over' | 'ending' | 'not_paused' | 'not_queued' | 'allowance' | 'rule' | 'not_ready';
 /** `signInsKept` is said only when a job that held the machine was paused: false when its sign-ins could not be put away (it will need them again when it carries on). */
 export type Controlled = { ok: true; view: ComputerView; signInsKept?: boolean } | { ok: false; reason: ControlRefusal };
 
@@ -136,6 +136,10 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   // A first turn that was sent and never named may still run with nothing to cancel it by: the machine is held until it is proved asleep (as a job's ending does), so nothing starts beside it
   const turnHold = !!job.firstTurnSentAt && !job.agentResponseId;
   if (turnHold) await tx.brickComputer.updateMany({ where: { botId: job.botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
+  // The job's sign-ins are not put away yet: that happens after this commit (`afterPause`). From this very commit the machine carries the job's id as a park that has not finished, so a crash between the two
+  // cannot let another job start on a browser that still holds this one's sign-ins: `tryStart` of any other job on this machine stays queued (`busy`) while it is set. `parkProfile` clears it, and the sweep
+  // finishes a park nobody finished (GPT round 6, finding 7)
+  await tx.brickComputer.updateMany({ where: { botId: job.botId }, data: { parkPendingJobId: jobId } });
   await tx.computerJob.update({
     where: { id: jobId },
     data: {
@@ -292,8 +296,11 @@ export async function resumeJob(botId: string, ownerId: string, jobId: string, n
   if (moved !== 'ok') return { ok: false, reason: moved };
   await controlInternals.tryStart(jobId, now, { quiet: true });
   // The month or a limit refused its start: tryStart put a job that ran before back as paused, with the reason
-  const after = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, pausedWhy: true } });
+  const after = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, pausedWhy: true, prepState: true } });
   if (after?.status === 'queued' && after.queuedFor === 'paused' && (after.pausedWhy === 'allowance' || after.pausedWhy === 'rule')) return { ok: false, reason: after.pausedWhy };
+  // The start brings the job's own browser back before it answers, so a resume that got here has it: unless it could not be settled (`recover`), and then the person is told so plainly. The sweep tries the
+  // restore again and empties the browser after the hours sign-ins are kept; until one of those works the job holds its room and its place but is worked on by nobody (GPT round 6, finding 7)
+  if (after?.prepState !== null) return { ok: false, reason: 'not_ready' };
   return viewOf(botId, ownerId, now);
 }
 

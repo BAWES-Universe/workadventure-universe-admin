@@ -65,7 +65,13 @@ import {
   NOT_PAUSED,
   type PausedWhy,
 } from '@/lib/computer-values';
-import { dropProfile, restoreProfile } from '@/lib/computer-browser-profile';
+import {
+  dropProfile,
+  finishPendingParks,
+  recoverResumedBrowsers,
+  restoreProfile,
+  settleResumedBrowser,
+} from '@/lib/computer-browser-profile';
 import { carryOnFrom } from '@/lib/computer-continue';
 
 /**
@@ -912,6 +918,14 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
     }
   }
 
+  // A pause whose park never ran leaves the paused job's own browser live on the machine: nothing else starts there until it is put away or emptied (the sweep does it), so no job ever
+  // inherits another's sign-ins (GPT round 6, finding 7)
+  const parking = await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { parkPendingJobId: true } });
+  if (parking?.parkPendingJobId && parking.parkPendingJobId !== job.id) {
+    await queue('busy');
+    return 'queued';
+  }
+
   const settings = await getMeterSettings();
   const key = roomKey(job.id, now);
   const room = await reserveRoom({ key, personId: job.personId, amountMicros: roomFor(settings.renewMinutes, provider.microsPerMinute()), botId: job.botId, jobId: job.id }, now);
@@ -974,7 +988,8 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
   try {
     const claimed = await prisma.computerJob.updateMany({
       where: { id: job.id, status: 'queued', ...NOT_PAUSED },
-      data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: now },
+      // A job that carries on is not ready to be worked on until its own browser is back (or a clean one is proved clean): `prep_state` keeps it out of the runnable list, refuses a claim and refuses every call until then (GPT round 6, finding 7)
+      data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: now, ...(job.pauses > 0 ? { prepState: 'restoring' as const } : {}) },
     });
     if (claimed.count === 0) {
       // Two tries in the same millisecond share one room: it is given back only when the job that won did not take it
@@ -1017,7 +1032,7 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
   // running job before it removes anything) goes on; the job is brought a computer from cold storage when its turn comes
   const taken = await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { machine: true } });
   if (taken?.machine === 'packing') {
-    const back = await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', reservationKey: key }, data: { status: 'queued', queuedFor: 'busy', reservationKey: null, startedAt: null, stretchStarted: null } });
+    const back = await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running', reservationKey: key }, data: { status: 'queued', queuedFor: 'busy', reservationKey: null, startedAt: null, stretchStarted: null, prepState: null } });
     if (back.count === 1) {
       await releaseRoom({ key }, now);
       await dropDiskRoom();
@@ -1069,7 +1084,14 @@ async function tryStart(jobId: string, now: Date, options: { /** The person's ow
   // A job that was paused gets its own browser back (and never the one of a job that ran in between) before its runner takes it up
   // Each of these is this try's own: a job that was paused and resumed again while the machine came up is on another room, and this try marks nothing for it (finding 3b)
   if (job.pauses > 0) await prisma.computerJobPause.updateMany({ where: { jobId: job.id, n: job.pauses, resumedAt: null, job: { reservationKey: key } }, data: { resumedAt: now } }).catch(() => undefined);
-  if (job.pauses > 0 && (await stillThisTry())) await restoreProfile(job.botId, job.id, now).catch((error) => console.error('[Computer] Could not bring back a resumed job’s browser:', error instanceof Error ? error.message : 'unknown'));
+  if (job.pauses > 0 && (await stillThisTry())) {
+    // What the browser came back as decides whether the job may be worked on: its own back, or a clean one proved clean, is ready; anything else leaves it `recover` for the sweep (finding 7)
+    const back = await restoreProfile(job.botId, job.id, now).catch((error) => {
+      console.error('[Computer] Could not bring back a resumed job’s browser:', error instanceof Error ? error.message : 'unknown');
+      return { state: 'failed' as const, reason: 'error', cookies: 0, pages: 0 };
+    });
+    await settleResumedBrowser(job.id, job.botId, back, now, key);
+  }
   // What is on the machine before this job works on it: only so the message can name files the job saved outside its own output folder (those are never handed over)
   if (job.writes) await takeBaseline(job.id, job.botId, provider, key);
   return 'running';
@@ -2319,6 +2341,10 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   // What a job ran whose write to the books failed is written again (same event id, so never twice), and the same for a pause's time
   await recordMissingComputerTime(now, batch);
   await (await import('@/lib/computer-job-controls')).bookMissingPauses(now, batch);
+  // A park nobody finished (the server stopped between a pause and putting its sign-ins away) is finished here, BEFORE anything starts below: while it is unfinished the machine carries that job's id and every other
+  // job on it stays queued, so finishing it is what lets the line move. A job that carried on whose browser could not be settled is tried again, and wiped once its sign-ins are past the hours they are kept (GPT round 6, finding 7)
+  await finishPendingParks(now, batch).catch((error) => console.error('[Computer] A park left unfinished could not be finished:', error instanceof Error ? error.message : 'unknown'));
+  await recoverResumedBrowsers(now, batch).catch((error) => console.error('[Computer] The browser of a job that carried on could not be settled:', error instanceof Error ? error.message : 'unknown'));
   // Jobs the person's month or a limit paused carry on by themselves once more arrived (one per person per sweep, oldest first), or Brick asks first when something about them changed (piece 3)
   started += await (await import('@/lib/computer-limit-pause')).carryOnPaused(now, batch);
   // One try per Brick: the oldest job in line has the turn. Bricks tried and blocked are skipped by the next page, so a long run of
@@ -3200,6 +3226,8 @@ export async function runnableJobsPage(limit = 50, cursor?: string | null): Prom
     where: {
       status: 'running',
       control: 'brick',
+      // A job that carries on is listed only once its browser is settled: a runner that took it up earlier would work on a browser that is not its own (GPT round 6, finding 7)
+      prepState: null,
       ...(after ? { OR: [{ startedAt: { gt: after.startedAt } }, { startedAt: after.startedAt, id: { gt: after.id } }] } : {}),
     },
     orderBy: [{ startedAt: 'asc' }, { id: 'asc' }],
@@ -3240,6 +3268,8 @@ export async function claimJob(
   | { ok: true; epoch: number }
   | { ok: false; reason: 'not_found' | 'over' | 'not_running' | 'finish_pending' | 'cutoff' }
   | { ok: false; reason: 'superseded'; ownerEpoch: number }
+  /** The job is being made ready to carry on (its browser): `restoring` while that is going on, `recover` when it could not be settled and the sweep is putting it right. Nobody owns it yet (GPT round 6, finding 7). */
+  | { ok: false; reason: 'not_ready'; prep: string }
   /** A healthy owner holds the job: nothing was written. The asker waits until `until` and looks again, never in a loop (GPT round 6, finding 3). */
   | { ok: false; reason: 'held'; until: Date }
 > {
@@ -3251,6 +3281,8 @@ export async function claimJob(
       if (job.status === 'queued') return { ok: false as const, reason: 'not_running' as const };
       if (await hasFinishIntent(tx, jobId)) return { ok: false as const, reason: 'finish_pending' as const };
       if (await hasPoolCutoff(tx, jobId)) return { ok: false as const, reason: 'cutoff' as const };
+      // Its browser is still being settled (or could not be): nobody takes the job up yet, and nothing is written (GPT round 6, finding 7)
+      if (job.prepState !== null) return { ok: false as const, reason: 'not_ready' as const, prep: job.prepState };
       if (job.ownerEpoch !== input.seen) return { ok: false as const, reason: 'superseded' as const, ownerEpoch: job.ownerEpoch };
       // A job with a LIVE owner is not taken from it, even by a worker that saw the right epoch: a second worker beside a healthy first one is what every fence below is there to prevent (GPT round 6, finding 3).
       // Read here, under the job's row lock, so a beat that is landing is never missed. Free to claim: a job nobody owns (epoch 0), one whose owner stopped beating (90 s), and one the owner let go (`release`)

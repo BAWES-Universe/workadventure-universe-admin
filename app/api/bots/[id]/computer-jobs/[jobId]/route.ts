@@ -100,6 +100,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         // A healthy owner holds it: wait until `until` and look again (never claim in a loop), and never end the job meanwhile
         if (claimed.reason === 'held') return NextResponse.json({ ok: false, reason: 'held', until: claimed.until, job });
         if (claimed.reason === 'not_found') return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+        // Its browser is still being settled: `prep` says which step it is at (`restoring`, or `recover` while the sweep puts it right). Look again later; nothing was written
+        if (claimed.reason === 'not_ready') return NextResponse.json({ ok: false, reason: 'not_ready', prep: claimed.prep, job });
         return NextResponse.json({ ok: false, reason: claimed.reason, ...(claimed.reason === 'finish_pending' ? { finishPending: job?.finishPending ?? null } : {}), job });
       }
       case 'beat': {
