@@ -4,9 +4,10 @@ import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
+import type { MeterEventInput } from '@/lib/meter-values';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { drawComputerCredit } from '@/lib/computer-credit';
-import { DISK_ROOM_PREFIX, diskRoomKey, memberAllowance, releaseRoom, renewRoomIn, reserveDiskRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
+import { DISK_ROOM_PREFIX, diskRoomKey, lockPool, memberAllowance, releaseRoom, renewRoomIn, reserveDiskRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
 import { priceChanges, pinnedMicrosPerMinute } from '@/lib/spend-rules-values';
@@ -2296,7 +2297,7 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
   const givenBack = givenBackJob(why.status, why.endedBy);
   // Credit given on purpose (a gift for computers) is drawn first, before the event is written, so the allowance never counts what credit paid. Never for a job that failed on our side: it takes nothing from the person
   if (!givenBack && cost !== null && cost > 0) await drawComputerCredit({ eventId, personId: job.personId, botId: job.botId, jobId: job.id, costMicros: cost, chargeClass: 'computer_job' }, at);
-  await recordMeterEvent({
+  const timeEvent: MeterEventInput = {
     eventId,
     kind: 'computer_time',
     pool: 'computer',
@@ -2320,7 +2321,14 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
     // period, the same split the held room was counted by (lib/spend-rules.ts). Events without it (older ones) count whole in the period they end in.
     // `terms`: only for a job whose price changed while it ran, so that split follows the prices it ran at and not only its duration.
     detail: { endedBy: why.endedBy, status: why.status, ...(job.startedAt ? { startedMs: job.startedAt.getTime() } : {}), ...(priceChanges(lease?.terms) ? { terms: priceChanges(lease?.terms) as unknown as Prisma.InputJsonValue } : {}), ...(job.runId ? { runId: job.runId } : {}), ...(givenBack ? { givenBack: true, forPersonId: job.personId } : {}) },
-  }).catch((error) => console.error('[Computer] Could not record computer time:', error instanceof Error ? error.message : 'unknown'));
+  };
+  // A paused stretch is counted in the person's month and the pool by its settled room until its event is in the books (`unbookedPauseMicros`, read apart from the event totals). The event is published under the pool's own
+  // lock, the one every admission holds while it reads both, so an admission never sees the event totals from before it and the exclusion from after it (a stretch counted in neither; CodeRabbit on #1025)
+  const publish = eventId === `computer:${job.id}:time` ? () => recordMeterEvent(timeEvent) : () => prisma.$transaction(async (tx) => {
+        await lockPool(tx);
+        return recordMeterEvent(timeEvent, tx);
+      }, { timeout: 15_000, maxWait: 15_000 });
+  await publish().catch((error) => console.error('[Computer] Could not record computer time:', error instanceof Error ? error.message : 'unknown'));
   return cost;
 }
 

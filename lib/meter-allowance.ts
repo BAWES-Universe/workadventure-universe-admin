@@ -261,7 +261,7 @@ export async function currentEnvelope(now: Date = new Date()): Promise<Envelope>
   return envelopeIn(prisma, now, settings);
 }
 
-async function lockPool(tx: Tx): Promise<void> {
+export async function lockPool(tx: Pick<Tx, '$executeRaw'>): Promise<void> {
   // One lock for every step, always taken first: two steps asked for at the same moment are settled one after the other
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${POOL_LOCK}))`;
 }

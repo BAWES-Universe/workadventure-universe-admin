@@ -498,6 +498,43 @@ run('computer job controls: pause, resume, do this next, cancel one job (piece 1
     });
   });
 
+  describe('a pause\'s event and the admissions that read the books', () => {
+    it('CodeRabbit on #1025 (28): the pause event is published under the pool lock, so an admission (which holds it while it reads the totals and the exclusion) never sees the event half way', async () => {
+      const { sara, jobId } = await running('b-pool-lock');
+      recordMeterEvent.mockImplementationOnce(async () => {
+        throw new Error('the books did not answer');
+      });
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(5));
+      expect(await eventsOf(jobId)).toHaveLength(0);
+      // An admission is in the middle of its reads: it holds the pool lock
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let locked: () => void = () => undefined;
+      const ready = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'meter:pool'}))`;
+          locked();
+          await held;
+        },
+        { timeout: 30_000, maxWait: 30_000 },
+      );
+      await ready;
+      const booking = bookMissingPauses(minutes(7), 10);
+      // The write waits for the lock: nothing is in the books while the admission reads
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(await eventsOf(jobId)).toHaveLength(0);
+      release();
+      await holder;
+      expect(await booking).toBe(1);
+      expect(await eventsOf(jobId)).toHaveLength(1);
+    });
+  });
+
   describe('the sign-ins of a paused job, and when it ran again', () => {
     it('a pause of a job that held the machine puts its browser away (a job paused in line does not); a resume brings it back and notes when; its ending drops it', async () => {
       const { sara, jobId } = await running('s-profile');
