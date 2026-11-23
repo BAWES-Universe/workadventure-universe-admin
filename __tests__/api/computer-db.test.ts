@@ -1502,6 +1502,20 @@ run('a Brick’s computer, in a real database', () => {
       expect(await fillInDetails(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'nothing_ready' });
     });
 
+    it('CodeRabbit on #1025 (13): settling the details that were put in clears THAT prompt only: a newer prompt the runner registered meanwhile stays for the person', async () => {
+      const { sara, jobId } = await waitingJob();
+      const ready = { what: 'Your details', where: 'Step 1' };
+      await requestHandover(jobId, 'details', minutes(1), ready);
+      await takeOver(sara.brickId, sara.id);
+      const asked = await fillInDetails(sara.brickId, sara.id, ready);
+      const key = asked.ok ? asked.job.detailsToFill[0].key : '';
+      await planEffect(jobId, { key, kind: 'details' });
+      // The runner names the next thing to put in before the settlement of the first lands
+      await prisma.computerJob.update({ where: { id: jobId }, data: { readyWhat: 'Your address', readyWhere: 'Step 2' } });
+      expect(await settleEffect(jobId, key, 'done', 'step 1')).toBe(true);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ readyWhat: 'Your address', readyWhere: 'Step 2' });
+    });
+
     it('a tap after details were confirmed not put in approves the same key again, so Brick can try once more', async () => {
       const { sara, jobId } = await waitingJob();
       const ready = { what: 'Your details', where: 'Step 1' };

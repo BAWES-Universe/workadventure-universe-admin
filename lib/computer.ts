@@ -3460,11 +3460,17 @@ export async function settleEffectAs(jobId: string, key: string, state: 'done' |
     if (changed.count > 0 && state === 'done') await markDeliveredLate(tx, jobId);
     // What Brick named is put in (or confirmed not): the tap is spent, and the next hand-over names its own
     const effect = changed.count > 0 ? await tx.computerEffect.findUnique({ where: { jobId_effectKey: { jobId, effectKey: key } }, select: { kind: true } }) : null;
+    // The prompt this settlement is for is cleared in the same transaction, and only that one: a newer prompt the worker registered since (another thing to put in, another place) stays for the person (CodeRabbit on #1025, 13)
+    if (effect?.kind === 'details') {
+      const shown = await tx.computerJob.findUnique({ where: { id: jobId }, select: { readyWhat: true, readyWhere: true } });
+      if (shown?.readyWhat && shown.readyWhere && detailsKey(shown.readyWhat, shown.readyWhere) === key) {
+        await tx.computerJob.updateMany({ where: { id: jobId, readyWhat: shown.readyWhat, readyWhere: shown.readyWhere }, data: { readyWhat: null, readyWhere: null } });
+      }
+    }
     return { count: changed.count, superseded: false, kind: effect?.kind ?? null };
   });
   if (done.superseded) return { ok: false, superseded: true };
   if (done.count > 0) {
-    if (done.kind === 'details') await prisma.computerJob.updateMany({ where: { id: jobId, ...(owner ? ownerWhere(owner.epoch) : {}) }, data: { readyWhat: null, readyWhere: null } });
     // A give-back that was held for this effect is decided now
     await noteEffectSettled(jobId).catch((error) => console.error('[Computer] Could not note a settled effect:', error instanceof Error ? error.message : 'unknown'));
   }
