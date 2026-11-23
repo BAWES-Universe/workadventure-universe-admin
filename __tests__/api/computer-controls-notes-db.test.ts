@@ -29,16 +29,11 @@ jest.mock('@/lib/meter', () => {
 import { prisma } from '@/lib/db';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
-import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
+import { saveMeterSettings } from '@/lib/meter';
 import * as meterModule from '@/lib/meter';
-import { memberAllowance } from '@/lib/meter-allowance';
-import * as allowanceModule from '@/lib/meter-allowance';
-import * as capabilityPause from '@/lib/capability-pause';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { claimJob, computerTimeInBooks, computerView, finishJobUnder, getJob, giveComputer, recordFinishIntent, renewJob, startJob, stopJobFor, sweepComputers, takeOver, controlInternals, turnOffComputer, stopComputerWork, startWindDown, liftWindDown } from '@/lib/computer';
-import { recordPoolCutoff } from '@/lib/computer-faults';
+import { claimJob, giveComputer, startJob } from '@/lib/computer';
 import * as profile from '@/lib/computer-browser-profile';
-import { checkSpend, proposeRule } from '@/lib/spend-rules';
 import { pauseJob, resumeJob } from '@/lib/computer-job-controls';
 import { addJobNote, notesSent, pendingNotes } from '@/lib/computer-job-notes';
 
@@ -51,8 +46,6 @@ const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
 const people: string[] = [];
 let made = 0;
 const env = process.env.COMPUTER_PROVIDER;
-/** The pretend provider's price: 6,000 micros a minute, so 5 minutes are 30,000. */
-const PER_MINUTE = 6_000;
 
 async function person(name: string) {
   const unique = `${name}-${tag}-${++made}`;
@@ -74,9 +67,6 @@ const wipe = async () => {
 };
 
 const jobOf = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });
-const roomOf = (key: string) => prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: key } });
-const eventsOf = (jobId: string) => prisma.meterEvent.findMany({ where: { jobId, kind: 'computer_time' }, orderBy: { eventId: 'asc' } });
-const liveKeys = (jobId: string) => prisma.computerJobToken.count({ where: { jobId, revokedAt: null } });
 const claimed = async (jobId: string, runName: string, at: Date = NOW): Promise<number> => {
   const won = await claimJob(jobId, { run: runName, seen: (await jobOf(jobId)).ownerEpoch }, at);
   if (!won.ok) throw new Error(`the claim was refused: ${won.reason}`);
@@ -91,11 +81,6 @@ async function running(name: string) {
   if (!started.ok || started.job.status !== 'running') throw new Error('the job did not start');
   return { sara, jobId: started.job.id };
 }
-const another = async (sara: { id: string; brickId: string }, title: string, at: Date = NOW) => {
-  const started = await startJob({ botId: sara.brickId, personId: sara.id, title }, at);
-  if (!started.ok) throw new Error('the job was not made');
-  return started.job.id;
-};
 
 run('C8: steering notes and the job controls together, in a real database', () => {
   let fake: FakeComputerProvider;

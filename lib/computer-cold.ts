@@ -16,7 +16,6 @@ import {
   STORAGE_DELETION_ALERT_MS,
   storageDeletionsWaiting,
   downloadUrl,
-  markFailed,
   markVerified,
   mintDownloadToken,
   pruneArchives,

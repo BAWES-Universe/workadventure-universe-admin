@@ -38,7 +38,7 @@ import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { listDeletedBricks } from '@/lib/brick-default';
 import { computerReadiness } from '@/lib/computer-readiness';
 import { CopyOutcomeUnknown } from '@/lib/agent37/saved-copies';
-import { archiveById, deleteAllArchives, markVerified, removeBrickObjects, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, setStrayPassForTests, setWriteLimitForTests, storageDeletionsWaiting, storeArchive, STORAGE_DELETION_ALERT_MS, STRAY_CURSOR_KEY, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
+import { archiveById, deleteAllArchives, markVerified, removeBrickObjects, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, setStrayPassForTests, setWriteLimitForTests, storageDeletionsWaiting, storeArchive, STORAGE_DELETION_ALERT_MS, STRAY_CURSOR_KEY, verifiedArchives } from '@/lib/computer-archives';
 import { GET as download } from '@/app/api/computer/archives/[id]/download/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -194,7 +194,7 @@ run('cold storage for a Brick’s computer, in a real database', () => {
     it('a proof that ran so long its claim was taken over cannot fail the copy another run has proved since: the proved copy and the removal stay', async () => {
       const brick = await idleBrick();
       const original = provider.restoreInto.bind(provider);
-      provider.restoreInto = async (ref, source) => {
+      provider.restoreInto = async () => {
         void original;
         // Meanwhile the other run proved the same copy and moved the row on to the removal
         const archive = (await prisma.computerArchive.findFirstOrThrow({ where: { botId: brick.botId } }));

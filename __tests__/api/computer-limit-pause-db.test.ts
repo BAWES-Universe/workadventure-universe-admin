@@ -47,7 +47,6 @@ let made = 0;
 const env = process.env.COMPUTER_PROVIDER;
 /** The pretend provider's price: 6,000 micros a minute, so a 10-minute room is 60,000. */
 const PER_MINUTE = 6_000;
-const ROOM = 10 * PER_MINUTE;
 const ACCEPTS = ['paused', 'carried_on', 'can_carry_on'];
 let issuer: { userId: string; superAdmin: true };
 

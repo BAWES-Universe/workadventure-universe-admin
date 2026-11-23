@@ -102,7 +102,6 @@ const WHY_MAX = 160;
 const WHERE_MAX = 120;
 const FILE_NAME_MAX = 80;
 const FILES_SHOWN_MAX = 12;
-// eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f]/g;
 /** A long unbroken run of letters and digits with both: what keys and tokens look like, not words. */
 const TOKEN_LIKE = /(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{24,}/g;
