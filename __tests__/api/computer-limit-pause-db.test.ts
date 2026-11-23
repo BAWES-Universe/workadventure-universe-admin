@@ -313,6 +313,11 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       await renewJob(plain.jobId, minutes(5), { epoch: plain.epoch });
       expect(await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId: plain.jobId, n: 1 } } })).toMatchObject({ heldScreen: false });
       expect((await tellings(plain.jobId)).map((one) => one.heldScreen)).toEqual([false]);
+      // The report of a plain pause has no held mark at all (absent, never false): the game says the usual line
+      const plainSaid = (await told(minutes(5))).filter((one) => one.jobId === plain.jobId);
+      expect(plainSaid).toHaveLength(1);
+      expect(plainSaid[0]).toMatchObject({ kind: 'paused', pausedWhy: 'allowance' });
+      expect('heldScreen' in plainSaid[0]).toBe(false);
       await setUp();
       await resumeJob(plain.sara.brickId, plain.sara.id, plain.jobId, minutes(6));
       expect(await getJob(plain.jobId)).toMatchObject({ resumed: true, askAgain: false });
