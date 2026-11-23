@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client';
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { recordMeterEvent } from '@/lib/meter';
-import { releaseRoom, releaseRoomIn, reserveRoom, settleRoom } from '@/lib/meter-allowance';
+import { lockPool, releaseRoom, releaseRoomIn, reserveRoom, settleRoom } from '@/lib/meter-allowance';
 import { revokeJobTokens, verifyJobToken } from '@/lib/computer-token';
 import { givenBackJob } from '@/lib/computer-values';
 import { drawComputerCredit, giveBackComputerCredit } from '@/lib/computer-credit';
@@ -107,7 +107,7 @@ export async function authorizeModelCall(
     // moment either counted this room (and did not stop the job) or won (the key is no longer good): the room goes back, never both. A look that FAILS is the same answer as one that says no: the call is refused and
     // the room goes back, never held for a call that was not authorized
     // The key is looked at again by `authorizedPastCutoff`, with the time read after the room's wait for the pool's lock (and after the cutoff's, when there is one): a key that ran out meanwhile is no longer good
-    const stands = await authorizedPastCutoff(base.jobId, input.callId, input.token, verified.generation, clock, { turn: input.turn, run: input.run }, room.created ? null : base.personId).catch((error) => {
+    const stands = await authorizedPastCutoff(base.jobId, input.callId, input.token, verified.generation, clock, { turn: input.turn, run: input.run }, base.personId, room.created ? null : base.personId).catch((error) => {
       console.error('[Computer] Could not look again at a call that was authorized:', error instanceof Error ? error.message : 'unknown');
       return false;
     });
@@ -336,7 +336,7 @@ export { cutoffLockKey };
  * moment is waited for: if it won, the call is refused (its keys ended with it) and its room goes back; if this won, the stop finds the admission and answers stale. A wait that fails is a failed check (a no), never a
  * call authorized past a stop that may have won.
  */
-async function authorizedPastCutoff(jobId: string, callId: string, token: string, generation: number, clock: () => Date, admitted: { turn?: number | null; run?: string | null } = {}, replayOf: string | null = null): Promise<boolean> {
+async function authorizedPastCutoff(jobId: string, callId: string, token: string, generation: number, clock: () => Date, admitted: { turn?: number | null; run?: string | null } = {}, holder: string, replayOf: string | null = null): Promise<boolean> {
   return prisma.$transaction(
     async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${cutoffLockKey(jobId)}, 0))`;
@@ -354,9 +354,11 @@ async function authorizedPastCutoff(jobId: string, callId: string, token: string
       // Asked again for a call whose room an earlier request took (`replayOf` is the person who holds it): that request may still be deciding whether the call stands, and would give the room back. The room is looked at HERE,
       // under the call's own lock (taken above, after the job's cutoff lock), with the time read after the waits, BEFORE anything is written: a replay whose room is gone (given back, settled, lapsed) is refused and leaves
       // no admission, no stretch and no renewal of the hold behind. Its answer is kept under that lock, so the room is never released from under a call that was authorized (CodeRabbit on #1025)
-      if (replayOf !== null) {
-        if (!(await holdsItsRoom(jobId, callId, replayOf, clock(), tx))) return false;
-      }
+      // The room is looked at under the POOL's lock as well (the lock every release and settlement of a room takes first), for a new room and a replayed one alike: a release that committed between the room being held and
+      // this look is seen (the call is refused and leaves no admission), and one that comes after waits for this commit and finds the call admitted (CodeRabbit on #1025). The order is always: the job's cutoff lock, the call's
+      // own lock, the pool's lock
+      await lockPool(tx);
+      if (!(await holdsItsRoom(jobId, callId, replayOf ?? holder, clock(), tx))) return false;
       // The call is ADMITTED: kept per call (one row), in this very transaction, for the first request and every replay alike. A room that lapses with no such row belongs to a call that was never admitted and is released, never
       // settled as unknown usage (the sweep reads it with `hasCallAdmission`), and a room whose creator could not give it back is kept for any request that was answered with it (CodeRabbit on #1025)
       await recordCallAdmission(tx, jobId, callId, clock());
@@ -370,6 +372,29 @@ async function authorizedPastCutoff(jobId: string, callId: string, token: string
     },
     { timeout: 15_000, maxWait: 15_000 },
   );
+}
+
+/**
+ * The sweep's look at a lapsed call room: released only when its call was never admitted, decided and released as ONE step under the locks an admission writes under (the call's own lock, then the pool's, the order a replay
+ * takes them in), so a replay or a first admission that commits meanwhile is seen (`admitted`: the room stays, to be settled as the usage it is) and never loses its room from under it. A look that fails is `unknown`: the room
+ * is left for the next sweep, never read as admitted (it would be booked as usage the person is charged for) and never released (CodeRabbit on #1025).
+ */
+export async function releaseUnadmittedCallRoom(jobId: string, callId: string, key: string, now: Date): Promise<'released' | 'admitted' | 'unknown'> {
+  try {
+    return await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${admitLockKey(jobId, callId)}, 0))`;
+        await lockPool(tx);
+        if (await hasCallAdmission(tx, jobId, callId)) return 'admitted' as const;
+        await releaseRoomIn(tx, { key }, now);
+        return 'released' as const;
+      },
+      { timeout: 15_000, maxWait: 15_000 },
+    );
+  } catch (error) {
+    console.error('[Computer] Could not look at a lapsed call’s admission:', error instanceof Error ? error.message : 'unknown');
+    return 'unknown';
+  }
 }
 
 /** True when this call id already holds room for this job and person: room held and not lapsed (what reserving it again would answer with its own reservation). */

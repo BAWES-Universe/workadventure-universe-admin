@@ -31,7 +31,7 @@ import { cleanStepLabel } from '@/lib/computer-redact';
 import { appendStep } from '@/lib/computer-job-steps';
 import { CALL_IN_LAST_STRETCH, HOLD_IN_LAST_STRETCH } from '@/lib/computer-stretch';
 import { tellIn } from '@/lib/computer-tellings';
-import { callRoomKey, endIfCutoffDecided, endStuckCutoffs, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
+import { callRoomKey, endIfCutoffDecided, endStuckCutoffs, giveBackModelCalls, releaseUnadmittedCallRoom, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { reconcileComputers } from '@/lib/computer-reconcile';
 import { bringBackFromCold, coldStep, dropColdCopiesIfNewer } from '@/lib/computer-cold';
@@ -41,7 +41,7 @@ import { computersArePaused } from '@/lib/capability-pause';
 import { noteHands, recordVisits } from '@/lib/computer-visits';
 import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
-import { hasCallAdmission, hasFinishIntent, hasPoolCutoff, hasTurnAdmitted, lockCutoff, lockRelayReach } from '@/lib/computer-faults';
+import { hasFinishIntent, hasPoolCutoff, hasTurnAdmitted, lockCutoff, lockRelayReach } from '@/lib/computer-faults';
 import { extendHoldIn } from '@/lib/computer-lease';
 import { epochMatches, leaseUntil, lockJob, lockJobRow, noEndingWhere, ownerWhere, SUPERSEDED, type EpochSaid } from '@/lib/computer-owner';
 import { POOL_BUSY_WORDS } from '@/lib/task-receipt-words';
@@ -2607,10 +2607,14 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   for (const reservation of lapsedCalls) {
     const callId = reservation.jobId && reservation.reservationKey.startsWith(callRoomKey(reservation.jobId, '')) ? reservation.reservationKey.slice(callRoomKey(reservation.jobId, '').length) : null;
     // A room whose call was never admitted (its refusal could not give the room back) is released, not written as usage the person is charged for: only an admitted call that never reported is unknown usage
-    if (reservation.jobId && callId && !(await hasCallAdmission(prisma, reservation.jobId, callId).catch(() => true))) {
-      await releaseRoom({ key: reservation.reservationKey }, now);
-      released++;
-      continue;
+    if (reservation.jobId && callId) {
+      const look = await releaseUnadmittedCallRoom(reservation.jobId, callId, reservation.reservationKey, now);
+      // A look that failed leaves the room for the next sweep: an unread call is neither released nor booked as usage
+      if (look === 'unknown') continue;
+      if (look === 'released') {
+        released++;
+        continue;
+      }
     }
     const settled =
       reservation.jobId && callId
