@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, PackInventory, ProviderDay, RestoreResult, RestoreSource, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
+import { markCommand, parseMark, type MachineMark } from '@/lib/computer-fence-script';
 import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, TurnNotSent, type Instance, type NetworkPolicy } from '@/lib/agent37/client';
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros, restingMicrosPerMinute } from '@/lib/agent37/rates';
@@ -337,7 +338,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * The first time on a machine it also writes Hermes' config, and Hermes only reads that when it starts: so the machine is stopped and started
    * once, and `universe-up` is run again.
    */
-  async ready(ref: string): Promise<void> {
+  async ready(ref: string): Promise<MachineMark | null> {
     let instance = await this.settle(ref);
     // A part that was still coming up (a browser right after a machine woke or restarted): `universe-up` is safe to run again, so it is
     // asked once more, after the first ask and after the restart
@@ -355,11 +356,16 @@ export class Agent37ComputerProvider implements ComputerProvider {
       up = await again(await this.up(ref));
     }
     if (!up.ready) throw new Error(`The computer is not ready${up.reason ? ` (${up.reason})` : ''}`);
-    // Last, once the computer is as it should be and before any job has used it: the note the take-over fence tells the agent's processes by
-    // (everything already running is the computer's own, everything started after is the agent's). As root, so the agent cannot write it.
-    // Run again on the same boot it keeps the first note. A computer that cannot be marked cannot be fenced, so it is not ready.
-    const marked = await this.client.exec(ref, 'universe-mark', { user: 'root', timeoutMs: 30_000 });
-    if (!/(^|\n)marked=1\b/.test(marked.stdout)) throw new Error(`The computer could not be marked${/marked=0 reason=([a-z_]+)/.exec(marked.stdout)?.[1] ? ` (${/marked=0 reason=([a-z_]+)/.exec(marked.stdout)?.[1]})` : ''}`);
+    // Last, once the computer is as it should be and before any job has used it: the mark the take-over fence tells the agent's processes by (everything already
+    // running is the computer's own, everything started after is the agent's), read here and kept by Orbit, never by the computer: the agent has admin rights there and could
+    // rewrite a note. Read as the normal user (root cannot read what the agent's processes are). A computer that cannot be marked cannot be fenced, so it is not ready.
+    const done = await this.client.exec(ref, markCommand(), { timeoutMs: 30_000 });
+    const mark = done.exitCode === 0 ? parseMark(done.stdout) : null;
+    if (!mark) {
+      const reason = /marked=0 reason=([a-z_]+)/.exec(done.stdout)?.[1];
+      throw new Error(`The computer could not be marked${reason ? ` (${reason})` : ''}`);
+    }
+    return mark;
   }
 
   /** Runs `universe-up` and reads what it says. */

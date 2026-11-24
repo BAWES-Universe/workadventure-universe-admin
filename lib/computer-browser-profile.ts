@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { ownsBrick } from '@/lib/brick';
+import { refreshMarkParts } from '@/lib/computer-mark';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { isSafeJobId, readSignInsAnswer, signInsCommand, type SignInsAction, type SignInsAnswer } from '@/lib/computer-browser-profile-script';
 import { CLEAN_CLAIM_STALE_MS, MACHINE_COMMAND_MS } from '@/lib/computer-values';
@@ -87,6 +88,7 @@ function keptOfPark(answer: SignInsResult): boolean | undefined {
 const isHeld = (status: string) => status === 'running' || status === 'waiting';
 
 interface Machine {
+  botId: string;
   ref: string;
   provider: ComputerProvider;
 }
@@ -96,7 +98,7 @@ async function awakeMachine(botId: string): Promise<Machine | null> {
   const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { provider: true, providerRef: true, machine: true } });
   const provider = getComputerProvider();
   if (!row?.providerRef || !provider || row.provider !== provider.kind || row.machine !== 'working') return null;
-  return { ref: row.providerRef, provider };
+  return { botId, ref: row.providerRef, provider };
 }
 
 /** When the job was last paused while it ran (its last pause row), or null when it never was. */
@@ -162,7 +164,10 @@ async function withClaim<T>(botId: string, work: (renew: () => Promise<boolean>)
 async function onMachine(machine: Machine, action: SignInsAction, jobId: string, keep: string[], hours: number, /** The pause a restore brings back, or a commit is for (N29). */ generation = 0): Promise<SignInsAnswer> {
   try {
     const done = await machine.provider.exec(machine.ref, signInsCommand(action, jobId, keep, hours, undefined, generation), { user: 'root', timeoutMs: COMMAND_MS });
-    return readSignInsAnswer(action, done.exitCode, done.stdout);
+    const answer = readSignInsAnswer(action, done.exitCode, done.stdout);
+    // These put a new browser up (park and clear start an empty one, a restore starts the job's own): the parts the take-over fence keeps are saved again. Best effort, never throws.
+    if (answer.done !== 'failed' && (action === 'park' || action === 'restore' || action === 'clear')) await refreshMarkParts(machine.botId, machine.ref, machine.provider);
+    return answer;
   } catch (error) {
     console.error(`[Computer] Could not ${action} a job’s browser sign-ins:`, error instanceof Error ? error.message : 'unknown');
     return { done: 'failed', reason: 'unreachable', cookies: 0, pages: 0 };

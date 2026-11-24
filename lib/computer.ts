@@ -81,6 +81,9 @@ import {
   settlePark,
   settleResumedBrowser,
 } from '@/lib/computer-browser-profile';
+import { markUpdate, refreshMarkParts, savedMark, MARK_SELECT } from '@/lib/computer-mark';
+import { fenceCommand } from '@/lib/computer-fence-script';
+import type { MachineMark } from '@/lib/computer-fence-script';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
 import { CONSENT_WINDOW_MS, startAnswerBody } from '@/lib/computer-start-answer';
 export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
@@ -1970,11 +1973,12 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
       void prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "wake_epoch" = ${mine}`.catch(() => undefined);
     }, wakeTiming.beatMs);
     beat.unref?.();
+    let mark: MachineMark | null = null;
     try {
       await provider.wake(ref);
       try {
-        // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready
-        await provider.ready(ref);
+        // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready. Answers the fence's mark (kept in Orbit, written below with the machine's state)
+        mark = (await provider.ready(ref)) ?? null;
       } catch (error) {
         // Awake and not ready: no job will use it, so it is put to sleep (and tried again by the sweep until proved) instead of left running. Only while this start still holds the machine (its ticket is the Brick's
         // number): a replacement that woke it meanwhile keeps it awake, and this start only throws its own error (the job it served is ended or left by the reservation guard as before)
@@ -2000,11 +2004,12 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
     }
     // Only while this start's ticket is still the Brick's: a start that was replaced while it waited for readiness writes nothing
     const wrote = await prisma.$transaction(async (tx) => {
-      const held = await tx.$queryRaw<Array<{ wake_epoch: number }>>`SELECT "wake_epoch" FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
+      const held = await tx.$queryRaw<Array<{ wake_epoch: number; mark_boot_id: string | null }>>`SELECT "wake_epoch", "mark_boot_id" FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
       if (held[0]?.wake_epoch !== mine) return false;
       await tx.brickComputer.update({
         where: { botId },
-        data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: older, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
+        // The fence's mark is saved with the state that says the machine works, and only here (this start still holds the wake ticket); on the same boot the first one stays
+        data: { ...(mark ? markUpdate({ markBootId: held[0].mark_boot_id }, mark) : {}), machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: older, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
       });
       return true;
     });
@@ -2442,6 +2447,8 @@ async function closeOutIfUnheld(botId: string): Promise<FilesList | null> {
     const cleaned = await provider.exec(row.providerRef, 'universe-clean', { timeoutMs: 20_000 });
     // A profile that could not be removed stays marked on the machine, and the next start-up removes it before any job can use it
     if (cleaned.exitCode !== 0 || !/(^|\n)cleaned=1\s*$/.test(cleaned.stdout)) console.error('[Computer] The browser could not be cleared after a job; it is cleared before the next one');
+    // The clean-up brought a new browser up: its parts are saved again for the fence (it keeps only what the saved list names)
+    else await refreshMarkParts(botId, row.providerRef, provider);
   } catch (error) {
     console.error('[Computer] Could not clear the browser after a job:', error instanceof Error ? error.message : 'unknown');
   } finally {
@@ -3471,14 +3478,14 @@ async function cancelAgentTurn(botId: string, responseId: string): Promise<void>
   await provider.cancelTurn(row.providerRef, responseId).catch((error) => console.error('[Computer] Could not cancel a turn:', error instanceof Error ? error.message : 'unknown'));
 }
 
-/** What `universe-fence --check` prints when nothing the agent started is left running. The command is in the image (it knows which processes the desktop needs). */
+/** What the fence's check prints when nothing the agent started is left running. The fence is sent by Orbit with every call (lib/computer-fence-script.ts) together with the mark Orbit holds. */
 const FENCE_CLEAR = /(^|\n)remaining=0\s*$/;
 const FENCE_TRIES = 3;
 
 /**
  * The take-over fence's second half (build handoff v2, section 4), done on the machine before the person has the keyboard: the turn
- * the agent is running is cancelled, every process it started is stopped (the image's `universe-fence` keeps the desktop, the screen
- * and the agent's gateway), and a second look proves none is left. A fence that cannot be proved stops the machine: the person
+ * the agent is running is cancelled, every process it started is stopped (the fence keeps what Orbit's mark names: the desktop, the screen
+ * and the agent's gateway), and a second look proves none is left. A computer with no mark for its boot is not fenced and nothing is proved. A fence that cannot be proved stops the machine: the person
  * then has no screen, rather than a screen with an agent still acting behind it. The disk is kept either way. Never throws.
  */
 export async function fenceMachine(botId: string, stillLeader?: StillLeader): Promise<'done' | 'failed' | 'skipped' | 'lost'> {
@@ -3495,11 +3502,14 @@ export async function fenceMachine(botId: string, stillLeader?: StillLeader): Pr
       if (turn.agentResponseId) await provider.cancelTurn(ref, turn.agentResponseId).catch((error) => console.error('[Computer] Could not cancel a turn:', error instanceof Error ? error.message : 'unknown'));
       await prisma.computerJob.updateMany({ where: { id: turn.id, agentResponseId: turn.agentResponseId }, data: { agentResponseId: null } });
     }
-    for (let attempt = 0; attempt < FENCE_TRIES; attempt++) {
+    // The mark is Orbit's own (never read back from the computer, where the agent could have rewritten it). A computer row with none (a machine made ready before marks
+    // were kept here, or one whose mark was damaged) cannot be proved clear: it goes the way an unproved fence goes, and the next wake takes a mark
+    const mark = savedMark(await prisma.brickComputer.findUnique({ where: { botId }, select: MARK_SELECT }));
+    for (let attempt = 0; attempt < FENCE_TRIES && mark; attempt++) {
       if (stillLeader && !(await stillLeader())) return 'lost';
       try {
-        await provider.exec(ref, 'universe-fence', { timeoutMs: 30_000 });
-        const check = await provider.exec(ref, 'universe-fence --check', { timeoutMs: 30_000 });
+        await provider.exec(ref, fenceCommand(mark), { timeoutMs: 30_000 });
+        const check = await provider.exec(ref, fenceCommand(mark, true), { timeoutMs: 30_000 });
         if (check.exitCode === 0 && FENCE_CLEAR.test(check.stdout)) return 'done';
       } catch (error) {
         console.error('[Computer] The fence did not run:', error instanceof Error ? error.message : 'unknown');
