@@ -765,7 +765,7 @@ describe('cold storage operations on a computer', () => {
         if (!asked) return 'ok';
         const at = Number(asked[1]);
         const piece = tweak(text.slice(at, at + Number(asked[2])), at);
-        return `listpiece=${piece}\n`;
+        return `listpiece=${piece}|end|\n`;
       });
     };
 
@@ -799,7 +799,7 @@ describe('cold storage operations on a computer', () => {
       // Same length, one character changed in the last piece: only the SHA-256 can tell
       holding(w, list, {}, (piece, at) => (at > 0 ? `${piece.slice(0, -2)}9${piece.slice(-1)}` : piece));
       await expect(p.prepack('m1')).rejects.toThrow('could not be read');
-      w.setExec((command) => (command === 'universe-cold prepack' ? line(list) : { stdout: 'listpiece=x\n', truncated: true }));
+      w.setExec((command) => (command === 'universe-cold prepack' ? line(list) : { stdout: 'listpiece=x|end|\n', truncated: true }));
       await expect(p.prepack('m1')).rejects.toThrow('could not be read');
       w.setExec((command) => (command === 'universe-cold prepack' ? line(list) : { stdout: '', exitCode: 1 }));
       await expect(p.prepack('m1')).rejects.toThrow('could not be read');
@@ -823,7 +823,7 @@ describe('cold storage operations on a computer', () => {
       w.setExec(() => 'noise only\n');
       await expect(p.prepack('m1')).rejects.toThrow('could not be inventoried');
       // A short line that survived the cut whole is read as it is
-      w.setExec((command) => (command === 'universe-cold prepack' ? { stdout: `${'noise\n'.repeat(1000)}${line({ files: [], packages: [] })}`, truncated: true } : { stdout: 'listpiece={"files":[],"packages":[]}\n' }));
+      w.setExec((command) => (command === 'universe-cold prepack' ? { stdout: `${'noise\n'.repeat(1000)}${line({ files: [], packages: [] })}`, truncated: true } : { stdout: 'listpiece={"files":[],"packages":[]}|end|\n' }));
       await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: { files: [], packages: [] } });
     });
 
@@ -909,6 +909,141 @@ describe('cold storage operations on a computer', () => {
         expect(w.execs.some((entry) => entry.command.startsWith('universe-cold finish'))).toBe(false);
         w.execs.length = 0;
       }
+    });
+
+    it('every piece, sent or read, has a name of its own, so Agent37 runs it again only when we mean it to and returns the first answer to a repeat of the same ask', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      holding(w, list);
+      await p.prepack('m1');
+      w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.startsWith('universe-cold list-put') ? { stdout: `listput=1 size=${asPut(command)}\n` } : 'finished=1\n'));
+      await p.restoreInto('m1', { ...source, outside: list as never });
+      const named = w.execs.filter((entry) => /list-(piece|put)/.test(entry.command));
+      expect(named.length).toBeGreaterThan(12);
+      const names = named.map((entry) => (entry.options as { name?: string }).name);
+      expect(names.every((name) => typeof name === 'string' && /^cold-(read|put):[0-9a-f]{8}:\d+/.test(name))).toBe(true);
+      expect(new Set(names).size).toBe(names.length);
+      // The same list sent twice does not reuse a name (a name that is remembered would return the first answer for the second send)
+      const again = w.execs.length;
+      await p.restoreInto('m1', { ...source, outside: list as never });
+      const second = w.execs.slice(again).filter((entry) => entry.command.startsWith('universe-cold list-put')).map((entry) => (entry.options as { name?: string }).name);
+      expect(second.some((name) => names.includes(name))).toBe(false);
+    });
+
+    /** The size a put command would leave on the computer (its offset plus the piece it carries). */
+    const asPut = (command: string) => {
+      const found = /^universe-cold list-put (\d+) <<'(LIST_[0-9a-f]{24})'\n([^\n]*)\n\2$/.exec(command)!;
+      return Number(found[1]) + found[3].length;
+    };
+
+    it('one piece that fails once does not fail the restore: the whole send starts again from the first piece, which makes the file new', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      for (const failure of ['refused', 'thrown', 'cut'] as const) {
+        w.execs.length = 0;
+        let failed = false;
+        w.setExec((command) => {
+          if (command.startsWith('universe-cold restore')) return 'restored=1\n';
+          if (!command.startsWith('universe-cold list-put')) return 'finished=1\n';
+          if (!failed && command.startsWith('universe-cold list-put 49152 ')) {
+            failed = true;
+            if (failure === 'thrown') throw new Agent37Unreached('lost');
+            return failure === 'refused' ? 'listput=0 reason=not_written\n' : { stdout: 'listput=1 size=1\n', truncated: true };
+          }
+          return `listput=1 size=${asPut(command)}\n`;
+        });
+        await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: true, reason: null });
+        const offsets = w.execs.filter((entry) => entry.command.startsWith('universe-cold list-put')).map((entry) => Number(/list-put (\d+)/.exec(entry.command)![1]));
+        // 0, 49152 (failed), then again from 0 and all the way through
+        expect(offsets.slice(0, 2)).toEqual([0, 49152]);
+        expect(offsets.slice(2, 4)).toEqual([0, 49152]);
+        expect(offsets.at(-1)).toBeGreaterThan(400_000);
+        const finishes = w.execs.filter((entry) => entry.command.startsWith('universe-cold finish'));
+        expect(finishes).toHaveLength(1);
+      }
+    });
+
+    it('a send that fails on every try is a failed restore (a refusal) or the error itself (Agent37 not reached), after three tries, and finish never runs', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : 'listput=0 reason=not_written\n'));
+      await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_transfer' });
+      expect(w.execs.filter((entry) => entry.command.startsWith('universe-cold list-put 0 '))).toHaveLength(3);
+      w.execs.length = 0;
+      w.setExec((command) => {
+        if (command.startsWith('universe-cold restore')) return 'restored=1\n';
+        throw new Agent37Unreached('down');
+      });
+      await expect(p.restoreInto('m1', { ...source, outside: list as never })).rejects.toThrow('down');
+      expect(w.execs.filter((entry) => entry.command.startsWith('universe-cold list-put 0 '))).toHaveLength(3);
+      expect(w.execs.some((entry) => entry.command.startsWith('universe-cold finish'))).toBe(false);
+    });
+
+    it('a piece read that fails once (thrown, short, cut, no exit 0) is asked again and the list is still read whole; three failures in a row are an error', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      const text = JSON.stringify(list);
+      for (const failure of ['thrown', 'short', 'cut', 'exit'] as const) {
+        for (const at of [0, 200_000]) {
+          let failed = 0;
+          w.setExec((command) => {
+            if (command === 'universe-cold prepack') return line(list);
+            const asked = /^universe-cold list-piece (\d+) (\d+)$/.exec(command)!;
+            const from = Number(asked[1]);
+            const piece = text.slice(from, from + Number(asked[2]));
+            if (from === at && failed < 1) {
+              failed++;
+              if (failure === 'thrown') throw new Agent37Unreached('lost');
+              if (failure === 'short') return `listpiece=${piece.slice(0, -1)}|end|\n`;
+              if (failure === 'cut') return { stdout: `listpiece=${piece}|end|\n`, truncated: true };
+              return { stdout: '', exitCode: 1 };
+            }
+            return `listpiece=${piece}|end|\n`;
+          });
+          await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: list });
+          expect(failed).toBe(1);
+        }
+      }
+      let failures = 0;
+      w.setExec((command) => {
+        if (command === 'universe-cold prepack') return line(list);
+        if (/ 200000 \d+$/.test(command)) {
+          failures++;
+          throw new Agent37Unreached('lost');
+        }
+        const asked = /^universe-cold list-piece (\d+) (\d+)$/.exec(command)!;
+        return `listpiece=${text.slice(Number(asked[1]), Number(asked[1]) + Number(asked[2]))}|end|\n`;
+      });
+      await expect(p.prepack('m1')).rejects.toThrow('lost');
+      expect(failures).toBe(3);
+    });
+
+    it('a piece that ends in a space is read whole even when the end of the answer is trimmed on the way (the computer prints an end marker after it)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      // A path with a space as the very last character of the first piece (a piece is 200,000 characters)
+      const original = JSON.stringify(crowd(3000));
+      expect(original[199_999]).toBe('x');
+      const padded = JSON.parse(`${original.slice(0, 199_999)} ${original.slice(200_000)}`) as ReturnType<typeof crowd>;
+      const whole = JSON.stringify(padded);
+      expect(whole[199_999]).toBe(' ');
+      w.setExec((command) => {
+        if (command === 'universe-cold prepack') return line(padded);
+        const asked = /^universe-cold list-piece (\d+) (\d+)$/.exec(command)!;
+        const from = Number(asked[1]);
+        // What the script prints, after a transport that strips white space from the end of an answer
+        return { stdout: `listpiece=${whole.slice(from, from + Number(asked[2]))}|end|\n`.trimEnd() };
+      });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: padded });
     });
 
     it('a list that fits one command is still sent as it always was (no pieces)', async () => {

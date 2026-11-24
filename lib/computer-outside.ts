@@ -65,6 +65,10 @@ export function readOutsideManifest(value: unknown): OutsideManifest | null {
 /** A list is read back from a computer this many characters at a time, and sent to one this many (a single command line is capped near 128 KiB by Linux, and one answer at 512 KB by Agent37). */
 export const LIST_READ_PIECE = 200_000;
 export const LIST_SEND_PIECE = 48 * 1024;
+/** What `list-piece` prints after the text of a piece (on the same line), so a piece that ends in a space is read whole even if the end of the answer is trimmed on the way. */
+export const LIST_PIECE_END = '|end|';
+/** How many times a piece is read again, and how many times a whole send is started again from the first piece, before it is given up. */
+export const LIST_TRIES = 3;
 /** The largest list a computer may hand over: 5000 files at the longest path is about 21 MB. */
 export const LIST_MAX_BYTES = 32 * 1024 * 1024;
 /** A list that fits a command (heredoc) in one piece is sent as it is; a longer one goes in pieces. */

@@ -1447,7 +1447,8 @@ def list_piece():
     if "\n" in text:
         print("listpiece_failed reason=unreadable")
         return 1
-    print("listpiece=" + text)
+    # The marker after the text keeps a piece that ends in a space whole when whatever carries the answer trims the end of it
+    print("listpiece=" + text + "|end|")
     return 0
 
 def list_put():

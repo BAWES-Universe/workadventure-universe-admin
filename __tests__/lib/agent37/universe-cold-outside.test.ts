@@ -98,7 +98,7 @@ function listOf(w: World, out: Record<string, unknown>, piece = 200_000): Manife
   while (text.length < bytes) {
     const want = Math.min(piece, bytes - text.length);
     const got = cold(w, `list-piece ${text.length} ${want}`, w.fsA);
-    const data = /(^|\n)listpiece=([^\n]*)/.exec(got.stdout)?.[2];
+    const data = /(^|\n)listpiece=([^\n]*)\|end\|(\n|$)/.exec(got.stdout)?.[2];
     expect(data).toHaveLength(want);
     text += data;
   }
@@ -591,6 +591,21 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     sendInPieces(w, bad);
     expect(finishFrom(w, bad).stdout).toContain('finished=0 reason=outside_manifest');
     expect(writtenOnB(w)).toEqual([]);
+  });
+
+  it('every slice ends with a marker on its line, so a slice that ends in a space is whole after the end of the answer is trimmed', () => {
+    const w = world();
+    fs.writeFileSync(path.join(w.fsA, 'opt/tool/ends with a space '), 'x');
+    const out = printed(cold(w, 'prepack', w.fsA).stdout);
+    const bytes = out.manifest_bytes as number;
+    const text = JSON.stringify(packed(w));
+    expect(text).toContain('ends with a space "');
+    // Ask for a slice that ends exactly at that space
+    const cut = text.indexOf('ends with a space ') + 'ends with a space '.length;
+    const got = cold(w, `list-piece 0 ${cut}`, w.fsA).stdout;
+    expect(got).toBe(`listpiece=${text.slice(0, cut)}|end|\n`);
+    expect(got.trimEnd().endsWith('|end|')).toBe(true);
+    expect(bytes).toBeGreaterThan(cut);
   });
 
   it('a file name that is not valid UTF-8 (a path or a link target) makes the computer blocked, not a list a database would refuse', () => {

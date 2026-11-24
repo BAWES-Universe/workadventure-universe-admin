@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { LIST_INLINE_BYTES, LIST_MAX_BYTES, LIST_READ_PIECE, LIST_SEND_PIECE, asciiJson, checkOutsideManifest, readOutsideManifest, type OutsideManifest } from '@/lib/computer-outside';
+import { LIST_INLINE_BYTES, LIST_MAX_BYTES, LIST_PIECE_END, LIST_READ_PIECE, LIST_SEND_PIECE, LIST_TRIES, asciiJson, checkOutsideManifest, readOutsideManifest, type OutsideManifest } from '@/lib/computer-outside';
 import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, PackInventory, ProviderDay, RestoreResult, RestoreSource, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
 import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, TurnNotSent, type Instance, type NetworkPolicy } from '@/lib/agent37/client';
@@ -563,13 +563,11 @@ export class Agent37ComputerProvider implements ComputerProvider {
    */
   private async readList(ref: string, bytes: number, sha256: string): Promise<unknown> {
     const whole = () => new Error('The computer\'s list of what is outside its home folder could not be read');
+    const transfer = randomUUID().slice(0, 8);
     let text = '';
     while (text.length < bytes) {
       const want = Math.min(LIST_READ_PIECE, bytes - text.length);
-      const got = await this.client.exec(ref, `universe-cold list-piece ${text.length} ${want}`, { user: 'root', timeoutMs: 60_000 });
-      const piece = got.exitCode === 0 && !got.truncated ? /(^|\n)listpiece=([^\n]*)/.exec(got.stdout)?.[2] : undefined;
-      if (piece === undefined || piece.length !== want) throw whole();
-      text += piece;
+      text += await this.readPiece(ref, transfer, text.length, want);
     }
     if (createHash('sha256').update(text, 'latin1').digest('hex') !== sha256) throw whole();
     try {
@@ -577,6 +575,26 @@ export class Agent37ComputerProvider implements ComputerProvider {
     } catch {
       throw whole();
     }
+  }
+
+  /**
+   * One piece of the list. Reading changes nothing, so a piece that failed (Agent37 busy or not reached, a lost answer, a short or cut answer) is asked again up to `LIST_TRIES` times, each ask with
+   * its own name, which makes Agent37 run it again; an ask that is sent again after a lost answer carries the same name, so Agent37 returns its first answer instead of running it twice.
+   */
+  private async readPiece(ref: string, transfer: string, at: number, want: number): Promise<string> {
+    let last: unknown = null;
+    for (let attempt = 0; attempt < LIST_TRIES; attempt++) {
+      if (attempt > 0) await this.pause(1_000);
+      try {
+        const got = await this.client.exec(ref, `universe-cold list-piece ${at} ${want}`, { user: 'root', timeoutMs: 60_000, name: `cold-read:${transfer}:${at}:${attempt}` });
+        const marked = got.exitCode === 0 && !got.truncated ? new RegExp(`(?:^|\\n)listpiece=([^\\n]*)${LIST_PIECE_END.replace(/[|]/g, '\\|')}(?:\\n|$)`).exec(got.stdout)?.[1] : undefined;
+        if (marked !== undefined && marked.length === want) return marked;
+        last = new Error('The computer\'s list of what is outside its home folder could not be read');
+      } catch (error) {
+        last = error;
+      }
+    }
+    throw last;
   }
 
   /** The home folder as a tar.gz stream. Only for a machine that is awake (the address wakes a sleeper). */
@@ -643,18 +661,38 @@ export class Agent37ComputerProvider implements ComputerProvider {
     return { ok: true, reason: null, ms: this.now() - started };
   }
 
-  /** Sends a list to the computer in pieces of at most `LIST_SEND_PIECE` characters (plain ASCII, so the cut is never inside a character). Null when a piece was not taken exactly as sent. */
+  /**
+   * Sends a list to the computer in pieces of at most `LIST_SEND_PIECE` characters (plain ASCII, so the cut is never inside a character). Null when a piece was not taken exactly as sent, after
+   * the whole send was started again from the first piece up to `LIST_TRIES` times (safe: the first piece makes the file new, so a late piece of an earlier try can only append to the file that
+   * was removed). Every piece has a name of its own in its try, so a command that is sent again after a lost answer returns the first answer instead of running twice. A failure that is not a
+   * refusal (Agent37 not reached on every try) is thrown, as for any other command on the computer.
+   */
   private async sendList(ref: string, outside: OutsideManifest): Promise<{ bytes: number; sha256: string } | null> {
     const text = asciiJson(outside);
     if (text.length > LIST_MAX_BYTES) return null;
+    let last: unknown = null;
+    for (let attempt = 0; attempt < LIST_TRIES; attempt++) {
+      if (attempt > 0) await this.pause(1_000);
+      try {
+        if (await this.sendListOnce(ref, text, randomUUID().slice(0, 8))) return { bytes: text.length, sha256: createHash('sha256').update(text, 'latin1').digest('hex') };
+        last = null;
+      } catch (error) {
+        last = error;
+      }
+    }
+    if (last !== null) throw last;
+    return null;
+  }
+
+  private async sendListOnce(ref: string, text: string, transfer: string): Promise<boolean> {
     // A line of its own that no piece can contain (a piece is one line cut from a list, and this has a random part)
     const end = `LIST_${randomBytes(12).toString('hex')}`;
     for (let at = 0; at < text.length; at += LIST_SEND_PIECE) {
       const piece = text.slice(at, at + LIST_SEND_PIECE);
-      const put = await this.client.exec(ref, `universe-cold list-put ${at} <<'${end}'\n${piece}\n${end}`, { user: 'root', timeoutMs: 60_000 });
-      if (put.exitCode !== 0 || put.truncated || !new RegExp(`(^|\\n)listput=1 size=${at + piece.length}(\\n|$)`).test(put.stdout)) return null;
+      const put = await this.client.exec(ref, `universe-cold list-put ${at} <<'${end}'\n${piece}\n${end}`, { user: 'root', timeoutMs: 60_000, name: `cold-put:${transfer}:${at}` });
+      if (put.exitCode !== 0 || put.truncated || !new RegExp(`(^|\\n)listput=1 size=${at + piece.length}(\\n|$)`).test(put.stdout)) return false;
     }
-    return { bytes: text.length, sha256: createHash('sha256').update(text, 'latin1').digest('hex') };
+    return true;
   }
 
   /** Asks again until the provider says the machine is gone and no longer in its list (so no longer billed), for up to two minutes. */
