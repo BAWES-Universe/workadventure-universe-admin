@@ -61,9 +61,26 @@ const result = (state: SignInsState, reason: string | null = null, answer?: Sign
  * Writes whether a pause put a browser away: the pause `pause` names (its number), or the job's LAST pause when none is named. A park or a wipe that settles
  * for one pause names it, so a stale one never writes onto a later pause of the same job (CodeRabbit A9). Never throws.
  */
-async function recordKept(jobId: string, kept: boolean, pause?: number): Promise<void> {
-  const target = pause ?? (await prisma.computerJobPause.findFirst({ where: { jobId }, orderBy: { n: 'desc' }, select: { n: true } }).catch(() => null))?.n;
-  if (target !== undefined) await prisma.computerJobPause.updateMany({ where: { jobId, n: target }, data: { signInsKept: kept } }).catch((error) => console.error('[Computer] Could not keep what a pause put away:', error instanceof Error ? error.message : 'unknown'));
+async function recordKept(jobId: string, kept: boolean, pause?: number): Promise<boolean> {
+  try {
+    const target = pause ?? (await prisma.computerJobPause.findFirst({ where: { jobId }, orderBy: { n: 'desc' }, select: { n: true } }))?.n;
+    if (target !== undefined) await prisma.computerJobPause.updateMany({ where: { jobId, n: target }, data: { signInsKept: kept } });
+    return true;
+  } catch (error) {
+    console.error('[Computer] Could not keep what a pause put away:', error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
+}
+
+/**
+ * What a park came to, as it is kept on the pause's row: true when the browser was put away (or already was), false when there was nothing to put away or the park was left for the wipe, nothing when the outcome says nothing of
+ * the pause's own browser. The marker the pause left on the machine is let go only once this is written: a park that was proved but whose record failed leaves the marker, and the next settlement writes it (a pause whose result is never
+ * recorded would answer "not ready" for ever; CodeRabbit on #1025, Opus's O45 note).
+ */
+function keptOfPark(answer: SignInsResult): boolean | undefined {
+  if (answer.state === 'parked' || (answer.state === 'left' && answer.reason === 'already')) return true;
+  if (answer.state === 'left' && (answer.reason === 'nothing_saved' || answer.reason === 'wipe_later')) return false;
+  return undefined;
 }
 
 /** A job that is on the machine now (running, or waiting for its person). */
@@ -202,10 +219,10 @@ export async function parkProfile(botId: string, jobId: string, now: Date = new 
     });
     const answer = logged('put away', outcome ?? result('left', 'not_awake'));
     // What this pause came to is kept on its own row: a job that found nothing to put away has no browser of its own to wait for (`parkWorthWaitingFor`)
-    if (answer.state === 'parked' || (answer.state === 'left' && answer.reason === 'already')) await recordKept(jobId, true, generation);
-    else if (answer.state === 'left' && (answer.reason === 'nothing_saved' || answer.reason === 'wipe_later')) await recordKept(jobId, false, generation);
-    // The machine waits for no job's browser now (a park that FAILED, or a machine that was not awake, leaves the pointer: nothing else starts there until the sweep has put it right)
-    if (parkDone(answer)) await clearParkPending(botId, jobId, { pauses: generation });
+    const wasKept = keptOfPark(answer);
+    const recorded = wasKept === undefined ? true : await recordKept(jobId, wasKept, generation);
+    // The machine waits for no job's browser now (a park that FAILED, or a machine that was not awake, leaves the pointer: nothing else starts there until the sweep has put it right). A park whose result could not be recorded leaves it too
+    if (parkDone(answer) && recorded) await clearParkPending(botId, jobId, { pauses: generation });
     return answer;
   } catch (error) {
     console.error('[Computer] Could not put a job’s browser sign-ins away:', error instanceof Error ? error.message : 'unknown');
@@ -553,6 +570,9 @@ export async function settlePark(botId: string, jobId: string, outcome: SignInsR
     return 'settled';
   }
   if (outcome && parkDone(outcome) && !machine?.parkPendingWipe) {
+    // The result is written again here (the same value, for the same pause): the park's own write may have failed, and the marker stays until it is on the row (the sweep finishes it otherwise)
+    const wasKept = keptOfPark(outcome);
+    if (wasKept !== undefined && !(await recordKept(jobId, wasKept, generation))) return 'waiting';
     await clearParkPending(botId, jobId, generation === undefined ? undefined : { pauses: generation });
     return 'settled';
   }
@@ -560,7 +580,7 @@ export async function settlePark(botId: string, jobId: string, outcome: SignInsR
   // A job on the machine uses the browser: nothing is emptied under it, and the marker (with the wipe it carries) stays until none is left, when the pass that follows its ending (or the sweep) empties it (round 8, F)
   if (cleared.state !== 'cleared') return 'waiting';
   // The browser was emptied: this pause kept nothing, so the job has no browser of its own to wait for when it carries on
-  if (cleared.state === 'cleared') await recordKept(jobId, false, generation);
+  if (cleared.state === 'cleared' && !(await recordKept(jobId, false, generation))) return 'waiting';
   await clearParkPending(botId, jobId, generation === undefined ? undefined : { pauses: generation });
   return 'wiped';
 }

@@ -65,6 +65,38 @@ describe('a step label never carries a secret', () => {
     expect(Array.from(cleanStepLabel('é'.repeat(300)) ?? '')).toHaveLength(200);
   });
 
+  it('Sentry on #1025 (S1): real credentials in a header or a flag are still hidden, and plain words that only look like one are kept', () => {
+    const real = [
+      'Basic dXNlcjpwYXNz',
+      'basic dXNlcjpwYXNz',
+      'BASIC dXNlcjpwYXNz',
+      'Basic YWRtaW46c2VjcmV0',
+      'Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==',
+      'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0',
+      'Bearer abc_def_ghi',
+      'bearer abcdef123456',
+      'curl -H "Authorization: Basic dXNlcjpwYXNz" https://x.test',
+      'Cookie: sid=abc',
+      'set-cookie: a=b',
+      'Cookie=sid123',
+      'login --password hunter2',
+      'x --token=abc',
+      'run -auth x',
+      'curl --api-key abc',
+      '--password hunter2',
+      'run "--token=abc"',
+    ];
+    for (const text of real) {
+      expect(hasSecretShape(text)).toBe(true);
+      expect(cleanStepLabel(`${text} and then more words`)).toBe(STEP_LABEL_FALLBACK);
+    }
+    const plain = ['Basic information', 'Basic instructions', 'Basic Information about the visa', 'BASIC INSTRUCTIONS', 'basic input/output', 'basic set-up steps', 'Basic e-mail', 'Bearer of news', 'Cookie: ', 'Accept the Cookie:', 'pre-auth login', 're-auth page', 'post-token refresh now'];
+    for (const text of plain) {
+      expect(hasSecretShape(text)).toBe(false);
+      expect(cleanStepLabel(text)).toBe(text.trim());
+    }
+  });
+
   it('says nothing when there is nothing', () => {
     expect(cleanStepLabel(null)).toBeNull();
     expect(cleanStepLabel(undefined)).toBeNull();

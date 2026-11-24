@@ -1155,6 +1155,99 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
     });
   });
 
+  describe('Opus on #1025 (O45): a park that was proved but whose record could not be written never leaves the pause unrecorded for good', () => {
+    const markOf = async (botId: string) => (await prisma.brickComputer.findUniqueOrThrow({ where: { botId }, select: { parkPendingJobId: true } })).parkPendingJobId;
+    const keptOf = async (jobId: string) => (await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId, n: 1 } } })).signInsKept;
+    const failWrites = (times: number | 'always') => {
+      const real = prisma.computerJobPause.updateMany.bind(prisma.computerJobPause);
+      let left = times === 'always' ? Infinity : times;
+      return jest.spyOn(prisma.computerJobPause, 'updateMany').mockImplementation(((args: Parameters<typeof real>[0]) => {
+        if (left > 0) {
+          left--;
+          return Promise.reject(new Error('the database is not answering')) as never;
+        }
+        return real(args) as never;
+      }) as never);
+    };
+
+    it('the park\'s own write fails once: the marker stays, and the settlement that follows writes the result and lets the marker go', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
+      const spy = failWrites(1);
+      let parked;
+      try {
+        parked = await parkProfile(sara.brickId, visa.id, NOW);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(parked).toMatchObject({ state: 'parked' });
+      // Proved on the machine, but not recorded: the machine still waits for this pause
+      expect(await markOf(sara.brickId)).toBe(visa.id);
+      expect(await keptOf(visa.id)).toBeNull();
+      expect(await settlePark(sara.brickId, visa.id, parked, NOW)).toBe('settled');
+      expect(await keptOf(visa.id)).toBe(true);
+      expect(await markOf(sara.brickId)).toBeNull();
+    });
+
+    it('both writes fail: the settlement waits with the marker, and the sweep (finishParkOf) records the result and lets the marker go once the database answers', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
+      const spy = failWrites('always');
+      try {
+        const parked = await parkProfile(sara.brickId, visa.id, NOW);
+        expect(await settlePark(sara.brickId, visa.id, parked, NOW)).toBe('waiting');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await markOf(sara.brickId)).toBe(visa.id);
+      expect(await keptOf(visa.id)).toBeNull();
+      answers.park = 'parked=0 reason=already';
+      expect(await finishParkOf(sara.brickId, visa.id, NOW)).toBe('settled');
+      expect(await keptOf(visa.id)).toBe(true);
+      expect(await markOf(sara.brickId)).toBeNull();
+    });
+
+    it('a park with nothing to put away is recorded false the same way (the write fails, the marker stays, the retry writes false)', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id } });
+      answers.park = 'parked=0 reason=nothing';
+      const spy = failWrites(2);
+      try {
+        const parked = await parkProfile(sara.brickId, visa.id, NOW);
+        expect(await settlePark(sara.brickId, visa.id, parked, NOW)).toBe('waiting');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await markOf(sara.brickId)).toBe(visa.id);
+      expect(await finishParkOf(sara.brickId, visa.id, NOW)).toBe('settled');
+      expect(await keptOf(visa.id)).toBe(false);
+      expect(await markOf(sara.brickId)).toBeNull();
+    });
+
+    it('a wipe whose record fails keeps the marker (waiting); the next settlement empties again and records false', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { parkPendingJobId: visa.id, parkPendingWipe: true } });
+      const spy = failWrites(1);
+      try {
+        expect(await settlePark(sara.brickId, visa.id, null, NOW)).toBe('waiting');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await markOf(sara.brickId)).toBe(visa.id);
+      expect(await settlePark(sara.brickId, visa.id, null, NOW)).toBe('wiped');
+      expect(await keptOf(visa.id)).toBe(false);
+      expect(await markOf(sara.brickId)).toBeNull();
+    });
+  });
+
   describe('the sweep', () => {
     it('removes, on awake machines only, what was kept longer than the Limits say, once an hour per machine', async () => {
       const sara = await person('Sara');
