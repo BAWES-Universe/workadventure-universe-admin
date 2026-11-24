@@ -251,6 +251,28 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect((await machineOf(sara)).machine).toBe('waking');
     });
 
+    it.each(['resting', 'broken'] as const)('a turn hold on a machine that is `%s` is stopped and lifted, never left to hold every start in line for ever', async (state) => {
+      const sara = await owner(`hold-${state}`);
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: state, turnUnprovenSince: NOW } });
+      const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore + 1);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'stopped', turnUnprovenSince: null });
+    });
+
+    it('a turn hold on a machine that is restoring (a park\'s wake has no job) is left alone: nothing is stopped under it', async () => {
+      const sara = await owner('hold-restoring');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'restoring', turnUnprovenSince: NOW } });
+      const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
+      expect(await machineOf(sara)).toMatchObject({ machine: 'restoring' });
+    });
+
     it('(b) a stop whose sender died counts as in flight for its bounded life: the replacement goes back in line holding nothing, and wakes only after that life', async () => {
       const sara = await owner('dead');
       expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
@@ -425,6 +447,57 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       }
       expect(Date.now() - asked).toBeLessThan(5_000);
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'running', awakeProvedAt: null });
+    });
+
+    describe('an unanswered ending reads the machine too', () => {
+      // A job that asked its person for details and was not answered: the hand-over (180 s in) counts the stretch on into seconds_run; the machine was proved awake 120 s in, then a late stop put it to sleep
+      async function waitingJob(sara: Owner) {
+        const job = await workingJob(sara);
+        const began = job.stretchStarted!.getTime();
+        expect(await renewJob(job.id, new Date(began + 120_000))).toMatchObject({ ok: true });
+        expect(await requestHandover(job.id, 'details', new Date(began + 180_000))).not.toBeNull();
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'waiting', control: 'brick', secondsRun: 180 });
+        return { job, began };
+      }
+      const wait = 61 * 60_000;
+
+      it('(d) the machine went to sleep after its last proof and nobody renewed since: the sweep ends the job as unanswered and prices only the proved seconds', async () => {
+        const sara = await owner('unanswered-asleep');
+        const { job, began } = await waitingJob(sara);
+        await fake.stop(sara.ref);
+        expect((await machineOf(sara)).machine).toBe('working');
+        const room = (await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).reservationKey!;
+        await sweepComputers(new Date(began + 180_000 + wait));
+        const ended = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } });
+        expect(ended).toMatchObject({ status: 'stopped', endedBy: 'unanswered', secondsRun: 120 });
+        const price = costOfSeconds(120, fake.microsPerMinute())!;
+        expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: room } })).toMatchObject({ state: 'settled', settledMicros: BigInt(price) });
+        expect(await prisma.meterEvent.findFirst({ where: { eventId: { startsWith: `computer:${job.id}:time` } } })).toMatchObject({ quantity: BigInt(120), unit: 'second', costMicros: BigInt(price) });
+      });
+
+      it('a machine still awake at the ending is priced to the ending, as before', async () => {
+        const sara = await owner('unanswered-awake');
+        const { job, began } = await waitingJob(sara);
+        await sweepComputers(new Date(began + 180_000 + wait));
+        const ended = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } });
+        expect(ended).toMatchObject({ status: 'stopped', endedBy: 'unanswered' });
+        expect(ended.secondsRun).toBeGreaterThanOrEqual(180 + 60 * 60);
+      });
+
+      it('a look that does not answer proves nothing: the ending is priced as before, and the job still ends', async () => {
+        const sara = await owner('unanswered-silent');
+        const { job, began } = await waitingJob(sara);
+        await fake.stop(sara.ref);
+        const look = jest.spyOn(fake, 'awake').mockRejectedValue(new Error('the provider did not answer'));
+        try {
+          await sweepComputers(new Date(began + 180_000 + wait));
+        } finally {
+          look.mockRestore();
+        }
+        const ended = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } });
+        expect(ended).toMatchObject({ status: 'stopped', endedBy: 'unanswered' });
+        expect(ended.secondsRun).toBeGreaterThanOrEqual(180 + 60 * 60);
+      });
     });
 
     it('a machine proved awake renews as before, and nothing is paused', async () => {

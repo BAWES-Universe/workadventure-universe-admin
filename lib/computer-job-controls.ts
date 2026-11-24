@@ -23,7 +23,7 @@
 import { createHash } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { brickOf, computerView, controlInternals, providerFor, settleTurnHold, type ComputerView } from '@/lib/computer';
+import { brickOf, computerView, controlInternals, provedSecondsOf, providerFor, settleTurnHold, type ComputerView } from '@/lib/computer';
 import { lockJob } from '@/lib/computer-owner';
 import { hasFinishIntent, hasPoolCutoff } from '@/lib/computer-faults';
 import { revokeJobTokens } from '@/lib/computer-token';
@@ -263,13 +263,7 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   const counted = job.secondsRun + stretch;
   // Post-0.5.0 B: only the seconds the machine was proved awake. The stretch is one run from its readiness `began` (the hand-overs in between carry it on in `seconds_run`); the proof is the last renewal that read the machine
   // awake, or that readiness itself. Never more than was counted, never less than nothing
-  const proved = (): number => {
-    if (!job.stretchStarted) return 0;
-    const began = job.stretchStarted.getTime() - job.secondsRun * SECOND;
-    const proof = Math.min(now.getTime(), Math.max(began, job.awakeProvedAt?.getTime() ?? began));
-    return Math.min(counted, Math.max(0, Math.round((proof - began) / SECOND)));
-  };
-  const seconds = options.endAtProof ? proved() : counted;
+  const seconds = options.endAtProof ? provedSecondsOf(job, now, counted) : counted;
   const n = job.pauses + 1;
   // The Resumes of this job still pending (their request stopped before it kept an answer) are settled NOW, from the job as it stands before this pause writes anything, under the job's lock: what each came to is recorded on its own
   // command, per attempt, while its browser state (`prep_state`) still belongs to it. A pause leaves `prep_state` as it is, and a later Resume sets it again, so read later it would be another attempt's: a restore that never settled would

@@ -661,7 +661,8 @@ export async function startedJobFor(botId: string, personId: string, startKey: s
  */
 export async function ackStart(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<boolean> {
   // Under the same person lock the keyed start makes its job under, in one transaction: an ack that arrives while that start is still deciding waits for it, then confirms the job it made (never `true` with the job left unconfirmed)
-  const wait = { timeout: Math.max(15_000, rowLockWait().timeout), maxWait: Math.max(15_000, rowLockWait().maxWait) };
+  // Only the person's advisory lock is taken here, never the computer's row, so the transaction keeps the usual 15 s (a claim that takes the row has its own longer wait)
+  const wait = { timeout: 15_000, maxWait: 15_000 };
   const own = await prisma.$transaction(async (tx) => {
     await lockPerson(tx, personId);
     await tx.computerJob.updateMany({ where: { botId, personId, startKey, startAckedAt: null }, data: { startAckedAt: now } });
@@ -2334,6 +2335,17 @@ export async function renewJob(
 }
 
 /**
+ * The seconds of a stretch the machine was proved awake (post-0.5.0 B): the stretch is one run from its readiness `began` (hand-overs in between carry it on in `seconds_run`); the proof is the last renewal that read the machine
+ * awake, or that readiness itself. Never more than `counted` (what the job counted), never less than nothing. One rule for a machine found asleep at a renewal (a pause) and at an ending.
+ */
+export function provedSecondsOf(job: { stretchStarted: Date | null; secondsRun: number; awakeProvedAt: Date | null }, now: Date, counted: number): number {
+  if (!job.stretchStarted) return 0;
+  const began = job.stretchStarted.getTime() - job.secondsRun * SECOND;
+  const proof = Math.min(now.getTime(), Math.max(began, job.awakeProvedAt?.getTime() ?? began));
+  return Math.min(counted, Math.max(0, Math.round((proof - began) / SECOND)));
+}
+
+/**
  * How long a renewal waits for the provider to say whether the machine is awake; no answer in time proves nothing (the renewal goes on, the proof does not move). Well under the runner's own 8 s timeout on its renew call (game
  * BRICK_CALL_TIMEOUT_MS): a renewal the runner gave up on is asked again and would add room each time (Opus on e58adde1, fix 2). One request, never asked again, where the provider offers it (`awakeOnce`).
  */
@@ -2800,6 +2812,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   let job: NonNullable<Awaited<ReturnType<typeof prisma.computerJob.findUnique>>> | null = null;
   let seconds = 0;
   let ended = { count: 0 };
+  let look: Awaited<ReturnType<typeof awakeLookFor>> | undefined;
   for (let attempt = 0; attempt < END_TRIES && ended.count === 0; attempt++) {
     job = await prisma.computerJob.findUnique({ where: { id: jobId } });
     if (!job || isOver(job.status)) return;
@@ -2828,6 +2841,16 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     const held = job.status === 'running' || job.status === 'waiting';
     const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
     seconds = job.secondsRun + stretch;
+    // Post-0.5.0 B, an `unanswered` ending (the sweep's): the machine is read once, as a renewal reads it. Found asleep (a stop that landed late and nothing renewed since), the stretch ends at the last proof of awake and only those
+    // seconds are priced, never the time up to this ending. A look that does not answer proves nothing and the ending is priced as before. Read after the guards above, so a sweep that defers never asks the provider; asked once
+    // however many tries the write takes (the write's own WHERE holds the lease version, so a renewal that proved the machine since moves it and the try is read again)
+    if (endedBy === 'unanswered' && held) {
+      if (look === undefined) {
+        const machine = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
+        look = await awakeLookFor(job, machine, providerFor(machine));
+      }
+      if (look === 'asleep') seconds = Math.min(seconds, provedSecondsOf(job, now, seconds));
+    }
     // The seconds were worked out from what was read: the end lands only on that same snapshot. A take-over and a hand-back in between leave the status as
     // it was but move the seconds and the stretch, and an end written from the old read would put the smaller count over the newer one
     const endData = {
@@ -3855,8 +3878,10 @@ export async function settleTurnHold(botId: string, exceptJobId?: string): Promi
     if (!provider || !row.providerRef) return false;
     // Its work is saved before it is stopped, as every other stop does (a copy that fails is not claimed and never holds the stop up; a machine that is not awake is not woken to be copied)
     if (await provider.awake(row.providerRef).catch(() => false)) await saveCopy(botId, row.providerRef, provider);
-    // Claimed against the state it saw: a wake that took its ticket since (the machine is then `waking`) makes the claim write nothing, and no stop is sent under it (Opus's second minor note on #1036)
-    if (!(await stopMachine(botId, row.providerRef, provider, ['working', 'stopped', 'stopping']))) return false;
+    // Claimed against the state it saw: a wake that took its ticket since (the machine is then `waking`) makes the claim write nothing, and no stop is sent under it (Opus's second minor note on #1036). The state read is the one claimed
+    // (a machine `resting` or `broken` under a hold is stopped and the hold lifted, as before). A machine in any other state is not touched: a live wake has a running job (counted above), a park's wake has none and is not stopped
+    if (!(['working', 'stopping', 'resting', 'broken'] as string[]).includes(row.machine)) return false;
+    if (!(await stopMachine(botId, row.providerRef, provider, [row.machine]))) return false;
     await lift();
     // Proved asleep: no first turn of any job on this machine can still be running, so their marks go (as after a take-over fence that stopped it)
     await clearFirstTurnMarks(botId);
