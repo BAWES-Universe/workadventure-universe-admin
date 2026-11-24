@@ -8,7 +8,9 @@ import {
   exposureOf,
   holdToRules,
   periodStart,
+  priceChanges,
   ruleWords,
+  termWeight,
   type Ask,
   type Allowed,
   type ChargeClass,
@@ -23,6 +25,7 @@ import {
   type SpendRule,
   type SpentSoFar,
 } from '@/lib/spend-rules-values';
+import { givenBackJob } from '@/lib/computer-values';
 
 /**
  * Rules said in chat, held by the server (paying spec 3, part O4). A person tells a Brick "only use my accounts" or "no more than
@@ -33,7 +36,7 @@ import {
  * falls back to somebody else's credit and never lifts a limit: it only ever makes the allowed amount smaller.
  */
 
-type Db = Pick<typeof prisma, 'spendRule' | 'meterEvent' | 'meterReservation' | 'creditHold' | 'appSetting'> & Partial<Pick<Prisma.TransactionClient, '$executeRaw'>>;
+type Db = Pick<typeof prisma, 'spendRule' | 'meterEvent' | 'meterReservation' | 'creditHold' | 'appSetting' | 'computerJob' | 'computerJobPause'> & Partial<Pick<Prisma.TransactionClient, '$executeRaw'>>;
 
 const toNumber = (value: bigint | number | null): number => (value === null ? 0 : Number(value));
 
@@ -306,16 +309,79 @@ async function crossedBefore(db: Db, events: Prisma.MeterEventWhereInput[], star
   });
   let before = BigInt(0);
   for (const event of crossed) {
-    const startedMs = (event.detail as { startedMs?: unknown } | null)?.startedMs;
-    if (typeof startedMs !== 'number' || event.costMicros === null) continue;
-    // The time the cost covers: the run, and any seconds held after it ended (a hand over of the files) that are charged too, so the split never
-    // gives the earlier period more than its share of what was charged
-    const span = BigInt(Math.max(0, event.occurredAt.getTime() - startedMs, Math.round(Number(event.quantity) * 1000)));
-    const earlier = BigInt(Math.max(0, start.getTime() - startedMs));
-    // The part before the boundary: cost x (time before it) / (time in all), rounded down
-    before += span === BigInt(0) ? BigInt(0) : (event.costMicros * (earlier > span ? span : earlier)) / span;
+    const detail = event.detail as { startedMs?: unknown; terms?: unknown } | null;
+    if (typeof detail?.startedMs !== 'number' || event.costMicros === null) continue;
+    before += crossedShare(event.costMicros, event.occurredAt.getTime(), detail.startedMs, Number(event.quantity), start.getTime(), detail.terms);
   }
   return Number(before);
+}
+
+/**
+ * The part of one computer job's cost that belongs before `startMs`. The time the cost covers is the run, and any seconds held after it ended (a hand over
+ * of the files) that are charged too, so the split never gives the earlier period more than its share of what was charged. The cost is split by that time,
+ * or, for a job whose price changed while it ran (its lease's recorded prices, kept with its event), by what each stretch was priced at: the same split
+ * the held room was counted by (`exposureOf`), so settling a job never moves what a cap counts. Rounded down, so the two parts add up to the cost.
+ */
+function crossedShare(costMicros: bigint, occurredMs: number, startedMs: number, seconds: number, startMs: number, terms: unknown): bigint {
+  const span = Math.max(0, occurredMs - startedMs, Math.round(seconds * 1000));
+  if (span === 0) return BigInt(0);
+  const earlier = Math.max(0, startMs - startedMs);
+  const priced = priceChanges(terms);
+  if (priced) {
+    const total = termWeight(priced, startedMs, startedMs + span);
+    const before = termWeight(priced, startedMs, startedMs + Math.min(earlier, span));
+    // Whole micros of the weight, so the share is exact integer arithmetic like the duration split below
+    if (total > 0) return (costMicros * BigInt(Math.round(before * 1e6))) / BigInt(Math.round(total * 1e6));
+  }
+  // The part before the boundary: cost x (time before it) / (time in all), rounded down
+  return (costMicros * BigInt(Math.min(earlier, span))) / BigInt(span);
+}
+
+/**
+ * A computer job's time that was settled but whose event the books do not have yet (the write failed, and the sweep writes it again): its room is no
+ * longer held, so without this a paid step asked in between would see none of it. It counts at what its room settled at, split between periods like the
+ * event it will become (same job, same payer), until that event exists: from then on the event counts and this does not, so it is never counted twice.
+ * A job given back (failed on our side) takes nothing from the person and is not counted. `rooms` is what the rule is about (the person, the Brick, the task).
+ * Read AFTER the held room and BEFORE the events are summed: a job whose event lands in between is counted twice (a step too careful), never missed.
+ */
+async function unreportedTime(db: Db, rooms: Prisma.MeterReservationWhereInput[], start: Date | null): Promise<number> {
+  const settled = await db.meterReservation.findMany({
+    where: { AND: [...rooms, { state: 'settled', jobId: { not: null }, reservationKey: { startsWith: 'computer:job:' }, ...(start ? { closedAt: { gte: start } } : {}) }] },
+    select: { reservationKey: true, jobId: true, settledMicros: true, closedAt: true, terms: true },
+  });
+  if (settled.length === 0) return 0;
+  // A room a pause settled becomes the pause's own event (`computer:<job>:time:<n>`, lib/computer-job-controls), never the job's: it is reported once THAT event is there. Every other room becomes the job's event, as before
+  const pauses = await db.computerJobPause.findMany({ where: { roomKey: { in: settled.map((room) => room.reservationKey) } }, select: { roomKey: true, jobId: true, n: true, seconds: true, startedAt: true, at: true } });
+  const pauseOf = new Map(pauses.map((pause) => [pause.roomKey as string, pause]));
+  const eventOf = (room: (typeof settled)[number]): string => {
+    const pause = pauseOf.get(room.reservationKey);
+    return pause ? `computer:${pause.jobId}:time:${pause.n}` : `computer:${room.jobId}:time`;
+  };
+  const written = await db.meterEvent.findMany({ where: { eventId: { in: [...new Set(settled.map(eventOf))] } }, select: { eventId: true } });
+  const have = new Set(written.map((event) => event.eventId));
+  const unwritten = settled.filter((room) => !have.has(eventOf(room)));
+  if (unwritten.length === 0) return 0;
+  const missing = [...new Set(unwritten.filter((room) => !pauseOf.has(room.reservationKey)).map((room) => room.jobId as string))];
+  const jobs = missing.length > 0 ? await db.computerJob.findMany({ where: { id: { in: missing } }, select: { id: true, status: true, endedBy: true, startedAt: true, endedAt: true, secondsRun: true } }) : [];
+  const byId = new Map(jobs.map((job) => [job.id, job]));
+  let total = 0;
+  for (const room of unwritten) {
+    if (room.settledMicros === null) continue;
+    const pause = pauseOf.get(room.reservationKey);
+    // A pause is the person's (never given back), and its event is written at the moment of the pause, for the stretch that ran before it
+    const job = pause ? { status: 'paused', endedBy: null, startedAt: pause.startedAt, endedAt: pause.at, secondsRun: pause.seconds } : byId.get(room.jobId as string);
+    if (!job || givenBackJob(job.status, job.endedBy)) continue;
+    // The event it will become is written at the moment the job ended (a sweep that settles the room later does not move it), so the period and the split
+    // are read from that moment, never from when the room happened to close
+    const occurred = (job.endedAt ?? room.closedAt)?.getTime();
+    if (start && occurred !== undefined && occurred < start.getTime()) continue;
+    const cost = room.settledMicros;
+    total += Number(cost);
+    if (start && occurred !== undefined && job.startedAt && job.startedAt.getTime() < start.getTime()) {
+      total -= Number(crossedShare(cost, occurred, job.startedAt.getTime(), job.secondsRun, start.getTime(), room.terms));
+    }
+  }
+  return total;
 }
 
 /** What a rule counts for a step: taken (in the books) and held (room not yet settled), for the rule's own scope and period. */
@@ -324,15 +390,19 @@ async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Dat
   // Only what the platform's credit paid: a call on someone's own key (or paid by another person) took none of this person's credit
   const events: Prisma.MeterEventWhereInput[] = [{ personKey }, { pool: 'computer' }, { payerKind: 'universe' }];
   const holds: Prisma.MeterReservationWhereInput[] = [{ personKey, state: 'held' }];
+  // What the rule is about, for the rooms of any state (a settled room whose time is not in the books yet is read by it)
+  const rooms: Prisma.MeterReservationWhereInput[] = [{ personKey }];
   const credit: Prisma.CreditHoldWhereInput[] = [{ personId: rule.ownerPersonId, category: 'instant_apps' }];
   if (rule.scope === 'bot' && rule.botId) {
     events.push({ botId: rule.botId });
     holds.push({ botId: rule.botId });
+    rooms.push({ botId: rule.botId });
     credit.push({ botId: rule.botId });
   }
   if (rule.scope === 'task') {
     events.push({ jobId: rule.taskKey });
     holds.push({ jobId: rule.taskKey });
+    rooms.push({ jobId: rule.taskKey });
     credit.push({ jobKey: rule.taskKey });
   }
   if (rule.period === 'task' && rule.scope !== 'task') {
@@ -340,6 +410,7 @@ async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Dat
     if (!attempt.taskKey) return { spentMicros: 0, heldMicros: 0 };
     events.push({ jobId: attempt.taskKey });
     holds.push({ jobId: attempt.taskKey });
+    rooms.push({ jobId: attempt.taskKey });
     credit.push({ jobKey: attempt.taskKey });
   }
   const start = rule.period ? periodStart(rule.period, now) : null;
@@ -357,6 +428,8 @@ async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Dat
   // careful), never missed (a cap passed). Reading them together could miss it.
   if (wantsComputer(rule.covers)) {
     const held = await db.meterReservation.findMany({ where: { AND: holds }, select: { amountMicros: true, renewals: true, createdAt: true, expiresAt: true, terms: true } });
+    // A job whose room is settled and whose event is not in the books yet (its write failed) counts at what it settled at: read after the held room and before the events
+    const unreported = await unreportedTime(db, rooms, start);
     // The calls with no price are read BEFORE what was priced: a call priced in between (its room settled earlier, its price written later, under no lock
     // of this check) is then counted twice, at its room and at its price (a step too careful), never missed (a cap passed). The other way round, it
     // is in neither: not yet priced when the sums were read, no longer unpriced when its room was looked for.
@@ -366,7 +439,7 @@ async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Dat
     const crossed = start ? await crossedBefore(db, events, start) : 0;
     const taken = await db.meterEvent.aggregate({ where: { AND: events }, _sum: { costMicros: true } });
     const settings = await getMeterSettings(db);
-    spentMicros += toNumber(taken._sum.costMicros) + unpriced - crossed;
+    spentMicros += toNumber(taken._sum.costMicros) + unpriced + unreported - crossed;
     heldMicros += exposureOf(held, settings.renewMinutes, now, start);
   }
   if (wantsApps(rule.covers)) {
@@ -410,12 +483,17 @@ export async function checkSpend(attempt: SpendAttempt, now: Date = new Date(), 
  * through here (the start itself answers "not the owner") and their rules, which are about their own credit, are not read for it.
  * The step's own room is held to the same rules again where it is taken.
  */
-export async function ownerSpendAllowed(botId: string, personId: string, chargeClass: ChargeClass = 'computer', now: Date = new Date(), runId: string | null = null): Promise<Allowed | Refused> {
+export async function ownerSpendAllowed(botId: string, personId: string, chargeClass: ChargeClass = 'computer', now: Date = new Date(), runId: string | null = null, startKey: string | null = null, continuesJobId: string | null = null): Promise<Allowed | Refused> {
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { roomId: true, ownerId: true, deletedAt: true } });
   if (!bot || !ownsBrick(bot, personId)) return { ok: true };
   // A run that already has its job asks for nothing new: asked again it finds that job (and the room it holds is already counted, so a cap
   // that room used up exactly must not hide the job the person already has)
   if (runId && (await prisma.computerJob.findUnique({ where: { botId_runId: { botId, runId } }, select: { id: true } }))) return { ok: true };
+  // ...and so does a start asked again with the key of a start that already made its job (a retry after a lost answer): the job is there, and the room it holds is already counted
+  if (startKey && (await prisma.computerJob.findUnique({ where: { botId_personId_startKey: { botId, personId, startKey } }, select: { id: true } }))) return { ok: true };
+  // ...and so does "try again" of a job that was already carried on (one continuation per ended job, ever): asked again under a NEW key after the continuation used what the rule left, the answer is that job, never a false `rule`
+  // (CodeRabbit on #1025). A job of this person on this Brick only; the spend check stays for a request that would make a new job
+  if (continuesJobId && (await prisma.computerJob.findFirst({ where: { botId, personId, continuesJobId }, select: { id: true } }))) return { ok: true };
   return checkSpend({ payerPersonId: personId, botId, taskKey: null, chargeClass, amountMicros: 1 }, now);
 }
 

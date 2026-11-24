@@ -1,7 +1,9 @@
 import { prisma } from '@/lib/db';
 import { ensureIssued } from '@/lib/credit-issue';
 import { currentRules, personFacts, usableLots, type Db, type LotRow } from '@/lib/credit-store';
-import { holdCredit, refundHold, settleHold } from '@/lib/credit-spend';
+import { holdCredit, settleHold } from '@/lib/credit-spend';
+import { settleRefundObligations } from '@/lib/computer-refunds';
+import { stretchOfCharge } from '@/lib/computer-stretch';
 import { pickBase, reaches } from '@/lib/credit-values';
 
 /**
@@ -113,6 +115,9 @@ export async function drawComputerCredit(
     if (!Number.isSafeInteger(input.costMicros) || input.costMicros <= 0) return 0;
     if (!(await computerCreditMayExist(prisma))) return 0;
     await issueComputerCredit(input.personId, now);
+    // The draw carries the stretch of the charge it pays for (a model call the one it was admitted in, a pause its own, the job's time the one it is in now), so a give-back for a fault of ours
+    // touches that stretch's credit and no earlier stretch's (lib/computer-stretch)
+    const jobStretch = input.jobId ? await stretchOfCharge(input.jobId, input.eventId) : null;
     let want = input.costMicros;
     for (let attempt = 0; attempt < 2; attempt++) {
       const { availableMicros } = await computerCredit(prisma, input.personId, now);
@@ -127,6 +132,7 @@ export async function drawComputerCredit(
           chargeClass: input.chargeClass,
           botId: input.botId,
           jobKey: input.jobId,
+          jobStretch,
           effectKey: input.eventId,
           provider: 'universe',
           route: 'computer',
@@ -151,21 +157,11 @@ export async function drawComputerCredit(
 
 /**
  * A job that failed on our side takes nothing from the person's month, and that includes the credit it drew: each draw is given back into the
- * lot it came from while that lot lasts (a small replacement credit when it ended), by the funding books' own give-back. Safe to say twice
- * (what was given back is not given again). Never throws.
+ * lot it came from while that lot lasts (a small replacement credit when it ended), by the funding books' own give-back. What is owed is an obligation
+ * until the books acknowledge it (lib/computer-refunds): asked again it is the same refund (the same amount under the same key), never a second one. Never throws.
  */
 export async function giveBackComputerCredit(jobId: string, now: Date = new Date()): Promise<void> {
-  try {
-    const holds = await prisma.creditHold.findMany({
-      where: { jobKey: jobId, category: 'computers', state: 'settled' },
-      select: { holdKey: true, customerMicros: true, refundedMicros: true },
-    });
-    for (const hold of holds) {
-      const left = Number(hold.customerMicros ?? 0) - Number(hold.refundedMicros);
-      if (left <= 0) continue;
-      await refundHold({ holdKey: hold.holdKey, refundKey: `giveback:${hold.holdKey}`, amountMicros: left, reason: 'platform_failure' }, now);
-    }
-  } catch (error) {
-    console.error('[Computer] Could not give back the credit a job drew:', error instanceof Error ? error.message : 'unknown');
-  }
+  // What is owed is written first (once per hold, with its amount fixed), then asked of the books; one that cannot be acknowledged is kept, tried again with a
+  // growing wait, and told to Sentry when it is old (lib/computer-refunds)
+  await settleRefundObligations(jobId, now);
 }

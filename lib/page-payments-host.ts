@@ -30,7 +30,7 @@
 /** The id a page gives its request: short and plain, so it can only be echoed back and never carry anything else. */
 export const REQUEST_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
-export type PayProblem = 'unavailable' | 'limit' | 'not_paid' | 'cant_confirm' | 'none';
+export type PayProblem = 'unavailable' | 'limit' | 'not_paid' | 'cant_confirm' | 'still_checking' | 'long_unconfirmed' | 'none';
 
 /** What the host says under the page while a payment is on its way. */
 export interface PayLine {
@@ -482,12 +482,22 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
       const limit = setTimeout(() => look.abort(), Math.min(ASK_FOR_MS, left));
       try {
         const response = await ask(`${base}?order=${encodeURIComponent(orderId)}`, { cache: 'no-store', signal: look.signal });
+        // Orbit answers an order as "not there" when it is not this buyer's any more (another account signed in on this device while the checkout
+        // was on its way) or the page is no longer shared: the line of the one that left is cleared, and nothing of it is told to the one that came
+        if (response.status === 404) {
+          if (over || destroyed) return;
+          return finish({}, 'unavailable');
+        }
         const body = response.ok ? ((await response.json()) as { status?: string; testPayment?: boolean; pollAfterMs?: number }) : null;
         if (over || destroyed) return;
         if (body?.pollAfterMs && Number.isFinite(body.pollAfterMs)) next = Math.min(MOST_POLL_MS, Math.max(LEAST_POLL_MS, body.pollAfterMs));
         // An order found through a receipt link is "back", never a new purchase of this browser: no receipt of its own is offered for it, because
         // this browser's code would not bring it back
         if (body?.status === 'paid') return finish({ paid: { test: body.testPayment === true }, ...(byReceipt ? { restored: { paidAt: null } } : {}) }, 'paid', body.testPayment === true);
+        // Closed, and the service has not had the last word: still being checked (there is no link to go on with), told to the page as one that could not be confirmed yet
+        // More than 90 days past the late window: not "still checking" for ever, but told to contact the page's owner (the looks go on, and Check payment still asks)
+        if ((body as { longWaitOver?: boolean } | null)?.longWaitOver === true) return finish({ problem: 'long_unconfirmed', canCheck: true }, 'cant_confirm');
+        if (body?.status === 'checking' && (body as { longWait?: boolean }).longWait === true) return finish({ problem: 'still_checking', canCheck: true }, 'cant_confirm');
         if (body?.status === 'not_paid') return finish({ problem: 'not_paid', canCheck: true }, 'not_paid');
         if (body?.status === 'cant_confirm') return finish({ problem: 'cant_confirm', canCheck: true }, 'cant_confirm');
       } catch {
@@ -609,6 +619,13 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
         if (destroyed) return;
         const status = answer.body?.status;
         if (answer.ok && status === 'paid') return end({ paid: { test: answer.body?.testPayment === true }, restored: restoredOf(answer.body) }, 'paid', request, ticket, answer.body?.testPayment === true);
+        // An order of theirs that closed while the service has still not had the last word: it may have been paid, so it is never "no purchase found" and
+        // never waited on for twenty minutes (there is no link), and a new purchase is not held up by it
+        // This Restore is now the ask Check payment follows (what it asks, and the request the page hears the answer under), not the wish of an earlier checkout
+        if (answer.ok && status === 'checking' && answer.body?.longWait === true) {
+          target = { intentId: null, request, ticket };
+          return end({ problem: answer.body?.longWaitOver === true ? 'long_unconfirmed' : 'still_checking', canCheck: true }, 'cant_confirm', request, ticket);
+        }
         // Their own start that never finished, not yet ready to be carried on: Orbit only does that when Restore is asked again after its wait,
         // so it is asked again, at the pace it gives, until the link comes, the purchase is found, or twenty minutes have passed
         if (answer.ok && stillStarting(answer.body)) {
@@ -694,6 +711,14 @@ export function createPagePaymentsHost(options: PagePaymentsHostOptions): PagePa
           tellOwed(!!update.paid, isTest, { request, ticket: asked.ticket });
         };
         if (answer.ok && status === 'paid') return done({ paid: { test }, restored: asked.intentId ? null : restoredOf(answer.body) }, 'paid', test);
+        // Closed, and the service has not had the last word: still being checked, never waited on (there is no link) and never "not paid"
+        if (answer.ok && status === 'checking' && answer.body?.longWait === true) {
+          // An explicit Restore becomes the ask Check payment follows; Check payment itself stays on the wish it asked by
+          if (restoring) target = { intentId: null, request: asked.request, ticket: asked.ticket };
+          return done({ problem: answer.body?.longWaitOver === true ? 'long_unconfirmed' : 'still_checking', canCheck: true }, 'cant_confirm');
+        }
+        // A closed order more than 90 days past its late window: told to contact the page's owner (the looks go on), never "not paid yet" or "still checking"
+        if (answer.ok && answer.body?.longWaitOver === true && (status === 'not_paid' || status === 'cant_confirm')) return done({ problem: 'long_unconfirmed', canCheck: true }, 'cant_confirm');
         // This browser's own start that never finished and cannot be carried on yet (it may still be in flight, or its wait is not over): Orbit
         // resumes it only when it is asked about again by its wish (Check payment) or by Restore, never when an order is polled. So the same ask is
         // made again, at the pace the server gives, until the link comes (then it is adopted as any other), the purchase is found, or twenty

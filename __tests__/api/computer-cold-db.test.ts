@@ -13,6 +13,7 @@ import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn(), withScope: jest.fn() }));
 // The books' write path, wrapped so a test can make it refuse one kind of line
 const actualRecord = jest.requireActual('@/lib/meter').recordMeterEvent;
 jest.mock('@/lib/meter', () => {
@@ -20,6 +21,7 @@ jest.mock('@/lib/meter', () => {
   return { ...actual, recordMeterEvent: jest.fn(actual.recordMeterEvent) };
 });
 
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { memoryStore } from '../helpers/archive-store';
 import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
@@ -36,7 +38,7 @@ import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { listDeletedBricks } from '@/lib/brick-default';
 import { computerReadiness } from '@/lib/computer-readiness';
 import { CopyOutcomeUnknown } from '@/lib/agent37/saved-copies';
-import { archiveById, deleteAllArchives, markVerified, removeBrickObjects, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, setStrayPassForTests, setWriteLimitForTests, storeArchive, STRAY_CURSOR_KEY, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
+import { archiveById, deleteAllArchives, markVerified, removeBrickObjects, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, setStrayPassForTests, setWriteLimitForTests, storageDeletionsWaiting, storeArchive, STORAGE_DELETION_ALERT_MS, STRAY_CURSOR_KEY, verifiedArchives } from '@/lib/computer-archives';
 import { GET as download } from '@/app/api/computer/archives/[id]/download/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -156,6 +158,16 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect((await row(recent.botId)).machine).toBe('resting');
     });
 
+    it('a PAUSED job is not use: it holds nothing, so its computer is packed away (and the job comes back through the line when resumed); CONTROL: a job waiting in line still keeps it', async () => {
+      const paused = await idleBrick();
+      await prisma.computerJob.create({ data: { botId: paused.botId, personId: paused.personId, title: 'paused for weeks', status: 'queued', queuedFor: 'paused', pausedWhy: 'person', pausedAt: new Date(NOW.getTime() - 20 * DAY), createdAt: new Date(NOW.getTime() - 30 * DAY), pauses: 1 } });
+      const waiting = await idleBrick();
+      await prisma.computerJob.create({ data: { botId: waiting.botId, personId: waiting.personId, title: 'in line', status: 'queued', queuedFor: 'turn', createdAt: new Date(NOW.getTime() - 30 * DAY) } });
+      expect((await coldStep(provider, NOW)).packed).toBe(1);
+      expect((await row(paused.botId)).machine).toBe('cold');
+      expect((await row(waiting.botId)).machine).toBe('resting');
+    });
+
     it('packs only a few computers a sweep, so a first run is never one burst of spending', async () => {
       for (let i = 0; i < 4; i++) await idleBrick();
       expect((await coldStep(provider, NOW)).packed).toBe(2);
@@ -182,7 +194,7 @@ run('cold storage for a Brick’s computer, in a real database', () => {
     it('a proof that ran so long its claim was taken over cannot fail the copy another run has proved since: the proved copy and the removal stay', async () => {
       const brick = await idleBrick();
       const original = provider.restoreInto.bind(provider);
-      provider.restoreInto = async (ref, source) => {
+      provider.restoreInto = async () => {
         void original;
         // Meanwhile the other run proved the same copy and moved the row on to the removal
         const archive = (await prisma.computerArchive.findFirstOrThrow({ where: { botId: brick.botId } }));
@@ -1225,6 +1237,8 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       const cameFrom = new Date(NOW.getTime() - 3 * DAY);
       // The newest copy (a day ago) stayed the saved-copy date; the older copy (3 days ago) was restored an hour ago and nothing was saved since
       await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'waking', providerRef: `fake-${brick.botId}`, olderCopyUsed: true, restoredFrom: cameFrom, filesSavedAt: new Date(NOW.getTime() - DAY), returnedAt: new Date(NOW.getTime() - 60 * 60_000) } });
+      // The machine is `waking` with no start behind it (its wake is older than a start can take): this start wakes it
+      await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = (NOW() AT TIME ZONE 'UTC') - INTERVAL '10 minutes' WHERE "bot_id" = ${brick.botId}`;
       const started = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Second' }, NOW);
       expect(started.ok && started.job.status).toBe('running');
       expect(await row(brick.botId)).toMatchObject({ machine: 'working', olderCopyUsed: true, restoredFrom: cameFrom });
@@ -1235,6 +1249,8 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       await packAway(brick.botId, provider, NOW);
       const cameFrom = new Date(NOW.getTime() - 3 * DAY);
       await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'waking', providerRef: `fake-${brick.botId}`, olderCopyUsed: true, restoredFrom: cameFrom, filesSavedAt: new Date(NOW.getTime() - 10 * 60_000), returnedAt: new Date(NOW.getTime() - 60 * 60_000) } });
+      // The machine is `waking` with no start behind it (its wake is older than a start can take): this start wakes it
+      await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = (NOW() AT TIME ZONE 'UTC') - INTERVAL '10 minutes' WHERE "bot_id" = ${brick.botId}`;
       const started = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Third' }, NOW);
       expect(started.ok && started.job.status).toBe('running');
       expect(await row(brick.botId)).toMatchObject({ machine: 'working', olderCopyUsed: false, restoredFrom: null });
@@ -1546,5 +1562,196 @@ run('cold storage for a Brick’s computer, in a real database', () => {
     expect(status.storageMonthMicros).toBe(100);
     expect(status.last30Days.runs).toBeGreaterThan(0);
     expect(status.last30Days.scratchSeconds).toBeGreaterThanOrEqual(0);
+  });
+  // GPT money review O1b: a deletion that cannot finish keeps its record (never dropped to make the page look clean) and says how long it has waited, so a
+  // slow bucket and one that has stopped accepting deletes can be told apart. Aged in whole hours here; the bucket is the in-memory one with `remove` refused.
+  describe('the oldest deletion still waiting', () => {
+    const HOUR = 3_600_000;
+    const down = () => setArchiveStoreForTests({ ...bucket.store, remove: async () => { throw new Error('the bucket is down'); } });
+    const copy = async (botId: string, generation: number, state: 'failed' | 'verified' | 'superseded', extra: { deletionSince?: Date | null } = {}) => {
+      const id = randomUUID();
+      const objectKey = `computer-cold/${botId}/${generation}.${id}.ubc`;
+      bucket.objects.set(objectKey, Buffer.from('copy'));
+      bucket.written.set(objectKey, new Date(NOW.getTime() - 40 * DAY));
+      return prisma.computerArchive.create({ data: { id, botId, generation, state, objectKey, createdAt: new Date(NOW.getTime() - 40 * DAY), ...extra } });
+    };
+
+    it('says nothing is waiting when nothing is', async () => {
+      expect(await storageDeletionsWaiting(NOW)).toEqual({ count: 0, oldestSince: null, ageMs: null, strayCopiesSince: null });
+    });
+
+    it('a copy whose object cannot be deleted keeps its row and counts from the FIRST try, not from the copy’s own age or the latest try', async () => {
+      const brick = await idleBrick();
+      const old = await copy(brick.botId, 1, 'failed');
+      down();
+      expect(await pruneArchives(brick.botId, null, NOW)).toBe(0);
+      const waiting = await prisma.computerArchive.findUniqueOrThrow({ where: { id: old.id } });
+      expect(waiting.state).toBe('superseded');
+      expect(waiting.deletionSince?.toISOString()).toBe(NOW.toISOString());
+      // Three hours and another failed try later: still one wait that began at the first try
+      expect(await pruneArchives(brick.botId, null, new Date(NOW.getTime() + 3 * HOUR))).toBe(0);
+      expect(await storageDeletionsWaiting(new Date(NOW.getTime() + 3 * HOUR))).toEqual({ count: 1, oldestSince: NOW, ageMs: 3 * HOUR, strayCopiesSince: null });
+      // The bucket comes back: the object and the row go, and nothing waits
+      setArchiveStoreForTests(bucket.store);
+      expect(await pruneArchives(brick.botId, null, new Date(NOW.getTime() + 4 * HOUR))).toBe(1);
+      expect(bucket.objects.size).toBe(0);
+      expect(await storageDeletionsWaiting(new Date(NOW.getTime() + 4 * HOUR))).toMatchObject({ count: 0, ageMs: null });
+    });
+
+    it('the wait begins when the copy is taken for deletion, before its object is touched (a server that stops there leaves the time written)', async () => {
+      const brick = await idleBrick();
+      const old = await copy(brick.botId, 1, 'failed');
+      let seenWhenDeleting: Date | null | undefined;
+      setArchiveStoreForTests({ ...bucket.store, remove: async () => { seenWhenDeleting = (await prisma.computerArchive.findUnique({ where: { id: old.id } }))?.deletionSince; throw new Error('the bucket is down'); } });
+      await pruneArchives(brick.botId, null, NOW);
+      expect(seenWhenDeleting?.toISOString()).toBe(NOW.toISOString());
+    });
+
+    it('a copy left superseded by an older version, with no time written, begins its wait at the first try that fails', async () => {
+      const brick = await idleBrick();
+      const old = await copy(brick.botId, 1, 'superseded');
+      expect(await storageDeletionsWaiting(NOW)).toMatchObject({ count: 0 });
+      down();
+      await pruneArchives(brick.botId, null, NOW);
+      expect((await prisma.computerArchive.findUniqueOrThrow({ where: { id: old.id } })).deletionSince?.toISOString()).toBe(NOW.toISOString());
+    });
+
+    it('the oldest of several is the one read, and a purge that cannot delete marks every copy it tried', async () => {
+      const brick = await idleBrick();
+      const first = await copy(brick.botId, 1, 'verified');
+      const second = await copy(brick.botId, 2, 'verified');
+      down();
+      await expect(deleteAllArchives(brick.botId, NOW)).rejects.toThrow('down');
+      await expect(deleteAllArchives(brick.botId, new Date(NOW.getTime() + 2 * HOUR))).rejects.toThrow('down');
+      const rows = await prisma.computerArchive.findMany({ where: { id: { in: [first.id, second.id] } } });
+      expect(rows.map((row) => row.deletionSince?.toISOString())).toEqual([NOW.toISOString(), NOW.toISOString()]);
+      // A younger one on another Brick does not hide the older wait
+      const other = await idleBrick();
+      await copy(other.botId, 1, 'failed', { deletionSince: new Date(NOW.getTime() + 5 * HOUR) });
+      expect(await storageDeletionsWaiting(new Date(NOW.getTime() + 6 * HOUR))).toEqual({ count: 3, oldestSince: NOW, ageMs: 6 * HOUR, strayCopiesSince: null });
+    });
+
+    it('a sweep for copies no row points at that cannot delete says since when, keeps where it was, and clears when it can', async () => {
+      const key = 'computer-cold/0-z/9.' + '0'.repeat(8) + '-0000-0000-0000-' + '0'.repeat(12) + '.ubc';
+      bucket.objects.set(key, Buffer.from('stray'));
+      bucket.written.set(key, new Date(NOW.getTime() - 2 * HOUR));
+      down();
+      await expect(removeStrayCopies(NOW)).rejects.toThrow('down');
+      await expect(removeStrayCopies(new Date(NOW.getTime() + 2 * HOUR))).rejects.toThrow('down');
+      expect(await storageDeletionsWaiting(new Date(NOW.getTime() + 2 * HOUR))).toEqual({ count: 0, oldestSince: NOW, ageMs: 2 * HOUR, strayCopiesSince: NOW });
+      setArchiveStoreForTests(bucket.store);
+      expect(await removeStrayCopies(new Date(NOW.getTime() + 3 * HOUR))).toBe(1);
+      expect(await storageDeletionsWaiting(new Date(NOW.getTime() + 3 * HOUR))).toMatchObject({ oldestSince: null, ageMs: null, strayCopiesSince: null });
+      await prisma.appSetting.deleteMany({ where: { key: STRAY_CURSOR_KEY } });
+    });
+
+    it('a prune that read the row before a purge wrote its first failure keeps the earlier time: the wait is the database’s own, not the one read', async () => {
+      const brick = await idleBrick();
+      const old = await copy(brick.botId, 1, 'failed');
+      const early = new Date(NOW.getTime() - 3 * HOUR);
+      const real = prisma.brickComputer.findUnique.bind(prisma.brickComputer);
+      // Between the prune's read of the rows and its guarded update, a purge writes down its own (earlier) first failure, leaving the row's state as it was
+      const spy = jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementationOnce(((args: never) =>
+        prisma.computerArchive.update({ where: { id: old.id }, data: { deletionSince: early } }).then(() => real(args))) as never);
+      down();
+      try {
+        expect(await pruneArchives(brick.botId, null, NOW)).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await prisma.computerArchive.findUniqueOrThrow({ where: { id: old.id } })).deletionSince).toEqual(early);
+      expect(await storageDeletionsWaiting(NOW)).toMatchObject({ count: 1, oldestSince: early, ageMs: 3 * HOUR });
+    });
+
+    it('when the stray-sweep state cannot be read the status says so (never "nothing waits"), while a sweep pass still goes on from the top and writes nothing it cannot check', async () => {
+      const key = 'computer-cold/0-z/9.' + '0'.repeat(8) + '-0000-0000-0000-' + '0'.repeat(12) + '.ubc';
+      bucket.objects.set(key, Buffer.from('stray'));
+      bucket.written.set(key, new Date(NOW.getTime() - 2 * HOUR));
+      down();
+      await expect(removeStrayCopies(NOW)).rejects.toThrow('down');
+      await expect(removeStrayCopies(new Date(NOW.getTime() + 2 * HOUR))).rejects.toThrow('down');
+      expect(await storageDeletionsWaiting(new Date(NOW.getTime() + 2 * HOUR))).toMatchObject({ strayCopiesSince: NOW });
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const realFind = prisma.appSetting.findUnique.bind(prisma.appSetting);
+      // Only the stray-sweep row cannot be read; everything else the readiness page reads works
+      const unreadable = jest.spyOn(prisma.appSetting, 'findUnique').mockImplementation(((args: { where: { key: string } }) => (args.where.key === STRAY_CURSOR_KEY ? Promise.reject(new Error('the database is busy')) : realFind(args as never))) as never);
+      try {
+        // The status caller is told: an overdue failure that cannot be read is not "no wait"
+        await expect(storageDeletionsWaiting(new Date(NOW.getTime() + 30 * HOUR))).rejects.toThrow('busy');
+        const readiness = (await computerReadiness()).checks.find((one) => one.name === 'storage deletions');
+        expect(readiness).toMatchObject({ ok: false, detail: 'The deletions waiting in storage could not be read' });
+        // Cursor recovery is tolerant: the pass lists from the top and deletes, but writes nothing (it cannot tell whether a newer pass wrote since)
+        setArchiveStoreForTests(bucket.store);
+        expect(await removeStrayCopies(new Date(NOW.getTime() + 30 * HOUR))).toBe(1);
+      } finally {
+        unreadable.mockRestore();
+        quiet.mockRestore();
+      }
+      // The failure written before is still there, not cleared by a pass that could not read it
+      expect(await storageDeletionsWaiting(new Date(NOW.getTime() + 30 * HOUR))).toMatchObject({ strayCopiesSince: NOW });
+      await prisma.appSetting.deleteMany({ where: { key: STRAY_CURSOR_KEY } });
+    });
+
+    it('an older pass that finishes after a newer one wrote a failure never clears that failure or moves the cursor back', async () => {
+      for (const name of ['a', 'b', 'c', 'd']) bucket.objects.set(`computer-cold/0-${name}/other.txt`, Buffer.from(name));
+      setStrayPassForTests(2);
+      const real = bucket.store.list;
+      let overtaken = false;
+      // While the older pass is listing, a newer pass records a failure and has already moved the cursor on
+      setArchiveStoreForTests({
+        ...bucket.store,
+        list: async (prefix, max, startAfter) => {
+          if (!overtaken) {
+            overtaken = true;
+            await prisma.appSetting.upsert({ where: { key: STRAY_CURSOR_KEY }, create: { key: STRAY_CURSOR_KEY, value: { after: 'computer-cold/0-d/other.txt', failingSince: NOW.toISOString() } }, update: { value: { after: 'computer-cold/0-d/other.txt', failingSince: NOW.toISOString() } } });
+          }
+          return real(prefix, max, startAfter);
+        },
+      });
+      try {
+        await removeStrayCopies(new Date(NOW.getTime() + HOUR));
+        // The older pass looked at the first page only: what it wrote does not replace the newer state
+        expect((await prisma.appSetting.findUniqueOrThrow({ where: { key: STRAY_CURSOR_KEY } })).value).toEqual({ after: 'computer-cold/0-d/other.txt', failingSince: NOW.toISOString() });
+        expect(await storageDeletionsWaiting(new Date(NOW.getTime() + HOUR))).toMatchObject({ strayCopiesSince: NOW });
+      } finally {
+        setStrayPassForTests(20_000);
+        setArchiveStoreForTests(bucket.store);
+        await prisma.appSetting.deleteMany({ where: { key: STRAY_CURSOR_KEY } });
+      }
+    });
+
+    it('the readiness page shows how long, is still ready inside a day, and is not ready once a deletion has waited longer than a day', async () => {
+      const brick = await idleBrick();
+      const old = await copy(brick.botId, 1, 'superseded', { deletionSince: new Date() });
+      const check = async () => (await computerReadiness()).checks.find((one) => one.name === 'storage deletions');
+      expect(await check()).toMatchObject({ ok: true, detail: expect.stringMatching(/^1 copy deletion waiting; the oldest for \d+ min$/) });
+      await prisma.computerArchive.update({ where: { id: old.id }, data: { deletionSince: new Date(Date.now() - 5 * HOUR) } });
+      expect(await check()).toMatchObject({ ok: true, detail: '1 copy deletion waiting; the oldest for 5 hours' });
+      await prisma.computerArchive.update({ where: { id: old.id }, data: { deletionSince: new Date(Date.now() - 50 * HOUR) } });
+      const stalled = await check();
+      expect(stalled).toMatchObject({ ok: false });
+      expect(stalled?.detail).toBe('1 copy deletion waiting; the oldest for 2 days: the bucket may have stopped accepting deletes');
+      expect((await computerReadiness()).ready).toBe(false);
+      await prisma.computerArchive.deleteMany({ where: { id: old.id } });
+      expect(await check()).toMatchObject({ ok: true, detail: 'No deletion is waiting in storage' });
+    });
+
+    it('the sweep tells the team once a deletion has waited more than a day, and not again until some hours later', async () => {
+      const brick = await idleBrick();
+      await copy(brick.botId, 1, 'superseded', { deletionSince: new Date(NOW.getTime() - STORAGE_DELETION_ALERT_MS + HOUR) });
+      down();
+      (Sentry.captureMessage as jest.Mock).mockClear();
+      await coldStep(provider, NOW);
+      expect(Sentry.captureMessage).not.toHaveBeenCalledWith(expect.stringContaining('deletion of stored computer copies'), expect.anything());
+      const later = new Date(NOW.getTime() + 2 * HOUR);
+      await coldStep(provider, later);
+      expect(Sentry.captureMessage).toHaveBeenCalledWith(expect.stringContaining('deletion of stored computer copies has waited more than a day'), expect.objectContaining({ level: 'warning', extra: expect.objectContaining({ waiting: 1 }) }));
+      const times = () => (Sentry.captureMessage as jest.Mock).mock.calls.filter((call) => String(call[0]).includes('deletion of stored computer copies')).length;
+      expect(times()).toBe(1);
+      await coldStep(provider, new Date(later.getTime() + HOUR));
+      expect(times()).toBe(1);
+      await coldStep(provider, new Date(later.getTime() + 7 * HOUR));
+      expect(times()).toBe(2);
+    });
   });
 });

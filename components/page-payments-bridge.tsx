@@ -110,10 +110,15 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
       ) : null}
       <p className="m-0 font-semibold">{view.title}</p>
       {view.sub ? <p className="m-0 text-[13px] leading-[1.4] text-[#b3acc7]">{view.sub}</p> : null}
+      {view.note ? (
+        <p className="m-0 text-[13px] leading-[1.4] text-[#b3acc7]" data-testid="pagePaymentsNote">
+          {view.note}
+        </p>
+      ) : null}
       {failed && line.receipt ? (
         <>
           <p className="m-0 text-[13px] leading-[1.4] text-[#b3acc7]">{PAY_WORDS.copyFailed}</p>
-          <input readOnly value={line.receipt} aria-label="Receipt link" onFocus={(event) => event.currentTarget.select()} className="h-11 w-full min-w-0 rounded-full border border-white/[.12] bg-white/[.06] px-4 text-[13px] text-[#f3f1fa]" />
+          <input readOnly value={line.receipt} aria-label="Private receipt link" onFocus={(event) => event.currentTarget.select()} className="h-11 w-full min-w-0 rounded-full border border-white/[.12] bg-white/[.06] px-4 text-[13px] text-[#f3f1fa]" />
         </>
       ) : null}
       {view.actions.length ? (

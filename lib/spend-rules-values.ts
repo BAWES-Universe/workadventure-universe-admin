@@ -280,6 +280,65 @@ export function termsOf(value: unknown): LeaseTerm[] | null {
 }
 
 /**
+ * What the stretches of a lease are priced at between two moments, as a weight: each stretch counts for the room it held per millisecond (its recorded
+ * `micros` over its `stretchMs`) times the time of `from`..`to` that fell in it (the first stretch reaches back and the last one forward, so the whole
+ * window is always priced). A job's price, and the split of it between two months, are both read from this, so they can never disagree with the room that
+ * was held for the same time (`exposureOf`).
+ */
+export function termWeight(terms: ReadonlyArray<LeaseTerm>, from: number, to: number): number {
+  let weight = 0;
+  for (let index = 0; index < terms.length; index++) {
+    const begin = index === 0 ? Number.NEGATIVE_INFINITY : terms[index].at;
+    const end = index + 1 < terms.length ? terms[index + 1].at : Number.POSITIVE_INFINITY;
+    const overlap = Math.min(to, end) - Math.max(from, begin);
+    if (overlap > 0) weight += (terms[index].micros * overlap) / terms[index].stretchMs;
+  }
+  return weight;
+}
+
+/**
+ * The stretches of a lease that carry a real price. A stretch taken while the provider's rate was not known (the room is then the least there can be, 1
+ * micro) says nothing about the price, so it is not one: counted as a price it would pull a job's rate towards nothing. Its time is priced by the stretch
+ * before it (the one after it, for the first), the same way a stretch always reaches to the next. Null when none is left.
+ */
+function pricedTerms(value: unknown): LeaseTerm[] | null {
+  const terms = termsOf(value);
+  const known = terms ? terms.filter((term) => term.micros > 1) : [];
+  return known.length > 0 ? known : null;
+}
+
+/** The terms of a lease whose price changed while it ran (more than one rate among them), else null: only those need keeping to split a job between periods. */
+export function priceChanges(value: unknown): LeaseTerm[] | null {
+  const terms = pricedTerms(value);
+  if (!terms) return null;
+  const first = terms[0];
+  return terms.every((term) => term.micros * first.stretchMs === first.micros * term.stretchMs) ? null : terms;
+}
+
+/**
+ * The rate a job is priced at when it settles: what each stretch of its lease was priced at when it was taken, over the time the job ran (from its
+ * lease to its end, or to the seconds it was charged for if those reach further), never the provider's rate at the moment it closed. One price all
+ * through is exactly that price (per minute). Null for a lease with no recorded price (no terms: an older row; or only stretches taken while the rate
+ * was not known), which keeps the provider's rate.
+ */
+export function pinnedMicrosPerMinute(value: unknown, seconds: number, endMs: number): number | null {
+  const all = termsOf(value);
+  const terms = pricedTerms(value);
+  if (!all || !terms) return null;
+  const first = terms[0];
+  if (!priceChanges(value)) return (first.micros * 60_000) / first.stretchMs;
+  // The window starts where the lease did, whichever stretch was priced first
+  const from = all[0].at;
+  const to = Math.max(endMs, from + Math.max(0, seconds) * 1000);
+  const span = to - from;
+  if (span <= 0) {
+    const last = terms[terms.length - 1];
+    return (last.micros * 60_000) / last.stretchMs;
+  }
+  return (termWeight(terms, from, to) / span) * 60_000;
+}
+
+/**
  * What held room can still cost, for a rule. A job that keeps running renews its room every part of a stretch and each renewal holds one
  * more stretch (so the room held grows faster than the computer is used: that is how the allowance stays safe). A rule is about what a
  * task can really cost, so it counts the time the lease covers, never the whole of what was stacked up: a cap of $1 must not stop a job at

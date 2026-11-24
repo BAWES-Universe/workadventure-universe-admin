@@ -3,6 +3,7 @@
  * page is told the same things in both. These run without a browser: the frame, the fetch and the clock are stand-ins.
  */
 import { createPagePaymentsHost, safeCheckout, type PayLine } from '@/lib/page-payments-host';
+import { describeLine } from '@/components/page-payments-words';
 
 const PAGE = 'https://orbit.example.org/a/k7Qm2xR9';
 const ART = 'art-1';
@@ -230,6 +231,38 @@ describe('a paying page on the public share link', () => {
     host.destroy();
   });
 
+  it('clears the line of a checkout that Orbit no longer answers for this buyer (another account signed in on the device), and tells the page nothing but that it is unavailable', async () => {
+    let signedInElsewhere = false;
+    const { tap, host, lines, told } = setup((call) => (call.init?.method === 'POST' ? { body: started } : signedInElsewhere ? { status: 404, body: { error: 'Not found' } } : { body: { status: 'checking', pollAfterMs: 3000 } }));
+    tap({ request: 'a' });
+    await flush();
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(lines.at(-1)).toMatchObject({ checking: true });
+    // Another account signs in on this device: the order is no longer this buyer's, and the previous account's status is gone
+    signedInElsewhere = true;
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(lines.at(-1)).toMatchObject({ checking: false, paid: null, problem: null, canCheck: false, needsUpdate: false });
+    expect(told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'unavailable', request: 'a' });
+    expect(told().some((message) => message.status === 'paid')).toBe(false);
+    host.destroy();
+  });
+
+  it('a restored test purchase stays a test one for the page and the line, and a second restore of the same purchase starts nothing', async () => {
+    const { tap, host, lines, told, calls } = setup((call) => (call.body.restore ? { body: { status: 'paid', testPayment: true, orderId: 'o-1', paidAt: '2026-11-19T10:00:00Z', via: 'own', buyer: 'guest' } } : 'lost'));
+    tap({ request: 'r1', restore: true });
+    await flush();
+    expect(lines.at(-1)).toMatchObject({ paid: { test: true } });
+    tap({ request: 'r2', restore: true });
+    await flush();
+    // Both are told a test payment, never a plain paid, and nothing but Restore was asked of Orbit (no start, no second purchase)
+    expect(told()).toEqual([
+      { universe: 'app-result', session: 's1', status: 'paid', request: 'r1', test: true },
+      { universe: 'app-result', session: 's1', status: 'paid', request: 'r2', test: true },
+    ]);
+    expect(calls.every((call) => call.body.restore === true)).toBe(true);
+    host.destroy();
+  });
+
   it('answers the document that asked, and no other: the same document tapping again is the same request', async () => {
     const { tap, told, host } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'paid', testPayment: false } }));
     tap({ request: 'a', session: 's-one' });
@@ -360,6 +393,109 @@ describe('a paying page on the public share link', () => {
     expect(calls[0].body.intentId).toBeUndefined();
     expect(told()).toEqual([{ universe: 'app-result', session: 's1', status: 'paid', request: 'r1', test: true }]);
     host.destroy();
+  });
+
+  it('says a closed order the service has not had the last word about is "still being checked": never "no purchase found", never waited on, never "not paid"', async () => {
+    const unresolved = { status: 'checking', longWait: true, orderId: 'o-9', checkoutUrl: null, testPayment: false, via: 'own', buyer: 'guest', pollAfterMs: 15_000 };
+    // Restore (the page asks for its purchase back): one ask, no watching for twenty minutes, the page is told it could not be confirmed yet
+    const restored = setup((call) => (call.body.restore ? { body: unresolved } : { body: { status: 'paid', testPayment: false } }));
+    restored.tap({ request: 'r1', restore: true });
+    await flush();
+    expect(restored.lines.at(-1)).toMatchObject({ problem: 'still_checking', canCheck: true, checking: false, paid: null, offerRestore: false });
+    expect(restored.told()).toEqual([{ universe: 'app-result', session: 's1', status: 'cant_confirm', request: 'r1' }]);
+    // What the guest reads, and what can be pressed: Check payment, and not the sentence for a purchase that was never found
+    const view = describeLine(restored.lines.at(-1)!, { copied: false });
+    expect(view).toMatchObject({ title: 'We’re still checking your earlier payment.', closable: false, actions: [{ kind: 'check' }] });
+    expect(JSON.stringify(view)).not.toMatch(/No purchase found|Not paid yet/);
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(restored.calls).toHaveLength(1);
+    restored.host.destroy();
+    // Check payment by the wish of the last checkout says the same (the start's answer was lost, so the wish is on record)
+    const checked = setup((call) => (call.body.check ? { body: unresolved } : 'lost'));
+    checked.tap({ request: 'r2' });
+    await jest.advanceTimersByTimeAsync(10_000);
+    checked.host.checkPayment();
+    await flush();
+    expect(checked.calls.at(-1)?.body).toMatchObject({ check: true });
+    expect(checked.lines.at(-1)).toMatchObject({ problem: 'still_checking', canCheck: true, checking: false });
+    expect(describeLine(checked.lines.at(-1)!, { copied: false })?.title).toBe('We’re still checking your earlier payment.');
+    expect(checked.told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'cant_confirm', request: 'r2' });
+    checked.host.destroy();
+  });
+
+  it('more than 90 days past the late window the buyer is told to contact the page’s owner, never "still checking" for ever: Restore, Check payment and a polled order all say so, and Check payment can still be pressed (the looks go on)', async () => {
+    const restoredOver = { status: 'checking', longWait: true, longWaitOver: true, orderId: 'o-9', checkoutUrl: null, testPayment: false, via: 'own', buyer: 'guest', pollAfterMs: 15_000 };
+    const checkedOver = { status: 'not_paid', longWaitOver: true, orderId: 'o-9', checkoutUrl: null, testPayment: false, buyer: 'guest', pollAfterMs: 15_000 };
+    const restored = setup((call) => (call.body.restore ? { body: restoredOver } : { body: { status: 'paid', testPayment: false } }));
+    restored.tap({ request: 'r1', restore: true });
+    await flush();
+    expect(restored.lines.at(-1)).toMatchObject({ problem: 'long_unconfirmed', canCheck: true, checking: false, paid: null });
+    expect(restored.told()).toEqual([{ universe: 'app-result', session: 's1', status: 'cant_confirm', request: 'r1' }]);
+    const view = describeLine(restored.lines.at(-1)!, { copied: false });
+    expect(view).toMatchObject({ title: 'We could not confirm your earlier payment.', closable: false, actions: [{ kind: 'check' }] });
+    expect(view?.sub).toContain('contact the page’s owner with the time of the payment');
+    // The page stops refreshing on this line, so the buyer is told how to get a later update: the Check payment button on it
+    expect(view?.sub).toContain('press Check payment to see a later update');
+    expect(JSON.stringify(view)).not.toMatch(/still checking|Not paid yet/);
+    restored.host.destroy();
+    const checked = setup((call) => (call.body.check ? { body: checkedOver } : 'lost'));
+    checked.tap({ request: 'r2' });
+    await jest.advanceTimersByTimeAsync(10_000);
+    checked.host.checkPayment();
+    await flush();
+    expect(checked.lines.at(-1)).toMatchObject({ problem: 'long_unconfirmed', canCheck: true, checking: false });
+    expect(describeLine(checked.lines.at(-1)!, { copied: false })?.title).toBe('We could not confirm your earlier payment.');
+    checked.host.destroy();
+  });
+
+  it('a checkout that is polled and answers more than 90 days past the late window: the line says contact the owner, Check payment stays available, and the host sends no further polls (CodeRabbit nitpick: the polling path)', async () => {
+    // A successful checkout (the POST), then the order's poll (the GET) answers as Orbit does for an order in the long wait past its words: closed, with `longWaitOver`
+    const { tap, host, lines, told, calls } = setup((call) => (call.init?.method === 'POST' ? { body: started } : { body: { status: 'not_paid', longWaitOver: true, orderId: 'o-1', checkoutUrl: null, testPayment: false, buyer: 'guest', pollAfterMs: 15_000 } }));
+    tap({ request: 'req_1' });
+    await flush();
+    const polls = () => calls.filter((call) => call.init?.method !== 'POST').length;
+    expect(polls()).toBe(0);
+    // The first poll
+    await jest.advanceTimersByTimeAsync(3_000);
+    expect(polls()).toBe(1);
+    expect(calls.at(-1)?.url).toContain('?order=o-1');
+    expect(lines.at(-1)).toMatchObject({ problem: 'long_unconfirmed', canCheck: true, checking: false, paid: null });
+    const view = describeLine(lines.at(-1)!, { copied: false });
+    expect(view).toMatchObject({ title: 'We could not confirm your earlier payment.', closable: false, actions: [{ kind: 'check' }] });
+    expect(JSON.stringify(view)).not.toMatch(/still checking|Not paid yet/);
+    expect(told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'cant_confirm', request: 'req_1' });
+    // The watch is over: not one more poll, however long the page stays open (the buyer presses Check payment for an update)
+    await jest.advanceTimersByTimeAsync(10 * 60_000);
+    expect(polls()).toBe(1);
+    host.destroy();
+  });
+
+  it('after a Restore that finds an order still being checked, Check payment follows that Restore (its ask and its request), while Check payment by an earlier wish stays on that wish', async () => {
+    const unresolved = { status: 'checking', longWait: true, orderId: 'o-9', checkoutUrl: null, testPayment: false, via: 'own', buyer: 'guest', pollAfterMs: 15_000 };
+    const earlier = setup((call) => (call.body.restore || call.body.check ? { body: unresolved } : 'lost'));
+    earlier.tap({ request: 'r1' });
+    await jest.advanceTimersByTimeAsync(10_000);
+    // The page then asks for its purchase back (request r2): still being checked, told under r2
+    earlier.tap({ request: 'r2', restore: true });
+    await flush();
+    expect(earlier.told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'cant_confirm', request: 'r2' });
+    // Check payment now asks as that Restore did, and the page hears it under r2 (not under r1, whose checkout is long over)
+    earlier.host.checkPayment();
+    await flush();
+    expect(earlier.calls.at(-1)?.body).toMatchObject({ restore: true });
+    expect(earlier.calls.at(-1)?.body.intentId).toBeUndefined();
+    expect(earlier.told().at(-1)).toEqual({ universe: 'app-result', session: 's1', status: 'cant_confirm', request: 'r2' });
+    earlier.host.destroy();
+    // The explicit Restore purchase button does the same
+    const button = setup((call) => (call.body.restore || call.body.check ? { body: unresolved } : 'lost'));
+    button.tap({ request: 'r3' });
+    await jest.advanceTimersByTimeAsync(10_000);
+    button.host.restorePurchase();
+    await flush();
+    button.host.checkPayment();
+    await flush();
+    expect(button.calls.at(-1)?.body).toMatchObject({ restore: true });
+    button.host.destroy();
   });
 
   it('tells a page "none" when a restore finds nothing, and watches an order of theirs that is still open', async () => {

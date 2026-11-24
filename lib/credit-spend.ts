@@ -76,6 +76,8 @@ export interface HoldInput {
   /** composio, universe (our own version of an App), and so on. */
   provider?: string | null;
   jobKey?: string | null;
+  /** Which stretch of the job this draw belongs to (a computer job that was paused and carried on is charged a stretch at a time: lib/computer-stretch). Left out for work that has no stretches. */
+  jobStretch?: number | null;
   /** The hold of the job this step runs inside. A step inside a computer job is a computer_tool and is charged once, to that job's category. */
   parentHoldKey?: string | null;
   /** What happened in the world (an execution id): the same execution is never charged under two keys. */
@@ -199,6 +201,7 @@ async function holdOnce(input: HoldInput, now: Date, settings: MeterSettings, is
         route: input.route ?? null,
         provider: input.provider ?? null,
         jobKey: input.jobKey ?? null,
+        jobStretch: input.jobStretch ?? null,
         parentHoldKey: input.parentHoldKey ?? null,
         effectKey: input.effectKey ?? null,
         onlyAccountId: input.onlyAccountId ?? null,

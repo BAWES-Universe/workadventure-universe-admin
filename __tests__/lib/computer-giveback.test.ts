@@ -43,3 +43,73 @@ describe('Instant’s pause rule on one person’s month', () => {
     expect(personGiveBackPaused({ pauseMinRuns: null, pauseFailureRateBps: null }, 100, 100)).toBe(false);
   });
 });
+
+import { faultClassOf } from '@/lib/computer-faults';
+import { giveBackSettingsProblems, retryWaitMs } from '@/lib/computer-giveback';
+
+describe('the class of one thing the relay saw go wrong (Orbit judges it, not the relay)', () => {
+  const row = (reason: string, extra: Partial<{ kind: string; source: string }> = {}) => ({ kind: 'fault', source: 'universe-ai', reason, ...extra });
+
+  it('is ours for the faults only our side can cause, and the provider refusing our key, when the relay confirmed it (kind fault)', () => {
+    for (const reason of ['relay_down', 'route_unknown', 'authorize_failed', 'key_decrypt_failed', 'pool_busy', 'provider_key_ours']) expect(faultClassOf(row(reason))).toBe('ours');
+  });
+
+  it('is the person’s for their allowance, a rule, and a field their job set, when the relay marked it so (kind not_ours)', () => {
+    for (const reason of ['allowance', 'rule', 'field_job_set']) expect(faultClassOf(row(reason, { kind: 'not_ours' }))).toBe('person');
+  });
+
+  it('reads what the relay sends for failures on the owner’s own key by kind and reason: a credential or credit rejection and a resting key are theirs (not_ours own_provider, with or without a status); a generic 5xx, 429, cut stream, timeout, unreachable endpoint or plain 403 is uncertain, so unresolved', () => {
+    const own = (reason: string, kind: string) => faultClassOf(row(reason, { kind, source: 'own-key' }));
+    expect(own('own_provider', 'not_ours')).toBe('person');
+    for (const reason of ['provider_5xx', 'provider_429', 'stream_cut', 'timeout_no_output', 'timeout_after_output', 'provider_403']) expect(own(reason, 'uncertain')).toBe('unresolved');
+  });
+
+  it('is unresolved for provider failures, a field only the relay sets, and any reason Orbit does not know (never ours)', () => {
+    for (const reason of ['provider_5xx', 'provider_429', 'stream_cut', 'timeout_no_output', 'timeout_after_output', 'fieldless_400', 'field_relay_set', 'provider_403', 'brand_new_reason']) expect(faultClassOf(row(reason, { kind: 'uncertain' }))).toBe('unresolved');
+  });
+
+  it('is unresolved when the relay’s kind and Orbit’s reason do not agree', () => {
+    expect(faultClassOf(row('provider_key_ours', { kind: 'uncertain' }))).toBe('unresolved');
+    expect(faultClassOf(row('provider_5xx', { kind: 'fault' }))).toBe('unresolved');
+    expect(faultClassOf(row('allowance', { kind: 'fault' }))).toBe('unresolved');
+    expect(faultClassOf(row('relay_down', { kind: 'not_ours' }))).toBe('unresolved');
+  });
+
+  it('does not charge by source alone: an own-key call reads by kind and reason, so our relay being down is ours and a timeout is unresolved', () => {
+    expect(faultClassOf(row('relay_down', { source: 'own-key' }))).toBe('ours');
+    expect(faultClassOf(row('provider_5xx', { source: 'own-key', kind: 'uncertain' }))).toBe('unresolved');
+    expect(faultClassOf(row('timeout_after_output', { source: 'own-key', kind: 'uncertain' }))).toBe('unresolved');
+    expect(faultClassOf(row('own_provider', { source: 'own-key', kind: 'not_ours' }))).toBe('person');
+    // Their provider refusing their key is theirs only when the relay says it is not ours; unconfirmed, or a row that says fault on their own key, stays unresolved
+    expect(faultClassOf(row('provider_key_ours', { source: 'own-key', kind: 'not_ours' }))).toBe('person');
+    expect(faultClassOf(row('provider_key_ours', { source: 'own-key', kind: 'uncertain' }))).toBe('unresolved');
+    expect(faultClassOf(row('provider_key_ours', { source: 'own-key', kind: 'fault' }))).toBe('unresolved');
+  });
+
+  it('is nothing for an answered call', () => {
+    expect(faultClassOf(row('relay_down', { kind: 'answered' }))).toBeNull();
+    expect(faultClassOf(row('relay_down', { source: 'own-key', kind: 'answered' }))).toBeNull();
+  });
+});
+
+describe('the settings the give-back reads, and the wait before a held decision is tried again', () => {
+  it('has no problem when the numbers are there, and says so when they are not', () => {
+    expect(giveBackSettingsProblems({ goodwillPerPersonPerMonth: null, pauseMinRuns: 10, pauseFailureRateBps: 2000 })).toEqual([]);
+    expect(giveBackSettingsProblems({ goodwillPerPersonPerMonth: null, pauseMinRuns: null, pauseFailureRateBps: null }).length).toBeGreaterThan(0);
+  });
+
+  it('names the provider pause number and the person’s failure rate apart: the number of runs is what pauses a provider, the rate only a person’s own give-backs', () => {
+    const onlyRate = giveBackSettingsProblems({ goodwillPerPersonPerMonth: 2, pauseMinRuns: 3, pauseFailureRateBps: null });
+    expect(onlyRate).toHaveLength(1);
+    expect(onlyRate[0]).toMatch(/failure rate/);
+    expect(onlyRate[0]).not.toMatch(/provider failing/);
+    const onlyRuns = giveBackSettingsProblems({ goodwillPerPersonPerMonth: 2, pauseMinRuns: null, pauseFailureRateBps: 2000 });
+    expect(onlyRuns.some((line) => /number of runs/.test(line) && /provider failing/.test(line))).toBe(true);
+  });
+
+  it('grows from one minute to an hour and stops growing', () => {
+    expect(retryWaitMs(0)).toBe(60_000);
+    expect(retryWaitMs(3)).toBe(8 * 60_000);
+    expect(retryWaitMs(30)).toBe(60 * 60_000);
+  });
+});

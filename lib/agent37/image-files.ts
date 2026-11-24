@@ -22,7 +22,7 @@
  */
 
 /** Goes up when anything in the image changes; the machine's own set-up (`universe-up`) is redone when it differs from the one it saw. */
-export const IMAGE_SETUP_VERSION = '2';
+export const IMAGE_SETUP_VERSION = '4';
 
 /** The base image. A dated tag is better for reproducible builds; the registered image is pinned by digest at build anyway. */
 export const BASE_IMAGE = 'ghcr.io/agent37-platform/hermes-base';
@@ -119,7 +119,10 @@ fi
 # A cleanup that could not remove the browser's profile left a mark: no job may use that profile. It is removed here, before the browser
 # runs, and a profile that still cannot be removed means the machine is not ready.
 PROFILE_DIR="$HOME_DIR/.config/universe-chromium"
-if [ -f "$STATE/profile.dirty" ]; then
+# Two places: the root-only marks folder (what Orbit's sign-ins command marks in, a folder the agent cannot swap for a link under root) and the agent's own state folder (what universe-clean and an older command mark in)
+# The word on the next line is what Orbit's sign-ins command looks for before it marks anything: a start-up without it does not read the marks folder, and the command refuses on that machine (universe-marks-v1)
+MARKS="/var/lib/universe/marks"
+if [ -e "$MARKS/profile.dirty" ] || [ -L "$MARKS/profile.dirty" ] || [ -e "$STATE/profile.dirty" ]; then
   pkill -x chromium 2>/dev/null
   pkill -x chrome 2>/dev/null
   i=0
@@ -131,7 +134,8 @@ if [ -f "$STATE/profile.dirty" ]; then
   done
   rm -rf "$PROFILE_DIR" "$HOME_DIR/.cache/chromium" 2>/dev/null
   if [ -e "$PROFILE_DIR" ] || [ -e "$HOME_DIR/.cache/chromium" ]; then echo "ready=0 reason=profile_not_cleared"; exit 1; fi
-  rm -f "$STATE/profile.dirty"
+  rm -rf "$MARKS/profile.dirty" "$STATE/profile.dirty" 2>/dev/null
+  if [ -e "$MARKS/profile.dirty" ] || [ -L "$MARKS/profile.dirty" ] || [ -e "$STATE/profile.dirty" ]; then echo "ready=0 reason=profile_not_cleared"; exit 1; fi
 fi
 
 # Starts a part unless it is running. Each is its own session, so it outlives the command that started it.
@@ -1123,6 +1127,15 @@ export const UNIVERSE_CLEAN = String.raw`#!/bin/sh
 # proved gone before the profile is deleted, and the parts come back only after the lock is let go.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+# This is the AGENT's command: Orbit runs it as the agent user (never as root). Everything below removes and makes things under the agent's own home, whose folders the agent can swap for a link at any moment, so it must
+# never be done with more rights than the agent has. Started as root it does nothing itself: it hands over to the agent user and runs again there, or, when it cannot, it refuses and has touched nothing (CodeRabbit on #1025, N26)
+if [ "$(id -u)" = "0" ]; then
+  AGENT=node
+  AGENT_HOME="$(getent passwd "$AGENT" | cut -d: -f6)"
+  if [ -n "$AGENT_HOME" ] && [ -f "$0" ] && command -v runuser >/dev/null 2>&1; then exec runuser -u "$AGENT" -- env HOME="$AGENT_HOME" "$0"; fi
+  echo "cleaned=0 reason=root"
+  exit 1
+fi
 HOME_DIR="$HOME"
 [ -n "$HOME_DIR" ] || HOME_DIR=/home/node
 STATE="$HOME_DIR/.universe"
@@ -1136,8 +1149,12 @@ until mkdir "$LOCK" 2>/dev/null; do
   sleep 0.2
 done
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
-# Marked first, unmarked only when the profile is proved gone: until then the next start-up removes it before any job can use it
-: > "$STATE/profile.dirty" 2>/dev/null || { echo "cleaned=0 reason=mark"; exit 1; }
+# Marked first, unmarked only when the profile is proved gone: until then the next start-up removes it before any job can use it.
+# A FOLDER made with mkdir, never a file opened with ">": this runs as root over a path the agent owns, and an open for writing would follow
+# a link the agent put there and empty its target. mkdir follows no link and truncates nothing; anything already at that name fails the run
+[ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "cleaned=0 reason=mark"; exit 1; }
+rm -rf "$STATE/profile.dirty" 2>/dev/null
+mkdir "$STATE/profile.dirty" 2>/dev/null || { echo "cleaned=0 reason=mark"; exit 1; }
 pkill -x websockify 2>/dev/null
 pkill -x chromium 2>/dev/null
 pkill -x chrome 2>/dev/null
@@ -1150,7 +1167,7 @@ while pgrep -x chromium >/dev/null 2>&1 || pgrep -x chrome >/dev/null 2>&1; do
 done
 rm -rf "$HOME_DIR/.config/universe-chromium" "$HOME_DIR/.cache/chromium" 2>/dev/null
 if [ -e "$HOME_DIR/.config/universe-chromium" ] || [ -e "$HOME_DIR/.cache/chromium" ]; then echo "cleaned=0 reason=profile_not_removed"; exit 1; fi
-rm -f "$STATE/profile.dirty"
+rm -rf "$STATE/profile.dirty"
 rmdir "$LOCK" 2>/dev/null
 trap - EXIT
 /usr/local/bin/universe-up --child >/dev/null 2>&1

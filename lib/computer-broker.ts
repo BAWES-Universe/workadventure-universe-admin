@@ -1,6 +1,8 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { agentCannotRun, providerFor, fenceMachine, finishJob, settleTurnHold, underTurnHold, wakeIfStopped } from '@/lib/computer';
+import { agentCannotRun, providerFor, fenceMachine, finishJobUnder, settleTurnHold, underTurnHold, wakeIfStopped } from '@/lib/computer';
+import { hasFinishIntent, hasPoolCutoff, lockRelayReach, recordRelayUnreachable } from '@/lib/computer-faults';
+import { epochMatches, lockJob, lockJobRow, type EpochSaid } from '@/lib/computer-owner';
 import { mintJobToken, revokeJobTokens, revokeToken } from '@/lib/computer-token';
 import { agentMayAct } from '@/lib/computer-control';
 import { jobTagOf } from '@/lib/computer-values';
@@ -8,6 +10,7 @@ import { withoutTags } from '@/lib/computer-turn-tags';
 import { Agent37Error, TurnNotSent } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
 import { gitLoginCommand, jobGitAccess, NO_GIT_COMMAND, relayBase } from '@/lib/github/git-login';
+import { carriedOnFrom } from '@/lib/computer-continue';
 
 /**
  * The broker (build handoff v2, section 5): how the bot server's runner reaches a computer without ever holding Agent37's key.
@@ -18,22 +21,25 @@ import { gitLoginCommand, jobGitAccess, NO_GIT_COMMAND, relayBase } from '@/lib/
  * no turn, and a person who has taken over is never talked over.
  */
 
-type Live = { jobId: string; botId: string; generation: number; ref: string; sessionId: string | null; responseId: string | null; firstTurnSentAt: Date | null };
+type Live = { jobId: string; botId: string; generation: number; ownerEpoch: number; ref: string; sessionId: string | null; responseId: string | null; firstTurnSentAt: Date | null; /** "Try again" (piece 8): the ended job whose conversation this one carries on, or null. */ continuesJobId: string | null };
 
-export type NotLive = { ok: false; reason: 'not_found' | 'not_running' | 'person_has_it' | 'no_machine' };
+export type NotLive = { ok: false; reason: 'not_found' | 'not_running' | 'person_has_it' | 'no_machine' | 'finish_pending' | 'superseded' };
 
-/** The job as it stands, when Brick may act on it. */
-async function liveJob(jobId: string): Promise<{ ok: true; job: Live; provider: NonNullable<ReturnType<typeof providerFor>> } | NotLive> {
+/** The job as it stands, when Brick may act on it. `owner` is the worker that asks (the epoch it says): another worker's job is not its to act on (`superseded`); left out, for Orbit's own looks. */
+async function liveJob(jobId: string, owner?: { epoch: EpochSaid }): Promise<{ ok: true; job: Live; provider: NonNullable<ReturnType<typeof providerFor>> } | NotLive> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (!job) return { ok: false, reason: 'not_found' };
   if (job.status === 'waiting' && job.control === 'person') return { ok: false, reason: 'person_has_it' };
   if (job.status !== 'running' || job.control !== 'brick') return { ok: false, reason: 'not_running' };
+  if (owner && !epochMatches(job.ownerEpoch, owner.epoch)) return { ok: false, reason: 'superseded' };
+  // The runner committed to ending this job (its finish intent): nothing is prepared and no turn is started for it any more; the finish is what is still to be completed
+  if (await hasFinishIntent(prisma, jobId)) return { ok: false, reason: 'finish_pending' };
   // Control is Brick's only once a change of hands is over: a hand back is still being completed, or a take over is being fenced, until then
   if (!(await agentMayAct(job.botId))) return { ok: false, reason: 'person_has_it' };
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
   if (!row?.providerRef || !provider || row.machine !== 'working') return { ok: false, reason: 'no_machine' };
-  return { ok: true, job: { jobId: job.id, botId: job.botId, generation: job.controlGeneration, ref: row.providerRef, sessionId: job.agentSessionId, responseId: job.agentResponseId, firstTurnSentAt: job.firstTurnSentAt }, provider };
+  return { ok: true, job: { jobId: job.id, botId: job.botId, generation: job.controlGeneration, ownerEpoch: job.ownerEpoch, ref: row.providerRef, sessionId: job.agentSessionId, responseId: job.agentResponseId, firstTurnSentAt: job.firstTurnSentAt, continuesJobId: job.continuesJobId }, provider };
 }
 
 /** Where the model relay is: an https address with no login, query or fragment, ending where /v1 begins. */
@@ -94,7 +100,9 @@ export type Prepared =
   | NotLive
   /** Another prepare of the job holds its claim: the caller waits a few seconds and asks again, it is not a failure. */
   | { ok: false; reason: 'preparing' }
-  | { ok: false; reason: 'bad_relay' | 'failed' };
+  | { ok: false; reason: 'bad_relay' | 'failed' }
+  /** The key was written, but the computer could not get the relay's model list with it (no connection, a timeout, a reply that is not the relay's): a confirmed fault of ours, kept for the job. */
+  | { ok: false; reason: 'relay_unreachable' };
 
 /**
  * Gives the job's computer what it needs to ask for a model: a new key and the relay's address, written where the image's local
@@ -105,16 +113,38 @@ export type Prepared =
  * GitHub): a second key of scope "git" and the files that make plain `git clone https://github.com/owner/repo` go through Orbit's git
  * relay (see lib/github/git-login.ts). Without it the old git files are removed. `git` in the answer says whether the computer has it.
  */
-export async function prepareJob(jobId: string, relay: unknown, now: Date = new Date()): Promise<Prepared> {
+export async function prepareJob(jobId: string, relay: unknown, now: Date = new Date(), options: { run?: string | null; /** The ownership epoch the runner won by its claim; none = a worker that knows none (good only while the job has none). */ epoch?: EpochSaid; /** False: the bot server's own look at the relay got a reply that is not the relay's. */ relayReached?: boolean; relayStatus?: number | null } = {}): Promise<Prepared> {
   const address = relayAddressOf(relay);
   if (!address) return { ok: false, reason: 'bad_relay' };
   // One key is made and written at a time for a job: ending the old keys, making the new one and writing it are one piece, so a second
   // prepare at the same moment cannot end this one's key after it was written, or write an older key over a newer one
+  // A worker that does not own the job does not even take the claim (it would hold the real owner's prepare off for nothing): decided again, in the key's own transaction, below
+  const first = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { ownerEpoch: true } });
+  if (!first) return { ok: false, reason: 'not_found' };
+  if (!epochMatches(first.ownerEpoch, options.epoch)) return { ok: false, reason: 'superseded' };
   const claim = await claimOnJob(jobId, 'prepareClaimedAt', PREPARE_CLAIM_STALE_MS, PREPARE_CLAIM_WAIT_MS);
   if (claim === 'gone') return { ok: false, reason: 'not_found' };
   if (claim === 'busy') return { ok: false, reason: 'preparing' };
   try {
-    return await prepareClaimed(jobId, address, now, claim);
+    // The bot server itself found that the address answers something that is not the relay: a confirmed fault of ours, kept (once per run) and told at once, with no key made for a relay that is not there
+    if (options.relayReached === false) {
+      // Only for a job that is running under Brick's control: a job in line (no machine yet), over, or the person's keeps no such fault (a row with no run named would apply to every later run of the job)
+      // The look and the write are ONE transaction under the lock a relay-reach write takes and the job's row lock: the fault is recorded only while the job still is what the look found (this worker's, running, Brick's)
+      const recorded = await prisma.$transaction(async (tx) => {
+        await lockRelayReach(tx, jobId);
+        const now_ = await lockJobRow(tx, jobId);
+        if (!now_) return { ok: false as const, reason: 'not_found' as const };
+        if (!epochMatches(now_.ownerEpoch, options.epoch)) return { ok: false as const, reason: 'superseded' as const };
+        if (now_.status === 'waiting' && now_.control === 'person') return { ok: false as const, reason: 'person_has_it' as const };
+        if (now_.status !== 'running' || now_.control !== 'brick') return { ok: false as const, reason: 'not_running' as const };
+        // A kept finish intent does not change the job's status or its epoch: the ordinary prepare answers `finish_pending` for it, and so does this one, before any fault is written (CodeRabbit on #1025)
+        if (await hasFinishIntent(tx, jobId)) return { ok: false as const, reason: 'finish_pending' as const };
+        await recordRelayUnreachable(tx, jobId, { run: options.run ?? null, status: options.relayStatus ?? null, at: now });
+        return { ok: false as const, reason: 'relay_unreachable' as const };
+      });
+      return recorded;
+    }
+    return await prepareClaimed(jobId, address, now, claim, options.run ?? null, options.epoch);
   } finally {
     await releaseOnJob(jobId, 'prepareClaimedAt', claim);
   }
@@ -128,29 +158,55 @@ const holdsPrepareClaim = async (jobId: string, claim: Date) => (await prisma.co
  * claim meanwhile never leaves the key it made good next to the one that took the claim over. (A key is only ever usable from the machine's relay file, which holds one:
  * the key crosses only the write, so a key that was not written, or was written over, reaches no call.)
  */
-async function endOwnKey(jobId: string, token: string, now: Date, claim: Date): Promise<void> {
-  await revokeJobTokens(jobId, now, { prepareClaim: claim });
+async function endOwnKey(jobId: string, token: string, now: Date, claim: Date, epoch: number): Promise<void> {
+  // The keys of THIS owner's epoch only: another owner's key is never ended by a prepare of this one
+  await revokeJobTokens(jobId, now, { prepareClaim: claim, epoch });
   await revokeToken(token, now);
 }
 
-async function prepareClaimed(jobId: string, address: string, now: Date, claim: Date): Promise<Prepared> {
-  const live = await liveJob(jobId);
+async function prepareClaimed(jobId: string, address: string, now: Date, claim: Date, run: string | null, epoch: EpochSaid): Promise<Prepared> {
+  const live = await liveJob(jobId, { epoch });
   if (!live.ok) return live;
+  const ownerEpoch = live.job.ownerEpoch;
   // A prepare that was held up past its claim (a stopped process, a database that did not answer) finds another one has it now: it changes no key and
   // writes nothing, and the caller asks again. The keys end only while the claim is still this one's, in the very statement that checks it
   if (!(await holdsPrepareClaim(jobId, claim))) return { ok: false, reason: 'preparing' };
-  await revokeJobTokens(jobId, now, { prepareClaim: claim });
-  if (!(await holdsPrepareClaim(jobId, claim))) return { ok: false, reason: 'preparing' };
-  // Only for the job as it stands now: a take-over after the look above gets no key
-  const minted = await mintJobToken(jobId, 'model', now, { generation: live.job.generation });
+  // Only for the job as it stands now: a take-over after the look above gets no key. The key is made ONLY while this owner owns the job and this prepare still holds the claim (decided in the key's own transaction); the
+  // older keys of this owner end with it, in the same commit (never another owner's)
+  const minted = await mintJobToken(jobId, 'model', now, { generation: live.job.generation }, { epoch, prepareClaim: claim });
   if (!minted.ok) return { ok: false, reason: minted.reason };
   // Not written when the claim went to another while the key was made: that one makes and writes its own, and this key is ended
   if (!(await holdsPrepareClaim(jobId, claim))) {
     await revokeToken(minted.token, now);
     return { ok: false, reason: 'preparing' };
   }
+  // The computer asks the relay for its model list with the key it was just given, the very thing its model address does on each call (asked BEFORE the key is written, so a computer that cannot reach the
+  // relay is never given a key that cannot be used). A computer that cannot (the address answers a page that is not the relay's, nothing answers, the key is refused) would fail every call before one
+  // reaches the relay, with nothing recorded: it is a confirmed fault of ours, kept before anything else is said, and the runner is told. A check that could not be made at all (no curl on the machine, a
+  // command that did not run) says nothing and changes nothing
+  if ((await relayProbe(live.provider, live.job.ref, address, minted.token)) === 'down') {
+    // A prepare held up during the probe may have lost its claim, and a newer prepare then ended this key: the probe failed on a key that was refused, not on the relay. Only the prepare that still holds the claim says a fault
+    if (!(await holdsPrepareClaim(jobId, claim))) {
+      await revokeToken(minted.token, now);
+      return { ok: false, reason: 'preparing' };
+    }
+    await recordRelayUnreachable(prisma, jobId, { run, at: now });
+    await endOwnKey(jobId, minted.token, now, claim, ownerEpoch);
+    return { ok: false, reason: 'relay_unreachable' };
+  }
   const file = JSON.stringify({ url: address, token: minted.token });
-  const gitPart = await gitLoginFor(jobId, live.job.generation, now);
+  // A job that carries on an ended one ("try again", piece 8) talks in that job's conversation, which holds the OLD jobs' tags too, and the model address reads the first tag it finds: this job's key is
+  // also written under the id of every job it carries on from, so every call of the conversation goes with THIS job's key (theirs ended with them). Ids are Orbit's own (uuid characters only)
+  const aliases = live.job.continuesJobId ? (await carriedOnFrom(jobId)).filter((id) => /^[A-Za-z0-9-]{8,64}$/.test(id)) : [];
+  // Every file a key is written to has its own order, kept in a stamp beside it (the claim time of the prepare that last wrote it, whichever job's prepare that was): a prepare writes a file only when no later prepare wrote it
+  // already, so a delayed predecessor never puts its revoked key over the file of a successor that carries on its conversation, and a later valid prepare still refreshes it (CodeRabbit on #1025)
+  const mark0 = claim.getTime();
+  // `sm` is emptied before every read: the same shell runs this once for the job's own file and once per alias, and a read of a stamp file that does not exist does not run at all, so without it an alias with no stamp would inherit the
+  // previous file's (newer) value and be skipped, leaving a revoked key in its file (Sentry on #1025, S2). The other reads below run once per command, but their variables are emptied too
+  const writeTo = (dest: string): string =>
+    `{ sm=; read -r sm < "$d/jobs/${dest}.stamp" 2>/dev/null; if [ -n "$sm" ] && [ "$sm" -gt ${mark0} ] 2>/dev/null; then :; else printf '%s' '${file}' > "$d/jobs/${dest}.json.new" && mv "$d/jobs/${dest}.json.new" "$d/jobs/${dest}.json" && printf '%s' ${mark0} > "$d/jobs/${dest}.stamp"; fi; } && `;
+  const aliasPart = aliases.map((id) => writeTo(id)).join('');
+  const gitPart = await gitLoginFor(jobId, live.job.generation, now, epoch);
   // Written whole to a new file and moved over the old one, so a call never reads half of it. Only the machine's own user can read it.
   // Under a lock, and only over a key of an older or the same control number: a write that was delayed past a take-over and a hand-back
   // finds a newer key there and leaves it alone. Of two writes under the same control number the one whose claim was made later wins (a claim is
@@ -162,31 +218,38 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
     `umask 077 && d="$HOME/.universe" && mkdir -p "$d" && ( flock 9 || exit 1; ` +
     // The job's own newer write is looked for FIRST, before anything is written: a write that is stale for this job (an older control number, or an older claim
     // of the same number) changes nothing at all, not even the key last written, whichever job wrote last
-    `read -r jg jm < "$d/jobs/${jobId}.gen" 2>/dev/null; ` +
+    `jg=; jm=; read -r jg jm < "$d/jobs/${jobId}.gen" 2>/dev/null; ` +
     `if [ -n "$jg" ] && { [ ${generation} -lt "$jg" ] || { [ ${generation} -eq "$jg" ] && [ -n "$jm" ] && [ ${mark} -lt "$jm" ]; }; } 2>/dev/null; then exit 0; fi; ` +
-    `read -r who cur mk < "$d/relay.gen" 2>/dev/null; ` +
+    `who=; cur=; mk=; read -r who cur mk < "$d/relay.gen" 2>/dev/null; ` +
     `if [ "$who" = '${jobId}' ] && [ -n "$cur" ] && { [ "$cur" -gt ${generation} ] || { [ "$cur" -eq ${generation} ] && [ -n "$mk" ] && [ "$mk" -gt ${mark} ]; }; } 2>/dev/null; then exit 0; fi; ` +
-    `printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json" && printf '%s %s %s' '${jobId}' ${generation} ${mark} > "$d/relay.gen" && ` +
+    // The shared file is also left alone when ANOTHER job's claim that wrote it is later than this one (control numbers are of one job, so only the claims are compared): a delayed prepare of an older job never puts its key over a newer claim's. Its own files below are still written
+    `if [ "$who" != '${jobId}' ] && [ -n "$mk" ] && [ "$mk" -gt ${mark} ] 2>/dev/null; then :; else printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json" && printf '%s %s %s' '${jobId}' ${generation} ${mark} > "$d/relay.gen"; fi && ` +
     // The job's own key goes where the model address looks for the job a call belongs to (its turns carry the job's tag). Another job's key beside it is never
     // touched, so jobs that run at once each call on their own. Files a week old are removed.
-    `mkdir -p "$d/jobs" && printf '%s' '${file}' > "$d/jobs/${jobId}.json.new" && mv "$d/jobs/${jobId}.json.new" "$d/jobs/${jobId}.json" && printf '%s %s' ${generation} ${mark} > "$d/jobs/${jobId}.gen" && ` +
+    `mkdir -p "$d/jobs" && ` +
+    writeTo(jobId) +
+    `printf '%s %s' ${generation} ${mark} > "$d/jobs/${jobId}.gen" && ` +
+    aliasPart +
     `{ find "$d/jobs" -type f -mtime +7 -delete 2>/dev/null || :; } && ` +
     `{ ${gitPart.command}; } ) 9>"$d/relay.lock"`;
   try {
     const done = await live.provider.exec(live.job.ref, command, { timeoutMs: 30_000 });
     if (done.exitCode !== 0) {
-      await endOwnKey(jobId, minted.token, now, claim);
+      await endOwnKey(jobId, minted.token, now, claim, ownerEpoch);
       return { ok: false, reason: 'failed' };
     }
   } catch (error) {
     console.error('[Computer] Could not prepare a machine:', error instanceof Error ? error.message : 'unknown');
-    await endOwnKey(jobId, minted.token, now, claim);
+    await endOwnKey(jobId, minted.token, now, claim, ownerEpoch);
     return { ok: false, reason: 'failed' };
   }
   // The person may have taken over while the key was being written: the key is then of an older control number (it is refused), and the
   // runner is told the job is not its to act on
-  const after = await liveJob(jobId);
-  if (!after.ok) return after;
+  const after = await liveJob(jobId, { epoch });
+  if (!after.ok) {
+    if (after.reason === 'superseded') await revokeJobTokens(jobId, now, { epoch: ownerEpoch });
+    return after;
+  }
   if (after.job.generation !== generation) return { ok: false, reason: 'not_running' };
   // The claim went to another while the key was being written: that one's key is the one that stays, and the caller asks again
   if (!(await holdsPrepareClaim(jobId, claim))) {
@@ -196,11 +259,41 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
   return { ok: true, expiresAt: minted.expiresAt, git: gitPart.on };
 }
 
+/** How long the machine waits before it asks a second time, when the first ask found the address definitely wrong. */
+const PROBE_RETRY_WAIT_SECONDS = 2;
+
+/**
+ * Whether the computer can get the relay's model list (`GET <relay>/v1/models` with the job's key: a 200 whose body has `data`; the game's relay answers exactly that, bots/server/ComputerModelRelay.ts
+ * `router.get('/v1/models')`). Only a DEFINITE wrong address is `down`: a name that does not resolve or a connection refused (curl 6, 7), a 404 or 410, a 401 or 403 for a key that was just made, a 200
+ * with no model list, any other answer that is a page and not JSON. It is asked ONCE more after a short wait before it is believed; an answer that is fine the second time is fine. Everything else is
+ * `unknown`, which never counts against anyone: a timeout (curl 28) or any other curl error, a redirect, a 429 or 5xx (a blip, a busy relay), a JSON error answer that is none of the above, a
+ * machine with no curl, a command that did not run or said nothing.
+ */
+async function relayProbe(provider: NonNullable<ReturnType<typeof providerFor>>, ref: string, address: string, token: string): Promise<'ok' | 'down' | 'unknown'> {
+  const command =
+    `command -v curl >/dev/null 2>&1 || { echo reach=nocurl; exit 0; }; ` +
+    // ask: 0 = the relay's list, 2 = a definite wrong address, 1 = anything else (nothing is learned)
+    `ask() { r=$(curl -sS -m 10 -H 'Authorization: Bearer ${token}' -w '\n%{http_code}' '${address}/v1/models' 2>/dev/null); rc=$?; code=$(printf '%s' "$r" | tail -n 1); ` +
+    `if [ "$rc" -eq 6 ] || [ "$rc" -eq 7 ]; then return 2; fi; [ "$rc" -eq 0 ] || return 1; ` +
+    `case "$code" in 200) printf '%s' "$r" | grep -q '"data"' && return 0 || return 2;; 404|410|401|403) return 2;; 3??|429|5??) return 1;; esac; ` +
+    `printf '%s' "$r" | sed '$d' | grep -q '^[[:space:]]*[{[]' && return 1 || return 2; }; ` +
+    `ask; a=$?; if [ "$a" -eq 2 ]; then sleep ${PROBE_RETRY_WAIT_SECONDS}; ask; a=$?; fi; ` +
+    `case "$a" in 0) echo reach=ok;; 2) echo reach=down;; *) echo reach=unknown;; esac`;
+  try {
+    const done = await provider.exec(ref, command, { timeoutMs: 40_000 });
+    if (done.exitCode !== 0) return 'unknown';
+    if (/(^|\n)reach=down\s*($|\n)/.test(done.stdout)) return 'down';
+    return /(^|\n)reach=ok\s*($|\n)/.test(done.stdout) ? 'ok' : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 /**
  * The git half of preparing a job: a "git" key and the shell that writes the login, when the job may have one; otherwise the shell
  * that removes it. Never fails the preparing: a computer without git still works, and the reason is only logged.
  */
-async function gitLoginFor(jobId: string, generation: number, now: Date): Promise<{ on: boolean; command: string }> {
+async function gitLoginFor(jobId: string, generation: number, now: Date, epoch: EpochSaid): Promise<{ on: boolean; command: string }> {
   const off = { on: false, command: NO_GIT_COMMAND };
   try {
     const access = await jobGitAccess(jobId);
@@ -208,7 +301,7 @@ async function gitLoginFor(jobId: string, generation: number, now: Date): Promis
     if (!access || !base) return off;
     // Checked before a key is made: a name or address that is not plain characters gets no key at all
     if (!gitLoginCommand(`cjt_${'x'.repeat(43)}`, base, access)) return off;
-    const minted = await mintJobToken(jobId, 'git', now, { generation });
+    const minted = await mintJobToken(jobId, 'git', now, { generation }, { epoch });
     if (!minted.ok) return off;
     const command = gitLoginCommand(minted.token, base, access);
     return command ? { on: true, command } : off;
@@ -232,9 +325,9 @@ export type StartedTurn =
  * while the job is still the one that was asked: if the person took over in between, the turn is cancelled at once and the stream says it
  * was fenced. A second turn is never started on a conversation that is still working.
  */
-export async function startTurn(jobId: string, text: unknown, signal?: AbortSignal): Promise<StartedTurn> {
+export async function startTurn(jobId: string, text: unknown, signal?: AbortSignal, owner: { epoch: EpochSaid } = { epoch: undefined }): Promise<StartedTurn> {
   if (typeof text !== 'string' || text.trim() === '' || text.length > 200_000) return { ok: false, reason: 'failed' };
-  const live = await liveJob(jobId);
+  const live = await liveJob(jobId, owner);
   if (!live.ok) return live;
   const { job, provider } = live;
   // A turn is kept but its conversation is not known (the agent did not say it): whether it still runs cannot be asked, so the caller is
@@ -250,7 +343,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     if (unsure) return { ok: false, reason: 'failed' };
     if (active) return { ok: false, reason: 'busy', responseId: active };
     // The turn we kept is over (the stream was lost before its end reached us): it is cleared and this one goes ahead
-    await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: job.responseId }, data: { agentResponseId: null } });
+    await prisma.computerJob.updateMany({ where: { id: job.jobId, ownerEpoch: job.ownerEpoch, agentResponseId: job.responseId }, data: { agentResponseId: null } });
   }
   // Only one turn is started at a time on a job: it is claimed before the agent is asked, so two starts at the same moment never both open
   // one. The claim is let go when the turn's id is kept (or the start fails); one nobody released lapses by itself.
@@ -264,10 +357,12 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   // first-turn mark is written at the very end of this part, and a throw after it is the next try's, which keeps the mark rules
   let ready!: { job: Live; provider: NonNullable<ReturnType<typeof providerFor>> };
   let sessionId: string | null;
+  // The time of the mark THIS start put on the job's row for a first turn (null: none): the mark it lets go of when nothing was sent, and no other
+  let markedAt: Date | null = null;
   try {
     // Looked at again now that the claim is held: the job was read before it, and a start that kept its turn's id (or a take-over) in between changed what
     // is true. A turn the job holds now is busy (its id is given, to reconnect to), and the conversation to start on is the one it has now
-    let fresh = await liveJob(job.jobId);
+    let fresh = await liveJob(job.jobId, owner);
     if (!fresh.ok) {
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       return fresh;
@@ -287,7 +382,7 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       // The machine may have been put to sleep to prove it, with this job the only one holding it: it is woken for this job (and the job ends as an error
       // if it will not come back, its room given back), so the job goes on instead of failing for nothing
       await wakeIfStopped(fresh.job.botId);
-      fresh = await liveJob(job.jobId);
+      fresh = await liveJob(job.jobId, owner);
       if (!fresh.ok) {
         await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
         return fresh;
@@ -295,22 +390,15 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     }
     sessionId = fresh.job.sessionId;
     // A job's very first turn has no conversation to be found by, and the agent has no way to be asked for "the turn this request started" (a request
-    // carries no key of ours and sessions cannot be listed). So the turn is marked in the job's row BEFORE it is sent, and a start that finds the mark
+    // carries no key of ours and sessions cannot be listed). So the turn is marked in the job's row BEFORE it is sent (below, after the last look at the job and right before the provider is called: a mark that is written earlier would stand for a turn that was never sent), and a start that finds the mark
     // with no turn id and no conversation (the server stopped after the agent accepted the turn, or the stream failed before its id came) never opens
     // a second one beside it: the job ends, visibly, as it does when the turn never says its id. In a conversation the agent knows, a second turn is
     // refused by the agent itself, atomically, so only the first turn needs the mark.
     if (!sessionId) {
       if (fresh.job.firstTurnSentAt) {
-        const ended = await endJobOfUnknownTurn(job.jobId);
+        const ended = await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
         await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
-        return { ok: false, reason: ended ? 'not_running' : 'failed' };
-      }
-      const marked = await prisma.computerJob
-        .updateMany({ where: { id: job.jobId, status: 'running', control: 'brick', firstTurnSentAt: null }, data: { firstTurnSentAt: new Date() } })
-        .catch(() => null);
-      if (!marked || marked.count !== 1) {
-        await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
-        return { ok: false, reason: marked ? 'not_running' : 'failed' };
+        return ended === 'superseded' ? { ok: false, reason: 'superseded' } : { ok: false, reason: ended === 'ended' ? 'not_running' : 'failed' };
       }
     }
     ready = fresh;
@@ -328,8 +416,62 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   try {
     if (signal?.aborted) {
       clearTimeout(timer);
-      // Nothing was sent: the mark goes too
-      if (!sessionId) await prisma.computerJob.updateMany({ where: { id: job.jobId }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+      // Nothing was sent, and nothing is marked yet (the mark is written right before the provider is called)
+      await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+      return { ok: false, reason: 'failed' };
+    }
+    // The last look before the provider hears of the turn is made under the job's cutoff lock and its row lock, the two a claim of the job (a new owner), a finish intent and a pause write under: this worker is still the owner (its
+    // epoch), the job is still running in Brick's hands under the same control number, and no finish intent or pool cutoff is kept. A new owner's claim that lands first is seen here and the turn is never opened; a claim that lands
+    // after this look finds a turn that was admitted before it, which the id fence and the cancellation cover as before (CodeRabbit on #1025). No provider call is made inside the lock
+    const mark = new Date();
+    let wroteMark = false;
+    const standing = await prisma
+      .$transaction(
+        async (tx) => {
+          const row = await lockJob(tx, job.jobId);
+          if (!row) return 'gone' as const;
+          if (row.ownerEpoch !== job.ownerEpoch) return 'superseded' as const;
+          if (row.status !== 'running' || row.control !== 'brick' || row.controlGeneration !== ready.job.generation) return 'not_running' as const;
+          if ((await hasFinishIntent(tx, job.jobId)) || (await hasPoolCutoff(tx, job.jobId))) return 'finish_pending' as const;
+          // The job is not ready to be worked on: its browser is being brought back (`restoring`) or could not be (`recover`), or it is fresh and its ready write has not landed. No turn is opened on it, whoever asks and whatever epoch they
+          // say (a service-token caller can read the epoch from `getJob`); the caller waits and asks again (CodeRabbit on #1025, F4 and O44)
+          if (row.prepState !== null || row.stretchStarted === null) return 'starting' as const;
+          // The claim this start took is still the job's, read under the row's lock: a start that stalled past the claim's life and was replaced (the replacement opened a turn and stored its id, which clears the first-turn mark) must not
+          // admit itself again on a mark that is null once more. A turn stored by the replacement is busy, its id given to reconnect to (CodeRabbit on #1025, I3)
+          if (row.agentResponseId) return { busy: row.agentResponseId };
+          const held = await tx.$queryRaw<Array<{ turn_claimed_at: Date | null }>>`SELECT "turn_claimed_at" FROM "computer_jobs" WHERE "id" = ${job.jobId}`;
+          if (held[0]?.turn_claimed_at?.getTime() !== claim.getTime()) return 'starting' as const;
+          // A job's first turn is marked here, in the same decision that admits it and not before: a mark found later with no turn id means the turn was admitted and may have reached the agent. The mark is this attempt's (its time)
+          if (!sessionId) {
+            const wrote = await tx.computerJob.updateMany({ where: { id: job.jobId, firstTurnSentAt: null }, data: { firstTurnSentAt: mark } });
+            if (wrote.count !== 1) return 'not_running' as const;
+            wroteMark = true;
+          }
+          return 'ok' as const;
+        },
+        { timeout: 15_000, maxWait: 15_000 },
+      )
+      .catch(() => 'failed' as const);
+    // The mark is kept only if the transaction that wrote it committed
+    if (standing === 'ok' && wroteMark) markedAt = mark;
+    if (standing !== 'ok') {
+      clearTimeout(timer);
+      // Nothing was sent, and nothing is marked yet: the claim is let go of
+      await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
+      if (standing === 'finish_pending') return { ok: false, reason: 'finish_pending' };
+      if (standing === 'starting') return { ok: false, reason: 'starting' };
+      if (typeof standing === 'object') return { ok: false, reason: 'busy', responseId: standing.busy };
+      if (standing === 'gone') return { ok: false, reason: 'not_found' };
+      if (standing === 'failed') return { ok: false, reason: 'failed' };
+      // Superseded (or no longer Brick's to run): the same answer the worker gets on every other route
+      const now_ = await liveJob(job.jobId, owner);
+      return now_.ok ? { ok: false, reason: 'not_running' } : now_;
+    }
+    // The request was cut while the admission waited for the job's lock: nothing is sent, the claim is let go of and this attempt's own mark goes (the request's own signal is not handed on once the turn is dispatched, so a runner that goes
+    // away later cannot stop the id being kept)
+    if (signal?.aborted) {
+      clearTimeout(timer);
+      if (markedAt) await prisma.computerJob.updateMany({ where: { id: job.jobId, firstTurnSentAt: markedAt, agentResponseId: null, agentSessionId: null }, data: { firstTurnSentAt: null } }).catch(() => undefined);
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       return { ok: false, reason: 'failed' };
     }
@@ -346,29 +488,47 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       // An answer below 500 is a refusal, and `try_again` is Agent37 saying so itself. A 502/503/504 is not: it can come from a gateway after the agent
       // accepted the turn, so it ends the job rather than let a retry open a second first turn beside one that runs (the person would pay for both)
       const notSent = error instanceof TurnNotSent || (error instanceof Agent37Error && (error.status < 500 || error.code === 'try_again'));
-      if (notSent) await prisma.computerJob.updateMany({ where: { id: job.jobId }, data: { firstTurnSentAt: null } }).catch(() => undefined);
-      else await endJobOfUnknownTurn(job.jobId);
+      if (notSent && markedAt) await prisma.computerJob.updateMany({ where: { id: job.jobId, firstTurnSentAt: markedAt }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+      else await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
+    }
+    // A job that carries on an ended one's conversation ("try again", piece 8) on a computer that no longer has it (a new machine, an older copy brought back): the agent says it does
+    // not know the conversation. Nothing was sent, so the job starts a conversation of its own at its next turn (its first words already say all of the job); only that job's own copy
+    // of the conversation id is let go, and only while this owner still holds the job
+    if (sessionId && ready.job.continuesJobId && error instanceof Agent37Error && error.status === 404 && error.code !== 'session_busy') {
+      await prisma.computerJob.updateMany({ where: { id: job.jobId, ownerEpoch: job.ownerEpoch, agentSessionId: sessionId, agentResponseId: null }, data: { agentSessionId: null } }).catch(() => undefined);
     }
     await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
     if (error instanceof Agent37Error && error.code === 'session_busy') return { ok: false, reason: 'busy', responseId: error.runningResponseId };
     return { ok: false, reason: 'failed' };
   }
-  return { ok: true, events: withoutTags(keeping(ready.job, ready.provider, events, { timer, controller: own, claim })) };
+  return { ok: true, events: withoutTags(keeping(ready.job, ready.provider, events, { timer, controller: own, claim, markedAt })) };
 }
 
 /**
  * The job's first turn may be running on the machine with nothing to find it by: the job ends as failed (its keys revoked, its time settled, the
- * machine given back, which rests the turn). True when it ended; a job that cannot be ended now keeps its mark, so the next start ends it.
+ * machine given back, which rests the turn). Says what really happened: `ended` (the job is over, as a kept intent said when one was kept), `superseded` (another worker owns the job now: the ending was
+ * refused and nothing was ended) or `unresolved` (the ending could not be made now: the job keeps its mark, so the next start ends it). Never claims an ending the finalizer refused (CodeRabbit on #1025).
  */
-async function endJobOfUnknownTurn(jobId: string): Promise<boolean> {
+export type UnknownTurnEnd = 'ended' | 'superseded' | 'unresolved';
+async function endJobOfUnknownTurn(jobId: string, epoch: number): Promise<UnknownTurnEnd> {
   try {
-    await finishJob(jobId, 'failed');
-    return true;
+    // Ends the job only while the worker that is starting the turn still owns it (decided in the ending's own write), and as a kept intent says when one is kept: a job another owner holds is not ended by this one's turn
+    const done = await finishJobUnder(jobId, null, 'failed', new Date(), null, null, null, null, epoch);
+    if (done.superseded) return 'superseded';
+    return done.job && ['done', 'failed', 'stopped'].includes(done.job.status) && !done.stale ? 'ended' : 'unresolved';
   } catch (error) {
     console.error('[Computer] Could not end a job whose first turn has no id:', error instanceof Error ? error.message : 'unknown');
-    return false;
+    return 'unresolved';
   }
 }
+
+/** What the stream says when a first turn never named itself: the terminal message only when the job did end; supersession and an unresolved ending are said as what they are. */
+const noTurnIdEvent = (end: UnknownTurnEnd): TurnEvent =>
+  end === 'ended'
+    ? { type: 'failed', code: 'no_turn_id', message: 'The agent never said its turn had started, so the job was ended' }
+    : end === 'superseded'
+      ? { type: 'failed', code: 'superseded', message: 'Another worker owns this job now, so it was not ended here' }
+      : { type: 'failed', code: 'turn_unresolved', message: 'The agent never said its turn had started and the job could not be ended yet; it is ended on the next start' };
 
 /** How long the agent has to accept a turn and say its id. */
 const TURN_START_LIMIT_MS = 30_000;
@@ -382,7 +542,7 @@ async function* keeping(
   job: Live,
   provider: NonNullable<ReturnType<typeof providerFor>>,
   events: AsyncGenerator<TurnEvent>,
-  start?: { timer: ReturnType<typeof setTimeout>; controller: AbortController; claim?: Date },
+  start?: { timer: ReturnType<typeof setTimeout>; controller: AbortController; claim?: Date; /** The first-turn mark this start wrote (null when it wrote none): the only mark it clears, whoever owns the job now. */ markedAt?: Date | null },
 ): AsyncGenerator<TurnEvent> {
   let responseId: string | null = null;
   let over = false;
@@ -394,6 +554,7 @@ async function* keeping(
   const began = Date.now();
   // Set when the start is given up for good (see the cap below): the wait for the agent's answer ends at once
   let gaveUpAt: number | null = null;
+  let gaveUpEnd: UnknownTurnEnd = 'unresolved';
   let gaveUp: (() => void) | null = null;
   const givenUp = new Promise<'gave-up'>((resolve) => (gaveUp = () => resolve('gave-up')));
   const beat =
@@ -412,7 +573,7 @@ async function* keeping(
             if (!responseId && !job.sessionId && !over) {
               gaveUpAt = Date.now();
               renewing = (async () => {
-                await finishJob(job.jobId, 'failed').catch((error) => console.error('[Computer] Could not end a job whose turn never said its id:', error instanceof Error ? error.message : 'unknown'));
+                gaveUpEnd = await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
                 gaveUp?.();
                 start?.controller.abort();
               })();
@@ -455,22 +616,24 @@ async function* keeping(
         if (gaveUpAt !== null) next = 'gave-up';
         else if (unnamed) {
           // The stream failed before the id: the job ends here (its mark stays if it cannot), never a second turn beside one that may run
-          await endJobOfUnknownTurn(job.jobId);
+          const end = await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
           over = true;
-          yield { type: 'failed', code: 'no_turn_id', message: 'The agent never said its turn had started, so the job was ended' };
+          yield noTurnIdEvent(end);
           return;
         } else throw error;
       }
       if (next === 'gave-up') {
         over = true;
-        yield { type: 'failed', code: 'no_turn_id', message: 'The agent never said its turn had started, so the job was ended' };
+        // The give-up's own ending is waited for, so what is said is what happened to the job
+        await renewing;
+        yield noTurnIdEvent(gaveUpEnd);
         return;
       }
       if (next.done) {
         if (unnamed) {
-          await endJobOfUnknownTurn(job.jobId);
+          const end = await endJobOfUnknownTurn(job.jobId, job.ownerEpoch);
           over = true;
-          yield { type: 'failed', code: 'no_turn_id', message: 'The agent never said its turn had started, so the job was ended' };
+          yield noTurnIdEvent(end);
         }
         return;
       }
@@ -489,6 +652,10 @@ async function* keeping(
             status: 'running',
             control: 'brick',
             controlGeneration: job.generation,
+            // Still this owner's job: a worker that was replaced after it opened the turn records nothing (the turn is cancelled below, by its own id)
+            ownerEpoch: job.ownerEpoch,
+            // A finish intent kept since the turn was opened: the turn is not the job's, it is cancelled below (nothing starts after the runner committed to ending)
+            finishIntent: { is: null },
             OR: [{ agentResponseId: null }, { agentResponseId: event.id }],
           },
           data: { agentSessionId: event.sessionId ?? job.sessionId, agentResponseId: event.id, firstTurnSentAt: null },
@@ -502,18 +669,18 @@ async function* keeping(
           // what a start looks at first). When the cancel could not be made, the machine's fence took its place, and that keeps the agent's gateway, where the
           // turn runs: the mark stays (the next start ends the job and opens no second turn) unless the machine itself is proved asleep
           if (cancelled || (await agentCannotRun(job.botId).catch(() => false))) {
-            await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: null }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+            if (start?.markedAt) await prisma.computerJob.updateMany({ where: { id: job.jobId, firstTurnSentAt: start.markedAt, agentResponseId: null }, data: { firstTurnSentAt: null } }).catch(() => undefined);
           }
           responseId = null;
           over = true;
-          yield { type: 'failed', code: 'fenced', message: 'The turn was stopped because the person took over' };
+          yield { type: 'failed', code: 'fenced', message: (await hasFinishIntent(prisma, job.jobId)) ? 'The turn was stopped because the job is ending' : 'The turn was stopped because the person took over' };
           return;
         }
       }
       if (event.type === 'completed' || event.type === 'failed') {
         over = true;
         // The turn is over without its id having been kept: nothing runs that nothing names
-        if (start && !responseId) await prisma.computerJob.updateMany({ where: { id: job.jobId }, data: { firstTurnSentAt: null } }).catch(() => undefined);
+        if (start?.markedAt && !responseId) await prisma.computerJob.updateMany({ where: { id: job.jobId, firstTurnSentAt: start.markedAt }, data: { firstTurnSentAt: null } }).catch(() => undefined);
       }
       yield event;
       if (over) return;
@@ -524,7 +691,7 @@ async function* keeping(
     await letGoOfClaim();
     // The stream is let go of: the turn itself goes on on the machine unless it ended
     await events.return(undefined).catch(() => undefined);
-    if (responseId && over) await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: responseId }, data: { agentResponseId: null } }).catch(() => undefined);
+    if (responseId && over) await prisma.computerJob.updateMany({ where: { id: job.jobId, ownerEpoch: job.ownerEpoch, agentResponseId: responseId }, data: { agentResponseId: null } }).catch(() => undefined);
   }
 }
 
@@ -548,18 +715,26 @@ async function cancelOrFence(job: Live, provider: NonNullable<ReturnType<typeof 
 
 const CANCEL_TRIES = 3;
 
-export type Cancelled = { ok: true; cancelled: boolean } | NotLive | { ok: false; reason: 'failed' };
+export type Cancelled = { ok: true; cancelled: boolean; /** `not_current`: the turn the caller named is not the job's now (nothing was cancelled). */ reason?: 'not_current' } | NotLive | { ok: false; reason: 'failed' };
 
-/** Cancels the job's own running turn, if any. Which turn is the job's: the caller cannot name another. */
-export async function cancelJobTurn(jobId: string): Promise<Cancelled> {
+/**
+ * Cancels the turn a worker NAMES (`responseId`), if it is still the job's own and the worker still owns the job. Orbit checks the owner and the turn in one read and cancels that response id only, outside any lock: a turn
+ * that is not the one named (another owner's, a newer one) is left running (`not_current`), never "whichever is current". A worker that knows no epoch (a legacy runner) is served only while the job has none, and then cancels
+ * the job's current turn as before.
+ */
+export async function cancelJobTurn(jobId: string, owner: { epoch: EpochSaid; responseId?: string | null } = { epoch: undefined }): Promise<Cancelled> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (!job) return { ok: false, reason: 'not_found' };
+  if (!epochMatches(job.ownerEpoch, owner.epoch)) return { ok: false, reason: 'superseded' };
   if (!job.agentResponseId) return { ok: true, cancelled: false };
+  // The turn named is the turn that is cancelled; with a claimed job a request that names none cancels nothing
+  const named = owner.responseId ?? (job.ownerEpoch === 0 ? job.agentResponseId : null);
+  if (named === null || named !== job.agentResponseId) return { ok: true, cancelled: false, reason: 'not_current' };
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
   if (!row?.providerRef || !provider) return { ok: false, reason: 'no_machine' };
   try {
-    await provider.cancelTurn(row.providerRef, job.agentResponseId);
+    await provider.cancelTurn(row.providerRef, named);
   } catch (error) {
     console.error('[Computer] Could not cancel a turn:', error instanceof Error ? error.message : 'unknown');
     return { ok: false, reason: 'failed' };
@@ -570,8 +745,8 @@ export async function cancelJobTurn(jobId: string): Promise<Cancelled> {
 export type Reattached = { ok: true; events: AsyncGenerator<TurnEvent> } | NotLive | { ok: false; reason: 'no_turn' | 'failed' };
 
 /** Reconnects to the job's own turn from its start, after the runner or Orbit lost the stream. A turn that is gone (30 minutes after it ends) says so. */
-export async function reattachJobTurn(jobId: string, signal?: AbortSignal): Promise<Reattached> {
-  const live = await liveJob(jobId);
+export async function reattachJobTurn(jobId: string, signal?: AbortSignal, owner: { epoch: EpochSaid } = { epoch: undefined }): Promise<Reattached> {
+  const live = await liveJob(jobId, owner);
   if (!live.ok) return live;
   if (!live.job.responseId) return { ok: false, reason: 'no_turn' };
   try {
@@ -579,7 +754,7 @@ export async function reattachJobTurn(jobId: string, signal?: AbortSignal): Prom
     return { ok: true, events: withoutTags(keeping(live.job, live.provider, events)) };
   } catch (error) {
     if (error instanceof Agent37Error && error.status === 404) {
-      await prisma.computerJob.updateMany({ where: { id: jobId, agentResponseId: live.job.responseId }, data: { agentResponseId: null } });
+      await prisma.computerJob.updateMany({ where: { id: jobId, ownerEpoch: live.job.ownerEpoch, agentResponseId: live.job.responseId }, data: { agentResponseId: null } });
       return { ok: false, reason: 'no_turn' };
     }
     console.error('[Computer] Could not reconnect to a turn:', error instanceof Error ? error.message : 'unknown');

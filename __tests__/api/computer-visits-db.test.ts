@@ -16,7 +16,7 @@ import { deleteBrick, removeGoneBricks } from '@/lib/brick-delete';
 import { saveMeterSettings } from '@/lib/meter';
 import { CONTROL_TIMING } from '@/lib/computer-control';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { HANDS_MAX, VISITS_MAX, visitsFor } from '@/lib/computer-visits';
+import { HANDS_MAX, VISITS_MAX, recordVisits, visitsFor } from '@/lib/computer-visits';
 import { finishJob, giveComputer, handBack, startJob, takeOver } from '@/lib/computer';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -52,6 +52,53 @@ const reading = (lines: object[], head: { state?: string; alive?: number } = {})
   stdout: [`now=${Date.now()}`, `state=${head.state ?? 'on'}`, `alive=${head.alive ?? 1}`, ...lines.map((entry) => `line=${JSON.stringify(entry)}`), 'end=1'].join('\n') + '\n',
 });
 const visit = (second: number, over: Record<string, unknown> = {}) => ({ k: 'visit', at: seconds(second).getTime(), m: 'GET', h: 'shop.example', p: '/a', n: 1, ...over });
+/** A poll bounded by the checkpoint's own deadline, whatever the database does: a query that waits for a connection or stalls rejects with the checkpoint's own message when the time is up, never later (CodeRabbit on #1025, d522f4b3 pass, N7). */
+function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(what)), Math.max(1, ms));
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
+ * Waits, bounded, until `count` statements are blocked on a lock held by backend `holderPid` (directly or behind another waiter), and fails at once when one of `running` ends first: a checkpoint at the exact wait a test
+ * means to test, never a delay.
+ */
+async function waitUntilBlockedBy(holderPid: number, count: number, ...running: Array<Promise<unknown>>) {
+  let over = false;
+  const poll = (async () => {
+    const end = Date.now() + 10_000;
+    for (;;) {
+      const rows = await within(prisma.$queryRaw<{ n: number }[]>`
+        WITH RECURSIVE waiting(pid) AS (
+          SELECT a.pid FROM pg_stat_activity a WHERE a.datname = current_database() AND a.wait_event_type = 'Lock' AND ${holderPid}::int = ANY (pg_blocking_pids(a.pid))
+          UNION
+          SELECT a.pid FROM pg_stat_activity a JOIN waiting w ON w.pid = ANY (pg_blocking_pids(a.pid)) WHERE a.datname = current_database() AND a.wait_event_type = 'Lock'
+        )
+        SELECT count(*)::int AS n FROM waiting`, end - Date.now(), `Timed out waiting for ${count} statement(s) to be blocked by backend ${holderPid}`);
+      if (rows[0].n >= count) return;
+      if (over) return;
+      if (Date.now() > end) throw new Error(`Timed out waiting for ${count} statement(s) to be blocked by backend ${holderPid}`);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  })();
+  try {
+    await Promise.race([poll, ...running.map((one) => one.then(() => { throw new Error('A request ended before it was blocked by the fixture transaction'); }))]);
+  } finally {
+    over = true;
+    await poll.catch(() => undefined);
+  }
+}
+
 const reads = () => provider.commands.filter((entry) => entry.command.startsWith('universe-visits read'));
 
 run('where a job’s computer browsed, in a real database', () => {
@@ -113,6 +160,206 @@ run('where a job’s computer browsed, in a real database', () => {
     // Nothing that was cut away is anywhere in the rows
     const rows = await prisma.computerJobVisit.findMany({ where: { jobId: id } });
     expect(JSON.stringify(rows)).not.toMatch(/4242|secret|AbCdEf|Bad Host|dropped|earlier-job|after-the-job/);
+  });
+
+  describe('a job that was paused and carried on is read once per stretch (CodeRabbit N12, N16 and the unread note on #1025)', () => {
+    /** A job that ran a first stretch (its visit kept at second 245, `complete`), was paused and carried on at second 360: the stretch now being read begins there, and the read starts 120 s before it. */
+    async function resumed(name: string) {
+      const sara = await person(name);
+      const id = await jobFor(sara);
+      await prisma.computerJobPause.create({ data: { jobId: id, n: 1, why: 'person', seconds: 100, at: seconds(300) } });
+      await prisma.computerJob.update({ where: { id }, data: { pauses: 1, startedAt: seconds(360), visitsState: 'complete' } });
+      await prisma.computerJobVisit.create({ data: { jobId: id, kind: 'visit', at: seconds(245), by: 'brick', method: 'GET', host: 'shop.example', path: '/first-stretch', count: 1, failed: false, form: false } });
+      return { sara, id };
+    }
+    const pathsOf = async (id: string) => (await prisma.computerJobVisit.findMany({ where: { jobId: id, kind: { in: ['visit', 'post'] } }, orderBy: { at: 'asc' } })).map((row) => row.path);
+
+    it('O38: a capture that saves while another capture holds the job row waits for it and merges with the state it wrote: `complete` is never written over an `unread` it did not see', async () => {
+      const { sara, id } = await resumed('o38');
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? reading([visit(370, { p: '/second-stretch' })]) : {});
+      let letGo!: () => void;
+      const release = new Promise<void>((resolve) => (letGo = resolve));
+      let gotLock!: (pid: number) => void;
+      const locked = new Promise<number>((resolve) => (gotLock = resolve));
+      // Another stretch's failed capture: it has the row and says `unread`, and commits only after the complete capture has tried to save
+      const failed = prisma.$transaction(
+        async (tx) => {
+          const [{ pid }] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`;
+          await tx.$queryRaw`SELECT "id" FROM "computer_jobs" WHERE "id" = ${id} FOR UPDATE`;
+          await tx.computerJob.update({ where: { id }, data: { visitsState: 'unread' } });
+          gotLock(pid);
+          await release;
+        },
+        { timeout: 20_000, maxWait: 20_000 },
+      );
+      failed.catch(() => undefined);
+      let capture: Promise<unknown> = Promise.resolve();
+      try {
+        // A fixture that fails before it holds the row is reported at once (never a wait on a signal that cannot come) (CodeRabbit on #1025, N10)
+        const holder = await Promise.race([locked, failed.then(() => Promise.reject(new Error('the fixture transaction ended before it held the row')))]);
+        capture = recordVisits({ id, startedAt: seconds(360) }, provider, `fake-${sara.brickId}`, seconds(500));
+        capture.catch(() => undefined);
+        // The capture is shown waiting for the row the fixture holds, in pg_stat_activity (it never read the state `complete` that stood before the holder committed); a capture that ends first fails the checkpoint
+        // (CodeRabbit on #1025, N11: a fixed delay does not tell the save from a read that was still on its way)
+        await waitUntilBlockedBy(holder, 1, capture);
+        letGo();
+        await failed;
+        await capture;
+      } finally {
+        letGo();
+        await Promise.allSettled([failed, capture]);
+      }
+      expect((await prisma.computerJob.findUnique({ where: { id }, select: { visitsState: true } }))?.visitsState).toBe('unread');
+      // Its own rows were still written, in its own window
+      expect(await pathsOf(id)).toEqual(['/first-stretch', '/second-stretch']);
+    });
+
+    it('N12: the replacement boundary is the stretch’s own start, not the padded read start: a visit of the stretch before that falls inside the padding is kept', async () => {
+      const { sara, id } = await resumed('n12');
+      // The padded read (from second 240) returns the earlier stretch's visit too, which belongs to the stretch before and is left out of what this stretch keeps
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? reading([visit(245, { p: '/first-stretch' }), visit(370, { p: '/second-stretch' })]) : {});
+      const done = await recordVisits({ id, startedAt: seconds(360) }, provider, `fake-${sara.brickId}`, seconds(500));
+      expect(reads()[0].command).toBe(`universe-visits read ${seconds(360).getTime() - 120_000}`);
+      expect(done).toBe('complete');
+      expect(await pathsOf(id)).toEqual(['/first-stretch', '/second-stretch']);
+    });
+
+    it('CodeRabbit on #1025 (C5): a capture of an earlier stretch that finishes after a later stretch saved replaces only its own window, and never deletes the later stretch’s rows', async () => {
+      const sara = await person('c5');
+      const id = await jobFor(sara);
+      // The job ran from second 0 to 300 (paused), then carried on at 360; the later stretch was read and saved first
+      await prisma.computerJobPause.create({ data: { jobId: id, n: 1, why: 'person', seconds: 60, at: seconds(300) } });
+      await prisma.computerJob.update({ where: { id }, data: { pauses: 1, startedAt: seconds(360), visitsState: 'complete' } });
+      const row = (second: number, path: string) => ({ jobId: id, kind: 'visit', at: seconds(second), by: 'brick', method: 'GET', host: 'shop.example', path, count: 1, failed: false, form: false });
+      await prisma.computerJobVisit.createMany({ data: [row(10, '/stale-first'), row(370, '/second-stretch'), row(480, '/second-later')] });
+      // The late capture of the first stretch reads the whole file, which holds the later stretch's visits too
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? reading([visit(10, { p: '/first-fresh' }), visit(370, { p: '/second-stretch' }), visit(480, { p: '/second-later' })]) : {});
+      expect(await recordVisits({ id, startedAt: seconds(0) }, provider, `fake-${sara.brickId}`, seconds(300))).toBe('complete');
+      expect(await pathsOf(id)).toEqual(['/first-fresh', '/second-stretch', '/second-later']);
+      // The same when the first stretch has no recorder: only its own window is replaced
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? { exitCode: 127, stderr: 'universe-visits: not found' } : {});
+      expect(await recordVisits({ id, startedAt: seconds(0) }, provider, `fake-${sara.brickId}`, seconds(300))).toBe('none');
+      expect(await pathsOf(id)).toEqual(['/second-stretch', '/second-later']);
+    });
+
+    it('N18: the state and both sets of rows are read in ONE snapshot: a capture that commits while they are read is never half seen (`complete` beside the rows of a partial capture)', async () => {
+      const sara = await person('n18');
+      const id = await jobFor(sara);
+      const row = (second: number, path: string) => ({ jobId: id, kind: 'visit', at: seconds(second), by: 'brick', method: 'GET', host: 'shop.example', path, count: 1, failed: false, form: false });
+      await prisma.computerJob.update({ where: { id }, data: { visitsState: 'complete' } });
+      await prisma.computerJobVisit.create({ data: row(10, '/before') });
+      const real = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+      let landed = false;
+      // A capture commits (more rows, and a state that says the record is partial) right after the state was read and before the rows are
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options: unknown) => {
+        if (typeof fn !== 'function') return real(fn, options);
+        return real(async (tx: Record<string, unknown>) => {
+          const visitsOf = tx.computerJobVisit as { findMany: (...args: unknown[]) => Promise<unknown> };
+          const wrapped = new Proxy(tx, {
+            get: (target, name) =>
+              name === 'computerJobVisit'
+                ? new Proxy(visitsOf, {
+                    get: (inner, method) =>
+                      method === 'findMany'
+                        ? async (...args: unknown[]) => {
+                            if (!landed) {
+                              landed = true;
+                              await prisma.computerJobVisit.create({ data: row(20, '/during') });
+                              // ... and a note of a change of hands, which is read AFTER this point (a hands read outside the snapshot would show it in the first view)
+                              await prisma.computerJobVisit.create({ data: { jobId: id, kind: 'hands', at: seconds(25), by: 'person' } });
+                              await prisma.computerJob.update({ where: { id }, data: { visitsState: 'partial' } });
+                            }
+                            return inner.findMany(...args);
+                          }
+                        : Reflect.get(inner, method),
+                  })
+                : Reflect.get(target, name),
+          });
+          return (fn as (client: unknown) => unknown)(wrapped);
+        }, options);
+      }) as never);
+      let view;
+      try {
+        view = await visitsFor(sara.brickId, id);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(landed).toBe(true);
+      // One moment: the state it read and the rows that went with it
+      expect(view?.state).toBe('complete');
+      expect(view?.items.map((item) => item.path)).toEqual(['/before']);
+      // The hands read is in the same snapshot: the note that committed while the rows were read is not in this view
+      expect(view?.items.filter((item) => item.kind === 'hands')).toHaveLength(0);
+      // The next read sees the capture whole
+      const next = await visitsFor(sara.brickId, id);
+      expect(next?.state).toBe('partial');
+      expect(next?.items.filter((item) => item.kind !== 'hands').map((item) => item.path)).toEqual(['/before', '/during']);
+      expect(next?.items.filter((item) => item.kind === 'hands')).toHaveLength(1);
+    });
+
+    it('N16: a resumed machine with no listener (exit 127) keeps the earlier stretches’ rows and says the record is partial, never "none" over rows that exist', async () => {
+      const { sara, id } = await resumed('n16');
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? { exitCode: 127, stderr: 'universe-visits: not found' } : {});
+      expect(await recordVisits({ id, startedAt: seconds(360) }, provider, `fake-${sara.brickId}`, seconds(500))).toBe('none');
+      expect(await pathsOf(id)).toEqual(['/first-stretch']);
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id } })).visitsState).toBe('partial');
+      // CONTROL: a job that never paused and has no listener is `none`, with nothing kept
+      const lone = await person('n16-lone');
+      const loneId = await jobFor(lone);
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? { exitCode: 127, stderr: 'universe-visits: not found' } : {});
+      await recordVisits({ id: loneId, startedAt: NOW }, provider, `fake-${lone.brickId}`, seconds(60));
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: loneId } })).visitsState).toBe('none');
+    });
+
+    it('CodeRabbit on #1025 (40): a first stretch that had no recorder (`none`) and a resumed stretch that reads well is `partial`; `none` beside `none` stays `none`', async () => {
+      const { sara, id } = await resumed('cr40');
+      // A first stretch with no recorder has no rows: the fixture's row of a first stretch that was recorded is taken out
+      await prisma.computerJobVisit.deleteMany({ where: { jobId: id } });
+      await prisma.computerJob.update({ where: { id }, data: { visitsState: 'none' } });
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? reading([visit(370, { p: '/second-stretch' })]) : {});
+      expect(await recordVisits({ id, startedAt: seconds(360) }, provider, `fake-${sara.brickId}`, seconds(500))).toBe('complete');
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id } })).visitsState).toBe('partial');
+      // The coverage state agrees with the rows: only the stretch that was read is there
+      expect(await pathsOf(id)).toEqual(['/second-stretch']);
+      // CONTROL: no recorder on either stretch is still `none`
+      const both = await resumed('cr40-both');
+      await prisma.computerJobVisit.deleteMany({ where: { jobId: both.id } });
+      await prisma.computerJob.update({ where: { id: both.id }, data: { visitsState: 'none' } });
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? { exitCode: 127, stderr: 'universe-visits: not found' } : {});
+      await recordVisits({ id: both.id, startedAt: seconds(360) }, provider, `fake-${both.sara.brickId}`, seconds(500));
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: both.id } })).visitsState).toBe('none');
+      expect(await pathsOf(both.id)).toEqual([]);
+    });
+
+    it('a resumed stretch that cannot be read at all says `unread` even though the first stretch was kept `complete`, and deletes no row', async () => {
+      const { sara, id } = await resumed('unread');
+      const real = provider.exec.bind(provider);
+      const spy = jest.spyOn(provider, 'exec').mockImplementation(async (ref: string, command: string) => {
+        if (command.startsWith('universe-visits read')) throw new Error('machine unreachable');
+        return real(ref, command);
+      });
+      const mute = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        expect(await recordVisits({ id, startedAt: seconds(360) }, provider, `fake-${sara.brickId}`, seconds(500))).toBe('unread');
+      } finally {
+        spy.mockRestore();
+        mute.mockRestore();
+      }
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id } })).visitsState).toBe('unread');
+      expect(await pathsOf(id)).toEqual(['/first-stretch']);
+    });
+  });
+
+  it('CodeRabbit on #1025 (30): a resumed job that ends while its machine is no longer awake says `unread` over the `complete` its first stretch kept, and keeps the rows', async () => {
+    const sara = await person('cr30');
+    const id = await jobFor(sara);
+    await prisma.computerJobPause.create({ data: { jobId: id, n: 1, why: 'person', seconds: 100, at: seconds(300) } });
+    await prisma.computerJob.update({ where: { id }, data: { pauses: 1, startedAt: seconds(360), visitsState: 'complete' } });
+    await prisma.computerJobVisit.create({ data: { jobId: id, kind: 'visit', at: seconds(245), by: 'brick', method: 'GET', host: 'shop.example', path: '/first-stretch', count: 1, failed: false, form: false } });
+    await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
+    await finishJob(id, 'done', seconds(500));
+    expect((await prisma.computerJob.findUniqueOrThrow({ where: { id } })).visitsState).toBe('unread');
+    expect((await prisma.computerJobVisit.findMany({ where: { jobId: id, kind: 'visit' } })).map((row) => row.path)).toEqual(['/first-stretch']);
   });
 
   it('says complete for a clean read, and the computer is read before its browser is cleared', async () => {

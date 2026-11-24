@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { getAdapter } from '@/lib/app-adapter';
 import type { ReadyMadeAdapter } from '@/lib/app-adapter/types';
-import { evaluatePause, reconcileRun, sweepGoodwill, type GoodwillSweep } from '@/lib/instant/executor';
+import { evaluatePause, lateRunsDueWhere, reconcileRun, sweepGoodwill, type GoodwillSweep } from '@/lib/instant/executor';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 import { denyInstantOnSessions, type SessionSweep } from '@/lib/instant/sessions';
 import { pauseInstant } from '@/lib/instant/state';
@@ -95,9 +95,11 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
     take: BATCH,
     select: { id: true },
   });
-  // Runs let go unconfirmed are looked for in Composio's log a little longer (bounded days, a few a sweep): what turns up corrects the vendor cost only
+  // Runs let go unconfirmed (released after Composio could not be asked, or after the wait with no log or no readable one) are looked for in Composio's log a little longer
+  // (35 days, a few a sweep): what turns up corrects the vendor cost and what the receipt says, and never what the person pays. A run is asked again only when its spacing
+  // has passed (15 minutes the first day, 2 hours to the seventh, 12 hours after), counted from its last look, so one whose log says nothing yet is not asked on every sweep
   const lateRuns = await prisma.instantRun.findMany({
-    where: { state: 'failed', providerBasis: 'estimated', finishedAt: { gte: new Date(now.getTime() - 35 * 24 * 60 * 60 * 1000) }, detail: { path: ['releasedUnconfirmed'], equals: true } },
+    where: lateRunsDueWhere(now),
     orderBy: [{ checkedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
     take: 25,
     select: { id: true },

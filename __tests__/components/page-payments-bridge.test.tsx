@@ -56,6 +56,14 @@ describe('the payment line on the shared page', () => {
     expect(screen.queryByRole('button')).toBeNull();
   });
 
+  it('R5: an earlier payment that is still being checked says that a new Buy starts a new payment, beside Check payment', async () => {
+    const { ask } = mount('', { status: 'cant_confirm', testPayment: false, buyer: 'guest' });
+    await ask({ request: 'r1' });
+    expect(screen.getByRole('status').textContent).toContain('We haven’t heard back about your payment yet.');
+    expect(screen.getByTestId('pagePaymentsNote').textContent).toBe('This starts a new payment. Your earlier one is still being checked.');
+    expect(screen.getByRole('button', { name: 'Check payment' })).toBeTruthy();
+  });
+
   it('offers Restore purchase quietly when nothing is found, which can be closed, and points to the receipt link when tapped', async () => {
     const { ask } = mount('', { status: 'none', testPayment: false, buyer: 'guest' });
     await ask({ request: 'r1', restore: true });
@@ -77,9 +85,9 @@ describe('the payment line on the shared page', () => {
       await jest.advanceTimersByTimeAsync(3_000);
     });
     expect(screen.getByRole('status').textContent).toContain('Paid. Thank you.');
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Copy receipt link' })));
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Copy private receipt link' })));
     expect(written[0]).toMatch(/^http:\/\/localhost(:\d+)?\/a\/k7Qm2xR9#receipt=[A-Za-z0-9_-]{32,128}$/);
-    expect(screen.getByRole('status').textContent).toContain('Receipt link copied.');
+    expect(screen.getByRole('status').textContent).toContain('Private receipt link copied.');
   });
   it('shows a selectable receipt link and says so when the clipboard refuses', async () => {
     Object.defineProperty(navigator, 'clipboard', { value: { writeText: async () => { throw new Error('denied'); } }, configurable: true });
@@ -90,11 +98,11 @@ describe('the payment line on the shared page', () => {
     await act(async () => {
       await jest.advanceTimersByTimeAsync(3_000);
     });
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Copy receipt link' })));
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Copy private receipt link' })));
     expect(screen.getByRole('status').textContent).toContain('Couldn’t copy it.');
-    expect((screen.getByLabelText('Receipt link') as HTMLInputElement).value).toMatch(/#receipt=[A-Za-z0-9_-]{32,128}$/);
+    expect((screen.getByLabelText('Private receipt link') as HTMLInputElement).value).toMatch(/#receipt=[A-Za-z0-9_-]{32,128}$/);
     // Still not "copied": the button can be pressed again
-    expect(screen.getByRole('button', { name: 'Copy receipt link' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Copy private receipt link' })).toBeTruthy();
   });
 
   it('shows no copy fallback for a purchase a receipt link brought back, even after an earlier copy failed', async () => {
@@ -109,8 +117,8 @@ describe('the payment line on the shared page', () => {
     await act(async () => {
       await jest.advanceTimersByTimeAsync(3_000);
     });
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Copy receipt link' })));
-    expect(screen.getByLabelText('Receipt link')).toBeTruthy();
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Copy private receipt link' })));
+    expect(screen.getByLabelText('Private receipt link')).toBeTruthy();
     // A later purchase, brought back by someone's receipt link: no link of this browser's own is offered for it
     restoring = true;
     await ask({ request: 'r2', restore: true });
@@ -118,7 +126,7 @@ describe('the payment line on the shared page', () => {
       await jest.advanceTimersByTimeAsync(3_000);
     });
     expect(screen.getByRole('status').textContent).toContain('is back.');
-    expect(screen.queryByLabelText('Receipt link')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Copy receipt link' })).toBeNull();
+    expect(screen.queryByLabelText('Private receipt link')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy private receipt link' })).toBeNull();
   });
 });

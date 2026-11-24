@@ -29,8 +29,8 @@ export type NoRoom =
   | { ok: false; reason: 'allowance'; leftMicros: number }
   /** Jobs at once are taken, for this member or for everyone: wait in line. */
   | { ok: false; reason: 'busy' }
-  /** Our own pool has no more room for new work. */
-  | { ok: false; reason: 'pool' }
+  /** Our own pool has no more room for new work. `full` is true when it has none even for the smallest step (the envelope is at its ceiling), false when it only refused a step for its own size. */
+  | { ok: false; reason: 'pool'; full?: boolean }
   /** The reservation is not one that is held and in time any more: stop safely. */
   | { ok: false; reason: 'closed' }
   /** The key was used before for someone else: the first stands, and whoever asked has a bug to find. */
@@ -138,6 +138,8 @@ export interface Envelope {
   chatMicros: number;
   /** Jobs going now, everyone together. */
   jobsRunning: number;
+  /** The reservations that ran out and were never settled or released, read from the very rows `unsettledMicros` counts them from (so the two can never disagree, whatever settles or releases meanwhile). */
+  lapsed: { count: number; micros: number; oldestLapsedAt: Date | null };
 }
 
 /**
@@ -176,14 +178,21 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
   ]);
   let reserved = 0;
   let lapsed = 0;
+  let lapsedCount = 0;
+  let oldestLapsedAt: Date | null = null;
   for (const row of held) {
     if (row.expiresAt > now) reserved += Number(row.amountMicros);
-    else lapsed += Number(row.amountMicros);
+    else {
+      lapsed += Number(row.amountMicros);
+      lapsedCount += 1;
+      if (!oldestLapsedAt || row.expiresAt < oldestLapsedAt) oldestLapsedAt = row.expiresAt;
+    }
   }
   // A gigabyte is 10^9 bytes; rounded up in whole millionths of a dollar, and in BigInt so a very large disk cannot lose a digit
   const keptStorageMicros = storageMonthMicros(kept[0]?.bytes ?? BigInt(0), settings);
   const committedMicros = asNumber(settled._sum.costMicros);
-  const unsettledMicros = asNumber(unsettled._sum.costMicros) + lapsed;
+  // A paused stretch whose time is not in the books yet is spent and not settled with the provider: counted with the rest of that
+  const unsettledMicros = asNumber(unsettled._sum.costMicros) + lapsed + (await unbookedPauseMicros(tx, now));
   const reserveMicros = settings.reserveMicros ?? 0;
   return {
     committedMicros,
@@ -196,6 +205,53 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
     chatMicros: asNumber(chat._sum.costMicros),
     // The room held for one model call inside a job is not another job running
     jobsRunning: held.filter((row) => row.expiresAt > now && !isNoJob(row.reservationKey)).length,
+    lapsed: { count: lapsedCount, micros: lapsed, oldestLapsedAt },
+  };
+}
+
+/** The size of room a new model call asks for, as far as the readiness check can tell (a few cents: a call of the usual size). The real size is each call's own; this is only what "a call would be refused" is judged by. */
+export const USUAL_CALL_ROOM_MICROS = 20_000;
+
+export interface PoolStatus {
+  ceilingMicros: number;
+  /** committed + reserved + unsettled + keptStorage + reserve: what `fits` compares to the ceiling. */
+  totalMicros: number;
+  committedMicros: number;
+  reservedMicros: number;
+  /** Spent and not settled yet, and the lapsed holds below (they are counted here too: it is the sum `fits` reads). */
+  unsettledMicros: number;
+  keptStorageMicros: number;
+  reserveMicros: number;
+  chatMicros: number;
+  /** Room that ran out and was never settled or released: what it spent is not known, so it keeps counting. A leak shows here. */
+  lapsed: { count: number; micros: number; oldestLapsedAt: Date | null };
+  /** What is left under the ceiling (never below 0). */
+  leftMicros: number;
+  /** A new call of the usual size would be refused for the pool now. */
+  refusing: boolean;
+}
+
+/** The pool as `fits` sees it, in parts, with the lapsed holds counted apart (how many, how much, and since when the oldest ran out). Reads only. Null when the usage controls are not set. */
+export async function poolStatusNow(now: Date = new Date()): Promise<PoolStatus | null> {
+  const settings = await getMeterSettings();
+  if (missingSettings(settings).length > 0) return null;
+  // One read of the reservations, the envelope's own: the lapsed holds are counted from the same rows its unsettled spend counts them from, so a settlement or release in between can never leave
+  // `lapsed` larger than `unsettled` (a negative "recorded and not settled" in the check)
+  const envelope = await envelopeIn(prisma, now, settings);
+  const ceilingMicros = settings.poolCeilingMicros ?? 0;
+  return {
+    ceilingMicros,
+    totalMicros: envelope.totalMicros,
+    committedMicros: envelope.committedMicros,
+    reservedMicros: envelope.reservedMicros,
+    unsettledMicros: envelope.unsettledMicros,
+    keptStorageMicros: envelope.keptStorageMicros,
+    reserveMicros: envelope.reserveMicros,
+    chatMicros: envelope.chatMicros,
+    lapsed: envelope.lapsed,
+    leftMicros: Math.max(0, ceilingMicros - envelope.totalMicros),
+    // The same comparison `fits` makes for a call of the usual size
+    refusing: envelope.totalMicros + USUAL_CALL_ROOM_MICROS > ceilingMicros,
   };
 }
 
@@ -205,16 +261,42 @@ export async function currentEnvelope(now: Date = new Date()): Promise<Envelope>
   return envelopeIn(prisma, now, settings);
 }
 
-async function lockPool(tx: Tx): Promise<void> {
+export async function lockPool(tx: Pick<Tx, '$executeRaw'>): Promise<void> {
   // One lock for every step, always taken first: two steps asked for at the same moment are settled one after the other
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${POOL_LOCK}))`;
 }
 
 /** Whether `extra` more fits for this member and the pool; the reason it does not, or null. The member's own allowance comes first: a member who used theirs up asks for more, whatever the pool holds. */
-/** Room held for a person's steps that still counts against what they can start: held and in time, or ran out and not yet settled or released. */
-export async function heldRoom(personId: string, now: Date, db: Pick<Tx, 'meterReservation'> = prisma): Promise<number> {
+/**
+ * A paused computer job's stretch: its room is settled in the pause's own commit and its time is written to the books just after it (lib/computer-job-controls.ts).
+ * Until that write is known done, the settled room is counted here, so the stretch is never counted nowhere: not by the person's month, not by the pool (a write
+ * that failed waits for the sweep). Counted in the month the pause happened in, which is the month its event is dated.
+ *
+ * The stretch is counted ONCE, never twice (GPT round 6, finding 8): a pause whose own event is already in the books is left to that event, whether or not its
+ * `booked_at` mark was set (the mark is written after the event, and a mark that failed used to count the stretch a second time until the next sweep, which
+ * refused a person who had the room). A stretch paid from credit is still counted here at its full price until its event is there (the event then counts only
+ * what the allowance paid): on the safe side, and never free room.
+ */
+async function unbookedPauseMicros(db: Pick<Tx, '$queryRaw'>, now: Date, personId?: string): Promise<number> {
+  const month = monthOf(now);
+  const rows = personId
+    ? await db.$queryRaw<{ micros: bigint | null }[]>`
+        SELECT COALESCE(SUM(r."settled_micros"), 0)::bigint AS micros
+        FROM "computer_job_pauses" p JOIN "meter_reservations" r ON r."reservation_key" = p."room_key"
+        WHERE p."booked_at" IS NULL AND r."state" = 'settled' AND p."at" >= ${month.start} AND p."at" < ${month.end} AND r."person_key" = ${`person:${personId}`}
+          AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || p."job_id" || ':time:' || p."n")`
+    : await db.$queryRaw<{ micros: bigint | null }[]>`
+        SELECT COALESCE(SUM(r."settled_micros"), 0)::bigint AS micros
+        FROM "computer_job_pauses" p JOIN "meter_reservations" r ON r."reservation_key" = p."room_key"
+        WHERE p."booked_at" IS NULL AND r."state" = 'settled' AND p."at" >= ${month.start} AND p."at" < ${month.end}
+          AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || p."job_id" || ':time:' || p."n")`;
+  return asNumber(rows[0]?.micros ?? null);
+}
+
+/** Room held for a person's steps that still counts against what they can start: held and in time, or ran out and not yet settled or released; and a paused stretch not yet in the books. */
+export async function heldRoom(personId: string, now: Date, db: Pick<Tx, 'meterReservation' | '$queryRaw'> = prisma): Promise<number> {
   const held = await db.meterReservation.aggregate({ where: { personKey: `person:${personId}`, ...stillCounts(now) }, _sum: { amountMicros: true } });
-  return asNumber(held._sum.amountMicros);
+  return asNumber(held._sum.amountMicros) + (await unbookedPauseMicros(db, now, personId));
 }
 
 async function fits(tx: Tx, personId: string, extraMicros: number, now: Date, settings: MeterSettings, opts: { newJob: boolean }): Promise<NoRoom | null> {
@@ -230,7 +312,7 @@ async function fits(tx: Tx, personId: string, extraMicros: number, now: Date, se
     const mine = await tx.meterReservation.count({ where: { personKey: `person:${personId}`, state: 'held', expiresAt: { gt: now }, NOT: [{ reservationKey: { startsWith: CALL_ROOM_PREFIX } }, { reservationKey: { startsWith: DISK_ROOM_PREFIX } }] } });
     if (mine >= (settings.atOnceMember ?? 0) || envelope.jobsRunning >= (settings.atOnceAll ?? 0)) return { ok: false, reason: 'busy' };
   }
-  if (envelope.totalMicros + extraMicros > (settings.poolCeilingMicros ?? 0)) return { ok: false, reason: 'pool' };
+  if (envelope.totalMicros + extraMicros > (settings.poolCeilingMicros ?? 0)) return { ok: false, reason: 'pool', full: envelope.totalMicros + 1 > (settings.poolCeilingMicros ?? 0) };
   return null;
 }
 
@@ -239,12 +321,45 @@ const wholeMicros = (value: number, what: string): void => {
 };
 
 /**
+ * Would `reserveRoom` give this new job room now? The same checks in the same order (a rule the person said, then their allowance, then jobs at once and the pool), read under the pool's lock, and NOTHING is
+ * taken: for a job paused by its month or a limit, to know whether more arrived before it is carried on (lib/computer-limit-pause), so a job is not put back in line only to be paused again. Credit that is
+ * due to the person and not issued yet is issued first, as `reserveRoom` does. Null when it would fit; otherwise why not.
+ */
+export async function roomWouldFit(input: { personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass }, asked?: Date): Promise<NoRoom | null> {
+  wholeMicros(input.amountMicros, 'amountMicros');
+  const look = () =>
+    prisma.$transaction(async (tx): Promise<NoRoom | null> => {
+      await lockPool(tx);
+      const now = asked ?? new Date();
+      const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.jobId ?? null, chargeClass: input.chargeClass ?? 'computer', amountMicros: input.amountMicros }, now, tx);
+      if (!ruled.ok) return { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
+      return fits(tx, input.personId, input.amountMicros, now, await getMeterSettings(tx), { newJob: true });
+    });
+  const first = await look();
+  if (first?.reason === 'allowance' && (await issueComputerCredit(input.personId, asked ?? new Date())) > 0) return look();
+  return first;
+}
+
+/**
  * Takes room for a paid step, once per key: asking again for the same step finds the same reservation and takes nothing more.
  * The room is held for `renewMinutes`; a job that is still running renews it (below), and one that is not lets it lapse, which
  * the envelope keeps counting until it is settled or released. Never throws for "no room": that is an answer.
  */
 export async function reserveRoom(
-  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; /** False for a step inside a job that already holds its place (a model call): it is not another job at once. */ newJob?: boolean },
+  input: {
+    key: string;
+    personId: string;
+    amountMicros: number;
+    botId?: string | null;
+    jobId?: string | null;
+    chargeClass?: ChargeClass;
+    /** False for a step inside a job that already holds its place (a model call): it is not another job at once. */ newJob?: boolean;
+    /**
+     * Round 8, C: an amount that must ALSO fit, on top of `amountMicros`, under the person's allowance, every rule and the pool, in the same pool-locked transaction (a paused job's refused model call, asked again
+     * first thing once it runs). Only `amountMicros` is held: the call takes its own room when it comes.
+     */
+    alsoFits?: number;
+  },
   asked?: Date,
 ): Promise<Room> {
   wholeMicros(input.amountMicros, 'amountMicros');
@@ -257,9 +372,11 @@ export async function reserveRoom(
 }
 
 async function reserveRoomOnce(
-  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; newJob?: boolean },
+  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; newJob?: boolean; alsoFits?: number },
   asked?: Date,
 ): Promise<Room> {
+  // What must fit: the room, and what must also fit beside it (round 8, C). Only the room is held
+  const mustFit = input.amountMicros + Math.max(0, Math.floor(input.alsoFits ?? 0));
   return prisma.$transaction(async (tx): Promise<Room> => {
     await lockPool(tx);
     // The time is read once the lock is held, unless the caller fixed it
@@ -271,10 +388,10 @@ async function reserveRoomOnce(
       return already.state === 'held' && already.expiresAt > now ? { ok: true, reservation: viewOf(already), created: false } : { ok: false, reason: 'closed' };
     }
     // What the person said in chat comes first: a rule that does not let this step take that much stops it, whatever the allowance holds
-    const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.jobId ?? null, chargeClass: input.chargeClass ?? 'computer', amountMicros: input.amountMicros }, now, tx);
+    const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.jobId ?? null, chargeClass: input.chargeClass ?? 'computer', amountMicros: mustFit }, now, tx);
     if (!ruled.ok) return { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
     const settings = await getMeterSettings(tx);
-    const no = await fits(tx, input.personId, input.amountMicros, now, settings, { newJob: input.newJob !== false });
+    const no = await fits(tx, input.personId, mustFit, now, settings, { newJob: input.newJob !== false });
     if (no) return no;
     const row = await tx.meterReservation.create({
       data: {
@@ -334,7 +451,17 @@ export async function reserveDiskRoom(input: { botId: string; jobId: string; byt
 export async function renewRoom(input: { key: string; moreMicros?: number }, asked?: Date): Promise<Room> {
   const more = input.moreMicros ?? 0;
   if (more !== 0) wholeMicros(more, 'moreMicros');
-  return prisma.$transaction(async (tx): Promise<Room> => {
+  return prisma.$transaction((tx) => renewRoomIn(tx, input, asked));
+}
+
+/**
+ * `renewRoom` inside a transaction the caller already holds (it takes the pool's lock first, like every step): for a caller that must decide to renew and renew as ONE step under a lock of its own (a computer job's renewal,
+ * under the job's cutoff lock with its row locked, so a renewal never adds room for a worker that no longer owns the job).
+ */
+export async function renewRoomIn(tx: Tx, input: { key: string; moreMicros?: number }, asked?: Date): Promise<Room> {
+  const more = input.moreMicros ?? 0;
+  if (more !== 0) wholeMicros(more, 'moreMicros');
+  {
     await lockPool(tx);
     // The time is read once the lock is held (a renewal that waited for the lock past the end of its lease is a lapsed hold), unless the caller fixed it
     const now = asked ?? new Date();
@@ -373,7 +500,7 @@ export async function renewRoom(input: { key: string; moreMicros?: number }, ask
       data: { amountMicros: row.amountMicros + BigInt(more), expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE), renewals: { increment: 1 }, ...(nextTerms ? { terms: nextTerms.map((term) => ({ at: term.at, micros: term.micros, stretchMs: term.stretchMs })) } : {}) },
     });
     return { ok: true, reservation: viewOf(next), created: false };
-  });
+  }
 }
 
 /** The step happened: its room is given back, and what it really cost is in the books as events. Safe to say twice. */
@@ -387,16 +514,34 @@ export async function releaseRoom(input: { key: string }, now: Date = new Date()
 }
 
 async function close(key: string, state: 'settled' | 'released', now: Date, settledMicros: number | null): Promise<Reservation | null> {
-  return prisma.$transaction(async (tx) => {
-    await lockPool(tx);
-    const row = await tx.meterReservation.findUnique({ where: { reservationKey: key } });
-    if (!row) return null;
-    // Once it ended it stays as it ended: a second word, even a different one, changes nothing
-    if (row.state !== 'held') return viewOf(row);
-    const next = await tx.meterReservation.update({
-      where: { id: row.id },
-      data: { state, closedAt: now, settledMicros: settledMicros === null ? null : BigInt(settledMicros) },
-    });
-    return viewOf(next);
+  return prisma.$transaction((tx) => closeIn(tx, key, state, now, settledMicros));
+}
+
+/**
+ * `releaseRoom` inside a transaction the caller already holds (it takes the pool's lock first, like every step): for a caller that must decide to release and release as ONE step under a lock of its own,
+ * so nothing can use the room between the decision and the release.
+ */
+export async function releaseRoomIn(tx: Tx, input: { key: string }, now: Date = new Date()): Promise<Reservation | null> {
+  return closeIn(tx, input.key, 'released', now, null);
+}
+
+/**
+ * `settleRoom` inside a transaction the caller already holds (it takes the pool's lock first, like every step): for a caller that must settle a room in the same commit as the decision it settles for
+ * (a computer job's pause, under the job's cutoff lock with its row locked, so the time so far is settled exactly once and the room is never left held for a job that holds nothing).
+ */
+export async function settleRoomIn(tx: Tx, input: { key: string; settledMicros: number }, now: Date = new Date()): Promise<Reservation | null> {
+  return closeIn(tx, input.key, 'settled', now, input.settledMicros);
+}
+
+async function closeIn(tx: Tx, key: string, state: 'settled' | 'released', now: Date, settledMicros: number | null): Promise<Reservation | null> {
+  await lockPool(tx);
+  const row = await tx.meterReservation.findUnique({ where: { reservationKey: key } });
+  if (!row) return null;
+  // Once it ended it stays as it ended: a second word, even a different one, changes nothing
+  if (row.state !== 'held') return viewOf(row);
+  const next = await tx.meterReservation.update({
+    where: { id: row.id },
+    data: { state, closedAt: now, settledMicros: settledMicros === null ? null : BigInt(settledMicros) },
   });
+  return viewOf(next);
 }
