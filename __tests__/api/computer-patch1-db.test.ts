@@ -330,6 +330,17 @@ run('GPT eighth note, patch 1: start identity, in a real database', () => {
       expect(await post(sara, keyAgo(1_000), 'Fill the visa form')).toMatchObject({ ok: true });
     });
 
+    it('two records of one identity (the result of a race): the FIRST consent decides, so a third delivery under a new prefix is `stale_consent` when the first record is 7 hours old, though the second one is fresh', async () => {
+      const sara = await owner('a2-order');
+      const REST = restOf();
+      const KEY_OLD = keyAgo(7 * 3_600_000, REST);
+      const KEY_MID = keyAgo(2_000, REST);
+      for (const startKey of [KEY_MID, KEY_OLD]) await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey, state: 'expired', issuedAt: issuedOfKey(startKey) } });
+      expect(await post(sara, keyAgo(500, REST), 'Fill the visa form')).toEqual({ ok: false, reason: 'stale_consent' });
+      expect(await jobsOf(sara)).toHaveLength(0);
+      expect(await roomJobsOf(sara)).toHaveLength(0);
+    });
+
     it('a NEW event (another identity) still makes its own second job, even with the same title', async () => {
       const sara = await owner('a2-second');
       const first = await post(sara, keyAgo(60_000, restOf()), 'Fill the visa form');
