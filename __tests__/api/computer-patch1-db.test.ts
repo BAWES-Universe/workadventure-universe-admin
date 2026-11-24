@@ -39,9 +39,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { ackStart, finishJob, giveComputer, issuedOfKey, startJob } from '@/lib/computer';
-import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
-import { mintJobToken } from '@/lib/computer-token';
-import { carryOnPaused, resetCarryOnScanForTests } from '@/lib/computer-limit-pause';
+import { resetCarryOnScanForTests } from '@/lib/computer-limit-pause';
 import { GET, POST } from '@/app/api/bots/[id]/computer-jobs/route';
 import { POST as CONTROL } from '@/app/api/bots/[id]/computer-jobs/control/route';
 import { POST as RETIRE } from '@/app/api/bots/[id]/computer-jobs/start-retire/route';
@@ -77,8 +75,6 @@ const wipe = async () => {
   await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
 };
 
-// Round 8, A2: a start that acks carries its issue time (the moment of the message) in its key
-const key = () => `t${Date.now().toString(36)}-${randomUUID().replace(/-/g, '')}`;
 const jobsOf = (sara: Owner) => prisma.computerJob.findMany({ where: { personId: sara.id }, orderBy: { createdAt: 'asc' }, select: { id: true, startKey: true, status: true } });
 /** The time rooms ever taken, ONE entry per reservation row, by the job each was for (a released room keeps its row). Disk rooms are not time rooms and are left out; the rows are not de-duplicated, so a job that reserved its time twice is listed twice. */
 const roomJobsOf = async (sara: Owner) => (await prisma.meterReservation.findMany({ where: { personId: sara.id, reservationKey: { startsWith: 'computer:job:' } }, select: { jobId: true }, orderBy: { createdAt: 'asc' } })).map((room) => room.jobId);
@@ -368,6 +364,32 @@ run('GPT eighth note, patch 1: start identity, in a real database', () => {
         expect(await roomJobsOf(sara)).toEqual([jobs[0].id]);
         for (const answer of answers) expect(answerJobOf(answer) === null || answerJobOf(answer) === jobs[0].id).toBe(true);
       }
+    });
+  });
+
+  describe('E2 (Orbit side): the times the game tells two same-title jobs apart by', () => {
+    it('every job of the list carries `askedAt` (when the person asked) and an ended job lists its `endedAt`, both ISO 8601 UTC text', async () => {
+      const sara = await owner('e2-times');
+      const first = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' });
+      if (!first.ok) throw new Error('no job');
+      await finishJob(first.job.id, 'done', new Date(Date.now() - 60_000));
+      const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' });
+      if (!second.ok) throw new Error('no job');
+      const third = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' });
+      if (!third.ok) throw new Error('no job');
+      const rows = await prisma.computerJob.findMany({ where: { personId: sara.id }, select: { id: true, createdAt: true, endedAt: true } });
+      const created = (id: string) => rows.find((row) => row.id === id)?.createdAt.toISOString();
+      const listed = await control(sara, { action: 'list' });
+      expect(listed.body.view.job.askedAt).toBe(created(listed.body.view.job.id));
+      expect(listed.body.view.queued).toHaveLength(1);
+      // The order contract with the game: the line is oldest asked first; ended jobs are newest ended first
+      expect(new Date(listed.body.view.job.askedAt).getTime()).toBeLessThanOrEqual(new Date(listed.body.view.queued[0].askedAt).getTime());
+      expect(listed.body.view.queued[0].askedAt).toBe(created(listed.body.view.queued[0].id));
+      const ended = await GET(new NextRequest(`http://orbit.test/api/bots/${sara.brickId}/computer-jobs?userId=${encodeURIComponent(sara.uuid)}&ended=3`), { params: Promise.resolve({ id: sara.brickId }) });
+      const body = await ended.json();
+      expect(body.ended).toHaveLength(1);
+      expect(body.ended[0]).toMatchObject({ id: first.job.id, endedAt: rows.find((row) => row.id === first.job.id)?.endedAt?.toISOString() });
+      expect(body.ended[0].endedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     });
   });
 });

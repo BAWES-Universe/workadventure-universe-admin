@@ -84,7 +84,7 @@ export interface EndedJob {
 /** The most ended jobs one look lists. */
 export const ENDED_MAX = 5;
 
-/** The person's ended jobs on this Brick, newest first (the order `retryCandidate` reads), at most `ENDED_MAX`. Reads only. */
+/** The person's ended jobs on this Brick, NEWEST ENDED first (the order `retryCandidate` reads; a contract with the game, GPT eighth note E2), at most `ENDED_MAX`. Every job carries `endedAt` (an ISO 8601 UTC string in the answer; null only for an old row with no end time, which sorts last). Reads only. */
 export async function endedJobs(botId: string, personId: string, count: number, db: Db = prisma): Promise<EndedJob[]> {
   const take = Math.max(1, Math.min(ENDED_MAX, Math.floor(count)));
   const rows = await db.computerJob.findMany({

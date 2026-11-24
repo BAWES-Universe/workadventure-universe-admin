@@ -122,6 +122,8 @@ export interface JobView {
   control: 'brick' | 'person';
   /** What Brick is ready to put in at the hand-over and where, as it named it: the person's one tap fills in this and nothing else. */
   ready: { what: string; where: string } | null;
+  /** When the person asked for the job (its creation): Brick tells two jobs of one title apart by how long ago each was asked (GPT eighth note, E2). */
+  askedAt: Date;
   startedAt: Date | null;
   endedAt: Date | null;
   /** Details the person asked Brick to fill in, still to be done: what and where. Brick does only these, and only now. */
@@ -141,7 +143,10 @@ export interface ComputerView {
   machine: MachineState;
   /** The job that has the machine (running, or waiting for its person); null when it rests. */
   job: JobView | null;
-  /** Jobs in line behind it, or waiting for the person's allowance. */
+  /**
+   * Jobs in line behind it, or waiting for the person's allowance. ORDER (a contract with the game, GPT eighth note E2): the order the line is taken, NOT by age: highest queue rank first, then OLDEST asked first. A caller that
+   * wants "newest first" sorts by each job's `askedAt` itself. Every job here, and `job`, carries `askedAt`.
+   */
   queued: JobView[];
   /** The person's month for computers: the share left (0 to 1), or null when no allowance is set up yet. Never a count or a price. */
   month: { leftFraction: number; unlimited: boolean; endsAt: Date } | null;
@@ -181,6 +186,7 @@ type JobRow = {
   control: string;
   startedAt: Date | null;
   endedAt: Date | null;
+  createdAt: Date;
   pausedAt?: Date | null;
   pausedWhy?: string | null;
   pauses?: number;
@@ -217,6 +223,7 @@ function jobView(row: JobRow): JobView {
     waitingFor: row.waitingFor as WaitingFor | null,
     control: row.control === 'person' ? 'person' : 'brick',
     ready: row.readyWhat && row.readyWhere ? { what: row.readyWhat, where: row.readyWhere } : null,
+    askedAt: row.createdAt,
     startedAt: row.startedAt,
     endedAt: row.endedAt,
     detailsToFill,
