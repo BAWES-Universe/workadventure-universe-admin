@@ -23,7 +23,7 @@
 import { createHash } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { brickOf, computerView, controlInternals, providerFor, settleTurnHold, type ComputerView } from '@/lib/computer';
+import { brickOf, computerView, controlInternals, notStartedYet, providerFor, settleTurnHold, type ComputerView } from '@/lib/computer';
 import { lockJob } from '@/lib/computer-owner';
 import { hasFinishIntent, hasPoolCutoff } from '@/lib/computer-faults';
 import { revokeJobTokens } from '@/lib/computer-token';
@@ -36,8 +36,8 @@ import { releaseIfUnheld } from '@/lib/computer-control';
 import type { ComputerProvider as Provider } from '@/lib/computer-provider';
 import { claimCommand, claimCommandIn, commandRow, decidedOfCommand, keepOutcome, refuseUnder, resumeOutcomeFrom, seenCommand, settlePendingResumesIn, stretchOfCommand, type Claimed, type Command, type CommandKind, type CommandRow, type StoredOutcome } from '@/lib/computer-commands';
 
-/** Why a control was not done. `not_found`: not the owner's Brick, or no such job on it. `over`: the job already ended. `taken_over`: the person has the screen. `ending`: its ending is already decided. `not_paused` / `not_queued`: the job is not in the state the tap was for. `allowance` / `rule`: a resume the person's month, or a limit they set, does not let start (the job stays paused). `not_ready`: it carried on but its browser could not be settled, so the sweep is still working on it (finding 7). `not_ended`: a Cancel's ending did not finish (the job is still live after its bounded tries): nothing is kept as done, the command stays pending, and the same command id asked again ends it (CodeRabbit on #1025, N11 of the d522f4b3 pass). */
-export type ControlRefusal = 'not_found' | 'over' | 'taken_over' | 'ending' | 'not_paused' | 'not_queued' | 'allowance' | 'rule' | 'not_ready' | 'command_reused' | 'not_ended';
+/** Why a control was not done. `not_found`: not the owner's Brick, or no such job on it. `over`: the job already ended. `taken_over`: the person has the screen. `ending`: its ending is already decided. `not_paused` / `not_queued`: the job is not in the state the tap was for. `allowance` / `rule`: a resume the person's month, or a limit they set, does not let start (the job stays paused). `not_ready`: it carried on but its browser could not be settled, so the sweep is still working on it (finding 7). `started`: a Cancel that carried `expected: 'not_started'` found the job started since the person was asked: nothing was cancelled. `not_ended`: a Cancel's ending did not finish (the job is still live after its bounded tries): nothing is kept as done, the command stays pending, and the same command id asked again ends it (CodeRabbit on #1025, N11 of the d522f4b3 pass). */
+export type ControlRefusal = 'not_found' | 'over' | 'taken_over' | 'ending' | 'not_paused' | 'not_queued' | 'allowance' | 'rule' | 'not_ready' | 'command_reused' | 'not_ended' | 'started';
 /** `command_reused`: the control's command id was already used for another control (another job, kind or argument): refused, nothing written (finding 4). `signInsKept` is said only when a job that held the machine was paused: false when its sign-ins could not be put away (it will need them again when it carries on). */
 export type Controlled = { ok: true; view: ComputerView; signInsKept?: boolean } | { ok: false; reason: ControlRefusal };
 
@@ -49,7 +49,7 @@ export const pauseEventId = (jobId: string, n: number): string => `computer:${jo
 
 /** The job on this Brick, or null. */
 async function jobOnBrick(botId: string, jobId: string) {
-  return prisma.computerJob.findFirst({ where: { id: jobId, botId }, select: { id: true, botId: true, status: true, queuedFor: true, pauses: true } });
+  return prisma.computerJob.findFirst({ where: { id: jobId, botId }, select: { id: true, botId: true, status: true, queuedFor: true, pauses: true, stepDone: true } });
 }
 
 /** The highest rank in the Brick's line now (0 when nobody is ahead). */
@@ -610,35 +610,49 @@ async function firstIn(tx: Prisma.TransactionClient, botId: string, jobId: strin
       return out;
 }
 
+/** The state the person was asked about when they said Cancel. `not_started`: they were told the job had not started, so no question was asked; it is cancelled only while that is still true (a job that started in the gap is refused as `started`, nothing cancelled). Left out: cancelled whatever it is now (the person's own buttons, and callers that asked first). */
+export type CancelExpectation = 'not_started';
+
 /**
  * Cancel ONE job: running or waiting, it ends as the person's own Stop of that job only (charged the time it used, never given back) and the line moves on; waiting in line or paused, it leaves the line and nothing
  * is charged (a pause already wrote its own time). Every other job is left as it is.
  */
-export async function cancelJob(botId: string, ownerId: string, jobId: string, now: Date = new Date(), command?: Command): Promise<Controlled> {
+export async function cancelJob(botId: string, ownerId: string, jobId: string, now: Date = new Date(), command?: Command, expected?: CancelExpectation): Promise<Controlled> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
   const first = await jobOnBrick(botId, jobId);
   if (!first) return { ok: false, reason: 'not_found' };
   // The command (finding 4): its row is committed FIRST, naming this job, and the ending runs in the finalizer's own transactions. The same id again answers what it came to, or, while the first request did not
   // keep that (it stopped half way), finishes ending THIS job, which ends a job once whoever asks.
-  const under = underOf(command, botId, ownerId, jobId, 'cancel', {}, first.pauses);
+  // The expectation is part of the command: the same id with another expectation is another control (a cancel without one keeps the key it always had)
+  const under = underOf(command, botId, ownerId, jobId, 'cancel', expected ? { expected } : {}, first.pauses);
   if (under) {
     let seen = await seenCommand(under.command, under.row);
     if (!seen) {
       if (isOver(first.status)) return refused(botId, ownerId, under, 'over', now);
+      if (expected === 'not_started' && !notStartedYet(first)) return refused(botId, ownerId, under, 'started', now);
       seen = await claimed(claimCommand(under.command, under.row, { ok: true, pending: true, targets: [jobId] }));
     }
     // Answered before (or another control's id); a first request that stopped half way leaves it pending: this one finishes ending the job
     if (seen && ('reused' in seen || seen.replay !== null)) return answerOf(botId, ownerId, seen, now);
   } else if (isOver(first.status)) return { ok: false, reason: 'over' };
+  else if (expected === 'not_started' && !notStartedYet(first)) return { ok: false, reason: 'started' };
   // The job can change between the look and the ending (a job in line can start): the ending is asked again on what it is now
   for (let attempt = 0; attempt < 3; attempt++) {
     const job = await jobOnBrick(botId, jobId);
     if (!job || isOver(job.status)) break;
-    if (job.status === 'queued') await controlInternals.endByPerson(jobId, now, { advance: false, only: 'queued' });
+    // The person was told it had not started: a job that has started since (it was in line when they were asked) is never ended on that word, here or inside the ending's own write
+    if (expected === 'not_started' && !notStartedYet(job)) return startedSince(under);
+    if (job.status === 'queued') {
+      const report: { started?: boolean } = {};
+      await controlInternals.endByPerson(jobId, now, { advance: false, only: 'queued', ...(expected === 'not_started' ? { notStarted: true } : {}), report });
+      if (report.started) return startedSince(under);
+    }
     // A job that holds the machine: an ending already committed for it (the runner's kept intent, a decided pool cutoff) governs instead of the person's stop, decided under the finalizer's own lock
     else await controlInternals.endByPerson(jobId, now, { advance: true, held: true });
   }
   const after = await jobOnBrick(botId, jobId);
+  // The last look found a job that started since the person was told it had not (the tries ran out on it starting): that is the refusal, not an ending that did not finish
+  if (expected === 'not_started' && after && !isOver(after.status) && !notStartedYet(after)) return startedSince(under);
   // The parked browser is let go only once the job is over: a job that is still live (every ending lost its race) stays resumable with its saved sign-ins, and a retried Cancel drops it once the job is over (CodeRabbit on #1025, 14c4e407 pass, N8)
   if (after && after.pauses > 0 && isOver(after.status)) await dropProfile(botId, jobId, now).catch((error) => console.error('[Computer] Could not drop a cancelled job’s browser:', error instanceof Error ? error.message : 'unknown'));
   // The answer is kept only once the job is over: an ending that lost its race on every try (a concurrent write moved the job each time) leaves the command pending, and a retry under the same id ends it again, instead of
@@ -647,6 +661,12 @@ export async function cancelJob(botId: string, ownerId: string, jobId: string, n
   // A job that is still live is NOT told as cancelled: the person (or the Brick) would stop asking while it still holds the machine. The command stays pending and is asked again under the same id (CodeRabbit on #1025, N11)
   if (after && !isOver(after.status)) return { ok: false, reason: 'not_ended' };
   return viewOf(botId, ownerId, now);
+}
+
+/** A Cancel that was told "not started" found the job started: nothing was ended. The refusal is kept under its command (taken first, so a retry of the same id answers the same). */
+async function startedSince(under: { command: Command; row: CommandRow } | null): Promise<Controlled> {
+  if (under) await keepOutcome(prisma, under.command, refusalOutcome('started'));
+  return { ok: false, reason: 'started' };
 }
 
 /** A claim in a transaction of its own, as a seen command (or null when it is this request's). */
