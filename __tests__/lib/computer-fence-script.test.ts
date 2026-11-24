@@ -9,7 +9,7 @@
  *   - a program in Agent37's folder is the command runner only when its fingerprint is the runner's;
  *   - a browser the computer restarted counts once its parts are saved again, not before.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -86,6 +86,50 @@ describe('the commands Orbit sends', () => {
     expect(parsed).not.toBeNull();
     expect(parsed!.bootId).toMatch(/^[0-9a-f-]{36}$/);
     expect(parsed!.ticks).toBeGreaterThan(0);
+  });
+});
+
+describe('the fence run as the computer’s normal user against a program of root’s', () => {
+  const normalUser = isolated && have('runuser');
+  (normalUser ? it : it.skip)('cannot stop it, counts it, and does not prove the machine clear (also when the sandbox hides what the program is)', () => {
+    const dir = join(folder, 'normal');
+    mkdirSync(dir, { recursive: true });
+    chmodSync(folder, 0o755);
+    chmodSync(dir, 0o755);
+    writeFileSync(join(dir, 'fence.py'), FENCE_SCRIPT, { mode: 0o644 });
+    writeFileSync(join(dir, 'mark.py'), MARK_SCRIPT, { mode: 0o644 });
+    const script = `
+D=${dir}
+sleep 1
+python3 $D/mark.py > $D/mark.out
+BOOT=$(sed -n 's/^boot=//p' $D/mark.out)
+TICKS=$(sed -n 's/^ticks=//p' $D/mark.out)
+nfence() { runuser -u nobody -- python3 $D/fence.py --boot=$BOOT --cutoff=$TICKS --parts= --runners= "$@"; }
+sleep 1
+echo "control: $(nfence --check)"
+# what the agent, with admin rights, leaves running after the mark: a program of root's
+sh -c 'sleep 313' &
+ROOTP=$!
+sleep 1
+echo "before: $(nfence --check)"
+nfence
+kill -0 $ROOTP 2>/dev/null && echo "root-program-alive" || echo "root-program-dead"
+echo "after: $(nfence --check; echo rc=$?)"
+# a sandbox where a normal user lists root's processes but cannot read them (hidepid=1 here): each one is still counted
+if mount -o remount,hidepid=1 /proc 2>/dev/null; then
+  runuser -u nobody -- sh -c 'cat /proc/'$ROOTP'/stat >/dev/null 2>&1' && echo "readable" || echo "unreadable"
+  echo "hidden: $(nfence --check; echo rc=$?)"
+fi
+`;
+    const run = spawnSync('unshare', ['--pid', '--fork', '--mount-proc', '--mount', 'sh', '-c', script], { encoding: 'utf8', timeout: 60_000 });
+    const out = run.stdout;
+    // Nothing of root's was running before the program: the normal user's fence reads the computer's own as such
+    expect(out).toMatch(/control: remaining=0/);
+    expect(out).toMatch(/before: remaining=[1-9]/);
+    expect(out).toContain('root-program-alive');
+    expect(out).toMatch(/after: remaining=[1-9]\s+rc=1/);
+    if (out.includes("unreadable")) expect(out).toMatch(/hidden: remaining=[1-9]\s+rc=1/);
+    else expect(out).toContain('readable');
   });
 });
 

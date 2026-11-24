@@ -3504,6 +3504,10 @@ export async function fenceMachine(botId: string, stillLeader?: StillLeader): Pr
     }
     // The mark is Orbit's own (never read back from the computer, where the agent could have rewritten it). A computer row with none (a machine made ready before marks
     // were kept here, or one whose mark was damaged) cannot be proved clear: it goes the way an unproved fence goes, and the next wake takes a mark
+    // A restart Orbit is doing right now (a restore, park, clear or the clean-up after a job, all under the clean claim) saves the new browser's parts only once it is done:
+    // the fence waits for the claim first, so it never fences with the old list and stops the browser that was just brought back
+    await untilCleaned(botId);
+    if (stillLeader && !(await stillLeader())) return 'lost';
     const mark = savedMark(await prisma.brickComputer.findUnique({ where: { botId }, select: MARK_SELECT }));
     for (let attempt = 0; attempt < FENCE_TRIES && mark; attempt++) {
       if (stillLeader && !(await stillLeader())) return 'lost';

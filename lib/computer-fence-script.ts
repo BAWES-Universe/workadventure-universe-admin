@@ -24,8 +24,12 @@
  *
  * HONEST LIMITS (the words for the person must not promise more):
  *   - A program built to hide inside one of the kept parts (memory edits in a running browser, say) is not seen by this.
- *   - A program the agent ran as root stays running (the fence runs as the normal user and cannot stop it); the fence counts it, cannot
- *     prove the machine clear, and the machine is stopped. That fails safe.
+ *   - A program the agent ran as root stays running (the fence runs as the normal user and cannot stop it); the fence counts it (every process
+ *     that still exists counts, also one whose stat or command line it cannot read), cannot prove the machine clear, and the machine is
+ *     stopped. That fails safe.
+ *   - What is on the list is whatever ran the desktop's program with the desktop's arguments when Orbit read it, whoever started it: the
+ *     agent's own ordinary processes too. So the fence narrows the window from "any time" to "alive at one of Orbit's own read moments"; it
+ *     does not stop everything the agent started, and no words may say it does.
  *   - Parts are saved when the computer is made ready and again after each restart Orbit itself does (the browser after a clean-up or a
  *     sign-ins command). A part the computer restarted by itself in between (a browser that crashed) is not on the list: the fence stops it
  *     and the supervisor brings a fresh one up within seconds.
@@ -387,10 +391,25 @@ def protected(tree, cutoff, saved, runners):
     return keep
 
 
+PF_KTHREAD = 0x00200000
+
+
 def alive(pid):
-    state = (stat_fields(pid) or ["?"])[0]
-    # Kernel threads have no command line; a process waiting to be collected runs nothing
-    return state not in ("Z", "X", "?") and read(pid, "cmdline") != b""
+    # Everything that still exists counts, so a program the fence cannot read is never taken for "not running" (a root program on a sandbox where
+    # a normal user may not read its stat or command line, or one that emptied its own command line, would otherwise be neither stopped nor counted
+    # and the fence would prove a machine clear that it is not). Only what runs nothing is left out: a process waiting to be collected, one that has
+    # just gone, and a kernel thread (by its flag, not by an empty command line).
+    fields = stat_fields(pid)
+    if not fields:
+        return os.path.exists("/proc/%d" % pid)
+    if fields[0] in ("Z", "X"):
+        return False
+    try:
+        if int(fields[6]) & PF_KTHREAD:
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def others(cutoff, saved, runners):

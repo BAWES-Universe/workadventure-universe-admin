@@ -22,7 +22,7 @@ import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { isFenceCheckCommand, isFenceCommand, isMarkCommand } from '@/lib/computer-fence-script';
 import { savedMark } from '@/lib/computer-mark';
-import { finishJob, giveComputer, startJob, takeOver } from '@/lib/computer';
+import { fenceMachine, finishJob, giveComputer, startJob, takeOver } from '@/lib/computer';
 import { CONTROL_TIMING } from '@/lib/computer-control';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -165,6 +165,25 @@ run('the take-over fence’s mark, held by Orbit', () => {
       expect(fences.map((entry) => isFenceCheckCommand(entry.command))).toEqual([false, true]);
       for (const entry of fences) expect(entry.command).toContain(`--boot=22222222-2222-4222-8222-222222222222 --cutoff=424242 --parts=5:9:p,6:10:g --runners=${hash}`);
       expect(fake.commands.some((entry) => isMarkCommand(entry.command))).toBe(false);
+    });
+
+    it('waits while a restart of the browser is under way (the clean claim) and fences with the list that restart saved, never the old one', async () => {
+      fake.parts = [PART];
+      const { sara } = await running();
+      // A restore is putting the job's browser back: the claim is held, and the new browser's parts are saved only when it is done
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { cleanClaimedAt: new Date() } });
+      fake.commands.length = 0;
+      const fencing = fenceMachine(sara.brickId);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(fake.commands.filter((entry) => isFenceCommand(entry.command))).toEqual([]);
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { markParts: [GATEWAY], cleanClaimedAt: null } });
+      expect(await fencing).toBe('done');
+      const sent = fake.commands.filter((entry) => isFenceCommand(entry.command));
+      expect(sent.length).toBe(2);
+      for (const entry of sent) {
+        expect(entry.command).toContain('--parts=6:10:g ');
+        expect(entry.command).not.toContain('5:9:p');
+      }
     });
 
     it('a computer with no mark is not proved clear: no fence is sent, the machine is stopped, and the person has no screen until it wakes', async () => {
