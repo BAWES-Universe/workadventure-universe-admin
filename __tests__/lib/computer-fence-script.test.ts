@@ -133,6 +133,53 @@ fi
   });
 });
 
+describe('what the fence cannot be told is not running', () => {
+  const normalUser = isolated && have('runuser');
+  (normalUser ? it : it.skip)('a program whose first thread ended while its others run on is counted and stopped; a /proc that hides root’s programs proves nothing', () => {
+    const dir = join(folder, 'hidden');
+    mkdirSync(dir, { recursive: true });
+    chmodSync(folder, 0o755);
+    chmodSync(dir, 0o755);
+    writeFileSync(join(dir, 'fence.py'), FENCE_SCRIPT, { mode: 0o644 });
+    writeFileSync(join(dir, 'mark.py'), MARK_SCRIPT, { mode: 0o644 });
+    // The program's own first thread ends (it then reads as Z) and a second thread goes on working
+    writeFileSync(join(dir, 'leader.py'), 'import ctypes, threading, time\n'
+      + 'def work():\n    while True:\n        time.sleep(0.3)\n'
+      + 'threading.Thread(target=work).start()\ntime.sleep(0.2)\nctypes.CDLL(None).pthread_exit(None)\n', { mode: 0o644 });
+    const script = `
+D=${dir}
+sleep 1
+python3 $D/mark.py > $D/mark.out
+BOOT=$(sed -n 's/^boot=//p' $D/mark.out)
+TICKS=$(sed -n 's/^ticks=//p' $D/mark.out)
+f() { python3 $D/fence.py --boot=$BOOT --cutoff=$TICKS --parts= --runners= "$@"; }
+nfence() { runuser -u nobody -- python3 $D/fence.py --boot=$BOOT --cutoff=$TICKS --parts= --runners= "$@"; }
+sleep 1
+python3 $D/leader.py &
+L=$!
+sleep 1
+echo "state: $(cut -d' ' -f3 /proc/$L/stat) threads: $(ls /proc/$L/task | wc -l)"
+echo "leader: $(f --check)"
+f
+sleep 0.5
+[ -d /proc/$L ] && echo "leader-alive" || echo "leader-gone"
+echo "after: $(f --check)"
+sh -c 'sleep 313' &
+sleep 1
+if mount -o remount,hidepid=2 /proc 2>/dev/null; then
+  echo "invisible: $(nfence --check; echo rc=$?)"
+fi
+`;
+    const run = spawnSync('unshare', ['--pid', '--fork', '--mount-proc', '--mount', 'sh', '-c', script], { encoding: 'utf8', timeout: 60_000 });
+    const out = run.stdout;
+    expect(out).toMatch(/state: Z threads: 2/);
+    expect(out).toMatch(/leader: remaining=1/);
+    expect(out).toContain('leader-gone');
+    expect(out).toMatch(/after: remaining=0/);
+    if (out.includes('invisible:')) expect(out).toMatch(/invisible: hidden=1\s+rc=1/);
+  });
+});
+
 describe('the fence, with the mark Orbit holds', () => {
   scenario('stops what the mark does not name, whoever owns it; keeps what it names; and proves none is left', () => {
     const dir = join(folder, 'run');

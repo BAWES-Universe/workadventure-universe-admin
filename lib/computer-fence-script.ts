@@ -403,6 +403,20 @@ def alive(pid):
     if not fields:
         return os.path.exists("/proc/%d" % pid)
     if fields[0] in ("Z", "X"):
+        # A leader whose own thread ended while its other threads run on shows as Z too: that is a running program, not one waiting to be
+        # collected. Each of its threads is read, and one that is not ended (or cannot be read) counts
+        try:
+            tasks = os.listdir("/proc/%d/task" % pid)
+        except Exception:
+            return os.path.exists("/proc/%d" % pid)
+        for task in tasks:
+            text = read(pid, "task/%s/stat" % task).decode("utf-8", "replace")
+            if not text:
+                if os.path.exists("/proc/%d/task/%s" % (pid, task)):
+                    return True
+                continue
+            if text[text.rfind(")") + 2:].split()[:1] not in (["Z"], ["X"]):
+                return True
         return False
     try:
         if int(fields[6]) & PF_KTHREAD:
@@ -427,6 +441,26 @@ if not want or want != boot_id() or not cutoff_text or not cutoff_text.isdigit()
 cutoff = int(cutoff_text)
 saved = given_parts()
 runners = set(item for item in (option("runners") or "").split(",") if item)
+
+def proc_hides():
+    # A /proc that hides other users' processes from this user (hidepid=2 or 4, "invisible", "ptraceable", or only some of them shown) cannot
+    # show the fence everything that runs: nothing is proved on it. A mount table that cannot be read proves nothing either
+    hiding = {"hidepid=2", "hidepid=invisible", "hidepid=4", "hidepid=ptraceable", "subset=pid"}
+    try:
+        with open("/proc/self/mountinfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                left, _, right = line.partition(" - ")
+                where, kind = left.split(), right.split()
+                if len(where) > 4 and where[4] == "/proc" and len(kind) > 2 and kind[0] == "proc" and hiding & set(kind[2].split(",")):
+                    return True
+    except Exception:
+        return True
+    return False
+
+
+if proc_hides():
+    print("hidden=1")
+    sys.exit(1)
 
 if "--check" in sys.argv:
     left = others(cutoff, saved, runners)
