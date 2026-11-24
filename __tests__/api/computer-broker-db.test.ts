@@ -38,6 +38,9 @@ import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/com
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
+/** A take over's fence that cannot be proved: the computer has no note to fence by (`unmarked=1`, exit 3), so it is stopped. (A program still running, `remaining=N`, is a different answer for a take over: the person is asked.) */
+const UNPROVABLE = { stdout: 'unmarked=1\n', exitCode: 3 };
+
 const tag = randomUUID().slice(0, 8);
 // The real clock, not a fixed day: a failed start ends its job at the real now (the broker reads its own clock there), and a job that began on a fixed day is settled for every minute since, at the pretend price, so
 // each day that passed took more of the pool's room and the third job of a test eventually found none (the 504/502/503 test failed from 21 Nov: its job was queued for the pool). computer-db does the same
@@ -1509,7 +1512,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         const { sara, jobId } = await running();
         const { sent, lapse } = await acceptedAndLost(jobId);
         try {
-          fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
+          fake.execAnswer = (command) => (command.endsWith('--check') ? UNPROVABLE : {});
           expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
           expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopped');
           expect((await jobRow(jobId)).firstTurnSentAt).toBeNull();
@@ -1988,7 +1991,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
 
     it('does not call the machine stopped when the stop was refused: it is blocked and tried again until proved asleep', async () => {
       const { sara } = await running();
-      fake.execAnswer = () => ({ stdout: 'remaining=3\n', exitCode: 1 });
+      fake.execAnswer = () => (UNPROVABLE);
       const ref = `fake-${sara.brickId}`;
       fake.stuckAwake.add(ref);
       await takeOver(sara.brickId, sara.id, NOW);
@@ -2001,7 +2004,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
 
     it('wakes a machine that a failed fence stopped when the person hands the job back, so the job can go on', async () => {
       const { sara, jobId } = await running();
-      fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
+      fake.execAnswer = (command) => (command.endsWith('--check') ? UNPROVABLE : {});
       await takeOver(sara.brickId, sara.id, NOW);
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopped');
       fake.execAnswer = (command) => (command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {});

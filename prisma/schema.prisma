@@ -3376,6 +3376,9 @@ model BrickComputer {
   controlEpoch      Int       @default(0) @map("control_epoch")
   controlLeaseUntil DateTime? @map("control_lease_until")
   humanInputUntil   DateTime? @map("human_input_until")
+  /// The honest check before a take over (post 0.5.0, 1B). `blocked`: the fence ran and a program the agent left behind is still running (the person is asked: Restart first, or Take over anyway); `restarting`: the person chose Restart first and the computer is being restarted;
+  /// `running`: the person took over anyway, with such a program still running. Null otherwise. Cleared when control goes back to Brick.
+  takeOverCheck     String?   @map("take_over_check") @db.VarChar(10)
   // Set when a job ended while its first turn (marked as sent, never named) may still run on this machine: no job or turn starts here until the machine is proved asleep, and the sweep keeps trying
   turnUnprovenSince DateTime? @map("turn_unproven_since")
   /// The job whose pause committed and whose browser (its sign-ins) is not put away yet (GPT round 6, finding 7): while it is set no other job starts on this machine, so a job never gets another's sign-ins. The
@@ -3609,6 +3612,13 @@ model ComputerJob {
   ownerRun          String? @map("owner_run") @db.VarChar(40)
   /// Moves up on every claim, every renewal, every change of control and every start or end of a wait: a sweep that picked a job from a list compares it again under the job's lock, so a job that moved since is never ended on the strength of an older look.
   leaseVersion      Int     @default(0) @map("lease_version")
+  /// The honest check before a take over (post 0.5.0, 1B): how many times this job's computer was restarted at the person's choice, when the restart of the ask that is open now was done (null once the person has handed back, so the
+  /// next ask can offer a restart again: one per ask), and the ask that was open then (what Brick waited for, what it was ready to put in and where), so Brick asks again with the SAME words once its page is ready again.
+  restarts          Int       @default(0)
+  restartedAt       DateTime? @map("restarted_at")
+  restartKind       String?   @map("restart_kind") @db.VarChar(10)
+  restartWhat       String?   @map("restart_what") @db.VarChar(150)
+  restartWhere      String?   @map("restart_where") @db.VarChar(150)
 
   // Brick tells the person how a job went, in their chat with it (the report back). Each ending is said once: `endToldAt` is empty until it was
   // said, and set at once for the endings that are never said (the person's own Stop, turned off, deleted). Each time the job waits for its person

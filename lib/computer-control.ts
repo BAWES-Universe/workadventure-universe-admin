@@ -187,7 +187,7 @@ export async function releaseIfUnheld(botId: string): Promise<boolean> {
   }
   // No jobs to hand back: only a hand back whose lease has run out (nobody is finishing it) is ended here
   if (control.state === 'returning' && leaseLapsed(control)) {
-    const { count } = await prisma.brickComputer.updateMany({ where: { botId, controlState: 'returning', controlEpoch: control.epoch, controlLeaseUntil: control.leaseUntil }, data: { controlState: 'agent', controlLeaseUntil: null } });
+    const { count } = await prisma.brickComputer.updateMany({ where: { botId, controlState: 'returning', controlEpoch: control.epoch, controlLeaseUntil: control.leaseUntil }, data: { controlState: 'agent', controlLeaseUntil: null, takeOverCheck: null } });
     if (count === 1) return true;
   }
   return (await readControl(botId))?.state === 'agent';
