@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Test infrastructure (a fake payment service in plain Node), not part of the app
+    "tools/**",
   ]),
 ]);
 

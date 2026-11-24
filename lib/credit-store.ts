@@ -150,7 +150,7 @@ export async function lotBalances(db: Pick<Db, '$queryRaw'>, lotIds: readonly st
   return out;
 }
 
-type LotRow = Prisma.CreditLotGetPayload<Record<string, never>>;
+export type LotRow = Prisma.CreditLotGetPayload<Record<string, never>>;
 
 /**
  * The lots that may pay for something in a category for a person at a moment: theirs, and the shared pools they are recipients of;

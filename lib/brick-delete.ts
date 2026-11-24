@@ -92,6 +92,22 @@ async function markWaiting(brickId: string, now: Date): Promise<void> {
   await prisma.bot.updateMany({ where: { id: brickId, roomId: null, deletedAt: { not: null } }, data: { updatedAt: now } });
 }
 
+/** How long a removal is kept for the bot server to hear of it. */
+const REMOVAL_KEPT_DAYS = 7;
+
+/**
+ * The Bricks removed for good in the last days, whoever removed them: what the bot server is told on each sweep so it can close their
+ * chats. Telling it again is harmless (a chat already closed stays closed), and an answer that never got through loses nothing.
+ * Older ones are let go of here. Every id still kept is named, however many: a cut at some number would leave the newest ones unheard of for all
+ * seven days (the oldest are first, and they stay), and an id is a few dozen bytes.
+ */
+export async function recentlyRemovedBricks(now: Date = new Date()): Promise<string[]> {
+  const cutoff = new Date(now.getTime() - REMOVAL_KEPT_DAYS * DAY_MS);
+  await prisma.brickRemoval.deleteMany({ where: { removedAt: { lt: cutoff } } });
+  const rows = await prisma.brickRemoval.findMany({ where: { removedAt: { gte: cutoff } }, select: { botId: true }, orderBy: { removedAt: 'asc' } });
+  return rows.map((row) => row.botId);
+}
+
 /**
  * The second step, the final purge (audit F08): every deleted Brick whose days are over is purged for good, in one transaction, with
  * everything it owned (see lib/brick-purge.ts). For one person when `ownerId` is given, else for everyone. Returns the ids purged, so the bot

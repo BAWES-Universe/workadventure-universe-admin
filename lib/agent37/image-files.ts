@@ -22,7 +22,7 @@
  */
 
 /** Goes up when anything in the image changes; the machine's own set-up (`universe-up`) is redone when it differs from the one it saw. */
-export const IMAGE_SETUP_VERSION = '1';
+export const IMAGE_SETUP_VERSION = '4';
 
 /** The base image. A dated tag is better for reproducible builds; the registered image is pinned by digest at build anyway. */
 export const BASE_IMAGE = 'ghcr.io/agent37-platform/hermes-base';
@@ -119,7 +119,10 @@ fi
 # A cleanup that could not remove the browser's profile left a mark: no job may use that profile. It is removed here, before the browser
 # runs, and a profile that still cannot be removed means the machine is not ready.
 PROFILE_DIR="$HOME_DIR/.config/universe-chromium"
-if [ -f "$STATE/profile.dirty" ]; then
+# Two places: the root-only marks folder (what Orbit's sign-ins command marks in, a folder the agent cannot swap for a link under root) and the agent's own state folder (what universe-clean and an older command mark in)
+# The word on the next line is what Orbit's sign-ins command looks for before it marks anything: a start-up without it does not read the marks folder, and the command refuses on that machine (universe-marks-v1)
+MARKS="/var/lib/universe/marks"
+if [ -e "$MARKS/profile.dirty" ] || [ -L "$MARKS/profile.dirty" ] || [ -e "$STATE/profile.dirty" ]; then
   pkill -x chromium 2>/dev/null
   pkill -x chrome 2>/dev/null
   i=0
@@ -131,7 +134,8 @@ if [ -f "$STATE/profile.dirty" ]; then
   done
   rm -rf "$PROFILE_DIR" "$HOME_DIR/.cache/chromium" 2>/dev/null
   if [ -e "$PROFILE_DIR" ] || [ -e "$HOME_DIR/.cache/chromium" ]; then echo "ready=0 reason=profile_not_cleared"; exit 1; fi
-  rm -f "$STATE/profile.dirty"
+  rm -rf "$MARKS/profile.dirty" "$STATE/profile.dirty" 2>/dev/null
+  if [ -e "$MARKS/profile.dirty" ] || [ -L "$MARKS/profile.dirty" ] || [ -e "$STATE/profile.dirty" ]; then echo "ready=0 reason=profile_not_cleared"; exit 1; fi
 fi
 
 # Starts a part unless it is running. Each is its own session, so it outlives the command that started it.
@@ -201,11 +205,15 @@ exit 0
 
 export const UNIVERSE_PROXY = String.raw`#!/usr/bin/env python3
 # The model address on this computer: 127.0.0.1:__PORT__. Hermes talks to it as if it were any OpenAI-format server and holds no real key.
-# On EVERY call it reads the relay's address and this job's key from ~/.universe/relay.json and passes the call on, so a new key never
-# needs Hermes restarted. It logs the method, the path and the status, never a body or a key.
+# On EVERY call it reads the relay's address and a job's key and passes the call on, so a new key never needs Hermes restarted. Every turn
+# sent to the agent starts with the job's tag ("[universe-job:<id>]"): the tag at the start of a user message in a call's body names the job, and the call goes on
+# with that job's own key (~/.universe/jobs/<id>.json), so jobs that run at once are each booked their own calls. A call with no tag, or for a
+# job this computer holds no key of, goes on the key last written (~/.universe/relay.json). The tag is never authority: Orbit decides from the key.
+# It logs the method, the path and the status, never a body or a key.
 import http.client
 import json
 import os
+import re
 import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -213,14 +221,54 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = int(os.environ.get("UNIVERSE_PROXY_PORT") or __PORT__)
 HOME = os.environ.get("HOME") or "/home/node"
 RELAY = os.path.join(HOME, ".universe", "relay.json")
+JOBS = os.path.join(HOME, ".universe", "jobs")
+TAG = re.compile(r"^\[universe-job:([A-Za-z0-9-]{8,64})\]")
 CONNECT_SECONDS = 10
 READ_SECONDS = 900
 SKIP = {"connection", "keep-alive", "transfer-encoding", "content-length", "host", "authorization", "upgrade", "proxy-authorization", "te", "trailer"}
 
 
-def relay():
+def tag_of(body):
+    # The tag is read only from the START of a user message's text: the system message (the agent's own memory and skills), the agent's own
+    # answers and the tools' results are never where a job's tag is looked for. A body that is not JSON names no job.
     try:
-        with open(RELAY, "r", encoding="utf-8") as handle:
+        data = json.loads(body)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    items = []
+    for key in ("messages", "input"):
+        value = data.get(key)
+        if isinstance(value, list):
+            items.extend(value)
+        elif isinstance(value, str) and key == "input":
+            items.append({"role": "user", "content": value})
+    for item in items:
+        if not isinstance(item, dict) or item.get("role") != "user":
+            continue
+        content = item.get("content")
+        if isinstance(content, list):
+            content = next((part.get("text") for part in content if isinstance(part, dict) and isinstance(part.get("text"), str)), None)
+        if isinstance(content, str):
+            found = TAG.match(content)
+            if found:
+                return found.group(1)
+    return None
+
+
+def relay(body=None):
+    job = tag_of(body) if body else None
+    if job:
+        own = read_relay(os.path.join(JOBS, job + ".json"))
+        if own:
+            return own
+    return read_relay(RELAY)
+
+
+def read_relay(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
         url = urllib.parse.urlparse(data["url"])
         token = data["token"]
@@ -248,13 +296,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def handle_any(self):
-        found = relay()
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length > 0 else None
+        found = relay(body)
         if not found:
             self.say(503, "This computer has no model key yet.", "no_relay")
             return
         url, token = found
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length > 0 else None
         headers = {name: value for name, value in self.headers.items() if name.lower() not in SKIP}
         headers["Authorization"] = "Bearer " + token
         if body is not None:
@@ -790,6 +838,10 @@ SCRIPTS_DIR = "/usr/local/bin"
 # name): the program file must belong to root and be closed to everyone else (the agent cannot make one), and the arguments must be the ones
 # universe-up starts it with. The screen's own server and window manager are the base image's, so only the program is checked.
 DESKTOP_PROGRAMS = {"Xvfb", "openbox"}
+# What the screen's server and window manager must NOT be started with: the agent can run these root-owned programs itself, so a second
+# screen (any display but :99), or a window manager that runs a command of its own, is the agent's and is never kept. And what they
+# start is not kept below them: only the browser's own helpers are.
+OPENBOX_RUNS = ("--startup", "--config-file", "--exec")
 INTERPRETERS = re.compile(r"^(python3(\.\d+)?|sh|dash|bash)$")
 OWN_SCRIPTS = {os.path.join(SCRIPTS_DIR, name) for name in ("universe-proxy", "universe-supervise", "universe-up", "universe-fence", "universe-visits")}
 X11VNC_ARGS = ["-display", ":99", "-rfbport", "5900", "-localhost", "-forever", "-shared", "-nopw", "-quiet"]
@@ -857,8 +909,14 @@ def desktop_part(pid):
         return False
     name = os.path.basename(path)
     args = argv(pid)
-    if name in DESKTOP_PROGRAMS:
-        return True
+    if name == "Xvfb":
+        # Xvfb ignores everything after -I, so a display number placed there is not one it uses: Xvfb -I :99 runs on :0 and is not the supervisor's
+        rest = args[1:]
+        if "-I" in rest:
+            rest = rest[:rest.index("-I")]
+        return [part for part in rest if re.match(r"^:\d+$", part)] == [":99"]
+    if name == "openbox":
+        return not any(part.split("=")[0] in OPENBOX_RUNS for part in args[1:])
     if name == "x11vnc":
         return args[1:] == X11VNC_ARGS
     if name in ("chromium", "chrome"):
@@ -1011,8 +1069,10 @@ def protected(tree, cutoff):
         below.setdefault(up, []).append(pid)
     # Everything below a desktop part is its own, whether or not it was already kept for another reason: a helper that was running before
     # the note was written still has children (a new tab's renderer) that were not. Its own record of what was visited, apart from the kept set.
-    seen = set(desktop)
-    stack = list(desktop)
+    # (Not below the screen's server or window manager: the agent can run those programs itself, and what they start is the agent's.)
+    parents = {pid for pid in desktop if os.path.basename(program(pid) or "") not in DESKTOP_PROGRAMS}
+    seen = set(parents)
+    stack = list(parents)
     while stack:
         for child in below.get(stack.pop(), []):
             if child not in seen:
@@ -1067,6 +1127,15 @@ export const UNIVERSE_CLEAN = String.raw`#!/bin/sh
 # proved gone before the profile is deleted, and the parts come back only after the lock is let go.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+# This is the AGENT's command: Orbit runs it as the agent user (never as root). Everything below removes and makes things under the agent's own home, whose folders the agent can swap for a link at any moment, so it must
+# never be done with more rights than the agent has. Started as root it does nothing itself: it hands over to the agent user and runs again there, or, when it cannot, it refuses and has touched nothing (CodeRabbit on #1025, N26)
+if [ "$(id -u)" = "0" ]; then
+  AGENT=node
+  AGENT_HOME="$(getent passwd "$AGENT" | cut -d: -f6)"
+  if [ -n "$AGENT_HOME" ] && [ -f "$0" ] && command -v runuser >/dev/null 2>&1; then exec runuser -u "$AGENT" -- env HOME="$AGENT_HOME" "$0"; fi
+  echo "cleaned=0 reason=root"
+  exit 1
+fi
 HOME_DIR="$HOME"
 [ -n "$HOME_DIR" ] || HOME_DIR=/home/node
 STATE="$HOME_DIR/.universe"
@@ -1080,8 +1149,12 @@ until mkdir "$LOCK" 2>/dev/null; do
   sleep 0.2
 done
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
-# Marked first, unmarked only when the profile is proved gone: until then the next start-up removes it before any job can use it
-: > "$STATE/profile.dirty" 2>/dev/null || { echo "cleaned=0 reason=mark"; exit 1; }
+# Marked first, unmarked only when the profile is proved gone: until then the next start-up removes it before any job can use it.
+# A FOLDER made with mkdir, never a file opened with ">": this runs as root over a path the agent owns, and an open for writing would follow
+# a link the agent put there and empty its target. mkdir follows no link and truncates nothing; anything already at that name fails the run
+[ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "cleaned=0 reason=mark"; exit 1; }
+rm -rf "$STATE/profile.dirty" 2>/dev/null
+mkdir "$STATE/profile.dirty" 2>/dev/null || { echo "cleaned=0 reason=mark"; exit 1; }
 pkill -x websockify 2>/dev/null
 pkill -x chromium 2>/dev/null
 pkill -x chrome 2>/dev/null
@@ -1094,7 +1167,7 @@ while pgrep -x chromium >/dev/null 2>&1 || pgrep -x chrome >/dev/null 2>&1; do
 done
 rm -rf "$HOME_DIR/.config/universe-chromium" "$HOME_DIR/.cache/chromium" 2>/dev/null
 if [ -e "$HOME_DIR/.config/universe-chromium" ] || [ -e "$HOME_DIR/.cache/chromium" ]; then echo "cleaned=0 reason=profile_not_removed"; exit 1; fi
-rm -f "$STATE/profile.dirty"
+rm -rf "$STATE/profile.dirty"
 rmdir "$LOCK" 2>/dev/null
 trap - EXIT
 /usr/local/bin/universe-up --child >/dev/null 2>&1

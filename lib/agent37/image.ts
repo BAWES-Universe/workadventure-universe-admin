@@ -27,6 +27,9 @@ const RETRY_BASE_MS = 5 * 60 * 1000;
 const RETRY_CAP_MS = 6 * 60 * 60 * 1000;
 const SETTING_KEY = 'computer-image';
 
+/** How long a failed build waits before the next try: the base, doubling with each failure, up to the cap. */
+const retryWaitMs = (failures: number): number => Math.min(RETRY_CAP_MS, RETRY_BASE_MS * 2 ** Math.max(0, failures - 1));
+
 export interface ImageState {
   /** Of the image's content (the files), so a change starts a new build. */
   hash: string;
@@ -77,6 +80,11 @@ export const dbImageStore: ImageStore = {
       const same = value.hash === hash;
       // Someone claimed it a moment ago and has not yet recorded the build: it is theirs
       if (same && value.state === 'building' && !value.buildId && value.startedAt && now.getTime() - new Date(value.startedAt).getTime() < CLAIM_MS) return null;
+      // What the caller read before it got here may be out of date: a sweep that read "failed" or "no build" while another started
+      // one, or finished it, must not start a second build of the same content. Only what is true now, under the lock, decides
+      if (same && value.state === 'ready') return null;
+      if (same && value.state === 'building' && value.buildId) return null;
+      if (same && value.state === 'failed' && now.getTime() - new Date(value.failedAt ?? value.startedAt ?? 0).getTime() < retryWaitMs(value.failures ?? 0)) return null;
       const marker: ImageState = { hash, state: 'building', buildId: null, revision: null, startedAt: now.toISOString(), failures: same ? (value.failures ?? 0) : 0, error: null };
       const json = marker as unknown as Prisma.InputJsonValue;
       await tx.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value: json }, update: { value: json } });
@@ -161,7 +169,7 @@ export async function ensureImage(client: Agent37Client, store: ImageStore = dbI
         return state;
       }
       if (state.state === 'failed') {
-        const wait = Math.min(RETRY_CAP_MS, RETRY_BASE_MS * 2 ** Math.max(0, state.failures - 1));
+        const wait = retryWaitMs(state.failures);
         if (now.getTime() - new Date(state.failedAt ?? state.startedAt).getTime() < wait) return state;
       }
     }

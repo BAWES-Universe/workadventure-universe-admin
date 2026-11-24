@@ -11,11 +11,12 @@ import { randomUUID } from 'node:crypto';
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
-import { adoptGuestChat, claimGuestBrickReply, finishGuestBrickReply, guestBrickFor, guestChatHandedTo, takeCarriedGuestChat } from '@/lib/guest-brick';
+import { adoptGuestChat, adoptGuestChatKeepingIt, GuestChatNotKeptError, finishKeptGuestChats, claimGuestBrickReply, finishGuestBrickReply, guestBrickFor, guestChatHandedTo, takeCarriedGuestChat } from '@/lib/guest-brick';
 import { ensureDefaultBrick } from '@/lib/brick-default';
 import { checkReplyAllowance } from '@/lib/reply-limits';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
+import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -66,6 +67,7 @@ run('the Brick for guests, in a real database', () => {
     else await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
     await prisma.guestBrickReply.deleteMany({ where: { guestKey: { in: guests } } });
     await prisma.guestBrickHandover.deleteMany({ where: { guestKey: { in: guests } } });
+    await prisma.guestBrickPendingHandover.deleteMany({ where: { guestKey: { in: guests } } });
     await prisma.replyWindow.deleteMany({ where: { OR: [{ key: { startsWith: 'gb:' }, ...{} }, { key: { in: guests.map((id) => `ua:guest:${id}`) } }] } });
     if (universes.length) await prisma.universe.deleteMany({ where: { id: { in: universes } } });
     if (providerId) await prisma.botsAiProvider.deleteMany({ where: { providerId } });
@@ -213,6 +215,85 @@ run('the Brick for guests, in a real database', () => {
       expect(await prisma.guestBrickHandover.count({ where: { guestKey: guestId } })).toBe(1);
     });
 
+    it('keeps a hand-over that failed, and finishes it the next time the person gets in, once and no more', async () => {
+      const a = await universe('kept');
+      const sara = await person('sara-kept');
+      const guestId = guest();
+      await claim(guestId, a.roomUrl);
+      const failing = jest.spyOn(prisma.guestBrickHandover, 'findUnique').mockRejectedValueOnce(new Error('db hiccup'));
+      await expect(adoptGuestChatKeepingIt(guestId, sara.id)).rejects.toThrow('db hiccup');
+      failing.mockRestore();
+      expect(await prisma.guestBrickHandover.count({ where: { guestKey: guestId } })).toBe(0);
+      expect(await prisma.guestBrickPendingHandover.count({ where: { guestKey: guestId, userId: sara.id } })).toBe(1);
+      // The next visit finishes it, and the row is gone
+      expect(await finishKeptGuestChats(sara.id)).toBe(1);
+      expect(await prisma.guestBrickHandover.count({ where: { guestKey: guestId, userId: sara.id } })).toBe(1);
+      expect(await prisma.guestBrickPendingHandover.count({ where: { guestKey: guestId } })).toBe(0);
+      expect(await finishKeptGuestChats(sara.id)).toBe(0);
+    });
+
+    it('keeps a failed kept hand-over for the time after, and drops one whose window passed', async () => {
+      const a = await universe('kept-2');
+      const sara = await person('sara-kept-2');
+      const guestId = guest();
+      await claim(guestId, a.roomUrl);
+      await prisma.guestBrickPendingHandover.create({ data: { guestKey: guestId, userId: sara.id } });
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const failing = jest.spyOn(prisma.guestBrickReply, 'count').mockRejectedValueOnce(new Error('db hiccup'));
+      expect(await finishKeptGuestChats(sara.id)).toBe(0);
+      failing.mockRestore();
+      expect(await prisma.guestBrickPendingHandover.count({ where: { guestKey: guestId } })).toBe(1);
+      // Older than the window: dropped, never handed over
+      await prisma.guestBrickPendingHandover.update({ where: { guestKey: guestId }, data: { keptAt: new Date(Date.now() - 400 * 24 * 3600 * 1000) } });
+      expect(await finishKeptGuestChats(sara.id)).toBe(0);
+      expect(await prisma.guestBrickPendingHandover.count({ where: { guestKey: guestId } })).toBe(0);
+      expect(await prisma.guestBrickHandover.count({ where: { guestKey: guestId } })).toBe(0);
+    });
+
+    it('says so when the hand-over failed and the id could not be written down either: nothing holds it, and the visit is asked again with it', async () => {
+      const a = await universe('kept-3');
+      const sara = await person('sara-kept-3');
+      const guestId = guest();
+      await claim(guestId, a.roomUrl);
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const failing = jest.spyOn(prisma.guestBrickHandover, 'findUnique').mockRejectedValueOnce(new Error('db hiccup'));
+      const noWrite = jest.spyOn(prisma, '$executeRaw').mockRejectedValueOnce(new Error('db still away'));
+      try {
+        await expect(adoptGuestChatKeepingIt(guestId, sara.id)).rejects.toBeInstanceOf(GuestChatNotKeptError);
+      } finally {
+        failing.mockRestore();
+        noWrite.mockRestore();
+      }
+      expect(await prisma.guestBrickPendingHandover.count({ where: { guestKey: guestId } })).toBe(0);
+      // The visit asked again with the id (the game's retry) hands it over
+      expect(await adoptGuestChatKeepingIt(guestId, sara.id)).toEqual({ adopted: true });
+    });
+
+    it('never drops a kept guest id as too old on the recommended days when the saved limits could not be read', async () => {
+      const a = await universe('kept-4');
+      const sara = await person('sara-kept-4');
+      const guestId = guest();
+      await claim(guestId, a.roomUrl);
+      // Kept two days ago: inside the saved window, older than the recommended one days when those are shorter
+      await prisma.guestBrickPendingHandover.create({ data: { guestKey: guestId, userId: sara.id, keptAt: new Date(Date.now() - 2 * 24 * 3600 * 1000) } });
+      await saveServerLimits({ files: { guestDays: 30 } } as never, ownerId);
+      try {
+        jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        const failing = jest.spyOn(prisma.appSetting, 'findUnique').mockRejectedValue(new Error('db hiccup'));
+        try {
+          await expect(finishKeptGuestChats(sara.id)).rejects.toThrow('db hiccup');
+        } finally {
+          failing.mockRestore();
+        }
+        expect(await prisma.guestBrickPendingHandover.count({ where: { guestKey: guestId } })).toBe(1);
+        expect(await finishKeptGuestChats(sara.id)).toBe(1);
+        expect(await prisma.guestBrickHandover.count({ where: { guestKey: guestId, userId: sara.id } })).toBe(1);
+      } finally {
+        // The days other tests of this file rely on
+        await saveServerLimits({ files: { guestDays: 1 } } as never, ownerId);
+      }
+    });
+
     it('goes to one account only, even when two accounts sign in at the same moment with the same guest id', async () => {
       const a = await universe('two');
       const first = await person('first');
@@ -263,6 +344,47 @@ run('the Brick for guests, in a real database', () => {
       expect(await guestChatHandedTo(randomUUID(), rana.uuid)).toEqual({ handed: false });
       expect(await guestChatHandedTo(guestId, 'nobody')).toEqual({ handed: false });
       expect(await guestChatHandedTo(undefined, rana.uuid)).toEqual({ handed: false });
+    });
+
+    it('reads the windows only once it holds the locks: a claim that waited while another opened a new window counts in the new one', async () => {
+      const a = await universe('lockwin');
+      const guestId = guest();
+      const key = `gb:guest:${guestId}`;
+      const longAgo = new Date(Date.now() - 4 * 3_600_000);
+      // Two replies from the old window, which is still running when the claim begins
+      for (const n of [1, 2]) await prisma.guestBrickReply.create({ data: { turnId: `old-${randomUUID()}-${n}`, guestKey: guestId, universeKey: a.id, createdAt: longAgo } });
+      await prisma.replyWindow.create({ data: { key, startedAt: new Date(Date.now() - 4.9 * 3_600_000) } });
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      // Another claim holds the guest's lock and, before it lets go, has moved the window on and counted one reply in the new one
+      const other = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`gb:pool:${a.id}`}))`;
+        locked();
+        await held;
+        await tx.replyWindow.update({ where: { key }, data: { startedAt: new Date() } });
+        await tx.guestBrickReply.create({ data: { turnId: `new-${randomUUID()}`, guestKey: guestId, universeKey: a.id, createdAt: new Date() } });
+      });
+      await lockTaken;
+      const claiming = claim(guestId, a.roomUrl);
+      // The claim has reached the database and is waiting on the lock the other one holds
+      await waitUntilBlockedOnLock();
+      release();
+      await other;
+      expect(await claiming).toMatchObject({ allowed: true, counted: true });
+    });
+
+    it('a failed turn tried again from another universe is counted in that universe', async () => {
+      const a = await universe('retry-a');
+      const b = await universe('retry-b');
+      const guestId = guest();
+      const again = turn();
+      await claim(guestId, a.roomUrl, again);
+      await finishGuestBrickReply(again, { failed: true });
+      expect(await claim(guestId, b.roomUrl, again)).toMatchObject({ allowed: true, counted: true });
+      expect((await prisma.guestBrickReply.findUniqueOrThrow({ where: { turnId: again } })).universeKey).toBe(b.id);
     });
 
     it('does nothing when the guest never talked to the Brick, or only had a reply that failed', async () => {

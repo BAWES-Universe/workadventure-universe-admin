@@ -14,7 +14,7 @@ import { getManagedConnection, managesConnection } from '@/lib/app-team-access';
 import { findUserByIdentifier } from '@/lib/user-identifier';
 import { createMcpServerSchema } from '@/lib/mcp/server-input';
 import { isReconnectRequired, parseOAuthConfig, refreshBlockedReason } from '@/lib/mcp/oauth-token';
-import { syncToolSignInNotices } from '@/lib/tool-signin';
+import { syncToolSignInNotices, finishConnectionNotices } from '@/lib/tool-signin';
 import { revokeAtApp } from '@/lib/mcp/revoke';
 import { holdRefreshLease } from '@/lib/mcp/oauth-refresh';
 import { checkSharedUse, isAppShareable, type OwnerNote } from '@/lib/app-share';
@@ -151,7 +151,9 @@ export async function checkAppUse(botId: string, serverId: string, input: z.infe
     if (connection.universeId) {
       if (connection.universeId !== universeId) return refuse('gone');
       if (!row.enabled) return refuse('off');
-      if ((await recordUse({ connectionId: connection.id, universeId, botId, callId: input.callId, limit: null, serverId: row.id })) === 'gone') return refuse('gone');
+      const recorded = await recordUse({ connectionId: connection.id, universeId, botId, callId: input.callId, limit: null, serverId: row.id });
+      if (recorded === 'gone') return refuse('gone');
+      if (recorded === 'off') return refuse('off');
       return { allowed: true, viaConnection: true, paidBy: { kind: 'universe', universeId } };
     }
     const lend = await prisma.appLend.findUnique({ where: { connectionId_universeId: { connectionId: connection.id, universeId } } });
@@ -166,6 +168,7 @@ export async function checkAppUse(botId: string, serverId: string, input: z.infe
     const outcome = await recordUse({ connectionId: connection.id, universeId, botId, callId: input.callId, limit: lend.usesPerDay, serverId: row.id, lend: true });
     // Taken back while this check was waiting: nothing is recorded, and nothing is let through
     if (outcome === 'gone') return refuse('gone');
+    if (outcome === 'off') return refuse('off');
     if (outcome === 'limit_reached') {
       await tellLenderOfLimit(lend, connection.name);
       return refuse('limit_reached');
@@ -509,6 +512,29 @@ export async function newSignInNonce(connectionId: string): Promise<string> {
   return nonce;
 }
 
+/**
+ * A sign-in begins: the generation moves up and the new number goes into its state. Whichever sign-in began last is the only one whose
+ * tokens may be stored, so a slow older sign-in that finishes after a newer one never writes over it.
+ */
+export async function newSignInGeneration(target: { connectionId: string } | { serverId: string }): Promise<number> {
+  const data = { signInGeneration: { increment: 1 } };
+  const select = { signInGeneration: true } as const;
+  const row = 'connectionId' in target
+    ? await prisma.appConnection.update({ where: { id: target.connectionId }, data, select })
+    : await prisma.botMcpServer.update({ where: { id: target.serverId }, data, select });
+  return row.signInGeneration;
+}
+
+/**
+ * A sign-in of an app begins: the ticket and the generation are set by ONE write, and both come back from it. Made apart, two sign-ins begun at the same
+ * moment could leave the ticket of one with the number of the other, a pair nobody holds, and neither could finish.
+ */
+export async function beginConnectionSignIn(connectionId: string): Promise<{ nonce: string; generation: number }> {
+  const nonce = randomBytes(24).toString('base64url');
+  const row = await prisma.appConnection.update({ where: { id: connectionId }, data: { signInNonce: nonce, signInGeneration: { increment: 1 } }, select: { signInGeneration: true } });
+  return { nonce, generation: row.signInGeneration };
+}
+
 /** Uses the ticket exactly once: true for the first return that carries the current one, false for anything else. */
 export async function takeSignInNonce(connectionId: string, nonce: string | undefined): Promise<boolean> {
   if (!nonce) return false;
@@ -531,14 +557,15 @@ export async function markConnectionReconnected(connectionId: string, personId: 
     const wasDown = !!connection.signInLostAt || !!connection.noAnswerAt;
     await prisma.appConnection.update({
       where: { id: connectionId },
-      data: wasDown ? { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date() } : { reconnectedAt: new Date() },
+      data: wasDown ? { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date(), ...(connection.signInLostAt ? { noticesPendingAt: new Date() } : {}) } : { reconnectedAt: new Date() },
     });
     // Only the owner (or a manager of a universe's own app) can have signed it in; remembering who can fail (that account may be gone)
     // and never undoes the clear. A team app signed in again names the one who did it, so it no longer depends on whoever left.
     if (personId && (await managesConnection(personId, { id: connectionId, ownerId: connection.ownerId, universeId: connection.universeId }))) {
       await prisma.appConnection.update({ where: { id: connectionId }, data: { connectedById: personId } }).catch(() => undefined);
     }
-    if (connection.signInLostAt) for (const botId of new Set(connection.grants.map((grant) => grant.botId))) await syncToolSignInNotices(botId);
+    // The cards of every Brick that uses it; one that could not be finished now is finished by the next report for this connection
+    if (connection.signInLostAt) await finishConnectionNotices(connectionId);
   } catch (error) {
     console.error('[AppConnection] Could not clear the lost sign-in:', error instanceof Error ? error.message : 'unknown');
   }

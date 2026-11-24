@@ -9,7 +9,7 @@ export const runtime = 'nodejs';
 /** The most events one request may carry. */
 const MAX_EVENTS = 100;
 
-export type EventResult = { eventId: string | null; status: 'recorded' | 'duplicate' | 'conflict' | 'invalid' | 'unknown_bot'; error?: string };
+export type EventResult = { eventId: string | null; status: 'recorded' | 'duplicate' | 'conflict' | 'invalid' | 'unknown_bot' | 'retry'; error?: string };
 
 async function write(raw: unknown): Promise<EventResult> {
   const body = typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
@@ -23,6 +23,9 @@ async function write(raw: unknown): Promise<EventResult> {
   let guestId: string | null = null;
   if (typeof body.userId === 'string' && body.userId) {
     const person = await resolveUsagePerson(body.userId.slice(0, 255), body.isGuest);
+    // Who it was for could not be looked up (the database failed): it is not written down as a guest, or as nobody's. It is asked again,
+    // and the same event id is written once when it is
+    if (person.lookupFailed) return { eventId, status: 'retry', error: 'Could not tell who this was for, send it again' };
     personId = person.personId;
     guestId = !personId && person.guest !== false ? body.userId : null;
   }
@@ -41,7 +44,9 @@ async function write(raw: unknown): Promise<EventResult> {
  * POST /api/meter/events { ...event } or { events: [...] } - the one way anything but a model call (an app use, a computer minute,
  * a size change, stored bytes, speech) gets into the meter's books (game #1998). Written once under `eventId`: the same id again
  * is a "duplicate" and adds nothing, and the same id with other figures is a "conflict" and adds nothing either.
- * Answers 200 with one result for each event, so a bad one never hides a good one.
+ * Answers 200 with one result for each event, so a bad one never hides a good one. `retry` means nothing was written because who it was
+ * for could not be looked up just now. When any event of the request is `retry` the answer is 503 with the same `results`: a sender that
+ * treats every 200 as delivered cannot lose it, it sends the whole batch again, and the events already written come back as `duplicate`.
  *
  * Auth: service token only.
  */
@@ -64,7 +69,7 @@ export async function POST(request: NextRequest) {
     const results: EventResult[] = [];
     // One after another, so two events of one request that share an id are a recorded and a duplicate, in that order
     for (const event of list) results.push(await write(event));
-    return NextResponse.json({ results });
+    return NextResponse.json({ results }, { status: results.some((result) => result.status === 'retry') ? 503 : 200 });
   } catch (error) {
     console.error('[Meter] Could not record events:', error instanceof Error ? error.message : 'unknown');
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });

@@ -24,7 +24,9 @@ const dueSchema = z.object({ kinds: z.array(z.enum(ITEM_KINDS)).max(ITEM_KINDS.l
  * POST /api/bricks/items/held/:itemId/told { waitId } after saying it; an unconfirmed notice is handed out again after a while, so it is never lost.
  * A reminder is never held.
  * Answers { runs: [{ runId, itemId, brickId, userId, matrixUserId, kind, words, condition, outcome, steps, statusLine, timeZone, dueAt,
- * revision, late, fresh, attempt, leaseUntil, marker, deliveredEventId, deliveredReport }], held: [{ itemId, brickId, userId, matrixUserId, kind, words, resumesAt, waitId }] }
+ * revision, late, fresh, attempt, leaseUntil, marker, deliveredEventId, deliveredReport }], held: [{ itemId, brickId, userId, matrixUserId, kind, words, resumesAt, waitId }],
+ * failed: [{ runId, itemId, brickId, userId, matrixUserId, kind, words, timeZone, error }] }. `failed` is a run given up with no report: tell the person, then
+ * POST /api/bricks/items/runs/:runId/told (handed out again until then).
  */
 export async function POST(request: NextRequest) {
   try {

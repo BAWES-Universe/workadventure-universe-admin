@@ -310,11 +310,20 @@ export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now:
   if (!place.takesVisits) {
     // Not on this map, but the person is still here: the visit is kept alive for the places that take it, and it is not left
     // standing in the room they came from, where people could still reach a Brick whose person is elsewhere now
+    // A sighting older than the move that put the person elsewhere (the same page load's clock) is late: it moves nothing, and is told as late, so the bot
+    // server leaves the Brick standing in their newer room alone and does not read the empty list as "no Brick"
+    // The same sighting again (the same page load, the same time it came into this room, and the visit stands in no Brick room) is no move and not late:
+    // it is the person still here, so it keeps the visit alive. Equal while the visit stands in a Brick room is a clash of two times, and is late as before
+    const rejected = clientId
+      ? await prisma.brickVisit.findMany({ where: { userId: { in: userIds }, roomClient: clientId, OR: [{ roomSince: { gt: sightedAt } }, { roomSince: sightedAt, roomId: { not: null } }] }, select: { userId: true } })
+      : [];
+    const lateIds = new Set(rejected.map((row) => row.userId));
+    if (clientId) await prisma.brickVisit.updateMany({ where: { userId: { in: userIds.filter((id) => !lateIds.has(id)) }, roomClient: clientId, roomSince: sightedAt, roomId: null }, data: { seenAt: now } });
     await prisma.brickVisit.updateMany({
-      where: { userId: { in: userIds }, ...(newer ? { AND: [{ OR: newer }] } : {}) },
+      where: { userId: { in: userIds.filter((id) => !lateIds.has(id)) }, ...(newer ? { AND: [{ OR: newer }] } : {}) },
       data: { roomId: null, roomSince: sightedAt, roomClient: clientId ?? null, seenAt: now },
     });
-    return { place, ...none };
+    return { place, visiting: [] as VisitingBrickRow[], late: seen.filter((row) => lateIds.has(row.userId)).map((row) => row.user.uuid) };
   }
   // Already in this room: seen now. Somewhere else: moved here only when this sighting is newer than the move that put it there
   // (equal or older is a late sync from a room the person has left, and changes nothing)

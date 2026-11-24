@@ -379,12 +379,20 @@ describe('moveBotOffGoneModel, for a Brick', () => {
     expect(notice).not.toHaveBeenCalled();
   });
 
+  it('leaves a Brick alone whose owner picked another model while the provider was asked: nothing moves and nobody is told', async () => {
+    chat.mockReset().mockResolvedValue(gone404);
+    db.bot.updateMany.mockResolvedValue({ count: 0 });
+    expect(await moveBotOffGoneModel(key, brick.id)).toBe(true);
+    expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ aiModel: brick.aiModel }) }));
+    expect(notice).not.toHaveBeenCalled();
+  });
+
   it('moves only the Brick to Universe AI when the key has no other model that answers, and tells its owner', async () => {
     chat.mockReset().mockResolvedValue(gone404);
     expect(await moveBotOffGoneModel(key, brick.id)).toBe(true);
     // Nobody else leaves the key: a Brick shares its home with no other bot
     expect(moveBotsOffKey).not.toHaveBeenCalled();
-    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: brick.id, aiProviderRef: 'key-1' }, data: { aiProviderRef: 'universe-ai', aiModel: null } });
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: brick.id, aiProviderRef: 'key-1', aiModel: brick.aiModel }, data: { aiProviderRef: 'universe-ai', aiModel: null } });
     expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'maker', kind: 'ai-key-moved', title: 'Brick moved to Universe AI', href: '/admin/you/ai-keys' });
     expect(notice.mock.calls[0][0].body).toBe('OpenRouter no longer has a model Brick can reply with on My OpenRouter, so Brick now replies on Universe AI.');
     expect(notice.mock.calls[0][0].dedupeKey).toMatch(new RegExp(`^models-gone:key-1:brick:${brick.id}:`));

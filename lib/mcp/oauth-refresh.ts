@@ -289,16 +289,22 @@ export async function holdRefreshLease(connectionId: string): Promise<() => Prom
  * never run beside a renewal (one that rotates a refresh token, game #2041) stops instead of carrying on.
  */
 export async function takeRefreshLease(connectionId: string): Promise<(() => Promise<void>) | null> {
-  const claim = () =>
-    prisma.appConnection.updateMany({
+  // The lease is the time it ends: letting go clears only a lease with that time, so a request that ran long and lost its lease
+  // (it ended, and another request took it) never clears the other request's lease
+  const claim = async () => {
+    const until = new Date(Date.now() + LEASE_MS);
+    const taken = await prisma.appConnection.updateMany({
       where: { id: connectionId, OR: [{ refreshLeaseUntil: null }, { refreshLeaseUntil: { lt: new Date() } }] },
-      data: { refreshLeaseUntil: new Date(Date.now() + LEASE_MS) },
+      data: { refreshLeaseUntil: until },
     });
+    return taken.count === 1 ? until : null;
+  };
   const deadline = Date.now() + LEASE_MS;
   for (;;) {
-    if ((await claim()).count === 1) {
+    const until = await claim();
+    if (until) {
       return async () => {
-        await prisma.appConnection.updateMany({ where: { id: connectionId }, data: { refreshLeaseUntil: null } }).catch(() => undefined);
+        await prisma.appConnection.updateMany({ where: { id: connectionId, refreshLeaseUntil: until }, data: { refreshLeaseUntil: null } }).catch(() => undefined);
       };
     }
     // A row that is gone (disconnected at the same moment) has no lease to wait for: stop looking at once
@@ -321,20 +327,23 @@ async function refreshUnderLease(
   serverUrl: string | null,
   nowMs: number
 ): Promise<RefreshOutcome> {
-  const claim = () =>
-    prisma.appConnection.updateMany({
+  // The lease is the time it ends, and letting go clears only a lease with that time (see takeRefreshLease)
+  const claim = async () => {
+    const until = new Date(Date.now() + LEASE_MS);
+    const taken = await prisma.appConnection.updateMany({
       where: { id: holder.id, OR: [{ refreshLeaseUntil: null }, { refreshLeaseUntil: { lt: new Date() } }] },
-      data: { refreshLeaseUntil: new Date(Date.now() + LEASE_MS) },
+      data: { refreshLeaseUntil: until },
     });
+    return taken.count === 1 ? until : null;
+  };
   const deadline = Date.now() + LEASE_MS;
-  let claimed = (await claim()).count === 1;
+  let leaseUntil = await claim();
+  let claimed = leaseUntil !== null;
   while (!claimed) {
     // Someone else is renewing it: look at what they stored instead of renewing a second time
     await new Promise((resolve) => setTimeout(resolve, WAIT_STEP_MS));
     const stored = await readStoredConfig(holder).catch(() => null);
-    if (stored && !needsRefresh(stored.config, Date.now()) && !!stored.config.accessToken) {
-      return { status: 'fresh', config: stored.config, authConfig: stored.encrypted };
-    }
+    // Whether the person must reconnect is decided first: an expired access token with no refresh token "needs no refresh", and is not fresh
     if (stored && isReconnectRequired(stored.config, Date.now())) {
       return {
         status: 'reconnect_required',
@@ -343,7 +352,11 @@ async function refreshUnderLease(
         reason: refreshBlockedReason(stored.config, Date.now()) ?? 'Reconnect required.',
       };
     }
-    claimed = (await claim()).count === 1;
+    if (stored && !needsRefresh(stored.config, Date.now()) && !!stored.config.accessToken) {
+      return { status: 'fresh', config: stored.config, authConfig: stored.encrypted };
+    }
+    leaseUntil = await claim();
+    claimed = leaseUntil !== null;
     if (!claimed && Date.now() > deadline) {
       return {
         status: 'unavailable',
@@ -354,8 +367,16 @@ async function refreshUnderLease(
     }
   }
   try {
-    // Read again now that the lease is ours: the one that held it may have renewed it just before
-    const stored = await readStoredConfig(holder).catch(() => null);
+    // Read again now that the lease is ours: the one that held it may have renewed it just before. When it cannot be read, it is not
+    // known whether the token this request holds was already replaced, so it is never presented: asked again in a moment
+    let readFailed = false;
+    const stored = await readStoredConfig(holder).catch(() => {
+      readFailed = true;
+      return null;
+    });
+    if (readFailed) {
+      return { status: 'unavailable', config, authConfig: encryptedConfig, reason: 'This connection could not be read just now. Try again in a moment.' };
+    }
     if (stored && stored.encrypted !== encryptedConfig) {
       if (isReconnectRequired(stored.config, Date.now())) {
         return {
@@ -368,11 +389,12 @@ async function refreshUnderLease(
       if (!needsRefresh(stored.config, Date.now()) && !!stored.config.accessToken) {
         return { status: 'fresh', config: stored.config, authConfig: stored.encrypted };
       }
-      return performRefresh(holder, stored.encrypted, stored.config, serverUrl, nowMs);
+      // Awaited here, so the lease is held until the renewal is over (letting go in `finally` of a promise still running frees the lease early)
+      return await performRefresh(holder, stored.encrypted, stored.config, serverUrl, nowMs);
     }
     return await performRefresh(holder, encryptedConfig, config, serverUrl, nowMs);
   } finally {
-    await prisma.appConnection.updateMany({ where: { id: holder.id }, data: { refreshLeaseUntil: null } }).catch(() => undefined);
+    await prisma.appConnection.updateMany({ where: { id: holder.id, refreshLeaseUntil: leaseUntil }, data: { refreshLeaseUntil: null } }).catch(() => undefined);
   }
 }
 

@@ -154,8 +154,8 @@ export async function humanHasControl(botId: string): Promise<boolean> {
  * Whether Brick may act on this computer. A computer with no row has nothing to act on and is treated as Brick's. Used by every way
  * the agent is authorized (a key, a turn), on top of the job's own state.
  */
-export async function agentMayAct(botId: string): Promise<boolean> {
-  const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { controlState: true } });
+export async function agentMayAct(botId: string, db: Pick<Prisma.TransactionClient, 'brickComputer'> = prisma): Promise<boolean> {
+  const row = await db.brickComputer.findUnique({ where: { botId }, select: { controlState: true } });
   return !row || row.controlState === 'agent';
 }
 

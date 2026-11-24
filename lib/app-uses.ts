@@ -24,7 +24,7 @@ export function startOfMonth(now: Date = new Date()): Date {
 export const usesToday = (connectionId: string, universeId: string, now: Date = new Date()) =>
   prisma.appUse.count({ where: { connectionId, universeId, usedAt: { gte: startOfDay(now) } } });
 
-export type UseOutcome = 'recorded' | 'again' | 'limit_reached' | 'gone';
+export type UseOutcome = 'recorded' | 'again' | 'limit_reached' | 'gone' | 'off';
 
 /**
  * Writes one use under its call id. With a limit, the day's count and this write happen together under one lock, so two calls at
@@ -33,7 +33,7 @@ export type UseOutcome = 'recorded' | 'again' | 'limit_reached' | 'gone';
  *
  * What allowed the use is read again under lock before it is written (`serverId` is the bot's grant; `lend` is the lend of a
  * person's app): taking an app back holds the same rows for update, so a check that was waiting while the app was taken back finds
- * it gone (`gone`) and records nothing, never a use after the take-back.
+ * it gone (`gone`) and records nothing, never a use after the take-back. A grant switched off meanwhile is `off`, the same.
  */
 export async function recordUse(input: { connectionId: string; universeId: string; botId: string; callId: string; limit: number | null; serverId?: string; lend?: boolean }): Promise<UseOutcome> {
   return prisma.$transaction(async (tx) => {
@@ -48,8 +48,10 @@ export async function recordUse(input: { connectionId: string; universeId: strin
       if (lend.length === 0) return 'gone';
     }
     if (input.serverId) {
-      const grant = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "bot_mcp_servers" WHERE "id" = ${input.serverId} AND "bot_id" = ${input.botId} AND "connection_id" = ${input.connectionId} FOR SHARE`;
+      const grant = await tx.$queryRaw<{ id: string; enabled: boolean }[]>`SELECT "id", "enabled" FROM "bot_mcp_servers" WHERE "id" = ${input.serverId} AND "bot_id" = ${input.botId} AND "connection_id" = ${input.connectionId} FOR SHARE`;
       if (grant.length === 0) return 'gone';
+      // Switched off while the check was waiting: nothing is recorded, and nothing is let through
+      if (!grant[0].enabled) return 'off';
     }
     const seen = await tx.appUse.findUnique({ where: { connectionId_botId_callId: { connectionId: input.connectionId, botId: input.botId, callId: input.callId } }, select: { id: true } });
     if (seen) return 'again';

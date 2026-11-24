@@ -86,7 +86,7 @@ export const chatBrickSchema = newBrickSchema
 
 export type ChatBrickAnswer =
   | { ok: true; made: boolean; brick: BrickCard; bricks: BrickCard[] }
-  | { ok: false; status: 403 | 404; error: string };
+  | { ok: false; status: 403 | 404 | 409; error: string };
 
 /**
  * The owner of the Brick that asks, when `userId` is that owner: a signed-in person, found by the name the bot server
@@ -112,25 +112,31 @@ export async function makeBrickFromChat(viaBrickId: string, input: z.infer<typeo
   if (!ownerId) return { ok: false, status: 404, error: 'Brick not found' };
   // One at a time per person and name (a lock held for the transaction): two asks for the same name that arrive
   // together would otherwise each find no such Brick and each make one.
-  const outcome = await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-make:${ownerId}:${brick.name.toLowerCase()}`}))`;
-    if (!evenIfThere) {
-      const there = await tx.bot.findFirst({
-        where: { ownerId, roomId: null, deletedAt: null, name: { equals: brick.name, mode: 'insensitive' } },
-        select: { id: true },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      });
-      if (there) return { made: false as const, id: there.id };
-    }
-    return { made: true as const, brick: await makeBrick(ownerId, brick, tx) };
-  });
-  const bricks = await listBricks(ownerId);
-  if (outcome.made) return { ok: true, made: true, brick: outcome.brick, bricks };
-  const card = bricks.find((one) => one.id === outcome.id);
-  if (card) return { ok: true, made: false, brick: card, bricks };
-  // Deleted between the look and the list: it is no longer theirs to open, so they get the one they asked for
-  const made = await makeBrick(ownerId, brick);
-  return { ok: true, made: true, brick: made, bricks: await listBricks(ownerId) };
+  const lookOrMake = () =>
+    prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-make:${ownerId}:${brick.name.toLowerCase()}`}))`;
+      if (!evenIfThere) {
+        const there = await tx.bot.findFirst({
+          where: { ownerId, roomId: null, deletedAt: null, name: { equals: brick.name, mode: 'insensitive' } },
+          select: { id: true },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        });
+        if (there) return { made: false as const, id: there.id };
+      }
+      return { made: true as const, brick: await makeBrick(ownerId, brick, tx) };
+    });
+  // A Brick found can be deleted before the list is read: then the look is made again under the same lock, so two asks that both lost it
+  // find the one the first of them makes, and never make two
+  for (let attempt = 0; ; attempt++) {
+    const outcome = await lookOrMake();
+    const bricks = await listBricks(ownerId);
+    if (outcome.made) return { ok: true, made: true, brick: outcome.brick, bricks };
+    const card = bricks.find((one) => one.id === outcome.id);
+    if (card) return { ok: true, made: false, brick: card, bricks };
+    // The one found was gone from the list again and again: no Brick is made outside the lock (two asks that both got here would each make one), so the
+    // ask ends with an answer the caller can ask again after
+    if (attempt >= 2) return { ok: false, status: 409, error: 'Your Bricks changed while this was being asked. Ask again.' };
+  }
 }
 
 /** This person's Bricks, for the Brick that asks on their behalf (so it can open one instead of making it twice). */

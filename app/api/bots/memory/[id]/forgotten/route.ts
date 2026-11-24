@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { corsHeaders } from '@/lib/cors';
 import { acknowledgeForgets } from '@/lib/bot-privacy';
-import { acknowledgeItemForgets } from '@/lib/bot-memory-person';
+import { ITEM_FORGET_BATCH, acknowledgeItemForgets } from '@/lib/bot-memory-person';
 
 export const runtime = 'nodejs';
 
@@ -12,11 +12,15 @@ export const runtime = 'nodejs';
 const MAX_IDS = 500;
 
 const ids = z.array(z.string().min(1).max(100)).max(MAX_IDS);
+// Things forgotten come in batches of up to ITEM_FORGET_BATCH, and a whole batch is acknowledged in one report
+const itemIds = z.array(z.string().min(1).max(100)).max(ITEM_FORGET_BATCH);
 // `ids` are Forgets of a whole person (#435), `itemIds` things one person forgot (game #2003): either, or both
+// `items` is `itemIds` with the `at` of each notice it acts on: a thing forgotten again after that moment is not marked dropped by it
+const items = z.array(z.object({ id: z.string().min(1).max(100), at: z.number().int().nonnegative() }).strict()).max(ITEM_FORGET_BATCH);
 const bodySchema = z
-  .object({ ids: ids.optional(), itemIds: ids.optional() })
+  .object({ ids: ids.optional(), itemIds: itemIds.optional(), items: items.optional() })
   .strict()
-  .refine((body) => (body.ids?.length ?? 0) + (body.itemIds?.length ?? 0) > 0, { message: 'ids or itemIds required' });
+  .refine((body) => (body.ids?.length ?? 0) + (body.itemIds?.length ?? 0) + (body.items?.length ?? 0) > 0, { message: 'ids, itemIds or items required' });
 
 export async function OPTIONS(request: NextRequest) {
   return NextResponse.json({}, { headers: corsHeaders(request) });
@@ -26,6 +30,7 @@ export async function OPTIONS(request: NextRequest) {
  * POST /api/bots/memory/:botId/forgotten
  * Hide bot conversations (#435, #493): the bot server reports the Forgets it has dropped from what it holds in memory.
  * Body: { ids: string[] }, the row ids it was sent in the `forget` part of a privacy answer or a memory save.
+ * For things one person forgot: { items: [{ id, at }] } with the `at` it was sent (or `itemIds`, without it: a Forget said again meanwhile is then marked dropped too).
  *
  * Orbit keeps a Forget, and keeps skipping that person in memory saves, until this report, however long Orbit was out
  * of reach in between. Only then is the row removed. Ids that are gone already, or belong to another bot, are ignored.
@@ -44,8 +49,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     const acknowledged = await acknowledgeForgets(botId, parsed.data.ids ?? []);
     // The answer stays what it was for a report that names no thing, so an older bot server reads it as before
-    if (!parsed.data.itemIds) return NextResponse.json({ acknowledged }, { headers: corsHeaders(request) });
-    const itemsAcknowledged = await acknowledgeItemForgets(botId, parsed.data.itemIds);
+    if (!parsed.data.itemIds && !parsed.data.items) return NextResponse.json({ acknowledged }, { headers: corsHeaders(request) });
+    const itemsAcknowledged = await acknowledgeItemForgets(botId, parsed.data.itemIds ?? [], parsed.data.items ?? []);
     return NextResponse.json({ acknowledged, itemsAcknowledged }, { headers: corsHeaders(request) });
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'Unauthorized: Invalid service token') {

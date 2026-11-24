@@ -1,5 +1,5 @@
 import { classifyCharge } from '@/lib/credit-values';
-import { holdCredit, refundHold, releaseHold, releaseKeyIfNothingHeld, settleHold } from '@/lib/credit-spend';
+import { findRefund, holdCredit, refundHold, releaseHold, releaseKeyIfNothingHeld, settleHold } from '@/lib/credit-spend';
 import { checkSpend } from '@/lib/spend-rules';
 import { setInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 
@@ -77,6 +77,15 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
       } catch (error) {
         console.error('[Funding] Could not refund Instant credit:', error instanceof Error ? error.message : 'unknown');
         return { ok: false, refundedMicros: 0, reason: 'unavailable' };
+      }
+    },
+    async refundLookup(input) {
+      try {
+        const seen = await findRefund({ refundKey: input.refundKey });
+        return seen.found ? { status: 'found', refundedMicros: seen.refundedMicros } : { status: 'none' };
+      } catch (error) {
+        console.error('[Funding] Could not look up an Instant give-back:', error instanceof Error ? error.message : 'unknown');
+        return { status: 'unavailable' };
       }
     },
   };

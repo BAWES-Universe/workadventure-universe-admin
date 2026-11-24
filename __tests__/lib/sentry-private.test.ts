@@ -73,6 +73,14 @@ describe('errors', () => {
     expect(event.extra.tried).toEqual(['https://orbit.example.test/af/[pass]/2/index.html', 3, null]);
   });
 
+  it('sends nothing it could not read: a value nested past the depth read is dropped, not sent with a pass in it', () => {
+    let deep: Record<string, unknown> = { url: ADDRESS };
+    for (let level = 0; level < 20; level++) deep = { next: deep };
+    const event = scrubPrivateAddress({ message: 'boom', request: { data: deep } });
+    expect(JSON.stringify(event)).not.toContain(PASS);
+    expect(JSON.stringify(event)).toContain('[too deep to read]');
+  });
+
   it('reads an event that holds itself only once', () => {
     const event: { message: string; self?: unknown; request: { url: string } } = { message: 'boom', request: { url: ADDRESS } };
     event.self = event;

@@ -76,6 +76,8 @@ describe('our count and theirs', () => {
     expect(goesLines(row({ key: 'apps', uses: 1240, ourMicros: 0 }))).toEqual(['1,240 uses', 'Our count $0.00']);
     expect(goesLines(row({ key: 'instant', uses: 1, ourMicros: 7_000 }))).toEqual(['1 use', 'Our count $0.01']);
     expect(goesLines(row({ key: 'instant', uses: 3, ourMicros: null }))).toEqual(['3 uses', 'no price known yet']);
+    expect(goesLines(row({ key: 'instant', uses: 3, ourMicros: 7_000, releasedUnconfirmed: 2 }))).toEqual(['3 uses', 'Our count $0.01', '2 runs released unconfirmed']);
+    expect(goesLines(row({ key: 'instant', uses: 3, ourMicros: 7_000, releasedUnconfirmed: 0 }))).toEqual(['3 uses', 'Our count $0.01']);
     expect(goesLines(row({ key: 'files', bytes: 3_100_000_000, ourMicros: null }))).toEqual(['3.1 GB kept', 'no price set yet']);
     expect(goesLines(row({ key: 'files', bytes: 0, ourMicros: null }))[0]).toBe('Nothing kept yet');
   });

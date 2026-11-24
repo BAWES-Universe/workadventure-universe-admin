@@ -10,6 +10,7 @@ import * as Sentry from '@sentry/nextjs';
 jest.mock('@/lib/db', () => ({ prisma: require('../helpers/fake-db').fakeDb }));
 jest.mock('@/lib/oidc', () => ({ authenticateRequest: jest.fn() }));
 jest.mock('@/lib/discord', () => ({ notifyRoomAccess: jest.fn().mockResolvedValue(undefined) }));
+jest.mock('@/lib/guest-brick', () => ({ adoptGuestChatKeepingIt: jest.fn().mockResolvedValue({ adopted: false }), finishKeptGuestChats: jest.fn().mockResolvedValue(0) }));
 // What a part's picture is, not who may wear it: that is the wearable check's job and is not mocked.
 jest.mock('@/lib/avatar-catalog-validator', () => ({
   resolveTextureUrls: jest.fn(async (_prisma: unknown, ids: string[]) => ({

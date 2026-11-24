@@ -13,6 +13,8 @@ export function secretForms(secret: string): string[] {
   };
   add(secret);
   add(encodeURIComponent(secret));
+  // The form a key takes in a query the request is built with (URLSearchParams): it also encodes ~ ! ' ( ) and writes a space as +
+  add(new URLSearchParams({ k: secret }).toString().slice(2));
   add(JSON.stringify(secret).slice(1, -1));
   const b64 = Buffer.from(secret, 'utf8').toString('base64');
   add(b64);

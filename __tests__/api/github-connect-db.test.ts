@@ -208,6 +208,43 @@ run('Connect GitHub for Bricks, in a real database', () => {
     }
   });
 
+  it('setting up again while the kept app’s secrets cannot be read replaces that app, and is not refused as another setup', async () => {
+    mockUser.current = { id: sara, isSuperAdmin: true };
+    await prisma.appSetting.create({ data: { key: 'github-app', value: { appId: 123, slug: 'old', clientId: 'Iv1.old', htmlUrl: 'https://github.com/apps/old', secrets: 'cannot-be-decrypted' } } });
+    forgetGitHubApp();
+    const form = await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: {} }))).json();
+    const state = new URL(form.action).searchParams.get('state') as string;
+    pretendGitHub({ 'POST https://api.github.com/app-manifests/fresh/conversions': { status: 201, body: { id: 124, slug: 'new', client_id: 'Iv1.new', client_secret: 'app-secret', webhook_secret: null, pem: PEM, html_url: 'https://github.com/apps/new' } } });
+    const adminsBefore = process.env.SUPER_ADMINS;
+    try {
+      process.env.SUPER_ADMINS = `sara-${tag}@example.test`;
+      expect((await created(request(`/api/admin/github-app/created?code=fresh&state=${encodeURIComponent(state)}`))).status).toBe(200);
+    } finally {
+      if (adminsBefore === undefined) delete process.env.SUPER_ADMINS;
+      else process.env.SUPER_ADMINS = adminsBefore;
+    }
+    forgetGitHubApp();
+    expect((await getGitHubApp())?.appId).toBe(124);
+  });
+
+  it('the setup replaces the app it saw, and never one that another setup saved after it looked: the app and its id come from one read', async () => {
+    mockUser.current = { id: sara, isSuperAdmin: true };
+    forgetGitHubApp();
+    await prisma.appSetting.create({ data: { key: 'github-app', value: { appId: 55, slug: 'other', clientId: 'Iv1.other', htmlUrl: 'https://github.com/apps/other', secrets: 'cannot-be-decrypted' } } });
+    // The first look finds nothing (nothing was kept yet); another setup then saves its app. A second look would see that app and name it as the one to replace
+    const real = prisma.appSetting.findUnique.bind(prisma.appSetting);
+    const spy = jest.spyOn(prisma.appSetting, 'findUnique').mockImplementationOnce((() => Promise.resolve(null)) as never).mockImplementation(real as never);
+    let form: { action: string };
+    try {
+      form = await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: { again: true } }))).json();
+    } finally {
+      spy.mockRestore();
+    }
+    const state = JSON.parse(decryptApiKey(new URL(form.action).searchParams.get('state') as string)) as { replaces: number | null };
+    // Set out to make the first app: the return then refuses it (another setup finished first) instead of replacing that one
+    expect(state.replaces).toBeNull();
+  });
+
   it('connects once, signs in on GitHub with PKCE, keeps the token in Orbit and sends a person with no install on to pick where it works', async () => {
     await makeApp();
     mockUser.current = { id: sara };
@@ -412,8 +449,61 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(login).toBe('sara-gh');
     expect(await gitHubToken(id)).toMatchObject({ status: 'ok', token: 'ghp_good_key_123' });
     expect(await readConnection(id, sara)).toMatchObject({ connected: true });
+    // A sign-in started before the key was saved can no longer finish over it
+    await prisma.appConnection.update({ where: { id }, data: { signInNonce: 'a-sign-in-started-earlier' } });
+    expect((await saveKey(request('/api/me/apps/github/key', { method: 'POST', body: { key: 'ghp_good_key_123' } }))).status).toBe(200);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInNonce).toBeNull();
     await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }));
     expect(await readConnection(id, sara)).toMatchObject({ connected: false });
+  });
+
+  it('switching back while the GitHub app is not set up answers 404 and leaves the key as it is, since saving it again would answer 404 too', async () => {
+    await makeApp();
+    mockUser.current = { id: sara };
+    pretendGitHub({ 'GET https://api.github.com/user': { body: { login: 'sara-gh', id: 501 } } });
+    const saved = await saveKey(request('/api/me/apps/github/key', { method: 'POST', body: { key: 'ghp_good_key_123' } }));
+    expect(saved.status).toBe(200);
+    const { id } = await saved.json();
+    // The app is taken away (or not made yet on this server)
+    await prisma.appSetting.deleteMany({ where: { key: 'github-app' } });
+    forgetGitHubApp();
+    expect((await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }))).status).toBe(404);
+    expect(await prisma.appConnection.count({ where: { ownerId: sara, catalogKey: '@github' } })).toBe(1);
+    expect(await gitHubToken(id)).toMatchObject({ status: 'ok', token: 'ghp_good_key_123' });
+    // With the app back, switching back works as before
+    await makeApp();
+    expect((await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }))).status).toBe(200);
+    expect(await readConnection(id, sara)).toMatchObject({ connected: false });
+  });
+
+  it('switching back with no GitHub connection answers 404 and never makes one', async () => {
+    await makeApp();
+    mockUser.current = { id: sara };
+    expect((await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }))).status).toBe(404);
+    expect(await prisma.appConnection.count({ where: { ownerId: sara, catalogKey: '@github' } })).toBe(0);
+  });
+
+  it('never saves a key beside a sign-in that still holds the connection: it says it could not, and the key is not written', async () => {
+    await makeApp();
+    mockUser.current = { id: sara };
+    pretendGitHub({ 'GET https://api.github.com/user': { body: { login: 'sara-gh', id: 501 } } });
+    const first = await saveKey(request('/api/me/apps/github/key', { method: 'POST', body: { key: 'ghp_good_key_123' } }));
+    const { id } = await first.json();
+    const before = (await prisma.appConnection.findUniqueOrThrow({ where: { id } })).authConfig;
+    // A sign-in callback is waiting on GitHub and holds the lease for as long as a lease lasts
+    await prisma.appConnection.update({ where: { id }, data: { refreshLeaseUntil: new Date(Date.now() + 3_600_000) } });
+    const realNow = Date.now.bind(Date);
+    let calls = 0;
+    // The wait for the lease is as long as a lease: time moves on past it at once
+    const now = jest.spyOn(Date, 'now').mockImplementation(() => realNow() + (++calls > 4 ? 120_000 : 0));
+    let blocked;
+    try {
+      blocked = await saveKey(request('/api/me/apps/github/key', { method: 'POST', body: { key: 'ghp_other_key_456' } }));
+    } finally {
+      now.mockRestore();
+    }
+    expect(blocked.status).toBe(502);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).authConfig).toBe(before);
   });
 
   it('Disconnect takes the sign-in back at GitHub with the app’s own secret', async () => {

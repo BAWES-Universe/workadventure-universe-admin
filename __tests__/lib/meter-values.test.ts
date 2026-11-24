@@ -278,3 +278,19 @@ describe('the words under a usage bar (game #1999)', () => {
     expect(nextMonthStart(new Date('2026-12-31T23:59:00Z')).toISOString()).toBe('2027-01-01T00:00:00.000Z');
   });
 });
+
+describe('an event that cannot be read is refused, never thrown at the caller', () => {
+  const base = event();
+  it('refuses a time that is not a date, a detail that cannot be written as JSON, and accepts the usual ones', () => {
+    expect(readMeterEvent({ ...base, occurredAt: false })).toMatchObject({ ok: false });
+    expect(readMeterEvent({ ...base, occurredAt: { a: 1 } })).toMatchObject({ ok: false });
+    expect(readMeterEvent({ ...base, occurredAt: { toString: null } })).toMatchObject({ ok: false });
+    expect(readMeterEvent({ ...base, occurredAt: '2026-11-01T00:00:00Z' })).toMatchObject({ ok: true });
+    expect(readMeterEvent({ ...base, occurredAt: 1_700_000_000_000 })).toMatchObject({ ok: true });
+    expect(readMeterEvent({ ...base, detail: { n: BigInt(1) } })).toMatchObject({ ok: false });
+    const loop: Record<string, unknown> = {};
+    loop.self = loop;
+    expect(readMeterEvent({ ...base, detail: loop })).toMatchObject({ ok: false });
+    expect(readMeterEvent({ ...base, detail: { a: 1 } })).toMatchObject({ ok: true });
+  });
+});

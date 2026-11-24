@@ -248,14 +248,36 @@ export function shapeVisits(input: { back: ReadBack; startedAt: Date; endedAt: D
 }
 
 /** What is written for a job that ended: the rows (replacing what an earlier try wrote) and how well the record was taken. */
-async function save(jobId: string, rows: VisitRow[], state: VisitsState): Promise<void> {
-  await prisma.$transaction([
-    prisma.computerJobVisit.deleteMany({ where: { jobId, kind: { in: ['visit', 'post'] } } }),
-    prisma.computerJobVisit.createMany({
+/** How far a record falls short, so the record of a job that ran in stretches (it was paused) says the worst of its stretches. */
+const SHORT_BY: Record<VisitsState, number> = { complete: 0, none: 0, partial: 1, unread: 2 };
+
+async function save(jobId: string, rows: VisitRow[], state: VisitsState, since: Date = new Date(0), until: Date | null = null): Promise<void> {
+  // One transaction, the job's row locked first: two captures of one job (a paused job is read once per stretch) and a failed capture's `unread` write all go through that row, so a capture can never merge
+  // its state with a `visitsState` that another capture is about to change and then write `complete` over an `unread` it did not see (CodeRabbit on #1025, O38). The plain UPDATEs of the failure paths wait on this lock.
+  await prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "computer_jobs" WHERE "id" = ${jobId} FOR UPDATE`;
+    // The job is gone (cleaned away while the browser was read): nothing to keep the record on
+    if (locked.length === 0) return;
+    // A job that was paused was read once per stretch: what an earlier stretch kept (before this one began) stays, and the record says the worst of the stretches
+    if ((await tx.computerJobPause.count({ where: { jobId } })) > 0) {
+      const kept = (await tx.computerJob.findUnique({ where: { id: jobId }, select: { visitsState: true } }))?.visitsState as VisitsState | null | undefined;
+      if (kept && SHORT_BY[kept] !== undefined && SHORT_BY[kept] > SHORT_BY[state]) state = kept;
+      // This stretch could not be recorded at all (`none`) but an earlier one was: the record is partial, never "none" over rows that exist
+      else if (state === 'none' && (kept === 'complete' || kept === 'partial')) state = 'partial';
+      // ...and the other way round: an earlier stretch had no recorder (`none`) and this one was read: the record missed that stretch, so it is partial, never `complete` (CodeRabbit on #1025, 40). `none` beside `none` stays `none`,
+      // and an unread or partial stretch keeps what it said
+      else if (kept === 'none' && state === 'complete') state = 'partial';
+    } else {
+      since = new Date(0);
+      until = null;
+    }
+    // A job that was paused replaces only its own stretch's window, from its start to its end: a capture of an earlier stretch that finishes after a later stretch saved never deletes that stretch's rows (CodeRabbit on #1025, C5)
+    await tx.computerJobVisit.deleteMany({ where: { jobId, kind: { in: ['visit', 'post'] }, at: until ? { gte: since, lte: until } : { gte: since } } });
+    await tx.computerJobVisit.createMany({
       data: rows.map((row) => ({ jobId, kind: row.kind, at: row.at, by: row.by, method: row.method, host: row.host, path: row.path, count: row.count, failed: row.failed, form: row.form })),
-    }),
-    prisma.computerJob.update({ where: { id: jobId }, data: { visitsState: state } }),
-  ]);
+    });
+    await tx.computerJob.update({ where: { id: jobId }, data: { visitsState: state } });
+  });
 }
 
 /**
@@ -286,7 +308,8 @@ export async function recordVisits(job: { id: string; startedAt: Date | null }, 
     const after = Date.now();
     // The program is not on the machine (it was made before this existed): there is no record, and that is said
     if (done.exitCode === 127 || /universe-visits: (command )?not found|No such file or directory/.test(done.stderr)) {
-      await save(job.id, [], 'none');
+      // A resumed job keeps what its earlier stretches kept: only this stretch's rows are replaced (CodeRabbit N16 on #1025)
+      await save(job.id, [], 'none', job.startedAt, endedAt);
       return 'none';
     }
     if (done.exitCode !== 0 && !/(^|\n)end=1\s*$/.test(done.stdout)) {
@@ -298,11 +321,14 @@ export async function recordVisits(job: { id: string; startedAt: Date | null }, 
     const notes = await prisma.computerJobVisit.findMany({ where: { jobId: job.id, kind: 'hands' }, select: { at: true, by: true } });
     const hands: Hands[] = notes.map((note) => ({ at: note.at, by: note.by === 'person' ? 'person' : 'brick' }));
     const shaped = shapeVisits({ back, startedAt: job.startedAt, endedAt, before, after, hands });
-    await save(job.id, shaped.rows, shaped.state);
+    // The read starts a little before the stretch (padding for a clock that differs by a moment), but the rows replaced are the STRETCH's: a visit of the stretch before, inside the padding, was left out of
+    // `shaped` and must not be deleted with it (CodeRabbit N12 on #1025)
+    await save(job.id, shaped.rows, shaped.state, job.startedAt, endedAt);
     return shaped.state;
   } catch (error) {
     console.error('[Computer] Could not read where a job’s computer browsed:', error instanceof Error ? error.message : 'unknown');
-    await prisma.computerJob.updateMany({ where: { id: job.id, visitsState: null }, data: { visitsState: 'unread' } }).catch(() => undefined);
+    // Said whatever the state was: a job whose first stretch was kept `complete` and whose next read failed is no longer a complete record, and no row is deleted for saying so
+    await prisma.computerJob.updateMany({ where: { id: job.id, OR: [{ visitsState: null }, { visitsState: { not: 'unread' } }] }, data: { visitsState: 'unread' } }).catch(() => undefined);
     return 'unread';
   }
 }
@@ -320,14 +346,21 @@ export interface VisitsView {
 
 /** What the owner sees for one job of theirs, oldest first: where the computer's browser went, with the person's take-overs marked. Null when it is not their job. */
 export async function visitsFor(botId: string, jobId: string): Promise<VisitsView | null> {
-  const job = await prisma.computerJob.findFirst({ where: { id: jobId, botId }, select: { visitsState: true } });
-  if (!job) return null;
-  // Pages and posts are at most VISITS_MAX when kept; the take-over notes have their own bound, so one kind never pushes the other out of the answer
-  const order = [{ at: 'asc' as const }, { id: 'asc' as const }];
-  const [seen, handed] = await Promise.all([
-    prisma.computerJobVisit.findMany({ where: { jobId, kind: { not: 'hands' } }, orderBy: order, take: VISITS_MAX + 1 }),
-    prisma.computerJobVisit.findMany({ where: { jobId, kind: 'hands' }, orderBy: order, take: HANDS_MAX + 1 }),
-  ]);
+  // The state and both sets of rows are read in ONE snapshot: a capture that commits between three separate reads could show `complete` beside the rows of a partial capture (CodeRabbit on #1025, N18)
+  const read = await prisma.$transaction(
+    async (tx) => {
+      const found = await tx.computerJob.findFirst({ where: { id: jobId, botId }, select: { visitsState: true } });
+      if (!found) return null;
+      // Pages and posts are at most VISITS_MAX when kept; the take-over notes have their own bound, so one kind never pushes the other out of the answer
+      const order = [{ at: 'asc' as const }, { id: 'asc' as const }];
+      const seenRows = await tx.computerJobVisit.findMany({ where: { jobId, kind: { not: 'hands' } }, orderBy: order, take: VISITS_MAX + 1 });
+      const handedRows = await tx.computerJobVisit.findMany({ where: { jobId, kind: 'hands' }, orderBy: order, take: HANDS_MAX + 1 });
+      return { job: found, seen: seenRows, handed: handedRows };
+    },
+    { isolationLevel: 'RepeatableRead' },
+  );
+  if (!read) return null;
+  const { job, seen, handed } = read;
   const truncated = seen.length > VISITS_MAX || handed.length > HANDS_MAX;
   const rows = [...seen.slice(0, VISITS_MAX), ...handed.slice(0, HANDS_MAX)].sort((a, b) => a.at.getTime() - b.at.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const kept = job.visitsState === 'complete' || job.visitsState === 'partial' || job.visitsState === 'unread' || job.visitsState === 'none' ? job.visitsState : null;

@@ -736,6 +736,34 @@ export function brickLimits(values: BrickLimits): Limit[] {
       ],
     },
     {
+      id: 'pausedSignInsHours',
+      label: 'How long a paused computer job keeps its sign-ins',
+      hint: 'A paused job keeps the sites it was signed in to and the pages it had open, locked away from every other job, so it carries on where it was. After this long they are dropped: the job stays paused, and it signs in again when it carries on.',
+      unit: 'hours',
+      value: values.pausedSignInsHours,
+      recommended: recommended.pausedSignInsHours,
+      note: 'Applies from the next check, to jobs already paused too.',
+      options: [
+        { value: 4, label: '4 hours', meaning: 'Keeps sign-ins for the shortest time.' },
+        { value: 24, label: '1 day', meaning: 'Time to come back to it.' },
+        { value: 72, label: '3 days', meaning: 'For people who step away.' },
+      ],
+    },
+    {
+      id: 'computerSteps',
+      label: 'Steps of a computer job kept for its Activity',
+      hint: 'Activity lists what a computer job has done so far, step by step, beside Watch and Files. A job that takes more steps than this keeps the newest ones.',
+      unit: 'steps',
+      value: values.computerSteps,
+      recommended: recommended.computerSteps,
+      note: 'Applies from the next step a job takes.',
+      options: [
+        { value: 50, label: '50 steps', meaning: 'Enough for short jobs.' },
+        { value: 200, label: '200 steps', meaning: 'A steady pace.' },
+        { value: 1000, label: '1,000 steps', meaning: 'For long jobs.' },
+      ],
+    },
+    {
       id: 'scheduledCardWait',
       label: 'How long a card from a goal or task waits for a person',
       hint: 'When a goal or task needs a yes before it goes on, its card waits this long. If it is the same thing again on a later check, that check joins the waiting card: no second card, no second message. When the time is up the card ends.',
@@ -1170,7 +1198,9 @@ export function readInstantLimits(answer: unknown): InstantLimitViews | null {
   const limits = (answer as { limits?: unknown } | null)?.limits;
   if (!limits || typeof limits !== 'object') return null;
   const entries = Object.entries(limits as Record<string, Partial<InstantLimitView>>);
-  const valid = entries.length > 0 && entries.every(([, view]) => view && typeof view.label === 'string' && typeof view.hint === 'string' && view.range && typeof view.range.min === 'number' && typeof view.range.max === 'number' && ['micros', 'bps', 'count', 'minutes'].includes(view.unit as string));
+  // Every field a row is drawn from is checked: a row without its value, its recommendation or whether it is required would come out as NaN
+  const numberOrNull = (field: unknown) => field === null || (typeof field === 'number' && Number.isFinite(field));
+  const valid = entries.length > 0 && entries.every(([, view]) => view && typeof view.label === 'string' && typeof view.hint === 'string' && view.range && typeof view.range.min === 'number' && typeof view.range.max === 'number' && ['micros', 'bps', 'count', 'minutes'].includes(view.unit as string) && numberOrNull(view.value) && numberOrNull(view.recommended) && typeof view.required === 'boolean');
   return valid ? (limits as InstantLimitViews) : null;
 }
 

@@ -13,3 +13,6 @@ build
 coverage
 .DS_Store
 .env
+
+# Test infrastructure, never part of the app image
+tools

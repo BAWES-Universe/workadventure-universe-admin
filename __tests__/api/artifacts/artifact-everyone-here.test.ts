@@ -204,6 +204,21 @@ describe('a reply other people in the chat read (game #1993)', () => {
       expect((await call(change, friend, { id })).status).toBe(200);
     });
 
+    it('holds the original\'s row while it checks the copy of someone else is still allowed, so a change of how it is shared cannot land in between', async () => {
+      const id = await makePage();
+      await shareIt(id, { changeScope: 'openers' });
+      const held: string[] = [];
+      const raw = jest.spyOn(fakePrisma, '$queryRaw').mockImplementation((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        held.push(`${strings.join('?')}|${values.join(',')}`);
+        return [];
+      }) as never);
+      const res = await call(change, forEveryone({ botId: 'bot2', content: '<p>mine</p>' }, person('friend')), { id });
+      raw.mockRestore();
+      expect(res.status).toBe(200);
+      expect(res.body.artifact).toMatchObject({ copiedFromId: id });
+      expect(held.some((line) => line.includes('FROM "artifacts"') && /FOR (UPDATE|SHARE)/.test(line) && line.endsWith(`|${id}`))).toBe(true);
+    });
+
     it('does not land, from its owner either, once it became "Just you" in the same moment', async () => {
       const id = await makePage();
       const step = fakePrisma.$transaction;
