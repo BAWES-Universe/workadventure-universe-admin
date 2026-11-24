@@ -34,8 +34,10 @@ jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: (email: string | null) => 
 
 import { prisma } from '@/lib/db';
 import { authenticateRequest } from '@/lib/oidc';
+import { wearableHere as wearableHereFn } from '@/lib/woka-wearable';
 import { GET as roomAccess } from '@/app/api/room/access/route';
 
+const wearableHere = wearableHereFn as jest.Mock;
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
 
 const USERS: Record<string, { id: string; uuid: string; email: string; name: string; isGuest: boolean }> = {
@@ -87,6 +89,7 @@ describe('GET /api/room/access, members-only places', () => {
     db.bot.findFirst.mockImplementation(({ where }) =>
       Promise.resolve(where.id === BOT.slice(4) && where.roomId === 'r' ? { id: where.id } : null),
     );
+    wearableHere.mockResolvedValue({ wearable: true });
   });
 
   it('lets everyone into an open room', async () => {
@@ -123,5 +126,33 @@ describe('GET /api/room/access, members-only places', () => {
     place({ room: false });
     expect(await enter(BOT)).toBe('ok');
     expect(await enter('bot-99999999-2222-4333-8444-555555555555')).toBe('MEMBERS_ONLY');
+  });
+
+  describe('a Brick that has no room of its own', () => {
+    const BRICK = 'bot-aaaaaaaa-2222-4333-8444-555555555555';
+    // Orbit knows it as a Brick: no room, on, not deleted, and it visits (or lives in) the room in the address, or it does not
+    const brickIs = (where: 'visiting' | 'at home' | 'elsewhere') =>
+      db.bot.findFirst.mockImplementation(({ where: query }) => {
+        if (query.id !== BRICK.slice(4) || query.roomId !== null) return Promise.resolve(null);
+        const here = (query.OR as { visit?: { roomId: string }; home?: { roomId: string } }[]).some(
+          (clause) => (where === 'visiting' && clause.visit?.roomId === 'r') || (where === 'at home' && clause.home?.roomId === 'r'),
+        );
+        return Promise.resolve(here ? { id: query.id } : null);
+      });
+
+    it.each(['visiting', 'at home'] as const)('is one of the room\'s bots while it is %s here: it gets in, and is not held to a guest\'s Woka rules', async (where) => {
+      place({ room: false });
+      brickIs(where);
+      // The guest rule would refuse a Brick colour (it is in no catalog set and not in the game's list)
+      wearableHere.mockResolvedValue({ wearable: false, reason: 'removed' });
+      expect(await enter(BRICK)).toBe('ok');
+      expect(wearableHere).not.toHaveBeenCalled();
+    });
+
+    it('is a stranger in a room it is not visiting or living in', async () => {
+      place({ room: false });
+      brickIs('elsewhere');
+      expect(await enter(BRICK)).toBe('MEMBERS_ONLY');
+    });
   });
 });

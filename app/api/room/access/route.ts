@@ -331,9 +331,17 @@ export async function GET(request: NextRequest) {
       // Who somebody is counts only once they have signed in: the identifier in the address is whatever the caller
       // sent, and a member's id is not a secret.
       // A bot is whoever has a bot of this room under that id: an identifier shaped like one is only what the caller sent.
-      const verifiedBot = isBotIdentifier(finalUuid)
+      // A Brick has no room of its own (its roomId is null): it is also one of the room's bots while it walks beside its owner
+      // here (a visit seen in this room) or has a home here. Without that, a visiting Brick was held to a guest's Woka rules, its
+      // look ("brick-orange") was refused as not valid and it never reached the map.
+      const botId = isBotIdentifier(finalUuid) ? finalUuid.slice('bot-'.length) : null;
+      const verifiedBot = botId
         ? !!(await prisma.bot.findFirst({
-            where: { id: finalUuid.slice('bot-'.length), roomId: roomData.id },
+            where: { id: botId, roomId: roomData.id },
+            select: { id: true },
+          })) ||
+          !!(await prisma.bot.findFirst({
+            where: { id: botId, roomId: null, deletedAt: null, enabled: true, OR: [{ visit: { roomId: roomData.id } }, { home: { roomId: roomData.id } }] },
             select: { id: true },
           }))
         : false;
