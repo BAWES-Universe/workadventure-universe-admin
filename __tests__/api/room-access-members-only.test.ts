@@ -30,14 +30,17 @@ jest.mock('@/lib/avatar-catalog-validator', () => ({
   resolveTextureUrls: jest.fn().mockResolvedValue({ valid: true, textures: [] }),
   resolveCompanionTexture: jest.fn().mockResolvedValue({ valid: true, texture: null }),
 }));
+jest.mock('@/lib/brick-visit', () => ({ brickIsHereFor: jest.fn().mockResolvedValue(false) }));
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: (email: string | null) => email === 'root@example.test' }));
 
 import { prisma } from '@/lib/db';
 import { authenticateRequest } from '@/lib/oidc';
+import { brickIsHereFor as brickIsHereForFn } from '@/lib/brick-visit';
 import { wearableHere as wearableHereFn } from '@/lib/woka-wearable';
 import { GET as roomAccess } from '@/app/api/room/access/route';
 
 const wearableHere = wearableHereFn as jest.Mock;
+const brickIsHereFor = brickIsHereForFn as jest.Mock;
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
 
 const USERS: Record<string, { id: string; uuid: string; email: string; name: string; isGuest: boolean }> = {
@@ -130,29 +133,23 @@ describe('GET /api/room/access, members-only places', () => {
 
   describe('a Brick that has no room of its own', () => {
     const BRICK = 'bot-aaaaaaaa-2222-4333-8444-555555555555';
-    // Orbit knows it as a Brick: no room, on, not deleted, and it visits (or lives in) the room in the address, or it does not
-    const brickIs = (where: 'visiting' | 'at home' | 'elsewhere') =>
-      db.bot.findFirst.mockImplementation(({ where: query }) => {
-        if (query.id !== BRICK.slice(4) || query.roomId !== null) return Promise.resolve(null);
-        const here = (query.OR as { visit?: { roomId: string }; home?: { roomId: string } }[]).some(
-          (clause) => (where === 'visiting' && clause.visit?.roomId === 'r') || (where === 'at home' && clause.home?.roomId === 'r'),
-        );
-        return Promise.resolve(here ? { id: query.id } : null);
-      });
+    // Orbit answers whether the Brick is here right now (a live visit or a valid home in this room: lib/brick-visit.ts brickIsHereFor, covered against a real database)
+    const brickIs = (here: boolean) => brickIsHereFor.mockResolvedValue(here);
 
-    it.each(['visiting', 'at home'] as const)('is one of the room\'s bots while it is %s here: it gets in, and is not held to a guest\'s Woka rules', async (where) => {
+    it('is one of the room\'s bots while it is here: it gets in, and is not held to a guest\'s Woka rules', async () => {
       place({ room: false });
-      brickIs(where);
+      brickIs(true);
       // The guest rule would refuse a Brick colour (it is in no catalog set and not in the game's list)
       wearableHere.mockResolvedValue({ wearable: false, reason: 'removed' });
       expect(await enter(BRICK)).toBe('ok');
       expect(wearableHere).not.toHaveBeenCalled();
     });
 
-    it('is a stranger in a room it is not visiting or living in', async () => {
+    it('is a stranger in a room it is not visiting or living in, or where its visit or home no longer holds', async () => {
       place({ room: false });
-      brickIs('elsewhere');
+      brickIs(false);
       expect(await enter(BRICK)).toBe('MEMBERS_ONLY');
+      expect(brickIsHereFor).toHaveBeenCalledWith(BRICK.slice(4), 'http://play.test/@/uni/world/room');
     });
   });
 });

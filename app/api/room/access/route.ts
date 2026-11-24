@@ -8,6 +8,7 @@ import { prisma } from '@/lib/db';
 import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalog-validator';
 import { notifyRoomAccess } from '@/lib/discord';
 import { isBotIdentifier } from '@/lib/bot-visitor';
+import { brickIsHereFor } from '@/lib/brick-visit';
 import { isLinkableGuestId, linkGuestVisits } from '@/lib/guest-sign-in-link';
 import { adoptGuestChatKeepingIt, finishKeptGuestChats, GuestChatNotKeptError } from '@/lib/guest-brick';
 import { currentOutfit, recordOutfitPick } from '@/lib/user-outfits';
@@ -331,19 +332,15 @@ export async function GET(request: NextRequest) {
       // Who somebody is counts only once they have signed in: the identifier in the address is whatever the caller
       // sent, and a member's id is not a secret.
       // A bot is whoever has a bot of this room under that id: an identifier shaped like one is only what the caller sent.
-      // A Brick has no room of its own (its roomId is null): it is also one of the room's bots while it walks beside its owner
-      // here (a visit seen in this room) or has a home here. Without that, a visiting Brick was held to a guest's Woka rules, its
-      // look ("brick-orange") was refused as not valid and it never reached the map.
+      // A Brick has no room of its own (its roomId is null): it is also one of the room's bots while it walks beside its owner here or has a home here, and only while that is still true
+      // (the same answer `whereIsBrick` gives: a visit that has not run out, a universe that still takes visits, an owner who may still open the room, a placer who may still manage bots).
+      // Without that, a visiting Brick was held to a guest's Woka rules, its look ("brick-orange") was refused as not valid and it never reached the map.
       const botId = isBotIdentifier(finalUuid) ? finalUuid.slice('bot-'.length) : null;
       const verifiedBot = botId
         ? !!(await prisma.bot.findFirst({
             where: { id: botId, roomId: roomData.id },
             select: { id: true },
-          })) ||
-          !!(await prisma.bot.findFirst({
-            where: { id: botId, roomId: null, deletedAt: null, enabled: true, OR: [{ visit: { roomId: roomData.id } }, { home: { roomId: roomData.id } }] },
-            select: { id: true },
-          }))
+          })) || (await brickIsHereFor(botId, playUri))
         : false;
       const canEnter =
         canSeeRoom(
