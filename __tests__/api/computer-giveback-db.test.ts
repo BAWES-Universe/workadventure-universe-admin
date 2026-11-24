@@ -3317,6 +3317,33 @@ run('a computer job that failed on our side, and the bound on giving it back', (
         expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'incident' });
       });
 
+      it('CodeRabbit on #1032 (00abcd25 pass): a retry judges from the decision row it reads UNDER the person’s lock, so a retry that read before the lock never writes its older turn list over the one another retry committed first', async () => {
+        await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
+        const sara = await person('sara');
+        const route = 'universe-ai/model-lock';
+        const base = new Date();
+        const held = await job(sara, { outcome: 'failed', cause: 'agent', run: 'runlk' }, async (id) => {
+          await recordFaults(sara.brickId, id, [fault(null, 'provider_5xx', { route, run: 'runlk', at: base })]);
+          await planEffect(id, { key: 'lk-mail', kind: 'send' });
+        });
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', basis: 'effect_unresolved', judgedTurns: [] });
+        // Two numbered rows of the run arrive: a retry that judges from an empty list would take the later one
+        await recordFaults(sara.brickId, held.id, [fault(2, 'provider_5xx', { route, run: 'runlk', at: base }), fault(3, 'provider_5xx', { route, run: 'runlk', at: base })]);
+        let retry: Promise<string> = Promise.resolve('none');
+        const barrier = retryHasRead(held.id);
+        await prisma.$transaction(async (tx) => {
+          await lockPerson(tx, sara.id);
+          retry = resolveDecision(held.id, minutes(30));
+          // The retry has read the decision with its empty turn list; only then does the other retry commit the turn it judged on
+          await barrier.read;
+          await tx.computerGiveBackDecision.update({ where: { jobId: held.id }, data: { judgedTurns: [2], attempts: { increment: 1 } } });
+        }, HOLDER);
+        expect(await retry).toBe('pending');
+        barrier.restore();
+        // The committed selection stands: the stale retry does not replace [2] with what it would have judged from its own read
+        expect(await decisionOf(held.id)).toMatchObject({ state: 'pending', judgedTurns: [2], attempts: 2 });
+      });
+
       it('a decision that throws when it is tried again is rescheduled, so the oldest rows cannot keep every slot from the ones behind them', async () => {
         await prisma.appSetting.deleteMany({ where: { key: 'instant-limits' } });
         const sara = await person('sara');
