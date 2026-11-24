@@ -20,7 +20,7 @@ jest.mock('@/lib/artifact-storage', () => ({ artifactFiles: jest.requireActual('
 jest.mock('@/lib/bot-access', () => ({ checkBotAccess: jest.fn() }));
 jest.mock('@/lib/bot-privacy', () => ({ loadBotPrivacy: jest.fn() }));
 // The payment side has its own tests; here only who may ask about it
-jest.mock('@/lib/app-direct/pay', () => ({ pageTakesPayments: async () => false, orderForArtifact: async () => null, startCheckout: async () => ({ status: 'unavailable' }) }));
+jest.mock('@/lib/app-direct/pay', () => ({ ...jest.requireActual('@/lib/app-direct/pay'), pageTakesPayments: async () => false, orderForArtifact: async () => null, startCheckout: async () => ({ status: 'unavailable' }) }));
 
 /** Publish (game #2115): people who open an artifact only by its link see what its owner published, and nothing newer. */
 
