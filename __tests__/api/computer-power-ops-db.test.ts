@@ -22,7 +22,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeWakeTicketForTests } from '@/lib/computer';
-import { endPowerOp, openPowerOpOf, powerTiming, PROVIDER_MARGIN_MS, recordPowerOp, setPowerTimingForTests } from '@/lib/computer-power';
+import { endPowerOp, openPowerOpOf, powerTiming, PROVIDER_MARGIN_MS, recordPowerOp, setPowerTimingForTests, setRowLockWaitForTests } from '@/lib/computer-power';
 import { LONGEST_ACCOUNT_CALL_MS } from '@/lib/agent37/client';
 import { costOfSeconds } from '@/lib/computer-values';
 
@@ -238,6 +238,37 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(ticket).toBe(seen.wakeEpoch + 1);
       await holder;
     }, 40_000);
+
+    it('a start whose claim takes the computer\'s row waits for a leader\'s stop that holds it longer than 15 s, then claims (it no longer gives up with a timeout)', async () => {
+      const sara = await owner('claimwait');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'working' } });
+      setRowLockWaitForTests(20_000);
+      let release: () => void = () => undefined;
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${sara.brickId} FOR UPDATE`;
+          locked();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 60_000 },
+      );
+      try {
+        await lockTaken;
+        setTimeout(() => release(), 17_000);
+        const began = Date.now();
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+        expect(Date.now() - began).toBeGreaterThanOrEqual(16_000);
+        expect(started).toMatchObject({ ok: true, job: { status: 'running' } });
+      } finally {
+        release();
+        await holder;
+        setRowLockWaitForTests(null);
+      }
+    }, 80_000);
 
     it('a turn hold\'s stop is claimed against the state it saw: a wake that took its ticket since gets no stop sent under it', async () => {
       const sara = await owner('holdclaim');

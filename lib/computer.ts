@@ -1550,7 +1550,8 @@ async function claimMachineFor(job: { id: string; botId: string; writes: boolean
       });
       return { ok: true as const, count: done.count };
     },
-    { timeout: 15_000, maxWait: 15_000 },
+    // The computer's row is locked here (FOR UPDATE), so the wait is the row-lock wait: a leader's stop that holds the row for longer than 15 s must delay the claim, never make it throw
+    rowLockWait(),
   );
 }
 
