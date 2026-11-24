@@ -26,7 +26,7 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { claimJob, controlInternals, giveComputer, recordFinishIntent, startJob, stopAll } from '@/lib/computer';
+import { claimJob, controlInternals, finishJob, giveComputer, recordFinishIntent, startJob, stopAll, stopComputerWork } from '@/lib/computer';
 import { cancelJob, moveJobFirst, pauseJob, resumeJob, resumeWait } from '@/lib/computer-job-controls';
 import { addJobNote } from '@/lib/computer-job-notes';
 import { claimCommand, commandRow, recordResumeDecision } from '@/lib/computer-commands';
@@ -652,6 +652,67 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
         Object.assign(resumeWait, old);
         spy.mockRestore();
       }
+    });
+
+    describe('Opus on 14c4e407: a pending Resume whose request stopped before its own start settles once the job RAN and then ended or went to the person', () => {
+      type Way = 'cancel' | 'stopAll' | 'finish' | 'waiting' | 'off' | 'cancel-turn';
+      /** Resume A is taken and its request stops before its start; the line's own try then starts the job (no record on A); then `way` happens to the job. */
+      const ranThen = async (name: string, way: Way, prepState: 'recover' | null) => {
+        const { sara, jobId } = await running(`held-${name}`);
+        await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+        const realStart = controlInternals.tryStart;
+        const spy = jest.spyOn(controlInternals, 'tryStart').mockImplementation(async () => {
+          throw new Error('the server stopped');
+        });
+        const a = command();
+        try {
+          await expect(resumeJob(sara.brickId, sara.id, jobId, minutes(10), a)).rejects.toThrow('the server stopped');
+        } finally {
+          spy.mockRestore();
+        }
+        expect(await realStart(jobId, minutes(11), { quiet: true })).toBe('running');
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true, pending: true } });
+        if (prepState) await prisma.computerJob.update({ where: { id: jobId }, data: { prepState, stretchStarted: null } });
+        // `cancel-turn`: the job's first turn was sent and never named (the ending takes the machine-hold path, with its own transaction)
+        if (way === 'cancel-turn') await prisma.computerJob.update({ where: { id: jobId }, data: { firstTurnSentAt: minutes(11), agentResponseId: null } });
+        if (way === 'cancel' || way === 'cancel-turn') expect(await cancelJob(sara.brickId, sara.id, jobId, minutes(12), command())).toMatchObject({ ok: true });
+        else if (way === 'stopAll') expect(await stopAll(sara.brickId, sara.id, minutes(12), command())).toMatchObject({ ok: true });
+        else if (way === 'off') await stopComputerWork(sara.brickId, 'off', minutes(12));
+        else if (way === 'finish') await finishJob(jobId, 'done', minutes(12));
+        else await prisma.computerJob.update({ where: { id: jobId }, data: { status: 'waiting', control: 'person', waitingFor: 'signin' } });
+        return { sara, jobId, a };
+      };
+      const old = { ...resumeWait };
+      beforeEach(() => {
+        resumeWait.ms = 200;
+        resumeWait.capMs = 800;
+      });
+      afterEach(() => {
+        Object.assign(resumeWait, old);
+      });
+
+      it.each(['cancel', 'stopAll', 'finish', 'off', 'cancel-turn'] as const)('a job that ran and was ended by %s: the copy answers ok at once, the command is settled, and a second copy answers the same', async (way) => {
+        const { sara, jobId, a } = await ranThen(way, way, null);
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(13), a)).toMatchObject({ ok: true });
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true } });
+        expect((await commandOf(a.id))?.outcome).not.toHaveProperty('pending');
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(14), a)).toMatchObject({ ok: true });
+      });
+
+      it('a job that ran and was handed to the person (waiting): the copy answers ok and settles the command', async () => {
+        const { sara, jobId, a } = await ranThen('waiting', 'waiting', null);
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(13), a)).toMatchObject({ ok: true });
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true } });
+        expect((await commandOf(a.id))?.outcome).not.toHaveProperty('pending');
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(14), a)).toMatchObject({ ok: true });
+      });
+
+      it('CONTROL: a job ended while its browser was not settled (`recover`): A settles `not_ready`, final, and a copy returns the same', async () => {
+        const { sara, jobId, a } = await ranThen('recover', 'cancel', 'recover');
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: false, reason: 'not_ready' } });
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(13), a)).toEqual({ ok: false, reason: 'not_ready' });
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(14), a)).toEqual({ ok: false, reason: 'not_ready' });
+      });
     });
 
     it.each(['recover', 'restoring'] as const)('CodeRabbit on #1025 (d522f4b3 pass, N14): a pending Resume whose browser was not settled when the job was paused again answers `not_ready` (%s), recorded when its own start returned; a later pause or restore never changes it', async (state) => {

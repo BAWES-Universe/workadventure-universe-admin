@@ -99,10 +99,10 @@ async function resumeOutcomeOf(jobId: string, stretch: number | null = null): Pr
 async function resumeDecidedOf(command: Command, jobId: string): Promise<StoredOutcome | null> {
   const recorded = await decidedOfCommand(command);
   if (recorded) return recorded;
-  // Nothing recorded: the first request stopped inside its start. A job that RUNS with its browser settled cannot be refused by that start any more (a start finding it running changes nothing), so it is read as it stands; a job still
+  // Nothing recorded: the first request stopped inside its start. A job that RUNS (or waits for the person after running) with its browser settled cannot be refused by that start any more (a start finding it running changes nothing), so it is read as it stands; a job still
   // in line, paused or restoring waits for a decision (a try that is not this Resume's never decides it, N21)
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, pausedWhy: true, prepState: true, pauses: true } });
-  return job?.status === 'running' && job.prepState === null ? resumeOutcomeFrom(job, await stretchOfCommand(command)) : null;
+  return (job?.status === 'running' || job?.status === 'waiting') && job.prepState === null ? resumeOutcomeFrom(job, await stretchOfCommand(command)) : null;
 }
 
 /** Keeps the Resume's final outcome over its pending mark, once: the first write wins (a copy that settled the command meanwhile, or the request itself), and the stored outcome is what is returned. */

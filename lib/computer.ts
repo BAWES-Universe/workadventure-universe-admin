@@ -2575,7 +2575,6 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       return;
     }
     const held = job.status === 'running' || job.status === 'waiting';
-    const inLine = job.status === 'queued';
     const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
     seconds = job.secondsRun + stretch;
     // The seconds were worked out from what was read: the end lands only on that same snapshot. A take-over and a hand-back in between leave the status as
@@ -2680,8 +2679,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         const counted = verdict?.state === 'given' && verdict.counted;
         // A given-back ending ends as ours (`error`), counted or not: for a hinted one it was not ended so by the runner, so it is said here
         const data = !given ? { ...endData, status: 'failed', endedBy: null } : { ...endData, ...(hintJudged ? { endedBy: 'error' as const } : {}), ...(counted ? { runnerFault: true } : {}) };
-        // A Resume of a job in line that is still pending is settled from the job as it stands BEFORE the ending clears its place and its reason (CodeRabbit on #1025, d522f4b3 pass, N23)
-        if (inLine) await settlePendingResumesIn(tx, jobId);
+        // A Resume of the job that is still pending is settled from the job as it stands BEFORE the ending clears its place, its reason and its browser state: a job in line (N23) and one that held the machine (it ran, then ended) alike (Opus on 14c4e407)
+        await settlePendingResumesIn(tx, jobId);
         const done = await tx.computerJob.updateMany({ where, data });
         if (done.count === 1) {
           if (turnHold) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
@@ -2718,7 +2717,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         await lockCutoff(tx, jobId);
         const early = await decideUnderCutoff(tx);
         if (early) return early;
-        if (inLine) await settlePendingResumesIn(tx, jobId);
+        await settlePendingResumesIn(tx, jobId);
         return tx.computerJob.updateMany({ where, data: endData });
       });
       if ('deferred' in written && written.deferred) {
@@ -2734,14 +2733,12 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         continue;
       }
       ended = written;
-    } else if (inLine) {
-      // A Resume of a job in line that is still pending is settled from the job as it stands BEFORE the ending clears its place and its reason, in the same commit (N23)
+    } else {
+      // A Resume of the job that is still pending is settled from the job as it stands BEFORE the ending, in the same commit (N23; a job that ran and then ended too)
       ended = await prisma.$transaction(async (tx) => {
         await settlePendingResumesIn(tx, jobId);
         return tx.computerJob.updateMany({ where, data: endData });
       });
-    } else {
-      ended = await prisma.computerJob.updateMany({ where, data: endData });
     }
   }
   // Someone else ended it between the read and the write: that one counts and settles
