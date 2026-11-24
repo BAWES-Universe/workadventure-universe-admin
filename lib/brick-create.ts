@@ -16,6 +16,8 @@ export interface NewBrick {
   hello?: string | null;
   /** The key a New Brick came with (see makeBrickOnce): the same key from the same person is the same Brick. */
   createRequestKey?: string | null;
+  /** The name the keyed request asked for, kept so a retry is checked against it after a rename. */
+  createRequestName?: string | null;
 }
 
 /**
@@ -40,6 +42,7 @@ export async function createBrick(input: NewBrick, db: Prisma.TransactionClient 
       chatInstructions: input.chatInstructions ?? null,
       hello: input.hello ?? null,
       createRequestKey: input.createRequestKey ?? null,
+      createRequestName: input.createRequestKey ? input.name : null,
       behaviorType: 'idle',
       behaviorConfig: startWithToolCallsOn({}),
       aiProviderRef: UNIVERSE_AI_REF,

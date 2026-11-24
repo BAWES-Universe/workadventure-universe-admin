@@ -170,6 +170,14 @@ run('New Bricks per hour, in a real database', () => {
       expect(await makeBrickOnce(sara.id, { name: 'Teal Brick' }, undefined, 'key-1').catch((error: unknown) => error)).toBeInstanceOf(BrickRequestKeyUsed);
     });
 
+    it('still gives back the first Brick when the owner has renamed it since, and still refuses the key for another name', async () => {
+      const first = await makeBrickOnce(sara.id, { name: 'Teal Brick' }, undefined, 'key-1');
+      await prisma.bot.update({ where: { id: first.brick.id }, data: { name: 'Renamed Brick' } });
+      const again = await makeBrickOnce(sara.id, { name: 'Teal Brick' }, undefined, 'key-1');
+      expect(again).toMatchObject({ created: false, brick: { id: first.brick.id } });
+      expect(await makeBrickOnce(sara.id, { name: 'Renamed Brick' }, undefined, 'key-1').catch((error: unknown) => error)).toBeInstanceOf(BrickRequestKeyUsed);
+    });
+
     it('is the same key for the same person only', async () => {
       const mine = await makeBrickOnce(sara.id, { name: 'Teal Brick' }, undefined, 'shared-key');
       const theirs = await makeBrickOnce(omar.id, { name: 'Teal Brick' }, undefined, 'shared-key');

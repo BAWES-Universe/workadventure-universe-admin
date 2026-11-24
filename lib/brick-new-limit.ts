@@ -64,7 +64,9 @@ export function newBricksLine(retryAt: Date, timeZone: string | null, now: Date 
   const lead = "You've made a lot of Bricks this hour.";
   if (timeZone && isTimeZone(timeZone)) {
     // Newer runtimes put a narrow no-break space before AM/PM; a plain space reads the same and copies cleanly
-    const at = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone }).format(retryAt).replace(/[\u202f\u00a0]/g, ' ');
+    // Up to the next whole minute: "3:40 PM" for 3:40:59 would be a minute early, and a try inside it would be refused again
+    const shown = new Date(Math.ceil(retryAt.getTime() / 60_000) * 60_000);
+    const at = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone }).format(shown).replace(/[\u202f\u00a0]/g, ' ');
     return `${lead} Try again at ${at}.`;
   }
   const minutes = Math.max(1, Math.ceil((retryAt.getTime() - now.getTime()) / 60_000));

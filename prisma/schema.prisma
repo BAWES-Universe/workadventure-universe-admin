@@ -919,6 +919,8 @@ model Bot {
   // The key the game sent with New Brick (POST /api/bricks { requestKey }): the same key from the same person is the same
   // request, so a tap tried again after a dropped connection gives back the first Brick. Null for every other Brick.
   createRequestKey    String?   @map("create_request_key") @db.VarChar(200)
+  // The name that request asked for: a retry is checked against it, not against the Brick's name now (the owner may have renamed it since).
+  createRequestName   String?   @map("create_request_name") @db.VarChar(100)
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")

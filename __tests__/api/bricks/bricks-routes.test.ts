@@ -278,7 +278,7 @@ describe('POST /api/bricks: New Brick (game #1996)', () => {
     const response = await makeMine(request('/api/bricks', SARA, { method: 'POST', body: { name: 'Teal Brick' } }));
     expect(response.status).toBe(429);
     const body = await response.json();
-    const clock = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Kuwait' }).format(retryAt).replace(/[\u202f\u00a0]/g, ' ');
+    const clock = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Kuwait' }).format(new Date(Math.ceil(retryAt.getTime() / 60_000) * 60_000)).replace(/[\u202f\u00a0]/g, ' ');
     expect(body).toEqual({ error: `You've made a lot of Bricks this hour. Try again at ${clock}.`, code: 'new_bricks_limit', retryAt: retryAt.toISOString(), limit: 30 });
     expect(Number(response.headers.get('Retry-After'))).toBeGreaterThan(24 * 60);
   });

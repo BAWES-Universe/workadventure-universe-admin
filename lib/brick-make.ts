@@ -85,9 +85,10 @@ export async function makeBrickOnce(
   if ((db as unknown) === prisma) return prisma.$transaction((tx) => makeBrickOnce(ownerId, input, tx, requestKey, limit));
   await lockNewBricks(db, ownerId);
   if (requestKey) {
-    const first = await db.bot.findFirst({ where: { ownerId, createRequestKey: requestKey }, select: { ...CARD_SELECT, deletedAt: true } });
+    const first = await db.bot.findFirst({ where: { ownerId, createRequestKey: requestKey }, select: { ...CARD_SELECT, deletedAt: true, createRequestName: true } });
     if (first) {
-      if (first.deletedAt !== null || first.name !== input.name) throw new BrickRequestKeyUsed();
+      // The name that request asked for, not the Brick's name now: the owner may have renamed it since
+      if (first.deletedAt !== null || (first.createRequestName ?? first.name) !== input.name) throw new BrickRequestKeyUsed();
       return { brick: toCard(first, false), created: false };
     }
   }
@@ -126,7 +127,7 @@ export type ChatBrickAnswer =
   | { ok: true; made: boolean; brick: BrickCard; bricks: BrickCard[] }
   | { ok: false; status: 403 | 404 | 409; error: string }
   /** Over "New Bricks per hour": nothing was made. `error` is the kind line, in the person's own clock. */
-  | { ok: false; status: 429; error: string; code: typeof NEW_BRICKS_LIMIT_CODE; retryAt: string };
+  | { ok: false; status: 429; error: string; code: typeof NEW_BRICKS_LIMIT_CODE; retryAt: string; retryAfterSeconds: number };
 
 /**
  * The owner of the Brick that asks, when `userId` is that owner: a signed-in person, found by the name the bot server
@@ -184,7 +185,7 @@ export async function makeBrickFromChat(viaBrickId: string, input: z.infer<typeo
     // Over "New Bricks per hour": nothing was made, and the Brick that asks says the kind line as it is
     if (error instanceof NewBricksLimit) {
       const refusal = await newBricksRefusal(ownerId, error);
-      return { ok: false, status: 429, error: refusal.body.error, code: NEW_BRICKS_LIMIT_CODE, retryAt: refusal.body.retryAt };
+      return { ok: false, status: 429, error: refusal.body.error, code: NEW_BRICKS_LIMIT_CODE, retryAt: refusal.body.retryAt, retryAfterSeconds: refusal.retryAfterSeconds };
     }
     throw error;
   }

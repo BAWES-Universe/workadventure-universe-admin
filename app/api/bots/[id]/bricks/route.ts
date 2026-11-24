@@ -56,7 +56,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data', details: parsed.error.issues }, { status: 400 });
     const answer = await makeBrickFromChat(id, parsed.data);
     if (!answer.ok) {
-      if (answer.status === 429) return NextResponse.json({ error: answer.error, code: answer.code, retryAt: answer.retryAt }, { status: 429 });
+      if (answer.status === 429) {
+        const limited = NextResponse.json({ error: answer.error, code: answer.code, retryAt: answer.retryAt }, { status: 429 });
+        limited.headers.set('Retry-After', String(answer.retryAfterSeconds));
+        return limited;
+      }
       return NextResponse.json({ error: answer.error }, { status: answer.status });
     }
     return NextResponse.json({ made: answer.made, brick: answer.brick, bricks: answer.bricks }, { status: answer.made ? 201 : 200 });
