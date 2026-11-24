@@ -4,14 +4,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { PageHeader } from '../components/ds';
+import { GITHUB_WINDOW } from './window';
 
 type Existing = { slug?: string; url?: string; appId?: number };
 type Answer = { existing?: Existing; action?: string; manifest?: string; error?: string };
 type Form = { action: string; manifest: string };
 type Step = 'loading' | 'ready' | 'waiting' | 'made' | 'confirm' | 'failed';
 
-/** GitHub's Create page opens in this window, so the game and Orbit stay where they are. */
-export const GITHUB_WINDOW = 'github-app-setup';
 /** How often a waiting page asks whether the app has been made, and for how long (GitHub's own limit for the setup is an hour). */
 const POLL_MS = 2500;
 const POLL_FOR_MS = 60 * 60 * 1000;
@@ -48,6 +47,9 @@ export default function GitHubAppSetupPage() {
   const again = useRef(false);
   // The app the waiting page is waiting to see replaced (none while the first one is made)
   const replaced = useRef<number | null>(null);
+  // Which press owns GitHub's window, and which "make it again" is the current one: an answer that arrives for an older one is not acted on
+  const windowOwner = useRef(0);
+  const askedAgain = useRef(0);
 
   const apply = useCallback((result: { answer?: Answer; failed?: string }) => {
     if (result.failed) {
@@ -139,9 +141,12 @@ export default function GitHubAppSetupPage() {
       return;
     }
     setBlocked(false);
+    // The window is shared by name: a later press takes it over, and an earlier press then neither closes it nor sends its form into it
+    const mine = ++windowOwner.current;
     let toSend = form;
     if (Date.now() - loadedAt.current > FORM_FRESH_MS) {
       const result = await load(again.current);
+      if (windowOwner.current !== mine) return;
       // Made meanwhile (another tab): nothing to open
       if (result.answer?.existing) {
         popup.close();
@@ -164,10 +169,21 @@ export default function GitHubAppSetupPage() {
   };
 
   const makeAgain = async () => {
+    const mine = ++askedAgain.current;
     setBusy(true);
     again.current = true;
-    apply(await load(true));
+    const result = await load(true);
+    // "Keep this app" was chosen while this was on its way: the answer is not used, and the page stays where they put it
+    if (askedAgain.current !== mine) return;
+    apply(result);
     setBusy(false);
+  };
+
+  const keepApp = () => {
+    askedAgain.current += 1;
+    again.current = false;
+    setBusy(false);
+    setStep('made');
   };
 
   const retry = () => {
@@ -251,7 +267,7 @@ export default function GitHubAppSetupPage() {
               <Button type="button" onClick={() => void makeAgain()} disabled={busy}>
                 Make it again
               </Button>
-              <Button type="button" variant="outline" onClick={() => setStep('made')}>
+              <Button type="button" variant="outline" onClick={keepApp}>
                 Keep this app
               </Button>
             </div>

@@ -12,7 +12,8 @@ const fetchMock = jest.fn();
 jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[]) => fetchMock(...args) }));
 jest.mock('@/app/admin/components/ds', () => ({ PageHeader: ({ title }: { title: string }) => <h1>{title}</h1> }));
 
-import GitHubAppSetupPage, { GITHUB_WINDOW } from '@/app/admin/github-app/page';
+import GitHubAppSetupPage from '@/app/admin/github-app/page';
+import { GITHUB_WINDOW } from '@/app/admin/github-app/window';
 
 const FORM = { action: 'https://github.com/organizations/BAWES-Universe/settings/apps/new?state=abc', manifest: '{"name":"BAWES Universe"}' };
 const json = (body: unknown, ok = true) => Promise.resolve({ ok, status: ok ? 200 : 500, json: () => Promise.resolve(body) });
@@ -124,6 +125,60 @@ describe('GitHub for Universe setup page', () => {
     expect(popup.close).toHaveBeenCalled();
     expect(submit).not.toHaveBeenCalled();
     expect(screen.getByRole('alert').textContent).toMatch(/Could not open GitHub/);
+  });
+
+  it('two presses of Continue on an old form: the earlier one failing does not close the window the later one owns', async () => {
+    const popup = { close: jest.fn() };
+    open.mockReturnValue(popup as unknown as Window);
+    let calls = 0;
+    const answers: ((value: unknown) => void)[] = [];
+    fetchMock.mockImplementation((url: string, init?: { method?: string }) => {
+      if (init?.method !== 'POST') return json({ made: false });
+      calls += 1;
+      if (calls === 1) return json(FORM);
+      return new Promise((resolve) => answers.push(resolve));
+    });
+    render(<GitHubAppSetupPage />);
+    await settle();
+    await act(async () => {
+      jest.advanceTimersByTime(51 * 60 * 1000);
+    });
+    const button = screen.getByRole('button', { name: 'Continue to GitHub' });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await settle();
+    expect(answers).toHaveLength(2);
+    // the second press's form arrives first and is sent; then the first press's request fails
+    await act(async () => {
+      answers[1](await json({ action: `${FORM.action}-second`, manifest: FORM.manifest }));
+    });
+    await act(async () => {
+      answers[0](await json({ error: 'Could not open GitHub' }, false));
+    });
+    expect(popup.close).not.toHaveBeenCalled();
+    expect(sent).toEqual([{ action: `${FORM.action}-second`, target: GITHUB_WINDOW, manifest: FORM.manifest }]);
+    expect(screen.getByText(/Waiting for you on GitHub/)).toBeTruthy();
+  });
+
+  it('"Keep this app" pressed while "Make it again" is on its way stays on the kept app when the answer arrives', async () => {
+    let answer: ((value: unknown) => void) | undefined;
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (init?.method === 'POST') {
+        if (JSON.parse(init.body ?? '{}').again) return new Promise((resolve) => (answer = resolve));
+        return json({ existing: { slug: 'universe-app', url: 'https://github.com/apps/universe-app', appId: 7 } });
+      }
+      return json({ made: false });
+    });
+    render(<GitHubAppSetupPage />);
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'Make the app again' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Make it again' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Keep this app' }));
+    expect(screen.getByTestId('github-setup-card').getAttribute('data-step')).toBe('made');
+    await act(async () => {
+      answer?.(await json(FORM));
+    });
+    expect(screen.getByTestId('github-setup-card').getAttribute('data-step')).toBe('made');
   });
 
   it('says so, and goes nowhere, when the browser blocks the window', async () => {
