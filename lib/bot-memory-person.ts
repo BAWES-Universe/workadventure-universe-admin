@@ -90,23 +90,26 @@ export async function saveMemoryRow<T>(botId: string, userUuid: string, memories
  * newer stays as it is.
  */
 export async function forgetKeys(botId: string, userUuids: string[], keys: Map<string, MemoryItemKind>, at?: Date): Promise<void> {
-  const now = at ?? new Date();
   const ids = new Set(keys.keys());
   const people = [...new Set(userUuids)];
   await prisma.$transaction(async (tx) => {
     await lockPeople(tx, botId, people);
+    // Taken once the lock is held: a Forget that waited for another one is not older than it
+    const now = at ?? new Date();
     const fresh = await tx.botsMemory.findMany({ where: { botId, userUuid: { in: people } }, select: { id: true, userUuid: true, memories: true } });
     // With a time (a late report), a thing said after the Forget stays in the rows too; without one, every match goes
     const asked = new Map<string, Map<string, Date>>();
     for (const userUuid of people) {
       asked.set(userUuid, new Map());
       for (const [itemKey, kind] of keys) {
-        const kept = at ? await tx.botMemoryItemForget.findUnique({ where: { botId_userUuid_itemKey: { botId, userUuid, itemKey } }, select: { createdAt: true } }) : null;
-        if (at) asked.get(userUuid)!.set(itemKey, kept && kept.createdAt > now ? kept.createdAt : now);
+        // A Forget kept as newer, by a late report or by another Forget that took its turn first, is never made older
+        const kept = await tx.botMemoryItemForget.findUnique({ where: { botId_userUuid_itemKey: { botId, userUuid, itemKey } }, select: { createdAt: true } });
+        const newer = kept !== null && kept.createdAt > now;
+        if (at) asked.get(userUuid)!.set(itemKey, newer ? kept.createdAt : now);
         await tx.botMemoryItemForget.upsert({
           where: { botId_userUuid_itemKey: { botId, userUuid, itemKey } },
           // Forgotten again after it was said again: the Forget is as new as the second one (never older than one already kept)
-          update: kept && kept.createdAt > now ? { droppedAt: null } : { createdAt: now, droppedAt: null },
+          update: newer ? { droppedAt: null } : { createdAt: now, droppedAt: null },
           create: { botId, userUuid, itemKey, kind, createdAt: now },
         });
       }
@@ -127,7 +130,9 @@ export async function forgetMyItem(botId: string, who: Remembering, itemId: stri
   const holding = rows.filter((row) => memoryItemsOf(withoutForgotten(row.memories, forgotten.get(row.userUuid) ?? [])).some((item) => item.id === itemId));
   if (holding.length === 0) return false;
   const kind = memoryItemsOf(holding[0].memories).find((item) => item.id === itemId)?.kind ?? 'fact';
-  await forgetKeys(botId, holding.map((row) => row.userUuid), new Map([[itemId, kind]]));
+  // For every name the bot server may know them by, not only the rows that hold it: it may hold the thing under a name Orbit has no row for
+  // yet, and a save under that name must not bring it back
+  await forgetKeys(botId, [...who.refs, ...rows.map((row) => row.userUuid)], new Map([[itemId, kind]]));
   return true;
 }
 
@@ -139,10 +144,11 @@ export async function forgetMyItem(botId: string, who: Remembering, itemId: stri
  */
 export async function forgetMyEverything(botId: string, who: Remembering): Promise<number> {
   const found = await prisma.botsMemory.findMany({ where: rowsWhere(botId, who), select: { id: true, userUuid: true } });
-  const now = new Date();
   return prisma.$transaction(async (tx) => {
     // Locked (with every save of theirs) and read again here, so what a save wrote a moment ago is forgotten too
     await lockPeople(tx, botId, [...who.refs, ...found.map((row) => row.userUuid)]);
+    // Taken once the lock is held, and never older than a Forget another one wrote first
+    const now = new Date();
     if (found.length > 0) await tx.$queryRaw`SELECT id FROM bots_memory WHERE id IN (${Prisma.join(found.map((row) => row.id))}) FOR UPDATE`;
     const rows = await tx.botsMemory.findMany({ where: rowsWhere(botId, who), select: { id: true, userUuid: true, memories: true } });
     let count = 0;
@@ -150,9 +156,10 @@ export async function forgetMyEverything(botId: string, who: Remembering): Promi
       const items = memoryItemsOf(row.memories);
       count = Math.max(count, items.length);
       for (const item of items) {
+        const kept = await tx.botMemoryItemForget.findUnique({ where: { botId_userUuid_itemKey: { botId, userUuid: row.userUuid, itemKey: item.id } }, select: { createdAt: true } });
         await tx.botMemoryItemForget.upsert({
           where: { botId_userUuid_itemKey: { botId, userUuid: row.userUuid, itemKey: item.id } },
-          update: { createdAt: now, droppedAt: null },
+          update: kept && kept.createdAt > now ? { droppedAt: null } : { createdAt: now, droppedAt: null },
           create: { botId, userUuid: row.userUuid, itemKey: item.id, kind: item.kind, createdAt: now },
         });
       }
@@ -187,16 +194,30 @@ export interface ItemForgetNotice {
   at: number;
 }
 
+/** The most notices one report to the bot server carries; the bot server can acknowledge that many in one go. */
+export const ITEM_FORGET_BATCH = 1000;
+
 export async function takeItemForgets(botId: string): Promise<ItemForgetNotice[]> {
-  const rows = await prisma.botMemoryItemForget.findMany({ where: { botId, droppedAt: null }, select: { id: true, userUuid: true, itemKey: true, kind: true, createdAt: true }, orderBy: { createdAt: 'asc' }, take: 1000 });
+  const rows = await prisma.botMemoryItemForget.findMany({ where: { botId, droppedAt: null }, select: { id: true, userUuid: true, itemKey: true, kind: true, createdAt: true }, orderBy: { createdAt: 'asc' }, take: ITEM_FORGET_BATCH });
   return rows.map(({ createdAt, ...row }) => ({ ...row, at: createdAt.getTime() }));
 }
 
-/** The bot server reports what it dropped. Ids of other bots are ignored. The Forget itself stays. */
-export async function acknowledgeItemForgets(botId: string, ids: string[]): Promise<number> {
-  if (ids.length === 0) return 0;
-  const { count } = await prisma.botMemoryItemForget.updateMany({ where: { botId, id: { in: ids }, droppedAt: null }, data: { droppedAt: new Date() } });
-  return count;
+/**
+ * The bot server reports what it dropped. Ids of other bots are ignored. The Forget itself stays.
+ * `dropped` carries the `at` of each notice it acted on: a Forget said again after that moment (a newer `createdAt`) was not in the notice,
+ * so it is not marked dropped and is handed out again. An id sent without its `at` (an older bot server) is acknowledged as before.
+ */
+export async function acknowledgeItemForgets(botId: string, ids: string[], dropped: { id: string; at: number }[] = []): Promise<number> {
+  const seen = new Map(dropped.map((one) => [one.id, one.at]));
+  const plain = ids.filter((id) => !seen.has(id));
+  if (plain.length === 0 && seen.size === 0) return 0;
+  const now = new Date();
+  let total = 0;
+  if (plain.length > 0) total += (await prisma.botMemoryItemForget.updateMany({ where: { botId, id: { in: plain }, droppedAt: null }, data: { droppedAt: now } })).count;
+  for (const [id, at] of seen) {
+    total += (await prisma.botMemoryItemForget.updateMany({ where: { botId, id, droppedAt: null, createdAt: { lte: new Date(at) } }, data: { droppedAt: now } })).count;
+  }
+  return total;
 }
 
 /** A save from the bot server, without what these people forgot: one read for all of them. */

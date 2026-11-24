@@ -103,14 +103,16 @@ export async function GET(request: NextRequest) {
     }
 
     const { botId, serverId, redirectUrl, codeVerifier, redirectUri, resource, personId, connectionId, nonce } = stateData;
+    // Which sign-in this is: the one that began last is the only one that may store its tokens (a state from before this has none, and is generation 0)
+    const generation = typeof stateData.generation === 'number' ? stateData.generation : 0;
     const openerBase = getOpenerBase(redirectUrl);
 
     // Load the config that holds the OAuth provider settings: a person's connection (game #2001), or a bot's own server
-    let server: { id: string; authType: string; authConfig: string | null; serverUrl: string } | null;
+    let server: { id: string; authType: string; authConfig: string | null; serverUrl: string; signInGeneration: number } | null;
     if (connectionId) {
       const connection = await prisma.appConnection.findUnique({
         where: { id: connectionId },
-        select: { id: true, ownerId: true, universeId: true, authType: true, authConfig: true, serverUrl: true },
+        select: { id: true, ownerId: true, universeId: true, authType: true, authConfig: true, serverUrl: true, signInGeneration: true },
       });
       // Only the person who owns it can sign it in, and a connection that is gone has nothing to sign in
       server = connection && connection.authType === 'oauth' && !!personId && (await managesConnection(personId, connection)) ? connection : null;
@@ -124,7 +126,7 @@ export async function GET(request: NextRequest) {
     } else {
       const row = await prisma.botMcpServer.findUnique({
         where: { id: serverId },
-        select: { id: true, botId: true, authType: true, authConfig: true, serverUrl: true, connectionId: true },
+        select: { id: true, botId: true, authType: true, authConfig: true, serverUrl: true, connectionId: true, signInGeneration: true },
       });
       // A grant never signs in on its own: its connection does (the start route sends it there)
       server = row && row.botId === botId && !row.connectionId ? row : null;
@@ -136,6 +138,13 @@ export async function GET(request: NextRequest) {
         return popupRedirect(openerBase, { oauth: 'error', message: 'server_not_found' });
       }
       return new NextResponse('Server configuration not found', { status: 404 });
+    }
+
+    // A newer sign-in began after this one: this return is stale, and its code is not spent
+    if (server.signInGeneration !== generation) {
+      console.error('[OAuthCallback] A newer sign-in began after this one');
+      if (redirectUrl) return popupRedirect(openerBase, { oauth: 'error', message: 'sign_in_expired' });
+      return new NextResponse('A newer sign-in was started after this one. Use that one.', { status: 409 });
     }
 
     // The resource for the token request comes from the state token, not from the row.
@@ -260,7 +269,7 @@ export async function GET(request: NextRequest) {
     //   authorization server: the new tokens are carried onto what the row holds now;
     // - the server URL, an endpoint or the client changed: these tokens are not that
     //   connection's, so nothing is written and the login reports the change.
-    const stored = await storeAuthorizedTokens(!!connectionId, server.id, server.serverUrl, server.authConfig!, updatedOAuthConfig);
+    const stored = await storeAuthorizedTokens(!!connectionId, server.id, server.serverUrl, server.authConfig!, updatedOAuthConfig, generation);
     if (stored === 'busy') {
       // Every attempt lost to another write that kept this connection's settings: nothing
       // changed that invalidates the login, the row was just being written at the time.
@@ -271,6 +280,12 @@ export async function GET(request: NextRequest) {
       return new NextResponse('This connection was being updated at the same time. Connect again.', {
         status: 409,
       });
+    }
+    if (stored === 'superseded') {
+      // A newer sign-in began while this one was being exchanged: its tokens are the older ones and are not stored
+      console.error('[OAuthCallback] A newer sign-in began while this one was in flight; tokens not stored');
+      if (redirectUrl) return popupRedirect(openerBase, { oauth: 'error', message: 'sign_in_expired' });
+      return new NextResponse('A newer sign-in was started after this one. Use that one.', { status: 409 });
     }
     if (stored === 'changed') {
       console.error('[OAuthCallback] Connection changed while the authorization was in flight');
@@ -316,21 +331,25 @@ async function storeAuthorizedTokens(
   serverId: string,
   serverUrl: string,
   expectedAuthConfig: string,
-  authorized: OAuthConfig
-): Promise<'stored' | 'changed' | 'busy'> {
+  authorized: OAuthConfig,
+  generation: number
+): Promise<'stored' | 'changed' | 'busy' | 'superseded'> {
   let expected = expectedAuthConfig;
   let toStore = authorized;
   for (let attempt = 0; attempt < STORE_ATTEMPTS; attempt += 1) {
-    const where = { id: serverId, serverUrl, authConfig: expected };
+    // Only while this is still the newest sign-in: the generation is part of the guard
+    const where = { id: serverId, serverUrl, authConfig: expected, signInGeneration: generation };
     const data = { authConfig: encryptApiKey(JSON.stringify(toStore)) };
     const result = onConnection ? await prisma.appConnection.updateMany({ where, data }) : await prisma.botMcpServer.updateMany({ where, data });
     if (result.count === 1) return 'stored';
 
-    const select = { authType: true, authConfig: true, serverUrl: true } as const;
+    const select = { authType: true, authConfig: true, serverUrl: true, signInGeneration: true } as const;
     const row = onConnection
       ? await prisma.appConnection.findUnique({ where: { id: serverId }, select })
       : await prisma.botMcpServer.findUnique({ where: { id: serverId }, select });
     if (!row || row.authType !== 'oauth' || !row.authConfig || row.serverUrl !== serverUrl) return 'changed';
+    // A newer sign-in began: this one's tokens are the older ones, whatever else the row holds
+    if (row.signInGeneration !== generation) return 'superseded';
     let current: OAuthConfig;
     try {
       current = JSON.parse(decryptApiKey(row.authConfig)) as OAuthConfig;
@@ -359,7 +378,7 @@ async function storeAuthorizedTokens(
  * Parse the encrypted state token.
  * Checks the `exp` claim (epoch seconds) and returns null if expired.
  */
-function parseStateToken(state: string | null): { botId: string; serverId: string; redirectUrl: string; codeVerifier?: string; redirectUri?: string; resource?: string; personId?: string; connectionId?: string; nonce?: string } | null {
+function parseStateToken(state: string | null): { botId: string; serverId: string; redirectUrl: string; codeVerifier?: string; redirectUri?: string; resource?: string; personId?: string; connectionId?: string; nonce?: string; generation?: number } | null {
   if (!state) return null;
   try {
     const decrypted = decryptApiKey(state);

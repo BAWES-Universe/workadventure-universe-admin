@@ -51,13 +51,16 @@ export function forgetGitHubApp(): void {
   cached = null;
 }
 
-/** The app, or null while it has not been made. Never throws: an unreadable setting is no app (and is logged). */
-export async function getGitHubApp(): Promise<GitHubApp | null> {
-  if (cached && Date.now() - cached.at < CACHE_MS) return cached.app;
+/**
+ * The app kept and its id, from ONE read of the store (never cached). The id is there whenever a row has one, also when the app's secrets cannot be
+ * read (no app comes back then). Whoever needs both (the setup, to say which app it replaces) takes them from here, so they describe the same row:
+ * two reads could see no app and then another setup's, and the setup would replace an app it never saw.
+ */
+export async function readGitHubApp(): Promise<{ app: GitHubApp | null; appId: number | null }> {
   let app: GitHubApp | null = null;
+  const row = await prisma.appSetting.findUnique({ where: { key: SETTING_KEY } });
+  const value = row?.value as { appId?: unknown; slug?: unknown; clientId?: unknown; htmlUrl?: unknown; secrets?: unknown } | undefined;
   try {
-    const row = await prisma.appSetting.findUnique({ where: { key: SETTING_KEY } });
-    const value = row?.value as { appId?: unknown; slug?: unknown; clientId?: unknown; htmlUrl?: unknown; secrets?: unknown } | undefined;
     if (value && typeof value.secrets === 'string' && typeof value.appId === 'number' && typeof value.slug === 'string' && typeof value.clientId === 'string') {
       const secrets = JSON.parse(decryptApiKey(value.secrets)) as { clientSecret?: unknown; webhookSecret?: unknown; pem?: unknown };
       if (typeof secrets.clientSecret === 'string' && typeof secrets.pem === 'string') {
@@ -75,15 +78,25 @@ export async function getGitHubApp(): Promise<GitHubApp | null> {
   } catch (error) {
     console.error('[GitHubApp] Could not read the app:', error instanceof Error ? error.message : 'unknown');
   }
+  return { app, appId: typeof value?.appId === 'number' ? value.appId : null };
+}
+
+/** The app, or null while it has not been made. Never throws: an unreadable setting is no app (and is logged). */
+export async function getGitHubApp(): Promise<GitHubApp | null> {
+  if (cached && Date.now() - cached.at < CACHE_MS) return cached.app;
+  let app: GitHubApp | null = null;
+  try {
+    app = (await readGitHubApp()).app;
+  } catch (error) {
+    console.error('[GitHubApp] Could not read the app:', error instanceof Error ? error.message : 'unknown');
+  }
   cached = { at: Date.now(), app };
   return app;
 }
 
-/** The id of the app that is kept now, read straight from the store (no cache), or null while none is. */
+/** The id of the app kept, also when its secrets cannot be read (then no app comes back, but a row with an id is there). */
 export async function keptGitHubAppId(): Promise<number | null> {
-  const row = await prisma.appSetting.findUnique({ where: { key: SETTING_KEY } });
-  const appId = (row?.value as { appId?: unknown } | undefined)?.appId;
-  return typeof appId === 'number' ? appId : null;
+  return (await readGitHubApp()).appId;
 }
 
 /**

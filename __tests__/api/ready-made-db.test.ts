@@ -20,7 +20,7 @@ import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { POST as useApp } from '@/app/api/ready-made/use/route';
 import { POST as linkApp } from '@/app/api/ready-made/link/route';
 import { POST as testServer } from '@/app/api/bots/[id]/mcp-servers/[serverId]/test/route';
-import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
+import { POST as checkUse } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { POST as connectApp } from '@/app/api/me/apps/route';
 import { grantToBrick, createConnection, readConnection, listConnections } from '@/lib/app-connections';
 import { saveMeterSettings } from '@/lib/meter';
@@ -275,6 +275,21 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect((await connectReadyMadeApp(request('/api/me/apps/ready-made', { method: 'POST', body: { key: 'gmail' } }))).status).toBe(201);
   });
 
+  it('a change that names only some fields of an app keeps the rest, and null clears a sign-in setup of their own', async () => {
+    await saveReadyMadeApps({ apps: { [KEY]: { name: 'Gmail', authConfigId: 'ac_1', enabled: true } } }, boss);
+    // Turning it off names only `enabled`: the name and the sign-in setup stay
+    await saveReadyMadeApps({ apps: { [KEY]: { enabled: false } } }, boss);
+    expect((await saveReadyMadeApps({ apps: {} }, boss)).find((app) => app.key === KEY)).toEqual({ key: KEY, name: 'Gmail', authConfigId: 'ac_1', enabled: false });
+    // Sent as null, the sign-in setup is cleared and the provider's managed one is used again
+    const cleared = await saveReadyMadeApps({ apps: { [KEY]: { authConfigId: null } } }, boss);
+    expect(cleared.find((app) => app.key === KEY)).toEqual({ key: KEY, name: 'Gmail', authConfigId: null, enabled: false });
+    // The route takes null too
+    setAdapterForTests(fake());
+    mockUser.current = { id: boss, email: 'boss@example.test' };
+    const put = await adminPut(request('/api/admin/ready-made-apps', { method: 'PUT', body: { apps: { [KEY]: { authConfigId: null } } } }));
+    expect(put.status).toBe(200);
+  });
+
   it('restarts a sign-in that was lost after it had been confirmed, and reads connected again only when the provider confirms the new one', async () => {
     const adapter = fake();
     adapter.startConnect
@@ -402,11 +417,11 @@ run('ready-made apps through the adapter, in a real database', () => {
 
   it('says on the use check that the universe pays for a ready-made app, and not for a person’s own', async () => {
     const { serverId } = await connectedAndGranted();
-    const verdict = await (await useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `sara-${tag}` } }), params({ id: saraBrick, serverId }))).json();
+    const verdict = await (await checkUse(request(`/api/bots/${saraBrick}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `sara-${tag}` } }), params({ id: saraBrick, serverId }))).json();
     expect(verdict).toMatchObject({ allowed: true, readyMade: true });
     const own = await createConnection(sara, { name: 'Own', serverUrl: 'https://own.example.com/mcp', authType: 'none', source: 'link' });
     const ownGrant = await grantToBrick(sara, own.id, saraBrick);
-    const ownVerdict = await (await useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${(ownGrant as { id: string }).id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `sara-${tag}` } }), params({ id: saraBrick, serverId: (ownGrant as { id: string }).id }))).json();
+    const ownVerdict = await (await checkUse(request(`/api/bots/${saraBrick}/mcp-servers/${(ownGrant as { id: string }).id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `sara-${tag}` } }), params({ id: saraBrick, serverId: (ownGrant as { id: string }).id }))).json();
     expect(ownVerdict.allowed).toBe(true);
     expect(ownVerdict.readyMade).toBeUndefined();
   });
@@ -653,6 +668,34 @@ run('ready-made apps through the adapter, in a real database', () => {
         .mockResolvedValueOnce(answerOf(202, ''))
         .mockResolvedValueOnce(answerOf(200, 'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":{}}\n\nevent: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"GMAIL_FETCH_EMAILS"}]}}\n', 's1'));
       expect(await (await test(serverId)).json()).toMatchObject({ success: true, toolCount: 1, toolNames: ['GMAIL_FETCH_EMAILS'] });
+    });
+
+    it('does not take an answer that carries another id for the answer to the list it asked for, in a plain reply or in a stream', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      const mismatched = (listAnswer: ReturnType<typeof answerOf>) =>
+        adapter.callLink
+          .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}', 's1'))
+          .mockResolvedValueOnce(answerOf(202, ''))
+          .mockResolvedValueOnce(listAnswer);
+      mismatched(answerOf(200, '{"jsonrpc":"2.0","id":99,"result":{"tools":[{"name":"SOMEONE_ELSES"}]}}'));
+      expect(await (await test(serverId)).json()).toMatchObject({ success: false });
+      adapter.callLink.mockClear();
+      mismatched(answerOf(200, 'event: message\ndata: {"jsonrpc":"2.0","id":99,"result":{"tools":[{"name":"SOMEONE_ELSES"}]}}\n'));
+      const streamed = await (await test(serverId)).json();
+      expect(streamed).toMatchObject({ success: false });
+      expect(JSON.stringify(streamed)).not.toContain('SOMEONE_ELSES');
+    });
+
+    it('an answer to the start of a session that is for another id, or not an answer at all, is a failed test: a good list after it never makes the app look like it works', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      for (const opening of ['{"jsonrpc":"2.0","id":99,"error":{"code":-32000,"message":"no session"}}', '{"jsonrpc":"2.0","id":99,"result":{}}', '<html>maintenance</html>']) {
+        adapter.callLink.mockReset();
+        adapter.callLink
+          .mockResolvedValueOnce(answerOf(200, opening, 's1'))
+          .mockResolvedValueOnce(answerOf(202, ''))
+          .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"A"}]}}', 's1'));
+        expect(await (await test(serverId)).json()).toMatchObject({ success: false, toolCount: 0 });
+      }
     });
 
     it('reads every page of a long list of tools', async () => {

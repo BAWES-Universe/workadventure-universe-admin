@@ -11,7 +11,7 @@ const MIGRATIONS = path.join(__dirname, '../../prisma/migrations');
 async function main() {
   const db = new PGlite();
   for (const name of fs.readdirSync(MIGRATIONS).filter((n) => /^\d/.test(n)).sort()) {
-    await db.exec(fs.readFileSync(path.join(MIGRATIONS, name, 'migration.sql'), 'utf8'));
+    await db.exec(fs.readFileSync(path.join(MIGRATIONS, name, 'migration.sql'), 'utf8').replace(/\bCONCURRENTLY\s+/g, '') /* PGlite has one session: CONCURRENTLY cannot run there */);
   }
   await db.exec(`
     INSERT INTO users (id, uuid, name, updated_at) VALUES ('owner', 'uuid-owner', 'Owner', now()), ('friend', 'uuid-friend', 'Friend', now()), ('bulk', 'uuid-bulk', 'Bulk', now());

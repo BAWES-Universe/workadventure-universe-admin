@@ -243,7 +243,8 @@ describe('a bot whose maker lent their own listening key', () => {
   ])('never uses a key that is %s', async (_name, arrange) => {
     arrange();
     const answer = await heard();
-    expect(answer).toMatchObject({ route: 'universe-ai', payer: 'universe-ai', provider: { id: 'ua-soniox' } });
+    // Universe AI hears, and the answer says why it is not the key that was named
+    expect(answer).toMatchObject({ route: 'universe-ai', reason: 'own-key-unusable', payer: 'universe-ai', provider: { id: 'ua-soniox' } });
     expect(JSON.stringify(answer)).not.toContain('iv:tag:own');
   });
 

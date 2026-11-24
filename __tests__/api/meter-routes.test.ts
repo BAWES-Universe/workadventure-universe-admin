@@ -64,6 +64,37 @@ describe('POST /api/meter/events', () => {
     expect(sent()).toMatchObject({ personKey: 'person:sara', personId: 'sara', botId: 'b1', brick: true });
   });
 
+  it('writes nothing and asks to be sent again when who it was for could not be looked up, rather than calling the person a guest', async () => {
+    for (const isGuest of [undefined, false]) {
+      record.mockClear();
+      resolve.mockResolvedValue({ personId: null, guest: isGuest ?? null, lookupFailed: true });
+      const answer = await post(event({ botId: 'b1', userId: 'wa-sara', ...(isGuest === undefined ? {} : { isGuest }) }));
+      // A sender that takes every 200 as delivered must not lose it: 503, with the same results
+      expect(answer.status).toBe(503);
+      expect((await answer.json()).results).toEqual([{ eventId: 'e1', status: 'retry', error: expect.any(String) }]);
+      expect(record).not.toHaveBeenCalled();
+    }
+  });
+
+  it('answers 503 with every event’s result when one of a batch must be sent again, and the sender’s second try finds the written ones as duplicates', async () => {
+    let up = false;
+    resolve.mockImplementation(async (userId: string) => (userId === 'wa-down' && !up ? { personId: null, guest: null, lookupFailed: true } : { personId: 'sara', guest: false }));
+    const written = new Set<string>();
+    record.mockImplementation(async (value: { eventId: string }) => {
+      const had = written.has(value.eventId);
+      written.add(value.eventId);
+      return { recorded: !had, conflict: false };
+    });
+    const batch = { events: [event({ eventId: 'ok-1', botId: 'b1', userId: 'wa-sara', isGuest: false }), event({ eventId: 'wait-1', botId: 'b1', userId: 'wa-down' })] };
+    const first = await post(batch);
+    expect(first.status).toBe(503);
+    expect((await first.json()).results).toEqual([{ eventId: 'ok-1', status: 'recorded' }, { eventId: 'wait-1', status: 'retry', error: expect.any(String) }]);
+    up = true;
+    const second = await post(batch);
+    expect(second.status).toBe(200);
+    expect((await second.json()).results).toEqual([{ eventId: 'ok-1', status: 'duplicate' }, { eventId: 'wait-1', status: 'recorded' }]);
+  });
+
   it('counts a guest by their own id and never names them', async () => {
     await post(event({ botId: 'b1', userId: 'wa-guest', isGuest: true }));
     expect(sent()).toMatchObject({ personKey: 'guest:wa-guest', personId: null });

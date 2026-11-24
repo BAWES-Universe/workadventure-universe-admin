@@ -98,7 +98,6 @@ export async function* readTurn(body: ReadableStream<Uint8Array>): AsyncGenerato
       const { value, done } = await reader.read();
       if (done) break;
       pending += decoder.decode(value, { stream: true });
-      if (pending.length > LINE_MAX && pending.indexOf('\n') < 0) throw new Error('A line of the turn was too long');
       let at: number;
       while ((at = pending.indexOf('\n')) >= 0) {
         // Every line is measured, whatever ends it: a long line that arrives together with its line break is no shorter
@@ -122,6 +121,9 @@ export async function* readTurn(body: ReadableStream<Uint8Array>): AsyncGenerato
           addData(line.slice(5).replace(/^ /, ''));
         }
       }
+      // What is left has no line break yet, so it is one unfinished line: measured now, not only when more of it arrives (the
+      // stream may end on it, and a chunk that held complete lines before it would otherwise have passed it unmeasured)
+      if (pending.length > LINE_MAX) throw new Error('A line of the turn was too long');
     }
     // The stream closed in the middle of a frame: the last line is read, and the frame counts if it was whole
     const rest = pending.replace(/\r$/, '');

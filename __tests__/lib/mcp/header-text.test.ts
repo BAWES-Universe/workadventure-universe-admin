@@ -86,3 +86,14 @@ describe('testing an app saved with such text', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 });
+
+describe('the address of an app, by its parsed scheme', () => {
+  const input = { name: 'Exa' };
+  it('refuses an address that is not http or https, and takes HTTPS written in capitals as the revocation address', () => {
+    expect(createMcpServerSchema.safeParse({ ...input, serverUrl: 'ftp://files.example.com/mcp' }).success).toBe(false);
+    expect(createMcpServerSchema.safeParse({ ...input, serverUrl: 'https://mcp.exa.ai/mcp' }).success).toBe(true);
+    const oauth = (revocationUrl: string) => createMcpServerSchema.safeParse({ ...input, serverUrl: 'https://mcp.exa.ai/mcp', authType: 'oauth', authConfig: JSON.stringify({ clientId: 'c', authorizeUrl: 'https://auth.example.com/a', tokenUrl: 'https://auth.example.com/t', revocationUrl }) });
+    expect(oauth('HTTPS://auth.example.com/revoke').success).toBe(true);
+    expect(oauth('http://auth.example.com/revoke').success).toBe(false);
+  });
+});

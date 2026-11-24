@@ -10,7 +10,7 @@ jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[])
 const mockAddToast = jest.fn();
 jest.mock('@/components/ui/toast', () => ({ useToast: () => ({ addToast: mockAddToast }) }));
 
-import { UniverseAiLimits } from '@/app/admin/components/limits';
+import { UniverseAiLimits, readInstantLimits } from '@/app/admin/components/limits';
 import { SERVER_LIMITS_RECOMMENDED } from '@/lib/bot-limit-values';
 import { VOICE_LIMITS_RECOMMENDED } from '@/lib/voice-limit-values';
 
@@ -250,6 +250,26 @@ describe('Universe AI limits', () => {
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/meter-settings' && init?.method === 'PATCH')).toBe(true));
     const patch = fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/meter-settings' && init?.method === 'PATCH')!;
     expect(JSON.parse(String(patch[1].body))).toEqual({ memberAllowanceMicros: 7_500_000 });
+  });
+
+  it('lets a 0 typed into Other be saved where the limit’s own range starts at 0, and not an empty one', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    fireEvent.click(await screen.findByTestId('limit-markupBps'));
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    const field = screen.getByLabelText(/Added to Composio’s charge for what the person pays, in percent/);
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    fireEvent.change(field, { target: { value: '0' } });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')).toBe(true));
+    expect(JSON.parse(String(fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')![1].body))).toEqual({ markupBps: 0 });
+  });
+
+  it('reads Instant limits only when each row has its value, its recommendation and whether it is required', () => {
+    const row = { label: 'L', hint: 'H', range: { min: 0, max: 10 }, unit: 'count' };
+    expect(readInstantLimits({ limits: { a: row } })).toBeNull();
+    expect(readInstantLimits({ limits: { a: { ...row, value: 3, recommended: null, required: false } } })).not.toBeNull();
   });
 
   it('shows the Instant Apps limits as the route says them: dollars and percents, "Not set" with nothing recommended, saved in its own units', async () => {

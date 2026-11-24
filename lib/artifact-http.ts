@@ -117,7 +117,7 @@ export function artifactRoute<B extends z.ZodType>(
       return NextResponse.json(answer, { headers: { 'Cache-Control': 'no-store' } });
     } catch (error) {
       if (error instanceof ArtifactError) {
-        return NextResponse.json({ error: error.code, message: error.message }, { status: error.status });
+        return NextResponse.json({ error: error.code, message: error.message, ...(error.extra ?? {}) }, { status: error.status });
       }
       // Never the content: only where it broke
       Sentry.captureException(error, { tags: { area: 'artifacts', route: name } });

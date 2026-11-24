@@ -246,16 +246,21 @@ export async function botReadDenied(
 
 /**
  * Guard for routes that return what people said to a bot or what the bot remembers about them (transcripts, memory,
- * emotions): super admins and the admin token only. Managers of the bot's room read counts through botReadDenied, never
- * the words. Same answers as botReadDenied: 401 signed out, 403 otherwise.
+ * emotions): super admins and the admin token only. Never someone else's Brick (game #1992), except for the admin token (the
+ * bot server): a Brick's chats, memory and emotions are its owner's, a super admin included, the same rule viewerManagesBot
+ * keeps for its figures. Managers of
+ * the bot's room read counts through botReadDenied, never the words. Same answers as botReadDenied: 401 signed out,
+ * 403 otherwise.
  */
 export async function botContentReadDenied(
   request: NextRequest,
+  botId: string,
   headers?: HeadersInit,
 ): Promise<NextResponse | null> {
   const viewer = await getViewer(request);
   if (!viewer) return unauthorizedResponse(headers);
-  return isPrivileged(viewer) ? null : forbiddenResponse(headers);
+  if (!isPrivileged(viewer)) return forbiddenResponse(headers);
+  return (await isSomeoneElsesBrick(viewer, botId)) ? forbiddenResponse(headers) : null;
 }
 
 /** The worlds this person is a member of, optionally limited to the given worlds. */

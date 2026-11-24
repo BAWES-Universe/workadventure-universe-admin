@@ -27,7 +27,7 @@ export async function GET(
 ) {
   try {
     const { id: botId } = await params;
-    const denied = await botContentReadDenied(request, corsHeaders(request));
+    const denied = await botContentReadDenied(request, botId, corsHeaders(request));
     if (denied) return denied;
     // Hide bot conversations (#435): what the bot remembers about people, emotions included, is for the bot alone.
     if (await isBotHidden(botId)) return NextResponse.json([], { headers: corsHeaders(request) });

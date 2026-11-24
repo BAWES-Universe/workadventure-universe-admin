@@ -1,0 +1,12 @@
+{
+  "name": "fake-payment-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A fake payment service for the staging checkout journeys of Universe page payments. Test infrastructure only: it is not part of the product.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test selftest/gateway.check.js selftest/notice.check.js selftest/server.check.js"
+  },
+  "engines": { "node": ">=20" }
+}
