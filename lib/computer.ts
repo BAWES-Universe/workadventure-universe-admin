@@ -21,6 +21,7 @@ import {
   humanHasControl,
   leaseLapsed,
   readControl,
+  readControlAndCheck,
   releaseIfUnheld,
   releaseLease,
   renewTransition,
@@ -3917,13 +3918,19 @@ export async function restartComputer(botId: string, ownerId: string, now: Date 
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
   const deadline = Date.now() + CONTROL_TIMING.joinMs;
   for (;;) {
-    const row = await readControl(botId);
+    // One read for both: a second tap that read the control just before the first tap's commit and the check just after it would otherwise match neither case below and be told "not offered"
+    const row = await readControlAndCheck(botId);
     if (!row) return { ok: false, reason: 'not_offered' };
     const t = Date.now();
-    const check = (await prisma.brickComputer.findUnique({ where: { botId }, select: { takeOverCheck: true } }))?.takeOverCheck ?? null;
+    const check = row.check;
     if (row.state === 'fencing' && check === 'blocked' && leaseLapsed(row, t)) {
       // Once per ask: a restart that was done for this ask is not offered again, and a request that asks anyway is told so
-      if (!(await restartOffered(botId))) return { ok: false, reason: 'not_offered' };
+      if (!(await restartOffered(botId))) {
+        // The restart that was seen done may be the one another tap is starting right now (its commit landed between the control read above and this count): when control has moved since that read, look again and join it
+        const now2 = await readControl(botId);
+        if (!now2 || now2.epoch !== row.epoch || now2.state !== row.state) continue;
+        return { ok: false, reason: 'not_offered' };
+      }
       // One step: control moves to `returning`, the restart is said on the computer, and the ask is kept on the job. A second tap sees all of it or none of it (it joins the restart, never "not offered"),
       // and a leader that dies after this is finished by the sweep with the ask already kept. The job's kind is what Brick waited for; a job the person took over in the middle of its work
       // had no ask open, which is kept as `person` (Brick is told the person wanted the screen, not to ask a question again)
@@ -3944,6 +3951,12 @@ export async function restartComputer(botId: string, ownerId: string, now: Date 
       break;
     }
     // A restart that is on its way (its leader is alive) is joined; one whose leader is gone is finished here
+    // Control goes back to Brick a moment before the check is cleared (two writes): a tap that reads between them sees `agent` with the check still `restarting`, which is the restart ending, so it waits for the next read
+    if (row.state === 'agent' && check === 'restarting') {
+      if (t >= deadline) return { ok: false, reason: 'in_progress' };
+      await sleep(CONTROL_TIMING.pollMs);
+      continue;
+    }
     if (row.state === 'returning' && check === 'restarting') {
       if (leaseLapsed(row, t)) {
         const resumed = await resumeTransition(botId, row);

@@ -53,6 +53,15 @@ export async function readControl(botId: string): Promise<Control | null> {
   return row ? { state: asState(row.controlState), epoch: row.controlEpoch, leaseUntil: row.controlLeaseUntil, humanInputUntil: row.humanInputUntil } : null;
 }
 
+/**
+ * The control and the take-over check as ONE read: a request that reads them in two steps can see the control from before another request's step and the check from after it, and so
+ * answer a second tap "not offered" while the first is starting the restart (CodeRabbit on #1034, finding 3).
+ */
+export async function readControlAndCheck(botId: string): Promise<(Control & { check: string | null }) | null> {
+  const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { controlState: true, controlEpoch: true, controlLeaseUntil: true, humanInputUntil: true, takeOverCheck: true } });
+  return row ? { state: asState(row.controlState), epoch: row.controlEpoch, leaseUntil: row.controlLeaseUntil, humanInputUntil: row.humanInputUntil, check: row.takeOverCheck ?? null } : null;
+}
+
 /** A transition with no lease, or a lease that ran out, is one whose leader is gone (or gave up): anyone may finish it. */
 export const leaseLapsed = (control: Control, at: number = Date.now()): boolean => !control.leaseUntil || control.leaseUntil.getTime() <= at;
 

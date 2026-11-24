@@ -281,7 +281,7 @@ run('the honest check before a take over (1B)', () => {
       leftAfter.still = false;
       const [a, b] = await Promise.all([restartComputer(sara.brickId, sara.id, NOW), restartComputer(sara.brickId, sara.id, NOW)]);
       expect(a.ok).toBe(true);
-      expect(b.ok).toBe(true);
+      expect(b).toEqual(expect.objectContaining({ ok: true }));
       expect(stops()).toBe(1);
       expect((await jobOf(jobId)).restarts).toBe(1);
     });
@@ -302,7 +302,7 @@ run('the honest check before a take over (1B)', () => {
       const second = restartComputer(sara.brickId, sara.id, NOW);
       const [a, b] = await Promise.all([first, second]);
       expect(a.ok).toBe(true);
-      expect(b.ok).toBe(true);
+      expect(b).toEqual(expect.objectContaining({ ok: true }));
       expect(stops()).toBe(1);
       expect((await jobOf(jobId)).restarts).toBe(1);
     });
