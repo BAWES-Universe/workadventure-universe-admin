@@ -32,6 +32,7 @@ import * as meter from '@/lib/meter';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { bringBackFromCold, coldStatus, coldStep, heartbeat, packAway, restoreDrill, STUCK_MS } from '@/lib/computer-cold';
+import { readOutsideManifest } from '@/lib/computer-outside';
 import { computerView, giveComputer, startJob, sweepComputers } from '@/lib/computer';
 import { finishOutside, purgeBrick } from '@/lib/brick-purge';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
@@ -720,6 +721,19 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(names()).not.toContain(`streamFiles:${brick.ref}`);
       expect(await row(brick.botId)).toMatchObject({ machine: 'stopped', packFailures: 1 });
       expect((await coldStatus()).failing).toBe(1);
+    });
+
+    it('a file name that is not valid UTF-8 would be refused by the database; the computer reports it as blocked first, so the pack-away keeps the computer and no copy row is written', async () => {
+      // The premise: a lone surrogate (what such a name reads as) cannot be kept in a JSON column
+      const odd = { outside: { files: [['f', '/opt/x-\udcff', 1, 0o644, 'a'.repeat(64)]], packages: [] } };
+      const brick = await idleBrick();
+      await expect(storeArchive(brick.botId, new Response('x').body as ReadableStream<Uint8Array>, { manifest: odd })).rejects.toBeDefined();
+      // What Orbit does with such a list: it is not one (readOutsideManifest), and the provider turns that into a blocked computer
+      expect(readOutsideManifest(odd.outside)).toBeNull();
+      provider.inventory = { ...provider.inventory, blocked: 'outside_name_not_utf8' };
+      expect(await packAway(brick.botId, provider, NOW)).toBe('failed');
+      expect(names()).not.toContain(`streamFiles:${brick.ref}`);
+      expect(await row(brick.botId)).toMatchObject({ machine: 'stopped', packFailures: 1 });
     });
 
     it('keeps the computer when the copy cannot be read or stored (a stream that fails)', async () => {

@@ -29,7 +29,8 @@ let counter = 0;
 beforeAll(() => {
   fs.writeFileSync(script, imageFiles().find((file) => file.name === 'universe-cold')!.text, { mode: 0o755 });
   fs.mkdirSync(bin, { recursive: true });
-  fs.writeFileSync(path.join(bin, 'apt-mark'), '#!/bin/sh\nprintf "baseline1\\nffmpeg\\n"\n', { mode: 0o755 });
+  // EXTRA_PACKAGES makes the stand-in report that many more software names (for a computer with a very long list)
+  fs.writeFileSync(path.join(bin, 'apt-mark'), '#!/bin/sh\nprintf "baseline1\\nffmpeg\\n"\ni=0\nwhile [ "$i" -lt "${EXTRA_PACKAGES:-0}" ]; do echo "extra$i"; i=$((i+1)); done\n', { mode: 0o755 });
   fs.writeFileSync(path.join(bin, 'apt-get'), `#!/bin/sh\necho "$@" >> "${aptLog}"\nexit 0\n`, { mode: 0o755 });
 });
 
@@ -72,12 +73,13 @@ function world(): World {
   return { home, fsA, fsB, state: path.join(home, '.universe'), outside: path.join(home, '.universe', 'outside') };
 }
 
-function cold(w: World, command: 'prepack' | 'finish', fsRoot: string, input = ''): { stdout: string; status: number | null } {
-  const done = spawnSync('python3', [script, command], {
+function cold(w: World, command: string, fsRoot: string, input = '', extra: Record<string, string> = {}): { stdout: string; status: number | null } {
+  const done = spawnSync('python3', [script, ...command.split(' ')], {
     input,
     encoding: 'utf8',
     timeout: 60_000,
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, UNIVERSE_COLD_HOME: w.home, UNIVERSE_COLD_FS: fsRoot },
+    maxBuffer: 1 << 28,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, UNIVERSE_COLD_HOME: w.home, UNIVERSE_COLD_FS: fsRoot, ...extra },
   });
   return { stdout: done.stdout, status: done.status };
 }
@@ -89,12 +91,27 @@ const writtenOnB = (w: World) => fs.readdirSync(w.fsB, { recursive: true, withFi
 
 type Manifest = { files: Array<[string, string, number, number, string]>; packages: string[] };
 
+/** What Orbit does with a prepack answer: the list is not in it, it is read back from the computer in slices (as the provider does) and checked against the length and SHA-256 the line gave. */
+function listOf(w: World, out: Record<string, unknown>, piece = 200_000): Manifest {
+  const bytes = out.manifest_bytes as number;
+  let text = '';
+  while (text.length < bytes) {
+    const want = Math.min(piece, bytes - text.length);
+    const got = cold(w, `list-piece ${text.length} ${want}`, w.fsA);
+    const data = /(^|\n)listpiece=([^\n]*)/.exec(got.stdout)?.[2];
+    expect(data).toHaveLength(want);
+    text += data;
+  }
+  expect(sha(text)).toBe(out.manifest_sha256);
+  return JSON.parse(text) as Manifest;
+}
+
 function packed(w: World): Manifest {
   const done = cold(w, 'prepack', w.fsA);
   const out = printed(done.stdout);
   expect(out.blocked).toBeNull();
   expect(done.status).toBe(0);
-  return out.manifest as Manifest;
+  return listOf(w, out);
 }
 
 run('universe-cold: prepack prints what it copied, finish puts back only that (Opus on #1025)', () => {
@@ -148,7 +165,7 @@ run('universe-cold: prepack prints what it copied, finish puts back only that (O
     fs.symlinkSync(evil, w.outside);
     const done = cold(w, 'prepack', w.fsA);
     expect(done.status).toBe(1);
-    expect(printed(done.stdout)).toMatchObject({ blocked: 'outside_link', manifest: null });
+    expect(printed(done.stdout)).toMatchObject({ blocked: 'outside_link', manifest_bytes: null, manifest_sha256: null });
     // The link and everything behind it are as they were (rmtree did not follow it, nothing was copied into it)
     expect(fs.lstatSync(w.outside).isSymbolicLink()).toBe(true);
     expect(fs.readdirSync(evil, { recursive: true }).sort()).toEqual(['etc', 'etc/sudoers.d', 'etc/sudoers.d/x']);
@@ -327,7 +344,7 @@ run('universe-cold: prepack prints what it copied, finish puts back only that (O
     fs.symlinkSync(secret, path.join(w.fsA, 'var/www/sub'));
     const out = printed(cold(w, 'prepack', w.fsA).stdout);
     expect(out.blocked).toBeNull();
-    expect(JSON.stringify(out.manifest)).not.toContain('not for the agent');
+    expect(JSON.stringify(listOf(w, out))).not.toContain('not for the agent');
     expect(fs.existsSync(path.join(w.outside, 'var/www/sub/key'))).toBe(false);
   });
 
@@ -475,5 +492,127 @@ run('universe-cold: prepack prints what it copied, finish puts back only that (O
     } finally {
       server.close();
     }
+  });
+});
+
+run('universe-cold: a long list travels in pieces (Sentry on #1035: one command line and one answer are both capped)', () => {
+  /** Many files with long names, so the list is far over what one command (about 128 KiB) or one printed line can carry. */
+  function crowded(w: World, count: number) {
+    const folder = path.join(w.fsA, 'opt/many');
+    fs.mkdirSync(folder, { recursive: true });
+    for (let i = 0; i < count; i++) fs.writeFileSync(path.join(folder, `file-${String(i).padStart(5, '0')}-${'x'.repeat(120)}.dat`), `data ${i}`);
+  }
+
+  /** What Orbit does to send a list: slices of at most `piece` characters, each its own command, the way the provider sends them. */
+  function sendInPieces(w: World, text: string, piece = 48 * 1024) {
+    for (let at = 0; at < text.length; at += piece) {
+      const part = text.slice(at, at + piece);
+      const put = cold(w, `list-put ${at}`, w.fsB, `${part}\n`);
+      expect(put.stdout).toBe(`listput=1 size=${at + part.length}\n`);
+    }
+  }
+
+  const ascii = (value: unknown) => JSON.stringify(value);
+
+  it('prepack prints a short line, never the list: the list is a root-only file the caller reads back in slices and checks', () => {
+    const w = world();
+    crowded(w, 1200);
+    const done = cold(w, 'prepack', w.fsA);
+    expect(done.status).toBe(0);
+    // However many files there are, the line stays small (Agent37 cuts what is printed over 512 KB)
+    expect(done.stdout.length).toBeLessThan(2000);
+    const out = printed(done.stdout);
+    expect(out).not.toHaveProperty('manifest');
+    expect(out.manifest_bytes as number).toBeGreaterThan(160_000);
+    const file = path.join(w.fsA, 'usr/local/share/universe/cold/list.json');
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(path.dirname(file)).mode & 0o777).toBe(0o700);
+    // Read back in slices smaller than the list, every one exactly as long as asked
+    const list = listOf(w, out, 50_000);
+    expect(list.files).toHaveLength(1200 + 3);
+    // The list file is never part of what a later prepack copies
+    expect(list.files.map((entry) => entry[1]).some((name) => name.includes('/usr/local/share/universe/'))).toBe(false);
+  });
+
+  it('a list too long for one command is sent in pieces and put back whole, and the file it travelled in is gone afterwards', () => {
+    const w = world();
+    crowded(w, 1200);
+    const list = packed(w);
+    const text = ascii(list);
+    expect(text.length).toBeGreaterThan(160_000);
+    sendInPieces(w, text);
+    const done = cold(w, 'finish', w.fsB, JSON.stringify({ outside_file: { bytes: text.length, sha256: sha(text) } }));
+    expect(done.stdout).toMatch(/finished=1 files=1203 packages=1\n/);
+    expect(fs.readFileSync(path.join(w.fsB, `opt/many/file-01199-${'x'.repeat(120)}.dat`), 'utf8')).toBe('data 1199');
+    expect(fs.existsSync(path.join(w.fsB, 'usr/local/share/universe/cold/list.json'))).toBe(false);
+  });
+
+  it('a piece that arrives twice, out of order or skipping ahead is refused, and the transfer starts again from the first piece', () => {
+    const w = world();
+    const text = ascii({ files: [], packages: [] });
+    expect(cold(w, 'list-put 0', w.fsB, `${text.slice(0, 5)}\n`).stdout).toBe('listput=1 size=5\n');
+    expect(cold(w, 'list-put 0', w.fsB, `${text.slice(0, 5)}\n`).stdout).toBe('listput=1 size=5\n');
+    expect(cold(w, 'list-put 3', w.fsB, `${text.slice(3)}\n`).stdout).toMatch(/listput=0 reason=out_of_order/);
+    expect(cold(w, 'list-put 9', w.fsB, 'x\n').stdout).toMatch(/listput=0 reason=out_of_order/);
+    expect(cold(w, 'list-put 5', w.fsB, `${text.slice(5)}\n`).stdout).toBe(`listput=1 size=${text.length}\n`);
+    expect(finishFrom(w, text).stdout).toMatch(/finished=1/);
+    // A line break inside a piece, or a character that is not plain ASCII, is not a piece
+    expect(cold(w, 'list-put 0', w.fsB, 'a\nb\n').stdout).toMatch(/listput=0 reason=usage/);
+    expect(cold(w, 'list-put 0', w.fsB, 'caf\u00e9\n').stdout).toMatch(/listput=0 reason=usage/);
+  });
+
+  const finishFrom = (w: World, text: string) => cold(w, 'finish', w.fsB, JSON.stringify({ outside_file: { bytes: text.length, sha256: sha(text) } }));
+
+  it('finish refuses a list that is not the length and SHA-256 it was told, puts nothing back, and removes the file', () => {
+    const w = world();
+    const list = packed(w);
+    const text = ascii(list);
+    const file = path.join(w.fsB, 'usr/local/share/universe/cold/list.json');
+    sendInPieces(w, text);
+    const wrong = [
+      { bytes: text.length, sha256: sha('something else') },
+      { bytes: text.length - 1, sha256: sha(text) },
+      { bytes: text.length + 1, sha256: sha(text) },
+      { bytes: text.length, sha256: 'nothex' },
+      { bytes: 'many', sha256: sha(text) },
+      null,
+    ];
+    for (const spec of wrong) {
+      sendInPieces(w, text);
+      expect(cold(w, 'finish', w.fsB, JSON.stringify({ outside_file: spec })).stdout).toContain('finished=0 reason=outside_manifest');
+      expect(fs.existsSync(file)).toBe(false);
+    }
+    // No list was ever sent
+    expect(cold(w, 'finish', w.fsB, JSON.stringify({ outside_file: { bytes: text.length, sha256: sha(text) } })).stdout).toContain('finished=0 reason=outside_manifest');
+    expect(writtenOnB(w)).toEqual([]);
+    expect(aptCalls()).toEqual([]);
+    // A list that arrived whole is not trusted for its contents either: the same checks as for one sent as it is
+    const bad = ascii({ files: [['f', '/home/node/x', 1, 0o600, sha('x')]], packages: [] });
+    sendInPieces(w, bad);
+    expect(finishFrom(w, bad).stdout).toContain('finished=0 reason=outside_manifest');
+    expect(writtenOnB(w)).toEqual([]);
+  });
+
+  it('a file name that is not valid UTF-8 (a path or a link target) makes the computer blocked, not a list a database would refuse', () => {
+    const w = world();
+    fs.writeFileSync(Buffer.concat([Buffer.from(path.join(w.fsA, 'opt/tool/')), Buffer.from([0x66, 0xff, 0xfe, 0x2e, 0x74])]), 'x');
+    const done = cold(w, 'prepack', w.fsA);
+    expect(done.status).toBe(1);
+    expect(printed(done.stdout)).toMatchObject({ blocked: 'outside_name_not_utf8', manifest_bytes: null, manifest_sha256: null });
+    // The same for a link that points at such a name
+    const v = world();
+    fs.symlinkSync(Buffer.from([0x74, 0xff, 0x6f]) as unknown as string, path.join(v.fsA, 'opt/tool/odd'));
+    const again = cold(v, 'prepack', v.fsA);
+    expect(printed(again.stdout)).toMatchObject({ blocked: 'outside_name_not_utf8', manifest_bytes: null });
+  });
+
+  it('more than 2000 added software names makes the computer blocked (a list finish would refuse is never made)', () => {
+    const w = world();
+    const done = cold(w, 'prepack', w.fsA, '', { EXTRA_PACKAGES: '2000' });
+    expect(printed(done.stdout)).toMatchObject({ blocked: 'packages_too_many', manifest_bytes: null });
+    // 1999 more and ffmpeg is exactly 2000: still fine
+    const ok = world();
+    const fine = cold(ok, 'prepack', ok.fsA, '', { EXTRA_PACKAGES: '1999' });
+    expect(printed(fine.stdout).blocked).toBeNull();
   });
 });

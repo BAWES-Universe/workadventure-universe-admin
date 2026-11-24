@@ -1210,6 +1210,8 @@ find . -maxdepth 5 \( -path './.*' -o -name node_modules -o -name __pycache__ \)
  *   universe-cold restore   (node)  reads {url, token, sha256} on standard input, fetches the copy straight from Orbit, checks its SHA-256, unpacks it
  *                                   into the home folder and compares EVERY file with the copy; prints restored=1, or restored=0 reason=...
  *   universe-cold finish    (root)  puts back what was outside the home folder and installs the software the agent had added; prints finished=1, or finished=0 reason=...
+ *   universe-cold list-piece OFFSET LENGTH  (root)  prints a slice of the list prepack wrote (a root-only file), so the list never has to fit in one answer (Agent37 cuts one over 512 KB)
+ *   universe-cold list-put OFFSET           (root)  appends a slice (standard input) to a root-only file on this computer, so a list too big for one command can be sent in pieces; finish reads it
  */
 export const UNIVERSE_COLD = String.raw`#!/usr/bin/env python3
 import errno, hashlib, json, os, pwd, re, shutil, stat as statmod, subprocess, sys, tarfile, threading, urllib.request
@@ -1233,6 +1235,13 @@ SKIP = ("/etc/universe/", "/etc/hosts", "/etc/hostname", "/etc/resolv.conf", "/e
         "/etc/group", "/etc/gshadow", "/etc/subuid", "/etc/subgid", "/etc/machine-id", "/etc/profile.d/universe", "/etc/ca-certificates")
 MAX_FILES = 5000
 MAX_BYTES = 200 * 1024 * 1024
+MAX_PACKAGES = 2000
+# The list prepack made travels through a root-only file in a folder of its own (the folder is skipped by the scan, so it is never part of a copy): written by prepack and read back
+# in slices, or written in slices and read by finish. Plain ASCII (json escapes everything else), so a slice of N characters is N bytes
+COLD_DIR = "/usr/local/share/universe/cold"
+LIST_FILE = "list.json"
+MAX_LIST_BYTES = 32 * 1024 * 1024
+MAX_PIECE = 256 * 1024
 PACKAGE_NAME = re.compile(r"^[a-z0-9][a-z0-9+.:-]{0,100}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 # A test can put the whole file system of the computer under a folder of its own (only ever together with its own home folder)
@@ -1332,7 +1341,7 @@ def copy_into(outside_fd, root_fd, path):
                 target = os.readlink(name, dir_fd=source_dir)
                 # Not handed to the agent's user: a link owned by root in the home folder is harmless (the restore unpacks without owners), and a name there could be swapped
                 os.symlink(target, name, dir_fd=parent)
-                return ["l", path, 0, 0, target], len(target.encode())
+                return ["l", path, 0, 0, target], len(os.fsencode(target))
             source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=source_dir)
         finally:
             os.close(source_dir)
@@ -1357,8 +1366,134 @@ def copy_into(outside_fd, root_fd, path):
     finally:
         os.close(parent)
 
+def utf8_ok(text):
+    # A name that is not valid UTF-8 reads here as lone surrogate characters: it cannot be kept in a list that goes to a database, so the computer says so instead
+    try:
+        text.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+def cold_dir(create):
+    # The folder the list travels through, opened without following a link and only if it is ours (owned by whoever runs this, closed to everyone else)
+    path = real(COLD_DIR)
+    if create:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if os.fstat(fd).st_uid != os.getuid():
+            raise OSError("not ours")
+        os.fchmod(fd, 0o700)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+def write_list(text):
+    # The whole list, as one file made new (a name that is there is unlinked, never written through). Returns (bytes, sha256)
+    data = text.encode("ascii")
+    if len(data) > MAX_LIST_BYTES:
+        raise OverflowError("list")
+    folder = cold_dir(True)
+    try:
+        try:
+            os.unlink(LIST_FILE, dir_fd=folder)
+        except FileNotFoundError:
+            pass
+        with os.fdopen(os.open(LIST_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder), "wb") as handle:
+            handle.write(data)
+    finally:
+        os.close(folder)
+    return len(data), hashlib.sha256(data).hexdigest()
+
+def drop_list():
+    try:
+        folder = cold_dir(False)
+    except OSError:
+        return
+    try:
+        os.unlink(LIST_FILE, dir_fd=folder)
+    except OSError:
+        pass
+    finally:
+        os.close(folder)
+
+def list_piece():
+    if os.getuid() != 0 and not FSROOT:
+        print("listpiece_failed reason=not_root")
+        return 1
+    try:
+        offset, length = int(sys.argv[2]), int(sys.argv[3])
+    except (IndexError, ValueError):
+        print("listpiece_failed reason=usage")
+        return 2
+    if offset < 0 or length < 1 or length > MAX_PIECE:
+        print("listpiece_failed reason=usage")
+        return 2
+    try:
+        folder = cold_dir(False)
+        try:
+            fd = os.open(LIST_FILE, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=folder)
+        finally:
+            os.close(folder)
+        with os.fdopen(fd, "rb") as handle:
+            if not statmod.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise OSError("not a file")
+            data = os.pread(handle.fileno(), length, offset)
+        text = data.decode("ascii")
+    except (OSError, UnicodeDecodeError):
+        print("listpiece_failed reason=unreadable")
+        return 1
+    if "\n" in text:
+        print("listpiece_failed reason=unreadable")
+        return 1
+    print("listpiece=" + text)
+    return 0
+
+def list_put():
+    if os.getuid() != 0 and not FSROOT:
+        print("listput=0 reason=not_root")
+        return 1
+    try:
+        offset = int(sys.argv[2])
+    except (IndexError, ValueError):
+        print("listput=0 reason=usage")
+        return 2
+    raw = sys.stdin.read()
+    # The command ends the slice with a line break of its own (and the slice has none, a list is one line)
+    text = raw[:-1] if raw.endswith("\n") else raw
+    if offset < 0 or not text or len(text) > MAX_PIECE or any(ord(ch) < 0x20 or ord(ch) > 0x7e for ch in text) or offset + len(text) > MAX_LIST_BYTES:
+        print("listput=0 reason=usage")
+        return 2
+    try:
+        folder = cold_dir(True)
+        try:
+            if offset == 0:
+                try:
+                    os.unlink(LIST_FILE, dir_fd=folder)
+                except FileNotFoundError:
+                    pass
+                fd = os.open(LIST_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+            else:
+                fd = os.open(LIST_FILE, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, dir_fd=folder)
+        finally:
+            os.close(folder)
+        with os.fdopen(fd, "wb") as handle:
+            info = os.fstat(handle.fileno())
+            # Only the next slice is taken: a repeat of one that already arrived, or one that skips ahead, is refused and the sender starts again
+            if not statmod.S_ISREG(info.st_mode) or info.st_size != offset:
+                print("listput=0 reason=out_of_order")
+                return 1
+            handle.write(text.encode("ascii"))
+            handle.flush()
+            print("listput=1 size=%d" % os.fstat(handle.fileno()).st_size)
+    except OSError:
+        print("listput=0 reason=not_written")
+        return 1
+    return 0
+
 def prepack():
-    empty = {"home_files": 0, "home_bytes": 0, "outside_files": 0, "outside_bytes": 0, "packages": [], "manifest": None}
+    empty = {"home_files": 0, "home_bytes": 0, "outside_files": 0, "outside_bytes": 0, "packages": [], "manifest_bytes": None, "manifest_sha256": None}
     def stop(why):
         print("prepack=" + json.dumps(dict(empty, blocked=why)))
         return 1
@@ -1417,6 +1552,9 @@ def prepack():
                         # copied or unpacked with its old time kept (cp -p, tar x, rsync -a) has an old modification time but a change time of the day it arrived
                         if not newer_than(info, reference):
                             continue
+                        if not utf8_ok(path):
+                            blocked = "outside_name_not_utf8"
+                            break
                         found.append(path)
                         total += info.st_size if not statmod.S_ISLNK(info.st_mode) else 0
                         if len(found) > MAX_FILES or total > MAX_BYTES:
@@ -1439,6 +1577,9 @@ def prepack():
                 except OSError:
                     blocked = "outside_not_copied"
                     break
+                if entry[0] == "l" and not utf8_ok(entry[4]):
+                    blocked = "outside_name_not_utf8"
+                    break
                 entries.append(entry)
                 out_bytes += size
                 copied += 1
@@ -1449,6 +1590,8 @@ def prepack():
                 with open(real(BASELINE)) as handle:
                     base = set(handle.read().split())
                 packages = sorted(name for name in current - base if PACKAGE_NAME.match(name))
+                if len(packages) > MAX_PACKAGES:
+                    raise OverflowError("packages")
                 # Whatever is at the name is removed (a name, never what it points at: a hard link to a root file is only unlinked) and the file is made new, exclusively and without
                 # following a link, through the held folder; it is handed over through its descriptor
                 try:
@@ -1461,6 +1604,8 @@ def prepack():
                     handle.write("\n".join(packages) + ("\n" if packages else ""))
             except OSError as error:
                 blocked = "outside_link" if error.errno == errno.ELOOP else "packages_unknown"
+            except OverflowError:
+                blocked = "packages_too_many"
             except Exception:
                 blocked = "packages_unknown"
         if os.getuid() == 0:
@@ -1470,8 +1615,17 @@ def prepack():
             if fd is not None:
                 os.close(fd)
     files, size = home_stats()
-    manifest = {"files": entries, "packages": packages} if blocked is None else None
-    print("prepack=" + json.dumps({"home_files": files, "home_bytes": size, "outside_files": copied, "outside_bytes": out_bytes, "packages": packages[:500], "blocked": blocked, "manifest": manifest}, separators=(",", ":")))
+    # The list is not printed (Agent37 cuts what a command prints over 512 KB, and a list of thousands of files can be that long): it is written to a root-only file, and what is
+    # printed is how long it is and its SHA-256, so the caller reads it back in slices (list-piece) and checks every byte
+    list_bytes = list_sha = None
+    if blocked is None:
+        try:
+            list_bytes, list_sha = write_list(json.dumps({"files": entries, "packages": packages}, separators=(",", ":")))
+        except OverflowError:
+            blocked = "outside_list_too_big"
+        except (OSError, UnicodeEncodeError):
+            blocked = "outside_list_unwritten"
+    print("prepack=" + json.dumps({"home_files": files, "home_bytes": size, "outside_files": copied, "outside_bytes": out_bytes, "packages": packages[:500], "blocked": blocked, "manifest_bytes": list_bytes, "manifest_sha256": list_sha}, separators=(",", ":")))
     return 0 if blocked is None else 1
 
 def prefix_for(names):
@@ -1807,15 +1961,49 @@ def install_outside(entries):
         os.close(root_fd)
     return count
 
+def read_list(spec):
+    # The list Orbit sent in slices (list-put): as long as it said and with the SHA-256 it said, or it is refused
+    if not isinstance(spec, dict) or not isinstance(spec.get("bytes"), int) or isinstance(spec.get("bytes"), bool) or not isinstance(spec.get("sha256"), str) or not SHA256.match(spec["sha256"]):
+        raise ValueError("spec")
+    if spec["bytes"] < 2 or spec["bytes"] > MAX_LIST_BYTES:
+        raise ValueError("size")
+    try:
+        folder = cold_dir(False)
+        try:
+            fd = os.open(LIST_FILE, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=folder)
+        finally:
+            os.close(folder)
+        with os.fdopen(fd, "rb") as handle:
+            if not statmod.S_ISREG(os.fstat(handle.fileno()).st_mode) or os.fstat(handle.fileno()).st_size != spec["bytes"]:
+                raise ValueError("size")
+            data = handle.read(spec["bytes"] + 1)
+    except OSError:
+        raise ValueError("unreadable")
+    if len(data) != spec["bytes"] or hashlib.sha256(data).hexdigest() != spec["sha256"]:
+        raise ValueError("sha")
+    return json.loads(data.decode("ascii"))
+
 def finish():
+    try:
+        return finish_with_list()
+    finally:
+        # Whatever was sent in slices is gone once this ends, however it ended
+        if os.getuid() == 0 or FSROOT:
+            drop_list()
+
+def finish_with_list():
     if os.getuid() != 0 and not FSROOT:
         print("finished=0 reason=not_root")
         return 1
-    # What prepack printed comes from Orbit on standard input, never from the home folder: {"outside": {...}} (null for a copy made before the list was kept)
+    # What prepack printed comes from Orbit on standard input, never from the home folder: {"outside": {...}} (null for a copy made before the list was kept),
+    # or {"outside_file": {"bytes", "sha256"}} when the list was too long for one command and was sent in slices (list-put)
     try:
         raw = sys.stdin.read()
         config = json.loads(raw) if raw.strip() else {}
-        manifest = config.get("outside") if isinstance(config, dict) else None
+        if isinstance(config, dict) and "outside_file" in config:
+            manifest = read_list(config["outside_file"])
+        else:
+            manifest = config.get("outside") if isinstance(config, dict) else None
     except ValueError:
         print("finished=0 reason=outside_manifest")
         return 1
@@ -1850,7 +2038,7 @@ def finish():
 
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else ""
-    code = {"prepack": prepack, "restore": restore, "finish": finish}.get(command, lambda: (print("usage: universe-cold prepack|restore|finish") or 2))()
+    code = {"prepack": prepack, "restore": restore, "finish": finish, "list-piece": list_piece, "list-put": list_put}.get(command, lambda: (print("usage: universe-cold prepack|restore|finish|list-piece|list-put") or 2))()
     sys.exit(code)
 `;
 

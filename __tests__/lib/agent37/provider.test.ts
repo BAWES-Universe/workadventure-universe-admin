@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
 import { Agent37ComputerProvider, Agent37FundsLow, BRICK_NETWORK, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
 import type { ImageState } from '@/lib/agent37/image';
@@ -11,7 +12,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const calls: string[] = [];
   const execs: Array<{ id: string; command: string; options: unknown }> = [];
   let healthy = true;
-  let execOut: (command: string) => string = () => 'ok';
+  let execOut: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean } = () => 'ok';
   let markOut = 'marked=1\n';
   let revisionAfterUpdate = 2;
   /** What Agent37 holds as each machine's managed budget: the monthly cap and the remaining one-time credit (a machine not here has both at zero). */
@@ -79,7 +80,8 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
     async exec(id: string, command: string, options?: unknown) {
       calls.push(`exec:${id}:${command}`);
       execs.push({ id, command, options });
-      return { exitCode: 0, stdout: command === 'universe-mark' ? markOut : execOut(command), stderr: '', truncated: false };
+      const answer = command === 'universe-mark' ? markOut : execOut(command);
+      return typeof answer === 'string' ? { exitCode: 0, stdout: answer, stderr: '', truncated: false } : { exitCode: answer.exitCode ?? 0, stdout: answer.stdout, stderr: '', truncated: answer.truncated ?? false };
     },
     async openTurn(url: string, input: { text: string; sessionId?: string | null }) {
       calls.push(`turn:${url}:${input.text}`);
@@ -135,7 +137,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }> = [];
   const networks: Array<{ id: string; network: unknown }> = [];
   const usage: { day: string; totalMicros: number; instances: Array<{ id: string; totalMicros: number; computeMicros: number; awakeMinutes: number }> } = { day: '2026-11-15', totalMicros: 0, instances: [] };
-  return { client: client as unknown as Agent37Client, instances, budgets, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
+  return { client: client as unknown as Agent37Client, instances, budgets, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean }) => (execOut = fn), setMark: (value: string) => (markOut = value) };
 }
 
 function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
@@ -741,6 +743,183 @@ describe('cold storage operations on a computer', () => {
       w.setExec(() => `prepack=${JSON.stringify({ home_files: 1, home_bytes: 1, outside_files: 0, outside_bytes: 0, packages: [], blocked: null, manifest: bad })}\n`);
       await expect(p.prepack('m1')).rejects.toThrow('list of what is outside');
     }
+  });
+
+  describe('a long list of what is outside the home folder (Sentry on #1035)', () => {
+    /** Thousands of files with long paths: the list is far over one command line (128 KiB) and over what Agent37 prints in one answer (512 KB). */
+    const crowd = (count: number, extra: Partial<{ path: string }> = {}) => ({
+      files: Array.from({ length: count }, (_, i) => ['f', extra.path && i === 0 ? extra.path : `/opt/many/${String(i).padStart(5, '0')}-${'x'.repeat(150)}`, 10 + i, 0o644, SHA] as ['f', string, number, number, string]),
+      packages: ['ffmpeg'],
+    });
+    const hash = (text: string) => createHash('sha256').update(text, 'latin1').digest('hex');
+    const line = (list: unknown, over: Record<string, unknown> = {}) => {
+      const text = JSON.stringify(list);
+      return `prepack=${JSON.stringify({ home_files: 12, home_bytes: 3400, outside_files: 3000, outside_bytes: 90, packages: ['ffmpeg'], blocked: null, manifest_bytes: text.length, manifest_sha256: hash(text), ...over })}\n`;
+    };
+    /** The computer: prints the line, and answers `universe-cold list-piece OFFSET LENGTH` from the list it holds, the way the script does. */
+    const holding = (w: ReturnType<typeof world>, list: unknown, over: Record<string, unknown> = {}, tweak: (piece: string, at: number) => string = (piece) => piece) => {
+      const text = JSON.stringify(list);
+      w.setExec((command) => {
+        if (command === 'universe-cold prepack') return line(list, over);
+        const asked = /^universe-cold list-piece (\d+) (\d+)$/.exec(command);
+        if (!asked) return 'ok';
+        const at = Number(asked[1]);
+        const piece = tweak(text.slice(at, at + Number(asked[2])), at);
+        return `listpiece=${piece}\n`;
+      });
+    };
+
+    it('reads a list far longer than one answer in pieces, each asked as root, and every byte is checked', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      expect(JSON.stringify(list).length).toBeGreaterThan(512 * 1024);
+      holding(w, list);
+      const result = await p.prepack('m1');
+      expect(result).toMatchObject({ blocked: null, outsideFiles: 3000, packages: ['ffmpeg'] });
+      expect(result.outside).toEqual(list);
+      const reads = w.execs.filter((entry) => entry.command.startsWith('universe-cold list-piece'));
+      expect(reads.length).toBeGreaterThanOrEqual(3);
+      for (const read of reads) {
+        expect(read.options).toMatchObject({ user: 'root' });
+        expect(Number(/ (\d+)$/.exec(read.command)![1])).toBeLessThanOrEqual(200_000);
+      }
+    });
+
+    it('a piece that is short, cut, missing or changed is an error (the pack-away is tried again), never a shorter or different list', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      holding(w, list, {}, (piece) => piece.slice(0, -1));
+      await expect(p.prepack('m1')).rejects.toThrow('could not be read');
+      holding(w, list, {}, (piece, at) => (at === 0 ? piece : piece.replace(/x/, 'y')));
+      await expect(p.prepack('m1')).rejects.toThrow('could not be read');
+      // Same length, one character changed in the last piece: only the SHA-256 can tell
+      holding(w, list, {}, (piece, at) => (at > 0 ? `${piece.slice(0, -2)}9${piece.slice(-1)}` : piece));
+      await expect(p.prepack('m1')).rejects.toThrow('could not be read');
+      w.setExec((command) => (command === 'universe-cold prepack' ? line(list) : { stdout: 'listpiece=x\n', truncated: true }));
+      await expect(p.prepack('m1')).rejects.toThrow('could not be read');
+      w.setExec((command) => (command === 'universe-cold prepack' ? line(list) : { stdout: '', exitCode: 1 }));
+      await expect(p.prepack('m1')).rejects.toThrow('could not be read');
+      // A line that says no length or no SHA-256 is not a list
+      for (const over of [{ manifest_bytes: null }, { manifest_sha256: 'nothex' }, { manifest_bytes: 1 }]) {
+        holding(w, list, over);
+        await expect(p.prepack('m1')).rejects.toThrow('list of what is outside');
+      }
+    });
+
+    it('output Agent37 cut (over 512 KB, the middle removed) is a computer that is blocked with a reason, never an inventory read from what is left', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      // The line itself cut: nothing to read
+      w.setExec(() => ({ stdout: `${'noise\n'.repeat(100)}prepack={"home_files":1,"home_bytes":\n[... 700000 bytes cut ...]\nxxxx}`, truncated: true }));
+      await expect(p.prepack('m1')).resolves.toEqual({ homeFiles: 0, homeBytes: 0, outsideFiles: 0, outsideBytes: 0, packages: [], blocked: 'inventory_output_too_long', outside: null });
+      w.setExec(() => ({ stdout: 'noise only\n', truncated: true }));
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: 'inventory_output_too_long' });
+      // The same output that was not cut is still an error of its own
+      w.setExec(() => 'noise only\n');
+      await expect(p.prepack('m1')).rejects.toThrow('could not be inventoried');
+      // A short line that survived the cut whole is read as it is
+      w.setExec((command) => (command === 'universe-cold prepack' ? { stdout: `${'noise\n'.repeat(1000)}${line({ files: [], packages: [] })}`, truncated: true } : { stdout: 'listpiece={"files":[],"packages":[]}\n' }));
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: { files: [], packages: [] } });
+    });
+
+    it('a name a database would refuse, more software than a list can carry, or more files than it can carry is a blocked computer with a reason, never a failure', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      // A file name that is not valid UTF-8 reads as a lone surrogate
+      holding(w, crowd(3, { path: '/opt/many/bad-\udcff-name' }));
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: 'outside_name_not_utf8', outside: null, outsideFiles: 3000 });
+      holding(w, { files: [['l', '/opt/tool/odd', 0, 0, 'to-\ud800']], packages: [] });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: 'outside_name_not_utf8', outside: null });
+      // A pair is a character, not a lone surrogate: a name in any script is fine
+      holding(w, { files: [['f', '/opt/many/\u0627\u0644-\ud83d\ude00', 1, 0o644, SHA]], packages: [] });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null });
+      holding(w, { files: [], packages: Array.from({ length: 2001 }, (_, i) => `pkg${i}`) });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: 'packages_too_many', outside: null });
+      holding(w, { files: [], packages: Array.from({ length: 2000 }, (_, i) => `pkg${i}`) });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null });
+      holding(w, crowd(5001));
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: 'outside_too_big', outside: null });
+      holding(w, crowd(5000));
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null });
+      // A list that is not the shape the script prints is still an error
+      holding(w, { files: [['f', '/home/node/x', 1, 0o600, SHA]], packages: [] });
+      await expect(p.prepack('m1')).rejects.toThrow('list of what is outside');
+      // A list longer than a computer may hand over is blocked before any piece is read
+      holding(w, crowd(1), { manifest_bytes: 33 * 1024 * 1024 });
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: 'outside_list_too_big' });
+      expect(w.execs.at(-1)!.command).toBe('universe-cold prepack');
+    });
+
+    it('a restore sends a list too long for one command in pieces, each command well under the 128 KiB a single argument may be, then finish reads that file', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      // A name in another script too: sent as plain ASCII escapes, so no piece is cut inside a character
+      list.files[1][1] = '/opt/many/\u0627\u0644\u0645\u0644\u0641-\ud83d\ude00';
+      const received: string[] = [];
+      w.setExec((command) => {
+        if (command.startsWith('universe-cold restore')) return 'restored=1\n';
+        const put = /^universe-cold list-put (\d+) <<'(LIST_[0-9a-f]{24})'\n([^\n]*)\n\2$/.exec(command);
+        if (put) {
+          expect(Number(put[1])).toBe(received.join('').length);
+          received.push(put[3]);
+          return `listput=1 size=${received.join('').length}\n`;
+        }
+        return command.startsWith('universe-cold finish') ? 'finished=1 files=3000 packages=1\n' : 'ok';
+      });
+      await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: true, reason: null });
+      const text = received.join('');
+      expect(JSON.parse(text)).toEqual(list);
+      expect(/^[\x20-\x7e]*$/.test(text)).toBe(true);
+      expect(received.length).toBeGreaterThan(8);
+      const commands = w.execs.map((entry) => entry.command);
+      for (const command of commands) expect(Buffer.byteLength(command)).toBeLessThan(60 * 1024);
+      const puts = w.execs.filter((entry) => entry.command.startsWith('universe-cold list-put'));
+      for (const put of puts) expect(put.options).toMatchObject({ user: 'root' });
+      const finish = w.execs.at(-1)!;
+      expect(finish.command).toBe(`universe-cold finish <<'FINISH_JSON'\n${JSON.stringify({ outside_file: { bytes: text.length, sha256: hash(text) } })}\nFINISH_JSON`);
+      expect(finish.options).toMatchObject({ user: 'root' });
+      // Every piece went before the finish, after the restore
+      expect(commands.findIndex((command) => command.startsWith('universe-cold list-put'))).toBe(1);
+    });
+
+    it('a piece the computer did not take exactly as sent is a failed restore with a reason, and finish is never run', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const list = crowd(3000);
+      let puts = 0;
+      const answers: Array<(n: number) => string | { stdout: string; exitCode?: number; truncated?: boolean }> = [
+        () => 'listput=0 reason=not_written\n',
+        () => ({ stdout: 'listput=1 size=1\n' }),
+        (n) => ({ stdout: `listput=1 size=${n}\n`, exitCode: 1 }),
+        () => '',
+      ];
+      for (const answer of answers) {
+        puts = 0;
+        w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.startsWith('universe-cold list-put') ? answer(++puts) : 'ok'));
+        await expect(p.restoreInto('m1', { ...source, outside: list as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_transfer' });
+        expect(w.execs.some((entry) => entry.command.startsWith('universe-cold finish'))).toBe(false);
+        w.execs.length = 0;
+      }
+    });
+
+    it('a list that fits one command is still sent as it always was (no pieces)', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.startsWith('universe-cold finish') ? 'finished=1\n' : 'ok'));
+      await p.restoreInto('m1', { ...source, outside: crowd(100) as never });
+      expect(w.execs.map((entry) => entry.command.split(' ')[1])).toEqual(['restore', 'finish']);
+      expect(w.execs[1].command).toBe(`universe-cold finish <<'FINISH_JSON'\n${JSON.stringify({ outside: crowd(100) })}\nFINISH_JSON`);
+    });
   });
 
   it('moves a computer made from an older image to the current one BEFORE universe-cold prepack runs (the old script prints no list, and the pack-away would fail for good)', async () => {

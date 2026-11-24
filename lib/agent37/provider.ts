@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { readOutsideManifest } from '@/lib/computer-outside';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { LIST_INLINE_BYTES, LIST_MAX_BYTES, LIST_READ_PIECE, LIST_SEND_PIECE, asciiJson, checkOutsideManifest, readOutsideManifest, type OutsideManifest } from '@/lib/computer-outside';
 import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, PackInventory, ProviderDay, RestoreResult, RestoreSource, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
 import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, TurnNotSent, type Instance, type NetworkPolicy } from '@/lib/agent37/client';
@@ -511,16 +511,23 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * not packed away: nothing is thrown away to make a copy fit. The machine is settled first (moved to the image's current revision), so it runs the current script.
    */
   async prepack(ref: string): Promise<PackInventory> {
+    const unpacked = (blocked: string): PackInventory => ({ homeFiles: 0, homeBytes: 0, outsideFiles: 0, outsideBytes: 0, packages: [], blocked, outside: null });
     // Put in order first, as for a job and a restore: a computer made from an older image runs that image's `universe-cold`, which prints no list of what it copied
     // (and every Brick that sat idle since the new image would fail here for good). `settle` moves it to the current revision.
     await this.settle(ref);
     const done = await this.client.exec(ref, 'universe-cold prepack', { user: 'root', timeoutMs: 10 * 60_000 });
+    // Agent37 cuts the middle out of what a command prints over 512 KB: what is left of it is never read as an inventory. The script prints one short line (the list itself is
+    // read back below, in pieces), so this is a computer that says far more than it should, and it is said so (`blocked`), never guessed from what is left
     const line = /(^|\n)prepack=(\{[^\n]*\})/.exec(done.stdout)?.[2];
-    if (!line) throw new Error(`The computer could not be inventoried (exit ${done.exitCode})`);
+    if (!line) {
+      if (done.truncated) return unpacked('inventory_output_too_long');
+      throw new Error(`The computer could not be inventoried (exit ${done.exitCode})`);
+    }
     let data: Record<string, unknown>;
     try {
       data = JSON.parse(line);
     } catch {
+      if (done.truncated) return unpacked('inventory_output_too_long');
       throw new Error('The computer\'s inventory could not be read');
     }
     const count = (value: unknown) => (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null);
@@ -531,10 +538,45 @@ export class Agent37ComputerProvider implements ComputerProvider {
     if (homeFiles === null || homeBytes === null || outsideFiles === null || outsideBytes === null) throw new Error('The computer\'s inventory was not whole');
     const packages = Array.isArray(data.packages) ? data.packages.filter((name): name is string => typeof name === 'string' && /^[a-z0-9][a-z0-9+.:-]{0,100}$/.test(name)).slice(0, 500) : [];
     const blocked = typeof data.blocked === 'string' && /^[a-z_]{1,40}$/.test(data.blocked) ? data.blocked : null;
+    const counted = { homeFiles, homeBytes, outsideFiles, outsideBytes, packages };
+    if (blocked !== null) return { ...counted, blocked, outside: null };
     // The list of what was copied: required whenever the computer can be packed (a copy with no list would put nothing back), and read to the last field
-    const outside = readOutsideManifest(data.manifest);
-    if (blocked === null && outside === null) throw new Error('The computer\'s list of what is outside its home folder was not whole');
-    return { homeFiles, homeBytes, outsideFiles, outsideBytes, packages, blocked, outside };
+    let list: unknown = data.manifest;
+    if (list === undefined || list === null) {
+      const bytes = count(data.manifest_bytes);
+      const sha = typeof data.manifest_sha256 === 'string' && /^[0-9a-f]{64}$/.test(data.manifest_sha256) ? data.manifest_sha256 : null;
+      if (bytes === null || bytes < 2 || sha === null) throw new Error('The computer\'s list of what is outside its home folder was not whole');
+      if (bytes > LIST_MAX_BYTES) return { ...counted, blocked: 'outside_list_too_big', outside: null };
+      list = await this.readList(ref, bytes, sha);
+    }
+    const checked = checkOutsideManifest(list);
+    // A computer that holds more than a list can carry, or a name a list cannot keep, is one that cannot be packed away yet: a result, not a failure
+    if (!checked.ok && checked.reason !== 'invalid') return { ...counted, blocked: checked.reason, outside: null };
+    if (!checked.ok) throw new Error('The computer\'s list of what is outside its home folder was not whole');
+    return { ...counted, blocked: null, outside: checked.manifest };
+  }
+
+  /**
+   * The list `prepack` wrote on the computer (a root-only file), read back in pieces of at most `LIST_READ_PIECE` characters, each its own answer well under Agent37's cap.
+   * Every piece must be exactly as long as asked and the whole must have the length and SHA-256 the computer printed: a piece that is short, cut or changed is an error (the pack-away
+   * is tried again), never a shorter list.
+   */
+  private async readList(ref: string, bytes: number, sha256: string): Promise<unknown> {
+    const whole = () => new Error('The computer\'s list of what is outside its home folder could not be read');
+    let text = '';
+    while (text.length < bytes) {
+      const want = Math.min(LIST_READ_PIECE, bytes - text.length);
+      const got = await this.client.exec(ref, `universe-cold list-piece ${text.length} ${want}`, { user: 'root', timeoutMs: 60_000 });
+      const piece = got.exitCode === 0 && !got.truncated ? /(^|\n)listpiece=([^\n]*)/.exec(got.stdout)?.[2] : undefined;
+      if (piece === undefined || piece.length !== want) throw whole();
+      text += piece;
+    }
+    if (createHash('sha256').update(text, 'latin1').digest('hex') !== sha256) throw whole();
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw whole();
+    }
   }
 
   /** The home folder as a tar.gz stream. Only for a machine that is awake (the address wakes a sleeper). */
@@ -581,7 +623,14 @@ export class Agent37ComputerProvider implements ComputerProvider {
     }
     // The list of what prepack copied goes to finish from here, never from the home folder (null for a copy that has none: finish then puts nothing back outside the home folder)
     const outside = readOutsideManifest(source.outside);
-    const finishInput = JSON.stringify({ outside });
+    let finishInput = JSON.stringify({ outside });
+    // A list that does not fit one command (Linux caps one argument near 128 KiB, and a list of thousands of files is hundreds of KB) is written to a root-only file on the computer
+    // in pieces, each its own command, and `finish` reads that file (checking its length and SHA-256); a short list goes as it always did
+    if (outside !== null && Buffer.byteLength(finishInput) > LIST_INLINE_BYTES) {
+      const sent = await this.sendList(ref, outside);
+      if (!sent) return { ok: false, reason: 'finish_outside_transfer', ms: this.now() - started };
+      finishInput = JSON.stringify({ outside_file: sent });
+    }
     const finished = await this.client.exec(ref, `universe-cold finish <<'FINISH_JSON'\n${finishInput}\nFINISH_JSON`, { user: 'root', timeoutMs: 15 * 60_000 });
     if (!/(^|\n)finished=1\b/.test(finished.stdout)) {
       const reason = /finished=0 reason=([a-z_]+)/.exec(finished.stdout)?.[1] ?? `exit_${finished.exitCode}`;
@@ -592,6 +641,20 @@ export class Agent37ComputerProvider implements ComputerProvider {
       return { ok: true, reason: null, ms: this.now() - started, outside: 'unverified' };
     }
     return { ok: true, reason: null, ms: this.now() - started };
+  }
+
+  /** Sends a list to the computer in pieces of at most `LIST_SEND_PIECE` characters (plain ASCII, so the cut is never inside a character). Null when a piece was not taken exactly as sent. */
+  private async sendList(ref: string, outside: OutsideManifest): Promise<{ bytes: number; sha256: string } | null> {
+    const text = asciiJson(outside);
+    if (text.length > LIST_MAX_BYTES) return null;
+    // A line of its own that no piece can contain (a piece is one line cut from a list, and this has a random part)
+    const end = `LIST_${randomBytes(12).toString('hex')}`;
+    for (let at = 0; at < text.length; at += LIST_SEND_PIECE) {
+      const piece = text.slice(at, at + LIST_SEND_PIECE);
+      const put = await this.client.exec(ref, `universe-cold list-put ${at} <<'${end}'\n${piece}\n${end}`, { user: 'root', timeoutMs: 60_000 });
+      if (put.exitCode !== 0 || put.truncated || !new RegExp(`(^|\\n)listput=1 size=${at + piece.length}(\\n|$)`).test(put.stdout)) return null;
+    }
+    return { bytes: text.length, sha256: createHash('sha256').update(text, 'latin1').digest('hex') };
   }
 
   /** Asks again until the provider says the machine is gone and no longer in its list (so no longer billed), for up to two minutes. */
