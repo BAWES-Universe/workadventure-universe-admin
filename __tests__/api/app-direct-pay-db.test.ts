@@ -1108,9 +1108,12 @@ run('payments for pages, in a real database', () => {
       expect(await verifyOrder(stuck.id)).toMatchObject({ status: 'checking' });
       expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: stuck.id } })).status).toBe('creating');
       // Past the open time (24 hours by default) it ends, as not paid, with a line of history
-      await prisma.appPageOrder.update({ where: { id: stuck.id }, data: { createdAt: new Date(Date.now() - 25 * 3_600_000) } });
+      const createdLong = new Date(Date.now() - 25 * 3_600_000);
+      await prisma.appPageOrder.update({ where: { id: stuck.id }, data: { createdAt: createdLong } });
       expect(await verifyOrder(stuck.id)).toMatchObject({ status: 'not_paid' });
       expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: stuck.id } })).toMatchObject({ status: 'not_paid', paidAt: null });
+      // It closes AS OF when its open time ended (created + 24 hours), not at the look: the late window starts there (Opus on 14c4e407)
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: stuck.id } })).closedAt?.getTime()).toBe(createdLong.getTime() + 24 * 3_600_000);
       expect(await prisma.appPageOrderEvent.findMany({ where: { orderId: stuck.id }, select: { fromStatus: true, toStatus: true, reason: true } })).toEqual([{ fromStatus: 'creating', toStatus: 'not_paid', reason: 'start_never_finished' }]);
     });
 

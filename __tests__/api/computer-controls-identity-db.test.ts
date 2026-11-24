@@ -567,6 +567,37 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       }
     });
 
+    it('Opus on 14c4e407: a Resume whose own start leaves the job in line (the machine is busy) and whose request then stops is answered at once from what its start recorded, never `not_ready`', async () => {
+      const { sara, jobId } = await running('rec-busy');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      // Another job runs on the machine now: the job's start finds a writer and keeps it in line
+      const taxi = await another(sara, 'Taxi', minutes(3));
+      expect(await jobOf(taxi)).toMatchObject({ status: 'running' });
+      const realStart = controlInternals.tryStart;
+      const spy = jest.spyOn(controlInternals, 'tryStart').mockImplementation(async (...args: Parameters<typeof realStart>) => {
+        await realStart(...args);
+        throw new Error('the server stopped');
+      });
+      const old = { ...resumeWait };
+      resumeWait.ms = 200;
+      resumeWait.capMs = 600;
+      try {
+        const a = command();
+        await expect(resumeJob(sara.brickId, sara.id, jobId, minutes(10), a)).rejects.toThrow('the server stopped');
+        expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'turn' });
+        // What the start came to is on the command (a job that stays in line is a success: the resume was taken)
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true, pending: true, decided: { ok: true } } });
+        // The copy answers ok at once from the record and settles the command
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(11), a)).toMatchObject({ ok: true });
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true } });
+        expect((await commandOf(a.id))?.outcome).not.toHaveProperty('pending');
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(12), a)).toMatchObject({ ok: true });
+      } finally {
+        Object.assign(resumeWait, old);
+        spy.mockRestore();
+      }
+    });
+
     it('CodeRabbit on #1025 (d522f4b3 pass, N21): the queue sweep’s try for the SAME place in line never decides a Resume whose own start has not returned: its copy stores nothing and says `not_ready`, and when that start then gets the refusal both answer it', async () => {
       const { sara, jobId } = await running('n21-same-rank');
       await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
