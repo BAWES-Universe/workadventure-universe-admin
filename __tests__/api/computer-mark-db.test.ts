@@ -22,7 +22,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { isFenceCheckCommand, isFenceCommand, isMarkCommand } from '@/lib/computer-fence-script';
-import { savedMark } from '@/lib/computer-mark';
+import { refreshMarkParts, savedMark } from '@/lib/computer-mark';
 import { fenceMachine, finishJob, giveComputer, startJob, takeOver } from '@/lib/computer';
 import { CONTROL_TIMING } from '@/lib/computer-control';
 
@@ -240,6 +240,26 @@ run('the take-over fence’s mark, held by Orbit', () => {
       }
     });
 
+    it('waits while a hand-over of files is reading the machine (the files claim), so the fence does not stop its commands (Sentry on #1033)', async () => {
+      fake.parts = [PART];
+      const { sara } = await running();
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date() } });
+      fake.commands.length = 0;
+      const fencing = fenceMachine(sara.brickId);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(fake.commands.filter((entry) => isFenceCommand(entry.command))).toEqual([]);
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { filesClaimedAt: null } });
+      expect(await fencing).toBe('done');
+      expect(fake.commands.filter((entry) => isFenceCommand(entry.command)).length).toBe(2);
+    });
+
+    it('a files claim a stopped server left (older than a hand-over can run) is not waited for', async () => {
+      fake.parts = [PART];
+      const { sara } = await running();
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date(Date.now() - 60 * 60_000) } });
+      expect(await fenceMachine(sara.brickId)).toBe('done');
+    });
+
     it('a computer with no mark is not proved clear: no fence is sent, the machine is stopped, and the person has no screen until it wakes', async () => {
       const { sara, jobId } = await running();
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { markBootId: null, markTicks: null, markParts: undefined, markRunners: undefined } });
@@ -282,6 +302,20 @@ run('the take-over fence’s mark, held by Orbit', () => {
       fake.execAnswer = async () => ({ stdout: 'cleaned=0 reason=busy\n', exitCode: 1 });
       await finishJob(jobId, 'done', NOW);
       expect((await computerOf(sara.brickId)).markParts).toEqual([PART]);
+    });
+
+    it('not under a claim that is no longer held: the parts are neither read nor saved (Sentry on #1033)', async () => {
+      fake.parts = [PART];
+      const { sara } = await running();
+      const row = await computerOf(sara.brickId);
+      fake.parts = [GATEWAY];
+      fake.commands.length = 0;
+      expect(await refreshMarkParts(sara.brickId, row.providerRef as string, fake, async () => false)).toBe(false);
+      expect(fake.commands.filter((entry) => isMarkCommand(entry.command))).toEqual([]);
+      expect((await computerOf(sara.brickId)).markParts).toEqual([PART]);
+      // renewed and held: read and saved
+      expect(await refreshMarkParts(sara.brickId, row.providerRef as string, fake, async () => true)).toBe(true);
+      expect((await computerOf(sara.brickId)).markParts).toEqual([GATEWAY]);
     });
 
     it('not for another boot: a computer that restarted under Orbit is marked again by the next wake, never patched with a list of the new boot', async () => {

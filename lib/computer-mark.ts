@@ -60,8 +60,9 @@ export function markUpdate(held: { markBootId: string | null }, mark: MachineMar
  * restarted computer is marked again by the next wake), only while the machine is still `working`. Best effort and never throws: a list that
  * could not be saved is logged, and the fence then stops what it does not know (a browser the computer restarted) instead of trusting it.
  */
-export async function refreshMarkParts(botId: string, ref: string, provider: ComputerProvider): Promise<boolean> {
+export async function refreshMarkParts(botId: string, ref: string, provider: ComputerProvider, /** A caller that holds the clean claim renews it here first and says whether it is still held: the parts are not read (and saved) under a claim that went stale or was taken by another (Sentry on #1033). */ held?: () => Promise<boolean>): Promise<boolean> {
   try {
+    if (held && !(await held())) return false;
     const done = await provider.exec(ref, markCommand(), { timeoutMs: 30_000 });
     const mark = done.exitCode === 0 ? parseMark(done.stdout) : null;
     if (!mark) {
