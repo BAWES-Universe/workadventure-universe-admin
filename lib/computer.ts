@@ -3813,7 +3813,7 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
         if (done === 'unproved') return { ok: false, reason: 'not_secured' };
         if (done === 'blocked') return { ok: false, reason: 'still_running' };
       } else {
-        await finishReturn(botId, resumed);
+        await finishReturnOf(botId, resumed);
       }
       continue;
     }
@@ -3893,7 +3893,19 @@ async function restartSteps(botId: string, epoch: number): Promise<'back' | 'los
     // Stopped only while this request still leads (a leader that stalled cannot stop a machine another request now holds); a stop that is not proved is asked again by the wake below, which brings up a `stopping` machine too
     if (!(await stopMachineWhileLeader(botId, row.providerRef, provider, (db) => renewTransition(botId, 'returning', epoch, db)))) return 'lost';
   }
+  // Proved asleep: no first turn that was marked as sent and never named can still be running on this machine, so its mark goes (as after a fence that stopped it, and `settleTurnHold`).
+  // A stop that was not proved leaves the marks, and such a job ends as an unknown turn as before (CodeRabbit on 4503e0b8)
+  if (await agentCannotRun(botId)) await clearFirstTurnMarks(botId);
   return finishReturn(botId, epoch, true);
+}
+
+/**
+ * A `returning` transition whose leader is gone, finished by whoever finds it: as the restart it is when the check says `restarting` (the machine is stopped and proved asleep
+ * first, and the job's ask is kept), otherwise as an ordinary hand back. A restart finished as an ordinary hand back would clear the ask it kept and never stop the machine.
+ */
+async function finishReturnOf(botId: string, epoch: number): Promise<'back' | 'lost' | 'failed'> {
+  const check = (await prisma.brickComputer.findUnique({ where: { botId }, select: { takeOverCheck: true } }))?.takeOverCheck ?? null;
+  return check === 'restarting' ? restartSteps(botId, epoch) : finishReturn(botId, epoch);
 }
 
 /** Whether a restart can still be offered for the ask that is open: none of the Brick's live jobs has had one since the person last had the screen. */
@@ -3982,7 +3994,7 @@ export async function handBack(botId: string, ownerId: string): Promise<Control>
     if (row.state === 'agent') break;
     if (row.state === 'returning' && leaseLapsed(row, t)) {
       const resumed = await resumeTransition(botId, row);
-      if (resumed !== null) await finishReturn(botId, resumed);
+      if (resumed !== null) await finishReturnOf(botId, resumed);
       continue;
     }
     if (t >= deadline) return { ok: false, reason: 'in_progress' };
@@ -4035,8 +4047,7 @@ export async function recoverControl(now: Date = new Date(), batch: number = SWE
     if (resumed === null) continue;
     try {
       if (row.state === 'fencing') await leadFence(botId, resumed, now);
-      else if ((await prisma.brickComputer.findUnique({ where: { botId }, select: { takeOverCheck: true } }))?.takeOverCheck === 'restarting') await restartSteps(botId, resumed);
-      else await finishReturn(botId, resumed);
+      else await finishReturnOf(botId, resumed);
       finished++;
     } catch (error) {
       console.error('[Computer] Could not finish a change of hands:', error instanceof Error ? error.message : 'unknown');

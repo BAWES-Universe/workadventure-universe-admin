@@ -366,6 +366,32 @@ run('the honest check before a take over (1B)', () => {
       expect((await computerView(sara.brickId, sara.id, NOW))?.check).toBeNull();
     });
 
+    // CodeRabbit and Sentry on #1034: a restart whose leader died is found by a hand back (or a take over), which finished it as an ordinary return: the machine was never stopped and the kept ask was cleared
+    it('a restart whose leader died is finished AS A RESTART by the next hand back too: the machine is stopped and the kept ask stays', async () => {
+      const { sara, jobId } = await waitingForSignIn();
+      stillRunning();
+      await takeOver(sara.brickId, sara.id, NOW);
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { controlState: 'returning', controlEpoch: { increment: 1 }, controlLeaseUntil: new Date(Date.now() - 1000), takeOverCheck: 'restarting' } });
+      await prisma.computerJob.update({ where: { id: jobId }, data: { restarts: 1, restartedAt: NOW, restartKind: 'signin' } });
+      leftAfter.still = false;
+      expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
+      expect(stops()).toBe(1);
+      expect(await machineOf(sara.brickId)).toBe('working');
+      expect((await readControl(sara.brickId))?.state).toBe('agent');
+      expect(await jobOf(jobId)).toMatchObject({ status: 'running', control: 'brick', restarts: 1, restartKind: 'signin' });
+      expect((await jobOf(jobId)).restartedAt).not.toBeNull();
+    });
+
+    it('a first turn that was marked as sent and never named is let go once the restart proved the machine asleep', async () => {
+      const { sara, jobId } = await waitingForSignIn();
+      stillRunning();
+      await takeOver(sara.brickId, sara.id, NOW);
+      await prisma.computerJob.update({ where: { id: jobId }, data: { firstTurnSentAt: NOW, agentResponseId: null } });
+      leftAfter.still = false;
+      await restartComputer(sara.brickId, sara.id, NOW);
+      expect((await jobOf(jobId)).firstTurnSentAt).toBeNull();
+    });
+
     it('a computer that will not wake after the restart ends its jobs, as after any hand back', async () => {
       const { sara, jobId } = await waitingForSignIn();
       stillRunning();
