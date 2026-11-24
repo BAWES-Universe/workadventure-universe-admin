@@ -64,6 +64,47 @@ const call = (botId: string, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+const removeAfterCommit: string[] = [];
+/**
+ * Runs `make` the next time a start creates its job (the job is made on a transaction's own client, which the root client's spy never sees): its answer or its throw is the create's. A job `make` lists in `removeAfterCommit`
+ * is removed right after that transaction commits (another request landing between the commit and the first try). Returns the function that undoes the spy.
+ */
+function onJobCreate(make: (real: (args: never) => Promise<{ id: string }>, args: never) => Promise<{ id: string }>): () => void {
+  const real$transaction = prisma.$transaction.bind(prisma) as (fn: unknown, options?: unknown) => Promise<unknown>;
+  let used = false;
+  removeAfterCommit.length = 0;
+  const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options?: unknown) => {
+    if (typeof fn !== 'function') return real$transaction(fn, options);
+    const run = real$transaction(
+      (tx: unknown) =>
+        (fn as (tx: unknown) => Promise<unknown>)(
+          new Proxy(tx as object, {
+            get(target, key) {
+              const value = (target as Record<string | symbol, unknown>)[key];
+              if (key !== 'computerJob' || used) return value;
+              return new Proxy(value as object, {
+                get(model, method) {
+                  const original = (model as Record<string | symbol, unknown>)[method];
+                  if (method !== 'create' || used) return original;
+                  return (args: never) => {
+                    used = true;
+                    return make((original as (a: never) => Promise<{ id: string }>).bind(model), args);
+                  };
+                },
+              });
+            },
+          }),
+        ),
+      options,
+    );
+    return run.then(async (value) => {
+      for (const id of removeAfterCommit.splice(0)) await prisma.computerJob.deleteMany({ where: { id } });
+      return value;
+    });
+  }) as never);
+  return () => spy.mockRestore();
+}
+
 run('money and the run, in a real database', () => {
   beforeAll(() => {
     process.env.COMPUTER_PROVIDER = 'fake';
@@ -145,6 +186,8 @@ run('money and the run, in a real database', () => {
     // One event, under the id made from what the bot server sent, whatever the lookups said
     const events = await prisma.meterEvent.findMany({ where: { eventId: `run:${sara.brickId}:${mine.runId.length}:${mine.runId}:model:again` } });
     expect(events).toHaveLength(1);
+    // The retry that could name the run gives it to the stored event, so the task's receipt finds it; nothing else about the event changes
+    expect(events[0].detail).toMatchObject({ runId: mine.runId });
     expect(await prisma.meterEvent.count({ where: { eventId: `model:${sara.brickId}:again` } })).toBe(0);
 
     // A run that is not this Brick's is booked, with no run in its detail
@@ -209,11 +252,11 @@ run('money and the run, in a real database', () => {
     expect((await giveComputer(sara.brickId, sara.id)).ok).toBe(true);
     const mine = await goalRun(sara);
     // The second ask's insert hits the unique key (the first one's job), and the job is gone by the time it looks
-    const create = jest
-      .spyOn(prisma.computerJob, 'create')
-      .mockRejectedValueOnce(new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' }));
+    const undo = onJobCreate(async () => {
+      throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' });
+    });
     expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'For the run', runId: mine.runId }, NOW)).toEqual({ ok: false, reason: 'not_set' });
-    create.mockRestore();
+    undo();
     expect(await prisma.computerJob.count({ where: { botId: sara.brickId, runId: mine.runId } })).toBe(0);
   });
 
@@ -221,14 +264,13 @@ run('money and the run, in a real database', () => {
     const sara = await person('sara');
     expect((await giveComputer(sara.brickId, sara.id)).ok).toBe(true);
     const mine = await goalRun(sara);
-    // The first ask has inserted its job; before it tries, the second ask (controls not set up) has already removed it
-    const real = prisma.computerJob.create.bind(prisma.computerJob);
-    const create = jest.spyOn(prisma.computerJob, 'create').mockImplementationOnce(((args: never) =>
-      (real as (a: never) => Promise<{ id: string }>)(args).then(async (row) => {
-        await prisma.computerJob.deleteMany({ where: { id: row.id } });
-        return row;
-      })) as never);
+    // The first ask has inserted its job (committed with its link); before it tries, the second ask (controls not set up) has already removed it
+    const undo = onJobCreate(async (real, args) => {
+      const row = await real(args);
+      removeAfterCommit.push(row.id);
+      return row;
+    });
     expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'For the run', runId: mine.runId }, NOW)).toEqual({ ok: false, reason: 'not_set' });
-    create.mockRestore();
+    undo();
   });
 });

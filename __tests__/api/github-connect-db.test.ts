@@ -6,6 +6,8 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest --runInBand __tests__/api/github-connect-db.test.ts
  */
 import crypto, { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { NextRequest } from 'next/server';
 
 const mockUser: { current: { id: string; email?: string | null; isSuperAdmin?: boolean } | null } = { current: null };
@@ -29,10 +31,9 @@ import { POST as createPage } from '@/app/api/admin/github-app/create/route';
 import { GET as created } from '@/app/api/admin/github-app/created/route';
 import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { POST as link } from '@/app/api/ready-made/link/route';
-import { grantToBrick, readConnection, removeGrant } from '@/lib/app-connections';
-import { POST as gitPass } from '@/app/api/bots/[id]/git-pass/route';
-import { GET as gitGet, POST as gitPost } from '@/app/api/git/[...path]/route';
-import { checkGitPass, MAX_PUSH_BYTES, UPLOAD_GRACE_SECONDS } from '@/lib/github/git-relay';
+import { grantToBrick, readConnection } from '@/lib/app-connections';
+import { GET as gitGet } from '@/app/api/git/[...path]/route';
+import { checkGitKey } from '@/lib/github/git-relay';
 import { createBrick } from '@/lib/brick-create';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -205,6 +206,43 @@ run('Connect GitHub for Bricks, in a real database', () => {
       if (adminsBefore === undefined) delete process.env.SUPER_ADMINS;
       else process.env.SUPER_ADMINS = adminsBefore;
     }
+  });
+
+  it('setting up again while the kept app’s secrets cannot be read replaces that app, and is not refused as another setup', async () => {
+    mockUser.current = { id: sara, isSuperAdmin: true };
+    await prisma.appSetting.create({ data: { key: 'github-app', value: { appId: 123, slug: 'old', clientId: 'Iv1.old', htmlUrl: 'https://github.com/apps/old', secrets: 'cannot-be-decrypted' } } });
+    forgetGitHubApp();
+    const form = await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: {} }))).json();
+    const state = new URL(form.action).searchParams.get('state') as string;
+    pretendGitHub({ 'POST https://api.github.com/app-manifests/fresh/conversions': { status: 201, body: { id: 124, slug: 'new', client_id: 'Iv1.new', client_secret: 'app-secret', webhook_secret: null, pem: PEM, html_url: 'https://github.com/apps/new' } } });
+    const adminsBefore = process.env.SUPER_ADMINS;
+    try {
+      process.env.SUPER_ADMINS = `sara-${tag}@example.test`;
+      expect((await created(request(`/api/admin/github-app/created?code=fresh&state=${encodeURIComponent(state)}`))).status).toBe(200);
+    } finally {
+      if (adminsBefore === undefined) delete process.env.SUPER_ADMINS;
+      else process.env.SUPER_ADMINS = adminsBefore;
+    }
+    forgetGitHubApp();
+    expect((await getGitHubApp())?.appId).toBe(124);
+  });
+
+  it('the setup replaces the app it saw, and never one that another setup saved after it looked: the app and its id come from one read', async () => {
+    mockUser.current = { id: sara, isSuperAdmin: true };
+    forgetGitHubApp();
+    await prisma.appSetting.create({ data: { key: 'github-app', value: { appId: 55, slug: 'other', clientId: 'Iv1.other', htmlUrl: 'https://github.com/apps/other', secrets: 'cannot-be-decrypted' } } });
+    // The first look finds nothing (nothing was kept yet); another setup then saves its app. A second look would see that app and name it as the one to replace
+    const real = prisma.appSetting.findUnique.bind(prisma.appSetting);
+    const spy = jest.spyOn(prisma.appSetting, 'findUnique').mockImplementationOnce((() => Promise.resolve(null)) as never).mockImplementation(real as never);
+    let form: { action: string };
+    try {
+      form = await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: { again: true } }))).json();
+    } finally {
+      spy.mockRestore();
+    }
+    const state = JSON.parse(decryptApiKey(new URL(form.action).searchParams.get('state') as string)) as { replaces: number | null };
+    // Set out to make the first app: the return then refuses it (another setup finished first) instead of replacing that one
+    expect(state.replaces).toBeNull();
   });
 
   it('connects once, signs in on GitHub with PKCE, keeps the token in Orbit and sends a person with no install on to pick where it works', async () => {
@@ -411,8 +449,61 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(login).toBe('sara-gh');
     expect(await gitHubToken(id)).toMatchObject({ status: 'ok', token: 'ghp_good_key_123' });
     expect(await readConnection(id, sara)).toMatchObject({ connected: true });
+    // A sign-in started before the key was saved can no longer finish over it
+    await prisma.appConnection.update({ where: { id }, data: { signInNonce: 'a-sign-in-started-earlier' } });
+    expect((await saveKey(request('/api/me/apps/github/key', { method: 'POST', body: { key: 'ghp_good_key_123' } }))).status).toBe(200);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInNonce).toBeNull();
     await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }));
     expect(await readConnection(id, sara)).toMatchObject({ connected: false });
+  });
+
+  it('switching back while the GitHub app is not set up answers 404 and leaves the key as it is, since saving it again would answer 404 too', async () => {
+    await makeApp();
+    mockUser.current = { id: sara };
+    pretendGitHub({ 'GET https://api.github.com/user': { body: { login: 'sara-gh', id: 501 } } });
+    const saved = await saveKey(request('/api/me/apps/github/key', { method: 'POST', body: { key: 'ghp_good_key_123' } }));
+    expect(saved.status).toBe(200);
+    const { id } = await saved.json();
+    // The app is taken away (or not made yet on this server)
+    await prisma.appSetting.deleteMany({ where: { key: 'github-app' } });
+    forgetGitHubApp();
+    expect((await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }))).status).toBe(404);
+    expect(await prisma.appConnection.count({ where: { ownerId: sara, catalogKey: '@github' } })).toBe(1);
+    expect(await gitHubToken(id)).toMatchObject({ status: 'ok', token: 'ghp_good_key_123' });
+    // With the app back, switching back works as before
+    await makeApp();
+    expect((await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }))).status).toBe(200);
+    expect(await readConnection(id, sara)).toMatchObject({ connected: false });
+  });
+
+  it('switching back with no GitHub connection answers 404 and never makes one', async () => {
+    await makeApp();
+    mockUser.current = { id: sara };
+    expect((await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }))).status).toBe(404);
+    expect(await prisma.appConnection.count({ where: { ownerId: sara, catalogKey: '@github' } })).toBe(0);
+  });
+
+  it('never saves a key beside a sign-in that still holds the connection: it says it could not, and the key is not written', async () => {
+    await makeApp();
+    mockUser.current = { id: sara };
+    pretendGitHub({ 'GET https://api.github.com/user': { body: { login: 'sara-gh', id: 501 } } });
+    const first = await saveKey(request('/api/me/apps/github/key', { method: 'POST', body: { key: 'ghp_good_key_123' } }));
+    const { id } = await first.json();
+    const before = (await prisma.appConnection.findUniqueOrThrow({ where: { id } })).authConfig;
+    // A sign-in callback is waiting on GitHub and holds the lease for as long as a lease lasts
+    await prisma.appConnection.update({ where: { id }, data: { refreshLeaseUntil: new Date(Date.now() + 3_600_000) } });
+    const realNow = Date.now.bind(Date);
+    let calls = 0;
+    // The wait for the lease is as long as a lease: time moves on past it at once
+    const now = jest.spyOn(Date, 'now').mockImplementation(() => realNow() + (++calls > 4 ? 120_000 : 0));
+    let blocked;
+    try {
+      blocked = await saveKey(request('/api/me/apps/github/key', { method: 'POST', body: { key: 'ghp_other_key_456' } }));
+    } finally {
+      now.mockRestore();
+    }
+    expect(blocked.status).toBe(502);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).authConfig).toBe(before);
   });
 
   it('Disconnect takes the sign-in back at GitHub with the app’s own secret', async () => {
@@ -427,89 +518,22 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(await prisma.appConnection.count({ where: { id } })).toBe(0);
   });
 
-  it('gives a Brick’s computer a 15-minute git pass only while it may use its owner’s GitHub, and the relay takes nothing else', async () => {
+  it('has no git pass any more: nothing issues one, and the relay refuses one made earlier, even for a Brick that may use GitHub', async () => {
     await makeApp();
     const id = await signedIn();
-    const pass = (token = SERVICE) => gitPass(request(`/api/bots/${saraBrick}/git-pass`, { method: 'POST', token }), params({ id: saraBrick }));
-    expect((await pass('wrong')).status).toBe(401);
-    expect((await pass()).status).toBe(404);
     await grantToBrick(sara, id, saraBrick);
-    const issued = await (await pass()).json();
-    expect(issued).toMatchObject({ remoteBase: 'https://orbit.example.com/api/git', name: 'sara-gh', email: '501+sara-gh@users.noreply.github.com' });
-    expect(new Date(issued.expiresAt).getTime() - Date.now()).toBeGreaterThan(14 * 60_000);
-    expect(JSON.stringify(issued)).not.toContain('ghu_first');
-
-    const basic = (secret: string) => `Basic ${Buffer.from(`brick:${secret}`).toString('base64')}`;
-    const refs = (authorization?: string) =>
-      gitGet(request('/api/git/acme/tools.git/info/refs?service=git-upload-pack', { headers: authorization ? { authorization } : {} }), params({ path: ['acme', 'tools.git', 'info', 'refs'] }));
-    expect((await refs()).status).toBe(401);
-    expect((await refs(basic('made-up'))).status).toBe(401);
-    // A good pass, through to "GitHub" with the owner's token
+    // The route that gave a pass is gone
+    expect(existsSync(join(process.cwd(), 'app', 'api', 'bots', '[id]', 'git-pass', 'route.ts'))).toBe(false);
+    // A pass of the old kind, made with Orbit's own key for a Brick that has the grant and is the owner's: still turned away
+    const old = (exp: number) => `Basic ${Buffer.from(`brick:${encryptApiKey(JSON.stringify({ kind: 'git-pass', botId: saraBrick, connectionId: id, ownerId: sara, exp }))}`).toString('base64')}`;
     const calls = pretendGitHub({ 'GET https://github.com/acme/tools.git/info/refs': { body: 'refs' } });
-    expect((await refs(basic(issued.pass))).status).toBe(200);
-    expect((calls[0].init.headers as Record<string, string>).Authorization).toBe(`Basic ${Buffer.from('x-access-token:ghu_first').toString('base64')}`);
-    // Not a git address
-    expect((await gitGet(request('/api/git/acme/tools.git/HEAD', { headers: { authorization: basic(issued.pass) } }), params({ path: ['acme', 'tools.git', 'HEAD'] }))).status).toBe(404);
-    // A chunked push says no length: it is read as it comes and stopped past the limit, never read to the end, never sent on
-    let sent = 0;
-    let cancelled = false;
-    const piece = new Uint8Array(1024 * 1024);
-    const endless = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        sent += piece.length;
-        controller.enqueue(piece);
-      },
-      cancel() {
-        cancelled = true;
-      },
-    });
-    const before = calls.length;
-    const chunked = new NextRequest('https://orbit.example.com/api/git/acme/tools.git/git-receive-pack', {
-      method: 'POST',
-      headers: { authorization: basic(issued.pass), 'content-type': 'application/x-git-receive-pack-request', 'transfer-encoding': 'chunked' },
-      body: endless,
-      duplex: 'half',
-    } as ConstructorParameters<typeof NextRequest>[1] & { duplex: 'half' });
-    expect((await gitPost(chunked, params({ path: ['acme', 'tools.git', 'git-receive-pack'] }))).status).toBe(413);
-    expect(sent).toBeLessThan(MAX_PUSH_BYTES + 20 * piece.length);
-    expect(cancelled).toBe(true);
-    expect(calls.length).toBe(before);
-    // GitHub taken away from the Brick while a push is still uploading: checked again once it is read, and nothing goes to GitHub
-    // highWaterMark 0: nothing is pulled until the route starts reading the body, which is after its first pass check; that check
-    // must have let the push in (the grant is still there when reading starts)
-    let taken = false;
-    let grantWhenReadStarted: boolean | null = null;
-    const slow = new ReadableStream<Uint8Array>(
-      {
-        async pull(controller) {
-          if (taken) return controller.close();
-          taken = true;
-          grantWhenReadStarted = (await prisma.botMcpServer.count({ where: { botId: saraBrick, connectionId: id, enabled: true } })) === 1;
-          await removeGrant(sara, id, saraBrick);
-          controller.enqueue(new Uint8Array([48, 48, 48, 48]));
-        },
-      },
-      { highWaterMark: 0 },
-    );
-    const paused = new NextRequest('https://orbit.example.com/api/git/acme/tools.git/git-receive-pack', {
-      method: 'POST',
-      headers: { authorization: basic(issued.pass), 'content-type': 'application/x-git-receive-pack-request', 'transfer-encoding': 'chunked' },
-      body: slow,
-      duplex: 'half',
-    } as ConstructorParameters<typeof NextRequest>[1] & { duplex: 'half' });
-    expect((await gitPost(paused, params({ path: ['acme', 'tools.git', 'git-receive-pack'] }))).status).toBe(401);
-    expect(taken).toBe(true);
-    expect(grantWhenReadStarted).toBe(true);
-    expect(calls.length).toBe(before);
-    // ...and the pass stops for everything else at once
-    expect((await refs(basic(issued.pass))).status).toBe(401);
-    // A pass that ran out a minute ago during an upload still counts when the upload ends; one that ran out long ago does not
-    await grantToBrick(sara, id, saraBrick);
-    const passFrom = (secondsAgo: number) =>
-      basic(encryptApiKey(JSON.stringify({ kind: 'git-pass', botId: saraBrick, connectionId: id, ownerId: sara, exp: Math.floor(Date.now() / 1000) - secondsAgo })));
-    expect(await checkGitPass(passFrom(60))).toBeNull();
-    expect(await checkGitPass(passFrom(60), UPLOAD_GRACE_SECONDS)).toMatchObject({ botId: saraBrick });
-    expect(await checkGitPass(passFrom(UPLOAD_GRACE_SECONDS + 60), UPLOAD_GRACE_SECONDS)).toBeNull();
+    for (const service of ['git-upload-pack', 'git-receive-pack']) {
+      const refs = await gitGet(request(`/api/git/acme/tools.git/info/refs?service=${service}`, { headers: { authorization: old(Math.floor(Date.now() / 1000) + 900) } }), params({ path: ['acme', 'tools.git', 'info', 'refs'] }));
+      expect(refs.status).toBe(401);
+    }
+    expect((await gitGet(request('/api/git/acme/tools.git/info/refs?service=git-upload-pack'), params({ path: ['acme', 'tools.git', 'info', 'refs'] }))).status).toBe(401);
+    expect(calls).toHaveLength(0);
+    expect(await checkGitKey(old(Math.floor(Date.now() / 1000) + 900))).toBeNull();
   });
 
   it('takes webhooks only with GitHub’s signature', async () => {

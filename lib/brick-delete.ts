@@ -3,9 +3,10 @@ import { prisma } from '@/lib/db';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { endAllApprovals } from '@/lib/bot-actions';
 import { pauseItemsOfDeletedBrick } from '@/lib/brick-items';
-import { deleteWithHiddenBotData } from '@/lib/bot-privacy';
+import * as Sentry from '@sentry/nextjs';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
-import { stopComputerWork, removeMachineBeforeDelete } from '@/lib/computer';
+import { stopComputerWork } from '@/lib/computer';
+import { purgeBrick, sweepPurges } from '@/lib/brick-purge';
 import { listBricks, listDeletedBricks, type BrickCard, type DeletedBrickCard } from '@/lib/brick-default';
 
 /**
@@ -25,11 +26,11 @@ import { listBricks, listDeletedBricks, type BrickCard, type DeletedBrickCard } 
  * and a key that was taken away while it waited is checked again on its next reply like any other day. An action that
  * was running at the delete keeps its own record and is never sent again.
  *
- * Its computer (game #2000). At the tap its jobs end and it stops, its files saved and kept. Undo gives the Brick back but starts
- * no job again. At the second step the machine is removed only after its files were saved.
+ * Its computer (game #2000). At the tap its jobs end and it stops (its files are kept, off, for Undo). Undo gives the Brick back but
+ * starts no job again. At the second step the machine and every saved copy are deleted, with no copy made first (audit F08).
  *
- * What is never deleted. Everything the Brick made: an artifact belongs to the person who asked for it and only names
- * the Brick that made it (Artifact.makerBotId), so it stays in their artifacts after both steps.
+ * What is never deleted. What the Brick made and a person owns: an artifact belongs to the person who asked for it, so it stays in
+ * their artifacts after both steps, with a neutral line where the Brick's name was (lib/brick-purge.ts says everything that stays and why).
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -91,18 +92,39 @@ async function markWaiting(brickId: string, now: Date): Promise<void> {
   await prisma.bot.updateMany({ where: { id: brickId, roomId: null, deletedAt: { not: null } }, data: { updatedAt: now } });
 }
 
+/** How long a removal is kept for the bot server to hear of it. */
+const REMOVAL_KEPT_DAYS = 7;
+
 /**
- * The second step: every deleted Brick whose days are over is removed for good, with its saved chats and what it
- * remembers (a Brick's are always hidden, so they go in the same transaction, see deleteWithHiddenBotData). For one
- * person when `ownerId` is given, else for everyone. Returns the ids removed, so the bot server can close their chats.
+ * The Bricks removed for good in the last days, whoever removed them: what the bot server is told on each sweep so it can close their
+ * chats. Telling it again is harmless (a chat already closed stays closed), and an answer that never got through loses nothing.
+ * Older ones are let go of here. Every id still kept is named, however many: a cut at some number would leave the newest ones unheard of for all
+ * seven days (the oldest are first, and they stay), and an id is a few dozen bytes.
+ */
+export async function recentlyRemovedBricks(now: Date = new Date()): Promise<string[]> {
+  const cutoff = new Date(now.getTime() - REMOVAL_KEPT_DAYS * DAY_MS);
+  await prisma.brickRemoval.deleteMany({ where: { removedAt: { lt: cutoff } } });
+  const rows = await prisma.brickRemoval.findMany({ where: { removedAt: { gte: cutoff } }, select: { botId: true }, orderBy: { removedAt: 'asc' } });
+  return rows.map((row) => row.botId);
+}
+
+/**
+ * The second step, the final purge (audit F08): every deleted Brick whose days are over is purged for good, in one transaction, with
+ * everything it owned (see lib/brick-purge.ts). For one person when `ownerId` is given, else for everyone. Returns the ids purged, so the bot
+ * server can close their chats.
  *
- * Nothing waits on this to be right: from the moment its days are over a deleted Brick is in no list and Undo no longer
- * takes it, removed or not. The sweep only clears the rows away.
+ * Nothing outside Orbit holds it back. A machine that cannot be removed now, a saved copy that cannot be deleted now: each is written down
+ * with the purge and tried again by every sweep, with waits that grow, until the provider and the bucket both say it is done. A new backup is
+ * never made first. The only thing that ever makes a Brick wait is our own books not yet having a line for what its computer ran: that is
+ * money, it is only our own tables, and it cannot be caused by a provider.
+ *
+ * Nothing waits on this to be right: from the moment its days are over a deleted Brick is in no list and Undo no longer takes it, purged or
+ * not. The sweep only does the clearing.
  */
 export async function removeGoneBricks(now: Date = new Date(), ownerId?: string, batch: number = SWEEP_BATCH, pages: number = SWEEP_PAGES): Promise<string[]> {
   const removed: string[] = [];
-  // Bricks that wait for the next sweep (their computer's files were not saved) are skipped by the next page here, so a run of them
-  // never keeps the Bricks behind them from being removed
+  // Bricks that wait for the next sweep (their books are not written) are skipped by the next page here, so a run of them never keeps the
+  // Bricks behind them from being removed
   const waiting: string[] = [];
   for (let page = 0; page < pages; page++) {
     const gone = await prisma.bot.findMany({
@@ -114,26 +136,39 @@ export async function removeGoneBricks(now: Date = new Date(), ownerId?: string,
     });
     if (gone.length === 0) break;
     for (const { id } of gone) {
-      // Its computer goes only after its files were saved; if that did not happen the Brick waits for the next sweep (game #2000)
-      if (!(await removeMachineBeforeDelete(id, now))) {
-        // Kept for the next sweep, and said so: a computer that cannot be saved or removed (its provider is off or changed) is looked at, not lost quietly
-        console.warn(`[Brick delete] Brick ${id} waits: its computer's files could not be saved, its machine could not be removed or what it ran is not in the books yet`);
+      // One Brick that cannot be purged now (the database timed out, a lock was held too long) is looked at again next sweep and never takes the
+      // ids of the Bricks purged before it with it: the bot server needs every one of them to close those chats
+      let result: Awaited<ReturnType<typeof purgeBrick>>;
+      try {
+        result = await purgeBrick(id, now);
+      } catch (error) {
+        Sentry.captureException(error, { tags: { area: 'bricks', step: 'purge' } });
+        console.error(`[Brick delete] Brick ${id} could not be purged now:`, error instanceof Error ? error.message : 'unknown');
         waiting.push(id);
-        await markWaiting(id, now);
+        await markWaiting(id, now).catch(() => undefined);
         continue;
       }
-      // Still only one whose time has passed: the condition is asked again in the delete itself
-      const where = { id, roomId: null, goneAt: { lte: now } };
-      const { count } = await deleteWithHiddenBotData(where, () => prisma.bot.deleteMany({ where }));
-      if (count === 0) {
+      if (result !== 'purged') {
+        // 'books': what its computer ran is not in the books yet, looked at again next sweep. 'not_due': Undo, or another sweep, got there first.
+        if (result === 'books') console.warn(`[Brick delete] Brick ${id} waits: what its computer ran is not in the books yet`);
         waiting.push(id);
         await markWaiting(id, now);
         continue;
       }
       removed.push(id);
-      await syncToolSignInNotices(id);
+      // The Brick is purged and its id is kept above whatever this does: a sign-in notice that cannot be updated now is not a reason to lose the rest
+      await syncToolSignInNotices(id).catch((error) => {
+        console.error(`[Brick delete] The sign-in notices of Brick ${id} could not be updated:`, error instanceof Error ? error.message : 'unknown');
+      });
     }
     if (gone.length < batch) break;
+  }
+  // The outside deletions of every purged Brick that still has some, now (the ones just purged) or on their schedule (all of them). Never throws:
+  // a failing provider must not lose the ids purged above, the bot server needs them to close those chats
+  try {
+    await sweepPurges(now, ownerId ? removed : undefined);
+  } catch (error) {
+    console.error('[Brick delete] The outside deletions of purged Bricks could not be tried:', error instanceof Error ? error.message : 'unknown');
   }
   return removed;
 }

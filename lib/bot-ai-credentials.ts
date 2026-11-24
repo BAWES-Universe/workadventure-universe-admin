@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { providerPayload } from '@/lib/ai-provider-payload';
 import { checkKeyForBot, checkKeyForOthers, type KeyForBot } from '@/lib/ai-key-pay';
 import { whereIsBrick } from '@/lib/brick-visit';
+import { isTakenOff, standingMeeting } from '@/lib/brick-met';
 import { addNotice } from '@/lib/notices';
 import { UNIVERSE_AI_MISSING, UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 import { isTypedEndpoint, kindInfo } from '@/lib/ai-key-kinds';
@@ -65,7 +66,8 @@ export type BotAiCredentials =
  * lent to this universe (lib/ai-key-pay.ts).
  */
 interface Others {
-  universeId: string;
+  /** The universe whose lend counts; null for someone who met the Brick where its room is gone, who is served on what no lend decides. */
+  universeId: string | null;
 }
 
 /** What only a personal key's answer carries: whose it is, what kind it is, where it runs, and how the bot server should treat it. */
@@ -130,11 +132,17 @@ export async function credentialsForBot(botId: string, options: { asker?: string
     if (!asker || asker.id !== bot.ownerId) {
       // `roomUrl` is the room the asker is in, when the bot server knows it: a Brick with a home and a visit is then judged by that room's place
       const here = await whereIsBrick(bot.id, options.roomUrl ?? null);
+      // Someone who met it and writes to it where it no longer is (lib/brick-met.ts): served as when it was there, on the lend of
+      // the universe they met it in, whatever room the caller names (a direct message does not depend on where anyone is, as in
+      // lib/bot-access.ts). Never the owner's key unless it was lent there, so naming a room gets them nothing more
+      const met = !here && asker && !(await isTakenOff(bot.id, asker.id)) ? await standingMeeting(bot.id, asker.id) : null;
       if (here) others = { universeId: here.universeId };
-      // Someone named, and not its owner, while it is not visiting anywhere: nobody to serve. Nothing named and not visiting is
-      // the Brick's own business, as it always was. A call that names a room is not that: where the Brick stands somewhere else
-      // it is answered for nobody, so the owner's key is not served to a call from a room the Brick is not in.
-      else if (options.asker || (options.roomUrl && (await whereIsBrick(bot.id, null)))) return { status: 404, error: 'Bot not found' };
+      else if (met) others = { universeId: met.place?.universeId ?? null };
+      // Someone named, and not its owner, while it is not visiting anywhere and they never met it (or were taken off): nobody to serve. Nothing named at all (no person,
+      // no room) and not visiting is the Brick's own business, as it always was. A call that names a room is not that: the Brick is not visiting that room, so it is
+      // answered for nobody, and the owner's key is never served to a call from a room the Brick is not in. The room is judged by the one lookup above, never looked up
+      // again (a visit that ran out between two lookups would read as "nowhere" and serve the key).
+      else if (options.asker || options.roomUrl) return { status: 404, error: 'Bot not found' };
     }
   }
   const main = await mainCredentials(bot, others);
@@ -233,7 +241,7 @@ async function mainCredentials(bot: BotForCredentials, others: Others | null = n
   // the Brick is NOT moved off its key, which is its owner's setup. A Brick is never refused while something can answer,
   // so this person is served Universe AI, on their own allowance like anyone: never the owner's key, never their own.
   // Only when Universe AI itself cannot serve is the person told it can't answer them here.
-  const lent = others ? await checkKeyForOthers(bot.id, others.universeId, { aiProviderRef: ref, ownerId: bot.ownerId }) : null;
+  const lent = others ? (others.universeId ? await checkKeyForOthers(bot.id, others.universeId, { aiProviderRef: ref, ownerId: bot.ownerId }) : ({ ok: false, reason: 'not-lent' } as const)) : null;
   if (lent && !lent.ok) {
     const standIn = await universeAi();
     if (standIn.status === 200 && standIn.body.source === 'universe-ai') return { status: 200, body: { ...standIn.body, standingInFor: ref } };

@@ -12,8 +12,8 @@ export function setAdapterForTests(adapter: ReadyMadeAdapter | null | undefined)
 }
 
 /**
- * The adapter, or null when it is off. Off is the only state until Khalid says otherwise: it means no COMPOSIO_API_KEY in
- * Orbit's environment, and then nothing of it is reachable or shown anywhere.
+ * The adapter, or null when it is off. It is ON as soon as COMPOSIO_API_KEY is set in
+ * Orbit's environment (0.5.0 sets it); without the key nothing of it is reachable or shown anywhere, and the routes answer 404.
  */
 export function getAdapter(): ReadyMadeAdapter | null {
   if (override !== undefined) return override;

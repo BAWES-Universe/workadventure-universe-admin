@@ -25,6 +25,9 @@ jest.mock('@/lib/db', () => ({
     aiKeyLend: { findUnique: jest.fn(async () => null) },
     botsAiUsage: { create: jest.fn(async () => ({})) },
     appSetting: { findUnique: jest.fn(async () => null) },
+    // A reply row is written under the voice reservation lock, in a transaction (the stand-in hands this same object over as the transaction)
+    $executeRaw: jest.fn(async () => 0),
+    $transaction: jest.fn(async (run: unknown) => (typeof run === 'function' ? run(jest.requireMock('@/lib/db').prisma) : Promise.all(run as unknown[]))),
   },
 }));
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));

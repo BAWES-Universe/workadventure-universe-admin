@@ -3,6 +3,7 @@
  * that loaded its own copy of the modules. The books themselves are tested on a real database (credit-books-db, spend-rules-db).
  */
 jest.mock('@/lib/credit-spend', () => ({
+  findRefund: jest.fn(),
   holdCredit: jest.fn(),
   refundHold: jest.fn(),
   releaseHold: jest.fn(),
@@ -81,5 +82,20 @@ describe('wiring the Instant credit books', () => {
     expect(await funds.settle({ key: 'b', chargeMicros: 1 })).toEqual({ ok: false });
     (spend.settleHold as jest.Mock).mockResolvedValueOnce(null);
     expect(await funds.settle({ key: 'c', chargeMicros: 1 })).toEqual({ ok: false });
+  });
+
+  it('refundLookup: what the books gave is found, nothing given is none, and a failed look is unavailable (it never gives anything)', async () => {
+    const spend = await import('@/lib/credit-spend');
+    const { createInstantFunds } = await import('@/lib/funding/instant-funds');
+    const funds = createInstantFunds();
+    (spend.findRefund as jest.Mock).mockResolvedValueOnce({ found: true, refundedMicros: 5_000 });
+    expect(await funds.refundLookup({ key: 'k', refundKey: 'r' })).toEqual({ status: 'found', refundedMicros: 5_000 });
+    (spend.findRefund as jest.Mock).mockResolvedValueOnce({ found: false });
+    expect(await funds.refundLookup({ key: 'k', refundKey: 'r' })).toEqual({ status: 'none' });
+    (spend.findRefund as jest.Mock).mockRejectedValueOnce(new Error('down'));
+    const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(await funds.refundLookup({ key: 'k', refundKey: 'r' })).toEqual({ status: 'unavailable' });
+    quiet.mockRestore();
+    expect(spend.refundHold).not.toHaveBeenCalled();
   });
 });

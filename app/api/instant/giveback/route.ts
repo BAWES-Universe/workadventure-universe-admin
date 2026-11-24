@@ -24,7 +24,7 @@ const bodySchema = z
 /**
  * POST /api/instant/giveback - "Didn't work" on an Instant run that was charged: a bounded goodwill give-back, once per run, inside the
  * limits a super admin set (none is assumed). A run Universe saw fail was never charged and needs none. 200 { status: 'given', amountMicros }
- * or { status: 'refused', reason }. Auth: BOT_SERVICE_TOKEN.
+ * or { status: 'refused', reason } (a give-back the credit books could only make at zero is 'not_charged': nothing was given back, and it used none of the person's monthly give-backs). Auth: BOT_SERVICE_TOKEN.
  */
 export async function POST(request: NextRequest) {
   return serviceRoute(request, 'giving back an Instant run', async () => {

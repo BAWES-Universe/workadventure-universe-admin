@@ -1,7 +1,8 @@
 import { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { NOT_FOUND } from '@/lib/app-connections';
-import { connectGitHub, dropOwnKey, saveOwnKey } from '@/lib/github/connection';
+import { connectGitHub, dropOwnKey, existingGitHub, saveOwnKey } from '@/lib/github/connection';
+import { getGitHubApp } from '@/lib/github/app';
 import { appsRoute, preflight } from '@/lib/me-apps-route';
 
 export const runtime = 'nodejs';
@@ -32,10 +33,14 @@ export async function POST(request: NextRequest) {
   });
 }
 
-/** DELETE /api/me/apps/github/key - "Switch back": the pasted key is forgotten; the person signs in through the app again. */
+/** DELETE /api/me/apps/github/key - "Switch back": the pasted key is forgotten; the person signs in through the app again. 404 when there is no GitHub connection (nothing is made) or the GitHub app is not set up (the key is left as it is). */
 export async function DELETE(request: NextRequest) {
   return appsRoute(request, METHODS, 'dropping a GitHub key', async (user, respond) => {
-    const connection = await connectGitHub(user.id);
+    // The key is only forgotten while it can be saved again: with the GitHub app not set up, saving a key answers 404 (it makes the connection), so a key dropped
+    // now could never be put back. The same 404, and the key left as it is
+    if (!(await getGitHubApp())) return respond({ error: NOT_FOUND }, 404);
+    // Switching back only changes a connection that exists: it never makes one
+    const connection = await existingGitHub(user.id);
     if (!connection) return respond({ error: NOT_FOUND }, 404);
     await dropOwnKey(connection.id);
     return respond({ id: connection.id });

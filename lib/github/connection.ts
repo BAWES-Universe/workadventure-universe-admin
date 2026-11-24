@@ -3,7 +3,7 @@ import { Prisma, type AppConnection } from '@prisma/client';
 import type { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
-import { holdRefreshLease, takeRefreshLease } from '@/lib/mcp/oauth-refresh';
+import { takeRefreshLease } from '@/lib/mcp/oauth-refresh';
 import { gitHubRequest, type FetchLike } from '@/lib/github/api';
 import {
   appJwt,
@@ -28,6 +28,8 @@ import {
 export const GITHUB_CATALOG_KEY = '@github';
 /** The key "Connect another" shows the GitHub row under, and takes back on Connect. */
 export const GITHUB_ROW_KEY = 'github';
+/** The line under it, on the Apps page and in a Brick's offers. */
+export const GITHUB_BLURB = 'Code, pull requests, issues and CI';
 export const GITHUB_SOURCE = 'github';
 
 /** What a GitHub connection keeps, encrypted, in its authConfig. Only the token fields are read by the generic sign-in state. */
@@ -92,6 +94,11 @@ export async function connectGitHub(ownerId: string): Promise<{ id: string; crea
     }
     throw error;
   }
+}
+
+/** The person's GitHub connection if they have one; never makes one (asking to switch back is not a reason to connect). */
+export async function existingGitHub(ownerId: string): Promise<{ id: string } | null> {
+  return prisma.appConnection.findFirst({ where: { ownerId, catalogKey: GITHUB_CATALOG_KEY }, select: { id: true } });
 }
 
 /* ------------------------------------ sign in ------------------------------------ */
@@ -400,9 +407,12 @@ export async function saveOwnKey(connectionId: string, key: string, fetchImpl: F
   if (!me) return { status: 'unavailable' };
   if (!me.ok || typeof me.data.login !== 'string') return { status: 'refused' };
   const auth: GitHubAuth = { provider: 'github', ownKey: true, accessToken: key, login: me.data.login, githubId: me.data.id, reconnectRequired: null };
-  const letGo = await holdRefreshLease(connectionId);
+  // Strictly: a sign-in that is still waiting on GitHub holds the lease and would write its own sign-in over this key when it returns, so a key is
+  // never saved beside it. A key that could not be saved says so, and is asked for again
+  const letGo = await takeRefreshLease(connectionId);
+  if (!letGo) return (await prisma.appConnection.findUnique({ where: { id: connectionId }, select: { id: true } })) ? { status: 'unavailable' } : { status: 'gone' };
   try {
-    await prisma.appConnection.update({ where: { id: connectionId }, data: { authConfig: sealAuth(auth), signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date() } });
+    await prisma.appConnection.update({ where: { id: connectionId }, data: { authConfig: sealAuth(auth), signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date(), signInNonce: null } });
   } finally {
     await letGo();
   }

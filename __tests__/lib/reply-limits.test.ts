@@ -82,6 +82,24 @@ describe('extra usage a super admin gave (game #1999)', () => {
     expect(where).toMatchObject({ personId: 'u-sara', startsAt: { lte: NOW }, endsAt: { gt: NOW } });
   });
 
+  it('keeps the person’s window running with no limit, so the replies given in it count when the extra ends', async () => {
+    db.meterGrant.findMany.mockResolvedValue([grant({ multiplier: null, noLimit: true })]);
+    db.$queryRaw.mockClear();
+    expect(await ask(SARA)).toEqual({ allowed: true });
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(db.botsAiUsage.count).not.toHaveBeenCalled();
+  });
+
+  it('takes the replies kept for a voice bot’s greeting off the window the person really has, after its multiple', async () => {
+    db.appSetting.findUnique.mockImplementation(async ({ where }: { where: { key: string } }) => (where.key === 'voice-limits' ? { value: { limits: { textReserveShare: 4 } } } : null));
+    db.meterGrant.findMany.mockResolvedValue([grant({ multiplier: 2 })]);
+    // 30 doubled is 60, and a quarter of that is kept for text (15): 45 places, where taking 8 off 30 first would leave 44
+    counts(44);
+    expect(await checkReplyAllowance('bot-1', { ...SARA, source: 'universe-ai', greeting: true }, NOW)).toEqual({ allowed: true });
+    counts(45);
+    expect(await checkReplyAllowance('bot-1', { ...SARA, source: 'universe-ai', greeting: true }, NOW)).toMatchObject({ allowed: false });
+  });
+
   it('is never read for a guest, whose limit nothing lifts', async () => {
     db.meterGrant.findMany.mockResolvedValue([grant({ multiplier: null, noLimit: true })]);
     counts(10);

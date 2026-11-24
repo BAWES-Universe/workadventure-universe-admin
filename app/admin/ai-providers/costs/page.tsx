@@ -35,7 +35,10 @@ export default function CostsPage() {
   const replacePage = useReplacePage();
   const today = new Date();
   const [range, setRange] = useState({ from: dayInput(new Date(today.getTime() - 6 * 86400000)), to: dayInput(today) });
-  const [report, setReport] = useState<CostsReport | null>(null);
+  // The report is kept with the dates it was read for, and shown only while those are the dates in the boxes: when one valid date is
+  // changed to another, the old figures are not painted under the new dates before they are read
+  const [loaded, setLoaded] = useState<{ data: CostsReport; from: string; to: string } | null>(null);
+  const report = loaded && loaded.from === range.from && loaded.to === range.to ? loaded.data : null;
   const [failed, setFailed] = useState(false);
   // Only the latest read may show: a slower read of older dates must not land on top of the dates now showing
   const latest = useRef(0);
@@ -43,7 +46,7 @@ export default function CostsPage() {
   const load = useCallback(async () => {
     const mine = ++latest.current;
     // The figures showing belong to the old dates, so they go while the new dates load
-    setReport(null);
+    setLoaded(null);
     setFailed(false);
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -55,7 +58,7 @@ export default function CostsPage() {
       }
       if (!response.ok) throw new Error('load');
       const next = (await response.json()) as CostsReport;
-      if (mine === latest.current) setReport(next);
+      if (mine === latest.current) setLoaded({ data: next, from: range.from, to: range.to });
     } catch {
       if (mine === latest.current) setFailed(true);
     }
@@ -70,7 +73,7 @@ export default function CostsPage() {
     if (datesReady) load();
     else {
       latest.current += 1;
-      setReport(null);
+      setLoaded(null);
     }
   }, [datesReady, load]);
 

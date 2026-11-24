@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { startOAuth } from '@/lib/mcp/oauth-start';
-import { effectiveServer, newSignInNonce } from '@/lib/app-connections';
+import { beginConnectionSignIn, effectiveServer, newSignInGeneration } from '@/lib/app-connections';
 import { getSessionUser } from '@/lib/auth-session';
 import { managesConnection } from '@/lib/app-team-access';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
@@ -83,6 +83,10 @@ export async function GET(
       if (server.connection && !(await managesConnection(userId!, server.connection))) {
         return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
       }
+    } else if (server.connection) {
+      // The admin token is no person: the return of a sign-in on a connection is accepted only for the person who manages it (the
+      // callback checks), so this one could never finish, and starting it would replace the sign-in its owner may be in the middle of
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
     }
 
     if (effective.authType !== 'oauth') {
@@ -132,7 +136,7 @@ export async function GET(
       state: {
         botId,
         serverId,
-        ...(server.connectionId ? { connectionId: server.connectionId, nonce: await newSignInNonce(server.connectionId) } : {}),
+        ...(server.connectionId ? { connectionId: server.connectionId, ...(await beginConnectionSignIn(server.connectionId)) } : { generation: await newSignInGeneration({ serverId }) }),
         // Who is connecting it, remembered on the connection: the person told if its sign-in expires (game #1819)
         ...(userId ? { personId: userId } : {}),
       },

@@ -222,6 +222,23 @@ describe('the request built from a definition', () => {
     expect(Object.keys(built.headers)).toEqual(['accept']);
   });
 
+  it('keeps a literal empty object of the template, and drops one that an omitted optional value left empty', () => {
+    const def = definitionSchema.parse({
+      ...draft(),
+      operations: [
+        draft().operations[0],
+        {
+          id: 'ship', label: 'Send a parcel', method: 'POST', path: '/v1/parcels', category: 'make', returns: ['id'],
+          params: [{ name: 'to', type: 'string', in: 'body', required: true }, { name: 'note', type: 'string', in: 'body', required: false }],
+          body: { to: { $param: 'to' }, metadata: {}, extra: { note: { $param: 'note' } } },
+        },
+      ],
+      check: { operation: 'track', arguments: { parcelId: 'check' } },
+    });
+    expect(JSON.parse(buildRequest(def, 'ship', { to: 'Sara' }, KEY).body as string)).toEqual({ to: 'Sara', metadata: {} });
+    expect(JSON.parse(buildRequest(def, 'ship', { to: 'Sara', note: 'hi' }, KEY).body as string)).toEqual({ to: 'Sara', metadata: {}, extra: { note: 'hi' } });
+  });
+
   it('keeps every value inside its own part of the path', () => {
     const def = definitionSchema.parse(draft());
     expect(buildRequest(def, 'track', { parcelId: 'a/b?c=d#e' }, KEY).url).toBe('https://api.shiplink.com/v1/parcels/a%2Fb%3Fc%3Dd%23e');
@@ -290,6 +307,12 @@ describe('a key is taken out of anything that quotes it', () => {
     for (const form of secretForms(key)) expect(scrubSecret(`error at ${form} end`, key)).toBe('error at [key] end');
     expect(scrubSecret(`Basic ${Buffer.from(key).toString('base64')}`, key)).toBe('Basic [key]');
     expect(scrubSecret(`?k=${encodeURIComponent(key)}`, key)).toBe('?k=[key]');
+    // The query a request is built with writes some characters differently from encodeURIComponent
+    const odd = "sk_live~abcd!ef'g(h)i j";
+    const built = new URL('https://api.example.com/x');
+    built.searchParams.set('key', odd);
+    expect(built.search).not.toContain(encodeURIComponent(odd));
+    expect(scrubSecret(`error at ${built.toString()}`, odd)).toBe('error at https://api.example.com/x?key=[key]');
     expect(scrubDeep({ a: [`x ${key}`], [key]: 'y' }, key)).toEqual({ a: ['x [key]'], '[key]': 'y' });
   });
 
@@ -426,6 +449,41 @@ describe('the strict outgoing guard', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it('counts the time the name takes to resolve in the one deadline, and gives the request only what is left', async () => {
+    const slowName = () => new Promise<{ address: string; family: number }[]>((resolve) => setTimeout(() => resolve([{ address: '93.184.216.34', family: 4 }]), 200));
+    let sent = false;
+    await expect(guardedRequest({ ...request('https://api.example.com/'), timeoutMs: 100 }, { resolve: slowName, send: async () => ((sent = true), answer) })).rejects.toMatchObject({ code: 'timeout' });
+    expect(sent).toBe(false);
+    // A name that resolves in time leaves the request the rest of the time
+    let timeLeft = 0;
+    await guardedRequest({ ...request('https://api.example.com/'), timeoutMs: 1000 }, { resolve: async () => { await new Promise((resolve) => setTimeout(resolve, 150)); return [{ address: '93.184.216.34', family: 4 }]; }, send: async (target) => ((timeLeft = target.timeoutMs), answer) });
+    expect(timeLeft).toBeLessThanOrEqual(870);
+    expect(timeLeft).toBeGreaterThan(0);
+  });
+
+  it('counts a name lookup as in flight until it settles, not until its caller gave up: only so many wait at once, and one that settles frees its place', async () => {
+    const releases: Array<() => void> = [];
+    const hang = () => new Promise<{ address: string; family: number }[]>((resolve) => releases.push(() => resolve([{ address: '93.184.216.34', family: 4 }])));
+    const asked = jest.fn(hang);
+    // Each caller gives up at its deadline, but its lookup is still waiting for the system's resolver
+    for (let n = 0; n < 16; n += 1) {
+      await expect(guardedRequest({ ...request('https://api.example.com/'), timeoutMs: 5 }, { resolve: asked, send: async () => answer })).rejects.toMatchObject({ code: 'timeout' });
+    }
+    expect(asked).toHaveBeenCalledTimes(16);
+    // The next one is refused without a lookup being made: the places are all taken by lookups that have not settled
+    await expect(guardedRequest({ ...request('https://api.example.com/'), timeoutMs: 5 }, { resolve: asked, send: async () => answer })).rejects.toMatchObject({ code: 'unreachable' });
+    expect(asked).toHaveBeenCalledTimes(16);
+    // One lookup settles and its place is free again
+    releases[0]();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await expect(guardedRequest({ ...request('https://api.example.com/'), timeoutMs: 5 }, { resolve: asked, send: async () => answer })).rejects.toMatchObject({ code: 'timeout' });
+    expect(asked).toHaveBeenCalledTimes(17);
+    for (const release of releases) release();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // All settled: lookups work as before
+    await expect(guardedRequest(request('https://api.example.com/'), { resolve: async () => [{ address: '93.184.216.34', family: 4 }], send: async () => answer })).resolves.toBeDefined();
   });
 
   it('hands a redirect back as an answer, never follows it', async () => {

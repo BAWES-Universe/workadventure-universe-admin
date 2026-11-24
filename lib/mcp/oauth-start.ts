@@ -102,7 +102,9 @@ export function startOAuth(input: OAuthStartInput): OAuthStartResult {
   authorizeUrl.searchParams.set('code_challenge', codeChallenge);
   authorizeUrl.searchParams.set('code_challenge_method', 'S256');
   // RFC 8707 resource indicator, addressed to the app; guarded so an empty value never emits `resource=` (#185)
+  // With no resource intended, one the provider's own authorize address carried is dropped, so the request never names a resource the state does not
   if (serverUrl) authorizeUrl.searchParams.set('resource', serverUrl);
+  else authorizeUrl.searchParams.delete('resource');
 
   return { ok: true, authorizeUrl: authorizeUrl.toString() };
 }

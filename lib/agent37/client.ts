@@ -10,6 +10,17 @@
  */
 
 export const AGENT37_API = 'https://api.agent37.com';
+
+/** An answer that says more is to come: a next page or cursor, a "more" flag, or a total larger than what came. */
+export function morePages(answer: Record<string, unknown>, got: number): boolean {
+  const said = ['next', 'next_cursor', 'nextCursor', 'next_page', 'nextPage', 'cursor', 'has_more', 'hasMore', 'more'];
+  if (said.some((key) => !!answer[key])) return true;
+  const links = answer.links as Record<string, unknown> | undefined;
+  if (links && typeof links === 'object' && !!links.next) return true;
+  const pagination = answer.pagination as Record<string, unknown> | undefined;
+  if (pagination && typeof pagination === 'object' && (!!pagination.next || !!pagination.next_cursor || pagination.has_more === true)) return true;
+  return ['total', 'count', 'total_count'].some((key) => typeof answer[key] === 'number' && (answer[key] as number) > got);
+}
 /** Where commands run: the instance address is for the agent, this one is for the machine. Signed links cannot authorize it. */
 export const AGENT37_SANDBOX = 'https://sandbox.agent37.app';
 
@@ -28,6 +39,8 @@ export interface Instance {
   past_due?: boolean;
   /** The revision of the template this machine's image came from; behind the template's own revision means it can be updated. */
   template_revision?: number | null;
+  /** What the machine may reach on the internet, as Agent37 stored it (domains are lowercased, a bare address becomes /32). Not every answer carries it. */
+  network?: NetworkPolicy | null;
 }
 
 /** A cloud build of a template: `succeeded` carries the revision it published. */
@@ -61,6 +74,13 @@ export interface Billing {
   auto_top_up?: { enabled: boolean } | null;
 }
 
+/** What Agent37 billed for one UTC day (`GET /v1/usage`, docs agents-api/billing): whole micros, by instance. Managed spend is `totalMicros - computeMicros`. */
+export interface UsageDay {
+  day: string;
+  totalMicros: number;
+  instances: { id: string; totalMicros: number; computeMicros: number; awakeMinutes: number }[];
+}
+
 /** An answer that was not a success. `code` is Agent37's own word for it (`try_again`, `insufficient_balance`...), when it gave one. */
 export class Agent37Error extends Error {
   constructor(
@@ -76,6 +96,14 @@ export class Agent37Error extends Error {
   /** Safe to ask again: Agent37 said so, or it was a gateway hiccup. */
   get retryable(): boolean {
     return this.code === 'try_again' || this.status === 429 || this.status === 502 || this.status === 503 || this.status === 504;
+  }
+}
+
+/** A turn was never sent to the agent: the machine could not be found (before any request to the agent was made). */
+export class TurnNotSent extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TurnNotSent';
   }
 }
 
@@ -111,6 +139,8 @@ export interface ExecResult {
 export type NetworkPolicy = 'allow-all' | 'deny-all' | { allow: string[] };
 
 const REQUEST_TIMEOUT_MS = 30_000;
+/** The whole of a folder's archive, from the request to the last byte: a machine that stops answering ends the save at this. */
+const ARCHIVE_TIMEOUT_MS = 20 * 60_000;
 const RETRY_WAITS_MS = [1_000, 3_000, 8_000];
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -141,7 +171,7 @@ export class Agent37Client {
   }
 
   /** One call, one answer. Throws Agent37Error for an answer that is not a success and Agent37Unreached when there was none. */
-  private async call<T>(method: string, url: string, headers: Record<string, string>, body?: unknown, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+  private async call<T>(method: string, url: string, headers: Record<string, string>, body?: unknown, timeoutMs = REQUEST_TIMEOUT_MS, jsonRequired = false): Promise<T> {
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
@@ -161,15 +191,22 @@ export class Agent37Client {
     // An answer whose body could not be read says nothing: it is not read as an empty one (a check would take it for "idle")
     if (unreadable && response.ok) throw new Agent37Unreached('body');
     let json: unknown = null;
+    // Text that does not parse is malformed, whatever it holds (a page, a cut-off answer, only whitespace); no text at all is no answer either
+    let malformed = text.trim() === '';
     try {
-      json = text ? JSON.parse(text) : null;
+      json = text.trim() ? JSON.parse(text) : null;
     } catch {
       json = null;
+      malformed = true;
     }
     if (!response.ok) {
       const { code, message } = describe(json);
       throw new Agent37Error(response.status, code, message || `Agent37 answered ${response.status}`);
     }
+    // A success whose body is not the JSON that was asked for says nothing (a gateway's page, a cut-off answer): for a question where
+    // "no answer" would read as an answer, it is not reached, never taken for an empty one
+    // (An empty body, `null`, a list or anything that is not an object is as little as a cut-off one: the check would read it as "no turn running")
+    if (jsonRequired && (malformed || !json || typeof json !== 'object' || Array.isArray(json))) throw new Agent37Unreached('body');
     return json as T;
   }
 
@@ -200,8 +237,15 @@ export class Agent37Client {
 
   /** Newest first. The docs say nothing about pages, so this is the newest instances: enough to find one that was just made. */
   async listInstances(): Promise<Instance[]> {
-    const answer = await this.again(() => this.call<{ data?: Instance[] }>('GET', `${this.api}/v1/instances`, this.account()));
-    return Array.isArray(answer?.data) ? answer.data : [];
+    const answer = await this.again(() => this.call<{ data?: Instance[]; [more: string]: unknown }>('GET', `${this.api}/v1/instances`, this.account()));
+    // An answer with no list in it (an empty body, `{}`, a page that is not the list) says nothing: it is not read as an account with no machines,
+    // which would let a make look for its machine in nothing and a purge call a Brick clear without looking
+    if (!answer || typeof answer !== 'object' || !Array.isArray(answer.data)) throw new Error('Agent37 did not answer with a list of machines');
+    const rows = answer.data;
+    // The answer is the whole account (checked 18 Nov against the account: the answer is only `data`, newest first, each machine with `created`, and `limit`, `page`, `cursor` and `offset` change nothing). If Agent37 ever says more is to come, a list that is
+    // not all of it must not pass for all of it: a make would look for its machine in it, and a purge would call a Brick clear
+    if (morePages(answer, rows.length)) throw new Error('Agent37 says the list of machines is only part of them');
+    return rows;
   }
 
   /** Starts a stopped instance or wakes a sleeping one. 200 when done, 202 while a host move finishes: either way, look again. */
@@ -234,6 +278,26 @@ export class Agent37Client {
     return this.again(() => this.call('GET', `${this.api}/v1/billing`, this.account()));
   }
 
+  /**
+   * One UTC day of Agent37's bill, by instance: what they charged and how many minutes each machine was awake. Read-only, so safe to ask
+   * again. A day that is not a date, or an answer with no total, is refused rather than read as "nothing was billed".
+   */
+  async usageForDay(day: string): Promise<UsageDay> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || Number.isNaN(Date.parse(`${day}T00:00:00Z`))) throw new Error('A usage day must be a date (YYYY-MM-DD)');
+    const answer = await this.again(() => this.call<Record<string, unknown>>('GET', `${this.api}/v1/usage?from=${day}&to=${day}`, this.account()));
+    const whole = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : null);
+    const total = whole(answer?.total_micros);
+    if (total === null || !Array.isArray(answer?.instances)) throw new Agent37Error(502, null, 'Agent37 answered usage with no total');
+    const instances: UsageDay['instances'] = [];
+    for (const raw of answer.instances as Array<Record<string, unknown>>) {
+      const id = typeof raw?.id === 'string' ? raw.id : null;
+      const entryTotal = whole(raw?.total_micros);
+      if (!id || entryTotal === null) continue;
+      instances.push({ id, totalMicros: entryTotal, computeMicros: whole(raw.compute_micros) ?? entryTotal, awakeMinutes: whole(raw.awake_minutes) ?? 0 });
+    }
+    return { day, totalMicros: total, instances };
+  }
+
   /** The agent's own health. It answers 502 for a few seconds after a machine starts, so a caller asks again until `healthy` is true. */
   async healthy(instanceUrl: string): Promise<boolean> {
     try {
@@ -248,10 +312,11 @@ export class Agent37Client {
    * The home folder as a tar.gz, streamed. Any request to a machine's address wakes it: only call this for one that is awake.
    * Returns the response so the caller streams it; a non-200 throws.
    */
-  async archive(instanceUrl: string): Promise<Response> {
+  async archive(instanceUrl: string, signal: AbortSignal = AbortSignal.timeout(ARCHIVE_TIMEOUT_MS)): Promise<Response> {
     let response: Response;
     try {
-      response = await this.fetchImpl(`${instanceUrl.replace(/\/+$/, '')}/v1/files/archive`, { method: 'GET', headers: this.own() });
+      // The signal stays on the body as it streams: a machine that stops answering halfway ends the save instead of holding it for ever
+      response = await this.fetchImpl(`${instanceUrl.replace(/\/+$/, '')}/v1/files/archive`, { method: 'GET', headers: this.own(), signal });
     } catch (error) {
       throw new Agent37Unreached(error instanceof Error ? error.name : 'unknown');
     }
@@ -317,7 +382,7 @@ export class Agent37Client {
 
   /** The id of the turn running in a session, or null when it is idle (or the session is new). */
   async activeTurn(instanceUrl: string, sessionId: string): Promise<string | null> {
-    const answer = await this.again(() => this.call<{ active_response_id?: string | null }>('GET', `${instanceUrl.replace(/\/+$/, '')}/v1/sessions/${encodeURIComponent(sessionId)}`, this.own(), undefined, 20_000));
+    const answer = await this.again(() => this.call<{ active_response_id?: string | null }>('GET', `${instanceUrl.replace(/\/+$/, '')}/v1/sessions/${encodeURIComponent(sessionId)}`, this.own(), undefined, 20_000, true));
     return typeof answer?.active_response_id === 'string' && answer.active_response_id ? answer.active_response_id : null;
   }
 
@@ -375,6 +440,22 @@ export class Agent37Client {
   /** What the machine may reach on the internet. A 503 `try_again` means it is saved and reaches the machine within two minutes: asked again, it confirms. */
   setNetwork(id: string, network: NetworkPolicy): Promise<Instance> {
     return this.again(() => this.call('PATCH', `${this.api}/v1/instances/${encodeURIComponent(id)}`, this.account(), { network }));
+  }
+
+  /**
+   * A machine's managed budget as Agent37 holds it (`GET /v1/instances/{id}/budget`, docs agents-api/budgets): the monthly cap, what is left of
+   * the month, and what is left of the ONE-TIME credit. Agent37's managed services (model router, Brave, Composio, Perflo) can spend from either.
+   * A number that is not there is read as "not zero", so a changed answer never looks closed.
+   */
+  async getBudget(id: string): Promise<{ monthlyCapMicros: number; monthlyRemainingMicros: number; creditRemainingMicros: number }> {
+    const answer = await this.again(() => this.call<Record<string, unknown>>('GET', `${this.api}/v1/instances/${encodeURIComponent(id)}/budget`, this.account()));
+    const micros = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : Number.MAX_SAFE_INTEGER);
+    return { monthlyCapMicros: micros(answer?.monthly_cap_micros), monthlyRemainingMicros: micros(answer?.monthly_remaining_micros), creditRemainingMicros: micros(answer?.credit_remaining_micros) };
+  }
+
+  /** Sets the monthly cap (`PATCH /v1/instances/{id}/budget`); it takes effect at once. The one-time credit has no call that lowers it. */
+  setMonthlyCap(id: string, micros: number): Promise<unknown> {
+    return this.again(() => this.call('PATCH', `${this.api}/v1/instances/${encodeURIComponent(id)}/budget`, this.account(), { monthly_cap_micros: micros }));
   }
 
   /** A streamed call: returns the response when it is a 200, so the caller reads the body as it comes. */

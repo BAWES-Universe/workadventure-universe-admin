@@ -80,6 +80,8 @@ run('the list of apps to connect, in a real database', () => {
     expect((await add(entry('gmail', { authType: 'bearer', authConfig: 'one-key-for-everyone' }))).status).toBe(400);
     expect((await add(entry('gmail', { serverUrl: 'http://127.0.0.1/mcp' }))).status).toBe(400);
     expect((await add(entry('gmail', { key: 'Bad Key!' }))).status).toBe(400);
+    // The built-in GitHub entry is not listed again under its own name
+    expect((await add(entry('gmail', { key: 'github' }))).status).toBe(400);
     expect((await add(entry('gmail', { authConfig: JSON.stringify({ clientId: 'x' }) }))).status).toBe(400);
     expect((await add(entry('gmail', { authConfig: JSON.stringify({ clientId: 'x', authorizeUrl: 'https://a.example.com/a', tokenUrl: 'https://a.example.com/t', revocationUrl: 'http://10.0.0.1/revoke' }) }))).status).toBe(400);
     // The sign-in and the client secret go to the revocation address: never over plain http, even to a public host
@@ -291,7 +293,8 @@ run('the list of apps to connect, in a real database', () => {
       // An app that needs no sign-in works as soon as it is connected
       expect(row(first.apps, 'weather')).toMatchObject({ connected: true, usable: false });
       expect(JSON.stringify(first)).not.toMatch(/platform|authConfig|serverUrl|example\.com/);
-      for (const app of first.apps) expect(Object.keys(app).sort()).toEqual(['blurb', 'connected', 'connectionId', 'key', 'name', 'usable']);
+      for (const app of first.apps) expect(Object.keys(app).sort()).toEqual(['blurb', 'connected', 'connectionId', 'key', 'kind', 'name', 'usable']);
+      for (const app of mine(first.apps) as unknown as { kind: string }[]) expect(app.kind).toBe('listed');
 
       // They signed in, and the Brick was let use it
       const signedIn = JSON.parse(decryptApiKey((await prisma.appConnection.findUniqueOrThrow({ where: { id: gmail.id } })).authConfig!));

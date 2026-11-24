@@ -1,4 +1,4 @@
-import { lookup } from 'dns/promises';
+import { resolveHost } from '@/lib/name-lookup';
 import { checkOutboundUrl, isAllowedServerIp, isAllowedServerUrl } from '@/lib/mcp/outbound-guard';
 
 /**
@@ -8,11 +8,11 @@ import { checkOutboundUrl, isAllowedServerIp, isAllowedServerUrl } from '@/lib/m
  * including the one in front of the credential-bearing token requests.
  */
 
-jest.mock('dns/promises', () => ({
-  lookup: jest.fn(),
+jest.mock('@/lib/name-lookup', () => ({
+  resolveHost: jest.fn(),
 }));
 
-const mockLookup = lookup as unknown as jest.Mock;
+const mockLookup = resolveHost as unknown as jest.Mock;
 
 beforeEach(() => {
   mockLookup.mockReset();

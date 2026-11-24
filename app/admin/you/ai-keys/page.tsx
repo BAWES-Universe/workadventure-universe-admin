@@ -11,6 +11,7 @@ import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
 import type { AiKeySummary } from '@/lib/ai-keys';
 import type { VoiceKeySummary } from '@/lib/voice-keys';
+import { voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { lendModelId } from '@/lib/voice-lend-model';
 import { LoadError, LoadingRows, PageHeader, count } from '../../components/ds';
 import { FormSheet } from '../../components/form-sheet';
@@ -114,6 +115,9 @@ function ifDownHelp(key: AiKeySummary): string {
  * AI keys (#374): the keys you added so bots you manage can run on your own AI, hosted or on your own computer. The key
  * itself is never shown, only its last four characters.
  */
+/** The job a voice key's list could not be read for, as the toast says it. */
+const UNREAD_JOB_WORDS: Record<string, string> = { recognition: 'listening', speech: 'speaking', talk: 'talking live' };
+
 export default function AiKeysPage() {
   const { result: textResult, retry: retryText, update } = useAiKeys();
   const { result: voiceResult, retry: retryVoice, update: updateVoice } = useVoiceKeys();
@@ -139,6 +143,8 @@ export default function AiKeysPage() {
   const [movingSpeech, setMovingSpeech] = useState<VoiceKeySummary | null>(null);
   const [pulling, setPulling] = useState<{ key: AnyKey; lent: AnyLent } | null>(null);
   const [checking, setChecking] = useState<string | null>(null);
+  // Every voice key whose models are being loaded: one key's answer never ends the spinner of another's
+  const [loadingModels, setLoadingModels] = useState<ReadonlySet<string>>(new Set());
   const [saving, setSaving] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
 
@@ -215,6 +221,34 @@ export default function AiKeysPage() {
     }
   }
 
+  /** "Load models" on a saved voice key: its company is asked again with the key, and the models it lists that are new are added. */
+  async function loadVoiceModels(key: VoiceKeySummary) {
+    setLoadingModels((ids) => new Set(ids).add(key.id));
+    try {
+      const response = await authenticatedFetch(`/api/me/voice-keys/${encodeURIComponent(key.id)}/models`, { method: 'POST' });
+      const body = (await response.json().catch(() => null)) as { error?: string; models?: VoiceKeySummary['models']; added?: unknown[]; unread?: unknown[] } | null;
+      if (!response.ok || !Array.isArray(body?.models)) throw new AiKeyFailure(aiKeyError(response.status, body?.error));
+      const models = body.models;
+      // Only the models are taken from the answer: the card as it is now (a rename saved meanwhile, a lend changed) is kept
+      updateVoice((list) => list.map((entry) => (entry.id === key.id ? { ...entry, models } : entry)));
+      const added = Array.isArray(body.added) ? body.added.length : 0;
+      const company = voiceKeyCompanyInfo(key.adapter)?.label ?? key.name;
+      // A job whose list the company couldn't give right now is named, so "no new models" is never said about a list that wasn't read
+      const unread = (Array.isArray(body.unread) ? body.unread : []).map((job) => UNREAD_JOB_WORDS[String(job)]).filter((word): word is string => Boolean(word));
+      const nothing = unread.length > 0 ? `No new models were added to ${key.name} from the lists that were read` : `${company} lists no new models for ${key.name}`;
+      const said = added > 0 ? `${count(added, 'new model', 'new models')} from ${company} added to ${key.name}` : nothing;
+      addToast({ description: unread.length > 0 ? `${said}. Its list for ${unread.join(' and ')} couldn’t be read right now, try again.` : said, variant: 'success', duration: unread.length > 0 ? 5000 : 3000 });
+    } catch (error) {
+      addToast({ description: aiKeyFailureText(error), variant: 'error', duration: 4000 });
+    } finally {
+      setLoadingModels((ids) => {
+        const rest = new Set(ids);
+        rest.delete(key.id);
+        return rest;
+      });
+    }
+  }
+
   async function chooseIfDown(key: AiKeySummary, ifDown: AiKeySummary['ifDown']) {
     setSaving(key.id);
     const before = key.ifDown;
@@ -268,6 +302,7 @@ export default function AiKeysPage() {
           keyItem={key}
           renaming={renaming === key.id}
           checking={checking === key.id}
+          loadingModels={loadingModels.has(key.id)}
           busy={busy}
           onRename={() => setRenaming(key.id)}
           onCancelRename={() => setRenaming(null)}
@@ -281,6 +316,7 @@ export default function AiKeysPage() {
           onEditModels={(universeId) => setLending({ key, universeId })}
           onLimits={() => setVoiceLimitsFor(key.id)}
           onChangeAddress={() => setMovingSpeech(key)}
+          onLoadModels={() => void loadVoiceModels(key)}
           onPull={(lent) => {
             setFailure(null);
             if (lent.bots.length > 0) setPulling({ key, lent });

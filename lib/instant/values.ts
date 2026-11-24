@@ -14,6 +14,9 @@ import { DIRECT_EXECUTION_MICROS, RATE_MICROS } from '@/lib/composio-rates';
 
 export const INSTANT_PROVIDER = 'composio';
 
+/** A run that nobody could vouch for when its wait ended: it was let go as failed, and whether it finished is not known (a receipt says that, never "didn't work"). */
+export const isUnconfirmedRun = (run: { state: string; reason: string | null }): boolean => run.state === 'failed' && run.reason === 'unclear';
+
 /** The account name Composio's own docs give for choosing an Instant account on purpose when running a tool. */
 export const INSTANT_ACCOUNT = 'instant_account';
 
@@ -51,13 +54,22 @@ const shortText = (value: unknown): string | null => (typeof value === 'string' 
 // ---------- What arguments a run may carry ----------
 
 /** One argument's rule: true when its value cannot make the call cost more than the priced unit. */
-type ArgRule = (value: unknown) => boolean;
+type ArgRule = ((value: unknown) => boolean) & {
+  /** The same rule as a JSON Schema fragment, laid over the provider's own for that argument when the tool is offered. */
+  schema?: Record<string, unknown>;
+};
 
-const textArg: ArgRule = (v) => shortText(v) !== null;
-const flag = (only?: boolean): ArgRule => (v) => typeof v === 'boolean' && (only === undefined || v === only);
-const whole = (min: number, max: number): ArgRule => (v) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
-const oneOf = (...allowed: string[]): ArgRule => (v) => typeof v === 'string' && allowed.includes(v);
-const textList = (max: number): ArgRule => (v) => Array.isArray(v) && v.length >= 1 && v.length <= max && v.every((item) => shortText(item) !== null);
+const withSchema = (rule: (value: unknown) => boolean, schema: Record<string, unknown>): ArgRule => Object.assign(rule, { schema });
+
+/** Some character that is not a space: a text of only spaces is no text (`shortText` refuses it), and the length limits alone would let it through. */
+const NOT_BLANK = '\\S';
+
+const textArg: ArgRule = withSchema((v) => shortText(v) !== null, { type: 'string', minLength: 1, maxLength: MAX_TEXT, pattern: NOT_BLANK });
+const flag = (only?: boolean): ArgRule => withSchema((v) => typeof v === 'boolean' && (only === undefined || v === only), only === undefined ? { type: 'boolean' } : { type: 'boolean', enum: [only] });
+const whole = (min: number, max: number): ArgRule => withSchema((v) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max, { type: 'integer', minimum: min, maximum: max });
+const oneOf = (...allowed: string[]): ArgRule => withSchema((v) => typeof v === 'string' && allowed.includes(v), { type: 'string', enum: allowed });
+const textList = (max: number): ArgRule =>
+  withSchema((v) => Array.isArray(v) && v.length >= 1 && v.length <= max && v.every((item) => shortText(item) !== null), { type: 'array', minItems: 1, maxItems: max, items: { type: 'string', minLength: 1, maxLength: MAX_TEXT, pattern: NOT_BLANK } });
 
 /** A search is priced per search: the most results it may ask for. Above this the provider's own price steps up. */
 const MAX_RESULTS = 10;
@@ -103,10 +115,15 @@ function oneUnit(tool: string, args: Record<string, unknown>): number | null {
 }
 
 /** The argument names a Brick may use on a tool, or null for a tool that is not in the table; for cutting the schema it is offered. */
-export function instantAllowedArguments(tool: string): { names: string[]; required: string[] } | null {
+export function instantAllowedArguments(tool: string): { names: string[]; required: string[]; constraints: Record<string, Record<string, unknown>>; anyOf?: string[][]; together?: { names: [string, string]; max: number } } | null {
   const rules = Object.prototype.hasOwnProperty.call(ALLOWED, tool) ? ALLOWED[tool] : undefined;
-  if (rules) return { names: Object.keys(rules.args), required: rules.required };
-  return tool === 'EXA_GET_CONTENTS_ACTION' ? { names: [...EXA_CONTENTS_KEYS], required: [] } : null;
+  if (rules) {
+    const constraints = Object.fromEntries(Object.entries(rules.args).flatMap(([name, rule]) => (rule.schema ? [[name, rule.schema]] : [])));
+    return { names: Object.keys(rules.args), required: rules.required, constraints };
+  }
+  // Exa's contents: pages come from `urls` or `ids` (at least one list, up to the most pages), so one of them is required, however the provider words it
+  const pages = { type: 'array', minItems: 1, maxItems: MAX_URLS, items: { type: 'string', minLength: 1, maxLength: MAX_TEXT } };
+  return tool === 'EXA_GET_CONTENTS_ACTION' ? { names: [...EXA_CONTENTS_KEYS], required: [], constraints: { urls: pages, ids: pages }, anyOf: [['urls'], ['ids']], together: { names: ['urls', 'ids'], max: MAX_URLS } } : null;
 }
 
 /** The arguments of Exa's contents tool that are known not to add to its price. Any other argument could, so a call with one is not bounded. */
@@ -124,6 +141,12 @@ function exaContentsBound(args: Record<string, unknown>): number | null {
   if (lists.some((list) => !Array.isArray(list))) return null;
   const urls = (lists as unknown[][]).flat();
   if (urls.length < 1 || urls.length > MAX_URLS || urls.some((url) => typeof url !== 'string' || !url || url.length > MAX_TEXT)) return null;
+  // Each option is a flag or a small plain object, and the live-crawl timeout is a plain number: a long query inside `summary`, or a
+  // string where a number goes, is not an argument the price was read for
+  const optionOk = (value: unknown): boolean => value === undefined || value === null || typeof value === 'boolean' || (isRecord(value) && JSON.stringify(value).length <= MAX_TEXT);
+  if (!['text', 'highlights', 'summary'].every((key) => optionOk(args[key]))) return null;
+  if (args.livecrawl !== undefined && (typeof args.livecrawl !== 'string' || args.livecrawl.length > 20)) return null;
+  if (args.livecrawl_timeout !== undefined && (typeof args.livecrawl_timeout !== 'number' || !Number.isFinite(args.livecrawl_timeout) || args.livecrawl_timeout < 0 || args.livecrawl_timeout > 120_000)) return null;
   const kinds = ['text', 'highlights', 'summary'].filter((key) => args[key] !== undefined && args[key] !== false && args[key] !== null).length;
   return urls.length * Math.max(1, kinds);
 }
@@ -225,8 +248,9 @@ function plainDecimal(text: string): string {
 export function readInstantCharge(value: unknown): number | null {
   if (value === undefined || value === null) return null;
   if (isRecord(value)) {
+    // A currency that is there must be USD said in words: a code in any other shape (a number) is not known to be dollars
     const currency = value.currency ?? value.currency_code;
-    if (typeof currency === 'string' && currency.toUpperCase() !== 'USD') return null;
+    if (currency !== undefined && currency !== null && (typeof currency !== 'string' || currency.trim().toUpperCase() !== 'USD')) return null;
     for (const key of ['amount', 'usd', 'total', 'charge', 'value']) {
       if (value[key] !== undefined) return usdToMicros(value[key]);
     }
@@ -292,13 +316,15 @@ export interface InstantLimits {
   sentWaitMinutes: number;
   /** How long an unclear run is looked up for before it is closed on what is known, in minutes. */
   unclearWaitMinutes: number;
+  /** How long a run whose log Composio cannot be asked for is waited on before the person's hold is let go, in minutes. */
+  unreachableWaitMinutes: number;
   /** How long a charge not yet reported is waited for before it is settled at the top price, in minutes. */
   chargeWaitMinutes: number;
   /** How long failures are read over for the pause check, in minutes. */
   pauseWindowMinutes: number;
 }
 
-export const INSTANT_LIMITS_RECOMMENDED = { sentWaitMinutes: 5, unclearWaitMinutes: 30, chargeWaitMinutes: 60, pauseWindowMinutes: 60 };
+export const INSTANT_LIMITS_RECOMMENDED = { sentWaitMinutes: 5, unclearWaitMinutes: 30, unreachableWaitMinutes: 1_440, chargeWaitMinutes: 60, pauseWindowMinutes: 60 };
 
 export const INSTANT_LIMITS_EMPTY: InstantLimits = {
   maxRunMicros: null,
@@ -324,6 +350,7 @@ export const INSTANT_LIMIT_LABELS: Record<keyof InstantLimits, { label: string; 
   markupBps: { label: 'Added to Composio’s charge for what the person pays', hint: 'In hundredths of a percent (1,000 is 10%). Empty: the person pays Composio’s charge as it is.', unit: 'bps' },
   sentWaitMinutes: { label: 'Wait before looking up a run with no answer', hint: 'Minutes.', unit: 'minutes' },
   unclearWaitMinutes: { label: 'How long an unclear run is looked up for', hint: 'Minutes, from when it went out. After that it is closed on what is known and the person’s hold goes back.', unit: 'minutes' },
+  unreachableWaitMinutes: { label: 'How long to wait when Composio’s log cannot be reached', hint: 'Minutes, from when the run went out. After that the person’s hold is given back (they are never charged for it later), the cost is ours, and the Costs report says it was released unconfirmed.', unit: 'minutes' },
   chargeWaitMinutes: { label: 'Wait for Composio’s charge', hint: 'Minutes. After that the top price stands as an estimate until the monthly check.', unit: 'minutes' },
   pauseWindowMinutes: { label: 'Failure window', hint: 'Minutes of recent runs the pause check reads.', unit: 'minutes' },
 };
@@ -338,7 +365,10 @@ export const INSTANT_LIMIT_RANGES: Record<keyof InstantLimits, { min: number; ma
   goodwillPerPersonPerMonth: { min: 0, max: 10_000 },
   markupBps: { min: 0, max: 100_000 },
   sentWaitMinutes: { min: 1, max: 1_440 },
-  unclearWaitMinutes: { min: 1, max: 10_080 },
+  // Longer than the 60 seconds a request to Composio may take, so the sweep never closes a run whose answer is still on its way
+  unclearWaitMinutes: { min: 2, max: 10_080 },
+  // Never shorter than the time an unclear run is looked up for
+  unreachableWaitMinutes: { min: 60, max: 43_200 },
   chargeWaitMinutes: { min: 1, max: 10_080 },
   pauseWindowMinutes: { min: 1, max: 10_080 },
 };
@@ -430,3 +460,11 @@ export const REASON_WORDS: Record<InstantReason, string> = {
   invalid_request: 'Those details were not accepted, so it did not run. You were not charged.',
   unclear: 'Checking whether it worked.',
 };
+
+/** What a run says once the wait to look it up is over and nobody could confirm it: the person's hold is given back, and it is never charged to them later. */
+export const UNCONFIRMED_WORDS = 'We couldn’t confirm this one, so you weren’t charged.';
+
+/** Words for a run that ended failed: an unconfirmed one (reason unclear) is not called a failure, and says the person was not charged. */
+export function failedWords(reason: InstantReason): string {
+  return reason === 'unclear' ? UNCONFIRMED_WORDS : REASON_WORDS[reason];
+}

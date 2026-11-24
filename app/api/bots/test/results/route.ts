@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { corsHeaders } from '@/lib/cors';
+import { whileNotPurged } from '@/lib/brick-purge-lock';
 
 export const runtime = 'nodejs';
 
@@ -40,23 +41,27 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Upsert test result (update if exists)
-    await prisma.botsTestResult.upsert({
-      where: { testId },
-      update: {
-        botId: botId || null,
-        testSuite: testSuite || null,
-        results,
-        passed,
-      },
-      create: {
-        testId,
-        botId: botId || null,
-        testSuite: testSuite || null,
-        results,
-        passed,
-      },
-    });
+    // Upsert test result (update if exists). One that names a Brick is written under the lock a purge takes, after looking for its marker
+    // again, so a purge cannot leave it behind; a Brick that was purged keeps nothing (answered as stored, so the bot server does not retry)
+    const write = (db: Pick<typeof prisma, 'botsTestResult'>) =>
+      db.botsTestResult.upsert({
+        where: { testId },
+        update: {
+          botId: botId || null,
+          testSuite: testSuite || null,
+          results,
+          passed,
+        },
+        create: {
+          testId,
+          botId: botId || null,
+          testSuite: testSuite || null,
+          results,
+          passed,
+        },
+      });
+    if (botId) await whileNotPurged(botId, (tx) => write(tx));
+    else await write(prisma);
 
     return NextResponse.json(
       { status: 'stored' },

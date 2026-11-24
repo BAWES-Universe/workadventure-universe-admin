@@ -5,7 +5,7 @@ import { EVERYONE_KEY, MEMBER_KEY, coversWorld } from '@/lib/roles';
 import { allows, invitationReach, isAdministratorRole, ranksAbove, reachOf, worldsAllowing } from '@/lib/role-access';
 import { SYSTEM_USER_EMAIL } from '@/lib/system-user';
 import { withWokas } from '@/lib/woka-avatar';
-import { badRequest, checkScope, failed, needs, scopeSchema, universeContext } from '@/lib/universe-route';
+import { badRequest, checkScope, failed, needs, scopeSchema, seesHiddenRoles, universeContext } from '@/lib/universe-route';
 import { notifyInvitation } from '@/lib/push-messages';
 
 const inviteSchema = z.object({
@@ -104,12 +104,24 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
 }
 
-/** The most invitations listed at once, newest first. */
+/** The most invitations listed at once, newest first; the rest come with `cursor`. */
 const LISTED = 200;
 
-// GET /api/admin/universes/[id]/invitations - Invitations still waiting for an answer, newest first. Each person sees the
-// invitations they could send or take back: ones that name only worlds where they may invite and remove people (an
-// every-world invitation needs that permission everywhere). For everyone else the list is empty.
+/** Where the next page starts: the last invitation of this one. Equal times are told apart by id, so pages never skip or repeat. */
+const cursorOf = (row: { invitedAt: Date; id: string }) => Buffer.from(`${row.invitedAt.toISOString()}|${row.id}`).toString('base64url');
+function afterCursor(cursor: string | null) {
+  if (!cursor) return null;
+  const [time, id] = Buffer.from(cursor, 'base64url').toString().split('|');
+  const invitedAt = new Date(time);
+  if (!id || Number.isNaN(invitedAt.getTime())) return undefined;
+  return { OR: [{ invitedAt: { lt: invitedAt } }, { invitedAt, id: { lt: id } }] };
+}
+
+// GET /api/admin/universes/[id]/invitations - Invitations still waiting for an answer, newest first, 200 at a time (`cursor`
+// asks for the next 200). Anyone who may invite and remove people in some world sees every one of the universe's pending
+// invitations, whoever sent them and however many worlds they name, so the people who run a universe all see the same list.
+// Each one says whether this viewer may take it back (Invite and remove in every world it names). For everyone else the
+// list is empty.
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
@@ -118,39 +130,63 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const { access } = context;
 
     const where = worldsAllowing(access, 'INVITE_AND_REMOVE');
-    if (where !== 'all' && where.length === 0) return NextResponse.json({ invitations: [], canCancel: false });
+    if (where !== 'all' && where.length === 0) return NextResponse.json({ invitations: [], canCancel: false, total: 0, nextCursor: null });
 
-    // Someone who may invite only in some worlds gets just the invitations that start in one of them (an invitation's
-    // world is always one it gives, and never a deleted one), and the newest 200 are counted after the rule below, so
-    // older ones of theirs are never pushed out by invitations elsewhere
-    const rows = await prisma.membershipInvitation.findMany({
-      where: {
-        status: 'pending',
-        OR: [{ universeId: id }, { world: { universeId: id } }],
-        ...(where === 'all' ? {} : { allWorlds: false, worldId: { in: where } }),
-      },
+    const cursor = request.nextUrl.searchParams.get('cursor');
+    const after = afterCursor(cursor);
+    if (after === undefined) return badRequest('That is not a place in the list');
+
+    const query = {
       include: {
         // Never the invitee's email: they may not have shared it, and a name is all the list needs
         invitedUser: { select: { id: true, name: true } },
         invitedBy: { select: { id: true, name: true } },
       },
-      orderBy: { invitedAt: 'desc' },
-      ...(where === 'all' ? { take: LISTED } : {}),
-    });
-    // The rule that cancelling uses, so everything listed can be taken back
-    const mine = rows.filter((row) => allows(access, 'INVITE_AND_REMOVE', invitationReach(row))).slice(0, LISTED);
-    const invitations = mine.map((row) => ({
+      orderBy: [{ invitedAt: 'desc' as const }, { id: 'desc' as const }],
+    };
+    const inUniverse = { status: 'pending', OR: [{ universeId: id }, { world: { universeId: id } }] };
+    const [page, total, theirs] = await Promise.all([
+      // One more than shown tells whether there is a next page
+      prisma.membershipInvitation.findMany({ ...query, where: after ? { AND: [inUniverse, after] } : inUniverse, take: LISTED + 1 }),
+      prisma.membershipInvitation.count({ where: inUniverse }),
+      // On the first page, someone who may invite only in some worlds also gets the newest 200 they can take back: ones that
+      // name no world beyond theirs (the rule cancelling uses, and a deleted world asks for nothing). An invitation's first
+      // world is always one it gives, so it is theirs too. More than 200 newer invitations elsewhere, or in theirs and
+      // others' together, never push out the ones they can take back. The pages after it reach every other one.
+      where === 'all' || cursor
+        ? Promise.resolve([])
+        : prisma.membershipInvitation.findMany({
+            ...query,
+            where: { ...inUniverse, allWorlds: false, worldId: { in: where }, NOT: { worldIds: { hasSome: access.worldIds.filter((worldId) => !where.includes(worldId)) } } },
+            take: LISTED,
+          }),
+    ]);
+    const newest = page.slice(0, LISTED);
+    const nextCursor = page.length > LISTED ? cursorOf(newest[newest.length - 1]) : null;
+    const seen = new Set<string>();
+    const rows = [...newest, ...theirs]
+      .filter((row) => !seen.has(row.id) && !!seen.add(row.id))
+      .sort((a, b) => b.invitedAt.getTime() - a.invitedAt.getTime());
+    // A role whose badge is off is named only to people who give or manage roles, as on the members and roles screens
+    const named = [...new Set(rows.flatMap((row) => row.roleIds))];
+    const hidden =
+      seesHiddenRoles(access) || named.length === 0
+        ? new Set<string>()
+        : new Set((await prisma.role.findMany({ where: { universeId: id, showBadge: false, id: { in: named } }, select: { id: true } })).map((role) => role.id));
+    const invitations = rows.map((row) => ({
       id: row.id,
       userId: row.invitedUser.id,
       name: row.invitedUser.name,
       invitedBy: { userId: row.invitedBy.id, name: row.invitedBy.name },
       invitedAt: row.invitedAt,
-      roleIds: row.roleIds,
+      roleIds: row.roleIds.filter((roleId) => !hidden.has(roleId)),
       // An invitation from before roles names one world and a tag: they join as a Member there
       worlds: row.universeId ? { allWorlds: row.allWorlds, worldIds: row.worldIds } : { allWorlds: false, worldIds: [row.worldId] },
       tags: row.tags,
+      // The rule that cancelling uses, so the button shows only where it will work
+      canCancel: allows(access, 'INVITE_AND_REMOVE', invitationReach(row)),
     }));
-    return NextResponse.json({ invitations: await withWokas(invitations), canCancel: invitations.length > 0 });
+    return NextResponse.json({ invitations: await withWokas(invitations), canCancel: invitations.some((invitation) => invitation.canCancel), total, nextCursor });
   } catch (error) {
     return failed(error, 'list invitations');
   }

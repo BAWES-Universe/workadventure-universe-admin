@@ -5,7 +5,7 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { createMcpServerSchema } from '@/lib/mcp/server-input';
 import { createConnection } from '@/lib/app-connections';
 import { getGitHubApp } from '@/lib/github/app';
-import { connectGitHub, GITHUB_CATALOG_KEY, GITHUB_ROW_KEY } from '@/lib/github/connection';
+import { connectGitHub, GITHUB_BLURB, GITHUB_CATALOG_KEY, GITHUB_ROW_KEY } from '@/lib/github/connection';
 
 /**
  * The apps a person can connect with one tap (game #2001, "Connect another"): a list a super admin keeps in Orbit, never
@@ -40,7 +40,12 @@ function onlyProviderSetup(authConfig: string | null | undefined): boolean {
 
 export const catalogEntrySchema = createMcpServerSchema
   .safeExtend({
-    key: z.string().trim().regex(KEY, 'key must be lower case letters, digits and dashes'),
+    key: z
+      .string()
+      .trim()
+      .regex(KEY, 'key must be lower case letters, digits and dashes')
+      // The built-in GitHub entry is not in this list: a listed one with its name would stand in for it
+      .refine((key) => key !== 'github', 'github is the built-in App and cannot be listed again'),
     blurb: z.string().trim().min(1).max(200),
     icon: z.string().trim().regex(/^[a-z0-9-]{1,60}$/).default('plug'),
     sortOrder: z.number().int().min(-1000).max(1000).default(0),
@@ -117,9 +122,13 @@ export async function addCatalogEntry(input: z.infer<typeof catalogEntrySchema>)
 }
 
 export async function changeCatalogEntry(id: string, patch: z.infer<typeof catalogPatchSchema>): Promise<CatalogAdminView | null> {
-  const done = await prisma.appCatalogEntry.updateMany({ where: { id }, data: patch });
-  if (done.count === 0) return null;
-  return adminView(await prisma.appCatalogEntry.findUniqueOrThrow({ where: { id } }));
+  // The row that was written is the one answered (a second change between a write and a read would be someone else's)
+  try {
+    return adminView(await prisma.appCatalogEntry.update({ where: { id }, data: patch }));
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') return null;
+    throw error;
+  }
 }
 
 /**
@@ -169,7 +178,7 @@ export async function listCatalogForPerson(ownerId: string, query?: string): Pro
   const rows = entries.map((entry) => ({ key: entry.key, name: entry.name, blurb: entry.blurb, icon: entry.icon, connectionId: connected.get(entry.key) ?? null }));
   // GitHub, through Universe's own GitHub App (game #2041), once a super admin has made it: always first, for everyone
   if (!(await getGitHubApp())) return rows;
-  const github: CatalogRow = { key: GITHUB_ROW_KEY, name: 'GitHub', blurb: 'Code, pull requests, issues and CI', icon: 'github', connectionId: connected.get(GITHUB_CATALOG_KEY) ?? null };
+  const github: CatalogRow = { key: GITHUB_ROW_KEY, name: 'GitHub', blurb: GITHUB_BLURB, icon: 'github', connectionId: connected.get(GITHUB_CATALOG_KEY) ?? null };
   const wanted = !q || [github.name, github.blurb, github.key].some((field) => field.toLowerCase().includes(q.toLowerCase()));
   return [...(wanted ? [github] : []), ...rows.filter((row) => row.key !== GITHUB_ROW_KEY)];
 }

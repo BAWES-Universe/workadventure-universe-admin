@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { verifyOrder, type OrderState } from '@/lib/app-direct/pay';
+import { checksHaveEnded, verifyOrderForReturnPage, type OrderState } from '@/lib/app-direct/pay';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -20,11 +20,12 @@ const WORDS: Record<OrderState, { title: string; body: string }> = {
  */
 export default async function PaymentDone({ searchParams }: { searchParams: Promise<{ o?: string }> }) {
   const { o } = await searchParams;
-  const view = o && /^[0-9a-f-]{36}$/i.test(o) ? await verifyOrder(o).catch(() => null) : null;
+  const view = o && /^[0-9a-f-]{36}$/i.test(o) ? await verifyOrderForReturnPage(o).catch(() => null) : null;
   const words = view ? WORDS[view.status] : { title: 'This payment is not available', body: 'It may have been closed.' };
   return (
     <main className="grid min-h-dvh place-content-center gap-2 bg-[#0A0814] px-6 text-center text-[#f3f1fa] [font-family:var(--font-inter),system-ui,sans-serif]" role="status" data-testid="paymentDone">
-      {view?.status === 'checking' ? <meta httpEquiv="refresh" content="4" /> : null}
+      {/* Checking is looked at again soon (an order the service has not had the last word about, slowly, as its look schedule is); "not received yet" more slowly while a late payment can still be looked for (a closed checkout can be paid for a while, and the page says to keep it open), and not at all once no look is made any more */}
+      {view?.status === 'checking' ? <meta httpEquiv="refresh" content={view.longWait ? '15' : '4'} /> : view?.status === 'not_paid' && !checksHaveEnded(view) ? <meta httpEquiv="refresh" content="15" /> : null}
       <h1 className="text-[22px] font-bold [font-family:var(--font-space-grotesk),system-ui,sans-serif]">{view?.testPayment && view.status === 'paid' ? 'Test payment received' : words.title}</h1>
       <p className="text-[15px] text-[#b3acc7]">{words.body}</p>
     </main>

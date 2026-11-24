@@ -38,6 +38,7 @@ jest.mock('@/lib/db', () => ({
     botMemoryForget: { findMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn(), updateMany: jest.fn() },
     botMemoryItemForget: { findMany: jest.fn(), deleteMany: jest.fn(), updateMany: jest.fn() },
     botFile: { deleteMany: jest.fn() },
+    brickPurge: { count: jest.fn() },
   },
 }));
 
@@ -78,6 +79,8 @@ beforeEach(() => {
   session.mockReset().mockResolvedValue({ id: 'u-sara', email: 'sara@example.com', isSuperAdmin: false });
   manages.mockReset().mockResolvedValue(true);
   botIs(null);
+  // No Brick in these tests was purged
+  db.brickPurge.count.mockResolvedValue(0);
   db.botsConversation.findMany.mockResolvedValue([TRANSCRIPT]);
   db.botsConversation.count.mockResolvedValue(1);
   db.botsConversation.findFirst.mockResolvedValue({ endedAt: new Date(5) });
@@ -503,6 +506,20 @@ describe('the bot server really forgets (it saves a person again whenever they t
     expect(db.botMemoryForget.deleteMany).toHaveBeenCalledWith({ where: { botId: 'bot-1', id: { in: ['f-of-another-bot', 'already-gone'] } } });
   });
 
+  it('accepts a report for as many forgotten things as one batch of notices carries, and no more', async () => {
+    const { ITEM_FORGET_BATCH } = jest.requireActual('@/lib/bot-memory-person');
+    const full = Array.from({ length: ITEM_FORGET_BATCH }, (_, index) => `item-${index}`);
+    // Both full batches are acknowledged: the helpers answer, so a 500 (a batch that could not be acknowledged) would fail here, not pass as "not a 400"
+    db.botMemoryItemForget.updateMany.mockResolvedValue({ count: 1 });
+    const byIds = await call(forgotten, 'POST', { token: 'service-secret', body: { itemIds: full } });
+    expect(byIds.status).toBe(200);
+    expect(await byIds.json()).toEqual({ acknowledged: 0, itemsAcknowledged: 1 });
+    const byItems = await call(forgotten, 'POST', { token: 'service-secret', body: { items: full.map((id) => ({ id, at: 1 })) } });
+    expect(byItems.status).toBe(200);
+    expect(await byItems.json()).toEqual({ acknowledged: 0, itemsAcknowledged: ITEM_FORGET_BATCH });
+    expect((await call(forgotten, 'POST', { token: 'service-secret', body: { itemIds: [...full, 'one-too-many'] } })).status).toBe(400);
+  });
+
   it('takes the report from the bot server only: not from the admin token, a person, or nobody', async () => {
     const body = { ids: ['f3'] };
     expect((await call(forgotten, 'POST', { token: 'admin-secret', body })).status).toBe(401);
@@ -681,5 +698,36 @@ describe('the universe switch', () => {
     session.mockResolvedValue({ id: 'u-sara', email: 'sara@example.com', isSuperAdmin: false });
     expect((await patch({ hideBotConversations: false })).status).toBe(403);
     expect(db.universe.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("someone else's Brick: its chats, memory and emotions are its owner's, a super admin included (game #1992)", () => {
+  const brickOf = (ownerId: string) =>
+    db.bot.findUnique.mockImplementation(async () => ({ roomId: null, ownerId, deletedAt: null, hideConversations: null, room: null }));
+  const root = () => session.mockResolvedValue({ id: 'u-root', email: 'root@example.com', isSuperAdmin: true });
+
+  it.each([
+    ['transcripts', getConversations],
+    ['emotions', getEmotions],
+    ['memory', getMemory],
+  ])('a super admin who is not the owner is refused the %s of a Brick', async (_what, handler) => {
+    root();
+    brickOf('u-sara');
+    expect((await call(handler)).status).toBe(403);
+    expect(db.botsConversation.findMany).not.toHaveBeenCalled();
+    expect(db.botsMemory.findMany).not.toHaveBeenCalled();
+  });
+
+  it('a super admin reading a room bot, a super admin reading their own Brick, and the admin token reading a Brick, are not shut out', async () => {
+    root();
+    // A room bot (it has a room): not a Brick, so not someone's to keep from a super admin
+    db.bot.findUnique.mockImplementation(async () => ({ roomId: 'room-1', ownerId: 'u-sara', deletedAt: null, hideConversations: null, room: null }));
+    expect((await call(getConversations)).status).toBe(200);
+    // A Brick the super admin owns
+    brickOf('u-root');
+    expect((await call(getConversations)).status).toBe(200);
+    session.mockResolvedValue(null);
+    brickOf('u-sara');
+    expect((await call(getConversations, 'GET', { token: 'admin-secret' })).status).toBe(200);
   });
 });
