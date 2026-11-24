@@ -38,7 +38,7 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { ackStart, claimJob, controlInternals, finishJob, finishJobUnder, forgetOldStartMarks, giveComputer, issuedOfKey, registerStart, startJob, DEAD_ANSWER_MS } from '@/lib/computer';
+import { ackStart, finishJob, giveComputer, issuedOfKey, startJob } from '@/lib/computer';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { mintJobToken } from '@/lib/computer-token';
 import { carryOnPaused, resetCarryOnScanForTests } from '@/lib/computer-limit-pause';
@@ -267,6 +267,107 @@ run('GPT eighth note, patch 1: start identity, in a real database', () => {
       const legacy = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Fill the visa form', startKey: `legacy-${tag}-${made}-aaaa` });
       expect(legacy).toMatchObject({ ok: true });
       expect(await jobsOf(sara)).toHaveLength(2);
+    });
+  });
+
+  describe('A2: a redelivered event is the same start', () => {
+    const restOf = () => `mx_${randomUUID().replace(/-/g, '').slice(0, 32)}`;
+    const ack = async (sara: Owner, startKey: string) => (await jobsOf(sara)).find((job) => job.startKey === startKey);
+    const ack2 = (sara: Owner, startKey: string) =>
+      POST(
+        new NextRequest(`http://orbit.test/api/bots/${sara.brickId}/computer-jobs`, {
+          method: 'POST',
+          body: JSON.stringify({ action: 'start-ack', userId: sara.uuid, attempt: startKey }),
+          headers: { 'content-type': 'application/json' },
+        }),
+        { params: Promise.resolve({ id: sara.brickId }) },
+      ).then((res) => res.json());
+
+    it('GPT’s trace: the first key made its job, which was acknowledged and ended; the same event again under a NEW time prefix is that start: ONE job, ONE reservation, the first key is what it answers', async () => {
+      const sara = await owner('a2-redelivery');
+      const REST = restOf();
+      const KEY_1 = keyAgo(120_000, REST);
+      const KEY_2 = keyAgo(1_000, REST);
+      const first = await post(sara, KEY_1, 'Fill the visa form');
+      expect(first).toMatchObject({ ok: true });
+      expect(await ackStart(sara.brickId, sara.id, KEY_1)).toBe(true);
+      await finishJob(first.job.id, 'done', new Date());
+      const again = await post(sara, KEY_2, 'Fill the visa form');
+      expect(again).toMatchObject({ ok: true, job: { id: first.job.id } });
+      expect(await jobsOf(sara)).toHaveLength(1);
+      expect(await roomJobsOf(sara)).toEqual([first.job.id]);
+      // The look for the new prefix finds the first key's job, and it names the first key
+      expect((await look(sara, KEY_2)).body.started).toMatchObject({ id: first.job.id, attempt: KEY_1 });
+      // No row of its own is made for the replay
+      expect(await attemptOf(sara, KEY_2)).toBeNull();
+    });
+
+    it('the ack and the retire of the new prefix reach the first key’s start', async () => {
+      const sara = await owner('a2-ack');
+      const REST = restOf();
+      const KEY_1 = keyAgo(120_000, REST);
+      const KEY_2 = keyAgo(1_000, REST);
+      const first = await post(sara, KEY_1, 'Fill the visa form');
+      expect(first).toMatchObject({ ok: true });
+      expect((await ack(sara, KEY_1))?.id).toBe(first.job.id);
+      expect(await ack2(sara, KEY_2)).toMatchObject({ ok: true, acked: true });
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: first.job.id } })).startAckedAt).not.toBeNull();
+      const retired = await RETIRE(
+        new NextRequest(`http://orbit.test/api/bots/${sara.brickId}/computer-jobs/start-retire`, { method: 'POST', body: JSON.stringify({ userId: sara.uuid, startKey: KEY_2 }), headers: { 'content-type': 'application/json' } }),
+        { params: Promise.resolve({ id: sara.brickId }) },
+      );
+      // A key Orbit has seen is followed, never retired: its start happened
+      expect(await retired.json()).toMatchObject({ ok: true, retired: false });
+      expect(await jobsOf(sara)).toHaveLength(1);
+    });
+
+    it('consent is the FIRST key’s: a first key issued 7 hours ago whose attempt ended with no job makes the replay `stale_consent`, whatever time its prefix carries now', async () => {
+      const sara = await owner('a2-stale');
+      const REST = restOf();
+      const KEY_OLD = keyAgo(7 * 3_600_000, REST);
+      const KEY_NEW = keyAgo(1_000, REST);
+      await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: KEY_OLD, state: 'expired', issuedAt: issuedOfKey(KEY_OLD) } });
+      expect(await post(sara, KEY_NEW, 'Fill the visa form')).toEqual({ ok: false, reason: 'stale_consent' });
+      expect(await jobsOf(sara)).toHaveLength(0);
+      expect(await roomJobsOf(sara)).toHaveLength(0);
+      // The same identity under a time of its own, with no record before: a fresh ask
+      expect(await post(sara, keyAgo(1_000), 'Fill the visa form')).toMatchObject({ ok: true });
+    });
+
+    it('a NEW event (another identity) still makes its own second job, even with the same title', async () => {
+      const sara = await owner('a2-second');
+      const first = await post(sara, keyAgo(60_000, restOf()), 'Fill the visa form');
+      expect(first).toMatchObject({ ok: true });
+      expect(await ackStart(sara.brickId, sara.id, first.job.attempt)).toBe(true);
+      await finishJob(first.job.id, 'done', new Date());
+      const second = await post(sara, keyAgo(1_000, restOf()), 'Fill the visa form');
+      expect(second).toMatchObject({ ok: true });
+      expect(second.job.id).not.toBe(first.job.id);
+      expect(await jobsOf(sara)).toHaveLength(2);
+      expect(new Set(await roomJobsOf(sara)).size).toBe(2);
+    });
+
+    it('the identity is matched EXACTLY: `_` is no wildcard (a stored identity that differs in that one character is another event)', async () => {
+      const sara = await owner('a2-like');
+      const stored = await post(sara, keyAgo(60_000, 'mxXabcdef0123456789abcdef01234567'), 'Fill the visa form');
+      expect(stored).toMatchObject({ ok: true });
+      expect(await ackStart(sara.brickId, sara.id, stored.job.attempt)).toBe(true);
+      await finishJob(stored.job.id, 'done', new Date());
+      const other = await post(sara, keyAgo(1_000, 'mx_abcdef0123456789abcdef01234567'), 'Fill the visa form');
+      expect(other).toMatchObject({ ok: true });
+      expect(other.job.id).not.toBe(stored.job.id);
+    });
+
+    it('two prefixes of one identity at once, with no record yet: ONE job and ONE reservation (repeated, so the order varies)', async () => {
+      for (let round = 0; round < 6; round++) {
+        const sara = await owner(`a2-race-${round}`);
+        const REST = restOf();
+        const answers = await Promise.all([post(sara, keyAgo(2_000, REST), 'Fill the visa form'), post(sara, keyAgo(500, REST), 'Fill the visa form')]);
+        const jobs = await jobsOf(sara);
+        expect(jobs).toHaveLength(1);
+        expect(await roomJobsOf(sara)).toEqual([jobs[0].id]);
+        for (const answer of answers) expect(answerJobOf(answer) === null || answerJobOf(answer) === jobs[0].id).toBe(true);
+      }
     });
   });
 });

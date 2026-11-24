@@ -82,7 +82,7 @@ import {
   settleResumedBrowser,
 } from '@/lib/computer-browser-profile';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
-import { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, startAnswerBody } from '@/lib/computer-start-answer';
+import { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { claimCommandIn, commandRow, keepOutcome, recordResumeDecision, seenCommand, settlePendingResumesIn, type Command } from '@/lib/computer-commands';
 
@@ -822,6 +822,29 @@ export interface Registration {
   /** The attempt had ended with no job and was opened again for this request (A2): a job of this person on this Brick made after the key was issued answers it. */
   reopened: boolean;
   release: () => Promise<void>;
+}
+
+/**
+ * GPT eighth note, A2 (Opus's design): the identity of a timed key is the part after its time prefix (`t<ms base 36>-`), which a redelivery of the same event keeps while its time prefix can change. Null for a key with no time.
+ * The whole of the rest, `-` included: only the first `-` ends the prefix (the prefix never holds one).
+ */
+export function identityOfKey(startKey: string): string | null {
+  return issuedOfKey(startKey) ? startKey.slice(startKey.indexOf('-') + 1) : null;
+}
+
+/**
+ * The key a start of this person on this Brick is KNOWN by: the FIRST key Orbit saw with the same identity (earliest issue time, then creation, then id), or the key itself when it holds none. A redelivery of one event under another time
+ * prefix is the same start: its answer, its refusal, its job and its consent time are the first key's (a replay never gains consent from the time it was replayed). The identity is matched EXACTLY after the first `-` (`_`, which a key
+ * holds, is never a wildcard here). Read only; every route that takes a key maps it first.
+ */
+export async function canonicalStartKey(botId: string, personId: string, startKey: string): Promise<string> {
+  const rest = identityOfKey(startKey);
+  if (rest === null) return startKey;
+  const found = await prisma.$queryRaw<{ start_key: string }[]>`
+    SELECT "start_key" FROM "computer_start_attempts"
+    WHERE "bot_id" = ${botId} AND "person_id" = ${personId} AND "start_key" ~ '^t[0-9a-z]{1,11}-' AND substr("start_key", position('-' in "start_key") + 1) = ${rest}
+    ORDER BY "issued_at" ASC NULLS LAST, "created_at" ASC, "id" ASC LIMIT 1`;
+  return found[0]?.start_key ?? startKey;
 }
 
 /**
