@@ -82,7 +82,60 @@ export interface InstantAdapter {
   denySessionInstant(sessionId: string): Promise<'denied' | 'gone'>;
 }
 
+
+/** One run of code in a job's workspace, as the provider answered it. */
+export interface WorkbenchCell {
+  /** The provider's own word: the code ran and finished without an error. */
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  results: string;
+  /** What went wrong, for the books and the Brick; null when nothing did. */
+  error: string | null;
+  logId: string | null;
+}
+
+/** How one run of code came back. A refused or unreadable answer is a value, so the caller always knows which it is. */
+export type WorkbenchRun =
+  | { kind: 'done'; cell: WorkbenchCell }
+  /** Nothing came back in time (our wait ended): the code may still be running, so the session is deleted. */
+  | { kind: 'timeout' }
+  /** The provider has no such session any more (it was deleted or never was). */
+  | { kind: 'gone' }
+  /** No readable answer (a network failure, a server error): the code may have run. */
+  | { kind: 'failed'; status: number | null };
+
+/** A file read out of a job's workspace, never more than the caller allowed. */
+export type WorkbenchFile = { kind: 'ok'; bytes: Uint8Array } | { kind: 'too_big' } | { kind: 'missing' };
+
+/**
+ * What a code job needs of the provider's sandbox (the bounded "Workbench"). A job gets a session of its OWN, made with no App accounts, no
+ * tools, no raw requests and no connection tools, and the adapter reads that back before anything runs. Deleting the session is what ends
+ * the job: it shuts the sandbox down and every later request answers 404. Optional on the adapter: one without it cannot run code jobs.
+ */
+export interface WorkbenchAdapter {
+  /** Makes the job's own session. Throws when the provider is not reachable, or when the session does not read back exactly as restricted (it is deleted first). */
+  open(input: { jobUserId: string }): Promise<{ sessionId: string }>;
+  /** One run of code. `timeoutMs` is how long we wait for the answer (the provider stops a run at 3 minutes itself); `signal` ends the wait early (a cancel). Neither stops the code: deleting the session does. */
+  run(input: { sessionId: string; code: string; timeoutMs: number; signal?: AbortSignal }): Promise<WorkbenchRun>;
+  /** Puts a file in the workspace at `path` (under in/). Throws when it could not be put there. */
+  put(input: { sessionId: string; path: string; bytes: Uint8Array; timeoutMs: number }): Promise<void>;
+  /**
+   * The files under a folder of the workspace, with the sizes the provider states (null when it states none: such a file cannot be bounded,
+   * so the caller names it and does not keep it). Stops paging once `limit` files are in hand. Throws when it cannot be listed in full.
+   */
+  list(input: { sessionId: string; prefix: string; timeoutMs: number; limit?: number }): Promise<{ path: string; bytes: number | null }[]>;
+  /** One file's bytes, never reading past `maxBytes` (a file that is bigger is `too_big` and is not read). Throws when it cannot be read. */
+  read(input: { sessionId: string; path: string; maxBytes: number; timeoutMs: number }): Promise<WorkbenchFile>;
+  /** Deletes the session: `closed` when the provider says it did, `gone` when it had no such session. Throws when the provider cannot be asked (said again later). */
+  close(sessionId: string): Promise<'closed' | 'gone'>;
+  /** How many provider executions in this session were not our own runs of code (there should be none), or null when it could not be asked. */
+  nestedRuns(input: { sessionId: string; sinceMs: number }): Promise<number | null>;
+}
+
 export interface ReadyMadeAdapter {
+  /** The code jobs' side of the provider (the bounded Workbench). Absent on an adapter that cannot run them. */
+  workbench?: WorkbenchAdapter;
   /** The Instant executor's side of the provider. Absent on an adapter that cannot run Instant. */
   instant?: InstantAdapter;
   /** Starts a person's sign-in to one app on the provider's own page. `person` is our id for them, never their email. `authConfigId` is the sign-in setup already read by the caller (null: the provider's managed one); left out, the adapter reads the setting itself. A caller holding a database transaction passes it so no second connection is taken from the pool. */
@@ -108,6 +161,8 @@ export class AdapterError extends Error {
   constructor(
     readonly kind: 'off' | 'provider',
     message: string,
+    /** The provider's HTTP status when it answered with one (429 and 402 are its own limits). */
+    readonly status?: number,
   ) {
     super(message);
   }

@@ -3,7 +3,6 @@ import { prisma } from '@/lib/db';
 import { startOfDay } from '@/lib/app-uses';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { findUserByIdentifier } from '@/lib/user-identifier';
-import { addNotice } from '@/lib/notices';
 import { recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
 
@@ -33,8 +32,24 @@ export function isAppShareable(connection: { ownerId: string | null; source: str
 export type SharedRefusal = 'not_shared' | 'incomplete' | 'limit_reached' | 'busy' | 'already_asked' | 'gone';
 
 export type SharedVerdict =
-  | { allowed: true; ownerId: string; /** Names of the fields that may come back, or null for the whole answer. */ returns: string[] | null }
-  | { allowed: false; reason: SharedRefusal; /** When today's uses are back, for the kind line the asker reads. */ resetsAt?: Date; /** For `already_asked`: what the first try came to. */ earlier?: string };
+  | { allowed: true; ownerId: string; /** Names of the fields that may come back, or null for the whole answer. */ returns: string[] | null; ownerNote?: OwnerNote }
+  | { allowed: false; reason: SharedRefusal; /** When today's uses are back, for the kind line the asker reads. */ resetsAt?: Date; /** For `already_asked`: what the first try came to. */ earlier?: string; ownerNote?: OwnerNote };
+
+/**
+ * What the bot server needs to tell the owner, in their own chat with the Brick, that today's uses for other people ran out (game
+ * #2006, mock Part 17 picture 6). Only on the ask that made the day's note (once a day, never one per person): it is the same moment
+ * the owner's notice in Orbit is made.
+ */
+export interface OwnerNote {
+  /** The owner's chat id, for the direct chat the two share. */
+  matrixUserId: string;
+  appName: string;
+  botName: string;
+  limit: number;
+  connectionId: string;
+  /** The day (UTC, YYYY-MM-DD) whose uses ran out, as decided here: the bot server makes its message id from it, so the same day's note is one message and the next day's is another. */
+  day: string;
+}
 
 export interface SharedAsk {
   requesterKey?: string;
@@ -42,6 +57,20 @@ export interface SharedAsk {
   tool?: string;
   /** Names of the inputs this ask carries, never their values. */
   argumentNames?: string[];
+}
+
+/** A job still counts as shared only while its tool is confirmed, is the same tool that was picked, and sits under a heading that may be shared. One rule for what is listed and what runs. */
+const isSharedTool = (tool: { fingerprint: string; heading: string | null; confirmedAt: Date | null } | null | undefined, pickedFingerprint: string): boolean =>
+  !!tool && !!tool.confirmedAt && tool.fingerprint === pickedFingerprint && (SHAREABLE_HEADINGS as readonly string[]).includes(tool.heading ?? '');
+
+/** The jobs on a grant read with its share, its jobs and its tools, as the bot server is told them: only a job whose tool is still the one that was picked. Nothing when it is not shared. */
+export function sharedJobsOf(grant: { share?: { jobs: { toolName: string; fingerprint: string; inputs: Prisma.JsonValue; returns: Prisma.JsonValue | null }[] } | null; tools?: { name: string; fingerprint: string; heading: string | null; confirmedAt: Date | null }[] }): { shared?: { jobs: { tool: string; inputs: string[]; returns: string[] | null }[] } } {
+  if (!grant.share) return {};
+  const tools = new Map((grant.tools ?? []).map((tool) => [tool.name, tool]));
+  const jobs = grant.share.jobs
+    .filter((job) => isSharedTool(tools.get(job.toolName), job.fingerprint))
+    .map((job) => ({ tool: job.toolName, inputs: stringList(job.inputs) ?? [], returns: stringList(job.returns) }));
+  return { shared: { jobs } };
 }
 
 /** Midnight UTC after `now`: when a day's uses are back. */
@@ -89,22 +118,24 @@ export async function checkSharedUse(
       return { allowed: false, reason: outcome.busy ? 'busy' : 'already_asked', earlier: outcome.status };
     case 'busy':
       return { allowed: false, reason: 'busy' };
-    case 'limit':
-      if (outcome.which === 'everyone') await tellOwnerOfLimit({ shareId: found.id, ownerId: owner.ownerId, connectionId: grant.connectionId, botId: grant.botId, serverId: grant.id, appName: connectionName, botName, limit: outcome.limit });
-      return { allowed: false, reason: 'limit_reached', resetsAt: nextDay(new Date()) };
-    default:
+    case 'limit': {
+      const ownerNote = outcome.which === 'everyone' ? await tellOwnerOfLimit({ shareId: found.id, ownerId: owner.ownerId, connectionId: grant.connectionId, botId: grant.botId, serverId: grant.id, appName: connectionName, botName, limit: outcome.limit, at: outcome.at }) : undefined;
+      return { allowed: false, reason: 'limit_reached', resetsAt: nextDay(outcome.at), ...(ownerNote ? { ownerNote } : {}) };
+    }
+    default: {
       // The use that takes the last of the day's uses tells the owner now, not only when someone is turned away
-      if (outcome.lastOfDay !== null) await tellOwnerOfLimit({ shareId: found.id, ownerId: owner.ownerId, connectionId: grant.connectionId, botId: grant.botId, serverId: grant.id, appName: connectionName, botName, limit: outcome.lastOfDay });
-      return { allowed: true, ownerId: owner.ownerId, returns: outcome.returns };
+      const ownerNote = outcome.lastOfDay !== null ? await tellOwnerOfLimit({ shareId: found.id, ownerId: owner.ownerId, connectionId: grant.connectionId, botId: grant.botId, serverId: grant.id, appName: connectionName, botName, limit: outcome.lastOfDay, at: outcome.at, madeBy: ask.callId }) : undefined;
+      return { allowed: true, ownerId: owner.ownerId, returns: outcome.returns, ...(ownerNote ? { ownerNote } : {}) };
+    }
   }
 }
 
 type ReserveOutcome =
-  | { kind: 'recorded'; returns: string[] | null; lastOfDay: number | null }
+  | { kind: 'recorded'; returns: string[] | null; lastOfDay: number | null; at: Date }
   | { kind: 'not_shared' }
   | { kind: 'again'; status: string; busy: boolean }
   | { kind: 'busy' }
-  | { kind: 'limit'; which: 'everyone' | 'person'; limit: number }
+  | { kind: 'limit'; which: 'everyone' | 'person'; limit: number; at: Date }
   | { kind: 'gone' };
 
 type Limits = Awaited<ReturnType<typeof getBrickLimits>>;
@@ -132,7 +163,7 @@ async function reserve(input: { shareId: string; grant: { id: string; botId: str
     if (!job) return { kind: 'not_shared' } as const;
     const tool = await tx.botMcpTool.findUnique({ where: { serverId_name: { serverId: grant.id, name: input.tool } } });
     // A tool that changed since it was picked, was moved to a heading that is not shareable, or is not confirmed any more, is not shared
-    if (!tool || !tool.confirmedAt || tool.fingerprint !== job.fingerprint || !(SHAREABLE_HEADINGS as readonly string[]).includes(tool.heading ?? '')) return { kind: 'not_shared' } as const;
+    if (!isSharedTool(tool, job.fingerprint)) return { kind: 'not_shared' } as const;
     const inputs = stringList(job.inputs) ?? [];
     if (input.argumentNames.some((name) => !inputs.includes(name))) return { kind: 'not_shared' } as const;
 
@@ -161,8 +192,8 @@ async function reserve(input: { shareId: string; grant: { id: string; botId: str
     // A use given back (refunded) is not counted; a running, done or unknown try is
     const counted = { serverId: grant.id, createdAt: { gte: startOfDay(now) }, status: { not: 'refunded' } };
     const [everyone, person] = await Promise.all([tx.appShareUse.count({ where: counted }), tx.appShareUse.count({ where: { ...counted, askerKey } })]);
-    if (everyone >= share.usesPerDayEveryone) return { kind: 'limit', which: 'everyone', limit: share.usesPerDayEveryone } as const;
-    if (person >= share.usesPerDayPerson) return { kind: 'limit', which: 'person', limit: share.usesPerDayPerson } as const;
+    if (everyone >= share.usesPerDayEveryone) return { kind: 'limit', which: 'everyone', limit: share.usesPerDayEveryone, at: now } as const;
+    if (person >= share.usesPerDayPerson) return { kind: 'limit', which: 'person', limit: share.usesPerDayPerson, at: now } as const;
 
     await tx.appShareUse.create({ data: { serverId: grant.id, callId, askerKey, toolName: input.tool, status: 'running', createdAt: now } });
     // The books, in the same step. The tool is the owner's, so what it costs is the owner's; the cost of an app added by a link is not
@@ -191,25 +222,72 @@ async function reserve(input: { shareId: string; grant: { id: string; botId: str
       },
       tx,
     );
-    return { kind: 'recorded', returns: stringList(job.returns), lastOfDay: everyone + 1 >= share.usesPerDayEveryone ? share.usesPerDayEveryone : null } as const;
+    return { kind: 'recorded', returns: stringList(job.returns), lastOfDay: everyone + 1 >= share.usesPerDayEveryone ? share.usesPerDayEveryone : null, at: now } as const;
   });
 }
 
-/** The owner is told once a day that today's uses ran out for other people, with what they need to change the limit. Never throws. */
-async function tellOwnerOfLimit(input: { shareId: string; ownerId: string; connectionId: string; botId: string; serverId: string; appName: string; botName: string; limit: number }): Promise<void> {
+/**
+ * The owner is told once a day that today's uses ran out for other people, with what they need to change the limit. Never throws.
+ * Returns what the bot server needs to say it in the owner's own chat with the Brick, only for the one ask that made the day's note
+ * (and only when the owner has a chat id): every other ask that day returns nothing, so the owner is told once, not once per person.
+ */
+async function tellOwnerOfLimit(input: { shareId: string; ownerId: string; connectionId: string; botId: string; serverId: string; appName: string; botName: string; limit: number; at: Date; madeBy?: string }): Promise<OwnerNote | undefined> {
   try {
-    const day = new Date().toISOString().slice(0, 10);
-    await addNotice({
-      userId: input.ownerId,
-      kind: 'app-share-limit',
-      dedupeKey: `app-share-limit:${input.shareId}:${day}`,
-      title: `${input.appName} used up today's ${input.limit} uses for other people`,
-      body: `${input.botName} carries on without it for them until tomorrow. You can change the limit.`,
-      data: { connectionId: input.connectionId, botId: input.botId, serverId: input.serverId },
+    // The day is the one whose uses ran out (when the ask was decided), even when this runs a moment after midnight
+    const day = input.at.toISOString().slice(0, 10);
+    // The owner's chat is read before the notice is claimed: when this fails nothing was claimed, so a later ask tries again
+    const owner = await prisma.user.findUnique({ where: { id: input.ownerId }, select: { matrixChatId: true } });
+    // The day's uses are counted again under the share's lock, the one a refund settles under: a use given back between taking the
+    // last place and getting here leaves the day open, and then no note is made (taking it back would find nothing to take)
+    const added = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-share:${input.serverId}`}))`;
+      const share = await tx.appShare.findUnique({ where: { id: input.shareId }, select: { usesPerDayEveryone: true } });
+      if (!share) return false;
+      const used = await tx.appShareUse.count({ where: { serverId: input.serverId, createdAt: { gte: startOfDay(input.at), lt: nextDay(input.at) }, status: { not: 'refunded' } } });
+      if (used < share.usesPerDayEveryone) return false;
+      // Skipping a duplicate (rather than catching it) keeps this step usable inside the transaction
+      const made = await tx.userNotice.createMany({
+        data: [
+          {
+            userId: input.ownerId,
+            kind: 'app-share-limit',
+            dedupeKey: `app-share-limit:${input.shareId}:${day}`,
+            title: `${input.appName} used up today's ${input.limit} uses for other people`.slice(0, 200),
+            body: `${input.botName} carries on without it for them until tomorrow. You can change the limit.`.slice(0, 1000),
+            // `madeBy` is the use that took the last place: its chat note is held until that use settles, so only that use giving the day back
+            // can take the note back (any other use being given back finds a note that was or will be said)
+            data: { connectionId: input.connectionId, botId: input.botId, serverId: input.serverId, ...(input.madeBy ? { madeBy: input.madeBy } : {}) },
+          },
+        ],
+        skipDuplicates: true,
+      });
+      return made.count > 0;
     });
+    if (!added || !owner?.matrixChatId) return undefined;
+    return { matrixUserId: owner.matrixChatId, appName: input.appName, botName: input.botName, limit: input.limit, connectionId: input.connectionId, day };
   } catch (error) {
     console.error('[AppShare] Could not tell the owner about the limit:', error instanceof Error ? error.message : 'unknown');
+    return undefined;
   }
+}
+
+/**
+ * Takes back today's "used up" note for a share when the use that made it is given back and the day is open again. Only that use's: the
+ * bot holds the note it was handed until the use settles and drops it when the use failed, so nothing was said. A note made by a use that
+ * stays taken was (or will be) said in the owner's chat, and another use being given back leaves it be: taking it back would make a second
+ * one when the day runs out again. Only today's: a note of a day that is past stays.
+ */
+async function takeBackDayNote(tx: Prisma.TransactionClient, serverId: string, giveBack: { callId: string; createdAt: Date }, now: Date): Promise<void> {
+  if (startOfDay(giveBack.createdAt).getTime() !== startOfDay(now).getTime()) return;
+  const share = await tx.appShare.findUnique({ where: { serverId }, select: { id: true, usesPerDayEveryone: true } });
+  if (!share) return;
+  const used = await tx.appShareUse.count({ where: { serverId, createdAt: { gte: startOfDay(now) }, status: { not: 'refunded' } } });
+  if (used >= share.usesPerDayEveryone) return;
+  const dedupeKey = `app-share-limit:${share.id}:${now.toISOString().slice(0, 10)}`;
+  const note = await tx.userNotice.findFirst({ where: { kind: 'app-share-limit', dedupeKey }, select: { id: true, data: true } });
+  const madeBy = note?.data && typeof note.data === 'object' && !Array.isArray(note.data) ? (note.data as { madeBy?: unknown }).madeBy : undefined;
+  if (!note || madeBy !== giveBack.callId) return;
+  await tx.userNotice.deleteMany({ where: { id: note.id } });
 }
 
 /** What the bot server says a try came to, once it knows. `failed` means confirmed failed: it looked up what happened and nothing was done. */
@@ -243,6 +321,9 @@ export async function settleSharedUse(botId: string, serverId: string, callId: s
       return { status: 'settled', now: use.status } as const;
     }
     await tx.appShareUse.update({ where: { id: use.id }, data: { status: to, settledAt: now } });
+    // The day's note ("used up for today") was made when the last use was taken. A use given back, because the job never ran, leaves
+    // the day open: that note is taken back (what the owner was told is no longer so), and the next time the day runs out it is made again
+    if (to === 'refunded') await takeBackDayNote(tx, serverId, { callId: use.callId, createdAt: use.createdAt }, now);
     return { status: 'settled', now: to } as const;
   });
 }

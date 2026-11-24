@@ -294,6 +294,90 @@ run('goals and tasks, in a real database', () => {
     expect((await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } })).failuresInRow).toBe(1);
   });
 
+  it('a one-off reminder given up with no report still tells the person: a failed notice is handed out, again after the retry time, until confirmed', async () => {
+    const wren = await person('wren');
+    const item = await set(wren, { kind: 'reminder', words: 'Call the bank', cadence: { type: 'once', at: at(HOUR).toISOString() } });
+    const mine = <T extends { itemId: string }>(list: T[]) => list.filter((one) => one.itemId === item.id);
+    const [first] = mine((await claimWork(at(HOUR + MIN))).runs);
+    await claimWork(at(HOUR + 20 * MIN));
+    await claimWork(at(HOUR + 40 * MIN));
+    // Given up on this call: the notice rides with it
+    const lapsed = await claimWork(at(HOUR + 60 * MIN));
+    expect(mine(lapsed.runs)).toEqual([]);
+    expect(mine(lapsed.failed)).toMatchObject([{ runId: first.runId, brickId: wren.brickId, userId: wren.uuid, kind: 'reminder', words: 'Call the bank', error: 'It did not finish in time' }]);
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } })).toMatchObject({ state: 'done', tellRunId: first.runId, failureTold: false });
+    // Asked again straight away: not repeated; after the retry time: handed out again
+    expect(mine((await claimWork(at(HOUR + 61 * MIN))).failed)).toEqual([]);
+    const retry = await claimWork(at(HOUR + 60 * MIN + 2 * DAY));
+    expect(mine(retry.failed)).toMatchObject([{ runId: first.runId, error: 'It did not finish in time' }]);
+    // Confirmed: it stops
+    expect(await markTold(first.runId)).toEqual({ ok: true, told: true });
+    expect(mine((await claimWork(at(HOUR + 60 * MIN + 4 * DAY))).failed)).toEqual([]);
+  });
+
+  it('keeps a timeout notice that is still waiting to be confirmed when a later run\'s failure takes the tell over', async () => {
+    const nora = await person('nora');
+    const item = await set(nora, { kind: 'schedule', cadence: { type: 'every', minutes: 60 } });
+    const mine = <T extends { itemId: string }>(list: T[]) => list.filter((one) => one.itemId === item.id);
+    const [first] = mine((await claimWork(at(HOUR + MIN))).runs);
+    await claimWork(at(HOUR + 20 * MIN));
+    await claimWork(at(HOUR + 40 * MIN));
+    // The first run is given up with no report: its notice is handed out and waits to be confirmed
+    const lapsed = await claimWork(at(HOUR + 50 * MIN));
+    expect(mine(lapsed.failed)).toMatchObject([{ runId: first.runId }]);
+    const waiting = await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(waiting).toMatchObject({ tellRunId: first.runId, failureTold: false });
+    expect(waiting.failureNoticeAt).not.toBeNull();
+    // The next run is reported as failed: it takes the tell, and the waiting notice is not forgotten
+    const [next] = mine((await claimWork(at(2 * HOUR + MIN))).runs);
+    expect(next.runId).not.toBe(first.runId);
+    // (The sweep may have handed the waiting notice out again on that call: what counts is what stands just before the failure is reported)
+    const before = await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(before.failureNoticeAt).not.toBeNull();
+    expect(await finishRun(next.runId, { attempt: next.attempt, state: 'failed', error: 'The chat did not answer' }, at(2 * HOUR + 2 * MIN))).toMatchObject({ ok: true, applied: true, tellPerson: true });
+    const after = await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(after).toMatchObject({ tellRunId: next.runId, failureTold: false });
+    expect(after.failureNoticeAt?.getTime()).toBe(before.failureNoticeAt!.getTime());
+  });
+
+  it('a failed notice is not handed out again for an item that was deleted, nor for a Brick that is off, deleted or handed over since; a done item still is', async () => {
+    const thora = await person('thora');
+    const pending = async (label: string) => {
+      const item = await set(thora, { kind: 'reminder', words: label, cadence: { type: 'once', at: at(HOUR).toISOString() } });
+      const [first] = (await claimWork(at(HOUR + MIN))).runs.filter((one) => one.itemId === item.id);
+      await claimWork(at(HOUR + 20 * MIN));
+      await claimWork(at(HOUR + 40 * MIN));
+      const lapsed = await claimWork(at(HOUR + 60 * MIN));
+      expect(lapsed.failed.filter((one) => one.itemId === item.id)).toHaveLength(1);
+      return { item, first };
+    };
+    const deleted = await pending('deleted one');
+    const done = await pending('done one');
+    // The person deletes one of them after its notice went out and was never confirmed
+    await prisma.brickItem.update({ where: { id: deleted.item.id }, data: { state: 'deleted' } });
+    const retry = await claimWork(at(HOUR + 60 * MIN + 2 * DAY));
+    // (Notices other tests left unconfirmed are asked again two days on too: only thora's items count here)
+    const mineOnly = <T extends { itemId: string }>(list: T[]) => list.filter((one) => [deleted.item.id, done.item.id].includes(one.itemId));
+    expect(mineOnly(retry.failed).map((one) => one.itemId)).toEqual([done.item.id]);
+    // The Brick is switched off while a retry is on its way: it hands out nothing (the Brick predicates are read again under a lock, after it was chosen)
+    const real = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+    let switchedOff = false;
+    const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
+      if (!switchedOff && typeof args[0] === 'function') {
+        switchedOff = true;
+        return prisma.bot.update({ where: { id: thora.brickId }, data: { enabled: false } }).then(() => real(...args));
+      }
+      return real(...args);
+    }) as never);
+    try {
+      const again = await claimWork(at(HOUR + 60 * MIN + 4 * DAY));
+      expect(mineOnly(again.failed).map((one) => one.itemId)).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      await prisma.bot.update({ where: { id: thora.brickId }, data: { enabled: true } });
+    }
+  });
+
   it('a one-off whose run fails, or is never reported, ends instead of staying on with nothing due', async () => {
     const odin = await person('odin');
     const reported = await set(odin);
@@ -384,9 +468,13 @@ run('goals and tasks, in a real database', () => {
     // A briefing moves once and carries on from there
     expect(await changeItem(sami.brickId, briefing.id, { userId: sami.uuid, action: 'snooze' }, at(MIN))).toMatchObject({ ok: true, item: { state: 'on', nextDueAt: at(HOUR + MIN).toISOString(), cadence: { type: 'daily' } } });
     expect(await changeItem(sami.brickId, watch.id, { userId: sami.uuid, action: 'snooze' }, at(MIN))).toMatchObject({ ok: false, status: 409 });
+    // The same occurrence is snoozed once: asked again while it still waits (a double tap, even after the setting changed) is the item as it is
     await saveServerLimits({ bricks: { snooze: 15 } }, sami.id);
     try {
-      expect(await changeItem(sami.brickId, briefing.id, { userId: sami.uuid, action: 'snooze' }, at(MIN))).toMatchObject({ ok: true, item: { nextDueAt: at(16 * MIN).toISOString() } });
+      expect(await changeItem(sami.brickId, briefing.id, { userId: sami.uuid, action: 'snooze' }, at(2 * MIN))).toMatchObject({ ok: true, item: { nextDueAt: at(HOUR + MIN).toISOString() } });
+      // Another briefing, snoozed by the new setting
+      const other = await set(sami, { kind: 'schedule', cadence: { type: 'daily', time: '07:30', days: [0, 1, 2, 3, 4, 5, 6] } });
+      expect(await changeItem(sami.brickId, other.id, { userId: sami.uuid, action: 'snooze' }, at(MIN))).toMatchObject({ ok: true, item: { nextDueAt: at(16 * MIN).toISOString() } });
     } finally {
       await saveServerLimits({ bricks: { snooze: 60 } }, sami.id);
     }
@@ -1255,7 +1343,7 @@ run('goals and tasks, in a real database', () => {
     expect(await runsOf(schedule.id)).toEqual([]);
     expect((await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).nextDueAt?.toISOString()).toBe(at(HOUR).toISOString());
     // Asked for nothing: nothing
-    expect(await claimWork(at(HOUR + MIN), undefined, undefined, [])).toEqual({ runs: [], held: [] });
+    expect(await claimWork(at(HOUR + MIN), undefined, undefined, [])).toEqual({ runs: [], held: [], failed: [] });
     // Without kinds, everything that fell due, as before
     const claimedAll = mine(await claimDueRuns(at(HOUR + MIN)));
     expect(claimedAll.map((one) => one.itemId).sort()).toEqual([watch.id, schedule.id].sort());

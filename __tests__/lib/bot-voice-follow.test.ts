@@ -315,6 +315,54 @@ describe('what the bot server and the publish and roll back routes see', () => {
     expect(db.botVoiceRevision.create).toHaveBeenCalledWith({ data: expect.objectContaining({ number: 2, profile: profile() }) });
   });
 
+  // While a write holds its own connection, a look-up on the shared one waits for a second connection (a pool with none to spare never gives it)
+  const writeHoldsItsOwnConnection = () => {
+    let inside = false;
+    const sharedReadsInside: string[] = [];
+    const watch = (name: string, mock: jest.Mock) => {
+      const before = mock.getMockImplementation();
+      mock.mockImplementation(async (...args: unknown[]) => {
+        if (inside) sharedReadsInside.push(name);
+        return before ? before(...args) : undefined;
+      });
+    };
+    watch('draft', db.botVoiceDraft.findUnique);
+    watch('revision', db.botVoiceRevision.findUnique);
+    watch('bot', db.bot.findUnique);
+    watch('providers', db.voiceProvider.findMany);
+    db.$transaction.mockImplementation(async (run: (tx: unknown) => unknown) => {
+      inside = true;
+      try {
+        return await run({ botVoiceDraft: db.botVoiceDraft, botVoiceRevision: db.botVoiceRevision, bot: db.bot });
+      } finally {
+        inside = false;
+      }
+    });
+    return sharedReadsInside;
+  };
+
+  it('publishes with everything looked up before its write begins, not on the shared connection while the write holds its own', async () => {
+    db.botVoiceDraft.findUnique.mockResolvedValue({ profile: profile() });
+    db.botVoiceRevision.findFirst.mockResolvedValue({ number: 1 });
+    db.botVoiceRevision.create.mockResolvedValue({});
+    db.bot.update.mockResolvedValue({});
+    rows(ears, mouth);
+    const inside = writeHoldsItsOwnConnection();
+    await publishVoiceDraft('b1', null, 'u-ana').catch(() => undefined);
+    expect(db.botVoiceRevision.create).toHaveBeenCalled();
+    expect(inside).toEqual([]);
+  });
+
+  it('rolls back with everything looked up before its write, not on the shared connection while the write holds its own', async () => {
+    db.botVoiceRevision.findUnique.mockResolvedValue({ number: 1, profile: profile() });
+    db.bot.update.mockResolvedValue({});
+    rows(ears, mouth);
+    const inside = writeHoldsItsOwnConnection();
+    await rollBackVoice('b1', 1).catch(() => undefined);
+    expect(db.bot.update).toHaveBeenCalledWith({ where: { id: 'b1' }, data: { voiceRevision: 1 } });
+    expect(inside).toEqual([]);
+  });
+
   it('rolls back to a version published on a model that is gone from Universe AI', async () => {
     db.botVoiceRevision.findUnique.mockResolvedValue({ number: 1, profile: profile({ recognition: { providerId: 'soniox', model: 'stt-rt-v4' } }) });
     db.bot.update.mockResolvedValue({});

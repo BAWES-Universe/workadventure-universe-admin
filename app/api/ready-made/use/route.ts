@@ -4,7 +4,7 @@ import { checkAppUse } from '@/lib/app-connections';
 import { prisma } from '@/lib/db';
 import { json, preflight, readBody, serviceRoute } from '@/lib/bot-action-api';
 import { adapterIsOn } from '@/lib/app-adapter';
-import { useReadyMade } from '@/lib/app-adapter/ready-made';
+import { runReadyMade } from '@/lib/app-adapter/ready-made';
 
 export const runtime = 'nodejs';
 
@@ -39,11 +39,13 @@ export async function POST(request: NextRequest) {
     const { botId, serverId, requesterKey, forOwner, tool, callId } = body.data;
     const verdict = await checkAppUse(botId, serverId, { requesterKey, forOwner, callId });
     if (!verdict) return json(request, { allowed: false, reason: 'gone' }, 404);
+    // The team paused Apps: the same answer as the link route gives (nothing was counted or sent)
+    if (!verdict.allowed && verdict.reason === 'paused') return json(request, { error: 'Apps are paused for a while', code: 'paused' }, 503);
     if (!verdict.allowed) return json(request, { allowed: false, reason: verdict.reason }, 403);
     if (!verdict.readyMade) return json(request, { error: 'Not found' }, 404);
     const row = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { connectionId: true, connection: { select: { ownerId: true } } } });
     if (!row?.connectionId || !row.connection?.ownerId) return json(request, { allowed: false, reason: 'gone' }, 404);
-    const outcome = await useReadyMade({ botId, connectionId: row.connectionId, ownerId: row.connection.ownerId, tool, arguments: body.data.arguments, callId });
+    const outcome = await runReadyMade({ botId, connectionId: row.connectionId, ownerId: row.connection.ownerId, tool, arguments: body.data.arguments, callId });
     switch (outcome.status) {
       case 'done':
         return json(request, { ok: outcome.ok, data: outcome.data });
@@ -52,6 +54,9 @@ export async function POST(request: NextRequest) {
         return json(request, { error: 'Not found' }, 404);
       case 'not_owner':
         return json(request, { allowed: false, reason: 'not_owner' }, 403);
+      case 'paused':
+        // The team paused Apps: nothing was counted or sent, and the bot server says so kindly (it can ask again once they are back)
+        return json(request, { error: 'Apps are paused for a while', code: 'paused' }, 503);
       case 'already_asked':
         return json(request, { error: 'This call was already made', code: 'already_asked' }, 409);
       default:

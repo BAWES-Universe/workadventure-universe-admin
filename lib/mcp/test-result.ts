@@ -17,6 +17,29 @@
  * fields existed (every new field is optional).
  */
 
+/** What the test route answers, read into the shape the page keeps. A list of tools that was not read to its end stays marked `incomplete`, so the page never shows it as the whole inventory. */
+export function resultFromTestAnswer(data: Record<string, unknown>): McpTestResult {
+  if (data.success) {
+    return {
+      success: true,
+      toolCount: typeof data.toolCount === 'number' ? data.toolCount : 0,
+      toolNames: Array.isArray(data.toolNames) ? (data.toolNames as string[]) : [],
+      ...(data.incomplete === true ? { incomplete: true } : {}),
+    };
+  }
+  return {
+    success: false,
+    toolCount: 0,
+    toolNames: [],
+    error: (data.error as string | undefined) || 'Connection failed',
+    status: (data.status as number | null | undefined) ?? null,
+    statusText: (data.statusText as string | null | undefined) ?? null,
+    errorCode: (data.errorCode as string | null | undefined) ?? null,
+    wwwAuthenticate: (data.wwwAuthenticate as string | null | undefined) ?? null,
+    errorBody: (data.errorBody as string | null | undefined) ?? null,
+  };
+}
+
 /** Shape stored in `BotMcpServer.lastTestResult`. */
 export interface McpTestResult {
   success: boolean;
@@ -24,6 +47,8 @@ export interface McpTestResult {
   toolNames: string[];
   /** True when the app has more pages of tools than are read. */
   incomplete?: boolean;
+  /** Said beside a result that worked, e.g. a protocol version the check does not know. */
+  note?: string | null;
   error?: string | null;
   /** Captured from the failure path; absent on results stored before #186. */
   status?: number | null;
@@ -57,7 +82,7 @@ const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,
 // are RFC 6750 challenge parameters (a name, `=`, then a value) and carry none, so they are left readable — a bare `abc=` or `abc==`
 // is a padded token and is redacted —
 // the WWW-Authenticate header is precisely what we want to store and show.
-const BEARER_PATTERN = /(bearer\s+)(?!resource_metadata=|[a-z_]+[a-z]=[^\s,=])([A-Za-z0-9._~+/=-]{1,})/gi;
+const BEARER_PATTERN = /(bearer\s+)(?!resource_metadata=[^\s,=]|[a-z_]+[a-z]=[^\s,=])([A-Za-z0-9._~+/=-]{1,})/gi;
 const JSON_SECRET_PATTERN =
   /((?:"|')?(?:access_token|refresh_token|id_token|client_secret|api[_-]?key|token)(?:"|')?\s*[:=]\s*(?:"|'))([^"']{4,})(?:"|')/gi;
 const QUERY_SECRET_PATTERN =
@@ -222,7 +247,8 @@ export function summarizeTestResult(
 
   if (result.success) {
     // What an app brings reads "it can do 3 things" (I1): the word tool is never shown to a person
-    const label = `Connected — it can do ${result.toolCount} thing${result.toolCount !== 1 ? 's' : ''}`;
+    // A list that was not read to its end is not the whole of what the app can do: the count says "at least"
+    const label = `Connected — it can do ${result.incomplete ? 'at least ' : ''}${result.toolCount} thing${result.toolCount !== 1 ? 's' : ''}`;
     const lastTested = age ? ` (last tested ${age})` : '';
     if (opts.reconnectRequired === true) {
       return {
@@ -241,7 +267,8 @@ export function summarizeTestResult(
             : `token expired ${shortTimestamp(expiry!)} — re-authorize to reconnect${lastTested}`,
       };
     }
-    return { tone: 'ok', label, detail: age ? `tested ${age}` : undefined };
+    const detail = [age ? `tested ${age}` : null, result.note || null].filter(Boolean).join(' · ');
+    return { tone: 'ok', label, detail: detail || undefined };
   }
 
   const parts: string[] = [];

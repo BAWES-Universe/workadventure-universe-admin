@@ -35,6 +35,28 @@ describe('the Agent37 client', () => {
     expect(stubborn.sleep).toHaveBeenCalledTimes(3);
   });
 
+  it('hands back the whole list as it comes, and refuses one that says more is to come, so a part of the machines never passes for all of them', async () => {
+    const machine = { id: 'a', status: 'running', url: 'https://a.agent37.app', created: 1793794006 };
+    const whole = client([json(200, { data: [machine] })]);
+    await expect(whole.api.listInstances()).resolves.toEqual([machine]);
+    for (const extra of [{ next_cursor: 'abc' }, { has_more: true }, { next: '/v1/instances?page=2' }, { links: { next: 'x' } }, { pagination: { next: 2 } }, { total: 5 }]) {
+      const cut = client([json(200, { data: [machine], ...extra })]);
+      await expect(cut.api.listInstances()).rejects.toThrow('only part of them');
+    }
+    // Words that say nothing is left do not refuse it
+    const done = client([json(200, { data: [machine], has_more: false, next: null, total: 1 })]);
+    await expect(done.api.listInstances()).resolves.toEqual([machine]);
+  });
+
+  it('refuses an answer that holds no list (an empty body, `{}`, data that is not a list, a body that is not JSON) and takes a real empty list for what it is', async () => {
+    for (const bad of [json(200, {}), json(200, { data: null }), json(200, { data: { a: 1 } }), json(200, [1]), new Response('', { status: 200 }), new Response('<html>', { status: 200 })]) {
+      const odd = client([bad]);
+      await expect(odd.api.listInstances()).rejects.toThrow('did not answer with a list of machines');
+    }
+    const empty = client([json(200, { data: [] })]);
+    await expect(empty.api.listInstances()).resolves.toEqual([]);
+  });
+
   it('never asks again for a create: after a lost answer the caller looks first', async () => {
     const { api, calls } = client([json(502, { error: 'bad_gateway' }), json(201, { id: 'x' })]);
     await expect(api.createInstance({ template: 't' })).rejects.toBeInstanceOf(Agent37Error);
@@ -122,12 +144,76 @@ describe('the Agent37 client', () => {
       expect(await api.activeTurn('https://abc.agent37.app', 'sess-1')).toBeNull();
     });
 
+    it('says the machine was not reached, never idle, when the answer about the session is not JSON', async () => {
+      const { api } = client([new Response('<html>bad gateway page</html>', { status: 200 }), new Response('{"active_response_id": "resp', { status: 200 }), new Response(' \n', { status: 200 }), new Response('', { status: 200 })]);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+      // Whitespace only, and nothing at all, are no answer either: never "idle"
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+    });
+
+    it('says the machine was not reached, never idle, when the answer about the session is empty or only blanks', async () => {
+      const { api } = client([new Response('', { status: 200 }), new Response('  \n ', { status: 200 })]);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+    });
+
+    it('says the machine was not reached, never idle, for an empty answer, `null`, a list or a bare value about the session', async () => {
+      const { api } = client([new Response('', { status: 200 }), new Response('null', { status: 200 }), new Response('"idle"', { status: 200 }), new Response('7', { status: 200 }), new Response('[]', { status: 200 })]);
+      for (let ask = 0; ask < 5; ask++) await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+    });
+
+    it('gives the saved-files archive a signal, so a machine that stops answering cannot hold a save for ever, and takes the caller’s own', async () => {
+      const { api, calls } = client([new Response('bytes', { status: 200 }), new Response('bytes', { status: 200 })]);
+      await api.archive('https://abc.agent37.app');
+      expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
+      expect(calls[0].init.signal!.aborted).toBe(false);
+      const mine = new AbortController();
+      await api.archive('https://abc.agent37.app', mine.signal);
+      expect(calls[1].init.signal).toBe(mine.signal);
+    });
+
     it('sets what the machine may reach on the account address', async () => {
       const { api, calls } = client([json(200, { id: 'abc', status: 'running' })]);
       await api.setNetwork('abc', { allow: ['github.com'] });
       expect(calls[0].url).toBe('https://api.agent37.com/v1/instances/abc');
       expect(calls[0].init.method).toBe('PATCH');
       expect(JSON.parse(String(calls[0].init.body))).toEqual({ network: { allow: ['github.com'] } });
+    });
+  });
+
+  describe('what Agent37 billed', () => {
+    it('reads one UTC day of spend by instance, in micros', async () => {
+      const { api, calls } = client([
+        json(200, {
+          from: '2026-11-15',
+          to: '2026-11-15',
+          total_micros: 9000,
+          instances: [
+            { id: 'abc', total_micros: 8000, compute_micros: 7000, llm_micros: 500, brave_micros: 0, composio_micros: 500, perflo_micros: 0, awake_minutes: 60 },
+            { id: 'def', total_micros: 1000, compute_micros: 1000, awake_minutes: 0 },
+            { total_micros: 5 },
+          ],
+        }),
+      ]);
+      const day = await api.usageForDay('2026-11-15');
+      expect(calls[0].url).toBe('https://api.agent37.com/v1/usage?from=2026-11-15&to=2026-11-15');
+      expect((calls[0].init.headers as Record<string, string>).Authorization).toBe('Bearer sk_live_secret');
+      expect(day).toEqual({
+        day: '2026-11-15',
+        totalMicros: 9000,
+        instances: [
+          { id: 'abc', totalMicros: 8000, computeMicros: 7000, awakeMinutes: 60 },
+          { id: 'def', totalMicros: 1000, computeMicros: 1000, awakeMinutes: 0 },
+        ],
+      });
+    });
+
+    it('refuses a day that is not a date, and an answer with no total', async () => {
+      const { api } = client([json(200, { instances: [] })]);
+      await expect(api.usageForDay('yesterday')).rejects.toThrow('date');
+      await expect(api.usageForDay('2026-11-15')).rejects.toBeInstanceOf(Agent37Error);
     });
   });
 

@@ -17,11 +17,6 @@ interface Universe {
   isPublic: boolean;
   featured: boolean;
   thumbnailUrl: string | null;
-  owner: {
-    id?: string;
-    name: string | null;
-    email: string | null;
-  };
   _count?: {
     worlds?: number;
   };
@@ -126,7 +121,6 @@ export default function DiscoverUniversesPage() {
                         items={[
                           countPlace('world', universe._count?.worlds, 'world'),
                           ...activityStats(analytics),
-                          universe.owner?.name && `by ${universe.owner.name}`,
                         ]}
                       />
                       <VisitLine you={you} latest={latest} youWereLast={analytics?.youWereLast ?? false} />

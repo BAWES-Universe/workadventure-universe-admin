@@ -70,18 +70,23 @@ export async function denyInstantOnSessions(limit = 50, adapter: ReadyMadeAdapte
     }
     try {
       let state = await instant.sessionInstant(sessionId);
+      let turnedOff = false;
       if (state === 'allowed') {
         // Only a session that reads back as denied counts as denied
         state = await instant.denySessionInstant(sessionId);
-        if (state === 'denied') out.denied += 1;
-      } else if (state === 'denied') out.alreadyDenied += 1;
-      if (state === 'gone') out.gone += 1;
-      out.checked += 1;
+        turnedOff = state === 'denied';
+      }
+      const alreadyOff = !turnedOff && state === 'denied';
       await prisma.instantSessionCheck.upsert({
         where: { connectionId: row.id },
         create: { connectionId: row.id, sessionId, state: state === 'gone' ? 'gone' : 'denied' },
         update: { sessionId, state: state === 'gone' ? 'gone' : 'denied', checkedAt: new Date() },
       });
+      // Counted as checked only once its check is saved: one that could not be saved is a failure and stays unchecked
+      if (turnedOff) out.denied += 1;
+      if (alreadyOff) out.alreadyDenied += 1;
+      if (state === 'gone') out.gone += 1;
+      out.checked += 1;
     } catch (error) {
       out.failed += 1;
       console.error('[Instant] Could not check a session:', error instanceof Error ? error.message : 'unknown');

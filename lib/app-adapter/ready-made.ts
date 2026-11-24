@@ -4,18 +4,23 @@ import { getAdapter, AdapterError, type LinkAnswer } from '@/lib/app-adapter';
 import { readReadyMadeApps } from '@/lib/app-adapter/settings';
 import { createConnection } from '@/lib/app-connections';
 import { confirmReadyMade } from '@/lib/app-adapter/confirm';
-import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
+import { getMeterSettings } from '@/lib/meter';
+import { recordAppUseWithinCap } from '@/lib/app-use-cap';
 import { personKeyOf } from '@/lib/meter-values';
 import { priceCall } from '@/lib/composio-rates';
 import { readComposioBilling } from '@/lib/composio-billing';
 import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
+import { linkJson } from '@/lib/app-adapter/link-json';
+import { answerCodeJobCall, boundAppAnswer, isCodeJobTool, sandboxRefusal, withCodeJobTools } from '@/lib/workbench/link';
+import { touchesSandbox } from '@/lib/workbench/values';
 import { getGitHubApp } from '@/lib/github/app';
+import { appCallIsPaused } from '@/lib/capability-pause';
 import { routeForRun, type RunRoute } from '@/lib/app-routes';
 import type { OwnAppVersion } from '@/lib/app-routes/own-versions';
 
 /**
- * Ready-made apps through the adapter (game #2001, step 8). Everything here answers "not there" while the adapter is off, which
- * is always until Khalid says otherwise, so nothing of it shows anywhere. Connecting an app never makes a computer.
+ * Ready-made apps through the adapter (game #2001, step 8). Everything here answers "not there" while the adapter is off (no
+ * COMPOSIO_API_KEY), so nothing of it shows anywhere until the key is set. Connecting an app never makes a computer.
  *
  * Which apps, and the adapter's sign-in setup for each, are a super admin setting (settings.ts), never in code.
  */
@@ -121,7 +126,7 @@ async function restartIfNotSignedIn(
  * The use is written to the meter, first, under an event id taken from the call's own id (a retry never counts twice). Paid by the
  * universe, at the provider's own list price for what the call is (lib/composio-rates.ts): a search or lookup is free (written
  * with 0 and no tool run), a sandbox run and a tool run are priced by app, a batch is the sum of the tools inside it, and the
- * zero data retention add-on is counted where it covers, and a single run sent outside a session (`useReadyMade`) carries the direct execution add-on. The figure is always `estimated` (the provider sends no cost back); the
+ * zero data retention add-on is counted where it covers, and a single run sent outside a session (`runReadyMade`) carries the direct execution add-on. The figure is always `estimated` (the provider sends no cost back); the
  * month's free calls and the plan's credit are taken off at the account level (lib/composio-billing.ts), not here. A price a super
  * admin saved (`appUseMicros`) replaces the list price of each paid step.
  */
@@ -135,7 +140,7 @@ async function meterUse(input: { botId: string; ownerId: string; toolkit: string
   const ownTop = input.route?.provider === 'universe' ? input.route.own?.topPriceMicros ?? null : null;
   const cost = provider === 'universe' ? (ownTop === null ? null : steps * ownTop) : settings.appUseMicros === null ? priced.listMicros : steps * settings.appUseMicros;
   const eventId = `app:${input.botId}:${input.callId}`;
-  const recorded = await recordMeterEvent({
+  const recorded = await recordAppUseWithinCap({
     // Per Brick: a call id is only known to be unique for the one that made it, so two Bricks never count as one call
     eventId,
     kind: 'app_use',
@@ -197,9 +202,14 @@ async function appIsOn(toolkit: string): Promise<boolean> {
   return (await readyMadeApp(toolkit))?.enabled === true;
 }
 
+/** What a person is told when the month's spending stop holds a use back: plain words, and nothing was asked of the App. */
+export const APP_STOPPED_WORDS = 'Apps are resting right now: the month’s limit for using them has been reached. Nothing was done. Try again later.';
+
 export type ReadyMadeLinkOutcome =
   | { status: 'done'; answer: LinkAnswer }
-  | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' | 'refused' };
+  | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' | 'refused' | 'paused' };
+
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /** What may be sent to an app link through Orbit: opening a session, listing tools, and running one (which is counted like a use). */
 const LINK_METHODS = new Set(['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
@@ -214,13 +224,15 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
   if (!adapter) return { status: 'off' };
   const method = typeof input.message.method === 'string' ? input.message.method : '';
   if (!LINK_METHODS.has(method)) return { status: 'refused' };
+  // The team paused Apps: a call (a use) is refused before it is counted or sent. Opening a session and listing what an App can do are not uses.
+  if (method === 'tools/call' && (await appCallIsPaused(input.botId, input.callId))) return { status: 'paused' };
   const connection = await prisma.appConnection.findFirst({ where: { id: input.connectionId, ownerId: input.ownerId, source: 'ready_made' } });
   if (!connection || !connection.providerToolkit) return { status: 'gone' };
   if (!(await appIsOn(connection.providerToolkit))) return { status: 'off' };
   if (!(await confirmReadyMade(connection))) return { status: 'unavailable' };
   const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true } });
   if (!bot || bot.roomId !== null || bot.ownerId !== input.ownerId) return { status: 'not_owner' };
-  // One route for the whole message, read once (see useReadyMade); our own version answers the link itself, never a mix of the two
+  // One route for the whole message, read once (see runReadyMade); our own version answers the link itself, never a mix of the two
   const toolkit = connection.providerToolkit;
   const route = await routeForRun(toolkit);
   if (route.provider === 'universe' && !route.own) return { status: 'unavailable' };
@@ -229,22 +241,53 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
   if (method === 'tools/call') {
     const params = input.message.params && typeof input.message.params === 'object' ? (input.message.params as Record<string, unknown>) : {};
     if (typeof params.name !== 'string' || !params.name || !input.callId) return { status: 'refused' };
+    // Code runs only as a code job (lib/workbench): Orbit's own three tools are answered here, and the provider's own sandbox tools, alone or
+    // inside a batch, are refused on every link (a run sent that way has no deadline, no Limits and no cancel, and could reach the person's accounts).
+    // Neither is counted here: a job is counted once, when it ends, and a refusal runs nothing.
+    if (isCodeJobTool(params.name)) {
+      const answer = await answerCodeJobCall({
+        botId: input.botId,
+        personId: input.ownerId,
+        connectionId: input.connectionId,
+        toolkit,
+        name: params.name,
+        args: params.arguments,
+        callId: input.callId,
+        messageId: input.message.id,
+        read: async ({ tool, arguments: args, callId }) => {
+          const used = await runReadyMade({ botId: input.botId, connectionId: input.connectionId, ownerId: input.ownerId, tool, arguments: args, callId });
+          return used.status === 'done' ? { ok: used.ok, data: used.data } : null;
+        },
+      });
+      return { status: 'done', answer };
+    }
+    if (touchesSandbox(params.name, params.arguments)) return { status: 'done', answer: sandboxRefusal(input.message.id) };
     callParams = { name: params.name, arguments: params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments) ? (params.arguments as Record<string, unknown>) : {} };
     written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit, tool: params.name, arguments: params.arguments, callId: input.callId, route });
+    if (written.stopped) return { status: 'done', answer: stoppedAnswer(input.message.id) };
     if (!written.recorded) return { status: 'already_asked' };
   }
   try {
-    const answer =
+    const sent =
       route.provider === 'universe' && route.own
         ? await answerFromOwnVersion(route.own, input.message, callParams, { person: input.ownerId, providerAccountId: connection.providerAccountId, callId: input.callId ?? '' })
         : await adapter.callLink({ url: connection.serverUrl, message: input.message, sessionId: input.sessionId });
+    // The list of tools: the provider's sandbox tools come out (a link made before code jobs may still list them) and the code job tools go in
+    const answer = method === 'tools/list' ? await withCodeJobTools(sent, input.message.id, !(isObject(input.message.params) && typeof (input.message.params as { cursor?: unknown }).cursor === 'string')) : sent;
     if (written) await recordOutcome(written.eventId, toolkit, written.provider, answer.status < 400 && !rpcError(answer.body, typeof input.message.id === 'number' || typeof input.message.id === 'string' ? input.message.id : undefined) && !/"isError"\s*:\s*true/.test(answer.body));
-    return { status: 'done', answer };
+    // A big answer is never cut and never passed on half: the Brick is told it ran, how big it was, and what to do (already counted above)
+    return { status: 'done', answer: callParams ? await boundAppAnswer(answer, input.message.id, callParams.name, callParams.arguments) : answer };
   } catch (error) {
     console.error('[ReadyMade] Link failed:', error instanceof AdapterError ? error.message : error instanceof Error ? error.message : 'unknown');
     if (written) await recordOutcome(written.eventId, toolkit, written.provider, false);
     return { status: 'unavailable' };
   }
+}
+
+/** The answer of a link to a call that was held back: a tool result that says so (an error the Brick reads and tells the person), as the link itself would send one. */
+function stoppedAnswer(id: unknown): LinkAnswer {
+  const body = { jsonrpc: '2.0', id: typeof id === 'number' || typeof id === 'string' ? id : null, result: { content: [{ type: 'text', text: APP_STOPPED_WORDS }], isError: true } };
+  return { status: 200, contentType: 'application/json', sessionId: null, body: JSON.stringify(body) };
 }
 
 /**
@@ -276,7 +319,7 @@ async function answerFromOwnVersion(
 
 export type ReadyMadeUseOutcome =
   | { status: 'done'; ok: boolean; data: unknown }
-  | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' };
+  | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' | 'paused' };
 
 /**
  * One use of a ready-made app for the person who owns it. The meter is written FIRST, under an event id taken from the call's
@@ -284,9 +327,11 @@ export type ReadyMadeUseOutcome =
  * not called again (an unclear outcome is looked up by the caller, never repeated). Paid by the universe: the cost is the super
  * admin's setting while it has one, else the built-in estimate (always `estimated`). Nothing is refused for the price.
  */
-export async function useReadyMade(input: { botId: string; connectionId: string; ownerId: string; tool: string; arguments: Record<string, unknown>; callId: string }): Promise<ReadyMadeUseOutcome> {
+export async function runReadyMade(input: { botId: string; connectionId: string; ownerId: string; tool: string; arguments: Record<string, unknown>; callId: string }): Promise<ReadyMadeUseOutcome> {
   const adapter = getAdapter();
   if (!adapter) return { status: 'off' };
+  // The team paused Apps: nothing is counted or sent
+  if (await appCallIsPaused(input.botId, input.callId)) return { status: 'paused' };
   const connection = await prisma.appConnection.findFirst({ where: { id: input.connectionId, ownerId: input.ownerId, source: 'ready_made' } });
   if (!connection || !connection.providerToolkit) return { status: 'gone' };
   if (!(await appIsOn(connection.providerToolkit))) return { status: 'off' };
@@ -302,6 +347,7 @@ export async function useReadyMade(input: { botId: string; connectionId: string;
   if (route.provider === 'universe' && !route.own) return { status: 'unavailable' };
 
   const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit, tool: input.tool, arguments: input.arguments, callId: input.callId, direct: true, route });
+  if (written.stopped) return { status: 'done', ok: false, data: { error: APP_STOPPED_WORDS, stopped: true } };
   if (!written.recorded) return { status: 'already_asked' };
 
   try {
@@ -323,36 +369,14 @@ export interface ReadyMadeTestResult {
   toolNames: string[];
   /** True when the app has more pages of tools than are read: the list is the first pages, not everything. */
   incomplete?: boolean;
+  /** Said beside a result that worked (the MCP check: a protocol version it does not know). */
+  note?: string;
   error?: string;
   status?: number | null;
   statusText?: string | null;
   errorCode?: string | null;
   wwwAuthenticate?: string | null;
   errorBody?: string | null;
-}
-
-/** The JSON of a link's answer, which may be plain JSON or an event stream holding it. */
-function linkJson(body: string, id?: number | string): Record<string, unknown> | null {
-  const attempt = (text: string) => {
-    try {
-      const value = JSON.parse(text);
-      return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-    } catch {
-      return null;
-    }
-  };
-  const whole = attempt(body.trim());
-  if (whole) return whole;
-  // An event stream may carry notifications before the answer: the message that answers the question asked (its id) is the one wanted
-  const messages: Record<string, unknown>[] = [];
-  for (const line of body.split('\n')) {
-    if (line.startsWith('data:')) {
-      const found = attempt(line.slice(5).trim());
-      if (found) messages.push(found);
-    }
-  }
-  if (id === undefined) return messages[0] ?? null;
-  return messages.find((message) => message.id === id) ?? messages.find((message) => 'result' in message || 'error' in message) ?? null;
 }
 
 /** The text of a JSON-RPC error carried in an answer that came with a 2xx status, or null when there is none. */
@@ -382,6 +406,8 @@ export async function testReadyMade(connection: { id: string; source: string; se
     if (opened.status >= 400) return failed(`The app answered ${opened.status}.`, opened.status);
     const openError = rpcError(opened.body, 1);
     if (openError) return failed(`Initialize error: ${openError}`, opened.status);
+    // An answer to something else (another id, or no answer at all) is not an answer to this: an error in it would pass unseen, and the list below could then make the app look like it works
+    if (!linkJson(opened.body, 1)) return failed('The app did not answer the start of a session.', opened.status);
     await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId: opened.sessionId });
     // Every page of the list of tools (ids 2, 3, ...): a long list comes in pages, each with the cursor of the next
     const names: string[] = [];
@@ -428,3 +454,4 @@ export async function testReadyMade(connection: { id: string; source: string; se
     return failed('The app could not be reached.');
   }
 }
+

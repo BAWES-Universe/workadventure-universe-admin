@@ -74,6 +74,8 @@ export interface BrickLimits {
   universePool: number;
   /** Minutes a visiting Brick stays after the bot server last found its person in a room: it is how a visit ends when the person leaves Universe (game #2005). */
   visitEndsMinutes: number;
+  /** Days after which someone who only met a Brick, and never wrote to it, can no longer start a direct message. Once they have written, nothing but a decision ends it (game #2005, "People who met"). */
+  metExpiresDays: number;
   /** Goals and tasks one person can have going at once, paused ones included (game #2002); done ones do not count. */
   itemsPerPerson: number;
   /** The shortest wait between two runs of one reminder, schedule, watch or goal, in minutes. */
@@ -134,6 +136,16 @@ export interface BrickLimits {
   sharedJobMinutes: number;
   /** Templates in each of the three short lists under "Start from a template" (game #2008): starred, picks, and Bricks the person has met. */
   templateList: number;
+  /** Days a Brick's computer sits unused before it is packed into our own storage (cold storage) and made again on the next use. Its files and its Files list stay. */
+  coldStorageDays: number;
+  /** Files a finished computer job hands over to the person's chat as cards, newest first; the others are only named. */
+  computerFiles: number;
+  /** Megabytes the largest file may be that a finished computer job hands over; a bigger one is only named. */
+  computerFileMb: number;
+  /** Hours a paused computer job keeps its own browser sign-ins and open pages, locked away from every other job. After that they are dropped: the job stays paused, and it signs in again when it carries on. */
+  pausedSignInsHours: number;
+  /** Steps of one computer job kept for its Activity list (what it has done so far), newest kept; older ones drop off. */
+  computerSteps: number;
 }
 
 /** What a super admin sets, all in one place. */
@@ -151,7 +163,7 @@ export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, 
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
-export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20_000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2_000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10 };
+export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, metExpiresDays: 30, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20_000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2_000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10, computerFiles: 5, computerFileMb: 25, coldStorageDays: 14, pausedSignInsHours: 24, computerSteps: 200 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
 
@@ -215,6 +227,7 @@ const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
   guestReplies: { min: 1, max: 1_000_000, whole: true },
   universePool: { min: 1, max: 1_000_000, whole: true },
   visitEndsMinutes: { min: 1, max: 1_440, whole: true },
+  metExpiresDays: { min: 1, max: 3_650, whole: true },
   itemsPerPerson: { min: 1, max: 10_000, whole: true },
   shortestRepeat: { min: 1, max: 525_600, whole: true },
   runsPerDay: { min: 1, max: 100_000, whole: true },
@@ -245,6 +258,12 @@ const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
   sharedJobsAtOnce: { min: 1, max: 1_000, whole: true },
   sharedJobMinutes: { min: 1, max: 1_440, whole: true },
   templateList: { min: 1, max: 100, whole: true },
+  coldStorageDays: { min: 1, max: 3_650, whole: true },
+  computerSteps: { min: 10, max: 5_000, whole: true },
+  computerFiles: { min: 0, max: 50, whole: true },
+  // Never more than the chat server takes in one upload (the bot server's upload cap)
+  computerFileMb: { min: 1, max: 50, whole: true },
+  pausedSignInsHours: { min: 1, max: 720, whole: true },
 };
 
 /** The values each group can hold, for the pages to say ("Between 1 and 100 files") before anything is sent. */

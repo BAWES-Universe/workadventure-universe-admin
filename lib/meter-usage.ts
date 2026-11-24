@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { getMeterSettings } from '@/lib/meter';
+import { getMeterSettings, getMeterSettingsStrict } from '@/lib/meter';
 import { heldRoom, memberAllowance } from '@/lib/meter-allowance';
 import { runningExtra, type RunningExtra } from '@/lib/meter-grants';
 import { openRequestFor } from '@/lib/meter-requests';
@@ -54,7 +54,8 @@ export interface ComputerBar {
   totalMicros?: number;
   inProgressMicros?: number;
   renewsAt?: string;
-  unavailable?: false;
+  /** The numbers could not be read: the part says so rather than show a made-up bar. */
+  unavailable?: boolean;
 }
 
 export interface MemberUsage {
@@ -93,7 +94,8 @@ export async function chatBar(personId: string, now: Date, extra: RunningExtra |
   return {
     left,
     words: left >= 1 ? 'plenty' : chatWords(left),
-    fullAgainAt: endsAt.toISOString(),
+    // A window a reply check started before any reply was counted is full and has nothing to wait for
+    fullAgainAt: used === 0 ? null : endsAt.toISOString(),
     replies: { available: Math.max(0, total - used), total, running: true, windowHours: limits.windowHours },
     ...(extraWords ? { extra: extraWords } : {}),
   };
@@ -133,17 +135,30 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
   const money = await creditUsage(personId, now);
   let computer: ComputerBar | null = null;
   let storage: MemberUsage['storage'] = null;
+  // A computer part that cannot be read says so and leaves the others as they are: the bar and the credit above are what the person came for
+  try {
   if (await usesComputer(personId)) {
-    const settings = await getMeterSettings();
-    const allowance = await memberAllowance(personId, now, settings);
+    // Read strictly: a failed read must reach the catch below and show the computer part as unavailable, not leave it out as "no allowance"
+    const settings = await getMeterSettingsStrict();
+    // The allowance, the grant it was worked from and the room held are read from one snapshot, so an admin changing a grant between
+    // the reads can never leave the bar with a total from one grant and a figure left from another
+    const { allowance, grant, held } = await prisma.$transaction(
+      async (tx) => {
+        const grant = await runningExtra(personId, now, tx);
+        const allowance = await memberAllowance(personId, now, settings, tx);
+        const held = !allowance || allowance.unlimited ? 0 : await heldRoom(personId, now, tx);
+        return { grant, allowance, held };
+      },
+      { isolationLevel: 'RepeatableRead' },
+    );
     const asked = (await openRequestFor(personId, 'computer')) !== null;
     if (allowance && settings.memberAllowanceMicros) {
       // Against what they have now: the usual, or the raised one while extra usage runs, so the bar is never more than full
-      const total = settings.memberAllowanceMicros * (extra?.multiplier ?? 1);
+      // (their month is the default, or what an exception says for them, and credit given to them for computers is on top of it)
+      const total = allowance.baseMicros * (grant?.multiplier ?? 1) + allowance.creditTotalMicros;
       // What is left is what new work can take: the allowance less everything held, as admission counts it (a hold that ran out and is not yet settled still counts)
-      const held = allowance.unlimited ? 0 : await heldRoom(personId, now);
       const available = allowance.unlimited ? 0 : Math.max(0, (allowance.leftMicros ?? 0) - held);
-      const left = allowance.unlimited ? 1 : Math.min(1, Math.max(0, available / total));
+      const left = allowance.unlimited ? 1 : total > 0 ? Math.min(1, Math.max(0, available / total)) : 0;
       const words = allowance.unlimited ? 'plenty' : usageWords(left);
       const inProgress = await prisma.meterReservation.aggregate({ where: { personKey: `person:${personId}`, state: 'held', expiresAt: { gt: now } }, _sum: { amountMicros: true } });
       computer = {
@@ -157,6 +172,11 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
       };
     }
     storage = { bytes: await storedBytes(personId) };
+  }
+  } catch (error) {
+    console.error('[Usage] Could not read the computer part:', error instanceof Error ? error.message : 'unknown');
+    computer = { left: 0, words: 'out', startsAgainAt: nextMonthStart(now).toISOString(), unlimited: false, asked: false, canAskForMore: false, unavailable: true };
+    storage = null;
   }
   // A receipt that cannot be read leaves the list empty, never the whole page: the bars above are what the person came for
   const activity = await activityFor(personId).catch((error) => {

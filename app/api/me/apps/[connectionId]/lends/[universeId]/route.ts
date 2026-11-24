@@ -12,13 +12,14 @@ export async function OPTIONS(request: NextRequest) {
   return preflight(request, METHODS);
 }
 
-/** PATCH /api/me/apps/:id/lends/:universeId { things?, usesPerDay? } - "Change" the limits of a lend. */
+/** PATCH /api/me/apps/:id/lends/:universeId { things?, usesPerDay? } - "Change" the limits of a lend. 403 once the person can no longer manage bots in that universe (taking it back still works). */
 export async function PATCH(request: NextRequest, { params }: Params) {
   return appsRoute(request, METHODS, 'changing a lend', async (user, respond) => {
     const { connectionId, universeId } = await params;
     const parsed = lendChangeSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return respond({ error: 'Invalid input data' }, 400);
     const lend = await changeLend(user.id, connectionId, universeId, parsed.data);
+    if (lend === 'no_access') return respond({ error: 'You can no longer manage bots there, so you can only take this back' }, 403);
     if (!lend) return respond({ error: NOT_FOUND }, 404);
     return respond({ universeId: lend.universeId, things: lend.things, usesPerDay: lend.usesPerDay });
   });

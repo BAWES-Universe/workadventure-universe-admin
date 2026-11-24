@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
+import { isPurged } from '@/lib/brick-purge';
+import { whileNotPurged } from '@/lib/brick-purge-lock';
 import { botContentReadDenied, getViewer, isPrivileged } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
 import { visibleUserUuid } from '@/lib/visible-identity';
@@ -53,6 +55,11 @@ export async function POST(
         { error: 'Missing required fields: userUuid, messages, startedAt' },
         { status: 400, headers: corsHeaders(request) }
       );
+    }
+
+    // A Brick that was deleted for good keeps no chat, and nothing a bot server still holds for it is written back (audit F08)
+    if (await isPurged(botId)) {
+      return NextResponse.json({ conversationId: null, status: 'gone' }, { headers: corsHeaders(request) });
     }
 
     // Try to match userUuid to User table
@@ -124,20 +131,26 @@ export async function POST(
 
     try {
       // Try to create new active conversation (ended_at = started_at for active conversations)
-      const conversation = await prisma.botsConversation.create({
-        data: {
-          botId,
-          userUuid,
-          userId: finalUserId,
-          userName: userName || null,
-          isGuest: finalIsGuest,
-          messages: messages,
-          startedAt: conversationStartedAt,
-          endedAt: conversationEndedAt,
-          messageCount: messageCount || messages.length,
-        },
-        select: { id: true },
-      });
+      // Written under the lock a purge takes, after looking again for the purge marker: a purge that began after the check above cannot leave
+      // this row behind, because either it waits for this write and deletes it, or this waits for the purge and finds the marker
+      const made = await whileNotPurged(botId, (tx) =>
+        tx.botsConversation.create({
+          data: {
+            botId,
+            userUuid,
+            userId: finalUserId,
+            userName: userName || null,
+            isGuest: finalIsGuest,
+            messages: messages,
+            startedAt: conversationStartedAt,
+            endedAt: conversationEndedAt,
+            messageCount: messageCount || messages.length,
+          },
+          select: { id: true },
+        }),
+      );
+      if (made.gone) return NextResponse.json({ conversationId: null, status: 'gone' }, { headers: corsHeaders(request) });
+      const conversation = made.value;
       
       console.log(`Created new conversation ${conversation.id} for bot ${botId}, user ${userUuid}`);
       
@@ -178,21 +191,25 @@ export async function POST(
             existingConversation.startedAt.getTime() === existingConversation.endedAt.getTime();
           
           if (existingConversation && isActiveConversation) {
-            // Update existing active conversation
-            await prisma.botsConversation.update({
-              where: { id: existingConversation.id },
-              data: {
-                messages: messages,
-                messageCount: messageCount || messages.length,
-                userId: finalUserId,
-                userName: userName || null,
-                isGuest: finalIsGuest,
-                // Keep endedAt = startedAt (still active) unless endedAt was provided and > startedAt
-                endedAt: (endedAt && new Date(endedAt) > conversationStartedAt) 
-                  ? new Date(endedAt) 
-                  : undefined, // Keep current endedAt
-              },
-            });
+            // Update existing active conversation. Under the lock a purge takes, after looking again for the marker, like the create: a purge that
+            // deleted the row since it was found means the Brick is gone (not an error), and nothing is written for it
+            const updated = await whileNotPurged(botId, (tx) =>
+              tx.botsConversation.updateMany({
+                where: { id: existingConversation.id },
+                data: {
+                  messages: messages,
+                  messageCount: messageCount || messages.length,
+                  userId: finalUserId,
+                  userName: userName || null,
+                  isGuest: finalIsGuest,
+                  // Keep endedAt = startedAt (still active) unless endedAt was provided and > startedAt
+                  endedAt: (endedAt && new Date(endedAt) > conversationStartedAt) 
+                    ? new Date(endedAt) 
+                    : undefined, // Keep current endedAt
+                },
+              }),
+            );
+            if (updated.gone || updated.value.count === 0) return NextResponse.json({ conversationId: null, status: 'gone' }, { headers: corsHeaders(request) });
             
             return NextResponse.json(
               { 
@@ -273,7 +290,7 @@ export async function GET(
 ) {
   try {
     const { id: botId } = await params;
-    const denied = await botContentReadDenied(request, corsHeaders(request));
+    const denied = await botContentReadDenied(request, botId, corsHeaders(request));
     if (denied) return denied;
     // Hide bot conversations (#435): no transcript for anyone, super admins included. The count comes from usage rows.
     if (await isBotHidden(botId)) {

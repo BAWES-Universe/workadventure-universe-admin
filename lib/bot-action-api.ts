@@ -34,13 +34,23 @@ export async function serviceRoute(
   }
 }
 
-/** The body, or the 400 to send. An empty body counts as {} when `optional`. */
+/** The body, or the 400 to send. An empty body counts as {} when `optional`; a body that has something in it but is not JSON is a 400 either way. */
 export async function readBody<T extends z.ZodTypeAny>(
   request: NextRequest,
   schema: T,
   optional = false,
 ): Promise<{ data: z.infer<T>; response?: undefined } | { data?: undefined; response: NextResponse }> {
-  const raw = await request.json().catch(() => (optional ? {} : null));
+  const text = await request.text().catch(() => null);
+  let raw: unknown = null;
+  if (text !== null && text.trim() !== '') {
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      return { response: json(request, { error: 'Invalid request data', details: [{ message: 'The body is not valid JSON' }] }, 400) };
+    }
+  } else if (optional && text !== null) {
+    raw = {};
+  }
   const parsed = schema.safeParse(raw ?? (optional ? {} : null));
   if (!parsed.success) return { response: json(request, { error: 'Invalid request data', details: parsed.error.issues }, 400) };
   return { data: parsed.data };

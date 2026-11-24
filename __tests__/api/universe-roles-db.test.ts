@@ -541,7 +541,7 @@ run('universe roles and people routes (real database)', () => {
     expect((await prisma.role.findUnique({ where: { id: lead.id } }))?.position).toBe(501);
   });
 
-  it('lists pending invitations only for worlds the viewer may invite to, and an every-world one only to someone who may everywhere', async () => {
+  it('lists every pending invitation to someone who may invite in any world, and lets them take back only the ones within their worlds', async () => {
     const mine: Record<string, string> = {};
     for (const who of ['wanted-a', 'wanted-b', 'wanted-all']) {
       const user = await prisma.user.create({ data: { uuid: `${who}-${tag}`, email: `${who}-${tag}@example.test`, name: who } });
@@ -560,10 +560,15 @@ run('universe roles and people routes (real database)', () => {
     // The Moderator invites and removes in world A only
     const moderator = await as('mod', inviteRoute.GET, {});
     expect(moderator.status).toBe(200);
-    expect(names(moderator.body)).toEqual(['wanted-a']);
+    expect(names(moderator.body)).toEqual(['wanted-a', 'wanted-all', 'wanted-b']);
     expect(moderator.body.canCancel).toBe(true);
+    const cancellable = (body: { invitations: { userId: string; canCancel: boolean }[] }) =>
+      body.invitations.filter((invitation) => invitation.canCancel).map((invitation) => mine[invitation.userId]).filter(Boolean).sort();
+    expect(cancellable(moderator.body)).toEqual(['wanted-a']);
     // The Admin has it everywhere
-    expect(names((await as('admin', inviteRoute.GET, {})).body)).toEqual(['wanted-a', 'wanted-all', 'wanted-b']);
+    const admin = await as('admin', inviteRoute.GET, {});
+    expect(names(admin.body)).toEqual(['wanted-a', 'wanted-all', 'wanted-b']);
+    expect(cancellable(admin.body)).toEqual(['wanted-a', 'wanted-all', 'wanted-b']);
   });
   it('offers every visitor of the week to invite, however often members came in, and never a member or someone invited', async () => {
     for (const who of ['visitor', 'invitee']) {
@@ -694,5 +699,47 @@ run('universe roles and people routes (real database)', () => {
     const listed = await as('mod', inviteRoute.GET, {});
     expect(listed.body.invitations.map((invitation: { userId: string }) => invitation.userId)).toContain(early.id);
     await prisma.membershipInvitation.deleteMany({ where: { invitedUserId: { in: [early.id, ...crowdIds] } } });
+  });
+
+  it('lists an older invitation only the viewer may take back, however many newer ones start in their world but also name another', async () => {
+    const early = await prisma.user.create({ data: { uuid: `early2-${tag}`, email: `early2-${tag}@example.test`, name: 'early2' } });
+    await prisma.membershipInvitation.create({
+      data: { worldId: worldA, universeId, allWorlds: false, worldIds: [worldA], invitedUserId: early.id, invitedByUserId: people.admin, status: 'pending', tags: [], roleIds: [], invitedAt: new Date('2026-01-01T00:00:00Z') },
+    });
+    const crowd = Array.from({ length: 200 }, (_, index) => ({ uuid: `wide-${index}-${tag}`, email: `wide-${index}-${tag}@example.test`, name: `wide ${index}` }));
+    await prisma.user.createMany({ data: crowd });
+    const crowdIds = (await prisma.user.findMany({ where: { uuid: { in: crowd.map((person) => person.uuid) } }, select: { id: true } })).map((person) => person.id);
+    // Newer, start in world A like the Moderator's, but also name world B: the Moderator may not take these back
+    await prisma.membershipInvitation.createMany({
+      data: crowdIds.map((userId) => ({ worldId: worldA, universeId, allWorlds: false, worldIds: [worldA, worldB], invitedUserId: userId, invitedByUserId: people.admin, status: 'pending', tags: [], roleIds: [] })),
+    });
+
+    const listed = await as('mod', inviteRoute.GET, {});
+    const mine = listed.body.invitations.find((invitation: { userId: string }) => invitation.userId === early.id);
+    expect(mine).toMatchObject({ canCancel: true });
+    await prisma.membershipInvitation.deleteMany({ where: { invitedUserId: { in: [early.id, ...crowdIds] } } });
+  });
+
+  it('pages through every pending invitation, 200 at a time, even when they all share one time', async () => {
+    const crowd = Array.from({ length: 205 }, (_, index) => ({ uuid: `page-${index}-${tag}`, email: `page-${index}-${tag}@example.test`, name: `page ${index}` }));
+    await prisma.user.createMany({ data: crowd });
+    const crowdIds = (await prisma.user.findMany({ where: { uuid: { in: crowd.map((person) => person.uuid) } }, select: { id: true } })).map((person) => person.id);
+    const sameTime = new Date('2026-11-01T00:00:00Z');
+    await prisma.membershipInvitation.createMany({
+      data: crowdIds.map((userId) => ({ worldId: worldA, universeId, allWorlds: false, worldIds: [worldA], invitedUserId: userId, invitedByUserId: people.admin, status: 'pending', tags: [], roleIds: [], invitedAt: sameTime })),
+    });
+    const expected = await prisma.membershipInvitation.count({ where: { status: 'pending', OR: [{ universeId }, { world: { universeId } }] } });
+
+    const first = await as('owner', inviteRoute.GET, {});
+    expect(first.body.invitations).toHaveLength(200);
+    expect(first.body.total).toBe(expected);
+    expect(first.body.nextCursor).toEqual(expect.any(String));
+    const second = await as('owner', inviteRoute.GET, {}, undefined, `cursor=${first.body.nextCursor}`);
+    expect(second.body.nextCursor).toBeNull();
+
+    const ids = [...first.body.invitations, ...second.body.invitations].map((invitation: { id: string }) => invitation.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toHaveLength(expected);
+    await prisma.membershipInvitation.deleteMany({ where: { invitedUserId: { in: crowdIds } } });
   });
 });

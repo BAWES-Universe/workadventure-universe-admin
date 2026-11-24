@@ -5,7 +5,8 @@
  *
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/spend-rules-db.test.ts --runInBand
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
@@ -13,28 +14,41 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn() }));
 
 import { prisma } from '@/lib/db';
+import * as meter from '@/lib/meter';
 import { createBrick } from '@/lib/brick-create';
 import { getSessionUser } from '@/lib/auth-session';
 import { saveMeterSettings } from '@/lib/meter';
-import { releaseRoom, renewRoom, reserveRoom } from '@/lib/meter-allowance';
+import { releaseRoom, renewRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
 import { memberUsage } from '@/lib/meter-usage';
-import { changeRule, checkSpend, endRule, listRules, ownerSpendAllowed, proposeRule } from '@/lib/spend-rules';
+import { changeRule, checkSpend, chatRuleKey, endRule, listRules, ownerSpendAllowed, proposeRule } from '@/lib/spend-rules';
 import { activityFor, closeReceipt, openReceipt } from '@/lib/task-receipts';
+import { OUTCOME_WORDS, STOPPED_AT_RULE } from '@/lib/task-receipt-words';
 import { POST as postRule, GET as getRules } from '@/app/api/bots/[id]/spend-rules/route';
 import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
 import { GET as getPaidBy } from '@/app/api/bots/[id]/paid-by/route';
 import { POST as postJob } from '@/app/api/bots/[id]/computer-jobs/route';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { giveComputer, renewJob, startJob } from '@/lib/computer';
+import { finishJob, giveComputer, renewJob, startJob, stopJobForRefusal, sweepComputers } from '@/lib/computer';
+import { recordFaults } from '@/lib/computer-faults';
+import { reportsToTell } from '@/lib/computer-report';
+import { HAND_OVER_ALIVE_MS, HAND_OVER_LATEST_MS } from '@/lib/computer-file-cards';
 import { mintJobToken } from '@/lib/computer-token';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { createInstantFunds } from '@/lib/funding/instant-funds';
+import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
 import { PATCH as patchRule, DELETE as deleteRule } from '@/app/api/me/spend-rules/[ruleId]/route';
+
+// The books' own writer, wrapped so a test can make its writes fail (the reporting outage) and every other one run as it always does
+const actualRecord = jest.requireActual('@/lib/meter').recordMeterEvent as typeof meter.recordMeterEvent;
+jest.mock('@/lib/meter', () => {
+  const actual = jest.requireActual('@/lib/meter');
+  return { ...actual, recordMeterEvent: jest.fn(actual.recordMeterEvent) };
+});
 
 // Delegates to the real room-taking; one test makes it hold up a moment to let another try claim the job (see "a try refused by a rule")
 jest.mock('@/lib/meter-allowance', () => {
   const actual = jest.requireActual('@/lib/meter-allowance');
-  return { ...actual, reserveRoom: jest.fn(actual.reserveRoom) };
+  return { ...actual, reserveRoom: jest.fn(actual.reserveRoom), settleRoom: jest.fn(actual.settleRoom) };
 });
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -126,9 +140,12 @@ run('rules said in chat and task receipts, in a real database', () => {
   beforeEach(async () => {
     await wipe();
     await saveMeterSettings({ memberAllowanceMicros: 100_000_000, poolCeilingMicros: 1_000_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+    // A failed job the runner calls ours is decided by the give-back Limits (as production has them), never left to a missing setting
+    await seedGiveBackLimits();
   });
   afterAll(async () => {
     await wipe();
+    await clearGiveBackLimits();
     await prisma.universe.deleteMany({ where: { id: { in: universes } } });
     await prisma.user.deleteMany({ where: { id: { in: people.map((one) => one.id) } } });
     await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
@@ -164,6 +181,17 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await prisma.spendRule.count({ where: { ownerPersonId: omar.id } })).toBe(1);
       // Each person's own replay still finds their own rule
       expect(await proposeRule({ botId: sara.brickId, speakerId: omar.id, sayingKey: 'shared-id', scope: 'person', period: 'day', capMicros: 2_000_000 })).toMatchObject({ ok: true, created: false, rule: { words: expect.stringContaining('$2.00 a day') } });
+    });
+
+    it('a message id is a replay only of what that message said, even after the rule was corrected', async () => {
+      const sara = await person('sara');
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'edited-id', scope: 'person', period: 'month', capMicros: 1_000_000 });
+      if (!made.ok) throw new Error('not made');
+      expect((await changeRule(made.rule.id, sara.id, { capMicros: 3_000_000 })).ok).toBe(true);
+      // Another proposal under the same id is not that message: nothing is saved and nothing shown
+      expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'edited-id', scope: 'person', period: 'month', capMicros: 50_000_000 })).toEqual({ ok: false, reason: 'key_reused' });
+      // The same message again still finds its rule, as it stands now
+      expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'edited-id', scope: 'person', period: 'month', capMicros: 1_000_000 })).toMatchObject({ ok: true, created: false });
     });
 
     it('asks one short question when it is not clear, saves nothing, and saves when it is answered', async () => {
@@ -238,6 +266,24 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await checkSpend({ payerPersonId: omar.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: 99_000_000 }, NOW)).toEqual({ ok: true });
     });
 
+    it('reads no totals for a rule that is not about the step: another Brick’s', async () => {
+      const sara = await person('sara');
+      const second = await createBrickFor(sara.id);
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 1_000 });
+      await spend(sara.id, sara.brickId, 5_000);
+      const reads = jest.spyOn(prisma.meterEvent, 'aggregate');
+      try {
+        // Another Brick is not held to it, and nothing the rule counts is read for it
+        expect(await checkSpend({ payerPersonId: sara.id, botId: second, taskKey: null, chargeClass: 'computer', amountMicros: 1 }, NOW)).toEqual({ ok: true });
+        expect(reads).not.toHaveBeenCalled();
+        // The rule's own step does read, and is held
+        expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: 1 }, NOW)).toMatchObject({ ok: false, why: 'cap' });
+        expect(reads).toHaveBeenCalled();
+      } finally {
+        reads.mockRestore();
+      }
+    });
+
     it('a day’s cap starts again at 00:00 UTC, and a task’s cap counts that task only', async () => {
       const sara = await person('sara');
       await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'day', capMicros: 300_000 });
@@ -278,6 +324,252 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await ask()).toMatchObject({ ok: false, leftMicros: 100_000 });
       if (small.ok) await endRule(small.rule.id, sara.id);
       expect(await ask()).toEqual({ ok: true });
+    });
+  });
+
+  describe('review findings on the rule checks', () => {
+    const attemptOf = (sara: { id: string; brickId: string }, micros: number) => ({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer' as const, amountMicros: micros });
+
+    it('a cap lowered while a step waits for the person’s lock is the cap the step is held to', async () => {
+      const sara = await person('sara');
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 10_000_000 });
+      if (!made.ok) throw new Error('not made');
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      // Another step has the person's lock
+      const other = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`spend-check:${sara.id}`}))`;
+        locked();
+        await held;
+      });
+      await lockTaken;
+      const waiting = prisma.$transaction((tx) => checkSpend(attemptOf(sara, 5_000_000), NOW, tx));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await changeRule(made.rule.id, sara.id, { capMicros: 2_000_000 });
+      release();
+      await other;
+      expect(await waiting).toMatchObject({ ok: false, why: 'cap', leftMicros: 2_000_000 });
+    });
+
+    it('a first rule added while a step waits for the lock is held too', async () => {
+      const sara = await person('sara');
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      const other = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`spend-check:${sara.id}`}))`;
+        locked();
+        await held;
+      });
+      await lockTaken;
+      const waiting = prisma.$transaction((tx) => checkSpend(attemptOf(sara, 5_000_000), NOW, tx));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 });
+      release();
+      await other;
+      expect(await waiting).toMatchObject({ ok: false, why: 'cap' });
+    });
+
+    it('ending a rule waits for an edit that is in the middle of saving it, so the edit never lands on an ended rule', async () => {
+      const sara = await person('sara');
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 });
+      if (!made.ok) throw new Error('not made');
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      // An edit has the rule's lock
+      const editing = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`spend-rule:${made.rule.id}`}))`;
+        locked();
+        await held;
+        await tx.spendRule.updateMany({ where: { id: made.rule.id, state: 'active' }, data: { capMicros: BigInt(9_000_000) } });
+      });
+      await lockTaken;
+      let ended = false;
+      const ending = endRule(made.rule.id, sara.id).then((answer) => { ended = true; return answer; });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(ended).toBe(false);
+      release();
+      await editing;
+      expect(await ending).toEqual({ ok: true });
+      expect((await prisma.spendRule.findUnique({ where: { id: made.rule.id } }))?.state).toBe('ended');
+      expect(await changeRule(made.rule.id, sara.id, { capMicros: 2_000_000 })).toMatchObject({ ok: false, reason: 'not_found' });
+    });
+
+    it('two long message ids that start the same are two messages, not one', async () => {
+      const sara = await person('sara');
+      const long = 'x'.repeat(300);
+      const first = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-a`, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+      const second = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-b`, scope: 'bot', period: 'month', capMicros: 5_000_000 });
+      expect(first).toMatchObject({ ok: true, created: true });
+      expect(second).toMatchObject({ ok: true, created: true });
+      // The same long message again still finds its rule
+      expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-a`, scope: 'bot', period: 'month', capMicros: 1_000_000 })).toMatchObject({ ok: true, created: false });
+    });
+
+    it('a rule made from a long message id is saved under a hashed key and with the fingerprint of what the message said, never under a cut key', async () => {
+      const sara = await person('sara');
+      for (const sayingKey of [`m-${'a'.repeat(300)}`, `m-${'a'.repeat(300)}-b`]) {
+        const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+        if (!made.ok) throw new Error('not made');
+        const row = await prisma.spendRule.findUniqueOrThrow({ where: { id: made.rule.id } });
+        // The key is shorter than the column and carries the hash of the whole id: two ids that start alike never share a key, so a row under a
+        // cut key (and without a fingerprint) can only come from before the change, in a development database: spend rules were never in production
+        expect(row.ruleKey.length).toBeLessThan(255);
+        expect(row.ruleKey).toBe(chatRuleKey(sara.brickId, sara.id, sayingKey));
+        // The hashed key has a top-level name of its own ("chat-sha256:", slice 4's 0259e569): under "chat:" a literal id reading "sha256:<digest>" would make the
+        // same key as the long id that digest was made from
+        expect(row.ruleKey).toMatch(/^chat-sha256:/);
+        expect(row.ruleKey).not.toBe(`chat:${sara.brickId}:${sara.id}:${sayingKey}`.slice(0, 255));
+        expect(row.proposalFingerprint).not.toBeNull();
+      }
+    });
+
+    it('a rule saved before long ids were hashed (under the key cut to 255 characters) is never taken as this message\'s rule, whatever its state, and is never changed by it', async () => {
+      const long = `m-${'y'.repeat(300)}`;
+      // Active and as made, edited since, ended, and one that says another thing: none of them is "the rule of this message"
+      for (const [name, over] of [
+        ['active', {}],
+        ['edited', { version: 2, capMicros: BigInt(2_000_000) }],
+        ['ended', { state: 'ended' }],
+      ] as const) {
+        const sara = await person(`legacy-${name}`);
+        const first = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: long, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+        if (!first.ok) throw new Error('not made');
+        // Put the rule back under the key the earlier code gave it, as a rule with no fingerprint (the earlier code did not keep one)
+        const old = `chat:${sara.brickId}:${sara.id}:${long}`.slice(0, 255);
+        await prisma.spendRule.update({ where: { id: first.rule.id }, data: { ruleKey: old, proposalFingerprint: null, ...over } });
+        const again = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: long, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+        // The message makes its own rule under its hashed key; the old row is left exactly as it was
+        expect(again).toMatchObject({ ok: true, created: true });
+        if (!again.ok) throw new Error('not made');
+        expect(again.rule.id).not.toBe(first.rule.id);
+        const left = await prisma.spendRule.findUniqueOrThrow({ where: { id: first.rule.id } });
+        expect(left.ruleKey).toBe(old);
+        expect(left.state).toBe(over.state ?? 'active');
+        expect(left.version).toBe(over.version ?? 1);
+        // And a second send of it finds the rule it made, not the old one
+        expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: long, scope: 'bot', period: 'month', capMicros: 1_000_000 })).toMatchObject({ ok: true, created: false, rule: { id: again.rule.id } });
+      }
+    });
+
+    it('an active rule under a cut legacy key is not told to another message that starts the same, with the same words', async () => {
+      const sara = await person('sara');
+      const long = `m-${'q'.repeat(300)}`;
+      const first = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-a`, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+      if (!first.ok) throw new Error('not made');
+      await prisma.spendRule.update({ where: { id: first.rule.id }, data: { ruleKey: `chat:${sara.brickId}:${sara.id}:${long}-a`.slice(0, 255), proposalFingerprint: null } });
+      const second = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-b`, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+      expect(second).toMatchObject({ ok: true, created: true });
+      // Ending the old rule does not end the new message's rule
+      await prisma.spendRule.update({ where: { id: first.rule.id }, data: { state: 'ended' } });
+      expect(await prisma.spendRule.count({ where: { ownerPersonId: sara.id, state: 'active' } })).toBe(1);
+    });
+
+    it('a cut legacy key is not an identity: an ended rule under it is not replayed for another message that starts the same', async () => {
+      const sara = await person('sara');
+      const long = `m-${'z'.repeat(300)}`;
+      const first = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-a`, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+      if (!first.ok) throw new Error('not made');
+      const old = `chat:${sara.brickId}:${sara.id}:${long}-a`.slice(0, 255);
+      await prisma.spendRule.update({ where: { id: first.rule.id }, data: { ruleKey: old, state: 'ended' } });
+      // Another message, the same words: it must have a rule of its own, not be told the ended one is its rule
+      const second = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `${long}-b`, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+      expect(second).toMatchObject({ ok: true, created: true });
+      expect(await prisma.spendRule.count({ where: { ownerPersonId: sara.id, state: 'active' } })).toBe(1);
+    });
+
+    it('a renewal at the exact cap goes on when the job can cost no more than it already could', async () => {
+      const sara = await person('sara');
+      // 100 millionths for a 10-minute stretch: a first stretch renewed with 33 more, five minutes in, can still cost 100
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100 });
+      const key = `k-${tag}-exact`;
+      expect((await reserveRoom({ key, personId: sara.id, amountMicros: 100, botId: sara.brickId, jobId: 'jx' }, NOW)).ok).toBe(true);
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: NOW } });
+      expect(await renewRoom({ key, moreMicros: 33 }, new Date(NOW.getTime() + 300_000))).toMatchObject({ ok: true });
+      await releaseRoom({ key }, NOW);
+    });
+
+    it('a renewal that waited for the lock past the end of its lease is a lapsed hold, not a renewed one', async () => {
+      const sara = await person('sara');
+      const key = `k-${tag}-lapse`;
+      await prisma.meterReservation.create({ data: { reservationKey: key, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, jobId: 'jl', amountMicros: BigInt(100), state: 'held', expiresAt: new Date(Date.now() + 1_000) } });
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      const other = prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('meter:pool'))`;
+        locked();
+        await held;
+      });
+      await lockTaken;
+      const renewing = renewRoom({ key, moreMicros: 0 });
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      release();
+      await other;
+      expect(await renewing).toEqual({ ok: false, reason: 'closed' });
+    });
+
+    it('a message id that reads like a hashed key never makes the same rule as the long id it was made from', async () => {
+      const sara = await person('sara');
+      const long = 'x'.repeat(300);
+      const digest = createHash('sha256').update(long).digest('hex');
+      const first = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: long, scope: 'bot', period: 'month', capMicros: 1_000_000 });
+      const second = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: `sha256:${digest}`, scope: 'bot', period: 'month', capMicros: 5_000_000 });
+      expect(first).toMatchObject({ ok: true, created: true });
+      expect(second).toMatchObject({ ok: true, created: true });
+    });
+
+    it('a call priced between the two reads of a check is never missed: its cost or its room is counted, whichever read ran first', async () => {
+      const sara = await person('sara');
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+      const jobId = randomUUID();
+      const eventId = `computer:${jobId}:call:c1`;
+      await prisma.meterEvent.create({
+        data: { eventId, kind: 'model_call', pool: 'computer', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId, quantity: BigInt(1), unit: 'call', costMicros: null, basis: 'measured' },
+      });
+      await prisma.meterReservation.create({
+        data: { reservationKey: `computer:call:${jobId}:c1`, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, jobId, amountMicros: BigInt(90_000), settledMicros: BigInt(90_000), state: 'settled', expiresAt: NOW },
+      });
+      // The price is written (as settleModelCall does for a call reported after the sweep wrote it unknown) right after the first of the two reads
+      let priced = false;
+      const price = async () => {
+        if (priced) return;
+        priced = true;
+        await prisma.meterEvent.updateMany({ where: { eventId, costMicros: null }, data: { costMicros: BigInt(90_000), basis: 'measured' } });
+      };
+      const realAggregate = prisma.meterEvent.aggregate.bind(prisma.meterEvent) as (args: unknown) => Promise<unknown>;
+      const realFind = prisma.meterEvent.findMany.bind(prisma.meterEvent) as (args: unknown) => Promise<unknown>;
+      const aggregate = jest.spyOn(prisma.meterEvent, 'aggregate').mockImplementation(((args: unknown) => realAggregate(args).then(async (row) => (await price(), row))) as never);
+      const find = jest.spyOn(prisma.meterEvent, 'findMany').mockImplementation(((args: unknown) => realFind(args).then(async (row) => (await price(), row))) as never);
+      try {
+        // 90,000 of the 100,000 was spent, so 20,000 more is over the cap
+        expect(await checkSpend(attemptOf(sara, 20_000), NOW)).toMatchObject({ ok: false, why: 'cap' });
+        expect(priced).toBe(true);
+      } finally {
+        aggregate.mockRestore();
+        find.mockRestore();
+      }
+    });
+
+    it('a model call whose id holds ":call:" still finds the room it settled', async () => {
+      const sara = await person('sara');
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+      const jobId = randomUUID();
+      const callId = 'part:call:2';
+      await prisma.meterEvent.create({
+        data: { eventId: `computer:${jobId}:call:${callId}`, kind: 'model_call', pool: 'computer', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId, quantity: BigInt(1), unit: 'call', costMicros: null, basis: 'measured' },
+      });
+      await prisma.meterReservation.create({
+        data: { reservationKey: `computer:call:${jobId}:${callId}`, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, jobId, amountMicros: BigInt(90_000), settledMicros: BigInt(90_000), state: 'settled', expiresAt: NOW },
+      });
+      // The 90,000 the call took is counted, so 20,000 more is over the 100,000
+      expect(await checkSpend(attemptOf(sara, 20_000), NOW)).toMatchObject({ ok: false, why: 'cap' });
     });
   });
 
@@ -396,10 +688,188 @@ run('rules said in chat and task receipts, in a real database', () => {
       // Five minutes in, the job has used half a stretch and still has one stretch of lease: 90,000 can still be spent, under 100,000
       expect(await renewRoom({ key, moreMicros: 60_000 }, at(300))).toMatchObject({ ok: true });
       // Ten minutes in the job could cost 120,000 by the end of its lease: that is over, so it stops safely with the room it holds
-      expect(await renewRoom({ key, moreMicros: 60_000 }, at(600))).toMatchObject({ ok: false, reason: 'rule', leftMicros: 0 });
+      // (the lease it holds ends at minute 15 and can cost 90,000 whatever the clock says, so 10,000 is left of the cap: not enough for the 30,000 the renewal adds)
+      expect(await renewRoom({ key, moreMicros: 60_000 }, at(600))).toMatchObject({ ok: false, reason: 'rule', leftMicros: 10_000 });
       expect((await prisma.meterReservation.findUnique({ where: { reservationKey: key } }))?.amountMicros).toBe(BigInt(120_000));
       await changeRule(made.rule.id, sara.id, { capMicros: 500_000 });
       expect(await renewRoom({ key, moreMicros: 60_000 }, at(600))).toMatchObject({ ok: true });
+      await releaseRoom({ key }, NOW);
+    });
+
+    it('a renewal of room taken in an earlier month is held to this month’s rule for all it adds, not for the difference to room that rule never counted', async () => {
+      const sara = await person('sara');
+      // This month's cap of 100,000. The job's room was taken last month (its createdAt is before this month began), so this month's rule counts none of it
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+      if (!made.ok) throw new Error('not made');
+      const key = `k-${tag}-boundary`;
+      expect((await reserveRoom({ key, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: 'jb' }, NOW)).ok).toBe(true);
+      const lastMonth = new Date(NOW.getTime() - 40 * 86_400_000);
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: lastMonth, expiresAt: new Date(NOW.getTime() + 300_000), terms: [{ at: lastMonth.getTime(), micros: 60_000, stretchMs: 600_000 }] } });
+      // Renewing adds 80,000 of room: the room is then 140,000, over the cap of 100,000 that this month never counted any of. Only the difference (80,000) was asked before, and passed
+      expect(await renewRoom({ key, moreMicros: 80_000 }, NOW)).toMatchObject({ ok: false, reason: 'rule' });
+      await releaseRoom({ key }, NOW);
+    });
+
+    it('room renewed across the end of a month counts in the new month: the next step may take only what is left of the cap, not the whole cap', async () => {
+      const sara = await person('sara');
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+      if (!made.ok) throw new Error('not made');
+      const key = `k-${tag}-boundary-after`;
+      expect((await reserveRoom({ key, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: 'jb2' }, NOW)).ok).toBe(true);
+      // Taken last month (its createdAt is before this month began), lease still running
+      const lastMonth = new Date(NOW.getTime() - 40 * 86_400_000);
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: lastMonth, expiresAt: new Date(NOW.getTime() + 300_000), terms: [{ at: lastMonth.getTime(), micros: 60_000, stretchMs: 600_000 }] } });
+      // Renewed by 20,000 this month: passes (80,000 of the 100,000)
+      expect(await renewRoom({ key, moreMicros: 20_000 }, NOW)).toMatchObject({ ok: true });
+      // The renewal is now part of this month: a new step of 30,000 is over what is left (20,000), and one of 20,000 is not
+      const attempt = (amountMicros: number) => ({ payerPersonId: sara.id, botId: sara.brickId, taskKey: 'other', chargeClass: 'computer' as const, amountMicros });
+      expect(await checkSpend(attempt(30_000), NOW)).toMatchObject({ ok: false, why: 'cap', leftMicros: 20_000 });
+      expect(await checkSpend(attempt(20_000), NOW)).toMatchObject({ ok: true });
+      // A second renewal in the same month is asked for the difference only (the room is already counted)
+      expect(await renewRoom({ key, moreMicros: 10_000 }, new Date(NOW.getTime() + 60_000))).toMatchObject({ ok: true });
+      await releaseRoom({ key }, NOW);
+    });
+
+    describe('a computer lease that crosses the end of a month (N1)', () => {
+      // 5 minutes into November. A 10 minute stretch is 60,000. The lease began at 23:55 on 31 October and was renewed once (120,000 held), now ending at 00:15:
+      // 15 of its 20 minutes fall in November: 90,000 of November's cap of 100,000 is taken, and 10,000 is left
+      const BOUNDARY = new Date('2026-11-01T00:05:00Z');
+      const crossing = async (name: string) => {
+        const sara = await person(name);
+        const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+        if (!made.ok) throw new Error('not made');
+        const key = `k-${tag}-${name}`;
+        expect((await reserveRoom({ key, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: `j-${name}` }, new Date('2026-10-31T23:55:00Z'))).ok).toBe(true);
+        await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: new Date('2026-10-31T23:55:00Z'), expiresAt: new Date('2026-11-01T00:15:00Z'), amountMicros: BigInt(120_000), renewals: 1 } });
+        const ask = (micros: number, class_: 'apps' | 'computer' = 'apps') => checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: class_, amountMicros: micros }, BOUNDARY);
+        return { sara, key, made, ask };
+      };
+
+      it('is seen by an Instant App in the new month before any renewal: exactly what is left passes, one micro more is refused', async () => {
+        const { key, ask } = await crossing('mia');
+        expect(await ask(10_000)).toEqual({ ok: true });
+        expect(await ask(10_001)).toMatchObject({ ok: false, why: 'cap', leftMicros: 10_000 });
+        await releaseRoom({ key }, BOUNDARY);
+      });
+
+      it('is renewed for the growth of what the month counts of it, not for all of it', async () => {
+        const { key } = await crossing('noa');
+        // Renewed at 00:10, the lease would end at 00:20 and cover 20 minutes of November (120,000): 30,000 more than the 90,000 it counts now, with 10,000 left
+        expect(await renewRoom({ key, moreMicros: 60_000 }, new Date('2026-11-01T00:10:00Z'))).toMatchObject({ ok: false, reason: 'rule', leftMicros: 10_000 });
+        // Renewed at 00:05 it would end at 00:15, where it already ends: November's count does not grow, so it goes on though it is over the cap's last 10,000 for any new step
+        expect(await renewRoom({ key, moreMicros: 60_000 }, BOUNDARY)).toMatchObject({ ok: true });
+        await releaseRoom({ key }, BOUNDARY);
+      });
+
+      it('counts the same after the job ends: the job’s cost is split by the time before and after the boundary', async () => {
+        const { sara, key, ask } = await crossing('oli');
+        await releaseRoom({ key }, BOUNDARY);
+        // The job ran 20 minutes (23:55 to 00:15) and cost 120,000, written as one event when it ended at 00:15: 15 minutes of it are November's, 90,000
+        await prisma.meterEvent.create({
+          data: { eventId: `rules-${tag}-cross`, kind: 'computer_time', pool: 'computer', occurredAt: new Date('2026-11-01T00:15:00Z'), personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId: 'jx', quantity: 1200, unit: 'second', costMicros: BigInt(120_000), basis: 'measured', detail: { startedMs: Date.parse('2026-10-31T23:55:00Z') } },
+        });
+        const later = (micros: number) => checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'apps', amountMicros: micros }, new Date('2026-11-01T00:16:00Z'));
+        expect(await later(10_000)).toEqual({ ok: true });
+        expect(await later(10_001)).toMatchObject({ ok: false, why: 'cap', leftMicros: 10_000 });
+        void ask;
+      });
+
+      it('splits a job that was charged for seconds after it ended (a hand over) over all the seconds charged', async () => {
+        const sara = await person('vic');
+        await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 });
+        // Held from 23:59:50 to 00:00:10 (20 seconds) and 20 more seconds handing over files: 40 seconds, 400,000. A quarter of it, 100,000, is October's
+        await prisma.meterEvent.create({
+          data: { eventId: `rules-${tag}-handover`, kind: 'computer_time', pool: 'computer', occurredAt: new Date('2026-11-01T00:00:10Z'), personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId: 'jh', quantity: 40, unit: 'second', costMicros: BigInt(400_000), basis: 'measured', detail: { startedMs: Date.parse('2026-10-31T23:59:50Z') } },
+        });
+        const answer = await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'apps', amountMicros: 700_001 }, new Date('2026-11-01T00:16:00Z'));
+        expect(answer).toMatchObject({ ok: false, why: 'cap', leftMicros: 700_000 });
+      });
+
+      it('counts a job event written without its start (older) whole in the month it ended in', async () => {
+        const sara = await person('pat');
+        await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+        await prisma.meterEvent.create({
+          data: { eventId: `rules-${tag}-legacy`, kind: 'computer_time', pool: 'computer', occurredAt: new Date('2026-11-01T00:15:00Z'), personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId: 'jy', quantity: 1200, unit: 'second', costMicros: BigInt(120_000), basis: 'measured' },
+        });
+        expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'apps', amountMicros: 1 }, new Date('2026-11-01T00:16:00Z'))).toMatchObject({ ok: false, why: 'cap', leftMicros: 0 });
+      });
+
+      it('a job that crossed into the month and was written while the cap was being counted is counted whole, never taken off without being added', async () => {
+        const sara = await person('stu');
+        await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+        // The job's event lands between the cap's two reads of the books (whichever it makes first)
+        let landed = false;
+        const land = async () => {
+          if (landed) return;
+          landed = true;
+          await prisma.meterEvent.create({
+            data: { eventId: `rules-${tag}-between`, kind: 'computer_time', pool: 'computer', occurredAt: new Date('2026-11-01T00:15:00Z'), personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId: 'jz', quantity: 1200, unit: 'second', costMicros: BigInt(120_000), basis: 'measured', detail: { startedMs: Date.parse('2026-10-31T23:55:00Z') } },
+          });
+        };
+        const events = prisma.meterEvent as unknown as { aggregate: (...args: unknown[]) => Promise<unknown>; findMany: (...args: unknown[]) => Promise<unknown> };
+        const aggregate = events.aggregate;
+        const findMany = events.findMany;
+        let reads = 0;
+        const spies = [
+          jest.spyOn(events, 'aggregate').mockImplementation(async (...args) => { const out = await aggregate.apply(prisma.meterEvent, args); await land(); return out; }),
+          // The check reads the calls with no price first, then what crossed into the month, then the total: the event lands after the second read (the
+          // crossed one), so the total has it and the crossed part does not (the order that must never take it off without adding it)
+          jest.spyOn(events, 'findMany').mockImplementation(async (...args) => { const out = await findMany.apply(prisma.meterEvent, args); reads += 1; if (reads >= 2) await land(); return out; }),
+        ];
+        try {
+          const answer = await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'apps', amountMicros: 1 }, new Date('2026-11-01T00:16:00Z'));
+          expect(answer).toMatchObject({ ok: false, why: 'cap' });
+        } finally {
+          for (const spy of spies) spy.mockRestore();
+        }
+      });
+
+      it('two admissions at the same moment never both take the last room', async () => {
+        const sara = await person('quin');
+        await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+        const take = (index: number) => reserveRoom({ key: `k-${tag}-par-${index}`, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: `jp-${index}` }, NOW);
+        const answers = await Promise.all([take(1), take(2)]);
+        expect(answers.filter((one) => one.ok)).toHaveLength(1);
+        for (const index of [1, 2]) await releaseRoom({ key: `k-${tag}-par-${index}` }, NOW);
+      });
+
+      it('a cap lowered while a step waited is the cap it is held to', async () => {
+        const { sara, made, key } = await crossing('rae');
+        await releaseRoom({ key }, BOUNDARY);
+        await changeRule(made.rule.id, sara.id, { capMicros: 30_000 });
+        expect(await reserveRoom({ key: `k-${tag}-cap`, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: 'jcap' }, BOUNDARY)).toMatchObject({ ok: false, reason: 'rule' });
+      });
+    });
+
+    it('a price that changed in the middle of a lease counts each stretch at its own price: $0.25 through minute 15, not the $0.225 an average gives', async () => {
+      const sara = await person('sara');
+      // A stretch is 10 minutes. The first is held at 100,000; renewed at minute 5 for 200,000 (the price doubled): 5 minutes at 100,000 per ten and 10 at 200,000 per ten
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 240_000 });
+      if (!made.ok) throw new Error('not made');
+      const key = `k-${tag}-price`;
+      expect((await reserveRoom({ key, personId: sara.id, amountMicros: 100_000, botId: sara.brickId, jobId: 'jprice' }, NOW)).ok).toBe(true);
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: NOW } });
+      const at = (seconds: number) => new Date(NOW.getTime() + seconds * 1000);
+      // Equal stretches would count 225,000, under 240,000; at its own prices the lease can cost 250,000, which is over
+      expect(await renewRoom({ key, moreMicros: 200_000 }, at(300))).toMatchObject({ ok: false, reason: 'rule' });
+      await changeRule(made.rule.id, sara.id, { capMicros: 250_000 });
+      expect(await renewRoom({ key, moreMicros: 200_000 }, at(300))).toMatchObject({ ok: true });
+      const stored = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: key } });
+      expect(stored.terms).toEqual([{ at: NOW.getTime(), micros: 100_000, stretchMs: 600_000 }, { at: at(300).getTime(), micros: 200_000, stretchMs: 600_000 }]);
+      // Another step sees the same $0.25: exactly what is left of the cap passes nothing, one micro more is refused
+      expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'apps', amountMicros: 1 }, at(301))).toMatchObject({ ok: false, why: 'cap', leftMicros: 0 });
+      await releaseRoom({ key }, NOW);
+    });
+
+    it('a lease taken before terms were recorded is counted as equal stretches', async () => {
+      const sara = await person('sara');
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
+      const key = `k-${tag}-legacy`;
+      expect((await reserveRoom({ key, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: 'jleg' }, NOW)).ok).toBe(true);
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: NOW, terms: Prisma.DbNull, amountMicros: BigInt(120_000), renewals: 1, expiresAt: new Date(NOW.getTime() + 900_000) } });
+      // 120,000 held over two stretches, covering 15 minutes: 90,000, so 10,000 is left
+      expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'apps', amountMicros: 10_000 }, new Date(NOW.getTime() + 60_000))).toEqual({ ok: true });
+      expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'apps', amountMicros: 10_001 }, new Date(NOW.getTime() + 60_000))).toMatchObject({ ok: false, why: 'cap' });
       await releaseRoom({ key }, NOW);
     });
 
@@ -475,6 +945,25 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', NOW, 'run-x')).toEqual({ ok: true });
       expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', NOW, 'run-other')).toMatchObject({ ok: false, why: 'cap' });
       expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', NOW, null)).toMatchObject({ ok: false, why: 'cap' });
+    });
+
+    it('a start asked again with the key of a start that already made its job finds that job, even when its own held room used the cap up exactly; a new key still gets the rule', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 60_000 });
+      const first = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report', startKey: 'key-first-1' }, NOW);
+      expect(first).toMatchObject({ ok: true });
+      const jobId = first.ok ? first.job.id : '';
+      // The first start's own room is the whole cap now: the pre-check the route makes before a start still lets the same key through, and the start answers the job it made
+      expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', NOW, null, 'key-first-1')).toEqual({ ok: true });
+      const again = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report', startKey: 'key-first-1' }, NOW);
+      expect(again.ok && again.job.id).toBe(jobId);
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(1);
+      // A key that has no job gets the rule as before, and so does no key; another person's key never exempts
+      expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', NOW, null, 'key-new-2')).toMatchObject({ ok: false, why: 'cap' });
+      expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', NOW, null, null)).toMatchObject({ ok: false, why: 'cap' });
+      const omar = await person('omar');
+      expect(await ownerSpendAllowed(sara.brickId, omar.id, 'computer', NOW, null, 'key-first-1')).toEqual({ ok: true });
     });
 
     it('a queued job for a run, asked again after a rule is said, is refused with the rule’s words and taken away, not reported as started', async () => {
@@ -567,9 +1056,10 @@ run('rules said in chat and task receipts, in a real database', () => {
       if (!minted.ok) throw new Error('no key');
       const refused = await authorizeModelCall({ token: minted.token, callId: 'call-1', estimateMicros: 50_000, payer: 'universe' }, NOW);
       expect(refused).toEqual({ ok: false, reason: 'rule', ruleId: expect.any(String), why: 'cap', leftMicros: 40_000, words: expect.stringContaining('No more than $0.10 a month') });
-      // Nothing was held for it, and a call that fits is let through
+      // Nothing was held for it, and the job pauses as "rule" (as a refused renewal pauses it): its key is no longer good, so no call goes after it
       expect(await prisma.meterReservation.count({ where: { jobId: started.job.id, reservationKey: { contains: 'call' } } })).toBe(0);
-      expect(await authorizeModelCall({ token: minted.token, callId: 'call-2', estimateMicros: 30_000, payer: 'universe' }, NOW)).toMatchObject({ ok: true, reservedMicros: 30_000 });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule', endedBy: null });
+      expect(await authorizeModelCall({ token: minted.token, callId: 'call-2', estimateMicros: 30_000, payer: 'universe' }, NOW)).toEqual({ ok: false, reason: 'refused' });
     });
 
     it('a try refused by a rule leaves alone a job another try put on the machine at the same moment', async () => {
@@ -621,7 +1111,7 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: 40_001 }, NOW)).toMatchObject({ ok: false, leftMicros: 40_000 });
     });
 
-    it('a job that is running when a rule stops more room ends as "rule", saying so, not as "our room is used up"', async () => {
+    it('a job that is running when a rule stops more room pauses as "rule", saying so, not as "our room is used up"', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
       const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 100_000 });
@@ -634,9 +1124,359 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await renewJob(started.job.id, new Date(NOW.getTime() + 60_000))).toMatchObject({ ok: true });
       // Ten minutes in it could cost 120,000, which is over 100,000
       const renewed = await renewJob(started.job.id, new Date(NOW.getTime() + 600_000));
-      expect(renewed).toEqual({ ok: false, reason: 'rule', words: expect.stringContaining('No more than $0.10 a month') });
-      const ended = await prisma.computerJob.findUnique({ where: { id: started.job.id } });
-      expect(ended).toMatchObject({ status: 'stopped', endedBy: 'rule' });
+      expect(renewed).toEqual({ ok: false, reason: 'paused', why: 'rule' });
+      const paused = await prisma.computerJob.findUnique({ where: { id: started.job.id } });
+      expect(paused).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule', endedBy: null });
+    });
+
+    describe('what the payer reads on the receipt of a job stopped at their spending rule (GPT observation 2)', () => {
+      /** A job that ran, then stopped at a rule the person said, with its receipt closed the way the bot server closes it ("done"). A rule now PAUSES a running job; a job ended at a rule (before that, or by the
+       * refusal's ending path) still reads this way, so it is ended here through that path directly. */
+      async function stoppedAtRule(title: string) {
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 100_000 });
+        if (!made.ok) throw new Error('not made');
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title }, NOW);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: started.job.id, title, category: 'computer' }, NOW);
+        await prisma.meterReservation.updateMany({ where: { jobId: started.job.id }, data: { createdAt: NOW } });
+        expect(await renewJob(started.job.id, new Date(NOW.getTime() + 60_000))).toMatchObject({ ok: true });
+        await stopJobForRefusal(started.job.id, { reason: 'rule', words: 'No more than $0.10 a month' }, new Date(NOW.getTime() + 600_000));
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'rule', startedAt: expect.any(Date) });
+        await closeReceipt({ botId: sara.brickId, taskKey: started.job.id, personId: sara.id, state: 'done' }, new Date(NOW.getTime() + 601_000));
+        return { sara, jobId: started.job.id };
+      }
+
+      it('says "Stopped at your spending rule" and never Done: starting a computer is not proof that it finished', async () => {
+        const { sara, jobId } = await stoppedAtRule('Make the report');
+        // The stored receipt does not say done either
+        expect((await prisma.taskReceipt.findFirstOrThrow({ where: { taskKey: jobId } })).outcome).not.toBe('done');
+        const [item, ...rest] = (await activityFor(sara.id)).filter((one) => one.title === 'Make the report');
+        expect(rest).toEqual([]);
+        expect(item).toMatchObject({ state: 'done', outcome: 'stopped', outcomeText: STOPPED_AT_RULE, actions: [] });
+        expect(item.outcomeText).not.toBe(OUTCOME_WORDS.done);
+        expect(item.outcomeNote).toMatch(/^It stopped before it finished, and nothing was confirmed as done\./);
+        // Without a receipt of its own (the job alone) it reads the same
+        await prisma.taskReceipt.deleteMany({ where: { taskKey: jobId } });
+        expect((await activityFor(sara.id)).find((one) => one.title === 'Make the report')).toMatchObject({ outcome: 'stopped', outcomeText: STOPPED_AT_RULE });
+      });
+
+      it('verified work and the computer’s usage are shown apart: a Gmail that went out is partly done with its own charge, and the rule stop is still said', async () => {
+        const { sara, jobId } = await stoppedAtRule('Mail then stopped');
+        const run = await prisma.instantRun.create({
+          data: { runKey: `k-${randomUUID()}`, botId: sara.brickId, personId: sara.id, taskKey: jobId, toolSlug: 'GMAIL_SEND_EMAIL', toolkit: 'gmail', argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v', topMicros: BigInt(10_000), holdMicros: BigInt(10_000), state: 'succeeded', customerState: 'charged', customerMicros: BigInt(9_000), providerUserId: `u-${randomUUID().slice(0, 6)}` } as never,
+        });
+        await prisma.meterEvent.create({
+          data: { eventId: `instant:${run.id}`, kind: 'app_use', pool: 'chat', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(7_000), basis: 'measured', detail: { instant: true, taskKey: jobId, runId: run.id, app: 'gmail', customerMicros: 9_000 } } as never,
+        });
+        const { settleReceipt } = await import('@/lib/task-receipts');
+        await settleReceipt({ botId: sara.brickId, personId: sara.id, taskKey: jobId }, new Date(NOW.getTime() + 700_000));
+        const item = (await activityFor(sara.id)).find((one) => one.title === 'Mail then stopped');
+        expect(item).toMatchObject({ outcome: 'partial', outcomeText: OUTCOME_WORDS.partial });
+        expect(item?.actions).toEqual([{ label: 'gmail', outcome: 'worked', text: 'Gmail · worked', takenText: null, amountMicros: 9_000 }]);
+        expect(item?.outcomeNote).toContain('The computer stopped at your spending rule.');
+        expect(item?.outcomeNote).toContain('Gmail charged $0.009.');
+      });
+    });
+
+    describe('whatever stopped a job before it finished, the receipt and the Brick’s report never say done (Opus R1b)', () => {
+      const LATER = new Date(NOW.getTime() + 86_400_000);
+      /** A job that ran and was then ended as `stopped` by `endedBy`, its receipt closed the way the bot server closes it ("done"). */
+      async function stoppedBy(endedBy: string, title: string) {
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title }, NOW);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: started.job.id, title, category: 'computer' }, NOW);
+        await prisma.computerJob.update({ where: { id: started.job.id }, data: { status: 'stopped', endedBy, startedAt: NOW, endedAt: new Date(NOW.getTime() + 60_000) } });
+        await closeReceipt({ botId: sara.brickId, taskKey: started.job.id, personId: sara.id, state: 'done' }, new Date(NOW.getTime() + 61_000));
+        return { sara, jobId: started.job.id };
+      }
+
+      it.each([
+        // Our own capacity cut-off is given back (the #1024 rule), so its receipt is refunded and says so; the others are the person's and stay as they were
+        ['rule', 'done', STOPPED_AT_RULE, 'rule'],
+        ['allowance', 'done', 'Stopped: your computer time ran out', 'month'],
+        ['person', 'done', 'Stopped by you', null],
+        ['pool', 'refunded', 'Stopped: our computers were busy, and its time was given back', 'failed'],
+        // Sentry on #1025: the computer turned off or the Brick deleted ends a job that ran as `stopped` too. Such a job did not finish, so its receipt is not done either, and what the person reads is the stopped line (never "It didn't finish"); Brick says nothing (they did it)
+        ['off', 'done', OUTCOME_WORDS.stopped, null],
+        ['deleted', 'done', OUTCOME_WORDS.stopped, null],
+      ])('stopped by %s: the receipt is %s and says "%s", and the report kind is %s, never done', async (endedBy, state, words, kind) => {
+        const { sara, jobId } = await stoppedBy(endedBy, `Stopped by ${endedBy}`);
+        const item = (await activityFor(sara.id)).find((one) => one.title === `Stopped by ${endedBy}`);
+        expect(item).toMatchObject({ state, outcome: 'stopped', outcomeText: words });
+        expect(item?.outcomeText).not.toBe(OUTCOME_WORDS.done);
+        // A job we cut off ourselves is given back, so it ran nothing for the person: its stored word stays the bot server's, and what Activity and the report say is put right at read time (refunded, above). The others ran, so their stored outcome is already not done
+        if (endedBy !== 'pool') expect((await prisma.taskReceipt.findFirstOrThrow({ where: { taskKey: jobId } })).outcome).not.toBe('done');
+        const reports = (await reportsToTell(50, LATER)).filter((report) => report.jobId === jobId);
+        expect(reports.map((report) => report.kind)).toEqual(kind === null ? [] : [kind]);
+        expect(reports.map((report) => report.kind)).not.toContain('done');
+      });
+    });
+
+    it('a model call a rule refuses pauses the job right there as "rule", so a later "failed, ours" from the runner changes nothing and nothing is given back', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 100_000 });
+      if (!made.ok) throw new Error('not made');
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Long job' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      const minted = await mintJobToken(started.job.id, 'model', NOW);
+      if (!minted.ok) throw new Error('no key');
+      // 60,000 is the job's own room; a call for 30,000 fits under 100,000, and the next for 30,000 does not
+      expect(await authorizeModelCall({ token: minted.token, callId: 'c1', estimateMicros: 30_000, payer: 'universe' }, NOW)).toMatchObject({ ok: true });
+      await settleModelCall(started.job.id, 'c1', { costMicros: 30_000, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW);
+      expect(await authorizeModelCall({ token: minted.token, callId: 'c2', estimateMicros: 30_000, payer: 'universe' }, NOW)).toMatchObject({ ok: false, reason: 'rule' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule', endedBy: null });
+      await finishJob(started.job.id, 'failed', NOW, 'Three turns failed', 'ours');
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'rule', endedBy: null });
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${started.job.id}:call:c1` } })).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
+    });
+  });
+
+  describe('a job whose time the books could not take (the $1 rule)', () => {
+    const env = process.env.COMPUTER_PROVIDER;
+    const record = meter.recordMeterEvent as jest.Mock;
+    beforeAll(() => {
+      process.env.COMPUTER_PROVIDER = 'fake';
+      setComputerProviderForTests(new FakeComputerProvider());
+    });
+    afterAll(() => {
+      setComputerProviderForTests(null);
+      process.env.COMPUTER_PROVIDER = env;
+    });
+    afterEach(() => record.mockImplementation(actualRecord));
+    const ask = (sara: { id: string; brickId: string }, micros: number, at: Date) => checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: micros }, at);
+    const minutes = (count: number) => new Date(NOW.getTime() + count * 60_000);
+
+    it('a five-minute job of $0.03 whose event is missing is counted by the next paid step all through settlement and repair: $0.97 passes and one millionth more is refused, before and after', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      // The books refuse the write of its time (the reporting outage): the room still settles
+      record.mockRejectedValue(new Error('books down'));
+      await finishJob(started.job.id, 'done', minutes(5));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      // During settlement: the $0.03 is seen although its event is not in the books
+      expect(await ask(sara, 970_000, minutes(6))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, minutes(6))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      // A sweep while the books are still down changes nothing
+      await sweepComputers(minutes(10));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      expect(await ask(sara, 970_000, minutes(10))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, minutes(10))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      // The books come back and the sweep writes the event: the same answers, and the $0.03 is counted once (never as the room and as the event)
+      record.mockImplementation(actualRecord);
+      await sweepComputers(minutes(11));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(1);
+      expect(await ask(sara, 970_000, minutes(12))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, minutes(12))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      // Another sweep writes nothing twice
+      await sweepComputers(minutes(13));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(1);
+      expect(await ask(sara, 970_001, minutes(14))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+    });
+
+    it('a room left held when its job ended is settled at what the job ran when it lapses, never given back: the time is counted between the room and the books', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      // Neither the time nor the closing of its room gets through when it ends
+      record.mockRejectedValue(new Error('books down'));
+      (settleRoom as jest.Mock).mockRejectedValueOnce(new Error('books down'));
+      await finishJob(started.job.id, 'done', minutes(5));
+      expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'held' });
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      // The room lapses (ten minutes) and the sweep closes it while the books are still down: at the $0.03 it ran, not given back
+      await sweepComputers(minutes(11));
+      expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      expect(await ask(sara, 970_000, minutes(12))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, minutes(12))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      // The books come back: its time is written once, at the same $0.03, and the answers do not move
+      record.mockImplementation(actualRecord);
+      await sweepComputers(minutes(13));
+      expect(await prisma.meterEvent.findMany({ where: { eventId: `computer:${started.job.id}:time` }, select: { costMicros: true } })).toEqual([{ costMicros: BigInt(30_000) }]);
+      expect(await ask(sara, 970_000, minutes(14))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, minutes(14))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+    });
+
+    describe('a lapsed room of an ended job is not settled while its files are still being handed over', () => {
+      // The job ran 5 minutes ($0.03) and ended, its room left held with the books down; the hand-over adds its seconds to the job's time and settles the room itself
+      const endedWithRoomHeld = async () => {
+        const sara = await person('sara');
+        await giveComputer(sara.brickId, sara.id);
+        expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        record.mockRejectedValue(new Error('books down'));
+        (settleRoom as jest.Mock).mockRejectedValueOnce(new Error('books down'));
+        await finishJob(started.job.id, 'done', minutes(5));
+        expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'held' });
+        return { sara, jobId: started.job.id };
+      };
+      const room = (jobId: string) => prisma.meterReservation.findFirstOrThrow({ where: { jobId } });
+
+      it('a hand-over beating for this job keeps the room held; once the beat is stale the room is settled at what the job ran', async () => {
+        const { jobId } = await endedWithRoomHeld();
+        await prisma.computerJob.update({ where: { id: jobId }, data: { handOverAliveAt: new Date(minutes(11).getTime() - 5_000) } });
+        await sweepComputers(minutes(11));
+        expect(await room(jobId)).toMatchObject({ state: 'held' });
+        // The beat is older than HAND_OVER_ALIVE_MS: the hand-over was abandoned, so the room is settled at what it ran
+        await sweepComputers(new Date(minutes(11).getTime() + HAND_OVER_ALIVE_MS + 1_000));
+        expect(await room(jobId)).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      });
+
+      it('the machine’s files being claimed keeps the room held; once the claim is stale the room is settled at what the job ran', async () => {
+        const { sara, jobId } = await endedWithRoomHeld();
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { filesClaimedAt: minutes(10) } });
+        await sweepComputers(minutes(11));
+        expect(await room(jobId)).toMatchObject({ state: 'held' });
+        await sweepComputers(new Date(minutes(10).getTime() + HAND_OVER_LATEST_MS + 1_000));
+        expect(await room(jobId)).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      });
+
+      it('a job with no hand-over under way is settled at once, as before', async () => {
+        const { jobId } = await endedWithRoomHeld();
+        await sweepComputers(minutes(11));
+        expect(await room(jobId)).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      });
+    });
+
+    it('the sweep that writes a job’s missing time closes its room at the same time, so the room is never left held beside an event', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      // Renewed at minute 4, so its room does not lapse before the sweep that repairs it
+      expect(await renewJob(started.job.id, minutes(4))).toMatchObject({ ok: true });
+      record.mockRejectedValue(new Error('books down'));
+      (settleRoom as jest.Mock).mockRejectedValueOnce(new Error('books down'));
+      await finishJob(started.job.id, 'done', minutes(5));
+      expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'held' });
+      record.mockImplementation(actualRecord);
+      await sweepComputers(minutes(11));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(1);
+      expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      expect(await ask(sara, 970_000, minutes(12))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, minutes(12))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+    });
+
+    it('a job that crossed the end of a month and whose time is unwritten counts in the new month only by the part that ran in it, before and after repair', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      // 23:55 to 00:05: 5 minutes in each month, $0.006 a minute
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, new Date('2026-10-31T23:55:00Z'));
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      record.mockRejectedValue(new Error('books down'));
+      await finishJob(started.job.id, 'done', new Date('2026-11-01T00:05:00Z'));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      const later = new Date('2026-11-01T00:20:00Z');
+      expect(await ask(sara, 970_000, later)).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, later)).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      record.mockImplementation(actualRecord);
+      await sweepComputers(new Date('2026-11-01T00:30:00Z'));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(1);
+      expect(await ask(sara, 970_000, later)).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, later)).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+    });
+
+    it('a room the sweep settles after midnight for a job that ended before it counts in the old month only: the event it becomes is written at the job’s end', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      // 23:53 to 23:58 on the last day of November: $0.03
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, new Date('2026-11-30T23:53:00Z'));
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      record.mockRejectedValue(new Error('books down'));
+      (settleRoom as jest.Mock).mockRejectedValueOnce(new Error('books down'));
+      await finishJob(started.job.id, 'done', new Date('2026-11-30T23:58:00Z'));
+      // Its room lapses at 00:03 and the sweep settles it at 00:20 in December, the books still down
+      await sweepComputers(new Date('2026-12-01T00:20:00Z'));
+      expect(await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).toMatchObject({ state: 'settled', settledMicros: BigInt(30_000) });
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      // December's cap sees none of it (it ran in November), and November's cap sees all of it
+      const december = new Date('2026-12-01T00:30:00Z');
+      expect(await ask(sara, 1_000_000, december)).toEqual({ ok: true });
+      expect(await ask(sara, 970_000, new Date('2026-11-30T23:59:00Z'))).toEqual({ ok: true });
+      expect(await ask(sara, 970_001, new Date('2026-11-30T23:59:00Z'))).toMatchObject({ ok: false, why: 'cap', leftMicros: 970_000 });
+      // Written later it is the same: the event is November's
+      record.mockImplementation(actualRecord);
+      await sweepComputers(new Date('2026-12-01T00:40:00Z'));
+      expect((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${started.job.id}:time` } })).occurredAt).toEqual(new Date('2026-11-30T23:58:00Z'));
+      expect(await ask(sara, 1_000_000, december)).toEqual({ ok: true });
+    });
+
+    it('a renewal taken while the provider’s rate was not known (1 micro of room) does not pull the job’s price down: that stretch is priced by its neighbour', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const provider = new FakeComputerProvider();
+      setComputerProviderForTests(provider);
+      const rate = jest.spyOn(provider, 'microsPerMinute').mockReturnValue(6000);
+      try {
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        // The rate is not known at the renewal at minute 4 (it holds 1 micro), and known again when the job ends at minute 8
+        rate.mockReturnValue(null);
+        expect(await renewJob(started.job.id, minutes(4))).toMatchObject({ ok: true });
+        expect((await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).terms).toEqual([expect.objectContaining({ micros: 60_000 }), expect.objectContaining({ micros: 1 })]);
+        rate.mockReturnValue(6000);
+        await finishJob(started.job.id, 'done', minutes(8));
+        // 8 minutes at 6,000: 48,000 (counting the 1 micro as a price would say about 24,000)
+        expect((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${started.job.id}:time` } })).costMicros).toBe(BigInt(48_000));
+      } finally {
+        rate.mockRestore();
+      }
+    });
+
+    it('a job that failed on our side is not counted while its time is unwritten: it takes nothing from the person', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      record.mockRejectedValue(new Error('books down'));
+      // "Ours" is judged from what the relay recorded (a confirmed fault of ours), not from the runner's word alone
+      await recordFaults(sara.brickId, started.job.id, [{ turn: 1, callId: 'c-ours-1', kind: 'fault', reason: 'relay_down', source: 'universe-ai', route: 'universe-ai/model-a', at: minutes(4) }]);
+      await finishJob(started.job.id, 'failed', minutes(5), 'The machine broke', 'ours', [1]);
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${started.job.id}:time` } })).toBe(0);
+      expect(await ask(sara, 1_000_000, minutes(6))).toEqual({ ok: true });
+    });
+
+    it('a job is priced at what its lease was priced at, not at the provider’s rate when it closed, and a month boundary splits it by those prices', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 1_000_000 })).ok).toBe(true);
+      const provider = new FakeComputerProvider();
+      setComputerProviderForTests(provider);
+      const rate = jest.spyOn(provider, 'microsPerMinute').mockReturnValue(6000);
+      try {
+        // 23:55 on the last day of October at $0.006 a minute; the price doubles at 00:03; it ends at 00:10 (15 minutes: 8 at the old price, 7 at the new)
+        const start = new Date('2026-10-31T23:55:00Z');
+        const doubled = new Date('2026-11-01T00:03:00Z');
+        const end = new Date('2026-11-01T00:10:00Z');
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, start);
+        if (!started.ok) throw new Error(`not started: ${started.reason}`);
+        rate.mockReturnValue(12_000);
+        expect(await renewJob(started.job.id, doubled)).toMatchObject({ ok: true });
+        await finishJob(started.job.id, 'done', end);
+        // 8 minutes at 6,000 and 7 at 12,000: 132,000, not the 180,000 the closing rate would give
+        const event = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${started.job.id}:time` } });
+        expect(event.costMicros).toBe(BigInt(132_000));
+        // November's part is what ran from 00:00: 3 minutes at 6,000 and 7 at 12,000 = 102,000 (a split by duration alone would say 88,000)
+        expect(await ask(sara, 898_000, new Date('2026-11-01T00:20:00Z'))).toEqual({ ok: true });
+        expect(await ask(sara, 898_001, new Date('2026-11-01T00:20:00Z'))).toMatchObject({ ok: false, why: 'cap', leftMicros: 898_000 });
+      } finally {
+        rate.mockRestore();
+      }
     });
   });
 

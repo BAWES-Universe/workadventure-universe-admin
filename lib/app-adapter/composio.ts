@@ -1,9 +1,10 @@
-import { AdapterError, type AppLink, type ConnectStart, type InstantAdapter, type InstantCall, type InstantLog, type LinkAnswer, type ReadyMadeAdapter, type UseResult } from '@/lib/app-adapter/types';
+import { AdapterError, type AppLink, type ConnectStart, type InstantAdapter, type InstantCall, type InstantLog, type LinkAnswer, type ReadyMadeAdapter, type UseResult, type WorkbenchAdapter, type WorkbenchRun } from '@/lib/app-adapter/types';
+import { checkOutboundUrl } from '@/lib/mcp/outbound-guard';
 import { INSTANT_ACCOUNT, readInstantCharge } from '@/lib/instant/values';
 
 /**
- * The real adapter, written from the provider's live docs (docs.composio.dev, read 12 Nov 2026), wired but never switched on
- * here. It is built only when COMPOSIO_API_KEY is set in Orbit's environment (lib/app-adapter/index.ts), and nothing sets it.
+ * The real adapter, written from the provider's live docs (docs.composio.dev, read 12 Nov 2026), switched on by setting
+ * COMPOSIO_API_KEY in Orbit's environment (lib/app-adapter/index.ts); without it there is no adapter and the routes answer 404.
  *
  *  - API: https://backend.composio.dev/api/v3.1, header `x-api-key`.
  *  - Connect: POST /connected_accounts/link { auth_config_id, user_id, callback_url } -> { redirect_url, connected_account_id, expires_at }.
@@ -26,8 +27,22 @@ import { INSTANT_ACCOUNT, readInstantCharge } from '@/lib/instant/values';
  * account by the bounded executor (lib/instant/executor.ts). A single app step (`use`) names its connected account and never
  * runs without one, because a call with no account named is one the provider may serve from Instant.
  *
- * The provider's sandbox (its "workbench", which runs code on the person's own data) is ON in every session (the provider's default,
- * stated explicitly); each run is counted like an app step by whoever sends it (the bot server).
+ * CODE (the provider's sandbox, its "workbench"): OFF in every App session (`workbench: { enable: false }`), so an App link never offers the
+ * two sandbox tools, and Orbit refuses them on a link that was made before this (lib/app-adapter/ready-made.ts). Code runs only as a
+ * code job (lib/workbench/executor.ts), through `workbench` below, in a session made for that one job. Read live on 17 Nov 2026:
+ *  - POST /tool_router/session { user_id, toolkits: { enable: [] }, workbench: { enable: true, enable_proxy_execution: false,
+ *    enable_tool_execution: false, sandbox_size }, manage_connections: { enable: false }, instant: false } is accepted and read back as
+ *    toolkits.enabled [], workbench.proxy_execution_enabled false and tool_execution_enabled false, manage_connections.enabled false.
+ *    (`enable_tool_execution` is not on the docs page, but the API takes it and echoes it. With it off the sandbox has no
+ *    run_composio_tool, invoke_llm or web_search at all; with only toolkits.enable [] a nested run_composio_tool is refused by the provider.)
+ *  - POST /tool_router/session/{id}/execute { tool_slug: "COMPOSIO_REMOTE_WORKBENCH", arguments: { code_to_execute } } runs one cell and
+ *    answers { result_type: completed | failed, data: { stdout, stderr, results, error }, log_id }. The provider stops a cell at 180 seconds.
+ *  - GET /tool_router/session/{id}/mounts/files/items (mount_relative_prefix, limit, cursor) lists files with sizes; POST .../upload_url and
+ *    .../download_url { mount_relative_path } give presigned URLs (an hour); the files are deleted after a day.
+ *  - DELETE /tool_router/session/{id} answers { deleted: true }; after it the session, its link and its execute all answer 404, and a cell
+ *    still running when it was deleted came back failed at once. A second delete answers 404.
+ *  - POST /logs/tool_execution filtered by session_id lists the session's executions (one per cell, tool COMPOSIO_REMOTE_WORKBENCH).
+ *  NOT narrowed by anything here: the sandbox can reach the open internet (checked), and no setting turns that off.
  */
 
 const BASE = 'https://backend.composio.dev/api/v3.1';
@@ -42,6 +57,8 @@ export interface ComposioOptions {
   baseUrl?: string;
   /** For tests: how a wait is made. */
   sleep?: (ms: number) => Promise<void>;
+  /** For tests: whether a presigned file address may be used (the default refuses anything that is not a public https address). */
+  checkFileUrl?: (url: string) => Promise<boolean>;
 }
 
 /** The provider allows 2,000 calls a minute for the whole account: a refused call is asked again after the wait it names, a few times. */
@@ -68,6 +85,9 @@ function readCount(value: unknown): number | null {
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /** One execution log line, as far as the executor reads it. A line with no id is not one. */
+/** A wait that ended because its time was up or it was stopped (a DOMException is not always an Error in every runtime, so the name is read). */
+const endedByTimer = (error: unknown): boolean => isObject(error) && (error.name === 'TimeoutError' || error.name === 'AbortError');
+
 function readLog(row: Record<string, unknown>): InstantLog | null {
   const id = typeof row.id === 'string' && row.id ? row.id : null;
   if (!id) return null;
@@ -103,17 +123,19 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
     }
   }
 
-  async function call(path: string, body: Record<string, unknown> | null): Promise<Record<string, unknown>> {
+  /** `timeoutMs` bounds the whole call, every retry after a 429 included (30 seconds unless the caller has less time than that). */
+  async function call(path: string, body: Record<string, unknown> | null, timeoutMs = 30_000): Promise<Record<string, unknown>> {
+    const signal = AbortSignal.timeout(Math.max(1, Math.min(timeoutMs, 30_000)));
     const response = await send(`${base}${path}`, () => ({
       method: body ? 'POST' : 'GET',
       headers: { ...(body ? { 'content-type': 'application/json' } : {}), 'x-api-key': options.apiKey },
       ...(body ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(30_000),
+      signal,
       // The key goes only to the provider's own address: an answer that sends us elsewhere fails instead of being followed
       redirect: 'error',
     }));
     const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-    if (!response.ok || !json) throw new AdapterError('provider', `Provider answered ${response.status}`);
+    if (!response.ok || !json) throw new AdapterError('provider', `Provider answered ${response.status}`, response.status);
     return json;
   }
 
@@ -149,7 +171,7 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
         });
       } catch (error) {
         // Sent, and nothing came back that can be read: it may have run
-        const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+        const timedOut = endedByTimer(error);
         return { kind: 'unclear', why: timedOut ? 'timeout' : 'network', status: null };
       }
       const status = response.status;
@@ -236,8 +258,215 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
     },
   };
 
+
+  const WORKBENCH_SLUG = 'COMPOSIO_REMOTE_WORKBENCH';
+  const MOUNT = 'files';
+  const MOUNT_PAGE = 500;
+  const MOUNT_PAGES = 5;
+  const checkFileUrl = options.checkFileUrl ?? (async (url: string) => (await checkOutboundUrl(url)).allowed && new URL(url).protocol === 'https:');
+  const sessionPath = (sessionId: string) => `/tool_router/session/${encodeURIComponent(sessionId)}`;
+
+  /** The provider's answer to one mount question; a presigned address is used only if it is a public https one. */
+  async function mountUrl(sessionId: string, action: 'upload_url' | 'download_url', path: string, timeoutMs: number): Promise<string> {
+    const json = await call(`${sessionPath(sessionId)}/mounts/${MOUNT}/${action}`, { mount_relative_path: path }, timeoutMs);
+    const url = str(json[action]);
+    if (!url || !(await checkFileUrl(url))) throw new AdapterError('provider', 'Provider sent no usable file address');
+    return url;
+  }
+
+  const workbench: WorkbenchAdapter = {
+    async open({ jobUserId }) {
+      const json = await call('/tool_router/session', {
+        user_id: jobUserId,
+        // No App at all: nothing in the workspace can run an App tool, and the person's accounts are not in this session
+        toolkits: { enable: [] },
+        workbench: { enable: true, enable_proxy_execution: false, enable_tool_execution: false, sandbox_size: 'standard' },
+        manage_connections: { enable: false },
+        instant: false,
+      });
+      const sessionId = str(json.session_id);
+      if (!sessionId) throw new AdapterError('provider', 'Provider sent no job workspace');
+      const config = isObject(json.config) ? json.config : {};
+      const bench = isObject(config.workbench) ? config.workbench : {};
+      const toolkits = isObject(config.toolkits) ? config.toolkits : {};
+      const connections = isObject(config.manage_connections) ? config.manage_connections : {};
+      // Trusted only once it reads back exactly as asked: a field the provider did not echo is not "restricted"
+      const restricted =
+        config.instant === false &&
+        Array.isArray(toolkits.enabled) &&
+        toolkits.enabled.length === 0 &&
+        bench.enable === true &&
+        bench.proxy_execution_enabled === false &&
+        bench.tool_execution_enabled === false &&
+        connections.enabled === false;
+      if (!restricted) {
+        await workbench.close(sessionId).catch(() => undefined);
+        throw new AdapterError('provider', 'The job workspace did not come back restricted');
+      }
+      return { sessionId };
+    },
+
+    async run({ sessionId, code, timeoutMs, signal }): Promise<WorkbenchRun> {
+      let response: Response;
+      try {
+        response = await doFetch(`${base}${sessionPath(sessionId)}/execute`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-api-key': options.apiKey },
+          body: JSON.stringify({ tool_slug: WORKBENCH_SLUG, arguments: { code_to_execute: code, thought: 'Universe code job' } }),
+          signal: signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal]) : AbortSignal.timeout(timeoutMs),
+          redirect: 'error',
+        });
+      } catch (error) {
+        const timedOut = endedByTimer(error);
+        return timedOut ? { kind: 'timeout' } : { kind: 'failed', status: null };
+      }
+      if (response.status === 404 || response.status === 410) return { kind: 'gone' };
+      let json: Record<string, unknown> | null;
+      try {
+        json = (await response.json()) as Record<string, unknown> | null;
+      } catch (error) {
+        // The wait ending while the answer was still arriving is a timeout, not an unreadable answer
+        const timedOut = endedByTimer(error);
+        return timedOut ? { kind: 'timeout' } : { kind: 'failed', status: response.status };
+      }
+      if (!response.ok || !isObject(json)) return { kind: 'failed', status: response.status };
+      const data = isObject(json.data) ? json.data : {};
+      const text = (value: unknown): string => (typeof value === 'string' ? value : '');
+      const failure = str(data.error) ?? str(json.error);
+      return {
+        kind: 'done',
+        cell: {
+          ok: json.result_type === 'completed' && !failure,
+          stdout: text(data.stdout),
+          stderr: text(data.stderr),
+          results: text(data.results),
+          error: failure,
+          logId: str(json.log_id),
+        },
+      };
+    },
+
+    async put({ sessionId, path, bytes, timeoutMs }) {
+      // One budget for asking for the address and sending the file
+      const started = Date.now();
+      const url = await mountUrl(sessionId, 'upload_url', path, timeoutMs);
+      const response = await doFetch(url, { method: 'PUT', body: bytes as unknown as BodyInit, signal: AbortSignal.timeout(Math.max(1, timeoutMs - (Date.now() - started))), redirect: 'error' });
+      if (!response.ok) throw new AdapterError('provider', `Provider would not take the file (${response.status})`);
+    },
+
+    async list({ sessionId, prefix, timeoutMs, limit }) {
+      // One budget for the whole listing, not for each page
+      const started = Date.now();
+      const files: { path: string; bytes: number | null }[] = [];
+      let cursor: string | null = null;
+      for (let page = 0; page < MOUNT_PAGES; page += 1) {
+        const query = new URLSearchParams({ mount_relative_prefix: prefix, limit: String(MOUNT_PAGE) });
+        if (cursor) query.set('cursor', cursor);
+        const left = timeoutMs - (Date.now() - started);
+        if (left <= 0) throw new AdapterError('provider', 'The job’s files could not be listed in time');
+        const json = await call(`${sessionPath(sessionId)}/mounts/${MOUNT}/items?${query.toString()}`, null, left);
+        const items = Array.isArray(json.items) ? (json.items as unknown[]) : [];
+        for (const item of items) {
+          if (!isObject(item)) continue;
+          const path = str(item.mount_relative_path);
+          const size = readCount(item.size);
+          // A folder entry (a trailing slash) is not a file. A size that cannot be read is passed on as null: one odd entry must not hide the rest
+          if (!path || path.endsWith('/')) continue;
+          files.push({ path, bytes: size });
+          // Enough to decide which files are kept and to name some that are not: there is no need to page through the rest
+          if (limit !== undefined && files.length >= limit) return files;
+        }
+        const next = str(json.next_cursor);
+        if (!next || items.length === 0) return files;
+        cursor = next;
+      }
+      throw new AdapterError('provider', 'The job’s files could not be listed in full');
+    },
+
+    async read({ sessionId, path, maxBytes, timeoutMs }) {
+      // One budget for asking for the address and getting the file
+      const started = Date.now();
+      const url = await mountUrl(sessionId, 'download_url', path, timeoutMs);
+      const response = await doFetch(url, { method: 'GET', signal: AbortSignal.timeout(Math.max(1, timeoutMs - (Date.now() - started))), redirect: 'error' });
+      if (response.status === 404) return { kind: 'missing' };
+      if (!response.ok) throw new AdapterError('provider', `Provider would not give the file (${response.status})`);
+      const stated = readCount(response.headers?.get?.('content-length'));
+      if (stated !== null && stated > maxBytes) {
+        await response.body?.cancel().catch(() => undefined);
+        return { kind: 'too_big' };
+      }
+      // Read as it arrives and stopped past the limit, whatever the headers said
+      const reader = response.body?.getReader();
+      if (!reader) {
+        const whole = new Uint8Array(await response.arrayBuffer());
+        return whole.byteLength > maxBytes ? { kind: 'too_big' } : { kind: 'ok', bytes: whole };
+      }
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => undefined);
+          return { kind: 'too_big' };
+        }
+        chunks.push(value);
+      }
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return { kind: 'ok', bytes };
+    },
+
+    async close(sessionId) {
+      const response = await send(`${base}${sessionPath(sessionId)}`, () => ({
+        method: 'DELETE',
+        headers: { 'x-api-key': options.apiKey },
+        signal: AbortSignal.timeout(30_000),
+        redirect: 'error',
+      }));
+      if (response.status === 404) return 'gone';
+      const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      // Closed only when the provider says it deleted it: any other answer is not a confirmation
+      if (!response.ok || !json || json.deleted !== true) throw new AdapterError('provider', `Provider answered ${response.status} to closing a job workspace`);
+      return 'closed';
+    },
+
+    async nestedRuns({ sessionId, sinceMs }) {
+      try {
+        const nowMs = Date.now();
+        let nested = 0;
+        let cursor: string | null = null;
+        for (let page = 0; page < 3; page += 1) {
+          const json = await call('/logs/tool_execution', {
+            limit: 100,
+            ...(cursor ? { cursor } : {}),
+            filters: [{ field: 'session_id', operator: '==', value: sessionId }],
+            time_range: { from: Math.max(0, sinceMs - 60_000), to: nowMs + 60_000 },
+          });
+          const rows = Array.isArray(json.logs) ? (json.logs as Record<string, unknown>[]) : [];
+          for (const log of rows.map(readLog)) {
+            // Our own runs of code are the only executions a job's session should have; a line whose tool cannot be read is not counted
+            if (log && log.tool !== null && log.tool !== WORKBENCH_SLUG) nested += 1;
+          }
+          const next = str(json.next_cursor);
+          if (rows.length < 100 || !next) break;
+          cursor = next;
+        }
+        return nested;
+      } catch {
+        return null;
+      }
+    },
+  };
+
   return {
     instant,
+    workbench,
     async startConnect({ person, toolkit, returnUrl, authConfigId: given }): Promise<ConnectStart> {
       // A caller that already read the setting passes it (undefined: read it here), so a caller inside a database transaction never
       // takes a second pooled connection for it
@@ -263,7 +492,8 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
       const json = await call('/tool_router/session', {
         user_id: person,
         toolkits: { enable: toolkits },
-        workbench: { enable: true },
+        // Code never runs on an App link: it runs only as a code job, in a session made for that job alone
+        workbench: { enable: false },
         // Explicit, never left out: a session with no word about Instant allows it once the project switch is on
         instant: false,
         ...(pinned && Object.keys(pinned).length > 0 ? { connected_accounts: pinned } : {}),

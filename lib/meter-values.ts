@@ -104,12 +104,22 @@ export function readMeterEvent(input: unknown): Checked<MeterEventInput> {
   if (costMicros !== null && !whole(costMicros)) return { ok: false, error: 'costMicros must be a whole number, 0 or more, or empty when the price is not known' };
   // A figure we have no number for cannot be called measured
   if (input.basis === 'measured' && costMicros === null) return { ok: false, error: 'a measured figure needs costMicros' };
-  const occurredAt = input.occurredAt === undefined || input.occurredAt === null ? new Date() : new Date(input.occurredAt as string | number | Date);
+  // Only a date, a date's text or its number in milliseconds is read as a time: `false` or an object would become the year 1970
+  const given = input.occurredAt;
+  if (given !== undefined && given !== null && typeof given !== 'string' && typeof given !== 'number' && !(given instanceof Date)) return { ok: false, error: 'occurredAt is not a date' };
+  const occurredAt = given === undefined || given === null ? new Date() : new Date(given);
   if (Number.isNaN(occurredAt.getTime())) return { ok: false, error: 'occurredAt is not a date' };
   let detail: Record<string, unknown> | null = null;
   if (input.detail !== undefined && input.detail !== null) {
     if (!isRecord(input.detail)) return { ok: false, error: 'detail must be an object' };
-    if (JSON.stringify(input.detail).length > MAX_DETAIL_CHARS) return { ok: false, error: `detail is too long (up to ${MAX_DETAIL_CHARS} characters)` };
+    // A value that cannot be written as JSON (a bigint, a loop) is an invalid detail, not an error thrown at the caller
+    let written: string | undefined;
+    try {
+      written = JSON.stringify(input.detail);
+    } catch {
+      return { ok: false, error: 'detail must be plain data that can be written as JSON' };
+    }
+    if (written === undefined || written.length > MAX_DETAIL_CHARS) return { ok: false, error: `detail is too long (up to ${MAX_DETAIL_CHARS} characters)` };
     detail = input.detail;
   }
   return {
@@ -176,6 +186,14 @@ export interface MeterSettings {
   atOnceAll: number | null;
   /** One price for every paid step of a ready-made app, replacing the provider's list prices (lib/composio-rates.ts). Empty means those list prices are used, which is the usual case. Not needed to open anything. */
   appUseMicros: number | null;
+  /** The most Universe pays in a calendar month for the use of connected ready-made Apps, all people together (lib/app-use-cap.ts). Empty stops that use; 0 pauses it. */
+  appUseCeilingMicros: number | null;
+  /** The most of that one person's Bricks may use in a calendar month. */
+  appUseMemberCeilingMicros: number | null;
+  /** The most seconds of speech Universe AI pays for in a calendar month, all people together: audio heard and voice spoken, in live calls and voice notes (lib/speech-cap.ts). Empty stops that speech; 0 pauses it. */
+  speechCeilingSeconds: number | null;
+  /** The most of that for one person in a calendar month. */
+  speechMemberCeilingSeconds: number | null;
   /**
    * What the platform's funding account may issue in credit in one calendar month (UTC), in millionths of a dollar: the funded rollout
    * budget. Empty means no default grant, gift or renewal issues anything yet: nothing is assumed (paying spec v3, sections 16 and 19).
@@ -196,6 +214,10 @@ export const METER_SETTINGS_EMPTY: MeterSettings = {
   atOnceMember: null,
   atOnceAll: null,
   appUseMicros: null,
+  appUseCeilingMicros: null,
+  appUseMemberCeilingMicros: null,
+  speechCeilingSeconds: null,
+  speechMemberCeilingSeconds: null,
   rolloutBudgetMicros: null,
   renewMinutes: METER_RENEW_MINUTES_RECOMMENDED,
 };
@@ -214,6 +236,10 @@ export const METER_RANGES: Record<keyof MeterSettings, MeterRange> = {
   atOnceMember: { min: 1, max: 100_000 },
   atOnceAll: { min: 1, max: 1_000_000 },
   appUseMicros: { min: 0, max: 1_000_000_000 },
+  appUseCeilingMicros: { min: 0, max: 1_000_000_000_000_000 },
+  appUseMemberCeilingMicros: { min: 0, max: 1_000_000_000_000 },
+  speechCeilingSeconds: { min: 0, max: 1_000_000_000 },
+  speechMemberCeilingSeconds: { min: 0, max: 100_000_000 },
   rolloutBudgetMicros: { min: 0, max: 1_000_000_000_000_000 },
   renewMinutes: { min: 1, max: 1_440 },
 };
@@ -221,7 +247,7 @@ export const METER_RANGES: Record<keyof MeterSettings, MeterRange> = {
 const NEEDED: (keyof MeterSettings)[] = ['memberAllowanceMicros', 'poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll'];
 
 /** Settings that may be emptied again but that nothing is refused without (see `missingSettings`). */
-const OPTIONAL_MONEY: (keyof MeterSettings)[] = ['appUseMicros', 'rolloutBudgetMicros'];
+const OPTIONAL_MONEY: (keyof MeterSettings)[] = ['appUseMicros', 'appUseCeilingMicros', 'appUseMemberCeilingMicros', 'speechCeilingSeconds', 'speechMemberCeilingSeconds', 'rolloutBudgetMicros'];
 
 const fits = (value: unknown, range: MeterRange): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= range.min && value <= range.max;
 

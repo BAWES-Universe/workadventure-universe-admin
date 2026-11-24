@@ -61,6 +61,9 @@ export async function POST(request: NextRequest) {
         return json(request, { error: 'That message is not one an app link takes here', code: 'refused' }, 400);
       case 'not_owner':
         return json(request, { allowed: false, reason: 'not_owner' }, 403);
+      case 'paused':
+        // The team paused Apps: nothing was counted or sent, and the bot server says so kindly (it can ask again once they are back)
+        return json(request, { error: 'Apps are paused for a while', code: 'paused' }, 503);
       case 'already_asked':
         return json(request, { error: 'This call was already made', code: 'already_asked' }, 409);
       default:

@@ -39,7 +39,7 @@ const report = (over: Partial<DemandReport> = {}): DemandReport => ({
   from: '2026-10-17',
   to: '2026-11-15',
   days: 30,
-  totals: { uses: 14017, people: 402, costMicros: 170_950_000, asks: 156 },
+  totals: { uses: 14017, people: 402, costMicros: 170_950_000, asks: 156, cost: { state: 'measured', unpriced: 0, estimated: 0, notCounted: 0, mismatched: 0 } },
   apps: [
     app(),
     app({ key: 'gmail', name: 'Gmail', kind: 'own', uses: 5940, people: 188, costMicros: 1_780_000, ended: 5940, failed: 24, allFailedRefunded: false, refundedMicros: null, route: 'universe', routeVersion: 2, own: { ready: true, why: [], passedChecksOn: '2026-11-12T00:00:00.000Z', topPriceMicros: 100 } }),
@@ -67,6 +67,8 @@ describe('Apps: use and demand', () => {
     expect(await screen.findByText('14,017')).toBeInTheDocument();
     expect(screen.getByText('402')).toBeInTheDocument();
     expect(screen.getByText('$170.95')).toBeInTheDocument();
+    expect(screen.getByText('cost to us')).toBeInTheDocument();
+    expect(screen.queryByTestId('apps-cost-note')).not.toBeInTheDocument();
     expect(screen.getByText('156')).toBeInTheDocument();
 
     const video = screen.getByTestId('apps-row-video');
@@ -87,6 +89,31 @@ describe('Apps: use and demand', () => {
     expect(screen.getByText(/3 more App names were asked for/)).toBeInTheDocument();
     // Only the name is kept, and the page says so
     expect(screen.getByText(/Only the App’s name is kept, never what people wrote/)).toBeInTheDocument();
+  });
+
+  it('says the headline cost is a part, never the whole, while some uses have no price or some runs are not settled yet; a measured total says nothing extra', async () => {
+    answer(report({ totals: { uses: 10, people: 3, costMicros: 70_000, asks: 0, cost: { state: 'incomplete', unpriced: 2, estimated: 1, notCounted: 3, mismatched: 0 } } }));
+    render(<AppsDemandPage />);
+    expect(await screen.findByText('cost to us so far')).toBeInTheDocument();
+    expect(screen.queryByText('cost to us')).not.toBeInTheDocument();
+    expect(screen.getByTestId('apps-cost-note')).toHaveTextContent('only part of it');
+    expect(screen.getByTestId('apps-cost-note')).toHaveTextContent('2 uses have no price yet');
+    expect(screen.getByTestId('apps-cost-note')).toHaveTextContent('3 runs are not in this total yet');
+  });
+
+  it('a total that holds a run at a wrong figure says it is being corrected, and never calls it a part', async () => {
+    answer(report({ totals: { uses: 10, people: 3, costMicros: 70_000, asks: 0, cost: { state: 'correcting', unpriced: 0, estimated: 0, notCounted: 0, mismatched: 2 } } }));
+    render(<AppsDemandPage />);
+    expect(await screen.findByText('cost to us (being corrected)')).toBeInTheDocument();
+    expect(screen.getByTestId('apps-cost-note')).toHaveTextContent('2 runs are counted at a figure that differs from the provider’s own, and will be corrected');
+    expect(screen.getByTestId('apps-cost-note')).not.toHaveTextContent('only part of it');
+  });
+
+  it('a total priced partly with estimates says so', async () => {
+    answer(report({ totals: { uses: 10, people: 3, costMicros: 70_000, asks: 0, cost: { state: 'estimated', unpriced: 0, estimated: 4, notCounted: 0, mismatched: 0 } } }));
+    render(<AppsDemandPage />);
+    expect(await screen.findByText('cost to us (partly estimated)')).toBeInTheDocument();
+    expect(screen.getByTestId('apps-cost-note')).toHaveTextContent('4 uses are priced with our estimate');
   });
 
   it('uses only the word Apps: never tool, MCP or connector', async () => {
@@ -200,6 +227,59 @@ describe('Apps: use and demand', () => {
     });
     expect(screen.getByTestId('apps-sheet')).toBeInTheDocument();
     expect(within(screen.getByTestId('apps-sheet')).queryByTestId('apps-sheet-error')).not.toBeInTheDocument();
+  });
+
+  it('does not say the page is reloaded when reading it again failed', async () => {
+    const ready = report({ apps: [app({ own: { ready: true, why: [], passedChecksOn: null, topPriceMicros: 100 } })] });
+    let reads = 0;
+    fetchMock.mockImplementation((url: string, init?: { method?: string }) => {
+      if (init?.method === 'PUT') return Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ code: 'stale', route: 'universe', version: 1 }) });
+      reads += 1;
+      return reads === 1 ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(ready) }) : Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+    });
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    fireEvent.click(within(sheet).getByTestId('apps-route-universe'));
+    fireEvent.click(within(sheet).getByTestId('apps-route-save'));
+    const said = await within(await screen.findByTestId('apps-sheet')).findByTestId('apps-sheet-error');
+    expect(said).toHaveTextContent('could not be reloaded');
+    expect(said).not.toHaveTextContent('It is reloaded');
+    // It says what to do: the sheet cannot reload the Apps itself, so it is told to try loading them again, then open the App again
+    expect(said).toHaveTextContent('try loading the Apps again, then open the App again');
+  });
+
+  it('moves between the two routes with the arrow keys, Tab stops only on the picked one, and the one that is off is skipped', async () => {
+    const ready = report({ apps: [app({ own: { ready: true, why: [], passedChecksOn: null, topPriceMicros: 100 } })] });
+    answer(ready);
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    const composio = within(sheet).getByTestId('apps-route-composio');
+    const universe = within(sheet).getByTestId('apps-route-universe');
+    expect([composio.tabIndex, universe.tabIndex]).toEqual([0, -1]);
+    fireEvent.keyDown(composio, { key: 'ArrowDown' });
+    expect(universe).toHaveAttribute('aria-checked', 'true');
+    expect(universe).toHaveFocus();
+    expect([composio.tabIndex, universe.tabIndex]).toEqual([-1, 0]);
+    fireEvent.keyDown(universe, { key: 'ArrowUp' });
+    expect(composio).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('shows no figures of the days that were selected before while the new days are read', async () => {
+    let finish: (value: unknown) => void = () => undefined;
+    fetchMock.mockImplementation((url: string) =>
+      String(url).includes('days=7') ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(report()) }),
+    );
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-range-7'));
+    expect(screen.queryByText('14,017')).not.toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes('days=7'))).toBe(true));
+    await act(async () => finish({ ok: true, status: 200, json: () => Promise.resolve(report({ days: 7, totals: { uses: 99, people: 5, costMicros: 1_000_000, asks: 1, cost: { state: 'measured', unpriced: 0, estimated: 0, notCounted: 0, mismatched: 0 } } })) }));
+    expect(await screen.findByText('99')).toBeInTheDocument();
   });
 
   it('goes back to Orbit home for anyone who is not a super admin, and offers a retry when the read fails', async () => {

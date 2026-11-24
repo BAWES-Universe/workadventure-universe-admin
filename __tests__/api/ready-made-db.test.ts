@@ -15,11 +15,12 @@ import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
 import { GET as listReadyMade, POST as connectReadyMadeApp } from '@/app/api/me/apps/ready-made/route';
 import { GET as adminGet, PUT as adminPut } from '@/app/api/admin/ready-made-apps/route';
+import { GET as offerable } from '@/app/api/bots/[id]/apps/offerable/route';
 import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { POST as useApp } from '@/app/api/ready-made/use/route';
 import { POST as linkApp } from '@/app/api/ready-made/link/route';
 import { POST as testServer } from '@/app/api/bots/[id]/mcp-servers/[serverId]/test/route';
-import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
+import { POST as checkUse } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { POST as connectApp } from '@/app/api/me/apps/route';
 import { grantToBrick, createConnection, readConnection, listConnections } from '@/lib/app-connections';
 import { saveMeterSettings } from '@/lib/meter';
@@ -56,6 +57,14 @@ const fake = () => {
   return adapter;
 };
 
+
+async function monthSpentByOthers(): Promise<number> {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const sum = await prisma.meterEvent.aggregate({ where: { kind: 'app_use', route: 'app', payerKind: 'universe', occurredAt: { gte: start } }, _sum: { costMicros: true } });
+  return Number(sum._sum.costMicros ?? 0);
+}
+
 run('ready-made apps through the adapter, in a real database', () => {
   beforeAll(async () => {
     process.env.BOT_SERVICE_TOKEN = SERVICE_TOKEN;
@@ -65,6 +74,10 @@ run('ready-made apps through the adapter, in a real database', () => {
     omar = (await person('omar')).id;
     boss = (await person('boss', 'boss@example.test')).id;
     saraBrick = (await createBrick({ ownerId: sara, name: 'Brick' })).id;
+  });
+  beforeEach(async () => {
+    // Paid use of an App is held against two Limits (lib/app-use-cap.ts): other suites change the shared meter setting, so these suites state theirs
+    await saveMeterSettings({ appUseCeilingMicros: 1_000_000_000, appUseMemberCeilingMicros: 1_000_000_000 }, boss);
   });
   afterEach(async () => {
     setAdapterForTests(undefined);
@@ -262,6 +275,21 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect((await connectReadyMadeApp(request('/api/me/apps/ready-made', { method: 'POST', body: { key: 'gmail' } }))).status).toBe(201);
   });
 
+  it('a change that names only some fields of an app keeps the rest, and null clears a sign-in setup of their own', async () => {
+    await saveReadyMadeApps({ apps: { [KEY]: { name: 'Gmail', authConfigId: 'ac_1', enabled: true } } }, boss);
+    // Turning it off names only `enabled`: the name and the sign-in setup stay
+    await saveReadyMadeApps({ apps: { [KEY]: { enabled: false } } }, boss);
+    expect((await saveReadyMadeApps({ apps: {} }, boss)).find((app) => app.key === KEY)).toEqual({ key: KEY, name: 'Gmail', authConfigId: 'ac_1', enabled: false });
+    // Sent as null, the sign-in setup is cleared and the provider's managed one is used again
+    const cleared = await saveReadyMadeApps({ apps: { [KEY]: { authConfigId: null } } }, boss);
+    expect(cleared.find((app) => app.key === KEY)).toEqual({ key: KEY, name: 'Gmail', authConfigId: null, enabled: false });
+    // The route takes null too
+    setAdapterForTests(fake());
+    mockUser.current = { id: boss, email: 'boss@example.test' };
+    const put = await adminPut(request('/api/admin/ready-made-apps', { method: 'PUT', body: { apps: { [KEY]: { authConfigId: null } } } }));
+    expect(put.status).toBe(200);
+  });
+
   it('restarts a sign-in that was lost after it had been confirmed, and reads connected again only when the provider confirms the new one', async () => {
     const adapter = fake();
     adapter.startConnect
@@ -305,6 +333,56 @@ run('ready-made apps through the adapter, in a real database', () => {
     }
   });
 
+  it('lets a Brick offer the ready-made apps and GitHub in chat, before and after the person connects them', async () => {
+    const adapter = fake();
+    setAdapterForTests(adapter);
+    // A name of its own: an app with the name of another is offered once
+    await saveReadyMadeApps({ apps: { [KEY]: { name: `Mail ${tag}`, authConfigId: 'ac_1', enabled: true } } }, boss);
+    const ask = async () =>
+      (await (await offerable(new NextRequest(`http://localhost/api/bots/${saraBrick}/apps/offerable?userId=${encodeURIComponent(`sara-${tag}`)}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }), params({ id: saraBrick }))).json()).apps as { key: string; name: string; kind: string; connectionId: string | null; connected: boolean; usable: boolean }[];
+    const gmail = (apps: Awaited<ReturnType<typeof ask>>) => apps.find((app) => app.key === KEY);
+
+    // Before: on offer, nothing of the person's yet
+    expect(gmail(await ask())).toMatchObject({ name: `Mail ${tag}`, kind: 'readyMade', connectionId: null, connected: false, usable: false });
+    expect((await ask()).map((app) => app.key)).toContain('notion');
+    // Connected, sign-in not finished: theirs, and not working yet
+    asSara();
+    const made = await (await connect()).json();
+    adapter.connectionStatus.mockResolvedValue('pending');
+    mockUser.current = null;
+    expect(gmail(await ask())).toMatchObject({ connectionId: made.id, connected: false, usable: false });
+    // Signed in at the provider: connected, and the Brick may still not use it
+    adapter.connectionStatus.mockResolvedValue('active');
+    expect(gmail(await ask())).toMatchObject({ connectionId: made.id, connected: true, usable: false });
+    // Let this Brick use it
+    await grantToBrick(sara, made.id, saraBrick);
+    expect(gmail(await ask())).toMatchObject({ connectionId: made.id, connected: true, usable: true });
+    // Never the link or the provider's names
+    expect(JSON.stringify(await ask())).not.toMatch(/mcp\.example|ca_|authConfig|serverUrl/);
+
+    // GitHub: through Universe's own GitHub App once it is made, first, as a listed app, never twice
+    expect((await ask()).filter((app) => app.name === 'GitHub').map((app) => app.kind)).toEqual(['readyMade']);
+    await saveGitHubApp({ id: 77, slug: 'bawes-universe', client_id: 'Iv1.client', client_secret: 's', webhook_secret: null, pem: 'pem', html_url: 'https://github.com/apps/bawes-universe' }, null, null);
+    try {
+      const withApp = await ask();
+      expect(withApp[0]).toMatchObject({ key: 'github', name: 'GitHub', kind: 'listed', connectionId: null, connected: false, usable: false });
+      expect(withApp.filter((app) => app.name === 'GitHub')).toHaveLength(1);
+      asSara();
+      const github = await (await connectApp(request('/api/me/apps', { method: 'POST', body: { catalogKey: 'github' } }))).json();
+      mockUser.current = null;
+      expect((await ask())[0]).toMatchObject({ key: 'github', connectionId: github.id, connected: false, usable: false });
+      await grantToBrick(sara, github.id, saraBrick);
+      expect((await ask())[0]).toMatchObject({ key: 'github', connectionId: github.id, usable: true });
+    } finally {
+      await prisma.appSetting.deleteMany({ where: { key: 'github-app' } });
+      forgetGitHubApp();
+    }
+
+    // The adapter off: no ready-made app is offered, as if there were none
+    setAdapterForTests(null);
+    expect((await ask()).some((app) => app.kind === 'readyMade')).toBe(false);
+  });
+
   it('never stores the provider key, even when the provider’s session answer carries headers, and shows it nowhere', async () => {
     const adapter = fake();
     // A provider that sends the key back in the link's headers (the adapter drops them; a fake that returned them would still be ignored)
@@ -339,11 +417,11 @@ run('ready-made apps through the adapter, in a real database', () => {
 
   it('says on the use check that the universe pays for a ready-made app, and not for a person’s own', async () => {
     const { serverId } = await connectedAndGranted();
-    const verdict = await (await useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `sara-${tag}` } }), params({ id: saraBrick, serverId }))).json();
+    const verdict = await (await checkUse(request(`/api/bots/${saraBrick}/mcp-servers/${serverId}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `sara-${tag}` } }), params({ id: saraBrick, serverId }))).json();
     expect(verdict).toMatchObject({ allowed: true, readyMade: true });
     const own = await createConnection(sara, { name: 'Own', serverUrl: 'https://own.example.com/mcp', authType: 'none', source: 'link' });
     const ownGrant = await grantToBrick(sara, own.id, saraBrick);
-    const ownVerdict = await (await useCheck(request(`/api/bots/${saraBrick}/mcp-servers/${(ownGrant as { id: string }).id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `sara-${tag}` } }), params({ id: saraBrick, serverId: (ownGrant as { id: string }).id }))).json();
+    const ownVerdict = await (await checkUse(request(`/api/bots/${saraBrick}/mcp-servers/${(ownGrant as { id: string }).id}/use`, { method: 'POST', token: SERVICE_TOKEN, body: { requesterKey: `sara-${tag}` } }), params({ id: saraBrick, serverId: (ownGrant as { id: string }).id }))).json();
     expect(ownVerdict.allowed).toBe(true);
     expect(ownVerdict.readyMade).toBeUndefined();
   });
@@ -473,7 +551,7 @@ run('ready-made apps through the adapter, in a real database', () => {
 
     it('counts a tool run through the link like a use, once for each call id, and needs a call id', async () => {
       const { adapter, serverId } = await connectedAndGranted();
-      const message = { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'COMPOSIO_REMOTE_WORKBENCH', arguments: { code: 'secret code' } } };
+      const message = { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'GMAIL_FETCH_EMAILS', arguments: { query: 'secret code' } } };
       expect((await link(serverId, { message })).status).toBe(400);
       expect(adapter.callLink).not.toHaveBeenCalled();
       const callId = `call-${randomUUID()}`;
@@ -483,8 +561,8 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(adapter.callLink).toHaveBeenCalledTimes(1);
       const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
       expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, basis: 'estimated', payerKind: 'universe', quantity: BigInt(1), costMicros: BigInt(100) });
-      expect(events[0].detail).toMatchObject({ kind: 'sandbox', sandboxRuns: 1, executions: 0 });
+      expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, basis: 'estimated', payerKind: 'universe', quantity: BigInt(1), costMicros: BigInt(300) });
+      expect(events[0].detail).toMatchObject({ kind: 'execution', sandboxRuns: 0, executions: 1 });
       // What was asked is not written down: only which app and which tool
       expect(JSON.stringify(events[0].detail)).not.toContain('secret code');
     });
@@ -590,6 +668,34 @@ run('ready-made apps through the adapter, in a real database', () => {
         .mockResolvedValueOnce(answerOf(202, ''))
         .mockResolvedValueOnce(answerOf(200, 'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":{}}\n\nevent: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"GMAIL_FETCH_EMAILS"}]}}\n', 's1'));
       expect(await (await test(serverId)).json()).toMatchObject({ success: true, toolCount: 1, toolNames: ['GMAIL_FETCH_EMAILS'] });
+    });
+
+    it('does not take an answer that carries another id for the answer to the list it asked for, in a plain reply or in a stream', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      const mismatched = (listAnswer: ReturnType<typeof answerOf>) =>
+        adapter.callLink
+          .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}', 's1'))
+          .mockResolvedValueOnce(answerOf(202, ''))
+          .mockResolvedValueOnce(listAnswer);
+      mismatched(answerOf(200, '{"jsonrpc":"2.0","id":99,"result":{"tools":[{"name":"SOMEONE_ELSES"}]}}'));
+      expect(await (await test(serverId)).json()).toMatchObject({ success: false });
+      adapter.callLink.mockClear();
+      mismatched(answerOf(200, 'event: message\ndata: {"jsonrpc":"2.0","id":99,"result":{"tools":[{"name":"SOMEONE_ELSES"}]}}\n'));
+      const streamed = await (await test(serverId)).json();
+      expect(streamed).toMatchObject({ success: false });
+      expect(JSON.stringify(streamed)).not.toContain('SOMEONE_ELSES');
+    });
+
+    it('an answer to the start of a session that is for another id, or not an answer at all, is a failed test: a good list after it never makes the app look like it works', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      for (const opening of ['{"jsonrpc":"2.0","id":99,"error":{"code":-32000,"message":"no session"}}', '{"jsonrpc":"2.0","id":99,"result":{}}', '<html>maintenance</html>']) {
+        adapter.callLink.mockReset();
+        adapter.callLink
+          .mockResolvedValueOnce(answerOf(200, opening, 's1'))
+          .mockResolvedValueOnce(answerOf(202, ''))
+          .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"A"}]}}', 's1'));
+        expect(await (await test(serverId)).json()).toMatchObject({ success: false, toolCount: 0 });
+      }
     });
 
     it('reads every page of a long list of tools', async () => {
@@ -702,5 +808,110 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect(servers.find((s) => s.id === serverId)?.readyMade).toBe(true);
     expect(servers.find((s) => s.id === ownGrant.id)?.readyMade).toBe(false);
     expect(servers.find((s) => s.id === ownServer.id)?.readyMade).toBe(false);
+  });
+
+  describe('the spending stop on what the universe pays for (audit F3): held back before the call, never after', () => {
+    /** The meter setting is shared with other suites: what was there is put back, never deleted */
+    async function withLimits(limits: { appUseCeilingMicros: number | null; appUseMemberCeilingMicros: number | null }, run: () => Promise<void>) {
+      const before = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
+      try {
+        await saveMeterSettings(limits, boss);
+        await run();
+      } finally {
+        if (before) await prisma.appSetting.update({ where: { key: 'meter' }, data: { value: before.value as never } });
+        else await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
+      }
+    }
+    const paidUses = () => prisma.meterEvent.count({ where: { personId: sara, kind: 'app_use', route: 'app' } });
+
+    it('lets a person use it until their own month’s limit would be passed, then says so in plain words and does not call the App', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      // A use is $0.0004 (400); room for two
+      await withLimits({ appUseCeilingMicros: 1_000_000, appUseMemberCeilingMicros: 900 }, async () => {
+        expect((await useIt({ serverId })).status).toBe(200);
+        expect((await useIt({ serverId })).status).toBe(200);
+        const held = await useIt({ serverId });
+        expect(held.status).toBe(200);
+        expect(await held.json()).toEqual({ ok: false, data: { error: expect.stringContaining('Nothing was done'), stopped: true } });
+        expect(adapter.use).toHaveBeenCalledTimes(2);
+        expect(await paidUses()).toBe(2);
+      });
+    });
+
+    it('stops everyone at the month’s limit for all people together', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      await withLimits({ appUseCeilingMicros: 800 + (await monthSpentByOthers()), appUseMemberCeilingMicros: 1_000_000 }, async () => {
+        expect((await useIt({ serverId })).status).toBe(200);
+        expect((await useIt({ serverId })).status).toBe(200);
+        expect(await (await useIt({ serverId })).json()).toMatchObject({ ok: false, data: { stopped: true } });
+        expect(adapter.use).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    it('stops all paid use while a limit is empty, and 0 pauses it', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      await withLimits({ appUseCeilingMicros: null, appUseMemberCeilingMicros: 1_000_000 }, async () => {
+        expect(await (await useIt({ serverId })).json()).toMatchObject({ data: { stopped: true } });
+      });
+      await withLimits({ appUseCeilingMicros: 0, appUseMemberCeilingMicros: 1_000_000 }, async () => {
+        expect(await (await useIt({ serverId })).json()).toMatchObject({ data: { stopped: true } });
+      });
+      expect(adapter.use).not.toHaveBeenCalled();
+      expect(await paidUses()).toBe(0);
+    });
+
+    it('never counts a retry against the limit it already used, and never lets two calls at the same moment both take the last place', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      await withLimits({ appUseCeilingMicros: 1_000_000, appUseMemberCeilingMicros: 900 }, async () => {
+        const callId = `call-${randomUUID()}`;
+        expect((await useIt({ serverId, callId })).status).toBe(200);
+        expect((await useIt({ serverId })).status).toBe(200);
+        // The limit is now full, and a retry of the first call is still "already asked", not "stopped"
+        expect((await useIt({ serverId, callId })).status).toBe(409);
+      });
+      await prisma.meterEvent.deleteMany({ where: { personId: sara } });
+      adapter.use.mockClear();
+      await withLimits({ appUseCeilingMicros: 1_000_000, appUseMemberCeilingMicros: 900 }, async () => {
+        const answers = await Promise.all(Array.from({ length: 6 }, () => useIt({ serverId })));
+        const done = await Promise.all(answers.map(async (answer) => (await answer.json()) as { ok: boolean }));
+        expect(done.filter((answer) => answer.ok)).toHaveLength(2);
+        expect(adapter.use).toHaveBeenCalledTimes(2);
+        expect(await paidUses()).toBe(2);
+      });
+    });
+
+    it('holds a call back, and says so in plain words, when the limits cannot be checked in time: never a server error, never let through unchecked', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const transaction = jest.spyOn(prisma, '$transaction').mockRejectedValueOnce(new Error('Transaction API error: timed out'));
+      try {
+        const held = await useIt({ serverId });
+        expect(held.status).toBe(200);
+        expect(await held.json()).toMatchObject({ ok: false, data: { stopped: true } });
+        expect(adapter.use).not.toHaveBeenCalled();
+        expect(await paidUses()).toBe(0);
+      } finally {
+        transaction.mockRestore();
+        quiet.mockRestore();
+      }
+      // And the next call, once the books answer again, goes through
+      expect((await useIt({ serverId })).status).toBe(200);
+    });
+
+    it('holds back a paid call on the app link with a tool result that says so, and lets listings through', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      const call = (extra: Record<string, unknown>) =>
+        linkApp(request('/api/ready-made/link', { method: 'POST', token: SERVICE_TOKEN, body: { botId: saraBrick, serverId, requesterKey: `sara-${tag}`, ...extra } }));
+      await withLimits({ appUseCeilingMicros: 0, appUseMemberCeilingMicros: 0 }, async () => {
+        const stopped = await (await call({ callId: `call-${randomUUID()}`, message: { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'GMAIL_FETCH_EMAILS', arguments: {} } } })).json();
+        expect(stopped.status).toBe(200);
+        expect(JSON.parse(stopped.body)).toMatchObject({ id: 7, result: { isError: true, content: [{ type: 'text', text: expect.stringContaining('Nothing was done') }] } });
+        expect(adapter.callLink).not.toHaveBeenCalled();
+        expect(await paidUses()).toBe(0);
+        // A listing is not a use and costs nothing: it still goes through
+        expect((await call({ message: { jsonrpc: '2.0', id: 1, method: 'tools/list' } })).status).toBe(200);
+        expect(adapter.callLink).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 });

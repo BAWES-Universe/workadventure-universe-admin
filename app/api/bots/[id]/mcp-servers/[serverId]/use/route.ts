@@ -9,11 +9,16 @@ export async function OPTIONS(request: NextRequest) {
 }
 
 /**
- * POST /api/bots/:id/mcp-servers/:serverId/use { requesterKey?, forOwner? }
+ * POST /api/bots/:id/mcp-servers/:serverId/use { requesterKey?, forOwner?, callId?, heading?, tool?, argumentNames? }
+ * An empty body is the same as {}; a body that is not valid JSON is a 400, before anything about the app is looked at.
  * May this app be used right now, for this request? The bot server asks on EVERY use of an app (not once per chat or goal), so a
  * grant taken away, a disconnected app or a switch turned off stops it at once, also in a chat that is already open (game
  * #2001, checks 32 and 38). `requesterKey` is who is asking (their WorkAdventure uuid or email); `forOwner` says the Brick is
  * working for its owner on its own. Auth: BOT_SERVICE_TOKEN.
+ * What an app needs depends on whose it is. A Brick's own app and a person's app used by their own Brick need none of the rest. An app
+ * of a universe and an app lent to a universe's Brick both need `callId` (this call's id, so "uses a day" counts a retry once); a lent
+ * app also needs `heading` (which heading the tool falls under). A use missing what its app needs is refused as `incomplete`, never
+ * let through. `tool` and `argumentNames` are for someone else asking for a shared job, below.
  * Response: { allowed } and, when not, { reason: gone | off | not_owner | ... }, never anything about what the app holds.
  * 404 when this Brick has no such app: the use is refused too.
  *
@@ -37,6 +42,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ...(verdict.allowed && verdict.readyMade ? { readyMade: true } : {}),
       ...(verdict.allowed && verdict.paidBy ? { paidBy: verdict.paidBy } : {}),
       ...(verdict.allowed && verdict.shared ? { shared: verdict.shared } : {}),
+      // Once a day, on the ask that made the owner's note: the bot server says it in the owner's own chat with the Brick (game #2006)
+      ...(verdict.ownerNote ? { ownerNote: verdict.ownerNote } : {}),
       ...(!verdict.allowed && verdict.resetsAt ? { resetsAt: verdict.resetsAt.toISOString() } : {}),
       ...(!verdict.allowed && verdict.earlier ? { earlier: verdict.earlier } : {}),
     });

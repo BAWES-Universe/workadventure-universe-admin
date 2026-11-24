@@ -1,4 +1,4 @@
-import type { BotsAiProvider } from '@prisma/client';
+import type { BotsAiProvider, Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { checkKeyForBot, KEY_FOR_BOT_TEXT, type BotForKey } from '@/lib/ai-key-pay';
@@ -160,12 +160,14 @@ export async function checkConfigVision(
 /**
  * A bot someone moves to another key or Universe AI (#709) stops sending images to a key picked for "Another model" that isn't
  * theirs: the owner of that key no longer pays for this bot, and images go back to the default (the new key's own Vision model,
- * else Universe AI). Returns the config without that pick, or null when nothing changes.
+ * else Universe AI). Returns the config without that pick, or null when nothing changes. `client` is the transaction's, when called inside one.
  */
-export async function dropOthersVisionKey(config: unknown, actorId: string | null): Promise<Record<string, unknown> | null> {
+export async function dropOthersVisionKey(config: unknown, actorId: string | null, client: Pick<Prisma.TransactionClient, 'botsAiProvider'> = prisma): Promise<Record<string, unknown> | null> {
   const pick = readVisionPick(config);
   if (pick?.choice !== 'another' || !config || typeof config !== 'object') return null;
-  const key = await prisma.botsAiProvider.findUnique({ where: { providerId: pick.keyId }, select: { ownerId: true } });
+  // Called from inside a transaction, the key is read on the transaction's own connection: a second connection taken while the first is held
+  // waits for a free one (a pool of one never gets it) until the transaction runs out of time
+  const key = await client.botsAiProvider.findUnique({ where: { providerId: pick.keyId }, select: { ownerId: true } });
   if (key?.ownerId && key.ownerId === actorId) return null;
   const rest = { ...(config as Record<string, unknown>) };
   delete rest.vision;

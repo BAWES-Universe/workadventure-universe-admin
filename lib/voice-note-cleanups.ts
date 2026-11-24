@@ -80,7 +80,11 @@ export async function claimVoiceNoteCleanups(input: { limit?: unknown }, now: Da
     const row = providers.get(job.providerId);
     if (!row || !row.apiKeyEncrypted) {
       // Nobody can delete it with a key that is gone; the provider's own retention ends it
-      await prisma.voiceNoteCleanup.updateMany({ where: { id: job.id, state: 'pending' }, data: { state: 'orphaned', leaseUntil: null } });
+      // Only while it is still the job that was read: one the key came back for, and another bot server took, is that server's now
+      await prisma.voiceNoteCleanup.updateMany({
+        where: { id: job.id, state: 'pending', nextAt: { lte: now }, OR: [{ leaseUntil: null }, { leaseUntil: { lt: now } }] },
+        data: { state: 'orphaned', leaseUntil: null },
+      });
       continue;
     }
     // Checked again as it is taken: a job another bot server settled since it was read waits for its new time

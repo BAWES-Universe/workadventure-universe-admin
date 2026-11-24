@@ -74,6 +74,9 @@ describe('what a Brick can do on GitHub', () => {
     expect(looks).toEqual(expect.arrayContaining(['github_read_file', 'github_ci_status', 'github_ci_job_log', 'github_list_repos']));
     expect(looks).not.toContain('github_merge_pull_request');
     expect(GITHUB_TOOLS.find((tool) => tool.name === 'github_merge_pull_request')?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
+    // Changing an issue can clear its text or labels, so it is marked as one that can destroy (a Brick asks first before changing someone's issue)
+    expect(GITHUB_TOOLS.find((tool) => tool.name === 'github_update_issue')?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
+    expect(GITHUB_TOOLS.find((tool) => tool.name === 'github_rerun_ci')?.annotations).toMatchObject({ destructiveHint: false });
   });
 
   it('calls only api.github.com, with the person’s token', async () => {
@@ -241,6 +244,61 @@ describe('what a Brick can do on GitHub', () => {
     expect(read.comments[0].body).toBe('c2');
     expect(read.comments[29].body).toBe('c31');
     expect(calls).toHaveLength(3);
+  });
+
+  it('says the comments could not be read, rather than that there are none', async () => {
+    const { impl } = fakeGitHub([
+      ['GET', '/repos/acme/tools/issues/7', 200, { number: 7, title: 't', state: 'open', body: 'b', labels: [], user: { login: 's' }, html_url: 'https://github.com/acme/tools/issues/7', comments: 2 }],
+      ['GET', '/repos/acme/tools/issues/7/comments?per_page=30&page=1', 503, { message: 'down' }],
+    ]);
+    const read = JSON.parse((await runGitHubTool('ghu_x', 'github_get_issue', { repo: 'acme/tools', number: 7 }, impl)).text) as { comments: unknown[]; commentsUnavailable?: boolean };
+    expect(read.comments).toEqual([]);
+    expect(read.commentsUnavailable).toBe(true);
+  });
+
+  it('says the comments could not be read in full when one of the two pages it needs failed, and keeps the ones it got', async () => {
+    const comment = (n: number) => ({ user: { login: 's' }, body: `c${n}`, created_at: '2026-11-14T00:00:00Z' });
+    const issue = { number: 7, title: 't', state: 'open', body: 'b', labels: [], user: { login: 's' }, html_url: 'https://github.com/acme/tools/issues/7', comments: 31 };
+    const read = async (routes: [string, string, number, unknown][]) => JSON.parse((await runGitHubTool('ghu_x', 'github_get_issue', { repo: 'acme/tools', number: 7 }, fakeGitHub(routes).impl)).text) as { comments: { body: string }[]; commentsUnavailable?: boolean };
+    // The earlier page failed, the last read: only comment 31, and it is said
+    const partial = await read([
+      ['GET', '/repos/acme/tools/issues/7', 200, issue],
+      ['GET', '/repos/acme/tools/issues/7/comments?per_page=30&page=1', 503, { message: 'down' }],
+      ['GET', '/repos/acme/tools/issues/7/comments?per_page=30&page=2', 200, [comment(31)]],
+    ]);
+    expect(partial.comments.map((one) => one.body)).toEqual(['c31']);
+    expect(partial.commentsUnavailable).toBe(true);
+    // Both read: nothing is said
+    const whole = await read([
+      ['GET', '/repos/acme/tools/issues/7', 200, issue],
+      ['GET', '/repos/acme/tools/issues/7/comments?per_page=30&page=1', 200, Array.from({ length: 30 }, (_, i) => comment(i + 1))],
+      ['GET', '/repos/acme/tools/issues/7/comments?per_page=30&page=2', 200, [comment(31)]],
+    ]);
+    expect(whole.commentsUnavailable).toBeUndefined();
+  });
+
+  it('says a repository search is unavailable when a later page could not be read, rather than that nothing matches', async () => {
+    const repo = (n: number) => ({ full_name: `acme/r${n}`, private: false, default_branch: 'main', description: null, pushed_at: '2026-11-01T00:00:00Z' });
+    const { impl } = fakeGitHub([
+      ['GET', '/user/repos?per_page=100&sort=pushed', 200, Array.from({ length: 100 }, (_, i) => repo(i))],
+      ['GET', '/user/repos?per_page=100&sort=pushed&page=2', 503, { message: 'down' }],
+    ]);
+    const result = await runGitHubTool('t', 'github_list_repos', { query: 'r250' }, impl);
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/listing repositories/);
+  });
+
+  it('looks for a repository name beyond the first hundred, and keeps the one page when no name is asked', async () => {
+    const repo = (n: number) => ({ full_name: `acme/r${n}`, private: false, default_branch: 'main', description: null, pushed_at: '2026-11-01T00:00:00Z' });
+    const first = Array.from({ length: 100 }, (_, i) => repo(i));
+    const wanted = fakeGitHub([
+      ['GET', '/user/repos?per_page=100&sort=pushed', 200, first],
+      ['GET', '/user/repos?per_page=100&sort=pushed&page=2', 200, [repo(250)]],
+    ]);
+    expect((JSON.parse((await runGitHubTool('t', 'github_list_repos', { query: 'r250' }, wanted.impl)).text) as { repo: string }[]).map((row) => row.repo)).toEqual(['acme/r250']);
+    const plain = fakeGitHub([['GET', '/user/repos?per_page=100&sort=pushed', 200, first]]);
+    await runGitHubTool('t', 'github_list_repos', {}, plain.impl);
+    expect(plain.calls).toHaveLength(1);
   });
 
   it('clears an issue body when asked with an empty one', async () => {

@@ -63,9 +63,15 @@ const report = (over: Partial<CostsReport> = {}): CostsReport => ({
 const answer = (data: CostsReport | number = report()) =>
   fetchMock.mockImplementation(() => (typeof data === 'number' ? Promise.resolve({ ok: false, status: data, json: () => Promise.resolve({}) }) : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(data) })));
 
+// The page's own "today" (its default dates, "Today at") is a fixed day, so no test here depends on the day it runs: only the clock's date is faked, never its timers
+const TODAY = new Date('2026-11-10T12:00:00Z');
 beforeEach(() => {
+  jest.useFakeTimers({ now: TODAY, doNotFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'nextTick', 'queueMicrotask', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback', 'cancelIdleCallback', 'performance'] });
   fetchMock.mockReset();
   replace.mockReset();
+});
+afterEach(() => {
+  jest.useRealTimers();
 });
 
 describe('the Costs page', () => {
@@ -146,7 +152,7 @@ describe('the Costs page', () => {
     fetchMock.mockClear();
     fireEvent.change(screen.getByLabelText('From'), { target: { value: '2026-10-01' } });
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    expect(String(fetchMock.mock.calls[0][0])).toMatch(/^\/api\/admin\/meter-costs\?from=2026-10-01&to=\d{4}-\d{2}-\d{2}$/);
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/admin/meter-costs?from=2026-10-01&to=2026-11-10');
     fetchMock.mockClear();
     fireEvent.change(screen.getByLabelText('From'), { target: { value: '' } });
     expect(fetchMock).not.toHaveBeenCalled();
@@ -183,6 +189,25 @@ describe('the Costs page', () => {
     await waitFor(() => expect(calls).toBe(2));
     expect(screen.queryByTestId('costs-goes')).toBeNull();
     expect(screen.queryByText('cost to us')).toBeNull();
+    release({ ok: true, status: 200, json: () => Promise.resolve(report()) });
+    expect(await screen.findByTestId('costs-goes')).toBeTruthy();
+  });
+
+  it('does not paint the figures of the dates before under new valid dates while they are read', async () => {
+    let calls = 0;
+    let release: (value: unknown) => void = () => {};
+    fetchMock.mockImplementation(() => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(report()) });
+      return new Promise((resolve) => { release = resolve; });
+    });
+    render(<CostsPage />);
+    await screen.findByTestId('costs-goes');
+    expect(screen.getByText('$39.80')).toBeTruthy();
+    // One valid date to another: the old figures are gone at once, not after the next effect
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '2026-10-01' } });
+    expect(screen.queryByText('$39.80')).toBeNull();
+    await waitFor(() => expect(calls).toBe(2));
     release({ ok: true, status: 200, json: () => Promise.resolve(report()) });
     expect(await screen.findByTestId('costs-goes')).toBeTruthy();
   });
