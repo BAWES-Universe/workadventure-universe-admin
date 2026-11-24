@@ -122,8 +122,11 @@ export interface ComputerProvider {
    * Brings a machine that was just made or woken to what a job needs: the current image, the screen and the browser, the local model
    * address. Safe to ask any number of times. Throws when it cannot be made ready (the job then does not start). Answers the mark the take-over fence
    * is told by (taken last, once the computer is as it should be; Orbit saves it, the computer keeps nothing): nothing (null) when this provider has no fence to mark.
+   * `freshBoot`: the computer is stopped and started first, so what it was running before is gone and the mark is the first of a boot nothing has run on. Asked for a
+   * computer that has worked before and has no mark saved (made ready before marks were kept by Orbit): a mark taken on a boot that already ran jobs would name
+   * their programs as the computer's own.
    */
-  ready(ref: string): Promise<MachineMark | null | void>;
+  ready(ref: string, options?: { freshBoot?: boolean }): Promise<MachineMark | null | void>;
   /** What a job needs from the provider right now (the key works, the wallet carries a job, the image is built). Reads only; never throws. */
   checkup(): Promise<Check[]>;
   /** What the provider billed for a UTC day, by machine, for the daily check of our books against its bill. Reads only. Absent for a provider with no bill. */
@@ -319,9 +322,16 @@ export class FakeComputerProvider implements ComputerProvider {
     return 0;
   }
 
-  async ready(ref: string): Promise<MachineMark | null | void> {
+  /** The machines that were asked for a fresh boot, in order (a test reads it). */
+  readonly freshBoots: string[] = [];
+
+  async ready(ref: string, options?: { freshBoot?: boolean }): Promise<MachineMark | null | void> {
     this.fail('ready');
     this.readied.push(ref);
+    if (options?.freshBoot) {
+      this.freshBoots.push(ref);
+      this.rebootForTests(ref);
+    }
     return this.markOf(ref);
   }
 

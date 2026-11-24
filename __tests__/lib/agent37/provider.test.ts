@@ -643,6 +643,20 @@ describe('getting a machine ready for a job', () => {
     expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
   });
 
+  it('starts the machine afresh before anything else when asked for a fresh boot, and never otherwise (a computer that worked before and has no mark saved by Orbit)', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.setExec(() => 'ready=1 restart=0\n');
+    await p.ready('m1');
+    expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual([]);
+    await expect(p.ready('m1', { freshBoot: true })).resolves.toMatchObject({ bootId: BOOT });
+    // The restart comes before the screen and browser are brought up and before the mark is read: the mark is of the new boot, taken with nothing of an earlier job running
+    const second = w.calls.slice(w.calls.lastIndexOf('stop:m1'));
+    const kinds = second.flatMap((call) => (call.startsWith('stop:') ? ['stop'] : call.startsWith('start:') ? ['start'] : call.startsWith('exec:m1:') ? [labelled(call.slice('exec:m1:'.length)) === 'universe-up' ? 'up' : isMarkCommand(call.slice('exec:m1:'.length)) ? 'mark' : 'other'] : []));
+    expect(kinds).toEqual(['stop', 'start', 'up', 'mark']);
+  });
+
   it('after asking a machine to stop, waits until it is really stopped, not just until it stops saying "stopping"', async () => {
     const w = world();
     const p = provider(w);

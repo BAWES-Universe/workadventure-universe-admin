@@ -30,6 +30,8 @@
  *   - What is on the list is whatever ran the desktop's program with the desktop's arguments when Orbit read it, whoever started it: the
  *     agent's own ordinary processes too. So the fence narrows the window from "any time" to "alive at one of Orbit's own read moments"; it
  *     does not stop everything the agent started, and no words may say it does.
+ *   - Each stop is sent through a process handle (pidfd) opened on the process the scan classified; a kernel or sandbox without handles gets the start tick
+ *     read again just before the signal, which narrows the window and does not close it.
  *   - Parts are saved when the computer is made ready and again after each restart Orbit itself does (the browser after a clean-up or a
  *     sign-ins command). A part the computer restarted by itself in between (a browser that crashed) is not on the list: the fence stops it
  *     and the supervisor brings a fresh one up within seconds.
@@ -286,6 +288,10 @@ print("marked=1")
 
 /** The fence. Run as the normal user, with the mark Orbit holds. */
 const FENCE_BODY = String.raw`
+import errno
+import select
+import signal
+
 SYSTEM_FOLDERS = ("/usr/", "/lib/", "/lib64/", "/bin/", "/sbin/", "/etc/ld.so.cache")
 SHORT_SLEEP = re.compile(r"^\d{1,2}(\.\d+)?$")
 
@@ -369,9 +375,13 @@ def protected(tree, cutoff, saved, runners):
     keep |= set(live)
     for pid, kind in live.items():
         if kind == "g":
-            # the gateway's own chain above it
+            # The gateway's own chain above it, all the way. An ancestor that is already kept (the command runner, by its fingerprint, or something that ran before
+            # the mark) does not end the walk: what started that one, and what started that, are the gateway's chain too. Only a process this walk has already
+            # been through ends it (a loop in the table), never a process that was kept for another reason (CodeRabbit on #1033)
             up = tree.get(pid, 0)
-            while up > 1 and up in tree and up not in keep:
+            walked = set()
+            while up > 1 and up in tree and up not in walked:
+                walked.add(up)
                 keep.add(up)
                 up = tree[up]
     below = {}
@@ -427,20 +437,53 @@ def alive(pid):
 
 
 def others(cutoff, saved, runners):
-    tree = {pid: parent(pid) for pid in pids()}
+    listed = pids()
+    # Each process is written down with the tick it started at, in the same look as the table: the signal is later sent to THAT process, never to whatever
+    # holds the number by then
+    starts = {pid: started(pid) for pid in listed}
+    tree = {pid: parent(pid) for pid in listed}
     keep = protected(tree, cutoff, saved, runners)
-    return [pid for pid in tree if pid not in keep and alive(pid)]
+    return [(pid, starts[pid]) for pid in tree if pid not in keep and alive(pid)]
 
 
-# Without Orbit's mark for THIS boot nothing is stopped and nothing is proved
-want = option("boot")
-cutoff_text = option("cutoff")
-if not want or want != boot_id() or not cutoff_text or not cutoff_text.isdigit():
-    print("unmarked=1")
-    sys.exit(3)
-cutoff = int(cutoff_text)
-saved = given_parts()
-runners = set(item for item in (option("runners") or "").split(",") if item)
+def stop(pid, begun):
+    # Sends SIGKILL to the process the scan classified, or to none. A process number is given out again once its process is gone, so a bare number may by now be a
+    # program the scan never saw (one it would have kept). With a process handle (pidfd, Linux 5.3 and Python 3.9) the signal goes to the process the handle was opened
+    # on, and the handle is opened BEFORE the process is looked at again: while the process has not ended its number cannot be given out, so what is read through
+    # /proc between the opening and the check is that process. Without handles the start tick is read just before the signal (a narrower window, not a closed one)
+    if begun is None:
+        return False
+    if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
+        try:
+            handle = os.pidfd_open(pid)
+        except OSError as error:
+            # Gone: nothing to stop. Any other refusal (a kernel or a sandbox with no handles) is the same as having none
+            if error.errno == errno.ESRCH:
+                return False
+            handle = None
+        if handle is not None:
+            try:
+                if started(pid) != begun:
+                    return False
+                # A handle is readable once its process has ended: then what was read above may be a process that took the number after it
+                waiting = select.poll()
+                waiting.register(handle, select.POLLIN)
+                if waiting.poll(0):
+                    return False
+                signal.pidfd_send_signal(handle, signal.SIGKILL)
+                return True
+            except Exception:
+                return False
+            finally:
+                os.close(handle)
+    try:
+        if started(pid) != begun:
+            return False
+        os.kill(pid, signal.SIGKILL)
+        return True
+    except Exception:
+        return False
+
 
 def proc_hides():
     # A /proc that hides other users' processes from this user (hidepid=2 or 4, "invisible", "ptraceable", or only some of them shown) cannot
@@ -462,12 +505,22 @@ if proc_hides():
     print("hidden=1")
     sys.exit(1)
 
+# Without Orbit's mark for THIS boot nothing is stopped and nothing is proved. The /proc check comes first: on a /proc that hides processes (subset=pid also hides the
+# boot id) the cause is that, not a mark that does not fit
+want = option("boot")
+cutoff_text = option("cutoff")
+if not want or want != boot_id() or not cutoff_text or not cutoff_text.isdigit():
+    print("unmarked=1")
+    sys.exit(3)
+cutoff = int(cutoff_text)
+saved = given_parts()
+runners = set(item for item in (option("runners") or "").split(",") if item)
+
 if "--check" in sys.argv:
     left = others(cutoff, saved, runners)
     print("remaining=%d" % len(left))
     sys.exit(0 if not left else 1)
 
-import signal
 import time
 
 killed = 0
@@ -475,12 +528,9 @@ for _ in range(5):
     victims = others(cutoff, saved, runners)
     if not victims:
         break
-    for pid in victims:
-        try:
-            os.kill(pid, signal.SIGKILL)
+    for pid, begun in victims:
+        if stop(pid, begun):
             killed += 1
-        except Exception:
-            pass
     time.sleep(0.2)
 print("killed=%d" % killed)
 `;
@@ -514,7 +564,10 @@ export function parseMark(stdout: string): MachineMark | null {
   // listed would let the fence stop (or spare) the wrong ones (CodeRabbit on #1033). An empty list is a valid answer.
   const printed = (prefix: string): number => stdout.split('\n').filter((line) => line.startsWith(prefix)).length;
   if (printed('part=') !== parts.length || printed('runner=') !== runnerLines.length) return null;
-  return { bootId, ticks: count, parts, runners };
+  // Read whole is not the same as usable: a part with process number 0, say, passes the lines above and would be refused later, when Orbit reads the saved mark back. The same check that guards what Orbit sends is
+  // made here, before the computer is called ready, so a mark that could never be fenced with is never saved
+  const answered: MachineMark = { bootId, ticks: count, parts, runners };
+  return validMark(answered) ? answered : null;
 }
 
 /** What the database holds, checked once more before it is put in a command (a stored value is never trusted to be safe to send). */

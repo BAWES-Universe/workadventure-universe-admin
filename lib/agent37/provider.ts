@@ -338,8 +338,16 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * The first time on a machine it also writes Hermes' config, and Hermes only reads that when it starts: so the machine is stopped and started
    * once, and `universe-up` is run again.
    */
-  async ready(ref: string): Promise<MachineMark | null> {
+  async ready(ref: string, options?: { freshBoot?: boolean }): Promise<MachineMark | null> {
     let instance = await this.settle(ref);
+    // A computer that has worked before and has no mark saved by Orbit may be on a boot that already ran jobs (a machine that slept and woke keeps its boot): it is stopped and started
+    // first, so nothing a job started is still running when the mark is taken, and the mark is the first of a boot that no job has used
+    if (options?.freshBoot) {
+      await this.client.stopInstance(ref);
+      await this.untilDown(ref, true);
+      await this.client.startInstance(ref);
+      instance = await this.untilHealthy(ref, instance.url);
+    }
     // A part that was still coming up (a browser right after a machine woke or restarted): `universe-up` is safe to run again, so it is
     // asked once more, after the first ask and after the restart
     const again = async (state: { ready: boolean; restart: boolean; reason: string | null }) => {

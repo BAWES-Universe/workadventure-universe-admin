@@ -12,6 +12,7 @@
  *   - the computer's own parts are read and saved again after each restart Orbit does itself (the clean-up after a job), for the same boot only.
  */
 import { randomUUID } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
@@ -134,6 +135,48 @@ run('the take-over fence’s mark, held by Orbit', () => {
       const next = await computerOf(sara.brickId);
       expect(next.markBootId).not.toBe(first.markBootId);
       expect(Number(next.markTicks)).toBeGreaterThan(Number(first.markTicks));
+    });
+
+    it('a computer that has worked before and has no mark saved is started afresh before its first mark: a boot that already ran jobs is never marked as the computer’s own (CodeRabbit on #1033)', async () => {
+      fake.parts = [PART];
+      const { sara, jobId } = await running();
+      const before = await computerOf(sara.brickId);
+      const ref = before.providerRef as string;
+      // A computer made new, and one that has a mark, are not restarted for it
+      expect(fake.freshBoots).toEqual([]);
+      await finishJob(jobId, 'done', NOW);
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
+      expect((await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second' }, NOW)).ok).toBe(true);
+      expect(fake.freshBoots).toEqual([]);
+      expect((await computerOf(sara.brickId)).markBootId).toBe(before.markBootId);
+      // Made ready before Orbit kept marks: it worked, it slept, and its boot is the one the jobs ran on. The same boot would be marked with a clock reading taken NOW, after whatever those jobs left
+      // running; so it is stopped and started first, and the mark is the first one of a boot nothing has run on
+      const jobs = await prisma.computerJob.findMany({ where: { botId: sara.brickId, status: 'running' } });
+      for (const job of jobs) await finishJob(job.id, 'done', NOW);
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting', markBootId: null, markTicks: null, markParts: Prisma.DbNull, markRunners: Prisma.DbNull } });
+      expect((await startJob({ botId: sara.brickId, personId: sara.id, title: 'Third' }, NOW)).ok).toBe(true);
+      expect(fake.freshBoots).toEqual([ref]);
+      const after = await computerOf(sara.brickId);
+      expect(after.machine).toBe('working');
+      expect(after.markBootId).not.toBeNull();
+      expect(after.markBootId).not.toBe(before.markBootId);
+      expect(savedMark(after)).not.toBeNull();
+      // ... and from then on it is an ordinary row: the same boot keeps its first mark, with no more restarts
+      const third = await prisma.computerJob.findMany({ where: { botId: sara.brickId, status: 'running' } });
+      for (const job of third) await finishJob(job.id, 'done', NOW);
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
+      expect((await startJob({ botId: sara.brickId, personId: sara.id, title: 'Fourth' }, NOW)).ok).toBe(true);
+      expect(fake.freshBoots).toEqual([ref]);
+      expect((await computerOf(sara.brickId)).markTicks).toBe(after.markTicks);
+    });
+
+    it('a row with no mark that never worked has nothing to clear: it is not restarted', async () => {
+      const { sara, jobId } = await running('never');
+      await finishJob(jobId, 'done', NOW);
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting', lastWorkedAt: null, markBootId: null, markTicks: null, markParts: Prisma.DbNull, markRunners: Prisma.DbNull } });
+      expect((await startJob({ botId: sara.brickId, personId: sara.id, title: 'First' }, NOW)).ok).toBe(true);
+      expect(fake.freshBoots).toEqual([]);
+      expect((await computerOf(sara.brickId)).markBootId).not.toBeNull();
     });
 
     it('a start that no longer holds the wake ticket saves nothing: the replacement’s mark stands', async () => {

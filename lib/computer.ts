@@ -1975,10 +1975,15 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
     beat.unref?.();
     let mark: MachineMark | null = null;
     try {
+      // A computer that has worked before and has no mark saved here (made ready before Orbit kept marks) may be on a boot that already ran jobs: a machine that slept keeps its boot and its
+      // programs. A mark taken now would put its clock reading AFTER whatever those jobs left running, and the fence would keep it as the computer's own. So it is started afresh before the first
+      // mark (the first mark of a boot is always taken before any job runs on it). A machine just made or brought back from cold storage is new, and a row that has a mark is handled by its boot id.
+      const before = madeHere || cameBack !== null ? null : await prisma.brickComputer.findUnique({ where: { botId }, select: { markBootId: true, lastWorkedAt: true } });
+      const freshBoot = !!before && before.markBootId === null && before.lastWorkedAt !== null;
       await provider.wake(ref);
       try {
         // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready. Answers the fence's mark (kept in Orbit, written below with the machine's state)
-        mark = (await provider.ready(ref)) ?? null;
+        mark = (await provider.ready(ref, freshBoot ? { freshBoot: true } : undefined)) ?? null;
       } catch (error) {
         // Awake and not ready: no job will use it, so it is put to sleep (and tried again by the sweep until proved) instead of left running. Only while this start still holds the machine (its ticket is the Brick's
         // number): a replacement that woke it meanwhile keeps it awake, and this start only throws its own error (the job it served is ended or left by the reservation guard as before)
