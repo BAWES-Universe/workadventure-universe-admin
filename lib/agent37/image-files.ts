@@ -1569,6 +1569,8 @@ def prepack():
                     break
         else:
             blocked = "image_marker_missing"
+        # In path order, so the list (and the copy) is the same whatever order the file system reads its folders in
+        found.sort()
         copied = 0
         out_bytes = 0
         entries = []

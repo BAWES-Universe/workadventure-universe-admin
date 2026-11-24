@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
+import type { ExecOptions } from '@/lib/computer-provider';
 import { UNIVERSE_COLD } from '@/lib/agent37/image-files';
 import { Agent37ComputerProvider, Agent37FundsLow, BRICK_NETWORK, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
 import type { ImageState } from '@/lib/agent37/image';
@@ -1145,7 +1146,7 @@ describe('cold storage operations on a computer', () => {
         printsList(w);
         const execute = w.client.exec.bind(w.client);
         let failed = false;
-        (w.client as unknown as { exec: (id: string, command: string, options?: unknown) => Promise<unknown> }).exec = async (id, command, options) => {
+        (w.client as unknown as { exec: (id: string, command: string, options?: ExecOptions) => Promise<unknown> }).exec = async (id, command, options) => {
           if (!failed && command.startsWith('umask 077')) {
             failed = true;
             if (failure === 'thrown') throw new Agent37Unreached('lost');

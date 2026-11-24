@@ -641,8 +641,19 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     fs.writeFileSync(path.join(installed, 'universe-cold'), '#!/usr/bin/env python3\n');
     fs.writeFileSync(path.join(installed, 'universe-cold.new'), 'half');
     const list = packed(w);
-    expect(list.files.map((entry) => entry[1])).toEqual(['/etc/app.conf', '/opt/tool/latest', '/opt/tool/run.sh']);
+    expect(list.files.map((entry) => entry[1]).sort()).toEqual(['/etc/app.conf', '/opt/tool/latest', '/opt/tool/run.sh']);
     expect(fs.readFileSync(path.join(installed, 'universe-cold'), 'utf8')).toBe('#!/usr/bin/env python3\n');
+  });
+
+  it('the list is in path order, whatever order the file system reads its folders in', () => {
+    const w = world();
+    for (const name of ['z-last', 'b-middle', 'a-first', 'Capital']) fs.writeFileSync(path.join(w.fsA, 'opt/tool', name), name);
+    for (const name of ['y.conf', 'c.conf']) fs.writeFileSync(path.join(w.fsA, 'etc', name), name);
+    const names = packed(w).files.map((entry) => entry[1]);
+    expect(names).toEqual([...names].sort());
+    expect(names).toHaveLength(9);
+    // The same on the next run
+    expect(packed(w).files.map((entry) => entry[1])).toEqual(names);
   });
 
   it('every slice ends with a marker on its line, so a slice that ends in a space is whole after the end of the answer is trimmed', () => {
