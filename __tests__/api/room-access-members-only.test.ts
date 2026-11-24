@@ -151,5 +151,13 @@ describe('GET /api/room/access, members-only places', () => {
       expect(await enter(BRICK)).toBe('MEMBERS_ONLY');
       expect(brickIsHereFor).toHaveBeenCalledWith(BRICK.slice(4), 'http://play.test/@/uni/world/room');
     });
+
+    it("is never asked about for a guest whose id is the Brick's own id without bot- in front", async () => {
+      place({ room: false });
+      brickIs(true);
+      expect(await enter(BRICK.slice(4))).toBe('MEMBERS_ONLY');
+      expect(await enter(BRICK.slice(4), false)).toBe('MEMBERS_ONLY');
+      expect(brickIsHereFor).not.toHaveBeenCalled();
+    });
   });
 });
