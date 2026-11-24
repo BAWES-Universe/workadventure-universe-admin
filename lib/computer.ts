@@ -82,7 +82,7 @@ import {
   settleResumedBrowser,
 } from '@/lib/computer-browser-profile';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
-import { CONSENT_WINDOW_MS, startAnswerBody } from '@/lib/computer-start-answer';
+import { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, startAnswerBody } from '@/lib/computer-start-answer';
 export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { claimCommandIn, commandRow, keepOutcome, recordResumeDecision, seenCommand, settlePendingResumesIn, type Command } from '@/lib/computer-commands';
 
@@ -660,12 +660,13 @@ async function keptAnswerOf(botId: string, personId: string, startKey: string): 
  * Keeps, durably, that the start under `key` was answered with another start (finding 1, GPT round 6): state `answered`, with the job that answered it, or the attempt it waits for while that one has no job yet.
  * Written before the answer is given. The FIRST answer stored for a key stays: it never touches a start that made its own job (`made`), was superseded or was already answered (a caller that gets `false` reads the stored answer and gives that one: two requests that chose different earlier jobs must not hand the caller two answers), and it acknowledges nothing: the answering job's `start_acked_at` is left as it is.
  */
-async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>, key: { botId: string; personId: string; startKey: string }, by: { jobId: string } | { aliasAttemptId: string }): Promise<boolean> {
+async function answerAttemptIn(db: Pick<Prisma.TransactionClient, '$executeRaw'>, key: { botId: string; personId: string; startKey: string }, by: { jobId: string } | { aliasAttemptId: string }, issued: Date | null = null): Promise<boolean> {
   const jobId = 'jobId' in by ? by.jobId : null;
   const alias = 'aliasAttemptId' in by ? by.aliasAttemptId : null;
+  // A row this insert makes carries the key's issue time when the caller knows it (GPT eighth note, A1): the record of when its consent was given. An existing row keeps its own
   const written = await db.$executeRaw`
-    INSERT INTO "computer_start_attempts" ("id", "bot_id", "person_id", "start_key", "state", "job_id", "alias_attempt_id", "beat_at", "created_at")
-    VALUES (${randomUUID()}, ${key.botId}, ${key.personId}, ${key.startKey}, 'answered', ${jobId}, ${alias}, (NOW() AT TIME ZONE 'UTC'), (NOW() AT TIME ZONE 'UTC'))
+    INSERT INTO "computer_start_attempts" ("id", "bot_id", "person_id", "start_key", "state", "job_id", "alias_attempt_id", "beat_at", "created_at", "issued_at")
+    VALUES (${randomUUID()}, ${key.botId}, ${key.personId}, ${key.startKey}, 'answered', ${jobId}, ${alias}, (NOW() AT TIME ZONE 'UTC'), (NOW() AT TIME ZONE 'UTC'), ${issued})
     ON CONFLICT ("bot_id", "person_id", "start_key") DO UPDATE SET "state" = 'answered', "job_id" = EXCLUDED."job_id", "alias_attempt_id" = EXCLUDED."alias_attempt_id"
     WHERE "computer_start_attempts"."state" IN ('open', 'expired')`;
   return written > 0;
@@ -824,6 +825,45 @@ export interface Registration {
 }
 
 /**
+ * GPT eighth note, A1 (Opus's design): a keyed start with no attempt row whose key was issued BEFORE the key of an attempt this person already holds on this Brick (made or answered with a job, or open and beating), by
+ * the keys' own times (both are the message times of one chat, so no clock of ours is compared). The newer ask reached Orbit first, so this key is the earlier ask arriving late: it is written as answered by that job (or
+ * that attempt while it has no job), in one statement under the person's lock, and answers `earlier`: it makes and reserves nothing. Strictly later only: two starts of one message share a time and never answer each other.
+ * A deliberate second ask is issued AFTER the first answer, so its key is the newer one and is never touched. Null: none, or another request of this same key wrote its row first.
+ */
+async function answeredByNewerAsk(botId: string, personId: string, startKey: string, issued: Date, now: Date): Promise<Started | null> {
+  const newerWhere = (): Prisma.ComputerStartAttemptWhereInput => ({
+    botId,
+    personId,
+    startKey: { not: startKey },
+    issuedAt: { gt: issued, lte: new Date(now.getTime() + ISSUE_SKEW_MS) },
+    // A refused one counts too (Opus): the person's latest decision on this ask was a refusal (their month, a rule, controls not set up), and a delayed older packet must not override it and start paid work they were never told about
+    OR: [{ jobId: { not: null } }, { state: 'refused' }, { state: 'open', beatAt: { gt: new Date(now.getTime() - attemptLifeMs()) } }],
+  });
+  const orderBy = [{ issuedAt: 'asc' as const }, { id: 'asc' as const }];
+  // Nothing newer is the ordinary case: read without the lock first
+  if (!(await prisma.computerStartAttempt.findFirst({ where: newerWhere(), orderBy, select: { id: true } }))) return null;
+  const decided = await prisma.$transaction(
+    async (tx): Promise<Started | 'refused' | null> => {
+      await lockPerson(tx, personId);
+      const own = { botId, personId, startKey };
+      if (await tx.computerStartAttempt.findUnique({ where: { botId_personId_startKey: own }, select: { id: true } })) return null;
+      const newer = await tx.computerStartAttempt.findFirst({ where: newerWhere(), orderBy, select: { id: true, jobId: true, startKey: true, state: true } });
+      if (!newer) return null;
+      if (!(await answerAttemptIn(tx, own, newer.jobId ? { jobId: newer.jobId } : { aliasAttemptId: newer.id }, issued))) return null;
+      // A refused one: this key is answered with the same kept refusal, read below from the alias just written
+      if (!newer.jobId && newer.state === 'refused') return 'refused' as const;
+      const by = newer.jobId ? await tx.computerJob.findUnique({ where: { id: newer.jobId }, select: { id: true, status: true, startKey: true } }) : null;
+      return { ok: false, reason: 'earlier', job: by ? { id: by.id, status: by.status, state: startStateOf(by.status), attempt: by.startKey } : { id: null, status: null, state: 'starting', attempt: newer.startKey } };
+    },
+    { timeout: 15_000, maxWait: 15_000 },
+  );
+  if (decided !== 'refused') return decided;
+  const kept = await attemptAnswer(botId, personId, startKey, now);
+  // The refusal on record, the same body the newer ask was given; one that cannot be read now is not answered here: the start goes on and its own checks answer it from the alias just written
+  return kept && 'kept' in kept ? { ok: false, reason: 'kept', body: kept.kept } : null;
+}
+
+/**
  * Round 8, A1: registers a keyed start that acks BEFORE anything else is asked (the earlier-start look, "try again", the person's spending rule): its attempt row is written with the request's own moment `began`, so a
  * later request (a reworded retry under a new key) that decides while this one is held finds it, open and beating, and waits for it; and the look for this key says it is going on. Kept beating until `release`.
  *
@@ -837,6 +877,9 @@ export async function registerStart(botId: string, personId: string, startKey: s
   let reopened = false;
   if (!row) {
     if (!fresh) return { answer: { ok: false, reason: 'stale_consent' } };
+    // A1 (GPT eighth note): an ask Orbit never heard of that was issued BEFORE one it already holds is the earlier ask arriving late (the retry overtook it on the way). It is answered with that ask and makes nothing
+    const overtaken = await answeredByNewerAsk(botId, personId, startKey, issued, now);
+    if (overtaken) return { answer: overtaken };
   } else {
     const own = ownTerminalOf(row);
     if (own) return { answer: 'kept' in own ? { ok: false, reason: 'kept', body: own.kept } : { ok: false, reason: 'retired' } };
