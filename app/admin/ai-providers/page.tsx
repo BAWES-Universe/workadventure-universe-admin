@@ -4,13 +4,14 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
-import { BarChart3, Loader2, Plus, Sparkles } from 'lucide-react';
+import { BarChart3, Coins, Cpu, Gift, Loader2, Plus, Sparkles } from 'lucide-react';
 import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine, count } from '../components/ds';
 import { FormSheet } from '../components/form-sheet';
 import { EnabledPill, providerTypeLabel } from './components/provider-state';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import { useToast } from '@/components/ui/toast';
 import { UniverseAiLimits } from '../components/limits';
+import { CapabilityPauses } from '../components/pauses';
 import { VoiceSection } from './voice-section';
 
 interface AiProvider {
@@ -171,6 +172,24 @@ export default function AiProvidersPage() {
                 AI usage
               </Link>
             </Button>
+            <Button asChild variant="outline" className="h-11">
+              <Link href="/admin/ai-providers/costs">
+                <Coins className="mr-2 h-4 w-4" />
+                Costs
+              </Link>
+            </Button>
+            <Button asChild variant="outline" className="h-11">
+              <Link href="/admin/ai-providers/grants">
+                <Gift className="mr-2 h-4 w-4" />
+                Grants
+              </Link>
+            </Button>
+            <Button asChild variant="outline" className="h-11">
+              <Link href="/admin/ai-providers/apps">
+                <Cpu className="mr-2 h-4 w-4" />
+                Apps
+              </Link>
+            </Button>
           </>
         }
       />
@@ -249,6 +268,8 @@ export default function AiProvidersPage() {
       )}
 
       {allowed && <VoiceSection />}
+
+      <CapabilityPauses />
 
       <UniverseAiLimits />
 

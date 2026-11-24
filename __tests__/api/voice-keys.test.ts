@@ -7,6 +7,7 @@ import { NextRequest } from 'next/server';
 import { GET as list, POST as create } from '@/app/api/me/voice-keys/route';
 import { DELETE as remove, PATCH as patch } from '@/app/api/me/voice-keys/[id]/route';
 import { POST as lend } from '@/app/api/me/voice-keys/[id]/lend/route';
+import { POST as loadModels } from '@/app/api/me/voice-keys/[id]/models/route';
 import { DELETE as pull } from '@/app/api/me/voice-keys/[id]/lend/[universeId]/route';
 import { GET as listAdmin } from '@/app/api/admin/voice-providers/route';
 import { GET as getAdmin } from '@/app/api/admin/voice-providers/[id]/route';
@@ -17,7 +18,7 @@ import { isSuperAdmin } from '@/lib/super-admin';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { prisma } from '@/lib/db';
 import { BotSettingsError } from '@/lib/bot-access-settings';
-import { decryptApiKey } from '@/lib/encryption';
+import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { effectiveBotVoice } from '@/lib/bot-voice';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
@@ -571,6 +572,231 @@ describe('changing a key', () => {
     expect(db.voiceProvider.deleteMany).toHaveBeenCalledWith({ where: { id: 'k1', ownerId: 'u-ana' } });
     db.voiceProvider.deleteMany.mockResolvedValue({ count: 0 });
     expect((await call(remove, 'DELETE')).status).toBe(404);
+  });
+});
+
+describe('Load models on a saved key', () => {
+  const fetchMock = jest.fn();
+  const saved = (changes: Record<string, unknown> = {}) => key({ apiKeyEncrypted: encryptApiKey('sk-saved-key-9f2a'), ...changes });
+  // The company knows the key, then lists its speaking models
+  const company = (models: unknown) =>
+    fetchMock.mockImplementation(async (url: string) =>
+      url === 'https://api.elevenlabs.io/v1/models' ? { status: 200, json: async () => models, body: null } : { status: 200, text: async () => '', body: null },
+    );
+  beforeEach(() => {
+    global.fetch = fetchMock as unknown as typeof fetch;
+    db.voiceKeyLend.findMany.mockResolvedValue([]);
+  });
+
+  it('asks the company again with the saved key and adds only the models that are new, never taking one off', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved());
+    company([
+      { model_id: 'flash', name: 'Flash', can_do_text_to_speech: true },
+      { model_id: 'eleven_v4_turbo', name: 'Eleven v4 Turbo', can_do_text_to_speech: true, description: 'Fast' },
+    ]);
+    const response = await call(loadModels, 'POST');
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.added).toEqual([{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }]);
+    // The answer carries the models as saved: what the page shows
+    expect(body.models).toEqual([
+      { id: 'flash', label: 'Flash', kind: 'speech' },
+      { id: 'turbo', label: 'Turbo', kind: 'speech' },
+      { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' },
+    ]);
+    // Turbo isn't on the company's list now, and stays; the new one goes last; no lend is narrowed
+    expect(db.voiceProvider.update.mock.calls[0][0].data.models).toEqual([
+      { id: 'flash', label: 'Flash', kind: 'speech' },
+      { id: 'turbo', label: 'Turbo', kind: 'speech' },
+      { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' },
+    ]);
+    expect(db.voiceKeyLend.delete).not.toHaveBeenCalled();
+    // Sent to the company's own address only, with the saved key in its header
+    expect(fetchMock.mock.calls.every(([url]) => String(url).startsWith('https://api.elevenlabs.io/'))).toBe(true);
+    expect(fetchMock.mock.calls.every(([, init]) => init.headers['xi-api-key'] === 'sk-saved-key-9f2a')).toBe(true);
+  });
+
+  it('never adds back a model that was taken off by hand, and adds the other new ones', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved({ hiddenModels: ['speech:eleven_v4_turbo'] }));
+    company([
+      { model_id: 'flash', name: 'Flash', can_do_text_to_speech: true },
+      { model_id: 'eleven_v4_turbo', name: 'Eleven v4 Turbo', can_do_text_to_speech: true },
+      { model_id: 'eleven_v5', name: 'Eleven v5', can_do_text_to_speech: true },
+    ]);
+    const response = await call(loadModels, 'POST');
+    expect((await response.json()).added).toEqual([{ id: 'eleven_v5', label: 'Eleven v5', kind: 'speech' }]);
+    expect(db.voiceProvider.update.mock.calls[0][0].data.models).toEqual([
+      { id: 'flash', label: 'Flash', kind: 'speech' },
+      { id: 'turbo', label: 'Turbo', kind: 'speech' },
+      { id: 'eleven_v5', label: 'Eleven v5', kind: 'speech' },
+    ]);
+    // The kept-off list is left as it is
+    expect(db.voiceProvider.update.mock.calls[0][0].data).not.toHaveProperty('hiddenModels');
+  });
+
+  it('keeps a model ticked or taken off by hand while the list was loading, working out what is new from the models as they are when it saves', async () => {
+    // Read before the call to the company: flash and turbo. By the time it saves, turbo was taken off (and kept off) and "mine" was ticked
+    const first = saved();
+    db.voiceProvider.findFirst
+      .mockResolvedValueOnce(first)
+      .mockResolvedValue({ ...first, models: [{ id: 'flash', label: 'Flash', kind: 'speech' }, { id: 'mine', kind: 'speech' }], hiddenModels: ['speech:turbo'] });
+    company([
+      { model_id: 'flash', name: 'Flash', can_do_text_to_speech: true },
+      { model_id: 'turbo', name: 'Turbo', can_do_text_to_speech: true },
+      { model_id: 'eleven_v5', name: 'Eleven v5', can_do_text_to_speech: true },
+    ]);
+    const response = await call(loadModels, 'POST');
+    expect((await response.json()).added).toEqual([{ id: 'eleven_v5', label: 'Eleven v5', kind: 'speech' }]);
+    expect(db.voiceProvider.update.mock.calls[0][0].data.models).toEqual([
+      { id: 'flash', label: 'Flash', kind: 'speech' },
+      { id: 'mine', kind: 'speech' },
+      { id: 'eleven_v5', label: 'Eleven v5', kind: 'speech' },
+    ]);
+    expect(db.voiceProvider.update.mock.calls[0][0].data).not.toHaveProperty('hiddenModels');
+  });
+
+  it('saves nothing when only a model taken off by hand is listed', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved({ hiddenModels: ['speech:eleven_v4_turbo'] }));
+    company([{ model_id: 'eleven_v4_turbo', name: 'Eleven v4 Turbo', can_do_text_to_speech: true }]);
+    expect(await (await call(loadModels, 'POST')).json()).toMatchObject({ added: [] });
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+  });
+
+  it('says so, and adds nothing, when the company’s list could not be read right now', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved());
+    // The company knows the key, but its list is unavailable
+    fetchMock.mockImplementation(async (url: string) => (url === 'https://api.elevenlabs.io/v1/models' ? { status: 503, json: async () => ({}), body: null } : { status: 200, text: async () => '', body: null }));
+    const response = await call(loadModels, 'POST');
+    expect(response.status).toBe(502);
+    expect((await response.json()).error).toBe('Couldn’t read ElevenLabs’s list of models right now. Try again in a moment.');
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+  });
+
+  it('adds what it could read and names the job whose list could not be read', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved({ adapter: 'cartesia', recognition: true, speech: true, models: [{ id: 'sonic-3', kind: 'speech' }] }));
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith('https://api.cartesia.ai/models?capability=stt')) return { status: 503, json: async () => ({}), body: null };
+      if (url.startsWith('https://api.cartesia.ai/models?capability=tts')) return { status: 200, json: async () => ({ data: [{ id: 'sonic-3', capability: 'tts' }, { id: 'sonic-turbo', capability: 'tts' }] }), body: null };
+      return { status: 200, text: async () => '', body: null };
+    });
+    const response = await call(loadModels, 'POST');
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    // Only what was read is added: the catalog's hearing model that stands in for the unread list is not
+    expect(body.added).toEqual([{ id: 'sonic-turbo', kind: 'speech' }]);
+    expect(body.unread).toEqual(['recognition']);
+    expect(db.voiceProvider.update.mock.calls[0][0].data.models).toEqual([
+      { id: 'sonic-3', kind: 'speech' },
+      { id: 'sonic-turbo', kind: 'speech' },
+    ]);
+  });
+
+  it('is a successful no-op, not a failure, when a list was read and has no model to add', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved({ adapter: 'cartesia', recognition: false, speech: true, models: [{ id: 'sonic-3', kind: 'speech' }] }));
+    fetchMock.mockImplementation(async (url: string) =>
+      url.startsWith('https://api.cartesia.ai/models?capability=tts') ? { status: 200, json: async () => ({ data: [] }), body: null } : { status: 200, text: async () => '', body: null },
+    );
+    const response = await call(loadModels, 'POST');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ added: [], unread: [], models: [{ id: 'sonic-3', kind: 'speech' }] });
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+  });
+
+  it('says the list could not be read (502) even when the server’s own providers cannot be read either', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved());
+    // The server's provider list (where ownerId is null) fails, and so does the company's list
+    db.voiceProvider.findMany.mockImplementation(async ({ where }: { where: { ownerId?: unknown } }) => {
+      if (where.ownerId === null) throw new Error('database down');
+      return [];
+    });
+    fetchMock.mockImplementation(async (url: string) => (url === 'https://api.elevenlabs.io/v1/models' ? { status: 503, json: async () => ({}), body: null } : { status: 200, text: async () => '', body: null }));
+    const response = await call(loadModels, 'POST');
+    expect(response.status).toBe(502);
+    expect((await response.json()).error).toBe('Couldn’t read ElevenLabs’s list of models right now. Try again in a moment.');
+  });
+
+  it('adds nothing for a job the company has no list for, even if the catalog has a model for it', async () => {
+    // ElevenLabs lists its speaking models, not its listening ones: the catalog's Scribe is not added for a key that also listens
+    db.voiceProvider.findFirst.mockResolvedValue(saved({ recognition: true, speech: true }));
+    company([
+      { model_id: 'flash', name: 'Flash', can_do_text_to_speech: true },
+      { model_id: 'eleven_v5', name: 'Eleven v5', can_do_text_to_speech: true },
+    ]);
+    const response = await call(loadModels, 'POST');
+    expect((await response.json()).added).toEqual([{ id: 'eleven_v5', label: 'Eleven v5', kind: 'speech' }]);
+    expect(db.voiceProvider.update.mock.calls[0][0].data.models.some((model: { id: string }) => model.id === 'scribe_v2_realtime')).toBe(false);
+  });
+
+  it('has nothing to load, and asks no company, for a key with no list for what it does', async () => {
+    // Fish Audio has no model list; an ElevenLabs key that only listens has no list for its one job
+    db.voiceProvider.findFirst.mockResolvedValue(saved({ adapter: 'fish', recognition: false, speech: true }));
+    const fish = await call(loadModels, 'POST');
+    expect(fish.status).toBe(409);
+    db.voiceProvider.findFirst.mockResolvedValue(saved({ recognition: true, speech: false }));
+    const listening = await call(loadModels, 'POST');
+    expect(listening.status).toBe(409);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+  });
+
+  it('answers from what it saved: a failure of the key’s usage or bots afterwards does not turn a saved reload into an error', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved());
+    company([{ model_id: 'eleven_v5', name: 'Eleven v5', can_do_text_to_speech: true }]);
+    db.voiceKeyLend.findMany.mockRejectedValue(new Error('database down'));
+    db.voiceKeyUsage.findMany.mockRejectedValue(new Error('database down'));
+    db.bot.findMany.mockRejectedValue(new Error('database down'));
+    const response = await call(loadModels, 'POST');
+    expect(response.status).toBe(200);
+    expect((await response.json()).added).toEqual([{ id: 'eleven_v5', label: 'Eleven v5', kind: 'speech' }]);
+    expect(db.voiceProvider.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers with no unread job when every list was read', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved());
+    company([{ model_id: 'flash', name: 'Flash', can_do_text_to_speech: true }]);
+    expect((await (await call(loadModels, 'POST')).json()).unread).toEqual([]);
+  });
+
+  it('adds nothing when the key was changed while the company was being asked, so the old key’s list never goes to the new one', async () => {
+    // Read with one key, and by the time it saves under the lock the key is another
+    const first = saved();
+    db.voiceProvider.findFirst.mockResolvedValueOnce(first).mockResolvedValue({ ...first, apiKeyEncrypted: encryptApiKey('sk-rotated-key-77aa') });
+    company([{ model_id: 'eleven_v5', name: 'Eleven v5', can_do_text_to_speech: true }]);
+    const response = await call(loadModels, 'POST');
+    expect(response.status).toBe(409);
+    expect((await response.json()).error).toBe('The key changed while its models were loading. Try again.');
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+  });
+
+  it('adds nothing when the address or region changed while the company was being asked', async () => {
+    const first = saved();
+    db.voiceProvider.findFirst.mockResolvedValueOnce(first).mockResolvedValue({ ...first, endpoint: 'https://moved.example.com' });
+    company([{ model_id: 'eleven_v5', name: 'Eleven v5', can_do_text_to_speech: true }]);
+    expect((await call(loadModels, 'POST')).status).toBe(409);
+    db.voiceProvider.findFirst.mockResolvedValueOnce(first).mockResolvedValue({ ...first, region: 'eu-west-1' });
+    expect((await call(loadModels, 'POST')).status).toBe(409);
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+  });
+
+  it('saves nothing when the company lists nothing new, and leaves out models for a job the key doesn’t do', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved());
+    company([{ model_id: 'flash', name: 'Flash', can_do_text_to_speech: true }]);
+    const response = await call(loadModels, 'POST');
+    expect(await response.json()).toMatchObject({ added: [] });
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+  });
+
+  it('says what the company said, and has nothing to load for a typed Azure deployment or someone else’s key', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(saved());
+    fetchMock.mockResolvedValue({ status: 401, text: async () => '', body: null });
+    const refused = await call(loadModels, 'POST');
+    expect(refused.status).toBe(422);
+    expect((await refused.json()).error).toBe('ElevenLabs didn’t accept that key. Check it and paste it again.');
+    db.voiceProvider.findFirst.mockResolvedValue(saved({ adapter: 'azure', endpoint: 'https://my-res.openai.azure.com' }));
+    expect((await call(loadModels, 'POST')).status).toBe(409);
+    db.voiceProvider.findFirst.mockResolvedValue(null);
+    expect((await call(loadModels, 'POST')).status).toBe(404);
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
   });
 });
 

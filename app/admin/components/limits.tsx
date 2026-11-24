@@ -10,6 +10,7 @@ import { FormSheet } from './form-sheet';
 import { LoadError, LoadingRows, SectionHeader, SettingSwitch, Settings } from './ds';
 import {
   ARTIFACT_LIMITS_RECOMMENDED,
+  BRICK_LIMITS_RECOMMENDED,
   FAIR_USAGE_RECOMMENDED,
   FAIR_USAGE_WINDOW_HOURS,
   FILE_LIMITS_RECOMMENDED,
@@ -17,6 +18,7 @@ import {
   REPLY_LIMITS_RECOMMENDED,
   replyLimitsProblem,
   type ArtifactLimits,
+  type BrickLimits,
   type FairUsage,
   type FileLimits,
   type Range,
@@ -39,10 +41,14 @@ export interface Limit {
   value: number;
   recommended: number;
   options: LimitOption[];
+  /** Nothing is set yet and no value is suggested (game #1999: a computer's money comes from our own test): the row says "Not set", with no recommended mark. */
+  unset?: boolean;
   /** Shown under the choices in the sheet: cost or what it affects. */
   note?: string;
   /** No "Other" box (a choice between fixed steps). */
   fixedSteps?: boolean;
+  /** A row that may be left empty on purpose: a card to empty it is offered, and choosing it hands -1 to the saver (which saves "empty"). */
+  clearable?: { label: string; meaning: string };
   /** A model that stops below this value (#673): where it stops, the line that says so, and the words on each choice above it. */
   cap?: ModelCap;
   /** The values it can be set to, said on its sheet; Other outside them is turned down there. */
@@ -59,8 +65,13 @@ export interface ModelCap {
 }
 
 export function shown(limit: Limit, value = limit.value): string {
+  if (limit.unset && value === limit.value) return 'Not set';
   const option = limit.options.find((entry) => entry.value === value);
-  return option ? option.label : `${value.toLocaleString('en')} ${limit.unit}`;
+  if (option) return option.label;
+  // Money reads as dollars and a share as a percent, not as "0.5 dollars"
+  if (limit.unit === 'dollars') return `$${value.toLocaleString('en', { maximumFractionDigits: 6 })}`;
+  if (limit.unit === 'percent') return `${value.toLocaleString('en', { maximumFractionDigits: 2 })}%`;
+  return `${value.toLocaleString('en')} ${limit.unit}`;
 }
 
 /** The neutral pill that marks the recommended value: a fact, so it is neither violet nor gradient. */
@@ -75,6 +86,8 @@ export function RecommendedPill() {
 /** One row: what it is, what it does, and its value; the whole row opens the choices. */
 export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }) {
   const isRecommended = limit.value === limit.recommended;
+  // A limit with no recommended value (a negative one) shows its value alone, and "Not set" while nothing is set
+  const mark = limit.unset || limit.recommended < 0 ? null : isRecommended ? <RecommendedPill /> : <span className="text-[11px] text-muted-foreground">Recommended: {shown(limit, limit.recommended)}</span>;
   return (
     <button
       type="button"
@@ -93,12 +106,12 @@ export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }
         )}
         <span className="mt-1.5 flex flex-wrap items-center gap-2 sm:hidden">
           <span className="text-sm font-bold">{shown(limit)}</span>
-          {isRecommended ? <RecommendedPill /> : <span className="text-[11px] text-muted-foreground">Recommended: {shown(limit, limit.recommended)}</span>}
+          {mark}
         </span>
       </span>
       <span className="hidden shrink-0 justify-items-end gap-1 sm:grid">
         <span className="text-sm font-bold">{shown(limit)}</span>
-        {isRecommended ? <RecommendedPill /> : <span className="text-[11px] text-muted-foreground">Recommended: {shown(limit, limit.recommended)}</span>}
+        {mark}
       </span>
       <ChevronRight size={18} aria-hidden="true" className="shrink-0 text-muted-foreground" />
     </button>
@@ -107,21 +120,22 @@ export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }
 
 /** The choices for one limit: radio cards with what each means, the recommended one marked, and Other. */
 export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone: (value: number) => Promise<void> | void; onCancel: () => void }) {
-  const known = limit.options.some((option) => option.value === limit.value);
-  const [picked, setPicked] = useState<number | 'other'>(known ? limit.value : 'other');
-  const [other, setOther] = useState(known ? '' : String(limit.value));
+  const known = !limit.unset && limit.options.some((option) => option.value === limit.value);
+  const [picked, setPicked] = useState<number | 'other' | 'clear'>(limit.unset && limit.clearable ? 'clear' : known ? limit.value : 'other');
+  const [other, setOther] = useState(known || limit.unset ? '' : String(limit.value));
   const [saving, setSaving] = useState(false);
   // What was typed is read as it is, with commas and spaces as thousands marks: "-50" or "1e2" is refused, not turned into 50 or 12
   const typed = other.replace(/[,\s]/g, '');
-  const value = picked === 'other' ? (typed === '' ? 0 : /^\d+(\.\d+)?$/.test(typed) ? Number(typed) : Number.NaN) : picked;
+  const value = picked === 'clear' ? -1 : picked === 'other' ? (typed === '' ? 0 : /^\d+(\.\d+)?$/.test(typed) ? Number(typed) : Number.NaN) : picked;
   const range = limit.range;
   // A row that can't go above another says the lower of the two as its most
   const most = range ? Math.min(range.max, limit.atMost?.value ?? range.max) : 0;
   const rangeLine = range ? `Between ${range.min.toLocaleString('en')} and ${most.toLocaleString('en')} ${limit.unit}.` : null;
   const outOfRange = picked === 'other' && other.trim() !== '' && !!range && (Number.isNaN(value) || value < range.min || value > range.max || (!!range.whole && !Number.isInteger(value)));
   const aboveOther = !!limit.atMost && value > limit.atMost.value;
-  // "Never" (0) is a choice of its own; an empty or 0 "Other" is not
-  const ready = (picked === 'other' ? value > 0 : true) && !outOfRange && !aboveOther;
+  // "Never" (0) is a choice of its own; an empty "Other" is never a choice, and a typed 0 is one only on a row whose range starts at 0
+  const zeroAllowed = !!range && range.min <= 0;
+  const ready = (picked === 'other' ? typed !== '' && !Number.isNaN(value) && (value > 0 || (zeroAllowed && value === 0)) : true) && !outOfRange && !aboveOther;
   return (
     <div className="grid gap-4">
       {limit.cap?.line && (
@@ -147,6 +161,9 @@ export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone
             description={limit.cap && option.value > limit.cap.at ? `${option.meaning} ${limit.cap.short}` : option.meaning}
           />
         ))}
+        {limit.clearable && (
+          <PickCard role="radio" picked={picked === 'clear'} onClick={() => setPicked('clear')} indicator={<Radio checked={picked === 'clear'} />} title={limit.clearable.label} description={limit.clearable.meaning} />
+        )}
         {!limit.fixedSteps && (
           <>
             <PickCard role="radio" picked={picked === 'other'} onClick={() => setPicked('other')} indicator={<Radio checked={picked === 'other'} />} title="Other" />
@@ -264,7 +281,7 @@ export function replyLimits(values: ReplyLimits): Limit[] {
     {
       id: 'steps',
       label: 'Steps in one reply',
-      hint: 'Tools a bot may use before it answers: searching, reading, building.',
+      hint: 'How many times a bot may use an app before it answers: searching, reading, building.',
       unit: 'steps',
       value: values.steps,
       recommended: recommended.steps,
@@ -553,6 +570,715 @@ export function fairUsageLimits(values: FairUsage): Limit[] {
   ], LIMIT_RANGES.fairUsage);
 }
 
+/**
+ * Limits for Bricks. A person's own Bricks (game #1996): how long a deleted one can be brought back, and when a Brick
+ * suggests another. The Brick for guests (game #1997): its own allowance, apart from the replies a guest gets from a
+ * host's bots, so a guest who talks to it can still talk to a host's bots as much as before.
+ */
+export function brickLimits(values: BrickLimits): Limit[] {
+  const recommended = BRICK_LIMITS_RECOMMENDED;
+  return withRanges([
+    {
+      id: 'undoDays',
+      label: 'Days a deleted Brick can be brought back',
+      hint: 'Its chat, what it remembers and its files wait this long, then go for good.',
+      unit: 'days',
+      value: values.undoDays,
+      recommended: recommended.undoDays,
+      note: 'A change counts for Bricks deleted from now on. A Brick already deleted keeps the day it was given.',
+      options: [
+        { value: 3, label: '3 days', meaning: 'then gone for good' },
+        { value: 7, label: '7 days', meaning: 'then gone for good' },
+        { value: 14, label: '14 days', meaning: 'then gone for good' },
+      ],
+    },
+    {
+      id: 'offerAfter',
+      label: 'Times a job comes back before Brick suggests a Brick for it',
+      hint: 'Brick answers first. When the same kind of job has come back this often, it suggests a Brick just for it, once per topic.',
+      unit: 'times',
+      value: values.offerAfter,
+      recommended: recommended.offerAfter,
+      options: [
+        { value: 3, label: '3 times', meaning: 'Suggests it early.' },
+        { value: 5, label: '5 times', meaning: 'Waits a little longer.' },
+        { value: 10, label: '10 times', meaning: 'Only for a job that comes back a lot.' },
+      ],
+    },
+    {
+      id: 'guestReplies',
+      label: 'Replies for a guest from the Brick for guests',
+      hint: `Its own allowance, every ${FAIR_USAGE_WINDOW_HOURS} hours. Replies from a host’s bots don’t use it.`,
+      unit: 'replies',
+      value: values.guestReplies,
+      recommended: recommended.guestReplies,
+      options: [
+        { value: 10, label: '10 replies', meaning: every },
+        { value: 20, label: '20 replies', meaning: every },
+      ],
+    },
+    {
+      id: 'universePool',
+      label: 'Replies for all guests from the Brick for guests, in one universe',
+      hint: `Shared by every guest in that universe, every ${FAIR_USAGE_WINDOW_HOURS} hours. Nothing comes from a host.`,
+      unit: 'replies',
+      value: values.universePool,
+      recommended: recommended.universePool,
+      options: [
+        { value: 200, label: '200 replies', meaning: every },
+        { value: 500, label: '500 replies', meaning: every },
+      ],
+    },
+    {
+      id: 'visitEndsMinutes',
+      label: 'Minutes a visiting Brick stays after its person is gone',
+      hint: 'A Brick that walks with someone goes when they leave Universe. This is how long Universe waits without seeing them before it ends the visit.',
+      unit: 'minutes',
+      value: values.visitEndsMinutes,
+      recommended: recommended.visitEndsMinutes,
+      options: [
+        { value: 5, label: '5 minutes', meaning: 'It goes quickly.' },
+        { value: 10, label: '10 minutes', meaning: 'Survives a short break.' },
+        { value: 30, label: '30 minutes', meaning: 'Waits for a longer break.' },
+      ],
+    },
+    {
+      id: 'metExpiresDays',
+      label: 'Days someone who only met a Brick can still start a message to it',
+      hint: 'Meeting a Brick, in a place it visits or lives in, lets a person message it afterwards, wherever it is. Once they have written to it, that stays until its owner or a host changes it, whatever this says.',
+      unit: 'days',
+      value: values.metExpiresDays,
+      recommended: recommended.metExpiresDays,
+      options: [
+        { value: 7, label: '7 days', meaning: 'Only a fresh meeting counts.' },
+        { value: 30, label: '30 days', meaning: 'A month to write back.' },
+        { value: 90, label: '90 days', meaning: 'A season to write back.' },
+      ],
+    },
+    {
+      id: 'itemsPerPerson',
+      label: 'Goals and tasks one person can have going',
+      hint: 'Reminders, schedules, watches and goals together, paused ones included. Done ones do not count.',
+      unit: 'goals and tasks',
+      value: values.itemsPerPerson,
+      recommended: recommended.itemsPerPerson,
+      options: [
+        { value: 10, label: '10', meaning: 'Keeps it small.' },
+        { value: 20, label: '20', meaning: 'Room for a good few.' },
+        { value: 50, label: '50', meaning: 'For people who keep a lot going.' },
+      ],
+    },
+    {
+      id: 'shortestRepeat',
+      label: 'Shortest wait between two runs of one goal or task',
+      hint: 'A Brick that is asked to check more often says so and offers this instead.',
+      unit: 'minutes',
+      value: values.shortestRepeat,
+      recommended: recommended.shortestRepeat,
+      options: [
+        { value: 15, label: '15 minutes', meaning: 'Checks often.' },
+        { value: 30, label: '30 minutes', meaning: 'A steady pace.' },
+        { value: 60, label: '1 hour', meaning: 'Gentle on usage.' },
+      ],
+    },
+    {
+      id: 'runsPerDay',
+      label: 'Runs a day for one person’s goals and tasks',
+      hint: 'Watches, schedules and goals together. Reminders are fixed text with no AI, so they never use these.',
+      unit: 'runs',
+      value: values.runsPerDay,
+      recommended: recommended.runsPerDay,
+      options: [
+        { value: 12, label: '12 runs', meaning: 'Each day.' },
+        { value: 24, label: '24 runs', meaning: 'Each day.' },
+        { value: 48, label: '48 runs', meaning: 'Each day.' },
+      ],
+    },
+    {
+      id: 'longestRun',
+      label: 'Longest one run can take',
+      hint: 'After this the run is given up, shown as failed, and the next one starts fresh.',
+      unit: 'minutes',
+      value: values.longestRun,
+      recommended: recommended.longestRun,
+      options: [
+        { value: 5, label: '5 minutes', meaning: 'For short checks.' },
+        { value: 10, label: '10 minutes', meaning: 'A steady pace.' },
+        { value: 30, label: '30 minutes', meaning: 'For longer work.' },
+      ],
+    },
+    {
+      id: 'computerWait',
+      label: 'How long a computer waits for a person to take over',
+      hint: 'When Brick hands over and nobody takes over, the computer waits this long. Then the job ends and its room goes back to the person’s allowance.',
+      unit: 'minutes',
+      value: values.computerWait,
+      recommended: recommended.computerWait,
+      note: 'Applies to jobs already waiting. Jobs past the new limit end on the next check. Once a person has taken over, the job is theirs and is not ended by this.',
+      options: [
+        { value: 30, label: '30 minutes', meaning: 'Frees the room sooner.' },
+        { value: 60, label: '1 hour', meaning: 'Time to come back to it.' },
+        { value: 120, label: '2 hours', meaning: 'For people who step away.' },
+      ],
+    },
+    {
+      id: 'coldStorageDays',
+      label: 'Days a computer sits unused before it is packed away',
+      hint: 'A Brick’s computer that nobody has used for this long is packed into our own encrypted storage, tried out on a throwaway computer, and only then deleted. Its files, its Files list and its chat stay as they are. The next job that needs it brings it back first, which takes a few minutes.',
+      unit: 'days',
+      value: values.coldStorageDays,
+      recommended: recommended.coldStorageDays,
+      note: 'Applies from the next check. A computer already packed away stays packed until it is next used.',
+      options: [
+        { value: 7, label: '7 days', meaning: 'Saves the most; a return after a quiet week takes a few minutes.' },
+        { value: 14, label: '14 days', meaning: 'A steady pace.' },
+        { value: 30, label: '30 days', meaning: 'Keeps computers ready for longer.' },
+      ],
+    },
+    {
+      id: 'pausedSignInsHours',
+      label: 'How long a paused computer job keeps its sign-ins',
+      hint: 'A paused job keeps the sites it was signed in to and the pages it had open, locked away from every other job, so it carries on where it was. After this long they are dropped: the job stays paused, and it signs in again when it carries on.',
+      unit: 'hours',
+      value: values.pausedSignInsHours,
+      recommended: recommended.pausedSignInsHours,
+      note: 'Applies from the next check, to jobs already paused too.',
+      options: [
+        { value: 4, label: '4 hours', meaning: 'Keeps sign-ins for the shortest time.' },
+        { value: 24, label: '1 day', meaning: 'Time to come back to it.' },
+        { value: 72, label: '3 days', meaning: 'For people who step away.' },
+      ],
+    },
+    {
+      id: 'computerSteps',
+      label: 'Steps of a computer job kept for its Activity',
+      hint: 'Activity lists what a computer job has done so far, step by step, beside Watch and Files. A job that takes more steps than this keeps the newest ones.',
+      unit: 'steps',
+      value: values.computerSteps,
+      recommended: recommended.computerSteps,
+      note: 'Applies from the next step a job takes.',
+      options: [
+        { value: 50, label: '50 steps', meaning: 'Enough for short jobs.' },
+        { value: 200, label: '200 steps', meaning: 'A steady pace.' },
+        { value: 1000, label: '1,000 steps', meaning: 'For long jobs.' },
+      ],
+    },
+    {
+      id: 'scheduledCardWait',
+      label: 'How long a card from a goal or task waits for a person',
+      hint: 'When a goal or task needs a yes before it goes on, its card waits this long. If it is the same thing again on a later check, that check joins the waiting card: no second card, no second message. When the time is up the card ends.',
+      unit: 'minutes',
+      value: values.scheduledCardWait,
+      recommended: recommended.scheduledCardWait,
+      note: 'Applies to cards from now on. A card already waiting keeps the time it had. A card in chat has its own wait.',
+      options: [
+        { value: 240, label: '4 hours', meaning: 'Gone by the end of the day.' },
+        { value: 1440, label: '1 day', meaning: 'Time to come back to it.' },
+        { value: 4320, label: '3 days', meaning: 'For people who step away.' },
+      ],
+    },
+    {
+      id: 'snooze',
+      label: 'How long Snooze moves a reminder',
+      hint: 'Tap Snooze on a reminder or briefing and it comes back this much later.',
+      unit: 'minutes',
+      value: values.snooze,
+      recommended: recommended.snooze,
+      options: [
+        { value: 15, label: '15 minutes', meaning: 'A short nudge.' },
+        { value: 60, label: '1 hour', meaning: 'A steady pace.' },
+        { value: 180, label: '3 hours', meaning: 'Well out of the way.' },
+      ],
+    },
+    {
+      id: 'failuresBeforeTelling',
+      label: 'Failed checks in a row before Brick tells the person',
+      hint: 'For a watch or a goal. A reminder or a briefing that fails always tells the person the first time.',
+      unit: 'times',
+      value: values.failuresBeforeTelling,
+      recommended: recommended.failuresBeforeTelling,
+      options: [
+        { value: 2, label: '2 times', meaning: 'Tells early.' },
+        { value: 3, label: '3 times', meaning: 'A steady pace.' },
+        { value: 5, label: '5 times', meaning: 'Only when it keeps failing.' },
+      ],
+    },
+    {
+      id: 'goalsShare',
+      label: 'Share of a person’s usage that goals and tasks may use',
+      hint: `Out of the Universe AI usage a signed-in person gets every ${FAIR_USAGE_WINDOW_HOURS} hours. Watches, briefings and goals stop here, so chat always keeps room. A Brick on its owner’s own key never uses it.`,
+      unit: '%',
+      value: values.goalsShare,
+      recommended: recommended.goalsShare,
+      note: 'When it is used up they wait with their work saved and carry on when it is back. Reminders are fixed text and always come.',
+      options: [
+        { value: 20, label: '20%', meaning: 'Chat keeps most of it.' },
+        { value: 30, label: '30%', meaning: 'A steady balance.' },
+        { value: 50, label: '50%', meaning: 'Half for goals and tasks.' },
+      ],
+    },
+    {
+      id: 'keyFormMinutes',
+      label: 'How long the safe form for a key stays open',
+      hint: 'A Brick or a person asks for a key, and the form opens. After this time it is asked for again, so an old link in a chat cannot be used.',
+      unit: 'minutes',
+      value: values.keyFormMinutes,
+      recommended: recommended.keyFormMinutes,
+      options: [
+        { value: 15, label: '15 minutes', meaning: 'Short and tight.' },
+        { value: 30, label: '30 minutes', meaning: 'Time to find the key.' },
+        { value: 60, label: '1 hour', meaning: 'For slow sign-ins at the service.' },
+      ],
+    },
+    {
+      id: 'keyTries',
+      label: 'Tries for a key in one safe form',
+      hint: 'A key the service does not accept counts as a try. After the last one the form is asked for again.',
+      unit: 'tries',
+      value: values.keyTries,
+      recommended: recommended.keyTries,
+      options: [
+        { value: 3, label: '3 tries', meaning: 'Tight.' },
+        { value: 5, label: '5 tries', meaning: 'Room for a typo or two.' },
+        { value: 10, label: '10 tries', meaning: 'Loose.' },
+      ],
+    },
+    {
+      id: 'keyCallSeconds',
+      label: 'How long a request to an app with a key may take',
+      hint: 'Past this the request is given up and the Brick is told the app did not answer.',
+      unit: 'seconds',
+      value: values.keyCallSeconds,
+      recommended: recommended.keyCallSeconds,
+      options: [
+        { value: 10, label: '10 seconds', meaning: 'Quick services only.' },
+        { value: 20, label: '20 seconds', meaning: 'A steady wait.' },
+        { value: 60, label: '1 minute', meaning: 'For slow services.' },
+      ],
+    },
+    {
+      id: 'keyAnswerKb',
+      label: 'How much of an app’s answer is read',
+      hint: 'Only the fields the app’s definition lists come back, from at most this much of the answer.',
+      unit: 'KB',
+      value: values.keyAnswerKb,
+      recommended: recommended.keyAnswerKb,
+      options: [
+        { value: 64, label: '64 KB', meaning: 'Small answers.' },
+        { value: 256, label: '256 KB', meaning: 'Most answers.' },
+        { value: 1024, label: '1 MB', meaning: 'Large lists.' },
+      ],
+    },
+    {
+      id: 'keyCallsPerPerson',
+      label: 'Requests to apps with a key, for each person, an hour',
+      hint: 'All of one person’s Bricks together. When it is used up the Brick says the app is busy and tries again later. Reading and making things count the same.',
+      unit: 'requests',
+      value: values.keyCallsPerPerson,
+      recommended: recommended.keyCallsPerPerson,
+      options: [
+        { value: 120, label: '120 an hour', meaning: 'Steady use.' },
+        { value: 300, label: '300 an hour', meaning: 'Room for busy jobs.' },
+        { value: 1000, label: '1,000 an hour', meaning: 'For heavy automation.' },
+      ],
+    },
+    {
+      id: 'keyCallsPlatform',
+      label: 'Requests to apps with a key, for everyone, an hour',
+      hint: 'Every Brick together, a ceiling so one busy hour cannot flood the services people connected.',
+      unit: 'requests',
+      value: values.keyCallsPlatform,
+      recommended: recommended.keyCallsPlatform,
+      options: [
+        { value: 5000, label: '5,000 an hour', meaning: 'A small ceiling.' },
+        { value: 20000, label: '20,000 an hour', meaning: 'Plenty for now.' },
+        { value: 100000, label: '100,000 an hour', meaning: 'When many people use it.' },
+      ],
+    },
+    {
+      id: 'checkoutsPerVisitor',
+      label: 'Checkouts one visitor can start on a page, an hour',
+      hint: 'One person tapping Pay again and again. Past this the page says to try again later and the owner is told once.',
+      unit: 'checkouts',
+      value: values.checkoutsPerVisitor,
+      recommended: recommended.checkoutsPerVisitor,
+      options: [
+        { value: 5, label: '5 an hour', meaning: 'Tight.' },
+        { value: 10, label: '10 an hour', meaning: 'Room for a few tries.' },
+        { value: 30, label: '30 an hour', meaning: 'Loose.' },
+      ],
+    },
+    {
+      id: 'checkoutsPerPage',
+      label: 'Checkouts a page can start, an hour',
+      hint: 'Every visitor of one page together.',
+      unit: 'checkouts',
+      value: values.checkoutsPerPage,
+      recommended: recommended.checkoutsPerPage,
+      options: [
+        { value: 50, label: '50 an hour', meaning: 'A small shop.' },
+        { value: 100, label: '100 an hour', meaning: 'A busy page.' },
+        { value: 500, label: '500 an hour', meaning: 'A launch.' },
+      ],
+    },
+    {
+      id: 'checkoutsPerOwner',
+      label: 'Checkouts all of one person’s pages can start, an hour',
+      hint: 'All of a person’s pages together.',
+      unit: 'checkouts',
+      value: values.checkoutsPerOwner,
+      recommended: recommended.checkoutsPerOwner,
+      options: [
+        { value: 100, label: '100 an hour', meaning: 'A few pages.' },
+        { value: 300, label: '300 an hour', meaning: 'Many pages.' },
+        { value: 1000, label: '1,000 an hour', meaning: 'A lot of selling.' },
+      ],
+    },
+    {
+      id: 'checkoutOpenHours',
+      label: 'How long a checkout nobody paid stays open',
+      hint: 'After this it is closed as not paid. Services that hold a payment for 24 hours need at least that long.',
+      unit: 'hours',
+      value: values.checkoutOpenHours,
+      recommended: recommended.checkoutOpenHours,
+      options: [
+        { value: 24, label: '24 hours', meaning: 'A day.' },
+        { value: 48, label: '48 hours', meaning: 'Two days.' },
+        { value: 72, label: '72 hours', meaning: 'Three days.' },
+      ],
+    },
+    {
+      id: 'latePaymentHours',
+      label: 'How long a late payment is still counted',
+      hint: 'A buyer may pay at the service after the checkout was closed as not paid. Until this many hours later it is still asked about, and counted if it completes for the right amount.',
+      unit: 'hours',
+      value: values.latePaymentHours,
+      recommended: recommended.latePaymentHours,
+      options: [
+        { value: 24, label: '24 hours', meaning: 'A day.' },
+        { value: 72, label: '72 hours', meaning: 'Three days.' },
+        { value: 168, label: '168 hours', meaning: 'A week.' },
+      ],
+    },
+    {
+      id: 'paymentCheckSeconds',
+      label: 'Wait between two asks about the same payment',
+      hint: 'The service is left alone this long before it is asked again about one payment.',
+      unit: 'seconds',
+      value: values.paymentCheckSeconds,
+      recommended: recommended.paymentCheckSeconds,
+      options: [
+        { value: 3, label: '3 seconds', meaning: 'Quick.' },
+        { value: 5, label: '5 seconds', meaning: 'A steady pace.' },
+        { value: 15, label: '15 seconds', meaning: 'Gentle on the service.' },
+      ],
+    },
+    {
+      id: 'paymentLooksPerOwner',
+      label: 'Asks about payments an hour, for each owner',
+      hint: 'However many pages and buyers one owner has, their payment service is asked about payments at most this often an hour. It does not use up what Bricks may do with a key.',
+      unit: 'asks',
+      value: values.paymentLooksPerOwner,
+      recommended: recommended.paymentLooksPerOwner,
+      options: [
+        { value: 500, label: '500 an hour', meaning: 'A small shop.' },
+        { value: 2000, label: '2,000 an hour', meaning: 'A busy shop.' },
+        { value: 10000, label: '10,000 an hour', meaning: 'Many shops at once.' },
+      ],
+    },
+    {
+      id: 'appsPerBot',
+      label: 'Apps one bot or Brick can use',
+      hint: 'Apps added by hand and Apps lent to a universe count together. A bot that is full says so and asks for one to be taken off first.',
+      unit: 'apps',
+      value: values.appsPerBot,
+      recommended: recommended.appsPerBot,
+      options: [
+        { value: 5, label: '5 apps', meaning: 'Plenty for most bots.' },
+        { value: 10, label: '10 apps', meaning: 'For bots that do a lot.' },
+        { value: 20, label: '20 apps', meaning: 'For the busiest bots.' },
+      ],
+    },
+    {
+      id: 'sharedUsesEveryone',
+      label: 'Uses a day of a shared app, for everyone together',
+      hint: 'When a person lets other people ask their Brick for a job from an app, this is where they start: uses a day for everyone together. They can change it for their own app. A try that failed gives its use back; the owner’s own chats never count.',
+      unit: 'uses',
+      value: values.sharedUsesEveryone,
+      recommended: recommended.sharedUsesEveryone,
+      note: 'Applies to apps shared from now on. An app already shared keeps what its owner set.',
+      options: [
+        { value: 10, label: '10 uses', meaning: 'A small trial.' },
+        { value: 20, label: '20 uses', meaning: 'A steady start.' },
+        { value: 100, label: '100 uses', meaning: 'For apps that cost little.' },
+      ],
+    },
+    {
+      id: 'sharedUsesPerPerson',
+      label: 'Uses a day of a shared app, for each person',
+      hint: 'Where a person’s shared app starts for each person who asks: uses a day. Guests count by their session, so the limit for everyone together is what holds when a guest starts a new one.',
+      unit: 'uses',
+      value: values.sharedUsesPerPerson,
+      recommended: recommended.sharedUsesPerPerson,
+      note: 'Applies to apps shared from now on.',
+      options: [
+        { value: 1, label: '1 use', meaning: 'One try each.' },
+        { value: 3, label: '3 uses', meaning: 'A steady start.' },
+        { value: 10, label: '10 uses', meaning: 'For friends and regulars.' },
+      ],
+    },
+    {
+      id: 'sharedTriesPerHour',
+      label: 'Tries an hour at one shared app',
+      hint: 'A quiet ceiling beside the daily uses. Every try counts here, also one that failed and gave its use back, so endless failures cannot drain an owner’s account without showing.',
+      unit: 'tries',
+      value: values.sharedTriesPerHour,
+      recommended: recommended.sharedTriesPerHour,
+      options: [
+        { value: 30, label: '30 tries', meaning: 'Quiet.' },
+        { value: 60, label: '60 tries', meaning: 'A steady ceiling.' },
+        { value: 200, label: '200 tries', meaning: 'For busy places.' },
+      ],
+    },
+    {
+      id: 'sharedRetries',
+      label: 'Times one ask may come again',
+      hint: 'A retry never runs the job a second time. This is how many times the same ask may be repeated before it is turned away.',
+      unit: 'times',
+      value: values.sharedRetries,
+      recommended: recommended.sharedRetries,
+      options: [
+        { value: 0, label: 'Never', meaning: 'A repeat is turned away at once.' },
+        { value: 2, label: '2 times', meaning: 'A steady ceiling.' },
+        { value: 5, label: '5 times', meaning: 'For flaky connections.' },
+      ],
+    },
+    {
+      id: 'sharedJobsAtOnce',
+      label: 'Jobs at once at one shared app',
+      hint: 'How many shared jobs of one app may be running, or waiting to be settled, at the same moment. More wait for a turn: the asker is told to try again soon.',
+      unit: 'jobs',
+      value: values.sharedJobsAtOnce,
+      recommended: recommended.sharedJobsAtOnce,
+      options: [
+        { value: 1, label: '1 job', meaning: 'One after another.' },
+        { value: 3, label: '3 jobs', meaning: 'A steady ceiling.' },
+        { value: 10, label: '10 jobs', meaning: 'For apps that handle many.' },
+      ],
+    },
+    {
+      id: 'sharedJobMinutes',
+      label: 'How long a shared job may run before it stops counting as running',
+      hint: 'A job whose result never came back stops holding a place after this long. Its use is not given back: it is only given back once the app confirms it failed.',
+      unit: 'minutes',
+      value: values.sharedJobMinutes,
+      recommended: recommended.sharedJobMinutes,
+      options: [
+        { value: 5, label: '5 minutes', meaning: 'For quick jobs.' },
+        { value: 10, label: '10 minutes', meaning: 'A steady wait.' },
+        { value: 30, label: '30 minutes', meaning: 'For long jobs, like a song.' },
+      ],
+    },
+    {
+      id: 'templateList',
+      label: 'Templates in each short list',
+      hint: 'Under “Start from a template” a person sees three short lists: the ones they starred, a few picked by Universe, and Bricks they have met that share one. This is how many each list shows.',
+      unit: 'templates',
+      value: values.templateList,
+      recommended: recommended.templateList,
+      options: [
+        { value: 5, label: '5 templates', meaning: 'Very short lists.' },
+        { value: 10, label: '10 templates', meaning: 'Short and easy to scan.' },
+        { value: 20, label: '20 templates', meaning: 'For a busy shelf.' },
+      ],
+    },
+    {
+      id: 'computerFiles',
+      label: 'Files a finished computer job hands over',
+      hint: 'When a job on a Brick’s computer finishes, Brick puts the files it made in the chat as cards, newest first. This is how many. Any others are named in the message and stay on the computer. 0 hands over none.',
+      unit: 'files',
+      value: values.computerFiles,
+      recommended: recommended.computerFiles,
+      options: [
+        { value: 1, label: '1 file', meaning: 'Only the newest.' },
+        { value: 5, label: '5 files', meaning: 'Enough for most jobs.' },
+        { value: 10, label: '10 files', meaning: 'For jobs that make a few.' },
+      ],
+    },
+    {
+      id: 'computerFileMb',
+      label: 'Largest file a computer job hands over',
+      hint: 'A file bigger than this is not copied into the chat. Brick names it in the message and it stays on the computer. Every file handed over is kept in Universe in Files, so this also limits storage. The chat takes up to 50 MB.',
+      unit: 'megabytes',
+      value: values.computerFileMb,
+      recommended: recommended.computerFileMb,
+      options: [
+        { value: 10, label: '10 MB', meaning: 'Documents and pictures.' },
+        { value: 25, label: '25 MB', meaning: 'Most receipts, reports and slides.' },
+        { value: 50, label: '50 MB', meaning: 'The most the chat takes; slower to hand over.' },
+      ],
+    },
+  ], LIMIT_RANGES.bricks);
+}
+
+/**
+ * The first row of Limits, Bricks (game #1999): the computer allowance for each member, a month. Every member starts with it, so
+ * nothing is switched on per person. It has no suggested value: the starting value comes from our own test on the dev server, so
+ * until a super admin sets it the row says "Not set" and Bricks' computers stay closed. Shown in dollars; kept in millionths.
+ */
+export const COMPUTER_ALLOWANCE_ID = 'computerMonth';
+export const dollarsToMicros = (dollars: number) => Math.round(dollars * 1_000_000);
+
+export function computerAllowanceLimit(micros: number | null): Limit {
+  const month = 'a month, for each member';
+  return {
+    id: COMPUTER_ALLOWANCE_ID,
+    label: 'Computer allowance for each member, a month',
+    hint: 'What a member’s Bricks can use on computers in a month. When it runs out, Brick offers “Ask for more”. Chat and voice keep the fair usage above.',
+    unit: 'dollars',
+    value: micros === null ? 0 : micros / 1_000_000,
+    recommended: -1,
+    unset: micros === null,
+    options: [
+      { value: 3, label: '$3', meaning: month },
+      { value: 5, label: '$5', meaning: month },
+      { value: 10, label: '$10', meaning: month },
+    ],
+    note: micros === null ? 'Not set yet. Brick computers stay closed until it is. The starting value comes from our own test on the dev server.' : undefined,
+    range: { min: 0.01, max: 1_000_000 },
+  };
+}
+
+/**
+ * What Universe is ready to fund from grants (spec v3 section 16, O3): kept in the meter's settings, in millionths of a dollar. It
+ * has no suggested value: until a super admin sets it, the row says "Not set" and nothing is assumed.
+ */
+export const ROLLOUT_BUDGET_ID = 'rolloutBudget';
+export type MoneyLimitSettings = { rolloutBudgetMicros?: number | null };
+
+export function moneyLimits(settings: MoneyLimitSettings): Limit[] {
+  const micros = settings.rolloutBudgetMicros ?? null;
+  return [
+    {
+      id: ROLLOUT_BUDGET_ID,
+      label: 'Rollout budget for grants',
+      hint: 'The most credit Universe is ready to fund from defaults and gifts. A default stops reaching new people when it would go past this.',
+      unit: 'dollars',
+      value: micros === null ? 0 : micros / 1_000_000,
+      recommended: -1,
+      unset: micros === null,
+      options: [],
+      note: micros === null ? 'Not set yet. Nothing is assumed: set it before the first default reaches anyone.' : undefined,
+      range: { min: 0.01, max: 1_000_000 },
+    },
+  ];
+}
+
+/**
+ * The Instant Apps limits (spec v3 O2/O3): read from /api/admin/instant, which says each limit's words, range and value. Money is held in
+ * millionths of a dollar and shown in dollars; shares are held in hundredths of a percent and shown as a percent. Nothing is built in here.
+ */
+export type InstantLimitView = {
+  value: number | null;
+  range: { min: number; max: number };
+  recommended: number | null;
+  label: string;
+  hint: string;
+  unit: 'micros' | 'bps' | 'count' | 'minutes';
+  required: boolean;
+};
+export type InstantLimitViews = Record<string, InstantLimitView>;
+
+const INSTANT_COUNT_WORDS: Record<string, string> = { pauseMinRuns: 'runs', goodwillPerPersonPerMonth: 'give-backs' };
+const instantScale = (unit: InstantLimitView['unit']) => (unit === 'micros' ? 1_000_000 : unit === 'bps' ? 100 : 1);
+const instantUnit = (key: string, unit: InstantLimitView['unit']) => (unit === 'micros' ? 'dollars' : unit === 'bps' ? 'percent' : unit === 'minutes' ? 'minutes' : (INSTANT_COUNT_WORDS[key] ?? 'times'));
+
+/** The limits of an answer from /api/admin/instant, or null when it is not that answer (each one needs its words and range). */
+export function readInstantLimits(answer: unknown): InstantLimitViews | null {
+  const limits = (answer as { limits?: unknown } | null)?.limits;
+  if (!limits || typeof limits !== 'object') return null;
+  const entries = Object.entries(limits as Record<string, Partial<InstantLimitView>>);
+  // Every field a row is drawn from is checked: a row without its value, its recommendation or whether it is required would come out as NaN
+  const numberOrNull = (field: unknown) => field === null || (typeof field === 'number' && Number.isFinite(field));
+  const valid = entries.length > 0 && entries.every(([, view]) => view && typeof view.label === 'string' && typeof view.hint === 'string' && view.range && typeof view.range.min === 'number' && typeof view.range.max === 'number' && ['micros', 'bps', 'count', 'minutes'].includes(view.unit as string) && numberOrNull(view.value) && numberOrNull(view.recommended) && typeof view.required === 'boolean');
+  return valid ? (limits as InstantLimitViews) : null;
+}
+
+export function instantLimits(views: InstantLimitViews): Limit[] {
+  return Object.entries(views).map(([key, view]) => {
+    const scale = instantScale(view.unit);
+    const unset = view.value === null;
+    return {
+      id: key,
+      label: view.label,
+      hint: view.hint,
+      unit: instantUnit(key, view.unit),
+      value: unset ? 0 : (view.value as number) / scale,
+      recommended: view.recommended === null ? -1 : view.recommended / scale,
+      unset,
+      options: [],
+      note: unset ? (view.required ? 'Not set yet. Instant Apps do not run until you set it.' : 'Not set yet.') : undefined,
+      range: { min: view.range.min / scale, max: view.range.max / scale },
+    };
+  });
+}
+
+
+/**
+ * The code job limits for Apps (the bounded Workbench): read from /api/admin/workbench, which says each limit's words, range and value.
+ * Sizes are held in bytes and shown in MB (the code itself in KB), money in millionths of a dollar and shown in dollars. Nothing is built in here.
+ */
+export type CodeJobLimitView = {
+  value: number | null;
+  range: { min: number; max: number };
+  recommended: number | null;
+  label: string;
+  help: string;
+  unit: 'seconds' | 'count' | 'bytes' | 'micros' | 'days';
+  required: boolean;
+};
+export type CodeJobLimitViews = Record<string, CodeJobLimitView>;
+
+const CODE_JOB_COUNT_WORDS: Record<string, string> = { maxCells: 'runs', maxOutputFiles: 'files', maxResultChars: 'characters', maxReads: 'reads', atOncePerPerson: 'jobs', atOnceAll: 'jobs', jobsPerPersonPerDay: 'jobs' };
+const codeJobScale = (key: string, unit: CodeJobLimitView['unit']) => (unit === 'micros' ? 1_000_000 : unit === 'bytes' ? (key === 'maxCodeBytes' || key === 'maxAnswerBytes' ? 1024 : 1_048_576) : 1);
+const codeJobUnit = (key: string, unit: CodeJobLimitView['unit']) => (unit === 'micros' ? 'dollars' : unit === 'bytes' ? (key === 'maxCodeBytes' || key === 'maxAnswerBytes' ? 'KB' : 'MB') : unit === 'count' ? (CODE_JOB_COUNT_WORDS[key] ?? 'times') : unit);
+
+/** The limits of an answer from /api/admin/workbench, or null when it is not that answer (each one needs its words and range). */
+export function readCodeJobLimits(answer: unknown): CodeJobLimitViews | null {
+  const limits = (answer as { limits?: unknown } | null)?.limits;
+  if (!limits || typeof limits !== 'object') return null;
+  const entries = Object.entries(limits as Record<string, Partial<CodeJobLimitView>>);
+  const valid = entries.length > 0 && entries.every(([, view]) => view && typeof view.label === 'string' && typeof view.help === 'string' && view.range && typeof view.range.min === 'number' && typeof view.range.max === 'number' && ['seconds', 'count', 'bytes', 'micros', 'days'].includes(view.unit as string));
+  return valid ? (limits as CodeJobLimitViews) : null;
+}
+
+export function codeJobLimits(views: CodeJobLimitViews): Limit[] {
+  return Object.entries(views).map(([key, view]) => {
+    const scale = codeJobScale(key, view.unit);
+    const unset = view.value === null;
+    return {
+      id: key,
+      label: view.label,
+      hint: view.help,
+      unit: codeJobUnit(key, view.unit),
+      value: unset ? 0 : (view.value as number) / scale,
+      recommended: view.recommended === null ? -1 : view.recommended / scale,
+      unset,
+      options: [],
+      note: unset ? (view.required ? 'Not set yet. Code jobs do not run until you set it.' : key === 'maxAnswerBytes' ? 'Not set yet. Every App answer is passed on whole.' : 'Not set yet. Printed results are kept until the person deletes them.') : undefined,
+      range: { min: view.range.min / scale, max: view.range.max / scale },
+      // The two that may be empty on purpose can be emptied again from here
+      ...(CODE_JOB_EMPTYABLE[key] ? { clearable: CODE_JOB_EMPTYABLE[key] } : {}),
+    };
+  });
+}
+
+/** The code job Limits that may be left empty, and what empty means for each. */
+const CODE_JOB_EMPTYABLE: Record<string, { label: string; meaning: string } | undefined> = {
+  keepDays: { label: 'Not set', meaning: 'Printed results are kept until the person deletes them.' },
+  maxAnswerBytes: { label: 'Not set', meaning: 'Every App answer is passed on whole, whatever its size.' },
+};
+
 /** The id without its maker's prefix: "openai/gpt-4o-mini" is "gpt-4o-mini". */
 const shortModel = (id: string) => (id.includes('/') ? id.slice(id.indexOf('/') + 1) : id);
 const listOf = (names: string[]) => new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(names);
@@ -762,6 +1488,79 @@ export function voiceServerLimits(values: VoiceLimits, fair: { signedIn: number;
         { value: 5, label: '5 replies', meaning: fiveGuestReplies(guestVoiceLeft) },
       ],
     }),
+    // Voice notes (game: every bot hears voice notes): what Universe AI hears, apart from talking live
+    own('longestNoteSeconds', {
+      id: 'longestNoteSeconds',
+      label: 'Longest voice note',
+      hint: 'The longest voice note a bot listens to. A longer one is refused before anything is paid, with “Send a shorter one.”',
+      unit: 'seconds',
+      name: secondsLabel,
+      steps: [
+        { value: 60, label: '1 minute', meaning: 'Quick notes only.' },
+        { value: 180, label: '3 minutes', meaning: 'Most notes fit.' },
+        { value: 300, label: '5 minutes', meaning: 'Room for a long thought.' },
+      ],
+    }),
+    own('noteMinutesPerPerson', {
+      id: 'noteMinutesPerPerson',
+      label: 'Voice notes heard for a person',
+      hint: 'Minutes of voice notes Universe AI hears for one person in a day, from every bot together. A bot on its maker’s own listening key doesn’t count.',
+      unit: 'minutes',
+      name: (value) => (value === 0 ? 'None' : minutesLabel(value)),
+      steps: [
+        { value: 10, label: '10 minutes', meaning: 'A few short notes a day.' },
+        { value: 30, label: '30 minutes', meaning: 'Plenty for everyday notes.' },
+        { value: 60, label: '1 hour', meaning: 'For people who talk more than they type.' },
+      ],
+    }),
+    own('guestNoteMinutesPerGuest', {
+      id: 'guestNoteMinutesPerGuest',
+      label: 'Voice notes heard for a guest',
+      hint: 'Minutes of voice notes the Brick for guests hears for someone who isn’t signed in, in a day.',
+      unit: 'minutes',
+      name: (value) => (value === 0 ? 'None' : minutesLabel(value)),
+      steps: [
+        { value: 0, label: 'None', meaning: 'Guests type to the Brick.' },
+        { value: 5, label: '5 minutes', meaning: 'A taste of voice notes.' },
+        { value: 10, label: '10 minutes', meaning: 'A short conversation.' },
+      ],
+    }),
+    own('guestNoteMinutesPerUniverse', {
+      id: 'guestNoteMinutesPerUniverse',
+      label: 'Voice notes heard for a universe’s guests',
+      hint: 'Minutes of voice notes the Brick for guests hears for all the guests of one universe together, in a day.',
+      unit: 'minutes',
+      name: (value) => (value === 0 ? 'None' : minutesLabel(value)),
+      steps: [
+        { value: 60, label: '1 hour', meaning: 'A quiet universe.' },
+        { value: 120, label: '2 hours', meaning: 'A busy day of visitors.' },
+        { value: 480, label: '8 hours', meaning: 'A very busy universe.' },
+      ],
+    }),
+    own('notesAtOnce', {
+      id: 'notesAtOnce',
+      label: 'Voice notes heard at once',
+      hint: 'How many voice notes Universe AI hears at the same moment, for everyone. One more waits and is told to try again.',
+      unit: 'notes',
+      name: (value) => `${value} ${value === 1 ? 'note' : 'notes'}`,
+      steps: [
+        { value: 4, label: '4 notes', meaning: 'A small server.' },
+        { value: 8, label: '8 notes', meaning: 'Room for a busy hour.' },
+        { value: 20, label: '20 notes', meaning: 'A large server.' },
+      ],
+    }),
+    own('noteMinutesPerHour', {
+      id: 'noteMinutesPerHour',
+      label: 'Voice notes heard in an hour',
+      hint: 'Minutes of voice notes Universe AI hears in an hour, for everyone together. It keeps new guest ids from getting around the limits above.',
+      unit: 'minutes',
+      name: minutesLabel,
+      steps: [
+        { value: 120, label: '2 hours', meaning: 'A small server.' },
+        { value: 300, label: '5 hours', meaning: 'Room for a busy hour.' },
+        { value: 1200, label: '20 hours', meaning: 'A large server.' },
+      ],
+    }),
   ];
 }
 
@@ -823,6 +1622,15 @@ export function UniverseAiLimits() {
   const [failed, setFailed] = useState(false);
   const [voiceFailed, setVoiceFailed] = useState(false);
   const [savingGuard, setSavingGuard] = useState(false);
+  // The meter's computer allowance for each member (game #1999): null until a super admin sets it
+  const [allowance, setAllowance] = useState<{ micros: number | null } | null>(null);
+  // The money limits live in the same settings (spec v3 O3): what is given back, and how much Universe funds
+  const [money, setMoney] = useState<MoneyLimitSettings>({});
+  const [allowanceFailed, setAllowanceFailed] = useState(false);
+  // Instant Apps' own limits come from their own route; when it is not there (or not readable) the group is simply not shown
+  const [instant, setInstant] = useState<InstantLimitViews | null>(null);
+  // Code jobs' own limits, the same way
+  const [codeJobs, setCodeJobs] = useState<CodeJobLimitViews | null>(null);
 
   async function load() {
     setFailed(false);
@@ -849,10 +1657,103 @@ export function UniverseAiLimits() {
     }
   }
 
+  async function loadAllowance() {
+    setAllowanceFailed(false);
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/meter-settings');
+      if (!response.ok) throw new Error('load');
+      const { settings } = (await response.json()) as { settings: { memberAllowanceMicros: number | null } & MoneyLimitSettings };
+      setAllowance({ micros: settings.memberAllowanceMicros });
+      setMoney(settings);
+    } catch {
+      setAllowanceFailed(true);
+    }
+  }
+
+  async function loadInstant() {
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/instant');
+      if (!response.ok) return;
+      const views = readInstantLimits(await response.json());
+      if (views) setInstant(views);
+    } catch {
+      // Not shown until it can be read
+    }
+  }
+
+  async function loadCodeJobs() {
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/workbench');
+      if (!response.ok) return;
+      const views = readCodeJobLimits(await response.json());
+      if (views) setCodeJobs(views);
+    } catch {
+      // Not shown until it can be read
+    }
+  }
+
   useEffect(() => {
     load();
     loadVoice();
+    loadAllowance();
+    loadInstant();
+    loadCodeJobs();
   }, []);
+
+  async function saveAllowance(dollars: number): Promise<boolean> {
+    const result = await sendLimits('/api/admin/meter-settings', { memberAllowanceMicros: dollarsToMicros(dollars) });
+    if (!result.ok) {
+      addToast({ description: result.error, variant: 'error' });
+      return false;
+    }
+    setAllowance({ micros: (result.data as { settings: { memberAllowanceMicros: number | null } }).settings.memberAllowanceMicros });
+    addToast({ description: 'Saved', variant: 'success', duration: 2000 });
+    return true;
+  }
+
+  async function saveMoney(id: string, dollars: number): Promise<boolean> {
+    if (id !== ROLLOUT_BUDGET_ID) return false;
+    const result = await sendLimits('/api/admin/meter-settings', { rolloutBudgetMicros: dollarsToMicros(dollars) });
+    if (!result.ok) {
+      addToast({ description: result.error, variant: 'error' });
+      return false;
+    }
+    setMoney((result.data as { settings: MoneyLimitSettings }).settings);
+    addToast({ description: 'Saved', variant: 'success', duration: 2000 });
+    return true;
+  }
+
+  async function saveInstant(id: string, value: number): Promise<boolean> {
+    const view = instant?.[id];
+    if (!view) return false;
+    const result = await sendLimits('/api/admin/instant', { [id]: Math.round(value * instantScale(view.unit)) });
+    if (!result.ok) {
+      addToast({ description: result.error, variant: 'error' });
+      return false;
+    }
+    const views = readInstantLimits(result.data);
+    if (views) setInstant(views);
+    addToast({ description: 'Saved', variant: 'success', duration: 2000 });
+    return true;
+  }
+
+  async function saveCodeJobs(id: string, value: number): Promise<boolean> {
+    const view = codeJobs?.[id];
+    if (!view) return false;
+    // A negative value is the "Not set" card: empty is saved as null
+    const result = await sendLimits('/api/admin/workbench', { [id]: value < 0 ? null : Math.round(value * codeJobScale(id, view.unit)) });
+    if (!result.ok) {
+      addToast({ description: result.error, variant: 'error' });
+      return false;
+    }
+    const views = readCodeJobLimits(result.data);
+    if (views) setCodeJobs(views);
+    addToast({ description: 'Saved', variant: 'success', duration: 2000 });
+    return true;
+  }
 
   async function saveVoice(change: Record<string, unknown>): Promise<boolean> {
     const result = await sendLimits('/api/admin/voice-limits', change);
@@ -908,6 +1809,17 @@ export function UniverseAiLimits() {
           </Settings>
           <LimitGroup title="Files in chats, for all bots" limits={fileLimits(limits.files)} onChange={(id, value) => save({ files: { [id]: value } })} />
           <LimitGroup title="Fair usage" limits={fairUsageLimits(limits.fairUsage)} onChange={(id, value) => save({ fairUsage: { [id]: value } })} />
+          {allowanceFailed && <LoadError label="the computer allowance" retry={loadAllowance} />}
+          <LimitGroup
+            title="Bricks"
+            note="Every member starts with these, so nothing is switched on per person. The starting values come from our own test on the dev server."
+            // The Bricks limits that were read stay when only the allowance could not be read; its row comes in once it is
+            limits={[...(allowance ? [computerAllowanceLimit(allowance.micros)] : []), ...brickLimits(limits.bricks)]}
+            onChange={(id, value) => (id === COMPUTER_ALLOWANCE_ID ? saveAllowance(value) : save({ bricks: { [id]: value } }))}
+          />
+          {instant && <LimitGroup title="Instant Apps" note="Apps that work without connecting anything. Universe pays for each run, so each limit is yours to set. Instant Apps do not run until the required ones have a number." limits={instantLimits(instant)} onChange={saveInstant} />}
+          {codeJobs && <LimitGroup title="Apps: code jobs" note="Short pieces of code an App's Brick may run in a separate, temporary workspace with no access to anyone's accounts. They are on by default, with these starting values; change any of them here. A job stops at its time and size limits, whatever it was doing." limits={codeJobLimits(codeJobs)} onChange={saveCodeJobs} />}
+          {allowance && <LimitGroup title="Credit and give-backs" note="What Universe funds and returns. None of these has a built-in value: set each one yourself." limits={moneyLimits(money)} onChange={saveMoney} />}
           {voiceFailed ? (
             <LoadError label="the voice limits" retry={loadVoice} />
           ) : !voice ? (

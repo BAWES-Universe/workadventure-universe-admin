@@ -34,12 +34,19 @@ jest.mock('@/lib/avatar-catalog-validator', () => ({
   resolveCompanionTexture: jest.fn().mockResolvedValue({ valid: true, texture: null }),
 }));
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn() }));
+// What it hands over is covered in guest-brick-db.test.ts
+jest.mock('@/lib/guest-brick', () => ({
+  adoptGuestChatKeepingIt: jest.fn().mockResolvedValue({ adopted: false }),
+  finishKeptGuestChats: jest.fn().mockResolvedValue(0),
+  GuestChatNotKeptError: class GuestChatNotKeptError extends Error {},
+}));
 
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { authenticateRequest } from '@/lib/oidc';
 import { GET as roomAccess } from '@/app/api/room/access/route';
 import { isLinkableGuestId } from '@/lib/guest-sign-in-link';
+import { adoptGuestChatKeepingIt as adoptGuestChat, finishKeptGuestChats, GuestChatNotKeptError } from '@/lib/guest-brick';
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
 
@@ -135,6 +142,64 @@ describe('GET /api/room/access, a guest signing in (#630)', () => {
   it('still lets the person in when the move fails, and tells Sentry', async () => {
     db.roomAccess.findMany.mockRejectedValue(new Error('db down'));
     const body = await enter(`&previousGuestUuid=${GUEST}`);
+    expect(body.status).toBe('ok');
+    expect(Sentry.captureException).toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/room/access, a guest signing in with a chat with the Brick for guests (game #1997)', () => {
+  it('hands that chat to the account that signed in, under the guest id the game checked', async () => {
+    const body = await enter(`&previousGuestUuid=${GUEST}`);
+    expect(body.status).toBe('ok');
+    expect(adoptGuestChat).toHaveBeenCalledTimes(1);
+    expect(adoptGuestChat).toHaveBeenCalledWith(GUEST, 'u1');
+  });
+
+  it('hands nothing over without that id, when the sign-in was not verified, or for an id that is some account’s own', async () => {
+    await enter();
+    (authenticateRequest as jest.Mock).mockResolvedValue({ isAuthenticated: false });
+    await enter(`&previousGuestUuid=${GUEST}`);
+    (authenticateRequest as jest.Mock).mockResolvedValue(SIGNED_IN);
+    await enter(`&previousGuestUuid=${ACCOUNT.uuid}`);
+    expect(adoptGuestChat).not.toHaveBeenCalled();
+  });
+
+  it('still lets the person in when the hand-over fails, and tells Sentry', async () => {
+    (adoptGuestChat as jest.Mock).mockRejectedValueOnce(new Error('db down'));
+    const body = await enter(`&previousGuestUuid=${GUEST}`);
+    expect(body.status).toBe('ok');
+    expect(Sentry.captureException).toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/room/access, a guest id that could not be kept', () => {
+  it('shows the retry screen when the hand-over failed and the id could not be written down either, so the game asks again with it', async () => {
+    (adoptGuestChat as jest.Mock).mockRejectedValueOnce(new GuestChatNotKeptError(new Error('hand-over'), new Error('keep')));
+    const body = await enter(`&previousGuestUuid=${GUEST}`);
+    expect(body).toMatchObject({ status: 'error', type: 'retry', code: 'GUEST_CHAT_NOT_KEPT' });
+    expect(Sentry.captureException).toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/room/access, a hand-over that failed is finished on a later visit', () => {
+  it('finishes what was kept for the account on every verified visit, even with no guest id sent, and before a new hand-over', async () => {
+    const order: string[] = [];
+    (finishKeptGuestChats as jest.Mock).mockImplementationOnce(async () => { order.push('kept'); return 1; });
+    (adoptGuestChat as jest.Mock).mockImplementationOnce(async () => { order.push('new'); return { adopted: false }; });
+    await enter(`&previousGuestUuid=${GUEST}`);
+    expect(order).toEqual(['kept', 'new']);
+    await enter();
+    expect(finishKeptGuestChats).toHaveBeenCalledTimes(2);
+    expect(finishKeptGuestChats).toHaveBeenLastCalledWith('u1');
+  });
+
+  it('finishes nothing for a visit whose sign-in could not be verified, and still lets the person in when finishing fails', async () => {
+    (authenticateRequest as jest.Mock).mockResolvedValue({ isAuthenticated: false });
+    await enter();
+    expect(finishKeptGuestChats).not.toHaveBeenCalled();
+    (authenticateRequest as jest.Mock).mockResolvedValue(SIGNED_IN);
+    (finishKeptGuestChats as jest.Mock).mockRejectedValueOnce(new Error('db down'));
+    const body = await enter();
     expect(body.status).toBe('ok');
     expect(Sentry.captureException).toHaveBeenCalled();
   });

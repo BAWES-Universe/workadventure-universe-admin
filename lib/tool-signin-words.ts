@@ -8,8 +8,8 @@ export interface ToolSignInNoticeData {
   botId: string;
   bot: string;
   universe: string | null;
-  /** oauth: reconnect from the card; key: a key or token that was rejected; open: a connection with no sign-in that the tool server now wants one for. */
-  servers: { id: string; name: string; kind: 'oauth' | 'key' | 'open'; at: string }[];
+  /** direct: a key app (game #2044) whose key the service stopped accepting, replaced in Apps. oauth: reconnect from the card; key: a key or token that was rejected; open: a connection with no sign-in that the tool server now wants one for. */
+  servers: { id: string; name: string; kind: 'oauth' | 'key' | 'open' | 'direct'; at: string }[];
 }
 
 const listOf = (names: string[]) => (names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`);
@@ -17,27 +17,41 @@ const listOf = (names: string[]) => (names.length < 2 ? names.join('') : `${name
 /** The words of the notice. Without `formatTime` it leaves the times out (the stored text); the page passes the viewer's clock. */
 export function describeToolSignIn(data: ToolSignInNoticeData, formatTime?: (iso: string) => string) {
   const { servers } = data;
-  // The tools page can only change a connection by adding it again, so everything that is not an OAuth sign-in leads there
-  const keysOnly = servers.every((server) => server.kind !== 'oauth');
-  const anyKey = servers.some((server) => server.kind !== 'oauth');
-  const allKeys = servers.every((server) => server.kind === 'key');
   const names = servers.map((server) => server.name);
+  // Key apps (game #2044) are fixed in Apps with one Replace key, for every Brick at once: the words are about the person's key, not "this bot's"
+  const direct = servers.filter((server) => server.kind === 'direct');
+  if (direct.length === servers.length) {
+    const when = formatTime ? ` at ${formatTime(servers[0].at)}` : '';
+    return {
+      title: `${listOf(names)} stopped working`,
+      badge: 'Key stopped working',
+      body: `${data.universe ? `In ${data.universe}. ` : ''}${servers.length === 1 ? `${names[0]} stopped accepting your key${when}.` : `${listOf(names)} stopped accepting your keys.`} Your Bricks carry on without ${servers.length === 1 ? 'it' : 'them'}. In the game, open Chat, then Bricks, then Apps, and tap Replace key.`,
+    };
+  }
+  // A mix: the connections of the bot are told as before, and the key apps get their own sentence (they are never removed and added again)
+  const rest = servers.filter((server) => server.kind !== 'direct');
+  const directNote = direct.length ? ` ${listOf(direct.map((server) => server.name))} ${direct.length === 1 ? 'stopped accepting your key' : 'stopped accepting your keys'}: in the game, open Chat, then Bricks, then Apps, and tap Replace key.` : '';
+  // The tools page can only change a connection by adding it again, so everything that is not an OAuth sign-in leads there
+  const keysOnly = rest.every((server) => server.kind !== 'oauth');
+  const anyKey = rest.some((server) => server.kind !== 'oauth');
+  const allKeys = rest.every((server) => server.kind === 'key');
+  const restNames = rest.map((server) => server.name);
   const what = allKeys ? 'API key' : 'sign-in';
-  const times = formatTime ? servers.map((server) => formatTime(server.at)) : [];
+  const times = formatTime ? rest.map((server) => formatTime(server.at)) : [];
   const where = data.universe ? `In ${data.universe}. ` : '';
-  const one = servers.length === 1;
+  const one = rest.length === 1;
   const stopped = one
-    ? `${names[0]} stopped accepting this bot’s ${what}${formatTime ? ` at ${times[0]}` : ''}.`
-    : `${servers.length === 2 ? 'Both' : `All ${servers.length}`} stopped accepting this bot’s ${what}${formatTime ? ` (${listOf(times)})` : ''}.`;
+    ? `${restNames[0]} stopped accepting this bot’s ${what}${formatTime ? ` at ${times[0]}` : ''}.`
+    : `${rest.length === 2 ? 'Both' : `All ${rest.length}`} stopped accepting this bot’s ${what}${formatTime ? ` (${listOf(times)})` : ''}.`;
   const meanwhile = keysOnly
-    ? 'Tap to open this bot’s tools page, remove it there and add it again with a new key.'
+    ? 'Tap to open this bot’s apps page, remove it there and add it again with a new key.'
     : one
-      ? 'Until it’s reconnected, this bot answers without its tools and tells people who ask for them.'
+      ? 'Until it’s reconnected, this bot answers without its apps and tells people who ask for them.'
       : 'Until they’re reconnected, this bot answers without them and tells people who ask.';
-  const keyHint = anyKey && !keysOnly ? ' Tap to open this bot’s tools page, where the ones that need a new key can be removed and added again.' : '';
+  const keyHint = anyKey && !keysOnly ? ' Tap to open this bot’s apps page, where the ones that need a new key can be removed and added again.' : '';
   return {
     title: `${data.bot} can’t use ${listOf(names)}`,
     badge: allKeys ? 'Key rejected' : 'Sign-in expired',
-    body: `${where}${stopped} ${meanwhile}${keyHint}`,
+    body: `${where}${stopped} ${meanwhile}${keyHint}${directNote}`,
   };
 }

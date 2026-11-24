@@ -1,0 +1,568 @@
+/**
+ * Key apps (game #2044) against a real database: the safe form from its opening to a stored key, and what only the database can show.
+ * Runs only with ROLES_DB_TEST=yes and a DATABASE_URL to a migrated throwaway database:
+ *
+ *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest --runInBand __tests__/api/app-direct-db.test.ts
+ */
+import { randomUUID } from 'node:crypto';
+import { NextRequest } from 'next/server';
+
+const mockUser: { current: { id: string; isGuest?: boolean } | null } = { current: null };
+jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockUser.current) }));
+// The real guard, except when a test says what the service answers: nothing here reaches the internet
+const mockSend: { current: ((target: { path: string }) => number) | null } = { current: null };
+jest.mock('@/lib/app-direct/guard', () => {
+  const actual = jest.requireActual('@/lib/app-direct/guard');
+  return {
+    ...actual,
+    guardedRequest: jest.fn((request: Parameters<typeof actual.guardedRequest>[0], deps?: Parameters<typeof actual.guardedRequest>[1]) =>
+      mockSend.current
+        ? actual.guardedRequest(request, {
+            resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+            send: async (target: { path: string }) => ({ status: mockSend.current!(target), redirected: false, body: '{}', truncated: false, contentType: 'application/json' }),
+          })
+        : actual.guardedRequest(request, deps),
+    ),
+  };
+});
+
+import { prisma } from '@/lib/db';
+import { createBrick } from '@/lib/brick-create';
+import { decryptApiKey } from '@/lib/encryption';
+import { disconnect, effectiveServer, listConnections, WITH_CONNECTION } from '@/lib/app-connections';
+import { grantKeyAppToBricks } from '@/lib/app-direct/grants';
+import { openKeyForm, readKey, readKeyForm, submitKey, KeyFormError } from '@/lib/app-direct/connect';
+import type { GuardDeps } from '@/lib/app-direct/guard';
+
+/** Waits until a condition read from the database holds (a call in flight has reached the point the test is about). */
+const waitFor = async (holds: () => Promise<boolean>) => {
+  for (let i = 0; i < 200; i++) {
+    if (await holds()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('The condition never held');
+};
+import { GET as listServices } from '@/app/api/me/apps/key-services/route';
+import { POST as openForm } from '@/app/api/me/apps/key-forms/route';
+import { GET as readForm } from '@/app/api/me/apps/key-forms/[formId]/route';
+import { POST as sendKey } from '@/app/api/me/apps/key-forms/[formId]/key/route';
+import { GET as listApps } from '@/app/api/me/apps/route';
+import { saveServerLimits } from '@/lib/bot-limits';
+import { EXAMPLE_GATEWAY } from '../helpers/example-gateway';
+jest.mock('@/lib/app-direct/catalog', () => jest.requireActual('../helpers/example-gateway').catalogWithExample());
+
+const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
+
+const tag = randomUUID().slice(0, 8);
+const TEST_KEY = `sk_test_${randomUUID().replace(/-/g, '')}`;
+const LIVE_KEY = `sk_live_${randomUUID().replace(/-/g, '')}`;
+let sara = '';
+let omar = '';
+let saraBrick = '';
+const envKey = process.env.ENCRYPTION_KEY;
+let limitsBefore: { value: unknown } | null = null;
+
+const request = (path: string, body?: unknown) =>
+  new NextRequest(`http://localhost${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+const params = <T extends Record<string, string>>(value: T) => ({ params: Promise.resolve(value) });
+
+/** What the service answers, and every request it was sent. */
+function service(status: number | ((request: { path: string; headers: Record<string, string> }) => number)) {
+  const seen: { host: string; address: string; path: string; method: string; headers: Record<string, string> }[] = [];
+  const deps: GuardDeps = {
+    resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+    send: async (target) => {
+      seen.push({ host: target.host, address: target.address, path: target.path, method: target.method, headers: target.headers });
+      const code = typeof status === 'function' ? status({ path: target.path, headers: target.headers }) : status;
+      return { status: code, redirected: false, body: '{}', truncated: false, contentType: 'application/json' };
+    },
+  };
+  return { deps, seen };
+}
+
+run('key apps, in a real database', () => {
+  beforeAll(async () => {
+    process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'a'.repeat(64);
+    // The recommended limits, whatever an earlier run of anything left on this database
+    limitsBefore = await prisma.appSetting.findUnique({ where: { key: 'bot-limits' } });
+    await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
+    const person = (name: string) => prisma.user.create({ data: { uuid: `${name}-${tag}`, email: `${name}-${tag}@example.test`, name } });
+    sara = (await person('sara')).id;
+    omar = (await person('omar')).id;
+    saraBrick = (await createBrick({ ownerId: sara, name: 'Brick' })).id;
+  });
+
+  afterEach(async () => {
+    mockUser.current = null;
+    await prisma.appKeyRequest.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
+    await prisma.appConnection.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
+  });
+
+  afterAll(async () => {
+    await prisma.user.deleteMany({ where: { id: { in: [sara, omar] } } });
+    await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
+    if (limitsBefore) await prisma.appSetting.create({ data: { key: 'bot-limits', value: limitsBefore.value as object } });
+    if (envKey === undefined) delete process.env.ENCRYPTION_KEY;
+    else process.env.ENCRYPTION_KEY = envKey;
+    await prisma.$disconnect();
+  });
+
+  const open = async (ownerId = sara) => (await openKeyForm({ ownerId, service: 'examplepay' })).id;
+
+  it('shows the form for this person only, with where the key goes and what is checked, and nothing else', async () => {
+    const id = await open();
+    const view = await readKeyForm(id, sara);
+    expect(view).toMatchObject({ mode: 'prefilled', name: 'Example Pay', short: 'Example', keyLabel: 'Example key', host: 'api.examplepay.com', hostReadable: null, source: null, differentSite: false, check: 'Look up a payment', replacing: null, triesLeft: 5 });
+    expect(view.keyHint).toContain('sk_test_');
+    // Someone else's form looks exactly like one that does not exist
+    await expect(readKeyForm(id, omar)).rejects.toMatchObject({ status: 404, code: 'not_found' });
+    await expect(submitKey({ requestId: id, ownerId: omar, key: TEST_KEY }, service(404).deps)).rejects.toMatchObject({ status: 404 });
+    await expect(openKeyForm({ ownerId: sara, service: 'nothing' })).rejects.toMatchObject({ status: 404, code: 'unknown_service' });
+  });
+
+  it('checks the key with a look-up sent to the one origin, stores it encrypted, and shows only its end', async () => {
+    const id = await open();
+    const fake = service(404);
+    const done = await submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, fake.deps);
+    expect(done).toMatchObject({ name: 'Example Pay', created: true });
+
+    // One request, a GET look-up, to the shipped origin, at the checked address, with the key only in the header
+    expect(fake.seen).toHaveLength(1);
+    expect(fake.seen[0]).toMatchObject({ host: 'api.examplepay.com', address: '93.184.216.34', method: 'GET', path: '/v2/charges/chg_universe_key_check' });
+    expect(fake.seen[0].headers.authorization).toBe(`Bearer ${TEST_KEY}`);
+    expect(fake.seen[0].path).not.toContain(TEST_KEY);
+
+    const row = await prisma.appConnection.findUniqueOrThrow({ where: { id: done.id } });
+    expect(row).toMatchObject({ kind: 'direct', source: 'direct', authType: 'none', authConfig: null, catalogKey: 'direct:examplepay', keyLast4: TEST_KEY.slice(-4), keyMode: 'test', serverUrl: 'https://api.examplepay.com', ownerId: sara, universeId: null });
+    expect(row.keyCipher).not.toContain(TEST_KEY);
+    expect(decryptApiKey(row.keyCipher!)).toBe(TEST_KEY);
+    expect(readKey(row)).toBe(TEST_KEY);
+
+    // The form is used up, and the list shows the end of the key and never the key
+    await expect(readKeyForm(id, sara)).rejects.toMatchObject({ status: 410, code: 'used' });
+    mockUser.current = { id: sara };
+    const listed = await (await listApps(request('/api/me/apps'))).json();
+    expect(listed.apps).toHaveLength(1);
+    expect(listed.apps[0]).toMatchObject({ kind: 'direct', keyLast4: TEST_KEY.slice(-4), keyMode: 'test', connected: true, lendable: false });
+    expect(JSON.stringify(listed)).not.toContain(TEST_KEY);
+    expect(JSON.stringify(await listConnections(sara))).not.toContain(row.keyCipher!);
+  });
+
+  it('trims what was pasted around the key, and shows no hint of the end of a short key', async () => {
+    const id = await open();
+    const short = 'sk_test_abcd';
+    const fake = service(404);
+    const done = await submitKey({ requestId: id, ownerId: sara, key: `  ${short}\n` }, fake.deps);
+    expect(fake.seen[0].headers.authorization).toBe(`Bearer ${short}`);
+    const row = await prisma.appConnection.findUniqueOrThrow({ where: { id: done.id } });
+    expect(readKey(row)).toBe(short);
+    expect(row.keyLast4).toBeNull();
+    mockUser.current = { id: sara };
+    const listed = await (await listApps(request('/api/me/apps'))).json();
+    expect(listed.apps.find((app: { id: string }) => app.id === done.id)).toMatchObject({ kind: 'direct', keyLast4: null });
+    expect(JSON.stringify(listed)).not.toContain(short);
+    await prisma.appConnection.delete({ where: { id: done.id } });
+  });
+
+  it('does not take a key the service refuses: it costs a try, stores nothing, and the form closes after the last one', async () => {
+    const id = await open();
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(401).deps)).rejects.toMatchObject({ status: 422, code: 'rejected' });
+      expect((await readKeyForm(id, sara).catch(() => null))?.triesLeft ?? 0).toBe(5 - attempt);
+    }
+    const fake = service(200);
+    await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, fake.deps)).rejects.toMatchObject({ status: 429, code: 'too_many' });
+    expect(fake.seen).toHaveLength(0);
+    expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(0);
+  });
+
+  it('says only "not a key this form can take" for text that is not one, and sends nothing', async () => {
+    const id = await open();
+    const fake = service(200);
+    for (const bad of ['short', 'two words in here', 'x'.repeat(600), '', 7, null]) {
+      await expect(submitKey({ requestId: id, ownerId: sara, key: bad }, fake.deps)).rejects.toMatchObject({ status: 400, code: 'invalid_key' });
+    }
+    expect(fake.seen).toHaveLength(0);
+  });
+
+  it('does not say the key is wrong when the service could not be reached or sent a redirect, and costs no try', async () => {
+    const id = await open();
+    await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, { resolve: async () => [{ address: '10.0.0.1', family: 4 }] })).rejects.toMatchObject({ status: 502, code: 'unreachable' });
+    await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, { resolve: async () => [{ address: '93.184.216.34', family: 4 }], send: async () => ({ status: 302, redirected: true, body: '', truncated: false, contentType: null }) })).rejects.toMatchObject({ status: 502, code: 'unreachable' });
+    await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(503).deps)).rejects.toMatchObject({ status: 502 });
+    expect((await readKeyForm(id, sara)).triesLeft).toBe(5);
+  });
+
+  it.each([
+    ['the service refused the key', 401, 'rejected'],
+    ['the service could not be reached', 503, 'unreachable'],
+  ])('a try whose outcome the database could not write (%s) counts as used once it lapses, so a failed write never gives a key a free guess', async (_label, status, _code) => {
+    const id = await open();
+    await prisma.appKeyRequest.update({ where: { id }, data: { tries: 4 } });
+    const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const original = prisma.$executeRaw.bind(prisma);
+    // Every release fails (the database is gone at that moment); the reservation before it is a separate query and works
+    const spy = jest.spyOn(prisma, '$executeRaw').mockImplementation(((...args: unknown[]) => Promise.reject(new Error('connection lost'))) as never);
+    try {
+      await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(status).deps)).rejects.toMatchObject({ status: status === 401 ? 422 : 502 });
+    } finally {
+      spy.mockRestore();
+      quiet.mockRestore();
+    }
+    expect(await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true, reservedTries: true } })).toEqual({ tries: 4, reservedTries: 1 });
+    // While the reservation could still be a call in flight, the last try is not given to a second one
+    const quietService = service(404);
+    await expect(submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, quietService.deps)).rejects.toMatchObject({ status: 429, code: 'check_in_progress', message: 'A check is in progress' });
+    // After the longest a call can take it has lapsed: nobody can tell whether the service refused the key, so the try is used, in the row
+    // itself (nothing lives in this process), and the form shows and keeps it
+    await prisma.appKeyRequest.update({ where: { id }, data: { reservedAt: new Date(Date.now() - 10 * 60_000) } });
+    expect((await readKeyForm(id, sara)).triesLeft).toBe(0);
+    await expect(submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, quietService.deps)).rejects.toMatchObject({ status: 429, code: 'too_many' });
+    expect(quietService.seen).toHaveLength(0);
+  });
+
+  it('while a check holds the last room, a second key is told a check is in progress (not Too many tries), the form says so, and it goes through once the check has given its try back', async () => {
+    const id = await open();
+    await prisma.appKeyRequest.update({ where: { id }, data: { tries: 4 } });
+    let finish: (answer: { status: number; redirected: boolean; body: string; truncated: boolean; contentType: null }) => void = () => undefined;
+    const slow = {
+      resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+      send: () => new Promise<{ status: number; redirected: boolean; body: string; truncated: boolean; contentType: null }>((resolve) => (finish = resolve)),
+    };
+    const first = submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow as never);
+    await waitFor(async () => (await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { reservedTries: true } })).reservedTries === 1);
+    expect((await readKeyForm(id, sara)).checkInProgress).toBe(true);
+    await expect(submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, service(404).deps)).rejects.toMatchObject({ status: 429, code: 'check_in_progress' });
+    // The check ends without the service refusing the key: its try is given back, the wait is over, and the next key is checked
+    finish({ status: 503, redirected: false, body: '', truncated: false, contentType: null });
+    await expect(first).rejects.toMatchObject({ status: 502 });
+    expect((await readKeyForm(id, sara)).checkInProgress).toBe(false);
+    const next = service(404);
+    await submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, next.deps).catch(() => null);
+    expect(next.seen.length).toBeGreaterThan(0);
+  });
+
+  it('a form with no tries left says Too many tries, never that a check is in progress', async () => {
+    const id = await open();
+    await prisma.appKeyRequest.update({ where: { id }, data: { tries: 5 } });
+    expect((await readKeyForm(id, sara)).checkInProgress).toBe(false);
+    await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(404).deps)).rejects.toMatchObject({ status: 429, code: 'too_many' });
+  });
+
+  it('counts the lapsed tries of a form once, however many calls reserve at the same moment, and a late call from that run counts nothing more', async () => {
+    const id = await open();
+    await prisma.appKeyRequest.update({ where: { id }, data: { tries: 1, reservedTries: 1, reservedAt: new Date(Date.now() - 10 * 60_000) } });
+    await Promise.all([1, 2, 3].map(() => submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(503).deps).catch(() => null)));
+    // The one lapsed try is used once (1 + 1), and every call released its own reservation
+    expect(await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true, reservedTries: true } })).toEqual({ tries: 2, reservedTries: 0 });
+  });
+
+  it('a call still in flight from before its reservation lapsed takes no try away from the call in flight now, but its refusal still counts', async () => {
+    const id = await open();
+    await prisma.appKeyRequest.update({ where: { id }, data: { tries: 1 } });
+    // The first call is asked and waits in the service; the second call (after the reservation lapsed) is reserved in the next run; then the first call ends
+    let finishFirst: (answer: { status: number; redirected: boolean; body: string; truncated: boolean; contentType: null }) => void = () => undefined;
+    const slow = {
+      resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+      send: () => new Promise<{ status: number; redirected: boolean; body: string; truncated: boolean; contentType: null }>((resolve) => (finishFirst = resolve)),
+    };
+    const first = submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow as never);
+    await waitFor(async () => (await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { reservedTries: true } })).reservedTries === 1);
+    const start = await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { reservedEpoch: true } });
+    // The reservation lapses (the call has taken longer than the longest a call can take)
+    await prisma.appKeyRequest.update({ where: { id }, data: { reservedAt: new Date(Date.now() - 10 * 60_000) } });
+    let finishSecond: (answer: { status: number; redirected: boolean; body: string; truncated: boolean; contentType: null }) => void = () => undefined;
+    const second = submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, { resolve: slow.resolve, send: () => new Promise((resolve) => (finishSecond = resolve)) } as never);
+    await waitFor(async () => (await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { reservedEpoch: true } })).reservedEpoch === start.reservedEpoch + 1);
+    expect((await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { reservedTries: true } })).reservedTries).toBe(1);
+    // The first call ends, with a refusal: its try was counted as used when its reservation lapsed, so it counts nothing more, and it releases nothing that belongs to the second call
+    finishFirst({ status: 401, redirected: false, body: '', truncated: false, contentType: null });
+    await expect(first).rejects.toMatchObject({ code: 'rejected' });
+    expect(await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true, reservedTries: true } })).toEqual({ tries: 2, reservedTries: 1 });
+    // The second ends: its own reservation is released
+    finishSecond({ status: 503, redirected: false, body: '', truncated: false, contentType: null });
+    await expect(second).rejects.toMatchObject({ status: 502 });
+    expect(await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true, reservedTries: true } })).toEqual({ tries: 2, reservedTries: 0 });
+  });
+
+  it('counts a try only when the service refuses the key: a refusal uses one, an answer that is not a refusal uses none', async () => {
+    const id = await open();
+    await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(401).deps)).rejects.toMatchObject({ code: 'rejected' });
+    expect(await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true, reservedTries: true } })).toEqual({ tries: 1, reservedTries: 0 });
+    await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(503).deps)).rejects.toMatchObject({ status: 502 });
+    expect(await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true, reservedTries: true } })).toEqual({ tries: 1, reservedTries: 0 });
+  });
+
+  it('closes a form after its time, and a form can be used once, also when two keys arrive at the same moment', async () => {
+    const old = await open();
+    await prisma.appKeyRequest.update({ where: { id: old }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    await expect(readKeyForm(old, sara)).rejects.toMatchObject({ status: 410, code: 'expired' });
+    await expect(submitKey({ requestId: old, ownerId: sara, key: TEST_KEY }, service(404).deps)).rejects.toMatchObject({ status: 410 });
+
+    const id = await open();
+    const results = await Promise.allSettled([submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(404).deps), submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, service(404).deps)]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(1);
+  });
+
+  it('replaces a key atomically: the new one is checked first, the old one stops, and the app stays the same one', async () => {
+    const first = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
+    const again = `sk_test_${randomUUID().replace(/-/g, '')}`;
+
+    // A form for the same service replaces that app's key; it says whose key it replaces
+    const replace = await openKeyForm({ ownerId: sara, service: 'examplepay' });
+    expect(replace.replacing).toBe(true);
+    expect(await readKeyForm(replace.id, sara)).toMatchObject({ replacing: { keyLast4: TEST_KEY.slice(-4), mode: 'test' } });
+
+    // A key the service refuses changes nothing: the old key is still the one in use
+    await expect(submitKey({ requestId: replace.id, ownerId: sara, key: again }, service(401).deps)).rejects.toMatchObject({ code: 'rejected' });
+    expect(readKey(await prisma.appConnection.findUniqueOrThrow({ where: { id: first.id } }))).toBe(TEST_KEY);
+
+    const done = await submitKey({ requestId: replace.id, ownerId: sara, key: again }, service(404).deps);
+    expect(done).toMatchObject({ id: first.id, created: false });
+    const row = await prisma.appConnection.findUniqueOrThrow({ where: { id: first.id } });
+    expect(readKey(row)).toBe(again);
+    expect(row).toMatchObject({ keyVersion: 2, keyLast4: again.slice(-4), signInLostAt: null });
+    expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(1);
+  });
+
+  it('asks first when a replacement switches between a test key and a real one, and a new key clears "key stopped working"', async () => {
+    const first = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
+    await prisma.appConnection.update({ where: { id: first.id }, data: { signInLostAt: new Date(), signInLostStatus: 401 } });
+    const form = (await openKeyForm({ ownerId: sara, connectionId: first.id })).id;
+    await expect(submitKey({ requestId: form, ownerId: sara, key: LIVE_KEY }, service(404).deps)).rejects.toMatchObject({ status: 409, code: 'mode_change', extra: { from: 'test', to: 'live' } });
+    // Nothing changed and the form is still open for the answer
+    expect(readKey(await prisma.appConnection.findUniqueOrThrow({ where: { id: first.id } }))).toBe(TEST_KEY);
+    expect((await readKeyForm(form, sara)).triesLeft).toBe(5);
+    await submitKey({ requestId: form, ownerId: sara, key: LIVE_KEY, confirmChange: true }, service(404).deps);
+    const row = await prisma.appConnection.findUniqueOrThrow({ where: { id: first.id } });
+    expect(row).toMatchObject({ keyMode: 'live', signInLostAt: null, signInLostStatus: null });
+    expect(readKey(row)).toBe(LIVE_KEY);
+  });
+
+  it('refuses a replacement key whose kind it cannot tell, for an app that told test from real, and changes nothing', async () => {
+    const first = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
+    const form = (await openKeyForm({ ownerId: sara, connectionId: first.id })).id;
+    // Neither prefix: accepting it would set the kind to nothing and quietly stop payments on pages that use this app
+    const odd = `zz_${TEST_KEY.slice(8)}`;
+    await expect(submitKey({ requestId: form, ownerId: sara, key: odd, confirmChange: true }, service(404).deps)).rejects.toMatchObject({ status: 400, code: 'invalid_key' });
+    const row = await prisma.appConnection.findUniqueOrThrow({ where: { id: first.id } });
+    expect(row).toMatchObject({ keyMode: 'test', keyVersion: 1 });
+    expect(readKey(row)).toBe(TEST_KEY);
+    // The form is still open for a good key
+    expect((await readKeyForm(form, sara)).triesLeft).toBeGreaterThan(0);
+  });
+
+  it("never lets one person replace another's key, or open a form on another's app", async () => {
+    const mine = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
+    await expect(openKeyForm({ ownerId: omar, connectionId: mine.id })).rejects.toMatchObject({ status: 404 });
+    // Omar's own Example Pay is his own app, not Sara's
+    const omars = await submitKey({ requestId: await open(omar), ownerId: omar, key: LIVE_KEY }, service(404).deps);
+    expect(omars.id).not.toBe(mine.id);
+    expect(await prisma.appConnection.count({ where: { ownerId: { in: [sara, omar] } } })).toBe(2);
+  });
+
+  it('holds the shape in the database: a key app is its owner\'s, direct, with a key, never a universe\'s, and never lendable', async () => {
+    const base = { name: 'X', serverUrl: 'https://api.example.com', ownerId: sara, kind: 'direct', definition: { a: 1 }, definitionHash: 'h', keyCipher: 'c', source: 'direct', authType: 'none' } as const;
+    await expect(prisma.appConnection.create({ data: { ...base, source: 'link' } })).rejects.toThrow();
+    await expect(prisma.appConnection.create({ data: { ...base, keyCipher: null } })).rejects.toThrow();
+    await expect(prisma.appConnection.create({ data: { ...base, definition: undefined } })).rejects.toThrow();
+    await expect(prisma.appConnection.create({ data: { ...base, authType: 'bearer' } })).rejects.toThrow();
+    // An app link may not hold a key
+    await expect(prisma.appConnection.create({ data: { ...base, kind: 'mcp', source: 'link' } })).rejects.toThrow();
+
+    const ok = await prisma.appConnection.create({ data: base });
+    const universe = await prisma.universe.create({ data: { slug: `lend-${tag}`, name: 'Lend', ownerId: omar } });
+    try {
+      await expect(prisma.appLend.create({ data: { connectionId: ok.id, universeId: universe.id, lentById: sara } })).rejects.toThrow();
+    } finally {
+      await prisma.universe.delete({ where: { id: universe.id } });
+    }
+  });
+
+  it('is never handed to a Brick as a way in: a grant of it carries no key, whatever is written to the row', async () => {
+    const made = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
+    // Connecting gives the owner's Brick its grant; it holds a name and nothing to connect with
+    const grant = await prisma.botMcpServer.findFirstOrThrow({ where: { botId: saraBrick, connectionId: made.id } });
+    expect(grant).toMatchObject({ authType: 'none', authConfig: null, headers: null, serverUrl: '' });
+    const row = await prisma.botMcpServer.findUniqueOrThrow({ where: { id: grant.id }, include: WITH_CONNECTION });
+    const served = effectiveServer(row);
+    expect(served).toMatchObject({ authType: 'none', authConfig: null, headers: null });
+    expect(JSON.stringify(served)).not.toContain(TEST_KEY);
+    expect(JSON.stringify(served)).not.toContain(row.connection!.keyCipher!);
+    expect(served.connection?.keyCipher).toBeNull();
+    // Even a row written with a way in by hand reads back without it
+    await prisma.botMcpServer.update({ where: { id: grant.id }, data: { authType: 'bearer', authConfig: 'x:y:z', headers: { a: 'b' } } });
+    const forged = effectiveServer(await prisma.botMcpServer.findUniqueOrThrow({ where: { id: grant.id }, include: WITH_CONNECTION }));
+    expect(forged).toMatchObject({ authType: 'none', authConfig: null, headers: null });
+  });
+
+  it('goes on to the owner’s other Bricks when one of them could not be given the app', async () => {
+    const second = (await createBrick({ ownerId: sara, name: 'Second Brick' })).id;
+    try {
+      const made = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
+      await prisma.botMcpServer.deleteMany({ where: { connectionId: made.id } });
+      const real = prisma.$transaction.bind(prisma);
+      let calls = 0;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((...args: unknown[]) => {
+        calls += 1;
+        // The first Brick's grant fails (a dropped connection, a deadlock Postgres broke)
+        return calls === 1 ? Promise.reject(new Error('the database dropped the connection')) : (real as (...a: unknown[]) => unknown)(...args);
+      }) as never);
+      try {
+        expect(await grantKeyAppToBricks(sara, { id: made.id, name: made.name })).toMatchObject({ granted: 1 });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await prisma.botMcpServer.count({ where: { connectionId: made.id } })).toBe(1);
+    } finally {
+      await prisma.bot.deleteMany({ where: { id: second } });
+    }
+  });
+
+  it('disconnect takes it away', async () => {
+    const made = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
+    expect(await disconnect(omar, made.id)).toBe(false);
+    expect(await disconnect(sara, made.id)).toBe(true);
+    expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(0);
+  });
+
+  it('writes the key nowhere readable: not in any row of any table, in any of the forms it travels in', async () => {
+    const id = await open();
+    const made = await submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(404).deps);
+    await prisma.appConnection.update({ where: { id: made.id }, data: { name: 'Example Pay' } });
+    const tables = await prisma.$queryRaw<{ tablename: string }[]>`SELECT tablename FROM pg_tables WHERE schemaname = 'public'`;
+    const forms = [TEST_KEY, Buffer.from(TEST_KEY).toString('base64'), encodeURIComponent(TEST_KEY)];
+    for (const { tablename } of tables) {
+      for (const form of forms) {
+        const found = await prisma.$queryRawUnsafe<{ n: bigint }[]>(`SELECT count(*)::bigint AS n FROM "${tablename}" t WHERE row_to_json(t)::text LIKE $1`, `%${form}%`);
+        expect({ tablename, found: Number(found[0].n) }).toEqual({ tablename, found: 0 });
+      }
+    }
+  });
+
+  describe('through the routes', () => {
+    it('opens a form, shows it, takes the key, and refuses a guest, a stranger and a body with anything else in it', async () => {
+      const spec = await listServices(request('/api/me/apps/key-services'));
+      expect(spec.status).toBe(401);
+      // A guest is read from the account itself, not from anything the session carries
+      mockUser.current = { id: sara };
+      await prisma.user.update({ where: { id: sara }, data: { isGuest: true } });
+      try {
+        expect((await openForm(request('/api/me/apps/key-forms', { service: 'examplepay' }))).status).toBe(403);
+      } finally {
+        await prisma.user.update({ where: { id: sara }, data: { isGuest: false } });
+      }
+
+      mockUser.current = { id: sara };
+      expect((await (await listServices(request('/api/me/apps/key-services'))).json()).services.map((entry: { service: string }) => entry.service)).toEqual(['examplepay']);
+      expect((await openForm(request('/api/me/apps/key-forms', { service: 'examplepay', origin: 'https://evil.example' }))).status).toBe(400);
+      expect((await openForm(request('/api/me/apps/key-forms', { service: 'nothing' }))).status).toBe(404);
+      const opened = await openForm(request('/api/me/apps/key-forms', { service: 'examplepay' }));
+      expect(opened.status).toBe(201);
+      const { id } = await opened.json();
+
+      const shown = await (await readForm(request(`/api/me/apps/key-forms/${id}`), params({ formId: id }))).json();
+      expect(shown.form).toMatchObject({ id, host: 'api.examplepay.com', keyLabel: 'Example key' });
+
+      mockUser.current = { id: omar };
+      expect((await readForm(request(`/api/me/apps/key-forms/${id}`), params({ formId: id }))).status).toBe(404);
+      expect((await sendKey(request(`/api/me/apps/key-forms/${id}/key`, { key: TEST_KEY }), params({ formId: id }))).status).toBe(404);
+
+      mockUser.current = { id: sara };
+      expect((await sendKey(request(`/api/me/apps/key-forms/${id}/key`, { key: TEST_KEY, host: 'evil.example' }), params({ formId: id }))).status).toBe(400);
+      expect((await sendKey(request(`/api/me/apps/key-forms/${id}/key`, { key: 'tiny' }), params({ formId: id }))).status).toBe(400);
+      expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(0);
+    });
+
+    it('answers a key the service takes with the app and never the key, and one it refuses with a plain no', async () => {
+      mockUser.current = { id: sara };
+      try {
+        const refused = await open();
+        mockSend.current = () => 401;
+        const no = await sendKey(request(`/api/me/apps/key-forms/${refused}/key`, { key: TEST_KEY }), params({ formId: refused }));
+        expect(no.status).toBe(422);
+        expect(JSON.stringify(await no.json())).not.toContain(TEST_KEY);
+        expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(0);
+
+        const form = await open();
+        mockSend.current = () => 404;
+        const response = await sendKey(request(`/api/me/apps/key-forms/${form}/key`, { key: TEST_KEY }), params({ formId: form }));
+        expect(response.status).toBe(201);
+        expect(JSON.stringify(await response.json())).not.toContain(TEST_KEY);
+        expect(await prisma.appConnection.count({ where: { ownerId: sara, kind: 'direct' } })).toBe(1);
+      } finally {
+        mockSend.current = null;
+      }
+    });
+  });
+
+  it('takes the try before the service is asked, so keys sent at the same moment cannot get past the limit together', async () => {
+    try {
+      await saveServerLimits({ bricks: { keyFormMinutes: 5, keyTries: 2 } }, sara);
+      const id = await open();
+      let asked = 0;
+      // Both looks are held on an explicit gate, not a timer, until the four blocked submissions have been told to wait: one that reloaded the row after the
+      // looks were recorded would rightly be told there are no tries left
+      let letGo!: () => void;
+      const gate = new Promise<void>((resolve) => (letGo = resolve));
+      const slow: GuardDeps = {
+        resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+        send: async () => {
+          asked += 1;
+          await gate;
+          return { status: 401, redirected: false, body: '{}', truncated: false, contentType: 'application/json' };
+        },
+      };
+      let told = 0;
+      const all = Array.from({ length: 6 }, () =>
+        submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow).catch((error: { code?: string }) => {
+          if (error.code === 'check_in_progress') told += 1;
+          throw error;
+        }),
+      );
+      const settled = Promise.allSettled(all);
+      for (const end = Date.now() + 15_000; told < 4 && Date.now() < end; ) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(told).toBe(4);
+      letGo();
+      const results = await settled;
+      expect(asked).toBe(2);
+      expect(results.filter((r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'rejected')).toHaveLength(2);
+      // The two checks under way hold the room: the others are told to wait, which is not the same as having no tries left
+      expect(results.filter((r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'check_in_progress')).toHaveLength(4);
+      // Both were refused by the service, so the tries are used: now there really are none
+      await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow)).rejects.toMatchObject({ code: 'too_many' });
+    } finally {
+      await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
+    }
+  });
+
+  it('keeps the form time and tries as Limits settings, not numbers in the code', async () => {
+    try {
+      await saveServerLimits({ bricks: { keyFormMinutes: 1, keyTries: 2 } }, sara);
+      const id = await open();
+      expect((await readKeyForm(id, sara)).triesLeft).toBe(2);
+      const row = await prisma.appKeyRequest.findUniqueOrThrow({ where: { id } });
+      expect(row.expiresAt.getTime() - Date.now()).toBeLessThanOrEqual(60_000);
+      await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(401).deps)).rejects.toMatchObject({ code: 'rejected' });
+      await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(401).deps)).rejects.toMatchObject({ code: 'rejected' });
+      await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(401).deps)).rejects.toMatchObject({ code: 'too_many' });
+    } finally {
+      await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
+    }
+  });
+
+  it('does not tell a form error apart from one that was never there, for a draft that is not valid', async () => {
+    await expect(openKeyForm({ ownerId: sara, draft: { origin: 'http://x' } })).rejects.toBeInstanceOf(KeyFormError);
+  });
+  it('shows, for a setup a Brick wrote from a gateway’s docs, where buyers will pay and what counts as paid, so confirming the form is confirming that', async () => {
+    const draft = { ...EXAMPLE_GATEWAY, service: 'some-gateway' };
+    const { id } = await openKeyForm({ ownerId: sara, draft, source: 'https://docs.examplepay.com/api' });
+    const view = await readKeyForm(id, sara);
+    expect(view).toMatchObject({ mode: 'custom', payments: { checkoutHosts: ['examplepay.com'], paidWhen: ['CAPTURED'], testAndLive: true } });
+    // A setup that cannot take payments says nothing about them
+    const plain = { ...EXAMPLE_GATEWAY, service: 'x', payment: undefined, modes: undefined };
+    const other = await openKeyForm({ ownerId: sara, draft: plain, source: 'https://docs.examplepay.com/api' });
+    expect((await readKeyForm(other.id, sara)).payments).toBeNull();
+  });
+});

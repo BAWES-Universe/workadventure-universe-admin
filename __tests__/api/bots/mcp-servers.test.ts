@@ -46,6 +46,10 @@ jest.mock('@/lib/db', () => {
         botMcpServer: mockBotMcpServer,
         bot: mockBot,
         user: mockUser,
+        // The server's limits are read inside it: nothing saved, so the recommended ones
+        appSetting: { findUnique: jest.fn(async () => null) },
+        // Holding the bot's row while its apps are counted
+        $queryRaw: jest.fn(async () => []),
       })),
       bot: mockBot,
       user: mockUser,
@@ -55,6 +59,8 @@ jest.mock('@/lib/db', () => {
       universeMember: mockUniverseMember,
       botMcpServer: mockBotMcpServer,
       botAccessRule: mockBotAccessRule,
+      // No saved limits: the app limit is five
+      appSetting: { findUnique: jest.fn(async () => null) },
     },
   };
 });
@@ -445,6 +451,49 @@ describe('/api/bots/[id]/mcp-servers', () => {
       }
     );
 
+    it('names the field when a key has text that cannot be sent, and saves nothing', async () => {
+      (prisma.botMcpServer.count as jest.Mock).mockResolvedValue(0);
+      const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Exa', serverUrl: 'https://mcp.exa.ai/mcp', authType: 'api-key', authConfig: 'abc \u2014 def' }),
+      });
+
+      const response = await POST(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe('The key has an em dash (\u2014), which cannot be sent. Retype it with plain letters, numbers and symbols.');
+      expect(prisma.botMcpServer.create).not.toHaveBeenCalled();
+    });
+
+    it('still saves a key pasted with a trailing line break (it is trimmed first)', async () => {
+      (prisma.botMcpServer.count as jest.Mock).mockResolvedValue(0);
+      (prisma.botMcpServer.create as jest.Mock).mockResolvedValue({ id: MOCK_SERVER_ID, botId: MOCK_BOT_ID, name: 'Exa', serverUrl: 'https://mcp.exa.ai/mcp', authType: 'api-key', enabled: true, createdAt: new Date(), updatedAt: new Date() });
+      const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Exa', serverUrl: 'https://mcp.exa.ai/mcp', authType: 'api-key', authConfig: 'abc123\n' }),
+      });
+
+      const response = await POST(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
+
+      expect(response.status).toBe(201);
+      expect(encryption.encryptApiKey).toHaveBeenCalledWith('abc123');
+    });
+
+    it('answers 400, not a crash, when the key is not text', async () => {
+      (prisma.botMcpServer.count as jest.Mock).mockResolvedValue(0);
+      const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Exa', serverUrl: 'https://mcp.exa.ai/mcp', authType: 'api-key', authConfig: 12345 }),
+      });
+
+      const response = await POST(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
+
+      expect(response.status).toBe(400);
+    });
+
     it('should return 400 for invalid body (missing name)', async () => {
       (prisma.botMcpServer.count as jest.Mock).mockResolvedValue(0);
 
@@ -544,6 +593,28 @@ describe('/api/bots/[id]/mcp-servers', () => {
 
       expect(response.status).toBe(200);
       expect(data.name).toBe('Updated Name');
+    });
+
+    it('names the extra header when its value has text that cannot be sent, and saves nothing', async () => {
+      (prisma.botMcpServer.findUnique as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID,
+        botId: MOCK_BOT_ID,
+        name: 'Server',
+        serverUrl: 'https://example.com',
+        authType: 'none',
+        enabled: true,
+      });
+      const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers/${MOCK_SERVER_ID}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ headers: { 'X-Note': 'a \u2014 b' } }),
+      });
+
+      const response = await PATCH(request, { params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }) });
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toContain('extra header \u201cX-Note\u201d');
+      expect(prisma.botMcpServer.update).not.toHaveBeenCalled();
     });
 
     it('should re-encrypt authConfig when it changes', async () => {

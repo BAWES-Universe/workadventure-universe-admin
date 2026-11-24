@@ -8,7 +8,8 @@ import { readModels, type VoiceModel } from '@/lib/voice-providers';
  * "Load models" for a voice key (#749): one free, authenticated call to the company with the pasted key (the `check` of its
  * catalog entry, lib/voice-key-companies.ts), to see that the company accepts it. Nothing is transcribed or spoken, so nothing is
  * billed. The key goes only in that one header to the company's own fixed address, and is never logged or returned. The models
- * shown are the ones the server's own providers for that company list, so a model id is exactly what the bot server calls.
+ * shown are the ones the company itself lists for the key where it has a list (the catalog's `modelList`), otherwise the ones the
+ * server's own providers for that company list.
  */
 
 /** How long the company has to answer. */
@@ -121,6 +122,24 @@ export async function serverVoiceModels(adapter: string): Promise<VoiceModel[]> 
  * adapters the caller may add (lib/voice-keys.ts, voiceKeyCompanies): every company in the catalog.
  */
 export async function loadVoiceKeyModels(adapter: unknown, apiKey: unknown, enabled: string[], typedAddress?: unknown, pickedRegion?: unknown): Promise<VoiceKeyLoad> {
+  const accepted = await askCompany(adapter, apiKey, enabled, typedAddress, pickedRegion);
+  if (!accepted.ok) return accepted;
+  const { company, key } = accepted;
+  // Its model is typed as the person named it, once the company accepted the key
+  if (company.account?.typedModel) return { ok: true, models: [], typed: true };
+  const models = await keyVoiceModels(company, key);
+  if (models.length === 0) return { ok: false, reason: 'no-models', message: `${company.label} has no models set up here yet.` };
+  return { ok: true, models };
+}
+
+/** The company and the key, once the company has said it knows the key (the one free call), or why not. */
+async function askCompany(
+  adapter: unknown,
+  apiKey: unknown,
+  enabled: string[],
+  typedAddress?: unknown,
+  pickedRegion?: unknown,
+): Promise<{ ok: true; company: VoiceKeyCompanyInfo; key: string } | Extract<VoiceKeyLoad, { ok: false }>> {
   const company = voiceKeyCompanyInfo(adapter);
   if (!company || !enabled.includes(company.adapter)) return { ok: false, reason: 'bad-request', message: 'Pick a speech company from the list.' };
   const address = company.account?.address ? accountAddress(company, typedAddress) : null;
@@ -135,11 +154,77 @@ export async function loadVoiceKeyModels(adapter: unknown, apiKey: unknown, enab
   const verdict = await ask(company, key, address, region);
   if (verdict === 'refused') return { ok: false, reason: 'refused', message: `${company.label} didn’t accept that key. Check it and paste it again.` };
   if (verdict === 'unreachable') return { ok: false, reason: 'unreachable', message: `Couldn’t reach ${company.label}. Try again in a moment.` };
-  // Its model is typed as the person named it, once the company accepted the key
-  if (company.account?.typedModel) return { ok: true, models: [], typed: true };
-  const models = await serverVoiceModels(company.adapter);
-  if (models.length === 0) return { ok: false, reason: 'no-models', message: `${company.label} has no models set up here yet.` };
-  return { ok: true, models };
+  return { ok: true, company, key };
+}
+
+/**
+ * What the company itself lists now for a saved key, job by job, for "Load models" on a saved key: the same check and the same free
+ * GET per listed job (of `jobs`, the ones the key does) as a pasted key, and nothing else. `lists` holds the jobs whose list was read and has models the key can use;
+ * `unread` the jobs whose list couldn't be read right now. A list that was read and has no model Universe can run is in neither:
+ * there is nothing to add from it. No server provider is asked and no fallback model is made up: only what the company said.
+ */
+export async function loadVoiceKeyLists(
+  adapter: unknown,
+  apiKey: unknown,
+  jobs: readonly VoiceModel['kind'][],
+  typedAddress?: unknown,
+  pickedRegion?: unknown,
+): Promise<{ ok: true; lists: Map<VoiceModel['kind'], VoiceModel[]>; unread: VoiceModel['kind'][] } | Extract<VoiceKeyLoad, { ok: false }>> {
+  const info = voiceKeyCompanyInfo(adapter);
+  const accepted = await askCompany(adapter, apiKey, info ? [info.adapter] : [], typedAddress, pickedRegion);
+  if (!accepted.ok) return accepted;
+  const { company, key } = accepted;
+  // Only the jobs asked for (the ones the key does) that the company has a list for
+  const listedJobs = companyJobs(company).filter((job) => jobs.includes(job) && company.jobs[job]?.modelList);
+  const read = await Promise.all(listedJobs.map((job) => readCompanyList(company, key, job)));
+  const lists = new Map<VoiceModel['kind'], VoiceModel[]>();
+  const unread: VoiceModel['kind'][] = [];
+  listedJobs.forEach((job, index) => {
+    const answer = read[index];
+    if (!answer.read) unread.push(job);
+    else if (answer.models.length > 0) lists.set(job, answer.models.map(({ id, label, kind }) => ({ id, ...(label ? { label } : {}), kind })));
+  });
+  return { ok: true, lists, unread };
+}
+
+/**
+ * The models a person's own key lists: for each job the company lists models for (its catalog `modelList`), the ones the company
+ * itself lists for this key, read with the same key (one free GET per job, nothing heard or spoken). A job with no list, or a list
+ * that can't be read right now, gives what the server's own providers list for that job, or the catalog's starting models.
+ */
+async function keyVoiceModels(company: VoiceKeyCompanyInfo, key: string): Promise<VoiceModel[]> {
+  const listedJobs = companyJobs(company).filter((job) => company.jobs[job]?.modelList);
+  // The server's own list is read at the same time as the company's, and a failure there (the database) must not take the company's lists with it
+  const [read, listed] = await Promise.all([
+    serverVoiceModels(company.adapter).then(
+      (models) => ({ models }),
+      (error: unknown) => ({ error }),
+    ),
+    Promise.all(listedJobs.map((job) => listCompanyModels(company, key, job))),
+  ]);
+  const fromCompany = new Map<VoiceModel['kind'], VoiceModel[]>();
+  listedJobs.forEach((job, index) => {
+    const models = listed[index];
+    // The short line about each model is for an operator choosing; a key's list keeps the id, label and job
+    if (models) fromCompany.set(job, models.map(({ id, label, kind }) => ({ id, ...(label ? { label } : {}), kind })));
+  });
+  // Without the server's list, a job the company listed nothing for gives the catalog's starting models; with nothing read at all it fails as it did
+  if ('error' in read && fromCompany.size === 0) throw read.error;
+  const server = 'models' in read ? read.models : (company.models ?? []).filter((model) => !fromCompany.has(model.kind)).map((model) => ({ ...model }));
+  if (fromCompany.size === 0) return server;
+  // The server's list keeps its order, with each listed job's models swapped for the company's own where that job first comes up
+  const models: VoiceModel[] = [];
+  const placed = new Set<VoiceModel['kind']>();
+  for (const model of server) {
+    const own = fromCompany.get(model.kind);
+    if (!own) models.push(model);
+    else if (!placed.has(model.kind)) {
+      placed.add(model.kind);
+      models.push(...own);
+    }
+  }
+  for (const [kind, own] of fromCompany) if (!placed.has(kind)) models.push(...own);
+  return models;
 }
 
 /** The most models one company's list may give: more is not a list a person can tick through. */
@@ -178,10 +263,19 @@ function noteOf(spec: VoiceModelListSpec, fields: Record<string, unknown>, langu
  * languages added up.
  */
 export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: string, job?: VoiceCompanyJobName): Promise<ListedVoiceModel[] | null> {
+  const answer = await readCompanyList(company, apiKey, job);
+  return answer.read && answer.models.length > 0 ? answer.models : null;
+}
+
+/**
+ * The same read as listCompanyModels, saying which it was: `read: true` the list came and was understood (its `models` may be none,
+ * when it has no model Universe can run), `read: false` it couldn't be read right now, or the company has no list for the job.
+ */
+export async function readCompanyList(company: VoiceKeyCompanyInfo, apiKey: string, job?: VoiceCompanyJobName): Promise<{ read: true; models: ListedVoiceModel[] } | { read: false }> {
   // Each job has its own list, kept to models that do that job; with none named, the company's first job
   const kind: VoiceModel['kind'] = job ?? companyJobs(company)[0] ?? 'speech';
   const spec = company.jobs[kind]?.modelList;
-  if (!spec) return null;
+  if (!spec) return { read: false };
   let response: Response | undefined;
   try {
     response = await fetch(spec.url, {
@@ -191,17 +285,20 @@ export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: st
       signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
       cache: 'no-store',
     });
-    if (response.status < 200 || response.status >= 300) return null;
+    if (response.status < 200 || response.status >= 300) return { read: false };
     const body: unknown = await response.json();
     const list = spec.list ? (body as Record<string, unknown> | null)?.[spec.list] : body;
-    if (!Array.isArray(list)) return null;
+    if (!Array.isArray(list)) return { read: false };
     const found = new Map<string, { label: string; fields: Record<string, unknown>; languages: Set<string> }>();
     for (const entry of list) {
       if (typeof entry !== 'object' || entry === null) continue;
       const fields = entry as Record<string, unknown>;
       if (spec.where && !Object.entries(spec.where).every(([field, value]) => fields[field] === value)) continue;
-      const id = typeof fields[spec.id] === 'string' ? (fields[spec.id] as string).trim() : '';
+      if (spec.whereHas && !Object.entries(spec.whereHas).every(([field, value]) => Array.isArray(fields[field]) && (fields[field] as unknown[]).includes(value))) continue;
+      let id = typeof fields[spec.id] === 'string' ? (fields[spec.id] as string).trim() : '';
+      if (spec.idAfter && id.startsWith(spec.idAfter)) id = id.slice(spec.idAfter.length);
       if (!id || id.length > 255) continue;
+      if (spec.keepStarting && !spec.keepStarting.some((start) => id.startsWith(start))) continue;
       if (spec.leaveOut?.some((start) => id.startsWith(start))) continue;
       const languages = spec.languages ? languagesOf(fields[spec.languages]) : [];
       const seen = found.get(id);
@@ -217,10 +314,10 @@ export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: st
       const note = noteOf(spec, fields, [...languages]);
       return { id, ...(label && label !== id ? { label } : {}), kind, ...(note ? { note } : {}) };
     });
-    return models.length > 0 ? models : null;
+    return { read: true, models };
   } catch {
     // Nothing from the error is kept: it could carry the address with the key's header
-    return null;
+    return { read: false };
   } finally {
     await response?.body?.cancel().catch(() => undefined);
   }

@@ -6,10 +6,15 @@ import { canSeeRoom } from '@/lib/room-visibility';
 import { findUserByIdentifier } from '@/lib/user-identifier';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { bansCoveringWorld } from '@/lib/moderation';
+import { ownsBrick } from '@/lib/brick';
+import { whereIsBrick, type Place } from '@/lib/brick-visit';
+import { isTakenOff, rememberMet, standingMeeting } from '@/lib/brick-met';
+import * as Sentry from '@sentry/nextjs';
+import { canManageThisBot } from '@/lib/bot-permissions';
 
 /**
  * Can this person do this with this bot? (#426) What people do with a bot: chat in its bubble on the map, send it
- * direct messages, or summon it; and (#737) having it change things, or delete or send. The bot server and the game ask
+ * direct messages, call it (game #2004), or summon it; and (#737) having it change things, or delete or send. The bot server and the game ask
  * this with the service token before they let it happen, and show `reason` when the answer is no (null for having a bot
  * change things, or delete or send: the code says no, and the caller words it).
  *
@@ -17,12 +22,32 @@ import { bansCoveringWorld } from '@/lib/moderation';
  * then the bot's own rules (#427), in this order: its creator, the universe owner, super admins and Admin always pass;
  * then the person's own row; then the rows of their roles; then Private bot, which shuts out everyone a row does not
  * say Yes to; then the role permissions. Guests have no account, so they get Everyone's and Everyone's rows.
+ *
+ * A Brick (game #1992) has no room, so no world, roles or rules decide for it: its owner may do all of this with it, and
+ * nobody else may do any of it. That holds for a super admin too, because a Brick answers from its owner's private memory.
+ *
+ * One exception, for a Brick that walks beside its owner in a place that takes visiting Bricks (game #2005, see
+ * lib/brick-visit.ts): other people may chat with it nearby and send it direct messages as they could with any bot
+ * there, by the roles of that place, and for nothing else: nobody summons it, has it change things or delete or send for
+ * them. Nothing of its owner's is used for them (that is the bot server's rule, F4.1). No rule of the owner's, no
+ * Private bot and no "its creator passes" apply, and a super admin or the universe's owner has no more say than any
+ * member: it is not their bot.
+ *
+ * Meeting it is remembered (lib/brick-met.ts, game #2005 "People who met", Khalid 5 Nov): a person the Brick answered nearby or in
+ * a direct message may keep sending it direct messages after it has left, because a direct message depends on what they are
+ * allowed and never on where the Brick or they are. The roles and bans of the place they met it, their access to its room and
+ * the Brick being on still decide each message, and what ends it is a decision: its owner taking them off (`revokeMet`), a
+ * ban or the roles there, the Brick going off or being deleted, or, for someone who never wrote, the days Limits give.
+ * Whose key answers them is not decided here but in lib/bot-ai-credentials.ts: where the
+ * owner's own key runs it, others are served it only where it is lent to the place, and Universe AI otherwise, so a Brick
+ * is not refused here for its key; only when nothing can answer do they get the line that says so.
  */
-export type BotAction = 'chat' | 'dm' | 'summon' | 'change' | 'deleteOrSend';
+export type BotAction = 'chat' | 'dm' | 'call' | 'summon' | 'change' | 'deleteOrSend';
 
-export const BOT_ACTIONS: readonly BotAction[] = ['chat', 'dm', 'summon', 'change', 'deleteOrSend'];
+export const BOT_ACTIONS: readonly BotAction[] = ['chat', 'dm', 'call', 'summon', 'change', 'deleteOrSend'];
 
-const ACTION_PERMISSION: Record<BotAction, PermissionKey> = {
+/** The role permission behind each action. A call has none: only a Yes in a rule, or being the creator, owner, super admin, Admin or a manager, lets someone call. */
+const ACTION_PERMISSION: Record<Exclude<BotAction, 'call'>, PermissionKey> = {
   chat: 'CHAT_BOTS_NEARBY',
   dm: 'DM_BOTS',
   summon: 'SUMMON_BOTS',
@@ -33,17 +58,17 @@ const ACTION_PERMISSION: Record<BotAction, PermissionKey> = {
 export type BotAccessCode =
   /** Allowed. */
   | 'allowed'
-  /** A direct message needs an account. */
+  /** A direct message, or a call, needs an account. */
   | 'sign_in_required'
   /** The roles this person has don't allow it. */
   | 'not_allowed'
-  /** A direct message with a bot in a room this person can't see. */
+  /** A direct message or a call with a bot in a room this person can't see. */
   | 'no_room_access'
   /** A direct message from a chat account no Orbit account has. */
   | 'unknown_person'
   /** A direct message from a chat account two Orbit accounts claim: Orbit can't tell whose it is. */
   | 'shared_chat_id'
-  /** A direct message, or having the bot change things or delete or send, from someone banned from the bot's world. */
+  /** A direct message, a call, or having the bot change things or delete or send, from someone banned from the bot's world. */
   | 'banned';
 
 export interface BotAccessAnswer {
@@ -68,8 +93,11 @@ function refusal(
   botName: string,
   fixedReply?: string | null,
 ): BotAccessAnswer {
-  if (code === 'sign_in_required') return { allowed: false, code, reason: `Sign in to message ${botName}.` };
+  if (code === 'sign_in_required') {
+    return { allowed: false, code, reason: action === 'call' ? `Sign in to call ${botName}.` : `Sign in to message ${botName}.` };
+  }
   if (action === 'summon') return { allowed: false, code, reason: `${botName}'s owner limits who can summon it.` };
+  if (action === 'call') return { allowed: false, code, reason: `You can't call ${botName} now.` };
   // Having a bot change things, or delete or send, has no line of its own: the caller (the bot) words its own refusal
   if (action === 'change' || action === 'deleteOrSend') return { allowed: false, code, reason: null };
   if (action === 'chat') {
@@ -103,24 +131,29 @@ export function decideBotAccess(input: {
   canSeeRoom: boolean;
 }): BotAccessAnswer {
   const { action, botName } = input;
-  if (action === 'dm' && !input.signedIn) return refusal('sign_in_required', action, botName);
+  if ((action === 'dm' || action === 'call') && !input.signedIn) return refusal('sign_in_required', action, botName);
   if (input.passes) return ALLOWED;
   if (!input.isAdmin) {
     const verdict = verdictFor(action, input.personRule ?? null, input.roleRules ?? []);
     if (verdict === 'no') return refusal('not_allowed', action, botName, input.fixedReply);
     // Private bot decides who may use the bot at all; changing, deleting and sending are the roles' to decide
-    const shutOut = input.privateBot && (action === 'chat' || action === 'dm' || action === 'summon');
-    if (verdict === 'none' && (shutOut || !has(input.permissions, ACTION_PERMISSION[action]))) {
+    const shutOut = input.privateBot && (action === 'chat' || action === 'dm' || action === 'call' || action === 'summon');
+    if (verdict === 'none' && (shutOut || (action === 'call' || !has(input.permissions, ACTION_PERMISSION[action])))) {
       return refusal('not_allowed', action, botName, input.fixedReply);
     }
   }
-  if (action === 'dm' && !input.canSeeRoom) return refusal('no_room_access', action, botName);
+  if ((action === 'dm' || action === 'call') && !input.canSeeRoom) return refusal('no_room_access', action, botName);
   return ALLOWED;
 }
 
 export interface BotAccessRequest {
   botId: string;
   action: BotAction;
+  /**
+   * The room the person is in, when the caller knows it. A visiting Brick is only ever reached from the room it is in:
+   * from any other it answers as a Brick that is not there for them.
+   */
+  roomUrl?: string | null;
   person: {
     /** The caller vouches that this person is signed in. A guest's identifier is never looked at. */
     signedIn: boolean;
@@ -145,6 +178,10 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
       id: true,
       name: true,
       createdById: true,
+      roomId: true,
+      ownerId: true,
+      deletedAt: true,
+      enabled: true,
       privateBot: true,
       refusalReply: true,
       accessRules: { select: { roleId: true, userId: true, allow: true, deny: true } },
@@ -159,7 +196,6 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
     },
   });
   if (!bot) return null;
-  const { world } = bot.room;
 
   let user: { id: string; uuid: string; email: string | null; name: string | null; isGuest: boolean } | null;
   // Whose ban to look up. Only the ban: a guest account has no roles or membership, so `user` stays null for it
@@ -182,10 +218,65 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
     banUserId = user?.id ?? null;
   }
 
-  // A direct message can come from anywhere, so a ban from the bot's world keeps it out too, and so does having the bot
-  // change things, or delete or send, which can be asked in a direct message. Chatting nearby and summoning need the
-  // person in the room, which a ban already stops.
-  if ((action === 'dm' || action === 'change' || action === 'deleteOrSend') && banUserId) {
+  // A visiting Brick, and the person who is not its owner talking to it (game #2005): decided below by the roles of the
+  // place it visits, never by anything of its owner's
+  let visitor: { place: Omit<Place, 'roomUrl'>; met: boolean } | null = null;
+  // Someone who met the Brick and writes to it where it no longer is: no place to ask but the one they met it in, if it still exists
+  let metElsewhere = false;
+  if (!bot.room) {
+    // A Brick: its owner, signed in, and nobody else. No world to be banned from, and no roles or rules to read.
+    if ((action === 'dm' || action === 'call') && !signedIn) {
+      const answer = refusal('sign_in_required', action, bot.name);
+      return named ? { ...answer, person: named } : answer;
+    }
+    if (ownsBrick(bot, user?.id)) return named ? { ...ALLOWED, person: named } : ALLOWED;
+    // Talking nearby is talking in a room, so it is only ever answered for a room the caller names, and that must be the room the
+    // Brick is in. Callers that name none (the files and artifacts of a reply, a tool) get the answer of a Brick that is not there.
+    // Only a direct message may come from anywhere, as with any bot.
+    const roomNamed = action === 'dm' || !!request.roomUrl;
+    const here = (action === 'chat' || action === 'dm') && bot.deletedAt === null && roomNamed ? await whereIsBrick(bot.id, request.roomUrl ?? null) : null;
+    // The owner took this person off its direct messages: that holds wherever the Brick is, nearby chat is still the roles' to decide
+    const takenOff = action === 'dm' && !!user && bot.deletedAt === null ? await isTakenOff(bot.id, user.id) : false;
+    if (takenOff) {
+      const answer = refusal('not_allowed', action, bot.name);
+      return named ? { ...answer, person: named } : answer;
+    }
+    if (here) {
+      visitor = { place: here.place, met: false };
+    } else if (action === 'dm' && user && bot.deletedAt === null && bot.enabled) {
+      // Not standing anywhere other people can reach it: a direct message still depends on the person's standing with it, not
+      // on where it is. Someone who met it keeps writing to it until a decision says otherwise
+      const meeting = await standingMeeting(bot.id, user.id);
+      if (meeting) {
+        if (meeting.place) visitor = { place: meeting.place, met: true };
+        else metElsewhere = true;
+      }
+    }
+    if (!visitor && !metElsewhere) {
+      const answer = refusal('not_allowed', action, bot.name);
+      return named ? { ...answer, person: named } : answer;
+    }
+  }
+  // The room they met it in is gone, so no world's roles or bans are left to ask: only a ban from everywhere still applies. The owner's
+  // say, the Brick being on and the sign-in above have passed
+  if (metElsewhere) {
+    const banned = banUserId
+      ? await prisma.ban.findFirst({
+          where: { isActive: true, userId: banUserId, worldId: null, universeId: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+          select: { id: true },
+        })
+      : null;
+    const answer = banned ? refusal('banned', action, bot.name) : ALLOWED;
+    if (!banned && user) await rememberMet({ botId: bot.id, userId: user.id, roomId: null, wrote: true, onlyWrote: true }).catch(() => undefined);
+    return named ? { ...answer, person: named } : answer;
+  }
+  const place = bot.room ?? visitor!.place.room;
+  const { world } = place;
+
+  // A direct message and a call can come from anywhere, so a ban from the bot's world keeps them out too, and so does
+  // having the bot change things, or delete or send, which can be asked in a direct message. Chatting nearby and
+  // summoning need the person in the room, which a ban already stops.
+  if ((action === 'dm' || action === 'call' || action === 'change' || action === 'deleteOrSend') && banUserId) {
     const ban = await prisma.ban.findFirst({
       where: { AND: [bansCoveringWorld({ id: world.id, universeId: world.universeId }), { userId: banUserId }] },
       select: { id: true },
@@ -204,27 +295,66 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
   });
   const superAdmin = !!user && isSuperAdmin(user.email);
 
-  const rules = bot.accessRules ?? [];
+  // A visiting Brick has no rules of its own here: the roles of the place decide, like any bot that has none
+  const rules = visitor ? [] : (bot.accessRules ?? []);
   const roleIds = new Set(roles.map((role) => role.id));
   const personRule = user ? (rules.find((rule) => rule.userId === user.id) ?? null) : null;
   const roleRules = rules.filter((rule) => rule.roleId && roleIds.has(rule.roleId));
 
-  const answer = decideBotAccess({
-    action,
-    botName: bot.name,
-    signedIn,
-    passes: !!user && (bot.createdById === user.id || world.universe.ownerId === user.id || superAdmin),
-    isAdmin: has(permissions, 'ADMINISTRATOR') || roles.some((role) => role.key === ADMIN_KEY) || worldTags.includes(ADMIN_KEY),
-    permissions,
-    privateBot: bot.privateBot,
-    personRule,
-    roleRules,
-    fixedReply: bot.refusalReply,
-    canSeeRoom: canSeeRoom(
-      bot.room,
-      user ? { id: user.id, isSuperAdmin: superAdmin } : null,
-      new Set(membership ? [world.id] : []),
-    ),
-  });
+  const decide = (asked: BotAction, passes: boolean) =>
+    decideBotAccess({
+      action: asked,
+      botName: bot.name,
+      signedIn,
+      passes,
+      isAdmin: has(permissions, 'ADMINISTRATOR') || roles.some((role) => role.key === ADMIN_KEY) || worldTags.includes(ADMIN_KEY),
+      permissions,
+      privateBot: visitor ? false : bot.privateBot,
+      personRule,
+      roleRules,
+      fixedReply: visitor ? null : bot.refusalReply,
+      canSeeRoom: canSeeRoom(
+        place,
+        user ? { id: user.id, isSuperAdmin: superAdmin } : null,
+        new Set(membership ? [world.id] : []),
+      ),
+    });
+  const passes = !visitor && !!user && (bot.createdById === user.id || world.universe.ownerId === user.id || superAdmin);
+
+  let answer: BotAccessAnswer;
+  if (action === 'call') {
+    // A call is a direct message spoken out loud, so the person must be allowed to message the bot first (sign-in, the
+    // bot's room, a ban, Private bot, the rules for Direct messages); then the Call row decides on top of that.
+    const message = decide('dm', passes);
+    if (!message.allowed) {
+      answer = refusal(message.code as Exclude<BotAccessCode, 'allowed'>, 'call', bot.name);
+    } else {
+      // Call starts as No, so only the bot's creator, its universe's owner, super admins, Admin and the people who manage
+      // this bot call it unless a rule or a role says Yes. A rule that says No still stops a manager.
+      const said = verdictFor('call', personRule, roleRules);
+      const manages =
+        !passes && !!user && said === 'none'
+          ? await canManageThisBot(
+              user.id,
+              user.email,
+              { id: bot.id, createdById: bot.createdById, roomId: bot.roomId, ownerId: bot.ownerId, deletedAt: bot.deletedAt },
+              { creatorPasses: true },
+            )
+          : false;
+      answer = decide('call', passes || manages);
+    }
+  } else {
+    answer = decide(action, passes);
+  }
+  // Met it: the Brick answers someone who is not its owner nearby or in a direct message, so they may keep writing to it
+  // when it is gone (lib/brick-met.ts). Only for a person Orbit knows, and never for a person whose answer was no
+  if (visitor && answer.allowed && user && (action === 'chat' || action === 'dm')) {
+    const meeting = { botId: bot.id, userId: user.id, roomId: visitor.place.roomId, wrote: action === 'dm' };
+    // A message that is itself the continuation of a conversation is not a new meeting: it only makes it a written one
+    await rememberMet(visitor.met ? { ...meeting, onlyWrote: true } : meeting).catch((error: unknown) => {
+      // A person who was allowed is not refused because this could not be written; the next message writes it
+      Sentry.captureException(error, { tags: { area: 'bot-access-met' } });
+    });
+  }
   return named ? { ...answer, person: named } : answer;
 }

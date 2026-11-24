@@ -4,6 +4,8 @@ import { getUniverseAiReplyLimits } from '@/lib/bot-limits';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { textReserve } from '@/lib/voice-limit-values';
 import { resolveUsagePerson } from '@/lib/usage-person';
+import { runningExtra } from '@/lib/meter-grants';
+import { repliesPerWindowFor } from '@/lib/credit-replies';
 
 /**
  * Reply limits (game #1159), decided by Khalid 19 Oct and 26 Oct 2026:
@@ -13,7 +15,8 @@ import { resolveUsagePerson } from '@/lib/usage-person';
  *   - A bot's own limit per person (`dailyReplyCap`, set by whoever manages the bot): that bot only, whatever it runs
  *     on, in a 24-hour window. No limit when it is empty.
  * A window starts at the first reply asked for once the last one has ended, so the end time a person sees is fixed.
- * Replies are counted from usage rows (one per reply, failed ones left out). A super admin changes the three Universe AI
+ * Replies are counted from usage rows (one per reply, failed ones and greetings left out: a greeting the bot makes on its own
+ * is free for the person, the usage of whoever's key the bot runs on). A super admin changes the three Universe AI
  * numbers on the Universe AI page (#666), read through getUniverseAiReplyLimits.
  */
 export const BOT_LIMIT_WINDOW_HOURS = 24;
@@ -41,11 +44,12 @@ export class ReplyAllowanceError extends Error {
 
 /**
  * When the window under `key` started, starting a new one now when there is none or the last has ended. One statement,
- * so two replies asked for at the same moment agree on the same start.
+ * so two replies asked for at the same moment agree on the same start. `db` is the caller's transaction when it has one, so the start
+ * commits or rolls back with it.
  */
-export async function windowStart(key: string, hours: number, now: Date): Promise<Date> {
+export async function windowStart(key: string, hours: number, now: Date, db: Pick<typeof prisma, '$queryRaw'> = prisma): Promise<Date> {
   const endedBefore = new Date(now.getTime() - hours * HOUR);
-  const rows = await prisma.$queryRaw<{ started_at: Date }[]>(Prisma.sql`
+  const rows = await db.$queryRaw<{ started_at: Date }[]>(Prisma.sql`
     INSERT INTO "reply_windows" ("key", "started_at") VALUES (${key}, ${now})
     ON CONFLICT ("key") DO UPDATE SET "started_at" =
       CASE WHEN "reply_windows"."started_at" <= ${endedBefore} THEN EXCLUDED."started_at" ELSE "reply_windows"."started_at" END
@@ -59,7 +63,36 @@ type Check = {
   hours: number;
   limit: number;
   where: (since: Date) => Prisma.BotsAiUsageWhereInput;
+  /** Which voice notes still on their way to a reply count against this limit too (see `ReplySlot`). */
+  pending: PendingNotes;
 };
+
+/** The voice notes reserved but not yet answered that would use up a reply of one limit. */
+export interface PendingNotes {
+  /** The person the limit counts: their key (a signed-in person's account, or a guest's id). */
+  personKey: string;
+  /** Only notes for this bot (a limit about one bot), or any bot when empty. */
+  botId?: string;
+  /** Only guests' notes (the pool every guest on a bot shares). */
+  guestsOnly?: boolean;
+  /** Notes that run on the maker's own key never count against a Universe AI limit. */
+  notOwnKey: boolean;
+}
+
+/**
+ * One limit a reply was allowed under, as data: kept so a reservation can count the same limit again under its own lock, and count the
+ * notes already on their way (which have no usage row yet), instead of trusting a reading taken before the lock.
+ */
+export interface ReplySlot {
+  kind: LimitKind;
+  limit: number;
+  resetsAt: string;
+  who: Asker;
+  usage: Prisma.BotsAiUsageWhereInput;
+  pending: PendingNotes;
+  /** What to write down when the slot is found full, as when the first check finds a limit reached. */
+  hit: { botId: string; kind: LimitKind; talkedUserId: string; windowEndsAt: Date };
+}
 
 /**
  * May this person get one more reply from this bot now? Asked by the bot server before each reply, after it knows what
@@ -70,6 +103,8 @@ export async function checkReplyAllowance(
   botId: string,
   input: { userId?: unknown; isGuest?: unknown; source?: unknown; greeting?: unknown },
   now: Date = new Date(),
+  /** Given by a caller that will count again under its own lock: filled with every limit the reply was allowed under. */
+  collect?: ReplySlot[],
 ): Promise<ReplyAllowance> {
   const source = input.source;
   if (source !== 'universe-ai' && source !== 'provider' && source !== 'own-key') {
@@ -99,21 +134,35 @@ export async function checkReplyAllowance(
   if (source !== 'own-key') {
     const limits = await getUniverseAiReplyLimits();
     const room = (window: number) => (greeting ? window - textReserve(window, kept) : window);
-    checks.push({
-      kind: guest ? 'guest' : 'universe-ai',
-      key: `ua:${personKey}`,
-      hours: limits.windowHours,
-      limit: room(guest ? limits.guest : limits.signedIn),
-      // Every Universe AI reply this person got, from any bot: a reply no personal key paid for
-      where: (since) => ({ ...personRows, keyOwnerId: null, error: false, timestamp: { gte: since } }),
-    });
+    // Extra usage a super admin gave (game #1999) raises a signed-in person's window while it runs: a multiple of the usual,
+    // or no limit. It ends by itself, and a guest never has it
+    const extra = guest || !person.personId ? null : await runningExtra(person.personId, now);
+    // A super admin's exception can change how many replies a signed-in person has in a window (or give none); otherwise it is Limits' number
+    const signedIn = guest || !person.personId ? limits.signedIn : await repliesPerWindowFor(person.personId, limits.signedIn, now);
+    if (extra?.noLimit) {
+      // Nothing is counted, but the person's window keeps running: when the grant ends, the replies it covered are in the window they were
+      // given in and count like any other, not as if the window had only just opened
+      await windowStart(`ua:${personKey}`, limits.windowHours, now);
+    } else {
+      checks.push({
+        kind: guest ? 'guest' : 'universe-ai',
+        key: `ua:${personKey}`,
+        hours: limits.windowHours,
+        // The replies kept for text grow with the window: they are taken off the window the person really has, after its multiple
+        limit: room((guest ? limits.guest : signedIn) * (extra?.multiplier ?? 1)),
+        // Every Universe AI reply this person got, from any bot: a reply no personal key paid for
+        where: (since) => ({ ...personRows, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } }),
+        pending: { personKey, notOwnKey: true },
+      });
+    }
     if (guest) {
       checks.push({
         kind: 'guests',
         key: `ua:guests:${bot.id}`,
         hours: limits.windowHours,
         limit: limits.guestPool,
-        where: (since) => ({ botId: bot.id, talkedGuest: true, keyOwnerId: null, error: false, timestamp: { gte: since } }),
+        where: (since) => ({ botId: bot.id, talkedGuest: true, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } }),
+        pending: { personKey, botId: bot.id, guestsOnly: true, notOwnKey: true },
       });
     }
   }
@@ -123,14 +172,19 @@ export async function checkReplyAllowance(
       key: `bot:${bot.id}:${personKey}`,
       hours: BOT_LIMIT_WINDOW_HOURS,
       limit: bot.dailyReplyCap,
-      where: (since) => ({ ...personRows, botId: bot.id, error: false, timestamp: { gte: since } }),
+      where: (since) => ({ ...personRows, botId: bot.id, error: false, greeting: false, timestamp: { gte: since } }),
+      pending: { personKey, botId: bot.id, notOwnKey: false },
     });
   }
 
   for (const check of checks) {
     const since = await windowStart(check.key, check.hours, now);
     const used = await prisma.botsAiUsage.count({ where: check.where(since) });
-    if (used < check.limit) continue;
+    if (used < check.limit) {
+      const endsAt = new Date(since.getTime() + check.hours * HOUR);
+      collect?.push({ kind: check.kind, limit: check.limit, resetsAt: endsAt.toISOString(), who, usage: check.where(since), pending: check.pending, hit: { botId: bot.id, kind: check.kind, talkedUserId: userId, windowEndsAt: endsAt } });
+      continue;
+    }
     const resetsAt = new Date(since.getTime() + check.hours * HOUR);
     // A greeting that is not made is not a person running out: nobody asked for it
     if (!greeting) {

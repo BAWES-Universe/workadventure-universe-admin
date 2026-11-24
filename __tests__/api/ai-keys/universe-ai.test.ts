@@ -13,12 +13,16 @@ import { PATCH as adminPatch, DELETE as adminDelete } from '@/app/api/admin/ai-p
 import { GET as botCredentials } from '@/app/api/bots/ai-providers/[providerId]/credentials/route';
 import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
 
+// The meter's books copy each report (game #1998); these tests are about the report, not the books
+jest.mock('@/lib/meter', () => ({ recordModelCall: jest.fn(async () => null) }));
 jest.mock('@/lib/db', () => ({
   prisma: {
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), delete: jest.fn() },
     botsAiUsage: { create: jest.fn(async () => ({})) },
     bot: { groupBy: jest.fn(), count: jest.fn() },
-    $transaction: jest.fn(async (operations: unknown[]) => Promise.all(operations)),
+    $executeRaw: jest.fn(async () => 0),
+    // Operations in a list (the key changes) or a step that is handed this same object as its transaction (a reply row, written under the voice lock)
+    $transaction: jest.fn(async (run: unknown) => (typeof run === 'function' ? run(jest.requireMock('@/lib/db').prisma) : Promise.all(run as unknown[]))),
   },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => ({ id: 'admin-1', email: 'admin@bawes.net' })) }));
@@ -190,6 +194,8 @@ describe('the Universe AI page’s list', () => {
 
 describe('making a provider the Default', () => {
   it('clears the others and sets this one in one transaction', async () => {
+    // (Usage rows written by earlier cases also go through a transaction)
+    (prisma.$transaction as jest.Mock).mockClear();
     provider.findUnique.mockResolvedValue(lmstudio);
     provider.update.mockResolvedValue({ ...lmstudio, isDefault: true });
     const response = await adminPatch(patch({ isDefault: true }), params({ id: 'lmstudio-local' }));

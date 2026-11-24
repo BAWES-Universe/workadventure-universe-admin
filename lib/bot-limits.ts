@@ -25,14 +25,26 @@ const SETTING_KEY = 'bot-limits';
  * The super admin's limits as saved, the recommended value for anything never changed. A read that fails is logged and
  * gives the recommended values, so a reply or a save never fails over its limits alone.
  */
-export async function getServerLimits(): Promise<ServerLimits> {
+export async function getServerLimits(db: Pick<Prisma.TransactionClient, 'appSetting'> & { $executeRaw?: Prisma.TransactionClient['$executeRaw'] } = prisma): Promise<ServerLimits> {
+  // In a caller's transaction a failed statement leaves the whole transaction aborted, and every statement after it fails too. The read is made inside a
+  // savepoint, rolled back to when it fails, so the caller's work goes on with the recommended values (on the caller's own connection: never through the pool)
+  const savepoint = db !== prisma && typeof db.$executeRaw === 'function' ? db.$executeRaw.bind(db) : null;
+  if (savepoint) await savepoint`SAVEPOINT bot_limits_read`;
   try {
-    const row = await prisma.appSetting.findUnique({ where: { key: SETTING_KEY } });
+    const row = await db.appSetting.findUnique({ where: { key: SETTING_KEY } });
+    if (savepoint) await savepoint`RELEASE SAVEPOINT bot_limits_read`;
     return readServerLimits(row?.value);
   } catch (error) {
+    if (savepoint) await savepoint`ROLLBACK TO SAVEPOINT bot_limits_read`.catch(() => undefined);
     console.error('[BotLimits] Could not read the saved limits:', error instanceof Error ? error.message : 'unknown');
     return readServerLimits(null);
   }
+}
+
+/** The same limits, but a read that fails throws: for a decision that must not be made on the recommended values when the saved ones could not be read (a hand-over's window, which decides what is deleted). */
+export async function getServerLimitsOrThrow(db: Pick<Prisma.TransactionClient, 'appSetting'> = prisma): Promise<ServerLimits> {
+  const row = await db.appSetting.findUnique({ where: { key: SETTING_KEY } });
+  return readServerLimits(row?.value);
 }
 
 type ServerChange = Partial<{ [K in keyof ServerLimits]: ServerLimits[K] extends object ? Partial<ServerLimits[K]> : ServerLimits[K] }>;
@@ -59,6 +71,7 @@ export async function saveServerLimits(change: ServerChange, userId: string): Pr
       guard: change.guard ?? now.guard,
       fairUsage: { ...now.fairUsage, ...change.fairUsage },
       files: { ...now.files, ...change.files },
+      bricks: { ...now.bricks, ...change.bricks },
     };
     const next = readServerLimits(kept);
     const problem = replyLimitsProblem(next.universeAi, change.universeAi);
@@ -80,6 +93,46 @@ export async function saveServerLimits(change: ServerChange, userId: string): Pr
 export async function getUniverseAiReplyLimits(): Promise<{ signedIn: number; guest: number; guestPool: number; windowHours: number }> {
   const { fairUsage } = await getServerLimits();
   return { ...fairUsage, windowHours: FAIR_USAGE_WINDOW_HOURS };
+}
+
+/**
+ * A person's own Bricks (game #1996): how many days a deleted Brick can be brought back, and how often the same kind of
+ * job has to come back before a Brick suggests a Brick for it. 7 and 3 until a super admin changes them.
+ * The Brick for guests (game #1997) has its own two: replies one guest gets from it, and replies all guests together get
+ * from it in one universe, 10 and 200 until changed. They are apart from fair usage: a guest's replies from it never count
+ * toward the replies a host's bot gives them.
+ */
+export async function getBrickLimits(db?: Pick<Prisma.TransactionClient, 'appSetting'>): Promise<ServerLimits['bricks']> {
+  return (await getServerLimits(db)).bricks;
+}
+
+/** The most Apps one bot or Brick can use at once (5 until a super admin changes it), the same number for Apps added by hand and lent ones. */
+export async function maxAppsPerBot(db?: Pick<Prisma.TransactionClient, 'appSetting'>): Promise<number> {
+  return (await getBrickLimits(db)).appsPerBot;
+}
+
+/** The line a person reads when a bot is full of Apps; every way of adding one says it the same. */
+export class AppsFull extends Error {
+  constructor(readonly max: number) {
+    super(`Maximum of ${max} apps per bot reached`);
+  }
+}
+
+/** Holds the bot's row until the caller's transaction ends: everything that changes which Apps a bot has takes it first, so they go one at a time. */
+export async function lockBotForApps(tx: Prisma.TransactionClient, botId: string): Promise<void> {
+  await tx.$queryRaw`SELECT "id" FROM "bots" WHERE "id" = ${botId} FOR UPDATE`;
+}
+
+/**
+ * Makes room for one more App on a bot, inside the caller's transaction, or throws AppsFull. The bot's row is held while the
+ * count is taken, so two Apps added at the same moment, by hand or lent, cannot both slip in past the limit.
+ */
+export async function claimAppSlot(tx: Prisma.TransactionClient, botId: string): Promise<void> {
+  // The limit is read through the caller's own transaction: the global client would take a second connection while this one is held,
+  // and under load callers waiting for that second connection starve the pool they are holding one of
+  const max = await maxAppsPerBot(tx);
+  await lockBotForApps(tx, botId);
+  if ((await tx.botMcpServer.count({ where: { botId } })) >= max) throw new AppsFull(max);
 }
 
 /** A key's reply limits: what its owner changed, the recommended value for the rest. */

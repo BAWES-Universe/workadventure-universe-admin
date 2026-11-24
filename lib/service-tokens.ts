@@ -1,4 +1,11 @@
+import { createHash, timingSafeEqual } from 'crypto';
 import { NextRequest } from 'next/server';
+
+/** Same text, compared in constant time: both are hashed first, so their lengths never show in how long it takes. */
+function sameSecret(given: string, expected: string): boolean {
+  const digest = (value: string) => createHash('sha256').update(value).digest();
+  return timingSafeEqual(digest(given), digest(expected));
+}
 
 /**
  * Validate service token from Authorization header
@@ -21,7 +28,7 @@ export function validateServiceToken(request: NextRequest): boolean {
     return false; // Token not configured
   }
 
-  return token === expectedToken;
+  return sameSecret(token, expectedToken);
 }
 
 /**

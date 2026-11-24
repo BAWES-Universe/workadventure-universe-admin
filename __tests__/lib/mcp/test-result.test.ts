@@ -1,4 +1,5 @@
 import {
+  resultFromTestAnswer,
   extractErrorCode,
   formatResultAge,
   readBodyWithLimit,
@@ -53,6 +54,23 @@ describe('redactCredentialMaterial', () => {
     const out = redactCredentialMaterial('Authorization: Bearer abc123def456ghi789');
     expect(out).not.toContain('abc123def456ghi789');
     expect(out).toContain('[redacted]');
+  });
+
+  it('redacts a short bearer value too', () => {
+    const out = redactCredentialMaterial('Authorization: Bearer abc123');
+    expect(out).not.toContain('abc123');
+    expect(out).toContain('[redacted]');
+  });
+
+  it('redacts a padded bearer value, and leaves challenge parameters readable', () => {
+    expect(redactCredentialMaterial('Authorization: Bearer abc=')).toBe('Authorization: Bearer [redacted]');
+    expect(redactCredentialMaterial('Authorization: Bearer abc==')).toBe('Authorization: Bearer [redacted]');
+    expect(redactCredentialMaterial('Authorization: Bearer resource_metadata123')).toBe('Authorization: Bearer [redacted]');
+    // A padded token whose letters happen to spell the parameter name is a credential: only the name followed by a value is the parameter
+    expect(redactCredentialMaterial('Authorization: Bearer resource_metadata=')).toBe('Authorization: Bearer [redacted]');
+    expect(redactCredentialMaterial('Authorization: Bearer resource_metadata==')).toBe('Authorization: Bearer [redacted]');
+    expect(redactCredentialMaterial('Bearer error="invalid_token"')).toBe('Bearer error="invalid_token"');
+    expect(redactCredentialMaterial('Bearer realm=mcp, error=invalid_token')).toBe('Bearer realm=mcp, error=invalid_token');
   });
 
   it('redacts JSON token fields', () => {
@@ -144,8 +162,18 @@ describe('summarizeTestResult', () => {
     const legacy: McpTestResult = { success: true, toolCount: 37, toolNames: ['a'] };
     const summary = summarizeTestResult(legacy, { testedAt: '2026-07-31T10:00:00Z', now });
     expect(summary.tone).toBe('ok');
-    expect(summary.label).toBe('Connected — 37 tools');
+    expect(summary.label).toBe('Connected — it can do 37 things');
     expect(summary.detail).toBe('tested 53 days ago');
+  });
+
+  it('says "at least" when the list of what the app can do was not read to its end', () => {
+    const cut: McpTestResult = { success: true, toolCount: 20, toolNames: ['a'], incomplete: true };
+    expect(summarizeTestResult(cut, { testedAt: '2026-09-22T11:00:00Z', now }).label).toBe('Connected — it can do at least 20 things');
+    expect(summarizeTestResult({ ...cut, incomplete: false }, { now }).label).toBe('Connected — it can do 20 things');
+    // A note stored beside a result that worked (a protocol version the check does not know) is shown, and the result stays green
+    const noted = summarizeTestResult({ ...cut, note: 'The app answered with protocol version 2099-01-01, which this check does not know. What it can do was read anyway.' }, { testedAt: '2026-09-22T11:00:00Z', now });
+    expect(noted.tone).toBe('ok');
+    expect(noted.detail).toContain('2099-01-01');
   });
 
   it('renders a legacy failure without the new fields', () => {
@@ -169,7 +197,7 @@ describe('summarizeTestResult', () => {
       now,
     });
     expect(summary.tone).toBe('stale');
-    expect(summary.label).toBe('Connected — 37 tools');
+    expect(summary.label).toBe('Connected — it can do 37 things');
     expect(summary.detail).toContain('token expired');
     expect(summary.detail).toContain('re-authorize');
   });
@@ -265,5 +293,19 @@ describe('summarizeTestResult', () => {
     expect(summarizeTestResult(null).tone).toBe('none');
     expect(summarizeTestResult(null).label).toBe('Not tested');
     expect(summarizeTestResult(undefined).tone).toBe('none');
+  });
+});
+
+describe('resultFromTestAnswer', () => {
+  it('keeps the incomplete mark of a list that was not read to its end, so the page says "at least"', () => {
+    const answer = { success: true, toolCount: 20, toolNames: ['a', 'b'], incomplete: true };
+    const result = resultFromTestAnswer(answer);
+    expect(result).toEqual({ success: true, toolCount: 20, toolNames: ['a', 'b'], incomplete: true });
+    expect(summarizeTestResult(result, { now: new Date('2026-11-19T00:00:00Z') }).label).toBe('Connected — it can do at least 20 things');
+  });
+
+  it('leaves a complete list unmarked, and keeps what a failure captured', () => {
+    expect(resultFromTestAnswer({ success: true, toolCount: 3, toolNames: ['a'] })).toEqual({ success: true, toolCount: 3, toolNames: ['a'] });
+    expect(resultFromTestAnswer({ success: false, error: 'Nope', status: 401, errorCode: 'invalid_token' })).toMatchObject({ success: false, error: 'Nope', status: 401, errorCode: 'invalid_token', wwwAuthenticate: null });
   });
 });

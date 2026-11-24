@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { corsHeaders } from '@/lib/cors';
+import { groupByBrick, whileNotPurged } from '@/lib/brick-purge-lock';
 
 export const runtime = 'nodejs';
 
@@ -179,19 +180,30 @@ export async function POST(request: NextRequest) {
     }
 
     // Debug: log what we're inserting
+    // Nothing is written for a Brick that was deleted for good (audit F08)
+    const purgedIds = new Set((await prisma.brickPurge.findMany({ where: { botId: { in: [...new Set(rowsToInsert.map((row) => row.botId))] } }, select: { botId: true } })).map((note) => note.botId));
+    if (purgedIds.size > 0) {
+      for (let at = rowsToInsert.length - 1; at >= 0; at--) if (purgedIds.has(rowsToInsert[at].botId)) rowsToInsert.splice(at, 1);
+    }
+
     const metricTypesInserted = new Set(rowsToInsert.map(r => r.metricType));
     console.log(`Inserting ${rowsToInsert.length} metric rows with types:`, Array.from(metricTypesInserted));
 
     // Fire-and-forget: Don't await, just start the operation
     if (rowsToInsert.length > 0) {
-      prisma.botsMetric
-        .createMany({
-          data: rowsToInsert,
-        })
-        .catch((err) => {
-          // Log error but don't block response
-          console.error('Error storing metrics:', err);
-        });
+      // Each Brick's rows are written under the lock a purge takes, after looking for its marker again: a purge that began after the check above
+      // cannot leave these rows behind
+      (async () => {
+        const byBrick = groupByBrick(rowsToInsert);
+        for (const [botId, data] of byBrick) {
+          try {
+            await whileNotPurged(botId, (tx) => tx.botsMetric.createMany({ data }));
+          } catch (err) {
+            // Log error but don't block response; one Brick's failure does not stop the others
+            console.error('Error storing metrics:', err);
+          }
+        }
+      })();
     }
 
     // Return immediately (fire-and-forget)

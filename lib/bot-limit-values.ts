@@ -62,6 +62,92 @@ export interface FairUsage {
   guestPool: number;
 }
 
+/** A person's own Bricks (game #1996) and the Brick for guests (game #1997). */
+export interface BrickLimits {
+  /** Days a deleted Brick waits before it is gone for good; Undo gives it back until then. */
+  undoDays: number;
+  /** Times the same kind of job has to come back before a Brick suggests a Brick for it. */
+  offerAfter: number;
+  /** Replies one guest gets from the Brick for guests in each window. Its own allowance, apart from a guest's replies from a host's bots. */
+  guestReplies: number;
+  /** Replies all guests together get from the Brick for guests in one universe in each window. */
+  universePool: number;
+  /** Minutes a visiting Brick stays after the bot server last found its person in a room: it is how a visit ends when the person leaves Universe (game #2005). */
+  visitEndsMinutes: number;
+  /** Days after which someone who only met a Brick, and never wrote to it, can no longer start a direct message. Once they have written, nothing but a decision ends it (game #2005, "People who met"). */
+  metExpiresDays: number;
+  /** Goals and tasks one person can have going at once, paused ones included (game #2002); done ones do not count. */
+  itemsPerPerson: number;
+  /** The shortest wait between two runs of one reminder, schedule, watch or goal, in minutes. */
+  shortestRepeat: number;
+  /** Runs one person's watches, schedules and goals get in a day, all together. A reminder is fixed text with no AI, so it never uses them. */
+  runsPerDay: number;
+  /** Minutes a run may take before it is given up and counted as failed. */
+  longestRun: number;
+  /** Minutes a computer waits for a person to take over after Brick handed over; then the job ends and its room goes back (game #2000). */
+  computerWait: number;
+  /** Minutes a card that a goal or task put up (it needs the person's yes before it goes on) waits for the person. A later check of the same thing joins that card. When the time is up the card ends. */
+  scheduledCardWait: number;
+  /** Minutes Snooze moves a reminder or briefing by. */
+  snooze: number;
+  /** Runs of a watch or goal that fail one after another before Brick tells the person. A reminder or briefing tells on the first. */
+  failuresBeforeTelling: number;
+  /** The share, in percent, of one person's Universe AI usage window that goals and tasks may use, so live chat always keeps room. */
+  goalsShare: number;
+  /** Apps one bot or Brick can use at once, by hand or lent. */
+  appsPerBot: number;
+  /** Minutes the safe form for a key stays open after a Brick or a person asks for it (game #2044); then it is asked for again. */
+  keyFormMinutes: number;
+  /** Times a key may be tried in one safe form before it is asked for again. */
+  keyTries: number;
+  /** Seconds a request to an app that uses a key may take before it is given up. */
+  keyCallSeconds: number;
+  /** Kilobytes of an app's answer that are read; a longer answer is cut. */
+  keyAnswerKb: number;
+  /** Requests to apps with a key that one person's Bricks may send in an hour, all together. */
+  keyCallsPerPerson: number;
+  /** Requests to apps with a key that every Brick may send in an hour, all together. */
+  keyCallsPlatform: number;
+  /** Checkouts one visitor may start on one page in an hour (game #2044). */
+  checkoutsPerVisitor: number;
+  /** Checkouts all visitors together may start on one page in an hour. */
+  checkoutsPerPage: number;
+  /** Checkouts all of one person's pages may start in an hour. */
+  checkoutsPerOwner: number;
+  /** Hours a checkout nobody paid stays open before it is closed as not paid. */
+  checkoutOpenHours: number;
+  /** Hours after a checkout was closed as not paid that a payment which still completes is counted (the service may hold it longer). */
+  latePaymentHours: number;
+  /** Seconds the service is left alone between two asks about the same payment. */
+  paymentCheckSeconds: number;
+  /** How many times an hour the services of one owner may be asked about their payments, however many pages and buyers there are. Counted apart from Bricks' own uses of keys. */
+  paymentLooksPerOwner: number;
+  /** What a Brick's owner starts with when they let other people ask for a job from an app (game #2006): uses a day for everyone together. The owner can change it for their own app. */
+  sharedUsesEveryone: number;
+  /** The same, uses a day for each person. */
+  sharedUsesPerPerson: number;
+  /** The quiet ceiling on tries at one shared app in an hour, a failed try included (a failed try gives its use back, never its place here). */
+  sharedTriesPerHour: number;
+  /** Times one ask may come again with the same id before it is turned away; a repeat never runs the job a second time. */
+  sharedRetries: number;
+  /** Shared jobs of one app running or not yet settled at the same moment. */
+  sharedJobsAtOnce: number;
+  /** Minutes after which a shared job that was never settled stops counting as running (its use still counts, it is not given back). */
+  sharedJobMinutes: number;
+  /** Templates in each of the three short lists under "Start from a template" (game #2008): starred, picks, and Bricks the person has met. */
+  templateList: number;
+  /** Days a Brick's computer sits unused before it is packed into our own storage (cold storage) and made again on the next use. Its files and its Files list stay. */
+  coldStorageDays: number;
+  /** Files a finished computer job hands over to the person's chat as cards, newest first; the others are only named. */
+  computerFiles: number;
+  /** Megabytes the largest file may be that a finished computer job hands over; a bigger one is only named. */
+  computerFileMb: number;
+  /** Hours a paused computer job keeps its own browser sign-ins and open pages, locked away from every other job. After that they are dropped: the job stays paused, and it signs in again when it carries on. */
+  pausedSignInsHours: number;
+  /** Steps of one computer job kept for its Activity list (what it has done so far), newest kept; older ones drop off. */
+  computerSteps: number;
+}
+
 /** What a super admin sets, all in one place. */
 export interface ServerLimits {
   universeAi: ReplyLimits;
@@ -70,12 +156,14 @@ export interface ServerLimits {
   guard: boolean;
   fairUsage: FairUsage;
   files: FileLimits;
+  bricks: BrickLimits;
 }
 
 export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60, recentFiles: 5, results: 10, part: 8000, room: 80000 };
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
+export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, metExpiresDays: 30, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20_000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2_000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10, computerFiles: 5, computerFileMb: 25, coldStorageDays: 14, pausedSignInsHours: 24, computerSteps: 200 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
 
@@ -85,6 +173,7 @@ export const SERVER_LIMITS_RECOMMENDED: ServerLimits = {
   guard: true,
   fairUsage: FAIR_USAGE_RECOMMENDED,
   files: FILE_LIMITS_RECOMMENDED,
+  bricks: BRICK_LIMITS_RECOMMENDED,
 };
 
 /**
@@ -131,8 +220,54 @@ const FAIR_USAGE_RANGES: Record<keyof FairUsage, Range> = {
   guestPool: { min: 1, max: 1_000_000, whole: true },
 };
 
+const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
+  undoDays: { min: 1, max: 365, whole: true },
+  // Never 1: a job that came once has not come back
+  offerAfter: { min: 2, max: 100, whole: true },
+  guestReplies: { min: 1, max: 1_000_000, whole: true },
+  universePool: { min: 1, max: 1_000_000, whole: true },
+  visitEndsMinutes: { min: 1, max: 1_440, whole: true },
+  metExpiresDays: { min: 1, max: 3_650, whole: true },
+  itemsPerPerson: { min: 1, max: 10_000, whole: true },
+  shortestRepeat: { min: 1, max: 525_600, whole: true },
+  runsPerDay: { min: 1, max: 100_000, whole: true },
+  longestRun: { min: 1, max: 1_440, whole: true },
+  computerWait: { min: 1, max: 1_440, whole: true },
+  scheduledCardWait: { min: 1, max: 10_080, whole: true },
+  snooze: { min: 1, max: 10_080, whole: true },
+  failuresBeforeTelling: { min: 1, max: 100, whole: true },
+  goalsShare: { min: 1, max: 100, whole: true },
+  appsPerBot: { min: 1, max: 100, whole: true },
+  keyFormMinutes: { min: 1, max: 1_440, whole: true },
+  keyTries: { min: 1, max: 100, whole: true },
+  keyCallSeconds: { min: 1, max: 300, whole: true },
+  keyAnswerKb: { min: 1, max: 10_240, whole: true },
+  keyCallsPerPerson: { min: 1, max: 10_000_000, whole: true },
+  keyCallsPlatform: { min: 1, max: 100_000_000, whole: true },
+  checkoutsPerVisitor: { min: 1, max: 100_000, whole: true },
+  checkoutsPerPage: { min: 1, max: 10_000_000, whole: true },
+  checkoutsPerOwner: { min: 1, max: 10_000_000, whole: true },
+  checkoutOpenHours: { min: 1, max: 720, whole: true },
+  latePaymentHours: { min: 1, max: 2_160, whole: true },
+  paymentCheckSeconds: { min: 1, max: 3_600, whole: true },
+  paymentLooksPerOwner: { min: 1, max: 10_000_000, whole: true },
+  sharedUsesEveryone: { min: 1, max: 1_000_000, whole: true },
+  sharedUsesPerPerson: { min: 1, max: 1_000_000, whole: true },
+  sharedTriesPerHour: { min: 1, max: 1_000_000, whole: true },
+  sharedRetries: { min: 0, max: 20, whole: true },
+  sharedJobsAtOnce: { min: 1, max: 1_000, whole: true },
+  sharedJobMinutes: { min: 1, max: 1_440, whole: true },
+  templateList: { min: 1, max: 100, whole: true },
+  coldStorageDays: { min: 1, max: 3_650, whole: true },
+  computerSteps: { min: 10, max: 5_000, whole: true },
+  computerFiles: { min: 0, max: 50, whole: true },
+  // Never more than the chat server takes in one upload (the bot server's upload cap)
+  computerFileMb: { min: 1, max: 50, whole: true },
+  pausedSignInsHours: { min: 1, max: 720, whole: true },
+};
+
 /** The values each group can hold, for the pages to say ("Between 1 and 100 files") before anything is sent. */
-export const LIMIT_RANGES = { reply: REPLY_RANGES, artifacts: ARTIFACT_RANGES, fairUsage: FAIR_USAGE_RANGES, files: FILE_RANGES };
+export const LIMIT_RANGES = { reply: REPLY_RANGES, artifacts: ARTIFACT_RANGES, fairUsage: FAIR_USAGE_RANGES, files: FILE_RANGES, bricks: BRICK_RANGES };
 
 const fits = (value: unknown, range: Range): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= range.min && value <= range.max && (!range.whole || Number.isInteger(value));
@@ -180,6 +315,7 @@ export function readServerLimits(saved: unknown): ServerLimits {
     guard: typeof all.guard === 'boolean' ? all.guard : SERVER_LIMITS_RECOMMENDED.guard,
     fairUsage: readGroup(all.fairUsage, FAIR_USAGE_RANGES, FAIR_USAGE_RECOMMENDED),
     files: readGroup(all.files, FILE_RANGES, FILE_LIMITS_RECOMMENDED),
+    bricks: readGroup(all.bricks, BRICK_RANGES, BRICK_LIMITS_RECOMMENDED),
   };
 }
 
@@ -203,17 +339,28 @@ function checkGroup<T extends object>(input: unknown, ranges: Record<keyof T, Ra
 
 export const checkReplyLimits = (input: unknown, group = 'limits'): Checked<Partial<ReplyLimits>> => checkGroup(input, REPLY_RANGES, group);
 
-/** A super admin's change: any of the five parts, each checked. */
-export function checkServerLimits(input: unknown): Checked<Partial<{ universeAi: Partial<ReplyLimits>; artifacts: Partial<ArtifactLimits>; guard: boolean; fairUsage: Partial<FairUsage>; files: Partial<FileLimits> }>> {
+/** A super admin's change, as it can be sent: any of the parts, each with only the values that change. */
+export type ServerLimitsChange = Partial<{
+  universeAi: Partial<ReplyLimits>;
+  artifacts: Partial<ArtifactLimits>;
+  guard: boolean;
+  fairUsage: Partial<FairUsage>;
+  files: Partial<FileLimits>;
+  bricks: Partial<BrickLimits>;
+}>;
+
+/** A super admin's change: any of the six parts, each checked. */
+export function checkServerLimits(input: unknown): Checked<ServerLimitsChange> {
   if (!isRecord(input)) return { ok: false, error: 'Expected an object' };
-  const out: Partial<{ universeAi: Partial<ReplyLimits>; artifacts: Partial<ArtifactLimits>; guard: boolean; fairUsage: Partial<FairUsage>; files: Partial<FileLimits> }> = {};
+  const out: ServerLimitsChange = {};
   for (const [key, value] of Object.entries(input)) {
     if (key === 'guard') {
       if (typeof value !== 'boolean') return { ok: false, error: 'guard must be true or false' };
       out.guard = value;
       continue;
     }
-    const ranges = key === 'universeAi' ? REPLY_RANGES : key === 'artifacts' ? ARTIFACT_RANGES : key === 'fairUsage' ? FAIR_USAGE_RANGES : key === 'files' ? FILE_RANGES : null;
+    const ranges =
+      key === 'universeAi' ? REPLY_RANGES : key === 'artifacts' ? ARTIFACT_RANGES : key === 'fairUsage' ? FAIR_USAGE_RANGES : key === 'files' ? FILE_RANGES : key === 'bricks' ? BRICK_RANGES : null;
     if (!ranges) return { ok: false, error: `Unknown setting: ${key}` };
     const checked = checkGroup(value, ranges as Record<string, Range>, key);
     if (!checked.ok) return checked;

@@ -18,7 +18,7 @@ import { describeVoice } from '@/app/admin/you/ai-keys/voice-key-text';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
-jest.mock('@/lib/bot-voice', () => ({ effectiveBotVoice: jest.fn(), ownServerLentToBot: jest.fn() }));
+jest.mock('@/lib/bot-voice', () => ({ ...jest.requireActual('@/lib/bot-voice'), effectiveBotVoice: jest.fn(), ownServerLentToBot: jest.fn() }));
 jest.mock('@/lib/ai-key-lend', () => ({ ...jest.requireActual('@/lib/ai-key-lend'), lendAccess: jest.fn() }));
 jest.mock('@/lib/ai-key-fetch', () => ({ ...jest.requireActual('@/lib/ai-key-fetch'), checkPublicHttpsUrl: jest.fn(), safeGet: jest.fn() }));
 jest.mock('@/lib/db', () => ({

@@ -10,12 +10,30 @@ jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[])
 const mockAddToast = jest.fn();
 jest.mock('@/components/ui/toast', () => ({ useToast: () => ({ addToast: mockAddToast }) }));
 
-import { UniverseAiLimits } from '@/app/admin/components/limits';
+import { UniverseAiLimits, readInstantLimits } from '@/app/admin/components/limits';
 import { SERVER_LIMITS_RECOMMENDED } from '@/lib/bot-limit-values';
 import { VOICE_LIMITS_RECOMMENDED } from '@/lib/voice-limit-values';
 
-function answer(limits = SERVER_LIMITS_RECOMMENDED, voice = VOICE_LIMITS_RECOMMENDED) {
+// What /api/admin/instant says for two of its limits: money held in millionths of a dollar, shares in hundredths of a percent
+const instant: { on?: boolean; goodwillMaxMicros?: number | null; markupBps?: number | null } = {};
+const instantViews = () => ({
+  goodwillMaxMicros: { value: instant.goodwillMaxMicros ?? null, range: { min: 0, max: 1_000_000_000 }, recommended: null, label: 'Most one give-back may be', hint: 'Empty: nothing is given back for “Didn’t work”.', unit: 'micros', required: false },
+  markupBps: { value: instant.markupBps ?? null, range: { min: 0, max: 100_000 }, recommended: null, label: 'Added to Composio’s charge for what the person pays', hint: 'In hundredths of a percent.', unit: 'bps', required: false },
+});
+
+function answer(limits = SERVER_LIMITS_RECOMMENDED, voice = VOICE_LIMITS_RECOMMENDED, memberAllowanceMicros: number | null = null) {
+  let allowance = memberAllowanceMicros;
   fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    // The computer allowance for each member (game #1999) is the meter's setting, read and saved on its own route
+    if (url === '/api/admin/meter-settings') {
+      if (init?.method === 'PATCH') allowance = JSON.parse(String(init.body)).memberAllowanceMicros;
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ settings: { memberAllowanceMicros: allowance }, missing: [] }) });
+    }
+    // Instant Apps' limits (spec v3 O2) come from their own route
+    if (url === '/api/admin/instant') {
+      if (init?.method === 'PATCH') Object.assign(instant, JSON.parse(String(init.body)));
+      return Promise.resolve({ ok: instant.on !== false, status: instant.on !== false ? 200 : 404, json: () => Promise.resolve({ limits: instantViews() }) });
+    }
     // The voice limits (#792) are read and saved on their own route
     if (url === '/api/admin/voice-limits') {
       const change = init?.method === 'PATCH' ? JSON.parse(String(init.body)) : {};
@@ -34,6 +52,7 @@ function answer(limits = SERVER_LIMITS_RECOMMENDED, voice = VOICE_LIMITS_RECOMME
               guard: change.guard ?? limits.guard,
               fairUsage: { ...limits.fairUsage, ...change.fairUsage },
               files: { ...limits.files, ...change.files },
+              bricks: { ...limits.bricks, ...change.bricks },
             },
           }),
       });
@@ -43,6 +62,7 @@ function answer(limits = SERVER_LIMITS_RECOMMENDED, voice = VOICE_LIMITS_RECOMME
 }
 
 beforeEach(() => {
+  for (const key of Object.keys(instant)) delete (instant as Record<string, unknown>)[key];
   fetchMock.mockReset();
   mockAddToast.mockReset();
 });
@@ -133,6 +153,20 @@ describe('Universe AI limits', () => {
     await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ files: { guestDays: 7 } }));
   });
 
+  it('shows the Brick for guests\' two numbers under Bricks and saves one on the limits route (game #1997)', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    expect(await screen.findByText('Bricks')).toBeTruthy();
+    expect(screen.getByText('Replies for a guest from the Brick for guests')).toBeTruthy();
+    expect(screen.getByText('Replies for all guests from the Brick for guests, in one universe')).toBeTruthy();
+    expect(screen.getByTestId('limit-guestReplies').textContent).toContain('10 replies');
+    expect(screen.getByTestId('limit-universePool').textContent).toContain('200 replies');
+    fireEvent.click(screen.getByTestId('limit-guestReplies'));
+    fireEvent.click(await screen.findByRole('radio', { name: /20 replies/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ bricks: { guestReplies: 20 } }));
+  });
+
   it('turns media in artifacts off with None (#1510)', async () => {
     answer();
     render(<UniverseAiLimits />);
@@ -140,6 +174,132 @@ describe('Universe AI limits', () => {
     fireEvent.click(await screen.findByRole('radio', { name: /None/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ artifacts: { media: 0 } }));
+  });
+
+  it('shows the two numbers for Bricks, and saves each on its own (game #1996)', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    expect(await screen.findByText('Bricks')).toBeTruthy();
+    expect(screen.getByText('Days a deleted Brick can be brought back')).toBeTruthy();
+    expect(screen.getByText('Its chat, what it remembers and its files wait this long, then go for good.')).toBeTruthy();
+    expect(screen.getByText('Times a job comes back before Brick suggests a Brick for it')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('limit-undoDays'));
+    fireEvent.click(await screen.findByRole('radio', { name: /14 days/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ bricks: { undoDays: 14 } }));
+    await waitFor(() => expect(screen.getAllByText('Recommended: 7 days').length).toBeGreaterThan(0));
+    fetchMock.mockClear();
+    answer();
+    fireEvent.click(screen.getByTestId('limit-offerAfter'));
+    fireEvent.click(await screen.findByRole('radio', { name: /5 times/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ bricks: { offerAfter: 5 } }));
+  });
+
+  it('puts the computer allowance first in Bricks: "Not set" with nothing recommended, then saved in dollars (game #1999)', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    const row = await screen.findByTestId('limit-computerMonth');
+    expect(row.textContent).toContain('Computer allowance for each member, a month');
+    expect(row.textContent).toContain('Not set');
+    expect(row.textContent).not.toContain('Recommended');
+    // It is the first row of the Bricks group, above the two rows that were there
+    const group = screen.getByLabelText('Bricks');
+    expect(group.querySelectorAll('[data-testid^="limit-"]')[0]?.getAttribute('data-testid')).toBe('limit-computerMonth');
+    fireEvent.click(row);
+    // No choice on its sheet is marked recommended: the starting value comes from our own test
+    const sheet = (await screen.findByRole('dialog')) as HTMLElement;
+    expect(sheet.textContent).not.toContain('Recommended');
+    fireEvent.click(await screen.findByRole('radio', { name: /\$5/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/meter-settings' && init?.method === 'PATCH')).toBe(true));
+    const patch = fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/meter-settings' && init?.method === 'PATCH')!;
+    expect(JSON.parse(String(patch[1].body))).toEqual({ memberAllowanceMicros: 5_000_000 });
+    await waitFor(() => expect(screen.getByTestId('limit-computerMonth').textContent).toContain('$5'));
+    // Once set it still names no recommended value, never "Recommended: -1 dollars"
+    expect(screen.getByTestId('limit-computerMonth').textContent).not.toContain('Recommended');
+    // Never saved through the bot limits route
+    expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/bot-limits' && init?.method === 'PATCH')).toBe(false);
+  });
+
+  it('keeps the Brick limits that were read when only the computer allowance could not be (game #1999)', async () => {
+    answer();
+    const ok = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => (url === '/api/admin/meter-settings' ? Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) }) : ok(url, init)));
+    render(<UniverseAiLimits />);
+    expect(await screen.findByText('Days a deleted Brick can be brought back')).toBeTruthy();
+    expect(screen.getByText(/We couldn’t load the computer allowance/)).toBeTruthy();
+    expect(screen.queryByTestId('limit-computerMonth')).toBeNull();
+    // Trying again brings its row in, first
+    fetchMock.mockImplementation(ok);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    const row = await screen.findByTestId('limit-computerMonth');
+    expect(screen.getByLabelText('Bricks').querySelectorAll('[data-testid^="limit-"]')[0]).toBe(row);
+  });
+
+  it('takes a computer allowance of its own in dollars and cents', async () => {
+    answer(SERVER_LIMITS_RECOMMENDED, VOICE_LIMITS_RECOMMENDED, 5_000_000);
+    render(<UniverseAiLimits />);
+    const row = await screen.findByTestId('limit-computerMonth');
+    expect(row.textContent).toContain('$5');
+    expect(row.textContent).not.toContain('Recommended');
+    fireEvent.click(row);
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    fireEvent.change(screen.getByLabelText(/Computer allowance for each member, a month, in dollars/), { target: { value: '7.50' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/meter-settings' && init?.method === 'PATCH')).toBe(true));
+    const patch = fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/meter-settings' && init?.method === 'PATCH')!;
+    expect(JSON.parse(String(patch[1].body))).toEqual({ memberAllowanceMicros: 7_500_000 });
+  });
+
+  it('lets a 0 typed into Other be saved where the limit’s own range starts at 0, and not an empty one', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    fireEvent.click(await screen.findByTestId('limit-markupBps'));
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    const field = screen.getByLabelText(/Added to Composio’s charge for what the person pays, in percent/);
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    fireEvent.change(field, { target: { value: '0' } });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')).toBe(true));
+    expect(JSON.parse(String(fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')![1].body))).toEqual({ markupBps: 0 });
+  });
+
+  it('reads Instant limits only when each row has its value, its recommendation and whether it is required', () => {
+    const row = { label: 'L', hint: 'H', range: { min: 0, max: 10 }, unit: 'count' };
+    expect(readInstantLimits({ limits: { a: row } })).toBeNull();
+    expect(readInstantLimits({ limits: { a: { ...row, value: 3, recommended: null, required: false } } })).not.toBeNull();
+  });
+
+  it('shows the Instant Apps limits as the route says them: dollars and percents, "Not set" with nothing recommended, saved in its own units', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    const give = await screen.findByTestId('limit-goodwillMaxMicros');
+    expect(give.textContent).toContain('Most one give-back may be');
+    expect(give.textContent).toContain('Not set');
+    expect(give.textContent).not.toContain('Recommended');
+    fireEvent.click(give);
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    fireEvent.change(screen.getByLabelText(/Most one give-back may be, in dollars/), { target: { value: '0.50' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')).toBe(true));
+    expect(JSON.parse(String(fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')![1].body))).toEqual({ goodwillMaxMicros: 500_000 });
+    await waitFor(() => expect(screen.getByTestId('limit-goodwillMaxMicros').textContent).toContain('$0.5'));
+    fireEvent.click(screen.getByTestId('limit-markupBps'));
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    fireEvent.change(screen.getByLabelText(/Added to Composio’s charge for what the person pays, in percent/), { target: { value: '12.5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')).toHaveLength(2));
+    expect(JSON.parse(String(fetchMock.mock.calls.filter(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')[1][1].body))).toEqual({ markupBps: 1250 });
+  });
+
+  it('shows no Instant Apps group when its route is not there', async () => {
+    instant.on = false;
+    answer();
+    render(<UniverseAiLimits />);
+    expect(await screen.findByTestId('limit-computerMonth')).toBeTruthy();
+    expect(screen.queryByLabelText('Instant Apps')).toBeNull();
   });
 
   it('saves the switch', async () => {

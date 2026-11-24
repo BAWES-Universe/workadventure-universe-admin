@@ -1,0 +1,89 @@
+name: Prune old images
+
+# Keeps the GitHub package list clean (#741). Every week, and whenever a pull request closes, old images
+# are deleted from `workadventure-universe-admin`. What stays, and what goes, is decided in
+# scripts/prune-images.mjs (and tested in __tests__/scripts/prune-images.test.js):
+#
+#   stays:  every release image (latest, main, sha-<sha>, version numbers, the older main-<sha>), the current
+#           `develop` build and the newest 10 `develop-<sha>` builds (so a dev rollback still works), the build
+#           dev runs right now, and anything younger than two days.
+#   goes:   older develop builds, the images a PR put on dev as `<branch>` and `<branch>-<sha7>` once the PR is
+#           closed (a branch that still has an open PR keeps its newest 3), and untagged versions no kept image uses.
+#
+# The two-day grace period applies to the weekly sweep. When a PR closes, its own branch's images go at once, whatever
+# their age, when they were built from the closing PR's own commits (and no other open PR uses the branch).
+#
+# The plan is printed before anything is deleted. prune-images-check.yml prints the same plan as a dry run on
+# any pull request that changes this clean-up, so a change shows what it would delete before it merges.
+
+on:
+  schedule:
+    - cron: '17 3 * * 0'
+  # pull_request_target, not pull_request: GitHub does not start a pull_request workflow for a PR that conflicts with its base,
+  # so a conflicted PR closed unmerged would never clear its images. This job runs only the base branch's own scripts (the
+  # checkout below is the base branch) and never checks out or runs the PR's code; the PR's branch name and number are
+  # passed as plain values.
+  pull_request_target:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Only list what would be deleted'
+        type: boolean
+        default: false
+
+# Runs do not queue behind each other (a queue keeps only its newest waiting run, which would drop a closing PR's
+# clean-up). Two at once is safe: each plans from the current list and a version that is already gone is skipped.
+# Only the same PR closing twice shares a group, and waits.
+concurrency:
+  group: prune-images-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prune:
+    # A PR from a fork never built images here, and Dependabot (whose runs get no secrets, and whose branches build no
+    # images) has nothing to clear.
+    if: >-
+      github.event_name != 'pull_request_target' || (
+      github.event.pull_request.head.repo.full_name == github.repository
+      && github.actor != 'dependabot[bot]'
+      && github.event.pull_request.user.login != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # A closed PR has no merge ref when it conflicts, so take the script from the branch the PR targeted (the code already merged there).
+          ref: ${{ github.event.pull_request.base.ref || github.ref }}
+          sparse-checkout: scripts
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Prune workadventure-universe-admin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # What dev and production run now stays. A missing uuid, address or token stops the run before anything is deleted.
+          DEV_COOLIFY_BASE: ${{ vars.DEV_COOLIFY_BASE }}
+          DEV_COOLIFY_TOKEN: ${{ secrets.DEV_COOLIFY_TOKEN }}
+          DEV_APPS: |
+            workadventure-universe-admin ${{ vars.DEV_COOLIFY_ORBIT_UUID }}
+          PROD_COOLIFY_BASE: ${{ secrets.COOLIFY_BASE }}
+          PROD_COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          PROD_APPS: |
+            workadventure-universe-admin ${{ secrets.COOLIFY_ADMIN_UUID }}
+          CLOSED_BRANCH: ${{ github.event.pull_request.head.ref }}
+          CLOSED_PR: ${{ github.event.pull_request.number }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=(--package workadventure-universe-admin --prod-branch main --dev-branch develop)
+          [ "$DRY_RUN" = true ] || args+=(--live)
+          [ -z "$CLOSED_BRANCH" ] || args+=(--closed-branch "$CLOSED_BRANCH" --closed-pr "$CLOSED_PR")
+          node scripts/prune-images-cli.mjs "${args[@]}"

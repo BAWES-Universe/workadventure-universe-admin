@@ -38,7 +38,7 @@ export function corsHeaders(
 ): Record<string, string> {
   const headers: Record<string, string> = {
     'Access-Control-Allow-Methods': methods,
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Computer-Command',
     Vary: 'Origin',
   };
   const origin = requestOrigin(request);

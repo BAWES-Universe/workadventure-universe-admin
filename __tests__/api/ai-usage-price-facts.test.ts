@@ -7,11 +7,16 @@ import { prisma } from '@/lib/db';
 import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
 import { GET as usageReport } from '@/app/api/admin/ai-providers/usage/route';
 
+// The meter's books copy each report (game #1998); these tests are about the report, not the books
+jest.mock('@/lib/meter', () => ({ recordModelCall: jest.fn(async () => null) }));
 jest.mock('@/lib/db', () => ({
   prisma: {
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn() },
     botsAiUsage: { create: jest.fn(async () => ({})), findMany: jest.fn() },
     bot: { findMany: jest.fn(async () => []) },
+    // A reply row is written under the voice reservation lock, in a transaction (the stand-in hands this same object over as the transaction)
+    $executeRaw: jest.fn(async () => 0),
+    $transaction: jest.fn(async (run: unknown) => (typeof run === 'function' ? run(jest.requireMock('@/lib/db').prisma) : Promise.all(run as unknown[]))),
   },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => ({ id: 'admin-1', email: 'admin@bawes.net' })) }));

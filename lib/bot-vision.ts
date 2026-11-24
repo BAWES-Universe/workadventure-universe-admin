@@ -1,7 +1,7 @@
-import type { BotsAiProvider } from '@prisma/client';
+import type { BotsAiProvider, Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { kindInfo } from '@/lib/ai-key-kinds';
-import { checkKeyForBot, KEY_FOR_BOT_TEXT } from '@/lib/ai-key-pay';
+import { checkKeyForBot, KEY_FOR_BOT_TEXT, type BotForKey } from '@/lib/ai-key-pay';
 import { recheckIfDue } from '@/lib/ai-key-health';
 import { resolveVisionSupport } from '@/lib/vision-models';
 import { UNIVERSE_AI_MISSING, resolveUniverseAiProvider } from '@/lib/universe-ai';
@@ -76,7 +76,7 @@ export type AnotherProblem = 'gone' | 'no-owner' | 'other-owner' | 'not-lent' | 
  */
 export async function usableVisionKey(
   pick: Extract<VisionPick, { choice: 'another' }>,
-  bot: { id: string | null; createdById: string | null; roomId: string },
+  bot: BotForKey,
   options: { recheck?: boolean; mainKeyOwnerId?: string | null } = {}
 ): Promise<{ ok: true; key: BotsAiProvider } | { ok: false; problem: AnotherProblem; key: BotsAiProvider | null }> {
   const key = await prisma.botsAiProvider.findUnique({ where: { providerId: pick.keyId } });
@@ -106,7 +106,7 @@ export async function usableVisionKey(
  */
 export async function checkVisionPick(
   raw: unknown,
-  context: { current: VisionPick | null; actorId: string | null; makerId: string | null; roomId: string; botId: string | null; mainRef?: string | null }
+  context: { current: VisionPick | null; actorId: string | null; makerId: string | null; roomId: string | null; ownerId?: string | null; botId: string | null; mainRef?: string | null }
 ): Promise<string | null> {
   if (raw === undefined || raw === null) return null;
   const pick = parseVisionPick(raw);
@@ -121,7 +121,8 @@ export async function checkVisionPick(
     const main = await prisma.botsAiProvider.findUnique({ where: { providerId: context.mainRef }, select: { ownerId: true } });
     if (main?.ownerId && main.ownerId !== context.actorId) return OTHER_OWNER_TEXT;
   }
-  const usable = await usableVisionKey(pick, { id: context.botId, createdById: context.makerId, roomId: context.roomId });
+  // Saved through the room's bot editor this is a room bot (a room and no owner); a Brick has no room and its owner
+  const usable = await usableVisionKey(pick, { id: context.botId, createdById: context.makerId, roomId: context.roomId, ownerId: context.roomId === null ? context.ownerId ?? null : null, deletedAt: null });
   if (usable.ok) return null;
   switch (usable.problem) {
     case 'no-model':
@@ -142,7 +143,7 @@ const OTHER_OWNER_TEXT = 'This bot runs on someone else’s key, so its images c
 /** The same check for a bot's whole behavior config as it arrives on a save: only a `vision` key in it is judged here. */
 export async function checkConfigVision(
   behaviorConfig: unknown,
-  context: { storedConfig: unknown; actorId: string | null; makerId: string | null; roomId: string; botId: string | null; mainRef?: string | null }
+  context: { storedConfig: unknown; actorId: string | null; makerId: string | null; roomId: string | null; ownerId?: string | null; botId: string | null; mainRef?: string | null }
 ): Promise<string | null> {
   if (!behaviorConfig || typeof behaviorConfig !== 'object' || !('vision' in behaviorConfig)) return null;
   return checkVisionPick((behaviorConfig as Record<string, unknown>).vision, {
@@ -150,6 +151,7 @@ export async function checkConfigVision(
     actorId: context.actorId,
     makerId: context.makerId,
     roomId: context.roomId,
+    ownerId: context.ownerId,
     botId: context.botId,
     mainRef: context.mainRef,
   });
@@ -158,12 +160,14 @@ export async function checkConfigVision(
 /**
  * A bot someone moves to another key or Universe AI (#709) stops sending images to a key picked for "Another model" that isn't
  * theirs: the owner of that key no longer pays for this bot, and images go back to the default (the new key's own Vision model,
- * else Universe AI). Returns the config without that pick, or null when nothing changes.
+ * else Universe AI). Returns the config without that pick, or null when nothing changes. `client` is the transaction's, when called inside one.
  */
-export async function dropOthersVisionKey(config: unknown, actorId: string | null): Promise<Record<string, unknown> | null> {
+export async function dropOthersVisionKey(config: unknown, actorId: string | null, client: Pick<Prisma.TransactionClient, 'botsAiProvider'> = prisma): Promise<Record<string, unknown> | null> {
   const pick = readVisionPick(config);
   if (pick?.choice !== 'another' || !config || typeof config !== 'object') return null;
-  const key = await prisma.botsAiProvider.findUnique({ where: { providerId: pick.keyId }, select: { ownerId: true } });
+  // Called from inside a transaction, the key is read on the transaction's own connection: a second connection taken while the first is held
+  // waits for a free one (a pool of one never gets it) until the transaction runs out of time
+  const key = await client.botsAiProvider.findUnique({ where: { providerId: pick.keyId }, select: { ownerId: true } });
   if (key?.ownerId && key.ownerId === actorId) return null;
   const rest = { ...(config as Record<string, unknown>) };
   delete rest.vision;

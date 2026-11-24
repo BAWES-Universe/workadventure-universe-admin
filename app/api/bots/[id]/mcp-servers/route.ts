@@ -1,3 +1,5 @@
+import { AppsFull, claimAppSlot } from '@/lib/bot-limits';
+import { botUniverseId } from '@/lib/app-uses';
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { isReconnectRequired, parseOAuthConfig, refreshBlockedReason } from '@/lib/mcp/oauth-token';
@@ -7,7 +9,9 @@ import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
 import { corsHeaders } from '@/lib/cors';
-import { isAllowedServerUrl } from '@/lib/mcp/outbound-guard';
+import { createMcpServerSchema, unsendableIssueMessage } from '@/lib/mcp/server-input';
+import { WITH_CONNECTION, effectiveServer } from '@/lib/app-connections';
+import { sharedJobsOf } from '@/lib/app-share';
 
 export const runtime = 'nodejs';
 
@@ -18,102 +22,6 @@ export const runtime = 'nodejs';
 export async function OPTIONS(request: NextRequest) {
   return NextResponse.json({}, { headers: corsHeaders(request) });
 }
-
-// Validation schema for creating an MCP server
-const createMcpServerSchema = z.object({
-  name: z.string().min(1, 'name is required').max(255, 'name must be at most 255 characters'),
-  serverUrl: z.string().url('serverUrl must be a valid URL').refine(
-    (url) => isAllowedServerUrl(url),
-    { message: 'Server URL must not point to internal or private addresses' }
-  ),
-  authType: z.enum(['none', 'bearer', 'api-key', 'oauth'], {
-    message: 'authType must be one of: none, bearer, api-key, oauth',
-  }).default('none'),
-  authConfig: z.string().trim().optional().nullable(),
-  headers: z.record(z.string(), z.string()).refine(
-    (headers) => {
-      const reserved = ['authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'x-api-key'];
-      return !Object.keys(headers).some((key) => reserved.includes(key.toLowerCase()));
-    },
-    { message: 'Headers must not include reserved credentials: Authorization, Proxy-Authorization, Cookie, Set-Cookie, X-API-Key' }
-  ).optional(),
-  enabled: z.boolean().optional().default(true),
-}).superRefine((data, ctx) => {
-  if ((data.authType === 'bearer' || data.authType === 'api-key' || data.authType === 'oauth') && !data.authConfig) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['authConfig'],
-      message: `authConfig is required when authType is '${data.authType}'`,
-    });
-    return;
-  }
-  if (data.authType === 'oauth' && data.authConfig) {
-    // Validate that the OAuth config contains required non-empty fields
-    // clientSecret is optional — public OAuth clients (PKCE) have no secret
-    try {
-      const parsed = JSON.parse(data.authConfig);
-      const required = ['clientId', 'authorizeUrl', 'tokenUrl'];
-      for (const field of required) {
-        if (!parsed[field] || typeof parsed[field] !== 'string' || !parsed[field].toString().trim()) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['authConfig'],
-            message: `OAuth '${field}' is required and must be a non-empty string`,
-          });
-          return;
-        }
-      }
-      // Validate authorizeUrl and tokenUrl are valid, absolute URLs
-      // and do not point to internal/private addresses (SSRF prevention).
-      for (const urlField of ['authorizeUrl', 'tokenUrl'] as const) {
-        try {
-          const parsedUrl = new URL(parsed[urlField]);
-          if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
-            ctx.addIssue({
-              code: z.ZodIssueCode.custom,
-              path: ['authConfig'],
-              message: `OAuth '${urlField}' must use http or https protocol`,
-            });
-            return;
-          }
-          if (!isAllowedServerUrl(parsed[urlField])) {
-            ctx.addIssue({
-              code: z.ZodIssueCode.custom,
-              path: ['authConfig'],
-              message: `OAuth '${urlField}' must not point to internal or private addresses`,
-            });
-            return;
-          }
-        } catch {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['authConfig'],
-            message: `OAuth '${urlField}' must be a valid, absolute URL`,
-          });
-          return;
-        }
-      }
-      // If clientSecret is provided, it must be a non-empty string
-      if (parsed.clientSecret !== undefined && parsed.clientSecret !== null) {
-        if (typeof parsed.clientSecret !== 'string' || !parsed.clientSecret.toString().trim()) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['authConfig'],
-            message: `OAuth 'clientSecret' must be a non-empty string if provided`,
-          });
-          return;
-        }
-      }
-    } catch {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['authConfig'],
-        message: 'authConfig must be valid JSON for OAuth authentication',
-      });
-      return;
-    }
-  }
-});
 
 /**
  * GET /api/bots/[id]/mcp-servers
@@ -151,7 +59,7 @@ export async function GET(
     // Fetch the bot to check ownership
     const bot = await prisma.bot.findUnique({
       where: { id: botId },
-      select: { id: true, createdById: true, roomId: true },
+      select: { id: true, createdById: true, roomId: true, ownerId: true, deletedAt: true },
     });
 
     if (!bot) {
@@ -171,14 +79,32 @@ export async function GET(
       }
     }
 
-    const servers = await prisma.botMcpServer.findMany({
-      where: { botId },
-      orderBy: { createdAt: 'asc' },
-    });
+    // A grant on a person's connection (game #2001) is read together with it: the link, the way in and the sign-in lost
+    // fields are the connection's, never copies on the row. A bot's own server is read as before.
+    const servers = (
+      await prisma.botMcpServer.findMany({
+        // An app with a key (game #2044) is not an app link: the bot server gets it from GET .../key-apps, never as a server to connect to
+        where: { botId, OR: [{ connectionId: null }, { connection: { kind: { not: 'direct' } } }] },
+        // The jobs an owner shared (game #2006) are read with the grant, for the bot server only: nobody else is told what is shared here
+        include: isAdminToken ? { ...WITH_CONNECTION, share: { include: { jobs: true } }, tools: { select: { name: true, fingerprint: true, heading: true, confirmedAt: true } } } : WITH_CONNECTION,
+        orderBy: { createdAt: 'asc' },
+      })
+    ).map((row) => effectiveServer(row));
 
     // Transform: remove authConfig from response for security,
     // except for internal bot-server calls authenticated via ADMIN_API_TOKEN
     // For OAuth servers, check if connected (has accessToken) without exposing credentials
+    // Where each grant comes from: one of the bot's own maker's apps (a Brick), a person's app lent to this bot's universe (with what the
+    // lender allowed), or the universe's own app. The bot server holds the limits again at every use (POST .../use).
+    const universeId = bot.roomId ? await botUniverseId(botId) : null;
+    const lends = universeId && servers.some((row) => row.connectionId)
+      ? await prisma.appLend.findMany({ where: { universeId, connectionId: { in: servers.map((row) => row.connectionId).filter((id): id is string => !!id) } }, select: { connectionId: true, things: true, usesPerDay: true } })
+      : [];
+    // A grant on someone else's connection (lent to this universe, or the universe's own) shows its manager the app's name and state,
+    // never its address or headers: the address can carry a key, and the lender never agreed to show it to everyone who manages bots.
+    // A ready-made app's address is the provider's and is never shown to a person. Only the bot server (admin token) is handed them.
+    const seesWay = (s: (typeof servers)[number]) => isAdminToken || !s.connection || (s.connection.ownerId === userId && s.connection.source !== 'ready_made');
+    const lendOf = new Map(lends.map((lend) => [lend.connectionId, lend]));
     const transformed = await Promise.all(
       servers.map(async (s) => {
         let oauthConnected = false;
@@ -197,6 +123,7 @@ export async function GET(
             if (isAdminToken) {
               const outcome = await ensureFreshOAuthConfig({
                 serverId: s.id,
+                connectionId: s.connectionId,
                 authConfig: s.authConfig,
                 serverUrl: s.serverUrl,
               });
@@ -230,19 +157,30 @@ export async function GET(
             id: s.id,
             botId: s.botId,
             name: s.name,
-            serverUrl: s.serverUrl,
+            serverUrl: seesWay(s) ? s.serverUrl : '',
             authType: s.authType,
-            ...(isAdminToken ? { authConfig: authConfigToServe } : {}),
+            // A person's GitHub (game #2041) is answered by Orbit itself: its token is never handed out, not even to the bot server
+            ...(isAdminToken && s.connection?.source !== 'github' ? { authConfig: authConfigToServe } : {}),
             oauthConnected,
             oauthExpiresAt,
             // Set when refreshing is impossible and only a human can fix it (#187).
             oauthReconnectRequired: !!oauthReconnectReason,
             oauthReconnectReason,
             enabled: s.enabled,
+            // Set for a Brick's grant on a person's connection: its link and sign-in are changed on the app's own page
+            connectionId: s.connectionId,
+            // A ready-made app: the bot server never calls its link itself (it needs the provider key, which stays in Orbit), it goes through
+            // POST /api/ready-made/link. False for every other server.
+            readyMade: s.connection?.source === 'ready_made' || s.connection?.source === 'github',
+            // For the bot server only: the jobs this Brick's owner lets other people ask it for from this app, with the inputs people may fill in
+            // and the fields that may come back. A job whose tool changed since it was picked is not listed, as it is not shared
+            ...(isAdminToken ? sharedJobsOf(s as Parameters<typeof sharedJobsOf>[0]) : {}),
+            // Set when a person's app is lent to this bot's universe: what the lender allowed (null = all four) and the uses a day
+            ...(lendOf.has(s.connectionId ?? '') ? { lent: { things: lendOf.get(s.connectionId as string)!.things, usesPerDay: lendOf.get(s.connectionId as string)!.usesPerDay } } : {}),
             // A server that existed before its tools were checked keeps working in text, and reads Not checked yet (#738)
             notCheckedYet: s.legacyText === true,
             policyRevision: s.policyRevision ?? 1,
-            headers: s.headers,
+            headers: seesWay(s) ? s.headers : null,
             lastTestedAt: s.lastTestedAt,
             lastTestResult: s.lastTestResult,
             // What the bot server saw when it really used the server, not only the last Test (game #1819)
@@ -305,7 +243,7 @@ export async function POST(
     // Fetch the bot to check ownership
     const bot = await prisma.bot.findUnique({
       where: { id: botId },
-      select: { id: true, createdById: true, roomId: true },
+      select: { id: true, createdById: true, roomId: true, ownerId: true, deletedAt: true },
     });
 
     if (!bot) {
@@ -345,13 +283,7 @@ export async function POST(
 
     // Soft cap: reject if bot already has 5 servers (atomic check+create)
     const server = await prisma.$transaction(async (tx) => {
-      const existingCount = await tx.botMcpServer.count({
-        where: { botId },
-      });
-
-      if (existingCount >= 5) {
-        throw new Error('MaxServersReached');
-      }
+      await claimAppSlot(tx, botId);
 
       return tx.botMcpServer.create({
         data: {
@@ -385,9 +317,9 @@ export async function POST(
       { status: 201, headers: corsHeaders(request) }
     );
   } catch (error) {
-    if (error instanceof Error && error.message === 'MaxServersReached') {
+    if (error instanceof AppsFull) {
       return NextResponse.json(
-        { error: 'Maximum of 5 MCP servers per bot reached' },
+        { error: error.message },
         { status: 422, headers: corsHeaders(request) }
       );
     }
@@ -398,6 +330,11 @@ export async function POST(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
     }
     if (error instanceof z.ZodError) {
+      // A key, token or extra header with text that cannot be sent is named in words: the schema found it on the trimmed, typed input
+      const unsendable = unsendableIssueMessage(error.issues);
+      if (unsendable) {
+        return NextResponse.json({ error: unsendable }, { status: 400, headers: corsHeaders(request) });
+      }
       return NextResponse.json(
         { error: 'Invalid input data', details: error.issues },
         { status: 400, headers: corsHeaders(request) }

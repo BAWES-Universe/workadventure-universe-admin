@@ -1,0 +1,111 @@
+import { Prisma } from '@prisma/client';
+import { prisma } from '@/lib/db';
+import { getMeterSettings } from '@/lib/meter';
+import { heldRoom, memberAllowance } from '@/lib/meter-allowance';
+import { runningExtra } from '@/lib/meter-grants';
+import { openRequestFor } from '@/lib/meter-requests';
+import { monthOf } from '@/lib/meter-values';
+
+/**
+ * What a super admin sees about one person on the person's page (game #1999): their chat and voice cost over the last week, their
+ * computer use against this month's allowance, the disk their Bricks keep, whether they asked for more, and the extra usage
+ * they have been given. Figures come from the meter's books; a figure with no price known is left out of the sums.
+ */
+
+export interface PersonGrant {
+  grantKey: string;
+  multiplier: number | null;
+  noLimit: boolean;
+  startsAt: string;
+  endsAt: string;
+  givenById: string;
+  givenByName: string;
+  settlement: 'gift' | 'to_bill';
+  billedAt: string | null;
+  note: string | null;
+}
+
+export interface PersonUsage {
+  /** Chat and voice cost us in the last 7 days, millionths of a dollar. */
+  chatWeekMicros: number;
+  bricks: number;
+  /** This month's computer spending, and the allowance it counts against: the usual, the raised one, or none. */
+  computerMonthMicros: number;
+  /** Null when no limit is lifted for them now. */
+  allowanceMicros: number | null;
+  /** What new work can still take now (null with no limit, or no allowance set). */
+  leftMicros: number | null;
+  noLimit: boolean;
+  /** The usual allowance is not set yet, so there is nothing to count against. */
+  allowanceSet: boolean;
+  keptBytes: number;
+  asked: { at: string } | null;
+  extra: PersonGrant | null;
+}
+
+const WEEK = 7 * 24 * 60 * 60 * 1000;
+
+/** `viewerId` is the super admin looking: extra usage they gave themselves reads "you", as the mock says it. */
+export async function personUsage(personId: string, now: Date = new Date(), viewerId: string | null = null): Promise<PersonUsage> {
+  const personKey = `person:${personId}`;
+  const month = monthOf(now);
+  const settings = await getMeterSettings();
+  // The month's spending, the running grant, the grant's card and the allowance worked from it are read from one snapshot, so a grant changed
+  // by an admin in between can never give a card from one grant and a figure from another
+  const snapshot = await prisma.$transaction(
+    async (tx) => {
+      const [chat, computer, bricks, kept, open, extra, allowance] = await Promise.all([
+        tx.meterEvent.aggregate({ where: { personKey, pool: 'chat', payerKind: 'universe', occurredAt: { gte: new Date(now.getTime() - WEEK), lte: now } }, _sum: { costMicros: true } }),
+        tx.meterEvent.aggregate({ where: { personKey, pool: 'computer', payerKind: 'universe', occurredAt: { gte: month.start, lt: month.end } }, _sum: { costMicros: true } }),
+        tx.bot.count({ where: { ownerId: personId, deletedAt: null } }),
+        tx.$queryRaw<{ bytes: bigint | null }[]>(Prisma.sql`
+          SELECT COALESCE(SUM(latest.quantity), 0)::bigint AS bytes FROM (
+            SELECT DISTINCT ON (bot_id) quantity FROM meter_events
+            WHERE kind = 'stored_bytes' AND person_key = ${personKey} AND bot_id IS NOT NULL
+            ORDER BY bot_id, occurred_at DESC, recorded_at DESC
+          ) latest`),
+        // Read inside the snapshot too: asked through the pool while this transaction holds its connection, it would wait on a connection that is not free
+        openRequestFor(personId, 'computer', tx),
+        runningExtra(personId, now, tx),
+        memberAllowance(personId, now, settings, tx),
+      ]);
+      const row = extra ? await tx.meterGrant.findUnique({ where: { grantKey: extra.grantKey } }) : null;
+      const held = !allowance || allowance.unlimited ? 0 : await heldRoom(personId, now, tx);
+      return { chat, computer, bricks, kept, open, extra, allowance, row, held };
+    },
+    { isolationLevel: 'RepeatableRead' },
+  );
+  const { chat, computer, bricks, kept, open, extra, allowance, row, held } = snapshot;
+  let grant: PersonGrant | null = null;
+  if (extra && row) {
+    const giver = await prisma.user.findUnique({ where: { id: row.givenById }, select: { name: true, email: true } });
+    grant = {
+      grantKey: row.grantKey,
+      multiplier: row.noLimit ? null : row.multiplier,
+      noLimit: row.noLimit,
+      startsAt: row.startsAt.toISOString(),
+      endsAt: row.endsAt.toISOString(),
+      givenById: row.givenById,
+      givenByName: viewerId && row.givenById === viewerId ? 'you' : giver?.name?.trim() || giver?.email || 'a super admin',
+      settlement: row.settlement === 'to_bill' ? 'to_bill' : 'gift',
+      billedAt: row.billedAt?.toISOString() ?? null,
+      note: row.note,
+    };
+  }
+  const base = settings.memberAllowanceMicros;
+  // Unlimited comes from the running grant itself, so it is true even while no allowance is set
+  const noLimit = !!(extra?.noLimit || allowance?.unlimited);
+  return {
+    chatWeekMicros: Number(chat._sum.costMicros ?? 0),
+    bricks,
+    computerMonthMicros: Number(computer._sum.costMicros ?? 0),
+    allowanceMicros: base === null || !allowance ? null : noLimit ? null : allowance.baseMicros * (extra?.multiplier ?? 1) + allowance.creditTotalMicros,
+    // What new work can still take, as admission counts it (spending and what is held, with the extra drawn first); not the allowance less spending, which reads wrong once an extra ends
+    leftMicros: allowance && !allowance.unlimited && !noLimit ? Math.max(0, (allowance.leftMicros ?? 0) - held) : null,
+    noLimit,
+    allowanceSet: base !== null,
+    keptBytes: Number(kept[0]?.bytes ?? 0),
+    asked: open ? { at: open.createdAt.toISOString() } : null,
+    extra: grant,
+  };
+}

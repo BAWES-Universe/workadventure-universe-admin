@@ -15,11 +15,16 @@ import { GET as botList } from '@/app/api/bots/ai-providers/route';
 import { GET as botCredentials } from '@/app/api/bots/ai-providers/[providerId]/credentials/route';
 import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
 
+// The meter's books copy each report (game #1998); these tests are about the report, not the books
+jest.mock('@/lib/meter', () => ({ recordModelCall: jest.fn(async () => null) }));
 jest.mock('@/lib/db', () => ({
   prisma: {
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), delete: jest.fn(), create: jest.fn() },
     botsAiUsage: { findMany: jest.fn(async () => []), create: jest.fn(async () => ({})) },
     bot: { findMany: jest.fn(async () => []), groupBy: jest.fn(async () => []), count: jest.fn(async () => 0) },
+    // A reply row is written under the voice reservation lock, in a transaction (the stand-in hands this same object over as the transaction)
+    $executeRaw: jest.fn(async () => 0),
+    $transaction: jest.fn(async (run: unknown) => (typeof run === 'function' ? run(jest.requireMock('@/lib/db').prisma) : Promise.all(run as unknown[]))),
   },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => ({ id: 'admin-1', email: 'admin@bawes.net' })) }));

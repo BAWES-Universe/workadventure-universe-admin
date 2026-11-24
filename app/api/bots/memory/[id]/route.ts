@@ -3,7 +3,9 @@ import { prisma } from '@/lib/db';
 import { requireServiceToken, validateServiceToken } from '@/lib/service-tokens';
 import { botContentReadDenied } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
+import { saveMemoryRow, takeItemForgets, withoutForgottenFor, withoutForgottenOne } from '@/lib/bot-memory-person';
 import { dropForgottenFrom, forgetNotice, isBotHidden, memoryTally, takeForgets } from '@/lib/bot-privacy';
+import { isPurged } from '@/lib/brick-purge';
 
 export const runtime = 'nodejs';
 
@@ -36,7 +38,7 @@ export async function GET(
     const isServiceToken = validateServiceToken(request);
     const { id: botId } = await params;
     if (!isServiceToken) {
-      const denied = await botContentReadDenied(request, corsHeaders(request));
+      const denied = await botContentReadDenied(request, botId, corsHeaders(request));
       if (denied) return denied;
       // Hide bot conversations (#435): whoever is not the bot server gets the tally, never the contents: a person,
       // a super admin, and the deployment admin token alike (#444). The bot server reads everything back with its
@@ -58,7 +60,7 @@ export async function GET(
       orderBy: { updatedAt: 'desc' },
     });
 
-    const memories = rows.map((row) => {
+    const restored = rows.map((row) => {
       const rawEmotions = (row.emotions as Record<string, unknown> | null) || {};
       const lastEmotionMs = row.lastEmotionUpdate
         ? row.lastEmotionUpdate.getTime()
@@ -77,6 +79,9 @@ export async function GET(
         emotions,
       };
     });
+
+    // What a person forgot stays gone, also in a row that was restored with it still in (game #2003)
+    const memories = await withoutForgottenFor(botId, restored);
 
     return NextResponse.json(
       { memories },
@@ -160,6 +165,12 @@ export async function POST(
       );
     }
 
+    // A Brick that was deleted for good keeps nothing, and nothing a bot server still holds for it is written back (audit F08). The save is
+    // answered as done, so the bot server does not try it again.
+    if (await isPurged(botId)) {
+      return NextResponse.json({ status: 'saved', saveType, gone: true }, { headers: corsHeaders(request) });
+    }
+
     // People the owner asked the bot to forget (#435): their entries are not saved, and the bot server is told to drop
     // them from what it keeps in memory. A bot that nobody asked to forget anything has no rows here, so this changes
     // nothing for it. If the rows cannot be read, the save fails and the bot server tries again, rather than saving
@@ -168,7 +179,11 @@ export async function POST(
     const forgets = (userUuid: unknown) => forgetting.everyone || (typeof userUuid === 'string' && forgetting.userUuids.has(userUuid));
 
     // Process each memory entry
-    const memoryEntries = (Array.isArray(memories) ? memories : []).filter((memory: { userUuid?: unknown }) => !forgets(memory.userUuid));
+    // What a person forgot one thing at a time is taken out of what is saved (game #2003): the bot server may still hold it
+    const memoryEntries = await withoutForgottenFor(
+      botId,
+      (Array.isArray(memories) ? memories : []).filter((memory: { userUuid?: unknown }) => !forgets(memory.userUuid)),
+    );
     
     // Process memories asynchronously (fire-and-forget pattern)
     const written: string[] = [];
@@ -190,6 +205,9 @@ export async function POST(
             console.warn('Skipping memory entry without userUuid:', memory);
             continue; // Skip invalid entries
           }
+
+          // Purged while this save was running: nothing more is written
+          if (await isPurged(botId)) break;
 
           // Determine if user is logged in
           const userIsLogged = isGuest === false || isLogged === true;
@@ -259,33 +277,38 @@ export async function POST(
 
           // Always store userUuid (even for guests with no match)
           // This allows us to track ephemeral guest sessions
-          await prisma.botsMemory.upsert({
-            where: {
-              botId_userUuid: {
-                botId: botId,
-                userUuid: userUuid,
+          // Under the lock every Forget takes, taking out what was forgotten as it is now (game #2003)
+          const saved = await saveMemoryRow(botId, userUuid, memoryData, (tx, clean) =>
+            tx.botsMemory.upsert({
+              where: {
+                botId_userUuid: {
+                  botId: botId,
+                  userUuid: userUuid,
+                },
               },
-            },
-            update: {
-              userId: finalUserId,
-              userName: userName || undefined,
-              isGuest: finalIsGuest,
-              memories: memoryData || undefined,
-              emotions: emotions || undefined,
-              lastEmotionUpdate: lastEmotionUpdate ? new Date(lastEmotionUpdate) : undefined,
-              updatedAt: new Date(),
-            },
-            create: {
-              botId,
-              userUuid,
-              userId: finalUserId,
-              userName: userName || null,
-              isGuest: finalIsGuest,
-              memories: memoryData || null,
-              emotions: emotions || null,
-              lastEmotionUpdate: lastEmotionUpdate ? new Date(lastEmotionUpdate) : null,
-            },
-          });
+              update: {
+                userId: finalUserId,
+                userName: userName || undefined,
+                isGuest: finalIsGuest,
+                memories: (clean as typeof memoryData) || undefined,
+                emotions: emotions || undefined,
+                lastEmotionUpdate: lastEmotionUpdate ? new Date(lastEmotionUpdate) : undefined,
+                updatedAt: new Date(),
+              },
+              create: {
+                botId,
+                userUuid,
+                userId: finalUserId,
+                userName: userName || null,
+                isGuest: finalIsGuest,
+                memories: (clean as typeof memoryData) || null,
+                emotions: emotions || null,
+                lastEmotionUpdate: lastEmotionUpdate ? new Date(lastEmotionUpdate) : null,
+              },
+            }),
+          );
+          // Purged while this save was running: nothing was written, and nothing more is
+          if (saved === null) break;
           written.push(userUuid);
         }
 
@@ -375,37 +398,42 @@ export async function POST(
             fullMemoryData = body.memories || body.memory || body.memoryData || null;
           }
 
-          await prisma.botsMemory.upsert({
-            where: {
-              botId_userUuid: {
-                botId: botId,
-                userUuid: body.userUuid,
+          fullMemoryData = (await withoutForgottenOne(botId, body.userUuid, fullMemoryData)) as typeof fullMemoryData;
+
+          // Under the lock every Forget takes, taking out what was forgotten as it is now (game #2003)
+          const savedNow = await saveMemoryRow(botId, body.userUuid, fullMemoryData, (tx, clean) =>
+            tx.botsMemory.upsert({
+              where: {
+                botId_userUuid: {
+                  botId: botId,
+                  userUuid: body.userUuid,
+                },
               },
-            },
-            update: {
-              // Always update emotions when provided
-              emotions: body.emotions,
-              // Always update full memory data when provided (regardless of saveType)
-              memories: fullMemoryData !== null ? fullMemoryData : undefined,
-              userId: finalUserId,
-              userName: body.userName || undefined,
-              isGuest: finalIsGuest,
-              lastEmotionUpdate: new Date(),
-              updatedAt: new Date(),
-            },
-            create: {
-              botId,
-              userUuid: body.userUuid,
-              userId: finalUserId,
-              userName: body.userName || null,
-              isGuest: finalIsGuest,
-              // Store full memory data if provided, otherwise null
-              memories: fullMemoryData,
-              emotions: body.emotions,
-              lastEmotionUpdate: new Date(),
-            },
-          });
-          written.push(body.userUuid);
+              update: {
+                // Always update emotions when provided
+                emotions: body.emotions,
+                // Always update full memory data when provided (regardless of saveType)
+                memories: clean !== null ? (clean as typeof fullMemoryData) : undefined,
+                userId: finalUserId,
+                userName: body.userName || undefined,
+                isGuest: finalIsGuest,
+                lastEmotionUpdate: new Date(),
+                updatedAt: new Date(),
+              },
+              create: {
+                botId,
+                userUuid: body.userUuid,
+                userId: finalUserId,
+                userName: body.userName || null,
+                isGuest: finalIsGuest,
+                // Store full memory data if provided, otherwise null
+                memories: clean as typeof fullMemoryData,
+                emotions: body.emotions,
+                lastEmotionUpdate: new Date(),
+              },
+            }),
+          );
+          if (savedNow !== null) written.push(body.userUuid);
         }
       } catch (err) {
         // Log error but don't block response (fire-and-forget)
@@ -424,11 +452,13 @@ export async function POST(
 
     // Only when someone asked the bot to forget: the people to drop from what it keeps in memory.
     const forget = forgetNotice(forgetting);
+    const forgetItems = await takeItemForgets(botId);
     return NextResponse.json(
       {
         status: 'saved',
         saveType,
         ...(forget ? { forget } : {}),
+        ...(forgetItems.length > 0 ? { forgetItems } : {}),
       },
       { headers: corsHeaders(request) }
     );

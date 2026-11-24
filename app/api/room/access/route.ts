@@ -9,6 +9,7 @@ import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalo
 import { notifyRoomAccess } from '@/lib/discord';
 import { isBotIdentifier } from '@/lib/bot-visitor';
 import { isLinkableGuestId, linkGuestVisits } from '@/lib/guest-sign-in-link';
+import { adoptGuestChatKeepingIt, finishKeptGuestChats, GuestChatNotKeptError } from '@/lib/guest-brick';
 import { currentOutfit, recordOutfitPick } from '@/lib/user-outfits';
 import { companionWearableHere, wearableHere } from '@/lib/woka-wearable';
 import { canSeeRoom } from '@/lib/room-visibility';
@@ -199,6 +200,15 @@ export async function GET(request: NextRequest) {
         userName = name || null;
         userEmail = null;
       }
+      // A hand-over of a guest's chat that failed when they signed in (the game sends that id only once) is finished now: it was kept
+      // for them, and a failure here never stops them getting in
+      if (user && isAuthenticated && !user.isGuest && !unverifiedAccount && !isBotIdentifier(finalUuid)) {
+        try {
+          await finishKeptGuestChats(user.id);
+        } catch (error) {
+          Sentry.captureException(error);
+        }
+      }
       // Someone who just signed in: the visits they made as a guest on this device join their account (#630). Only for
       // an account whose token we verified, and a failure here never stops them getting in.
       if (user && isAuthenticated && !user.isGuest && !unverifiedAccount && !isBotIdentifier(finalUuid) && isLinkableGuestId(previousGuestUuid, user.uuid)) {
@@ -206,6 +216,28 @@ export async function GET(request: NextRequest) {
           await linkGuestVisits(previousGuestUuid, { id: user.id, uuid: user.uuid, name: user.name, email: user.email });
         } catch (error) {
           Sentry.captureException(error);
+        }
+        // Their chat with the Brick for guests joins the account's one Brick the same way (game #1997), once
+        try {
+          await adoptGuestChatKeepingIt(previousGuestUuid, user.id);
+        } catch (error) {
+          Sentry.captureException(error);
+          // A failure that was written down is finished on a later visit and never stops anyone getting in. One that could not even be written down loses
+          // the guest id (the game sends it only once), so the game shows its retry screen and asks again with it, instead of getting in with nothing kept
+          if (error instanceof GuestChatNotKeptError) {
+            const retry: ErrorApiRetryData = {
+              status: "error",
+              type: "retry",
+              title: "Couldn't finish signing you in",
+              subtitle: "We couldn't keep your chat from before you signed in. Trying again.",
+              code: "GUEST_CHAT_NOT_KEPT",
+              details: "This usually clears up in a few seconds.",
+              buttonTitle: "Retry",
+              timeToRetry: 5000,
+              canRetryManual: true,
+            };
+            return NextResponse.json(retry);
+          }
         }
       }
 
@@ -598,6 +630,9 @@ export async function GET(request: NextRequest) {
         email: account?.email || null,
         username: account?.name || userName || undefined,
         userUuid: finalUuid,
+        // Only for somebody signed in whose token we verified: an identifier somebody only presents (a guest's, or an
+        // account's they never proved) gets no id (#408).
+        ...(verifiedUserId ? { userId: verifiedUserId } : {}),
         tags: verifiedTags,
         visitCardUrl: visitCardUrl,
         isCharacterTexturesValid: isTexturesValid,

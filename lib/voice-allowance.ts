@@ -2,6 +2,11 @@ import { prisma } from '@/lib/db';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import { ReplyAllowanceError, windowStart } from '@/lib/reply-limits';
 import { servedVoiceLimits } from '@/lib/voice-limits';
+import { repliesPerWindowFor } from '@/lib/credit-replies';
+import { textReserve, voiceReplies } from '@/lib/voice-limit-values';
+import { runningExtra, type RunningExtra } from '@/lib/meter-grants';
+import { checkSpeechCap } from '@/lib/speech-cap';
+import { lockSpeech, speechReserved, SPEECH_LOCK } from '@/lib/speech-reserved';
 
 /**
  * Voice replies inside the Universe AI allowance (game #1669), decided by Khalid 29 Oct 2026: a spoken reply comes out of the
@@ -18,8 +23,11 @@ export type VoiceAllowance =
 
 /** What a person has left, for the line at the bottom of the Voice menu. `resetsAt` is null while no window is running (nothing used yet). */
 export interface VoiceLeft {
-  left: number;
+  /** `null` while the person has no limit (extra usage with no limit is running): there is no number to show. `null` with no `unlimited` is a person nobody could name. */
+  left: number | null;
   resetsAt: string | null;
+  /** True when `left` is null because the person has no limit (so the menu can say "unlimited"); absent otherwise, so a game that does not read it still reads null as "nothing to show". */
+  unlimited?: true;
 }
 
 const HOUR = 60 * 60 * 1000;
@@ -29,17 +37,46 @@ type Served = Awaited<ReturnType<typeof servedVoiceLimits>>;
 /**
  * Voice replies a person can still hear: what the voice limits leave of the window (30 gives 25, a guest 3) less the spoken ones,
  * and never more than what is left of the window once the replies kept for text are put aside, so replies they typed count too.
+ * `null` when extra usage with no limit is running: nothing stops them, so there is no number.
  */
-function repliesLeft(served: Served, guest: boolean, spoken: number, used: number): number {
-  const { byVoice, byText } = places(served, guest, spoken, used);
-  return Math.max(0, Math.min(byVoice, byText));
+function repliesLeft(served: Served, guest: boolean, spoken: number, used: number, extra: RunningExtra | null): number | null {
+  const { byVoice, byText } = places(served, guest, spoken, used, extra);
+  const left = Math.min(byVoice, byText);
+  return Number.isFinite(left) ? Math.max(0, Math.floor(left)) : null;
 }
 
-/** The places the voice limits leave (`byVoice`), and the places the window leaves once the replies kept for text are put aside (`byText`). */
-function places(served: Served, guest: boolean, spoken: number, used: number): { byVoice: number; byText: number } {
+/**
+ * The places the voice limits leave (`byVoice`), and the places the window leaves once the replies kept for text are put aside (`byText`).
+ * Extra usage a super admin gave (game #1999) is applied the way the text limit applies it (lib/reply-limits.ts): a multiple of the
+ * usual window, the replies kept for text and the voice replies with it, or no limit at all (both Infinity). A guest never has it.
+ */
+function places(served: Served, guest: boolean, spoken: number, used: number, extra: RunningExtra | null): { byVoice: number; byText: number } {
   const window = guest ? served.window.guest : served.window.signedIn;
-  return { byVoice: window.voiceReplies - spoken, byText: window.replies - used - window.textReserve };
+  if (!guest && extra?.noLimit) return { byVoice: Infinity, byText: Infinity };
+  const times = guest ? 1 : (extra?.multiplier ?? 1);
+  // The replies kept for text, and the voice replies, are worked out from the window the person really has, after its multiple, the way the
+  // text limit does (lib/reply-limits.ts): scaling the usual window's own figures would leave a one-reply window with a 2x grant no place at all
+  const total = window.replies * times;
+  return { byVoice: voiceReplies(total, served.limits, guest) - spoken, byText: total - used - textReserve(total, served.limits.textReserveShare) };
 }
+
+/**
+ * The windows a person is served: a signed-in person's own number of replies when a super admin's exception sets one (or gives none, so
+ * a spoken reply is no place either), the usual one when it does not. The text limit reads it the same way (lib/reply-limits.ts).
+ */
+async function servedFor(served: Served, person: { personId: string | null }, now: Date): Promise<Served> {
+  if (!person.personId) return served;
+  const base = served.window.signedIn.replies;
+  const replies = await repliesPerWindowFor(person.personId, base, now);
+  if (replies === base) return served;
+  return { ...served, window: { ...served.window, signedIn: { replies, textReserve: textReserve(replies, served.limits.textReserveShare), voiceReplies: voiceReplies(replies, served.limits, false) } } };
+}
+
+/** The extra usage running for a signed-in person now, if any; a guest has none. */
+const extraFor = (person: { personId: string | null }, now: Date) => (person.personId ? runningExtra(person.personId, now) : Promise.resolve(null));
+
+/** An allowed answer; no `left` when there is no limit to count down from. */
+const withLeft = (left: number | null, resetsAt: string): VoiceAllowance => (left === null ? { allowed: true, resetsAt } : { allowed: true, left, resetsAt });
 
 /** The Universe AI replies a person got in a window, from any bot, as the text limit counts them (lib/reply-limits.ts). */
 const usedReplies = (db: Pick<typeof prisma, 'botsAiUsage'>, person: { personId: string | null }, userId: string, since: Date) =>
@@ -48,6 +85,8 @@ const usedReplies = (db: Pick<typeof prisma, 'botsAiUsage'>, person: { personId:
       ...(person.personId ? { talkedPersonId: person.personId } : { talkedUserId: userId, talkedGuest: true }),
       keyOwnerId: null,
       error: false,
+      // A greeting the bot made on its own is free for the person (see lib/reply-limits.ts)
+      greeting: false,
       timestamp: { gte: since },
     },
   });
@@ -67,14 +106,27 @@ export async function checkVoiceAllowance(
   if (!bot) throw new ReplyAllowanceError('Bot not found', 404);
 
   const userId = typeof input.userId === 'string' && input.userId ? input.userId.slice(0, 255) : null;
-  if (!userId) return { allowed: true };
+  if (!userId) {
+    // Nobody to count, but the month's speech for everyone together still has its stop (lib/speech-cap.ts), and the reply holds its seconds
+    // like any other (under `anon:<bot>`, so asking again for the same reply is the same reply, and releasing it frees them)
+    const replySeconds = (await servedVoiceLimits()).limits.replySeconds;
+    return prisma.$transaction(async (tx): Promise<VoiceAllowance> => {
+      await lockSpeech(tx);
+      if (await tx.voiceReplyUse.findUnique({ where: { botId_turnId: { botId, turnId } }, select: { id: true } })) return { allowed: true };
+      const stop = await checkSpeechCap({ personId: null, seconds: replySeconds, inFlight: await speechReserved(tx, { personKey: null, replySeconds, now }) }, now, tx);
+      if (stop) return { allowed: false, resetsAt: stop.resetsAt };
+      await tx.voiceReplyUse.create({ data: { botId, turnId, personKey: `anon:${botId}`, seconds: replySeconds, createdAt: now } });
+      return { allowed: true };
+    }, SPEECH_LOCK);
+  }
 
   const person = await resolveUsagePerson(userId, input.isGuest);
   const guest = !person.personId;
   // The same words the Universe AI reply window is kept under (lib/reply-limits.ts), so a spoken reply is in the same window
   const personKey = person.personId ? `person:${person.personId}` : `guest:${userId}`;
 
-  const served = await servedVoiceLimits();
+  const [usual, extra] = await Promise.all([servedVoiceLimits(), extraFor(person, now)]);
+  const served = await servedFor(usual, person, now);
   const { window } = served;
   const since = await windowStart(`ua:${personKey}`, window.hours, now);
   const resetsAt = new Date(since.getTime() + window.hours * HOUR).toISOString();
@@ -87,16 +139,24 @@ export async function checkVoiceAllowance(
     const spoken = await tx.voiceReplyUse.count({ where: { personKey, createdAt: { gte: since } } });
     const used = await usedReplies(tx, person, userId, since);
     // A reply asked for again was counted already, so what is left now is what is left
-    if (already) return { allowed: true, left: repliesLeft(served, guest, spoken, used), resetsAt };
+    if (already) return withLeft(repliesLeft(served, guest, spoken, used, extra), resetsAt);
     // A place is only for a reply when the replies kept for text stay kept: typed replies take places from the same window. The text of
     // this reply is counted as ever, and the bot server may have sent it before this is asked or not yet, so it is not counted twice:
     // `used` may already hold it, which is why the window only has to leave 0 places, not 1, and why what is left after this reply
     // is taken from `used` as it stands
-    const { byVoice, byText } = places(served, guest, spoken, used);
+    const { byVoice, byText } = places(served, guest, spoken, used, extra);
     if (byVoice < 1 || byText < 0) return { allowed: false, resetsAt };
-    await tx.voiceReplyUse.create({ data: { botId, turnId, personKey, createdAt: now } });
-    return { allowed: true, left: Math.max(0, Math.min(byVoice - 1, byText)), resetsAt };
-  });
+    // The month's spending stop on the speech Universe AI pays for, asked with the longest a reply may be, before it is spoken (lib/speech-cap.ts).
+    // Under the lock every speech reservation is made under, with what notes and replies already admitted hold and the books do not show yet,
+    // so replies asked for one after the other (or at once, by different people) never all pass the last seconds of a Limit
+    await lockSpeech(tx);
+    const inFlight = await speechReserved(tx, { personKey, replySeconds: served.limits.replySeconds, now });
+    const stop = await checkSpeechCap({ personId: person.personId, seconds: served.limits.replySeconds, inFlight }, now, tx);
+    if (stop) return { allowed: false, resetsAt: stop.resetsAt };
+    await tx.voiceReplyUse.create({ data: { botId, turnId, personKey, seconds: served.limits.replySeconds, createdAt: now } });
+    const left = Math.min(byVoice - 1, byText);
+    return withLeft(Number.isFinite(left) ? Math.max(0, Math.floor(left)) : null, resetsAt);
+  }, SPEECH_LOCK);
 }
 
 /**
@@ -113,18 +173,22 @@ export async function voiceRepliesLeft(botId: string, input: { userId?: unknown;
   const person = await resolveUsagePerson(userId, input.isGuest);
   const guest = !person.personId;
   const personKey = person.personId ? `person:${person.personId}` : `guest:${userId}`;
-  const served = await servedVoiceLimits();
+  const [usual, extra] = await Promise.all([servedVoiceLimits(), extraFor(person, now)]);
+  const served = await servedFor(usual, person, now);
   const { window } = served;
 
   const row = await prisma.replyWindow.findUnique({ where: { key: `ua:${personKey}` }, select: { startedAt: true } });
   const endsAt = row ? new Date(row.startedAt.getTime() + window.hours * HOUR) : null;
-  if (!row || !endsAt || endsAt <= now) return { left: repliesLeft(served, guest, 0, 0), resetsAt: null };
+  if (!row || !endsAt || endsAt <= now) return withUnlimited({ left: repliesLeft(served, guest, 0, 0, extra), resetsAt: null });
   const [spoken, used] = await Promise.all([
     prisma.voiceReplyUse.count({ where: { personKey, createdAt: { gte: row.startedAt } } }),
     usedReplies(prisma, person, userId, row.startedAt),
   ]);
-  return { left: repliesLeft(served, guest, spoken, used), resetsAt: endsAt.toISOString() };
+  return withUnlimited({ left: repliesLeft(served, guest, spoken, used, extra), resetsAt: endsAt.toISOString() });
 }
+
+/** A person with no limit has no number, and says so: null alone also means "nobody the bot could name". */
+const withUnlimited = (answer: VoiceLeft): VoiceLeft => (answer.left === null ? { ...answer, unlimited: true } : answer);
 
 /**
  * A reply that was counted but never played (a person talked over it while it was being settled, a greeting that waited for audio

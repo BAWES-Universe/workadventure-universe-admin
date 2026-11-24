@@ -1,0 +1,117 @@
+/**
+ * The three calls the bot server's model relay makes about a computer's model call: who the key belongs to, room before the call, and
+ * the settlement after it. Service token only; the bodies are checked before anything is asked. What each does to the room and the books
+ * is tested against a real database in computer-calls-db.test.ts.
+ */
+import { NextRequest } from 'next/server';
+import * as nextServer from 'next/server';
+import { POST as identify } from '@/app/api/computer/llm/identify/route';
+import { POST as authorize } from '@/app/api/computer/llm/authorize/route';
+import { POST as settle } from '@/app/api/computer/llm/settle/route';
+import * as token from '@/lib/computer-token';
+import * as calls from '@/lib/computer-calls';
+
+jest.mock('@/lib/db', () => ({ prisma: {} }));
+jest.mock('@/lib/computer-token');
+jest.mock('@/lib/computer-calls');
+jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
+jest.mock('next/server', () => ({ ...jest.requireActual('next/server'), after: jest.fn() }));
+
+const SERVICE_TOKEN = 'bot-server-secret';
+const before = process.env.BOT_SERVICE_TOKEN;
+const lib = { token: token as jest.Mocked<typeof token>, calls: calls as jest.Mocked<typeof calls> };
+
+const post = (body: unknown, auth: string | null = SERVICE_TOKEN) =>
+  new NextRequest('http://localhost:3333/x', { method: 'POST', headers: auth ? { Authorization: `Bearer ${auth}` } : {}, body: JSON.stringify(body) });
+
+beforeEach(() => {
+  jest.resetAllMocks();
+  process.env.BOT_SERVICE_TOKEN = SERVICE_TOKEN;
+});
+afterAll(() => {
+  if (before === undefined) delete process.env.BOT_SERVICE_TOKEN;
+  else process.env.BOT_SERVICE_TOKEN = before;
+});
+
+describe.each([
+  ['identify', identify, { token: 'cjt_x' }],
+  ['authorize', authorize, { token: 'cjt_x', callId: 'c1', estimateMicros: 5, payer: 'universe', route: 'universe-ai:p1' }],
+  ['settle', settle, { jobId: 'j1', callId: 'c1', costMicros: 5 }],
+] as const)('%s', (_name, route, body) => {
+  it('is for the bot server only', async () => {
+    expect((await route(post(body, null))).status).toBe(401);
+    expect((await route(post(body, 'someone-else'))).status).toBe(401);
+    expect(lib.token.verifyJobToken).not.toHaveBeenCalled();
+    expect(lib.calls.authorizeModelCall).not.toHaveBeenCalled();
+    expect(lib.calls.settleModelCall).not.toHaveBeenCalled();
+  });
+  it('refuses a body with anything extra or missing, before asking anything', async () => {
+    expect((await route(post({ ...body, extra: 1 }))).status).toBe(400);
+    expect((await route(post({}))).status).toBe(400);
+    expect(lib.token.verifyJobToken).not.toHaveBeenCalled();
+  });
+});
+
+describe('identify', () => {
+  it('says whose job a good key is for, and gives the same answer for every key that is not good', async () => {
+    lib.token.verifyJobToken.mockResolvedValueOnce({ ok: true, jobId: 'j1', botId: 'b1', personId: 'p1', tokenId: 't1', generation: 0, epoch: 0 });
+    expect(await (await identify(post({ token: 'cjt_x' }))).json()).toEqual({ ok: true, jobId: 'j1', botId: 'b1' });
+    lib.token.verifyJobToken.mockResolvedValueOnce({ ok: false, reason: 'refused' });
+    expect(await (await identify(post({ token: 'cjt_old' }))).json()).toEqual({ ok: false, reason: 'refused' });
+  });
+  it('never says who pays', async () => {
+    lib.token.verifyJobToken.mockResolvedValueOnce({ ok: true, jobId: 'j1', botId: 'b1', personId: 'p-secret', tokenId: 't1', generation: 0, epoch: 0 });
+    expect(JSON.stringify(await (await identify(post({ token: 'cjt_x' }))).json())).not.toContain('p-secret');
+  });
+});
+
+describe('settle', () => {
+  it('turns a lost call into a 404, so the relay knows nothing was written', async () => {
+    lib.calls.settleModelCall.mockResolvedValueOnce({ ok: false, reason: 'unknown_call' });
+    expect((await settle(post({ jobId: 'j1', callId: 'ghost', costMicros: 5 }))).status).toBe(404);
+  });
+  it('gives the room back, and writes nothing, when the call was never sent', async () => {
+    lib.calls.releaseModelCall.mockResolvedValueOnce(undefined);
+    expect(await (await settle(post({ jobId: 'j1', callId: 'c1', sent: false }))).json()).toEqual({ ok: true });
+    expect(lib.calls.releaseModelCall).toHaveBeenCalledWith('j1', 'c1');
+    expect(lib.calls.settleModelCall).not.toHaveBeenCalled();
+  });
+  it('a call on the owner’s own key is the owner’s: the payer is the person, never us', async () => {
+    lib.calls.settleModelCall.mockResolvedValueOnce({ ok: true });
+    await settle(post({ jobId: 'j1', callId: 'c1', costMicros: 9, payerPersonId: 'p-owner' }));
+    expect(lib.calls.settleModelCall).toHaveBeenCalledWith('j1', 'c1', expect.objectContaining({ payer: { kind: 'person', personId: 'p-owner' }, route: 'own-key' }));
+  });
+});
+
+describe('authorize: the end of a decided cutoff runs after the response (CodeRabbit 12)', () => {
+  it('hands the call Next’s `after`, so the end of the job is run when the answer has been sent and never before it', async () => {
+    const after = nextServer.after as jest.Mock;
+    lib.calls.authorizeModelCall.mockResolvedValue({ ok: false, reason: 'pool', full: true });
+    expect((await authorize(post({ token: 'cjt_x', callId: 'c1', estimateMicros: 5, payer: 'universe', route: 'universe-ai:p1' }))).status).toBe(200);
+    const afterAnswer = lib.calls.authorizeModelCall.mock.calls[0][2] as (task: () => Promise<void>) => void;
+    // Until the response is sent nothing was handed to `after` to run; when the call asks for it, the task is exactly what `after` is given
+    expect(after).not.toHaveBeenCalled();
+    const task = jest.fn(async () => undefined);
+    afterAnswer(task);
+    expect(after).toHaveBeenCalledWith(task);
+    expect(task).not.toHaveBeenCalled();
+  });
+});
+
+describe('authorize: the route of a call we fund', () => {
+  const ok = { ok: true, jobId: 'j1', botId: 'b1', personId: 'p1', reservedMicros: 5 } as const;
+  it('refuses a call we fund that names no route (missing, null or empty) before asking anything: a call without one would reach the room unchecked while its provider’s route is paused', async () => {
+    for (const route of [undefined, null, '']) {
+      const body = { token: 'cjt_x', callId: 'c1', estimateMicros: 5, payer: 'universe', ...(route === undefined ? {} : { route }) };
+      expect((await authorize(post(body))).status).toBe(400);
+    }
+    expect(lib.calls.authorizeModelCall).not.toHaveBeenCalled();
+  });
+  it('passes the route of a call we fund on, and a person’s own key needs none', async () => {
+    lib.calls.authorizeModelCall.mockResolvedValue(ok);
+    expect((await authorize(post({ token: 'cjt_x', callId: 'c1', estimateMicros: 5, payer: 'universe', route: 'universe-ai:p1' }))).status).toBe(200);
+    expect(lib.calls.authorizeModelCall).toHaveBeenLastCalledWith(expect.objectContaining({ payer: 'universe', route: 'universe-ai:p1' }), undefined, expect.any(Function));
+    expect((await authorize(post({ token: 'cjt_x', callId: 'c2', estimateMicros: 0, payer: 'own-key' }))).status).toBe(200);
+    expect((await authorize(post({ token: 'cjt_x', callId: 'c3', estimateMicros: 0, payer: 'own-key', route: null }))).status).toBe(200);
+  });
+});

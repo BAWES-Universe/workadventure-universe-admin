@@ -5,12 +5,13 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
 import { lendModelId } from '@/lib/voice-lend-model';
-import { modelChange } from '@/lib/voice-hidden-models';
-import { AWS_KEY, TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, accountRegion, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { modelChange, readHiddenModels } from '@/lib/voice-hidden-models';
+import { AWS_KEY, TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, accountRegion, listedModelJobs, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { checkVoiceKeyLimits, readVoiceKeyLimits, savedVoiceKeyLimits, VOICE_KEY_LIMIT_NAMES, type VoiceKeyLimitValues } from '@/lib/voice-limit-values';
 import { healthOf, askForVoiceKeyTry, type VoiceKeyHealth } from '@/lib/voice-key-health';
+import { loadVoiceKeyLists } from '@/lib/voice-key-check';
 import { OWN_SPEECH_ENTRY, OWN_SPEECH_LABEL, OWN_SPEECH_NAME, checkOwnSpeechEndpoint, isOwnSpeechAdapter, loadOwnSpeechServer, ownSpeechEndpoint, ownSpeechKey, type OwnSpeechStep } from '@/lib/voice-own-server';
 
 /**
@@ -144,7 +145,7 @@ export const updateVoiceKeySchema = z
 
 /** A key that can't be saved or lent as asked, with the line that says why (shown as it is). */
 export class VoiceKeyRefused extends Error {
-  constructor(message: string, readonly status: 400 | 403 | 404 | 409 = 400) {
+  constructor(message: string, readonly status: 400 | 403 | 404 | 409 | 422 | 502 = 400) {
     super(message);
   }
 }
@@ -268,7 +269,7 @@ async function summaries(rows: KeyRow[], ownerId: string): Promise<VoiceKeySumma
     };
     const botsIn = (universeId: string): BotOnKey[] =>
       bots
-        .filter((bot) => bot.room.world.universeId === universeId)
+        .filter((bot) => bot.room?.world.universeId === universeId)
         .flatMap((bot) => {
           const named = namedProviders(profileOf.get(bot.id)).filter((choice) => choice.providerId === row.id);
           if (named.length === 0) return [];
@@ -441,6 +442,9 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
     }
     if (input.address !== undefined) endpoint = await movedAddress(current, input.address, input.apiKey);
   }
+  // The server's limits are read before the write begins (that read uses the shared connection, and one made while the write's own is held waits
+  // for a second one), and only when the owner is changing limits
+  const serverLimits = input.limits !== undefined ? (await getVoiceLimits()).limits : null;
   await prisma.$transaction(async (tx) => {
     // The row is held until this is saved, as model discovery holds it: one waits for the other, so neither saves over the other's models
     await tx.$queryRaw`SELECT 1 FROM "voice_providers" WHERE "id" = ${id} AND "owner_id" = ${ownerId} FOR UPDATE`;
@@ -464,7 +468,7 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
     if (input.limits !== undefined) {
       const checked = checkVoiceKeyLimits(input.limits);
       if (!checked.ok) throw new VoiceKeyRefused(checked.error);
-      const server = (await getVoiceLimits()).limits;
+      const server = serverLimits!;
       const next: Record<string, number> = { ...savedVoiceKeyLimits(row.voiceLimits), ...checked.value } as Record<string, number>;
       for (const name of VOICE_KEY_LIMIT_NAMES) if (name in checked.value && next[name] === server[name]) delete next[name];
       voiceLimits = Object.keys(next).length > 0 ? next : Prisma.DbNull;
@@ -565,4 +569,75 @@ export async function checkVoiceKey(ownerId: string, id: string): Promise<VoiceK
   const fresh = await owned(id, ownerId);
   if (!fresh) throw new VoiceKeyRefused('Key not found', 404);
   return summary(fresh, ownerId);
+}
+
+/**
+ * "Load models" on a saved key: its company is asked again with the saved key, the same free calls as when it was added, and the
+ * models it lists now for what the key does that the key doesn't have yet are added. Nothing is taken off: a list cut short or a
+ * model the company stops listing never pulls a lend. Answers with the key's models as saved (what the page shows, it changes nothing
+ * else of the key) and the models added (none when there are no new ones). Only the company's own lists are used: no server provider
+ * is asked and no fallback model is made up.
+ */
+export async function reloadVoiceKeyModels(ownerId: string, id: string): Promise<{ models: VoiceModel[]; added: VoiceModel[]; unread: VoiceModel['kind'][] }> {
+  const row = await owned(id, ownerId);
+  if (!row) throw new VoiceKeyRefused('Key not found', 404);
+  // The jobs this key does that the company has a list for: an own speech server's models are read again when its address changes,
+  // a model typed as the person named it (Azure) has no list, and a company with no list (Fish Audio) has nothing to load
+  const listedJobs = listedModelJobs(row);
+  if (listedJobs.length === 0) throw new VoiceKeyRefused(`${companyName(row.adapter)} has no list of models to load again.`, 409);
+  const company = voiceKeyCompanyInfo(row.adapter);
+  if (!company) throw new VoiceKeyRefused(`${companyName(row.adapter)} has no list of models to load again.`, 409);
+  if (!row.apiKeyEncrypted) throw new VoiceKeyRefused('This key can’t be read. Add it again.', 409);
+  let key: string;
+  try {
+    key = decryptApiKey(row.apiKeyEncrypted);
+  } catch {
+    throw new VoiceKeyRefused('This key can’t be read. Add it again.', 409);
+  }
+  const loaded = await loadVoiceKeyLists(row.adapter, key, listedJobs, row.endpoint ?? undefined, row.region ?? undefined);
+  if (!loaded.ok) throw new VoiceKeyRefused(loaded.message, loaded.reason === 'refused' ? 422 : loaded.reason === 'unreachable' ? 502 : 409);
+  // When none of those lists could be read, nothing was loaded and "no new models" would be a lie. When only some could not, what was
+  // read is added and the others are named. A list that was read and has nothing new is a successful read, not a failure
+  const unread = loaded.unread.filter((kind) => listedJobs.includes(kind));
+  if (unread.length === listedJobs.length) throw new VoiceKeyRefused(`Couldn’t read ${companyName(row.adapter)}’s list of models right now. Try again in a moment.`, 502);
+  const doesJob = (model: VoiceModel) => (model.kind === 'talk' ? row.recognition && row.speech && Boolean(company.does.talk) : row[model.kind]);
+  // Only what a company list gave, for a job whose list was read: never a fallback, and never a job the company has no list for
+  const listed = [...loaded.lists.values()].flat().filter(doesJob);
+  // What is new is worked out again under the row lock, against the models and the ones taken off as they are by then
+  const { added, models } = await addListedModels(ownerId, id, listed, {
+    apiKeyEncrypted: row.apiKeyEncrypted,
+    endpoint: row.endpoint,
+    region: row.region,
+  });
+  return { models, added, unread };
+}
+
+/**
+ * Adds the models the company lists that the key doesn't have yet, and answers with the ones added and the key's models as saved. The key's row is held while it is
+ * read and saved, as model discovery and updateVoiceKey hold it, and the key's models are read there, after the call to the company: a
+ * model ticked or taken off by hand while the list was loading is kept as it is, never saved over. A model taken off by hand stays off
+ * (`hiddenModels` is left as it is), and a key lists at most 200 models, as when it was added. Nothing is ever taken off. `readWith` is what
+ * the company was asked with: when the key, address or region is not the same under the lock, nothing is added (409).
+ */
+async function addListedModels(ownerId: string, id: string, listed: VoiceModel[], readWith: { apiKeyEncrypted: string; endpoint: string | null; region: string | null }): Promise<{ added: VoiceModel[]; models: VoiceModel[] }> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM "voice_providers" WHERE "id" = ${id} AND "owner_id" = ${ownerId} FOR UPDATE`;
+    const row = await tx.voiceProvider.findFirst({ where: { id, ownerId } });
+    if (!row) throw new VoiceKeyRefused('Key not found', 404);
+    // The company was asked with the key, address and region read before the call: a key rotated or moved meanwhile has a list for
+    // the old one, which must not be added to the new
+    if (row.apiKeyEncrypted !== readWith.apiKeyEncrypted || (row.endpoint ?? null) !== (readWith.endpoint ?? null) || (row.region ?? null) !== (readWith.region ?? null)) {
+      throw new VoiceKeyRefused('The key changed while its models were loading. Try again.', 409);
+    }
+    const has = readModels(row.models);
+    const known = new Set(has.map(lendModelId));
+    const off = new Set(readHiddenModels(row.hiddenModels));
+    const added = listed.filter((model) => !known.has(lendModelId(model)) && !off.has(lendModelId(model))).slice(0, Math.max(0, 200 - has.length));
+    if (added.length === 0) return { added, models: has };
+    const models = [...has, ...added];
+    const refused = problem({ recognition: row.recognition, speech: row.speech, models });
+    if (refused) throw new VoiceKeyRefused(refused);
+    await tx.voiceProvider.update({ where: { id }, data: { models: models as Prisma.InputJsonValue } });
+    return { added, models };
+  });
 }
