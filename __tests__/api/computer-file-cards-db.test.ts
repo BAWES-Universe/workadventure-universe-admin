@@ -22,8 +22,7 @@ import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-dele
 import { saveMeterSettings } from '@/lib/meter';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { isFenceCheckCommand, isFenceCommand } from '@/lib/computer-fence-script';
-const isPlainFence = (command: string) => isFenceCommand(command) && !isFenceCheckCommand(command);
+import { isFenceCheckCommand } from '@/lib/computer-fence-script';
 import { proposeRule } from '@/lib/spend-rules';
 import { finishJob, giveComputer, setHandOverClaimWaitForTests, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
