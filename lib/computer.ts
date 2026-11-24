@@ -3911,7 +3911,12 @@ export async function restartComputer(botId: string, ownerId: string, now: Date 
     const check = (await prisma.brickComputer.findUnique({ where: { botId }, select: { takeOverCheck: true } }))?.takeOverCheck ?? null;
     if (row.state === 'fencing' && check === 'blocked' && leaseLapsed(row, t)) {
       // Once per ask: a restart that was done for this ask is not offered again, and a request that asks anyway is told so
-      if (!(await restartOffered(botId))) return { ok: false, reason: 'not_offered' };
+      if (!(await restartOffered(botId))) {
+        // A first tap may have committed between the read above and this one: it moved the epoch, so reread and join it. Only an epoch that did not move is "not offered".
+        const again = await readControl(botId);
+        if (again && again.epoch !== row.epoch) continue;
+        return { ok: false, reason: 'not_offered' };
+      }
       // One step: control moves to `returning`, the restart is said on the computer, and the ask is kept on the job. A second tap sees all of it or none of it (it joins the restart, never "not offered"),
       // and a leader that dies after this is finished by the sweep with the ask already kept. The job's kind is what Brick waited for; a job the person took over in the middle of its work
       // had no ask open, which is kept as `person` (Brick is told the person wanted the screen, not to ask a question again)

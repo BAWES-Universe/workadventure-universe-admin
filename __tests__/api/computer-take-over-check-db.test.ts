@@ -307,7 +307,38 @@ run('the honest check before a take over (1B)', () => {
       expect((await jobOf(jobId)).restarts).toBe(1);
     });
 
-    it('the three writes of a restart are one: control going back, the restart noted and the ask kept are never seen apart', async () => {
+    it('a second tap that read the screen just before the first restart committed joins it, never "not offered"', async () => {
+      const { sara, jobId } = await waitingForSignIn();
+      stillRunning();
+      await takeOver(sara.brickId, sara.id, NOW);
+      leftAfter.still = false;
+      // The second tap has read the control row (still `fencing`) and is held just before its "is a restart offered" read, while the first tap runs to the end
+      const original = prisma.computerJob.count.bind(prisma.computerJob);
+      let atCount: () => void = () => {};
+      const reached = new Promise<void>((resolve) => (atCount = resolve));
+      let release: () => void = () => {};
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const spy = jest.spyOn(prisma.computerJob, 'count').mockImplementationOnce((async (args: Parameters<typeof original>[0]) => {
+        atCount();
+        await held;
+        return original(args);
+      }) as unknown as typeof prisma.computerJob.count);
+      try {
+        const second = restartComputer(sara.brickId, sara.id, NOW);
+        await reached;
+        const first = await restartComputer(sara.brickId, sara.id, NOW);
+        expect(first.ok).toBe(true);
+        release();
+        const b = await second;
+        expect(b.ok).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(stops()).toBe(1);
+      expect((await jobOf(jobId)).restarts).toBe(1);
+    });
+
+    it('the three writes of a restart are one:control going back, the restart noted and the ask kept are never seen apart', async () => {
       const { sara, jobId } = await waitingForSignIn();
       stillRunning();
       await takeOver(sara.brickId, sara.id, NOW);
