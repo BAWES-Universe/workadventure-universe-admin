@@ -40,6 +40,11 @@ export function topicKey(raw: unknown): string | null {
 const person = z.string().trim().min(1).max(320);
 export const offerSchema = z.object({ userId: person, topic: z.string().max(200) }).strict();
 export const offerAnswerSchema = z.object({ userId: person, topic: z.string().max(200), answer: z.enum(OFFER_ANSWERS) }).strict();
+/** The same two fields as a claim: the card of a claim never reached the person, so the claim is taken back. */
+export const offerReleaseSchema = offerSchema;
+
+/** How long after a claim it can still be taken back: the game takes it back right after its card failed to send, never later. */
+export const RELEASE_WITHIN_MS = 10 * 60_000;
 
 export interface OffersSoFar {
   /** How often the same kind of job has to come back before a Brick is suggested for it. */
@@ -75,7 +80,7 @@ export async function claimOffer(viaBrickId: string, input: z.infer<typeof offer
   const ownerId = await ownerAskingThrough(viaBrickId, input.userId);
   if (!ownerId) return { ok: false, status: 404, error: 'Brick not found' };
   const claimed = await prisma.$queryRaw<{ topic: string }[]>(Prisma.sql`
-    INSERT INTO "brick_offers" ("user_id", "topic") VALUES (${ownerId}, ${topic})
+    INSERT INTO "brick_offers" ("user_id", "topic", "offered_at") VALUES (${ownerId}, ${topic}, (NOW() AT TIME ZONE 'UTC'))
     ON CONFLICT ("user_id", "topic") DO NOTHING
     RETURNING "topic"`);
   return { ok: true, show: claimed.length > 0, topic };
@@ -92,4 +97,17 @@ export async function answerOffer(viaBrickId: string, input: z.infer<typeof offe
   if (!ownerId) return { ok: false, status: 404, error: 'Brick not found' };
   const kept = await prisma.brickOffer.updateMany({ where: { userId: ownerId, topic, answer: null }, data: { answer: input.answer, answeredAt: now } });
   return { ok: true, kept: kept.count > 0 };
+}
+
+/**
+ * The card of a claim never reached the person (the chat refused it on both tries): the claim is taken back, so the topic can be suggested again another time and a card nobody
+ * saw never closes it. Only a claim nobody answered and made in the last few minutes is taken back: a card the person saw and tapped, or one claimed long ago, stays closed.
+ */
+export async function releaseOffer(viaBrickId: string, input: z.infer<typeof offerReleaseSchema>, now: Date = new Date()): Promise<{ ok: true; released: boolean } | Refused> {
+  const topic = topicKey(input.topic);
+  if (!topic) return { ok: false, status: 400, error: 'topic must name the kind of job in a few words' };
+  const ownerId = await ownerAskingThrough(viaBrickId, input.userId);
+  if (!ownerId) return { ok: false, status: 404, error: 'Brick not found' };
+  const released = await prisma.brickOffer.deleteMany({ where: { userId: ownerId, topic, answer: null, offeredAt: { gte: new Date(now.getTime() - RELEASE_WITHIN_MS) } } });
+  return { ok: true, released: released.count > 0 };
 }
