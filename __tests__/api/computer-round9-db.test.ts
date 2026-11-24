@@ -250,6 +250,28 @@ run('CodeRabbit round 9 on #1025: the money and data items, in a real database',
       expect(await asked()).toEqual(retry);
     });
 
+    it('O40 (Opus): a refusal decided inside beginJob, before any job exists (computers off for this Brick), that cannot be kept is a retryable 503; the attempt stays open and the retry gets the same refusal, stored', async () => {
+      const sara = await owner('o40-begin');
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { enabled: false } });
+      const k = key();
+      const undo = await plant('r9_fail_refuse3', 'computer_start_attempts', `NEW.state = 'refused'`, 'fail');
+      let first;
+      try {
+        first = await post(sara, k);
+      } finally {
+        await undo();
+      }
+      expect(first.status).toBe(503);
+      expect(first.body).toMatchObject({ retry: true });
+      expect(await prisma.computerJob.count({ where: { personId: sara.id } })).toBe(0);
+      expect(await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: k } })).toMatchObject({ state: 'open' });
+      const retry = await post(sara, k);
+      expect(retry.status).toBe(200);
+      expect(retry.body).toMatchObject({ ok: false, reason: 'off' });
+      expect(await post(sara, k)).toEqual({ status: 200, body: retry.body });
+      expect(await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: k } })).toMatchObject({ state: 'refused' });
+    });
+
     it('O40: refuseAttempt says what happened: stored, decided (another request decided the key), failed', async () => {
       const sara = await owner('o40-unit');
       const k = key();
