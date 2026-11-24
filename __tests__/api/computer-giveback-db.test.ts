@@ -2720,6 +2720,35 @@ run('a computer job that failed on our side, and the bound on giving it back', (
       expect(await givenBack(held.id)).toBe(true);
     });
 
+    it('GPT eighth note, 2b: a refusal whose turn list was filled only when its pending refund resolved is corrected by the incident and refunded EXACTLY ONCE (a second correction, a retry of the resolver and the sweep change nothing)', async () => {
+      await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
+      const sara = await person('sara');
+      const route = 'universe-ai/model-2b';
+      const base = new Date();
+      const window = { route, from: new Date(base.getTime() - 60_000), to: new Date(base.getTime() + 60_000) };
+      const held = await job(sara, { outcome: 'failed', cause: 'agent', run: 'run2b' }, async (id) => {
+        await recordFaults(sara.brickId, id, [fault(null, 'provider_5xx', { route, run: 'run2b', at: base })]);
+        await planEffect(id, { key: '2b-mail', kind: 'send' });
+      });
+      await recordFaults(sara.brickId, held.id, [fault(3, 'provider_5xx', { route, run: 'run2b', at: base })]);
+      expect(await settleEffect(held.id, '2b-mail', 'done', 'ali@example.test')).toBe(true);
+      // Refused as delivered, with the turn it was judged on kept: that turn is what lets the incident find it
+      expect(await decisionOf(held.id)).toMatchObject({ state: 'refused', basis: 'delivered', judgedTurns: [3] });
+      expect(await givenBack(held.id)).toBe(false);
+      const eventsOf = () => prisma.meterEvent.count({ where: { eventId: { startsWith: `computer:${held.id}:` } } });
+      expect(await correctRouteTogether(window)).toMatchObject({ corrected: 1 });
+      expect(await givenBack(held.id)).toBe(true);
+      const once = await timeOf(held.id);
+      const events = await eventsOf();
+      // Again: nothing is corrected a second time, the decision and the posted give-back stay as they were
+      expect(await correctRouteTogether(window)).toMatchObject({ corrected: 0 });
+      expect(await resolveDecision(held.id, minutes(30))).not.toBe('pending');
+      await sweepGiveBackDecisions(minutes(60));
+      expect(await decisionOf(held.id)).toMatchObject({ state: 'given', basis: 'incident', judgedTurns: [3] });
+      expect(await timeOf(held.id)).toEqual(once);
+      expect(await eventsOf()).toBe(events);
+    });
+
     it('an incident corrects a decision only by its OWN evidence: a fault of an earlier run of the same job, or of a turn that was not judged, never reverses it', async () => {
       await limitsAre({ ...LAUNCH, goodwillPerPersonPerMonth: 1 });
       const sara = await person('sara');
