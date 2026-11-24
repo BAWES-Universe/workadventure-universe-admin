@@ -99,6 +99,7 @@ async function resumeOutcomeOf(jobId: string, stretch: number | null = null): Pr
 async function resumeDecidedOf(command: Command, jobId: string): Promise<StoredOutcome | null> {
   const recorded = await decidedOfCommand(command);
   if (recorded) return recorded;
+  // The "a restoring job waits for a decision" rule below holds only for a job that is still LIVE: once the job ends, every ending settles its pending Resumes first (`settlePendingResumesIn`, final), so nothing stays pending for good (N7).
   // Nothing recorded: the first request stopped inside its start. A job that RUNS (or waits for the person after running) with its browser settled cannot be refused by that start any more (a start finding it running changes nothing), so it is read as it stands; a job still
   // in line, paused or restoring waits for a decision (a try that is not this Resume's never decides it, N21)
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, pausedWhy: true, prepState: true, pauses: true } });
@@ -638,7 +639,8 @@ export async function cancelJob(botId: string, ownerId: string, jobId: string, n
     else await controlInternals.endByPerson(jobId, now, { advance: true, held: true });
   }
   const after = await jobOnBrick(botId, jobId);
-  if (after && after.pauses > 0) await dropProfile(botId, jobId, now).catch((error) => console.error('[Computer] Could not drop a cancelled job’s browser:', error instanceof Error ? error.message : 'unknown'));
+  // The parked browser is let go only once the job is over: a job that is still live (every ending lost its race) stays resumable with its saved sign-ins, and a retried Cancel drops it once the job is over (CodeRabbit on #1025, 14c4e407 pass, N8)
+  if (after && after.pauses > 0 && isOver(after.status)) await dropProfile(botId, jobId, now).catch((error) => console.error('[Computer] Could not drop a cancelled job’s browser:', error instanceof Error ? error.message : 'unknown'));
   // The answer is kept only once the job is over: an ending that lost its race on every try (a concurrent write moved the job each time) leaves the command pending, and a retry under the same id ends it again, instead of
   // answering the stored success forever while the job still holds the machine (CodeRabbit on #1025, 53)
   if (under && (!after || isOver(after.status))) await keepOutcome(prisma, under.command, { ok: true, targets: [jobId] });

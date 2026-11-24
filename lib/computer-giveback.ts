@@ -343,14 +343,15 @@ export async function resolveDecision(jobId: string, now: Date = new Date(), opt
     let next = await decideRunnerFinish(tx, limits, job, decision.judgedTurns, now, { effectsClosed, run: decision.judgedRun, hint: hintOf(decision.causeHint) });
     // Limits that cannot be read or are not set cannot be waited out when the evidence is about to be deleted: the person is not charged for it
     if (options.closing && next.state === 'pending') next = { state: 'given', basis: 'orbit_fault', counted: false, reason: 'brick_purged', route: next.route };
+    // `judgedTurns` is the turn the finish was judged on when it was not stored before (undefined, so left as it is, for every decision that already has its turn list): without it an incident correction can never match the numbered row of a refusal decided here (CodeRabbit on #1025, 14c4e407 pass, N2)
     if (next.state === 'pending') {
       await tx.computerGiveBackDecision.update({
         where: { jobId },
-        data: { basis: next.basis, reason: next.reason, route: next.route, attempts: { increment: 1 }, nextAttemptAt: new Date(now.getTime() + retryWaitMs(decision.attempts + 1)), lastError: next.basis },
+        data: { basis: next.basis, reason: next.reason, route: next.route, judgedTurns: next.judgedTurns, attempts: { increment: 1 }, nextAttemptAt: new Date(now.getTime() + retryWaitMs(decision.attempts + 1)), lastError: next.basis },
       });
       return next;
     }
-    await tx.computerGiveBackDecision.update({ where: { jobId }, data: { state: next.state, basis: next.basis, reason: next.reason, route: next.route, nextAttemptAt: null, lastError: null, attempts: { increment: 1 } } });
+    await tx.computerGiveBackDecision.update({ where: { jobId }, data: { state: next.state, basis: next.basis, reason: next.reason, route: next.route, judgedTurns: next.judgedTurns, nextAttemptAt: null, lastError: null, attempts: { increment: 1 } } });
     if (next.state === 'given') await applyGiveBack(tx, job, next.counted);
     return next;
   });

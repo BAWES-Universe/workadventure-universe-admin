@@ -75,26 +75,35 @@ function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
  */
 async function waitUntilBlockedBy(holderPid: number, count: number, ...running: Array<Promise<unknown>>) {
   let over = false;
+  // The poll's waits end the moment it is stopped (a watched request that exits early), so a cleanup never waits for a query or a sleep to run out (CodeRabbit on #1025, 14c4e407 pass, N4)
+  let stop: () => void = () => undefined;
+  const stopped = new Promise<null>((resolve) => (stop = () => resolve(null)));
   const poll = (async () => {
     const end = Date.now() + 10_000;
     for (;;) {
-      const rows = await within(prisma.$queryRaw<{ n: number }[]>`
+      if (over) return;
+      const query = within(prisma.$queryRaw<{ n: number }[]>`
         WITH RECURSIVE waiting(pid) AS (
           SELECT a.pid FROM pg_stat_activity a WHERE a.datname = current_database() AND a.wait_event_type = 'Lock' AND ${holderPid}::int = ANY (pg_blocking_pids(a.pid))
           UNION
           SELECT a.pid FROM pg_stat_activity a JOIN waiting w ON w.pid = ANY (pg_blocking_pids(a.pid)) WHERE a.datname = current_database() AND a.wait_event_type = 'Lock'
         )
         SELECT count(*)::int AS n FROM waiting`, end - Date.now(), `Timed out waiting for ${count} statement(s) to be blocked by backend ${holderPid}`);
+      // A query still running when the poll is stopped is let go: its late answer or error is handled here, never left unhandled
+      query.catch(() => undefined);
+      const rows = await Promise.race([query, stopped]);
+      if (rows === null) return;
       if (rows[0].n >= count) return;
       if (over) return;
       if (Date.now() > end) throw new Error(`Timed out waiting for ${count} statement(s) to be blocked by backend ${holderPid}`);
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await Promise.race([new Promise((resolve) => setTimeout(resolve, 25)), stopped]);
     }
   })();
   try {
     await Promise.race([poll, ...running.map((one) => one.then(() => { throw new Error('A request ended before it was blocked by the fixture transaction'); }))]);
   } finally {
     over = true;
+    stop();
     await poll.catch(() => undefined);
   }
 }

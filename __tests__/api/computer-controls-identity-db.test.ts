@@ -32,7 +32,7 @@ import { addJobNote } from '@/lib/computer-job-notes';
 import { claimCommand, commandRow, recordResumeDecision } from '@/lib/computer-commands';
 import { carryOnPaused, resetCarryOnScanForTests } from '@/lib/computer-limit-pause';
 import * as owner from '@/lib/computer-owner';
-import { parkProfile } from '@/lib/computer-browser-profile';
+import { dropProfile, parkProfile } from '@/lib/computer-browser-profile';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -685,6 +685,56 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       }
     });
 
+    it('Opus on 14c4e407 (N7): a Resume that RECORDED its decision keeps it when the job then goes to `recover` and is cancelled: it settles `{ok:true}` from its own record, never `not_ready`, and a copy answers the same', async () => {
+      const { sara, jobId } = await running('n7-recorded');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      const realStart = controlInternals.tryStart;
+      const spy = jest.spyOn(controlInternals, 'tryStart').mockImplementation(async (...args: Parameters<typeof realStart>) => {
+        await realStart(...args);
+        throw new Error('the server stopped');
+      });
+      const old = { ...resumeWait };
+      resumeWait.ms = 200;
+      resumeWait.capMs = 600;
+      try {
+        const a = command();
+        await expect(resumeJob(sara.brickId, sara.id, jobId, minutes(10), a)).rejects.toThrow('the server stopped');
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true, pending: true, decided: { ok: true } } });
+        // The browser later is not settled, and the person cancels the job
+        await prisma.computerJob.update({ where: { id: jobId }, data: { prepState: 'recover', stretchStarted: null } });
+        expect(await cancelJob(sara.brickId, sara.id, jobId, minutes(12), command())).toMatchObject({ ok: true });
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true } });
+        expect((await commandOf(a.id))?.outcome).not.toHaveProperty('pending');
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(13), a)).toMatchObject({ ok: true });
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(14), a)).toMatchObject({ ok: true });
+      } finally {
+        Object.assign(resumeWait, old);
+        spy.mockRestore();
+      }
+    });
+
+    it('CodeRabbit on #1025 (14c4e407 pass, N8): a Cancel whose every ending write is lost (a concurrent write moved the job each time) leaves the job live and its parked browser in place (no drop); the retry under the same id ends the job and drops the browser once', async () => {
+      const { sara, jobId } = await running('n8-keep-browser');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      expect((await jobOf(jobId)).pauses).toBe(1);
+      const drop = dropProfile as jest.MockedFunction<typeof dropProfile>;
+      drop.mockClear();
+      await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION n8_fail_end() RETURNS trigger AS $$ BEGIN IF NEW."status" = 'stopped' THEN RETURN NULL; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql`);
+      await prisma.$executeRawUnsafe(`CREATE TRIGGER n8_fail_end BEFORE UPDATE ON "computer_jobs" FOR EACH ROW WHEN (OLD."id" = '${jobId}') EXECUTE FUNCTION n8_fail_end()`);
+      const c = command();
+      try {
+        expect(await cancelJob(sara.brickId, sara.id, jobId, minutes(5), c)).toEqual({ ok: false, reason: 'not_ended' });
+        expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused' });
+        expect(drop).not.toHaveBeenCalled();
+      } finally {
+        await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS n8_fail_end ON "computer_jobs"');
+        await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS n8_fail_end()');
+      }
+      expect(await cancelJob(sara.brickId, sara.id, jobId, minutes(6), c)).toMatchObject({ ok: true });
+      expect(await jobOf(jobId)).toMatchObject({ status: 'stopped' });
+      expect(drop.mock.calls.filter((call) => call[1] === jobId).length).toBeGreaterThanOrEqual(1);
+    });
+
     describe('Opus on 14c4e407: a pending Resume whose request stopped before its own start settles once the job RAN and then ended or went to the person', () => {
       type Way = 'cancel' | 'stopAll' | 'finish' | 'waiting' | 'off' | 'cancel-turn';
       /** Resume A is taken and its request stops before its start; the line's own try then starts the job (no record on A); then `way` happens to the job. */
@@ -795,6 +845,8 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       try {
         const a = command();
         await expect(resumeJob(sara.brickId, sara.id, jobId, minutes(10), a)).rejects.toThrow('the server stopped');
+        // The Resume's own start recorded its success BEFORE anything below changes the job (a fallback that read the later ready state could not satisfy this)
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true, pending: true, decided: { ok: true } } });
         await prisma.computerJob.update({ where: { id: jobId }, data: { prepState: null } });
         await pauseJob(sara.brickId, sara.id, jobId, minutes(15), command());
         expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true } });

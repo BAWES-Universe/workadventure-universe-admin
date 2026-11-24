@@ -480,7 +480,10 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         // The own file was left alone (a later write is there), the alias is written with this prepare's key
         expect((JSON.parse(readFileSync(join(home, '.universe', 'jobs', `${jobId}.json`), 'utf8')) as { token: string }).token).toBe('cjt_later_own');
         const alias = JSON.parse(readFileSync(join(home, '.universe', 'jobs', `${earlier.id}.json`), 'utf8')) as { token: string };
-        expect(alias.token).toMatch(/^cjt_/);
+        // The alias carries the EXACT key this prepare made (the one in its command), never just any `cjt_` key (CodeRabbit on #1025, 14c4e407 pass, N3)
+        const made = [...new Set(command.match(/cjt_[A-Za-z0-9_-]+/g) ?? [])];
+        expect(made).toHaveLength(1);
+        expect(alias.token).toBe(made[0]);
         expect(readFileSync(join(home, '.universe', 'jobs', `${earlier.id}.stamp`), 'utf8')).toBe(String(mark0));
       } finally {
         rmSync(home, { recursive: true, force: true });
