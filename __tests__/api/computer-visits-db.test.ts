@@ -52,6 +52,23 @@ const reading = (lines: object[], head: { state?: string; alive?: number } = {})
   stdout: [`now=${Date.now()}`, `state=${head.state ?? 'on'}`, `alive=${head.alive ?? 1}`, ...lines.map((entry) => `line=${JSON.stringify(entry)}`), 'end=1'].join('\n') + '\n',
 });
 const visit = (second: number, over: Record<string, unknown> = {}) => ({ k: 'visit', at: seconds(second).getTime(), m: 'GET', h: 'shop.example', p: '/a', n: 1, ...over });
+/** A poll bounded by the checkpoint's own deadline, whatever the database does: a query that waits for a connection or stalls rejects with the checkpoint's own message when the time is up, never later (CodeRabbit on #1025, d522f4b3 pass, N7). */
+function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(what)), Math.max(1, ms));
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 /**
  * Waits, bounded, until `count` statements are blocked on a lock held by backend `holderPid` (directly or behind another waiter), and fails at once when one of `running` ends first: a checkpoint at the exact wait a test
  * means to test, never a delay.
@@ -61,13 +78,13 @@ async function waitUntilBlockedBy(holderPid: number, count: number, ...running: 
   const poll = (async () => {
     const end = Date.now() + 10_000;
     for (;;) {
-      const rows = await prisma.$queryRaw<{ n: number }[]>`
+      const rows = await within(prisma.$queryRaw<{ n: number }[]>`
         WITH RECURSIVE waiting(pid) AS (
           SELECT a.pid FROM pg_stat_activity a WHERE a.datname = current_database() AND a.wait_event_type = 'Lock' AND ${holderPid}::int = ANY (pg_blocking_pids(a.pid))
           UNION
           SELECT a.pid FROM pg_stat_activity a JOIN waiting w ON w.pid = ANY (pg_blocking_pids(a.pid)) WHERE a.datname = current_database() AND a.wait_event_type = 'Lock'
         )
-        SELECT count(*)::int AS n FROM waiting`;
+        SELECT count(*)::int AS n FROM waiting`, end - Date.now(), `Timed out waiting for ${count} statement(s) to be blocked by backend ${holderPid}`);
       if (rows[0].n >= count) return;
       if (over) return;
       if (Date.now() > end) throw new Error(`Timed out waiting for ${count} statement(s) to be blocked by backend ${holderPid}`);
@@ -248,6 +265,8 @@ run('where a job’s computer browsed, in a real database', () => {
                             if (!landed) {
                               landed = true;
                               await prisma.computerJobVisit.create({ data: row(20, '/during') });
+                              // ... and a note of a change of hands, which is read AFTER this point (a hands read outside the snapshot would show it in the first view)
+                              await prisma.computerJobVisit.create({ data: { jobId: id, kind: 'hands', at: seconds(25), by: 'person' } });
                               await prisma.computerJob.update({ where: { id }, data: { visitsState: 'partial' } });
                             }
                             return inner.findMany(...args);
@@ -269,10 +288,13 @@ run('where a job’s computer browsed, in a real database', () => {
       // One moment: the state it read and the rows that went with it
       expect(view?.state).toBe('complete');
       expect(view?.items.map((item) => item.path)).toEqual(['/before']);
+      // The hands read is in the same snapshot: the note that committed while the rows were read is not in this view
+      expect(view?.items.filter((item) => item.kind === 'hands')).toHaveLength(0);
       // The next read sees the capture whole
       const next = await visitsFor(sara.brickId, id);
       expect(next?.state).toBe('partial');
-      expect(next?.items.map((item) => item.path)).toEqual(['/before', '/during']);
+      expect(next?.items.filter((item) => item.kind !== 'hands').map((item) => item.path)).toEqual(['/before', '/during']);
+      expect(next?.items.filter((item) => item.kind === 'hands')).toHaveLength(1);
     });
 
     it('N16: a resumed machine with no listener (exit 127) keeps the earlier stretches’ rows and says the record is partial, never "none" over rows that exist', async () => {

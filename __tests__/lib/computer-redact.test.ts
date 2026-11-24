@@ -97,6 +97,19 @@ describe('a step label never carries a secret', () => {
     }
   });
 
+  it('N16 (d522f4b3 pass): a Basic value that is valid Base64 decoding to text with a colon is hidden however short; ordinary words after Basic stay visible', () => {
+    const hidden = ['Basic YTpi', 'Authorization was Basic YTpi ok', 'basic YTpi', 'Basic dXNlcjpwYXNz', 'Basic YTpiYw==', 'Basic YTo=', 'Basic dTpw', 'Authorization: Basic dTpw'];
+    for (const text of hidden) {
+      expect(hasSecretShape(text)).toBe(true);
+      expect(cleanStepLabel(text)).toBe(STEP_LABEL_FALLBACK);
+    }
+    const shown = ['Basic information', 'Basic data', 'Basic test', 'Basic plan', 'Basic YTpi is a word here?'.replace('YTpi', 'idea'), 'Basic set-up', 'Basic Instructions', 'basic input/output', 'Basic YWJj', 'Basic YQ==', 'Basic YTp=' /* not canonical Base64: stray bits in its last character, no encoder wrote it */];
+    for (const text of shown) {
+      expect(hasSecretShape(text)).toBe(false);
+      expect(cleanStepLabel(text)).toBe(text);
+    }
+  });
+
   it('Opus on acfe2a2e (R1, R2): a credential flag is hidden after any non-word character, and Bearer hides anything that is not one plain word', () => {
     const hidden = [
       // R1: the flag follows a character the first anchor did not list
@@ -118,6 +131,15 @@ describe('a step label never carries a secret', () => {
       'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0',
       'bearer abcdef123456',
       'Bearer cjt_abc123',
+      // N8, N15 (d522f4b3 pass): a quoted header key, and a Bearer value too short for the old six-character minimum
+      '{"Authorization": "Bearer x1"}',
+      '{"Authorization": "tok"}',
+      "{'x-api-key': 'abc'}",
+      'Bearer a1_b2',
+      'Bearer 2FA',
+      // Opus on the d522f4b3 pass: a quoted key with a plain lowercase value, and a quoted key before an equals sign
+      '{"Authorization": "Bearer abcdefgh"}',
+      '"apikey"=abc',
       // The Cookie change
       'Cookie: sid=abc',
     ];

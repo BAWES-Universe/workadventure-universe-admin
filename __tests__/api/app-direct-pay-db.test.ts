@@ -553,6 +553,25 @@ run('payments for pages, in a real database', () => {
       expect(await settle(late.orderId)).toMatchObject({ status: 'paid' });
     });
 
+    it('N12 (d522f4b3 pass): an order that runs out of time closes AS OF when its open time ended, however late the first look is (a readable answer that is not final); an order the service declares failed closes at the look', async () => {
+      await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
+      const { artifactId } = await pending();
+      gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+      const late = await checkout(artifactId, '198.51.100.40');
+      const createdAt = new Date(Date.now() - 30 * 3_600_000);
+      await prisma.appPageOrder.update({ where: { id: late.orderId }, data: { createdAt } });
+      expect(await settle(late.orderId)).toMatchObject({ status: 'not_paid' });
+      // The first look came 29 hours after the open time ended: the late window starts when the open time ended, not then
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: late.orderId } })).closedAt?.getTime()).toBe(createdAt.getTime() + 3_600_000);
+      // CONTROL: a closing the service itself declared is dated by the look
+      gateway({ record: (order) => paidRecord(order, { status: 'FAILED' }) });
+      const failed = await checkout(artifactId, '198.51.100.41');
+      await prisma.appPageOrder.update({ where: { id: failed.orderId }, data: { createdAt } });
+      const before = Date.now();
+      expect(await settle(failed.orderId)).toMatchObject({ status: 'not_paid' });
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: failed.orderId } })).closedAt?.getTime()).toBeGreaterThanOrEqual(before - 1000);
+    });
+
     it('closes an order whose look keeps failing once it has been open too long, so the buyer stops waiting, and still finds a late payment', async () => {
       await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
       const { artifactId } = await pending();
@@ -2168,6 +2187,8 @@ run('payments for pages, in a real database', () => {
           const done = await sweepPageOrders();
           expect(sent.filter((target) => target.method === 'GET')).toHaveLength(0);
           expect((await row(ran.id)).status).toBe('not_paid');
+          // N12 (d522f4b3 pass): the sweep's closing is dated by the end of the open time (created 3 hours ago, open 1 hour), not by the sweep
+          expect((await row(ran.id)).closedAt?.getTime()).toBe((await row(ran.id)).createdAt.getTime() + 3_600_000);
           expect(done).toMatchObject({ looked: 0, moved: 1 });
         });
 

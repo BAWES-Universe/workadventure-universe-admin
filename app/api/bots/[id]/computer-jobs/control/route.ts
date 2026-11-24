@@ -47,6 +47,10 @@ const bodySchema = z.discriminatedUnion('action', [
  * turn, so a retried turn sends the same ids): the same id again answers what it came to and does nothing more (finding 4). 400 `{ ok: false, reason: 'command_missing' }` without one, 400
  * `{ ok: false, reason: 'command_reused' }` for an id used for another control.
  *
+ * A command that was answered (done or refused) answers the same again and does nothing more. A command that did NOT finish is the exception, and says so with 503 `{ ok: false, reason: 'not_ended', retry: true }`: a Stop whose captured jobs are not all ended
+ * yet, or a Cancel whose job is still live after its bounded tries. Nothing is kept as done; ask AGAIN with the SAME command id (and, for Stop all, the SAME confirmed set), and the retry finishes ending exactly the jobs the command named at its
+ * first dispatch, never jobs that came later.
+ *
  * Every other refusal is HTTP 200 `{ ok: false, reason }`: `not_owner` (a guest, or not this Brick's owner), `not_found` (no such job on this Brick), and the
  * controls' own words: `over`, `taken_over`, `ending`, `not_paused`, `not_queued`. Anything else is "could not do it", never done. 503 `{ retry: true }`
  * when who it was for could not be looked up just now (ask again). Auth: service token only.
@@ -100,8 +104,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         return answer(await pauseJob(id, ownerId, body.jobId, new Date(), control));
       case 'resume':
         return answer(await resumeJob(id, ownerId, body.jobId, new Date(), control));
-      case 'cancel':
-        return answer(await cancelJob(id, ownerId, body.jobId, new Date(), control));
+      case 'cancel': {
+        const cancelled = await cancelJob(id, ownerId, body.jobId, new Date(), control);
+        // The job is still live after the bounded tries: nothing is kept as done, and the same command id asked again ends it, like a Stop that is `not_ended` (CodeRabbit on #1025, N11)
+        if (!cancelled.ok && cancelled.reason === 'not_ended') return NextResponse.json({ ok: false, reason: 'not_ended', retry: true }, { status: 503 });
+        return answer(cancelled);
+      }
       case 'first':
         return answer(await moveJobFirst(id, ownerId, body.jobId, { pauseRunning: body.pauseRunning === true }, new Date(), control));
     }

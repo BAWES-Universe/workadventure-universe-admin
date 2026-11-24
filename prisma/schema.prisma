@@ -4206,7 +4206,7 @@ model ComputerStartAttempt {
   aliasAttemptId String? @map("alias_attempt_id")
   /// Round 8, A1: what a start that ended with no job answered (state `refused`), kept so a retry of the key and an alias waiting on it are answered with the same outcome.
   outcome Json?
-  /// Round 8, A2: the moment the key was issued (the person gave their consent), read from the key; a key older than the consent window is not accepted for a new start.
+  /// Round 8, A2: the moment the key was issued (the person gave their consent), read from the key; a key older than the consent window is not accepted for a new start. Written only by a start that acks (`registerStart`): it is also the record of the start's ack mode (null = the start does not ack), read to decide whether a refusal is kept on the key.
   issuedAt DateTime? @map("issued_at")
   /// Round 8, A2 (CodeRabbit I7): set when a key is REOPENED: the moment its newer start supersedes from (the person's message was issued). Read under the person's lock by every delivery of the key, so the boundary never depends on which request reopened it. Null = never reopened.
   supersedeSince DateTime? @map("supersede_since")

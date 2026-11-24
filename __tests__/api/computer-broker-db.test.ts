@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import http from 'node:http';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -455,6 +455,33 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         const newest = at(forA, markOf(forA), 3_000_000, tokenOf(forA), 'cjt_newest_a');
         expect(runIt(newest).status).toBe(0);
         expect(keyIn('relay.json')).toBe('cjt_newest_a');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it('Sentry on #1025 (S2): an alias whose stamp file does not exist is written even when the job’s own stamp is newer (the stamp of one file never carries over to the next)', async () => {
+      const { sara, jobId } = await running('s2-alias');
+      // The job carries on an ended one: its key is also written under that job's id
+      const earlier = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Earlier', status: 'stopped', endedAt: NOW } });
+      await prisma.computerJob.update({ where: { id: jobId }, data: { continuesJobId: earlier.id } });
+      await prepareJob(jobId, RELAY, NOW);
+      const command = fake.commands.at(-1)?.command ?? '';
+      expect(command).toContain(`jobs/${earlier.id}.stamp`);
+      const mark0 = Number(/printf '%s' (\d+) > "\$d\/jobs\/[^"]*\.stamp"/.exec(command)?.[1]);
+      const home = mkdtempSync(join(tmpdir(), 'universe-relay-'));
+      try {
+        // The job's own file was written by a LATER prepare (its stamp is newer than this one's claim); the alias has no stamp at all
+        mkdirSync(join(home, '.universe', 'jobs'), { recursive: true });
+        writeFileSync(join(home, '.universe', 'jobs', `${jobId}.json`), JSON.stringify({ url: RELAY, token: 'cjt_later_own' }));
+        writeFileSync(join(home, '.universe', 'jobs', `${jobId}.stamp`), String(mark0 + 10_000));
+        const done = spawnSync('sh', ['-c', command], { env: { ...process.env, HOME: home }, encoding: 'utf8' });
+        expect(done.status).toBe(0);
+        // The own file was left alone (a later write is there), the alias is written with this prepare's key
+        expect((JSON.parse(readFileSync(join(home, '.universe', 'jobs', `${jobId}.json`), 'utf8')) as { token: string }).token).toBe('cjt_later_own');
+        const alias = JSON.parse(readFileSync(join(home, '.universe', 'jobs', `${earlier.id}.json`), 'utf8')) as { token: string };
+        expect(alias.token).toMatch(/^cjt_/);
+        expect(readFileSync(join(home, '.universe', 'jobs', `${earlier.id}.stamp`), 'utf8')).toBe(String(mark0));
       } finally {
         rmSync(home, { recursive: true, force: true });
       }

@@ -790,9 +790,12 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // The look that was taken moved the order's own schedule on by its age-based interval (up to a week) BEFORE the service was asked: a look that is not read is tried again soon instead,
   // never a week later. The age-based interval stays for a look that was read
   // An order past its open time ends, whatever stopped it being looked at
+  // An order whose time ran out closes as of WHEN its time ran out, never when somebody first looked: the late window, the long-wait schedule and the buyer's 90 days all start from `closedAt`, so a late first look must not start them late
+  // (CodeRabbit on #1025, d522f4b3 pass, N12). Only a closing the service itself declared (`failed`) is dated by the look
+  const openUntil = new Date(order.createdAt.getTime() + limits.checkoutOpenHours * HOUR);
   const endIfOutOfTime = async (): Promise<OrderView | null> => {
     if (!wasClosed && now.getTime() - order.createdAt.getTime() > limits.checkoutOpenHours * HOUR) {
-      if (await moveOrder(order.id, { from: 'pending', to: 'not_paid', reason: 'open_time_ran_out', data: { closedAt: now } })) return view('not_paid');
+      if (await moveOrder(order.id, { from: 'pending', to: 'not_paid', reason: 'open_time_ran_out', data: { closedAt: openUntil } })) return view('not_paid');
     }
     return null;
   };
@@ -971,7 +974,7 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
     }
     if (!expired) return (await moveOrder(order.id, { from: 'cant_confirm', to: 'pending', reason: 'readable_again' })) ? view('pending') : view(order.status);
     // It closes as of when its time ran out (or when it was closed, if it already was): a readable answer that is not final must not start the late window, and the buyer's 90 days, over again
-    const closedAt = order.closedAt ?? new Date(order.createdAt.getTime() + limits.checkoutOpenHours * HOUR);
+    const closedAt = order.closedAt ?? openUntil;
     return (await moveOrder(order.id, { from: 'cant_confirm', to: 'not_paid', reason: 'open_time_ran_out', data: { closedAt } })) ? view('not_paid') : view(order.status);
   }
   // A closed order that the service still does not call completed stays closed. When the service names a final failed state nothing more is asked
@@ -983,7 +986,7 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}, trace?:
   // Only a state the service names as final closes an order early; anything else (started, authorised only, a state we never heard of) stays
   // open until it has been open too long. A payment that completes after that is still real money and is still counted above.
   if (!failed && !expired) return view('pending');
-  const closed = await moveOrder(order.id, { from: 'pending', to: 'not_paid', reason: failed ? 'service_says_failed' : 'open_time_ran_out', data: { closedAt: now, ...(failed ? { reconciled: true } : {}) } });
+  const closed = await moveOrder(order.id, { from: 'pending', to: 'not_paid', reason: failed ? 'service_says_failed' : 'open_time_ran_out', data: { closedAt: failed ? now : openUntil, ...(failed ? { reconciled: true } : {}) } });
   return closed ? view('not_paid') : view('pending');
 }
 

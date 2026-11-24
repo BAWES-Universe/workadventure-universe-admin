@@ -84,6 +84,13 @@ describe('job control routes', () => {
     expect(res.status).toBe(404);
   });
 
+  it('N11 (d522f4b3 pass): a Cancel that left the job live is a retryable 503 with `retry: true`, never a 409 state of the job and never a 200', async () => {
+    lib.cancelJob.mockResolvedValue({ ok: false, reason: 'not_ended' });
+    const res = await cancelRoute(post('cancel'), jobParams);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ reason: 'not_ended', retry: true });
+  });
+
   it('signed out: nothing is asked of the library', async () => {
     session.mockResolvedValue(null);
     const res = await pauseRoute(post('pause'), jobParams);

@@ -1681,6 +1681,29 @@ run('what a computer may ask of Orbit, in a real database', () => {
           expect(await jobOf(jobId)).toMatchObject({ status: 'stopped', endedBy: 'pool' });
         });
 
+        it('N13 (d522f4b3 pass): the retirement of recovered pool refusals commits WITH the admission: when it cannot be written the call is refused (never admitted with the refusal still a fault), its room goes back, and the same call asked again is admitted and retires it', async () => {
+          const { jobId } = await running();
+          const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+          await setUp({ poolCeilingMicros: 60_000 });
+          expect(await call(token, 'c1', 1_000)).toMatchObject({ ok: false, reason: 'pool', full: true });
+          await setUp({ poolCeilingMicros: 100_000_000 });
+          // A database that refuses to retire the refusal (a real write failure, not a mock of the function)
+          await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION n13_fail_retire() RETURNS trigger AS $$ BEGIN IF NEW."reason" = 'pool_recovered' THEN RAISE EXCEPTION 'n13 planted failure'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql`);
+          await prisma.$executeRawUnsafe('CREATE TRIGGER n13_fail_retire BEFORE UPDATE ON "computer_job_faults" FOR EACH ROW EXECUTE FUNCTION n13_fail_retire()');
+          try {
+            expect(await call(token, 'c2')).toEqual({ ok: false, reason: 'refused' });
+          } finally {
+            await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS n13_fail_retire ON "computer_job_faults"');
+            await prisma.$executeRawUnsafe('DROP FUNCTION IF EXISTS n13_fail_retire()');
+          }
+          // Not admitted, the refusal still counts, the room went back
+          expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:pool:c1', kind: 'fault' } })).toBe(1);
+          expect(await prisma.meterReservation.findUnique({ where: { reservationKey: callRoomKey(jobId, 'c2') } })).toMatchObject({ state: 'released' });
+          // Asked again with the database working: admitted, and the refusal is retired in the same step
+          expect((await call(token, 'c3')).ok).toBe(true);
+          expect(await poolRows(jobId)).toMatchObject([{ callId: 'orbit:pool:c1', kind: 'answered', reason: 'pool_recovered' }]);
+        });
+
         it('recordPoolRefusal answers how many refusals still count: a retired one is not among them', async () => {
           const { jobId } = await running();
           await prisma.computerJobFault.create({ data: { jobId, turn: null, run: null, callId: 'orbit:pool:old', kind: 'answered', reason: 'pool_recovered', source: 'orbit', route: null, providerStatus: 503, at: NOW } });

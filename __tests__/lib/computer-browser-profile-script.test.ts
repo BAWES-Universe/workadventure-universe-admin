@@ -1240,7 +1240,8 @@ run('the dirty mark and the restore note (CodeRabbit on #1025: F1, F2, I4)', () 
 
     it('run as root with no agent user to hand over to, it refuses before it touches anything: what the agent linked its folders to is never removed', () => {
       const secret = configLinkedToDecoy();
-      const done = cleanAsRoot();
+      // An agent name that exists nowhere: with the image's own `node` a host that has that account (and `runuser`) would re-run the cleanup as it, in its REAL home (CodeRabbit on #1025, d522f4b3 pass, N1)
+      const done = cleanAsRoot((text) => text.replace('AGENT=node', 'AGENT=universe-no-such-agent'));
       expect(done.code).toBe(1);
       expect(done.out).toMatch(/cleaned=0 reason=root/);
       expect(existsSync(secret)).toBe(true);
@@ -1280,13 +1281,28 @@ run('the dirty mark and the restore note (CodeRabbit on #1025: F1, F2, I4)', () 
 
   describe('N27: the start-up runs between an interrupted restore and its retry', () => {
     /** The image's own start-up step that removes a marked profile (lib/agent37/image-files.ts, universe-up), taken from the image's text and run as the agent user, with the marks folder where this test keeps it. */
-    function startUp(plant?: (text: string) => string): { code: number; out: string } {
+    function startUp(plant?: (text: string) => string, lock?: { child: boolean; plantLock?: (text: string) => string }): { code: number; out: string } {
       const from = UNIVERSE_UP.indexOf("# A cleanup that could not remove the browser's profile left a mark");
       const to = UNIVERSE_UP.indexOf('# Starts a part unless it is running.');
       if (from < 0 || to < from) throw new Error('The start-up step was not found in the image');
       let step = UNIVERSE_UP.slice(from, to).replace('MARKS="/var/lib/universe/marks"', `MARKS="${marksFolder()}"`);
       if (plant) step = plant(step);
-      const script = `PATH="${shim}:$PATH"\nexport PATH\nHOME_DIR="${home}"\nSTATE="$HOME_DIR/.universe"\n${step}\necho start-up-ok\n`;
+      // With `lock`, the image's own lock step runs first, exactly as the real start-up does it (the child yields to a fresh lock, an old one is taken over), so the ordering "lock, then cleanup" is the image's, not the test's
+      // (CodeRabbit on #1025, d522f4b3 pass, N19)
+      let locking = '';
+      if (lock) {
+        const lockFrom = UNIVERSE_UP.indexOf('LOCK="$STATE/up.lock"');
+        const lockTo = UNIVERSE_UP.indexOf("trap 'rmdir \"$LOCK\" 2>/dev/null' EXIT");
+        if (lockFrom < 0 || lockTo < lockFrom) throw new Error('The lock step was not found in the image');
+        locking = UNIVERSE_UP.slice(lockFrom, lockTo + "trap 'rmdir \"$LOCK\" 2>/dev/null' EXIT".length);
+        if (lock.plantLock) {
+          const planted = lock.plantLock(locking);
+          if (planted === locking) throw new Error('The planted bug did not change the lock step');
+          locking = planted;
+        }
+        locking = `CHILD=${lock.child ? 1 : 0}\n${locking}\n`;
+      }
+      const script = `PATH="${shim}:$PATH"\nexport PATH\nHOME_DIR="${home}"\nSTATE="$HOME_DIR/.universe"\n${locking}${step}\necho start-up-ok\n`;
       const done = spawnSync('setpriv', [`--reuid=${agentUid}`, `--regid=${agentUid}`, '--clear-groups', '--', 'sh', '-c', script], { encoding: 'utf8', timeout: 60_000 });
       return { code: done.status ?? -1, out: done.stdout };
     }
@@ -1309,6 +1325,40 @@ run('the dirty mark and the restore note (CodeRabbit on #1025: F1, F2, I4)', () 
       expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
       expect(statSync(join(profile(), 'Default', 'Cookies')).uid).toBe(agentUid);
       expect(agentCanRead(profile())).toBe(true);
+    });
+
+    it('N19 (d522f4b3 pass): the start-up CHILD yields to the fresh lock of the interrupted restore and cleans nothing; once that lock is old, the start-up takes it over and only then runs its dirty-mark step', () => {
+      fakeProfile('job A cookies');
+      act('park', JOB_A, [JOB_A]);
+      expect(act('restore', JOB_A, [JOB_A], KILL_AFTER_MOVE).out).not.toMatch(/restored=/);
+      const lock = join(home, '.universe', 'up.lock');
+      expect(existsSync(lock)).toBe(true);
+      // The supervisor's child run meets the fresh lock: it leaves at once, before any cleanup (no "start-up-ok", no mark read), and the lock is not its to remove
+      const yielded = startUp(undefined, { child: true });
+      expect(yielded.code).toBe(0);
+      expect(yielded.out).not.toMatch(/start-up-ok/);
+      expect(existsSync(lock)).toBe(true);
+      expect(statSync(profile()).uid).toBe(0);
+      expect(agentCanRead(profile())).toBe(false);
+      // The killed try's lock is old now: the start-up takes it over, and only then runs its step (no mark, so the profile stays), and lets the lock go when it ends
+      const old = new Date(Date.now() - 5 * 60_000);
+      utimesSync(lock, old, old);
+      const took = startUp(undefined, { child: true });
+      expect(took.out).toMatch(/start-up-ok/);
+      expect(took.out).not.toMatch(/reason=/);
+      expect(existsSync(lock)).toBe(false);
+      expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+      expect(agentCanRead(profile())).toBe(false);
+      expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
+      expect(agentCanRead(profile())).toBe(true);
+    });
+
+    it('planted bug: a start-up that skips the lock goes straight to its cleanup beside the restore that holds it', () => {
+      fakeProfile('job A cookies');
+      act('park', JOB_A, [JOB_A]);
+      act('restore', JOB_A, [JOB_A], KILL_AFTER_MOVE);
+      const planted = startUp(undefined, { child: true, plantLock: (text) => text.replace('until mkdir "$LOCK" 2>/dev/null; do', 'until true; do') });
+      expect(planted.out).toMatch(/start-up-ok/);
     });
 
     it('planted bug: with the mark kept (the old order) the same start-up finds it and refuses to run on that profile', () => {

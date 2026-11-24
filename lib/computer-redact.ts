@@ -25,12 +25,13 @@ const SECRET_SHAPES: readonly RegExp[] = [
   /\bAKIA[0-9A-Z]{12,}/,
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}/,
   // A header or flag that carries a credential
-  /\b(?:authorization|proxy-authorization|x-api-key|api-key|apikey|x-auth-token)\s*[:=]/i,
+  // The key may be quoted (`{"Authorization": "…"}`, `'x-api-key': …`): an optional closing quote before the separator, or the Bearer rule alone would decide and show the single lowercase word (CodeRabbit on #1025, d522f4b3 pass, N8)
+  /\b(?:authorization|proxy-authorization|x-api-key|api-key|apikey|x-auth-token)["']?\s*[:=]/i,
   // A cookie header carries a value: "Cookie:" with nothing after it is just a word (Sentry on #1025, S1)
   /\b(?:cookie|set-cookie)\s*[:=]\s*\S/i,
-  // "Bearer x" hides any run that is not ONE plain word: a lowercase word or a Capitalised one, with no digit or credential character after it ("Bearer authentication, then", "bearer bonds" are prose; "Bearer abc-def-ghi",
+  // "Bearer x" hides any run that is not ONE plain word, however short (RFC 6750 sets no minimum length: "Bearer a1_b2" is a credential; "Bearer 2FA" is hidden too, and shows the fallback phrase): a lowercase word or a Capitalised one, with no digit or credential character after it ("Bearer authentication, then", "bearer bonds" are prose; "Bearer abc-def-ghi",
   // "Bearer ABCDEFGHIJKL", "Bearer tok/en.ab-cd", "Bearer dXNlcjpwYXNz" are not). A single all-lowercase word cannot be told from prose, so it is shown (Sentry on #1025, S1; Opus's ruling on acfe2a2e, R2)
-  /\b[Bb][Ee][Aa][Rr][Ee][Rr]\s+(?!(?:[a-z]+|[A-Z][a-z]+)(?![A-Za-z0-9_~+=]|[.\/-][A-Za-z0-9._~+\/=-]))[A-Za-z0-9._~+\/=-]{6,}/,
+  /\b[Bb][Ee][Aa][Rr][Ee][Rr]\s+(?!(?:[a-z]+|[A-Z][a-z]+)(?![A-Za-z0-9_~+=]|[.\/-][A-Za-z0-9._~+\/=-]))[A-Za-z0-9._~+\/=-]+/,
   // "Basic x" followed by something that LOOKS like a credential: a digit, one of + = _ ~, or (8 or more characters) a capital inside the run (base64 of "user:pass" is mixed case). Plain words after it
   // ("Basic information", "Basic Instructions", "basic input/output") are common prose and are not. Spelled letter by letter because the flag-free form is needed for the capital test
   /\b[Bb][Aa][Ss][Ii][Cc]\s+(?=[A-Za-z0-9._~+/=-]*(?:\d|[+=_~])|(?=[A-Za-z0-9._~+/=-]{8})[A-Za-z0-9._~+/=-]*[a-z][A-Z])[A-Za-z0-9._~+/=-]{6,}/,
@@ -52,9 +53,33 @@ const TOKEN_LIKE = /(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{
 const LINE_ASSIGNMENT = /(?:^|\n)[ \t]*[A-Za-z_][A-Za-z0-9_]*=\S/;
 const LINE_BREAKS = /\r\n?|[\u000b\u000c\u0085\u2028\u2029\t]/g;
 
+/**
+ * "Basic x" where x is valid Base64 that DECODES to text holding a colon: a user-id and password pair (RFC 7617), however short ("Basic YTpi" is `a:b`). Decoded because the look of the characters cannot tell a short pair from
+ * a word; an ordinary word after "Basic" is nearly never padded Base64 of readable text with a colon, so "Basic information" and "Basic data" stay visible (CodeRabbit on #1025, d522f4b3 pass, N16).
+ */
+const BASIC_RUN = /\bbasic\s+([A-Za-z0-9+/_-]+={0,2})(?![A-Za-z0-9+/=_-])/gi;
+function basicCredential(text: string): boolean {
+  for (const found of text.matchAll(BASIC_RUN)) {
+    const run = found[1].replace(/-/g, '+').replace(/_/g, '/');
+    const bare = run.replace(/=+$/, '');
+    // Valid Base64: whole groups of four, with the padding the length needs (a run that is not is a word)
+    if (!/^[A-Za-z0-9+/]+$/.test(bare) || run.length % 4 !== 0 || run.length - bare.length > 2) continue;
+    try {
+      const bytes = Buffer.from(run, 'base64');
+      const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      // Canonical: the run is exactly what that text encodes to (a word whose last character carries stray bits is not an encoding of anything, and "Basic Zm9v" style words are not mistaken for one)
+      if (bytes.toString('base64') !== run) continue;
+      if (decoded.includes(':') && !/[\u0000-\u0008\u000b-\u001f\u007f]/.test(decoded)) return true;
+    } catch {
+      // Not text: a word that happens to be made of Base64 characters
+    }
+  }
+  return false;
+}
+
 /** True when the text carries a shape that is a secret whatever else is around it (a key, a token, a credential in a header, flag or address, or a shell assignment, at the start of any of its lines). */
 export function hasSecretShape(text: string): boolean {
-  return SECRET_SHAPES.some((shape) => shape.test(text)) || LINE_ASSIGNMENT.test(text.replace(LINE_BREAKS, '\n'));
+  return SECRET_SHAPES.some((shape) => shape.test(text)) || LINE_ASSIGNMENT.test(text.replace(LINE_BREAKS, '\n')) || basicCredential(text);
 }
 
 /**

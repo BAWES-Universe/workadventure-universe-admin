@@ -36,8 +36,9 @@ const bodySchema = z.object({ route: z.string().min(1).max(120), from: timestamp
 /**
  * POST /api/admin/computer/give-backs/correct { route, from, to } (super admins only)
  * One incident, corrected together: every job with a provider failure on that route between the two times that is not a give-back yet (held for a decision,
- * or past the person's bound) is given back, and none of them counts towards anyone's bound. Jobs the person caused, or that delivered something outside their
- * computer, are left alone. Answers { corrected, costMicros }. Safe to say twice.
+ * or past the person's bound) is given back, and none of them counts towards anyone's bound. Jobs the person caused are left alone. A job that delivered something
+ * outside its computer is given back too; the App's delivered charge stays. Answers { corrected, uncounted, costMicros }: `corrected` is the jobs given back now,
+ * `uncounted` the goodwill jobs freed from the bound. Safe to say twice.
  */
 export async function POST(request: NextRequest) {
   try {

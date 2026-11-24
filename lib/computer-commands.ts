@@ -26,7 +26,7 @@ export interface Command {
 }
 
 /** What a control came to, as it is kept and replayed (the computer view is read fresh on a replay: it is how things stand now). */
-export type StoredOutcome = { ok: true; signInsKept?: boolean; note?: { seq: number; delivery: string }; targets?: string[]; /** Stop all with a confirmed set (round 8, D2): the live jobs not in the set, left alone, newest first. */ left?: Array<{ id: string; title: string }>; /** The pause each paused job's pending answer rests on (its number), so a copy reads exactly those rows however many pauses the job has had since. */ held?: Array<{ jobId: string; n: number }>; pending?: true } | { ok: false; reason: string };
+export type StoredOutcome = { ok: true; signInsKept?: boolean; note?: { seq: number; delivery: string }; targets?: string[]; /** Stop all with a confirmed set (round 8, D2): the live jobs not in the set, left alone, newest first. */ left?: Array<{ id: string; title: string }>; /** The pause each paused job's pending answer rests on (its number), so a copy reads exactly those rows however many pauses the job has had since. */ held?: Array<{ jobId: string; n: number }>; pending?: true; /** A Resume's own start attempt has decided (N6, N21, N22, N23 of the d522f4b3 pass): what THAT attempt came to, written by its own `tryStart` the moment it returned, once. A pending Resume is settled from this and from nothing a different try, a newer Resume or a pause did to the job. */ decided?: StoredOutcome } | { ok: false; reason: string };
 
 export type Claimed =
   /** First time: apply the effect (and keep its outcome). */
@@ -116,7 +116,8 @@ export function commandOf(request: Request): Command | null | 'invalid' {
 /**
  * What a Resume came to, from a job as it stands and the pause number its command was taken at (CodeRabbit on #1025, N1): the refusal its month or a limit made of the start, a browser that could not be settled, or success.
  * A job that has been paused again since the command was taken (more pauses than the command's stretch) has run: only a job that held the machine is paused with a number, so the command's own start succeeded and a
- * later pause's reason is never its answer.
+ * later pause's reason is never its answer. The browser's state (`prepState`) is read only for a job that has NOT been paused since: a pause settles every pending Resume of the job from the job as it stands (`settlePendingResumesIn`,
+ * called by the pause itself under the job's lock), so a Resume's browser outcome is recorded per attempt at the moment a later pause or restore could mask it, never inferred afterwards (CodeRabbit on #1025, d522f4b3 pass, N14).
  */
 export function resumeOutcomeFrom(job: { status: string; queuedFor: string | null; pausedWhy: string | null; prepState: string | null; pauses: number } | null, stretch: number | null): StoredOutcome {
   if (job && stretch !== null && job.pauses > stretch) return { ok: true };
@@ -131,13 +132,15 @@ export function resumeOutcomeFrom(job: { status: string; queuedFor: string | nul
  * (CodeRabbit on #1025, N1). Written once: an answer that was already kept stays.
  */
 export async function settlePendingResumesIn(tx: Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>, jobId: string, except: string | null = null): Promise<number> {
-  const pending = await tx.$queryRaw<Array<{ command_id: string; stretch: number | null; status: string; queued_for: string | null; paused_why: string | null; prep_state: string | null; pauses: number }>>`
-    SELECT c."command_id", c."stretch", j."status", j."queued_for", j."paused_why", j."prep_state", j."pauses"
+  const pending = await tx.$queryRaw<Array<{ command_id: string; stretch: number | null; decided: StoredOutcome | null; status: string; queued_for: string | null; paused_why: string | null; prep_state: string | null; pauses: number }>>`
+    SELECT c."command_id", c."stretch", c."outcome"->'decided' AS "decided", j."status", j."queued_for", j."paused_why", j."prep_state", j."pauses"
     FROM "computer_job_commands" c JOIN "computer_jobs" j ON j."id" = c."job_id"
     WHERE c."job_id" = ${jobId} AND c."kind" IN ('resume', 'first') AND c."outcome"->>'pending' = 'true' AND c."outcome"->'targets' IS NULL AND (${except}::text IS NULL OR c."command_id" <> ${except}::uuid)`;
   let settled = 0;
   for (const row of pending) {
-    const outcome = resumeOutcomeFrom({ status: row.status, queuedFor: row.queued_for, pausedWhy: row.paused_why, prepState: row.prep_state, pauses: row.pauses }, row.stretch);
+    // What the Resume's OWN start attempt came to, when it recorded that: never re-read from a job that other tries, a newer Resume or a pause have changed since. Only a Resume that never recorded one (its request stopped inside its
+    // start) is read from the job as it stands now
+    const outcome = row.decided ?? resumeOutcomeFrom({ status: row.status, queuedFor: row.queued_for, pausedWhy: row.paused_why, prepState: row.prep_state, pauses: row.pauses }, row.stretch);
     settled += await tx.$executeRaw`UPDATE "computer_job_commands" SET "outcome" = ${JSON.stringify(outcome)}::jsonb WHERE "command_id" = ${row.command_id}::uuid AND "outcome"->>'pending' = 'true'`;
   }
   return settled;
@@ -147,4 +150,23 @@ export async function settlePendingResumesIn(tx: Pick<Prisma.TransactionClient, 
 export async function stretchOfCommand(command: Command): Promise<number | null> {
   const rows = await prisma.$queryRaw<Array<{ stretch: number | null }>>`SELECT "stretch" FROM "computer_job_commands" WHERE "command_id" = ${command.id}::uuid`;
   return rows[0]?.stretch ?? null;
+}
+
+/**
+ * Records what a Resume's OWN start attempt came to, on its own command, at the moment its `tryStart` returned (once: the first record stays). A pending Resume is read from this alone: another try of the same job (the queue sweep, which
+ * can write its own decision for the same place in line), a newer Resume, a pause or a Cancel never decides it, so a copy never stores a success the Resume's own start may still turn into a refusal, and never returns a different
+ * attempt's outcome (CodeRabbit on #1025, d522f4b3 pass, N6, N21, N22, N23). The outcome is read from the job right after the attempt's own try, with the pause number the command was taken at.
+ */
+export async function recordResumeDecision(commandId: string, jobId: string, stretch: number | null): Promise<void> {
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, pausedWhy: true, prepState: true, pauses: true } });
+  const outcome = resumeOutcomeFrom(job, stretch);
+  await prisma.$executeRaw`
+    UPDATE "computer_job_commands" SET "outcome" = jsonb_set("outcome", '{decided}', ${JSON.stringify(outcome)}::jsonb)
+    WHERE "command_id" = ${commandId}::uuid AND "outcome"->>'pending' = 'true' AND "outcome"->'decided' IS NULL`;
+}
+
+/** What a pending Resume's own start attempt recorded (see `recordResumeDecision`), or null while it has not. */
+export async function decidedOfCommand(command: Command): Promise<StoredOutcome | null> {
+  const rows = await prisma.$queryRaw<Array<{ decided: StoredOutcome | null }>>`SELECT "outcome"->'decided' AS "decided" FROM "computer_job_commands" WHERE "command_id" = ${command.id}::uuid`;
+  return rows[0]?.decided ?? null;
 }

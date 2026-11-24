@@ -84,7 +84,7 @@ import {
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
 import { CONSENT_WINDOW_MS, startAnswerBody } from '@/lib/computer-start-answer';
 export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
-import { claimCommandIn, commandRow, keepOutcome, seenCommand, type Command } from '@/lib/computer-commands';
+import { claimCommandIn, commandRow, keepOutcome, recordResumeDecision, seenCommand, settlePendingResumesIn, type Command } from '@/lib/computer-commands';
 
 /**
  * A Brick's computer, and the jobs on it (game #2000, Brick 9).
@@ -720,7 +720,7 @@ async function attemptAnswer(botId: string, personId: string, startKey: string, 
  * A start under a key that was ANSWERED before (finding 1): the same answer again, before anything else, whatever happened since (the answering job was acknowledged, ended, or the game forgot its key).
  * While the answering job is unconfirmed it is `earlier` (acknowledging nothing); once it is confirmed it is that job, as a repeated start of it would be. Null when the key's row decides nothing.
  */
-export async function startAnsweredBefore(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<Started | null> {
+export async function startAnsweredBefore(botId: string, personId: string, startKey: string, now: Date = new Date(), options: { /** Only READ what the key answers: an acknowledged job is answered as it stands, never tried (a try can reserve room and wake a machine). For a lookup that follows a refusal which lost its race (CodeRabbit on #1025, d522f4b3 pass, N2). */ readOnly?: boolean } = {}): Promise<Started | null> {
   const answered = await attemptAnswer(botId, personId, startKey, now);
   if (!answered) {
     // Round 8, A1: a key refused before is that refusal again, first (a refusal exists only for starts that ack)
@@ -733,6 +733,8 @@ export async function startAnsweredBefore(botId: string, personId: string, start
   if ('starting' in answered) return { ok: false, reason: 'earlier', job: { id: null, status: null, state: 'starting', attempt: answered.starting } };
   const { job } = answered;
   if (!job.startAckedAt) return { ok: false, reason: 'earlier', job: { id: job.id, status: job.status, state: startStateOf(job.status), attempt: job.startKey } };
+  // A lookup that only reads (after a refusal that lost its race to another request): the job as it stands, never tried. `reuseJob` would try a queued job, which reserves room and wakes a machine for a request that was refused
+  if (options.readOnly) return (await prisma.computerJob.count({ where: { id: job.id } })) > 0 ? startedOfJob(job.id) : { ok: false, reason: 'retired' };
   return (await reuseJob(botId, { id: job.id }, now)) ?? { ok: false, reason: 'retired' };
 }
 
@@ -943,7 +945,8 @@ async function jobAnswerOf(jobId: string): Promise<Record<string, unknown>> {
  * request's look and its refusal). Null when nothing is on record; the caller then answers a retryable error, never its own local answer for a key that may have a job.
  */
 export async function storedStartAnswer(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<Record<string, unknown> | null> {
-  const answered = await startAnsweredBefore(botId, personId, startKey, now);
+  // Read only (N2 of the d522f4b3 pass): a key that aliases an acknowledged job still in line answers that job as it stands; nothing is tried, reserved or woken for a request that was refused
+  const answered = await startAnsweredBefore(botId, personId, startKey, now, { readOnly: true });
   if (answered) return startAnswerBody(answered);
   const own = await ownAnswerOf(botId, personId, startKey);
   if (own) return startAnswerBody(own);
@@ -1041,7 +1044,7 @@ export async function startJob(input: StartInput, now: Date = new Date()): Promi
       // Not on the key: the answer is not final (a retry of the key could be answered otherwise), so it is not given as one (CodeRabbit on #1025, O40)
       if (kept === 'failed') return { ok: false, reason: 'not_kept' };
       // Another request decided the key first: its stored answer is the key's answer
-      if (kept === 'decided') return (await startAnsweredBefore(input.botId, input.personId, input.startKey, now)) ?? (await ownAnswerOf(input.botId, input.personId, input.startKey)) ?? begun.done;
+      if (kept === 'decided') return (await startAnsweredBefore(input.botId, input.personId, input.startKey, now, { readOnly: true })) ?? (await ownAnswerOf(input.botId, input.personId, input.startKey)) ?? begun.done;
     }
     // No job was made by this start (refused, found one that was made earlier, or told it is `earlier`/`expired`): its attempt is over
     else if (input.startKey && opened && !(begun.done.ok)) await closeAttempt(input.botId, input.personId, input.startKey);
@@ -1273,7 +1276,15 @@ async function ruleWordsOf(botId: string, personId: string, now: Date, taskKey: 
  * Keeps the refusal of a start on its attempt and takes the provisional job away in ONE transaction (CodeRabbit on #1025, I8): the attempt (state `made`, naming this job) becomes `refused` with the answer, and the job goes. A
  * start without a key that acks has no attempt to write. Throws when the transaction fails: nothing was changed, and the caller gives no final answer.
  */
+/** Test seam: a checkpoint run once, right before the refusal's transaction opens (the moment another request can still change the job). Never set in production. */
+export const removalCheckpointForTests: { before: (() => Promise<void>) | null } = { before: null };
+
 async function removeWithRefusal(who: { botId: string; personId: string; startKey?: string | null; acks?: boolean }, jobId: string, answer: Started, remove: Prisma.ComputerJobWhereInput): Promise<'removed' | 'left' | 'gone'> {
+  const checkpoint = removalCheckpointForTests.before;
+  if (checkpoint) {
+    removalCheckpointForTests.before = null;
+    await checkpoint();
+  }
   try {
     await prisma.$transaction(async (tx) => {
       // The refusal is written first, because deleting the job lets go of the attempt's link to it (`ON DELETE SET NULL`), and it STAYS only when this request removed the job (count 1): when the delete finds nothing to remove, the whole
@@ -1299,7 +1310,7 @@ async function afterRemoval(done: 'removed' | 'left' | 'gone', who: { botId: str
   if (done === 'removed') return answer;
   if (done === 'left') return startedOfJob(jobId);
   if (!(who.startKey && who.acks)) return answer;
-  return (await startAnsweredBefore(who.botId, who.personId, who.startKey)) ?? { ok: false, reason: 'not_kept' };
+  return (await startAnsweredBefore(who.botId, who.personId, who.startKey, new Date(), { readOnly: true })) ?? { ok: false, reason: 'not_kept' };
 }
 
 /** Thrown inside the refusal's transaction to roll it back when the job it was to remove is no longer in the state the refusal removes. */
@@ -1317,11 +1328,22 @@ async function startedOfJob(jobId: string): Promise<Started> {
   return { ok: true, job: jobView(job), restoredFrom: after?.restoredFrom ?? null, ...(job.continuesJobId ? { continued: true as const } : {}) };
 }
 
+/**
+ * Whether the start under this key acks (the game confirms its answer), from the start's own durable record: its attempt row carries `issued_at`, the moment the person's consent was given, and ONLY `registerStart` (a start that
+ * acks, which the route requires to carry a timed key) writes it; a start that does not ack opens its attempt with no such time. Read once for a job found by a replay, so the refusal is kept on the key whether or not the game
+ * has acknowledged the job since (N17). Reads only.
+ */
+async function startAcks(botId: string, personId: string, startKey: string): Promise<boolean> {
+  return (await prisma.computerStartAttempt.count({ where: { botId, personId, startKey, issuedAt: { not: null } } })) > 0;
+}
+
 /** The same for a job a later ask found (a replay of a run or key): the key is read from the job itself. A write that fails answers `not_kept`, never a refusal that is not on the key. */
-async function refuseReused(botId: string, found: { id: string; personId: string; startKey: string | null; startAckedAt: Date | null }, answer: Started, remove: Prisma.ComputerJobWhereInput): Promise<Started> {
+async function refuseReused(botId: string, found: { id: string; personId: string; startKey: string | null }, answer: Started, remove: Prisma.ComputerJobWhereInput): Promise<Started> {
   try {
-    // An acking start made this job unacknowledged (`start_acked_at` NULL); a start without acks made it acknowledged and has no attempt answer to keep
-    const who = { botId, personId: found.personId, startKey: found.startKey, acks: found.startAckedAt === null };
+    // Whether the start that made this job acks is read from the START'S OWN RECORD (`startAcks`), never from `start_acked_at`: the game's acknowledgement sets that on a job an acking start made too, so an acknowledged job
+    // of an acking start would read as having no attempt to keep, and its refusal would not be on the key (CodeRabbit on #1025, d522f4b3 pass, N17).
+    // and a start that does not ack never has one
+    const who = { botId, personId: found.personId, startKey: found.startKey, acks: !!found.startKey && (await startAcks(botId, found.personId, found.startKey)) };
     return await afterRemoval(await removeWithRefusal(who, found.id, answer, remove), who, found.id, answer);
   } catch (error) {
     console.error('[Computer] Could not keep the refusal of a start before taking its job away:', error instanceof Error ? error.message : 'unknown');
@@ -1436,10 +1458,12 @@ async function settleAsleepPark(botId: string, provider: Provider, markJobId: st
 type Tried = 'running' | 'queued' | 'failed' | 'not_set' | 'gone' | { rule: string };
 
 /** One try to put a queued job on the machine. Safe to ask again: a job that is no longer queued is left as it is. */
-async function tryStart(jobId: string, now: Date, options: { /** The person's own Resume: they are answered at once, so a pause for their month or a limit is not told to them again. */ quiet?: boolean } = {}): Promise<Tried> {
+async function tryStart(jobId: string, now: Date, options: { /** The person's own Resume: they are answered at once, so a pause for their month or a limit is not told to them again. */ quiet?: boolean; /** The Resume this try is the START of: what the try came to is recorded on that command, once, the moment it returns (the only thing that decides the Resume's pending answer). */ decides?: { commandId: string; stretch: number | null } } = {}): Promise<Tried> {
   // The start this try belongs to: the job's place in line, which every Resume, carry-on and "do this first" moves on (a new start of the job). Read BEFORE the try looks at the job
   const generation = (await prisma.computerJob.findUnique({ where: { id: jobId }, select: { queueRank: true } }).catch(() => null))?.queueRank ?? null;
   const outcome = await tryStartOnce(jobId, now, options);
+  // The Resume's own start has returned: what it came to is kept on its command now, before anything else can change the job or another try can reach its own decision for the same place in line (N6, N21, N22, N23)
+  if (options.decides) await recordResumeDecision(options.decides.commandId, jobId, options.decides.stretch).catch((error) => console.error('[Computer] Could not record what a Resume’s start came to:', error instanceof Error ? error.message : 'unknown'));
   // The start reached its decision (it ran, went back in line, was refused or failed): written by the start itself, after the job's state is final. A copy of a Resume reads a job in line with no decision on record as one that has not decided
   // yet; the queue sweep's own mark (`last_tried_at`, set BEFORE it tries) says nothing of that (CodeRabbit on #1025, O46). Written only while the job is still in the start this try began in: a stale try (a sweep that saw the job
   // paused, or in an earlier start) never marks the NEW start of a Resume as decided (CodeRabbit on #1025, N28)
@@ -2551,6 +2575,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       return;
     }
     const held = job.status === 'running' || job.status === 'waiting';
+    const inLine = job.status === 'queued';
     const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
     seconds = job.secondsRun + stretch;
     // The seconds were worked out from what was read: the end lands only on that same snapshot. A take-over and a hand-back in between leave the status as
@@ -2655,6 +2680,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         const counted = verdict?.state === 'given' && verdict.counted;
         // A given-back ending ends as ours (`error`), counted or not: for a hinted one it was not ended so by the runner, so it is said here
         const data = !given ? { ...endData, status: 'failed', endedBy: null } : { ...endData, ...(hintJudged ? { endedBy: 'error' as const } : {}), ...(counted ? { runnerFault: true } : {}) };
+        // A Resume of a job in line that is still pending is settled from the job as it stands BEFORE the ending clears its place and its reason (CodeRabbit on #1025, d522f4b3 pass, N23)
+        if (inLine) await settlePendingResumesIn(tx, jobId);
         const done = await tx.computerJob.updateMany({ where, data });
         if (done.count === 1) {
           if (turnHold) await tx.brickComputer.updateMany({ where: { botId, turnUnprovenSince: null }, data: { turnUnprovenSince: now } });
@@ -2691,6 +2718,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         await lockCutoff(tx, jobId);
         const early = await decideUnderCutoff(tx);
         if (early) return early;
+        if (inLine) await settlePendingResumesIn(tx, jobId);
         return tx.computerJob.updateMany({ where, data: endData });
       });
       if ('deferred' in written && written.deferred) {
@@ -2706,6 +2734,12 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         continue;
       }
       ended = written;
+    } else if (inLine) {
+      // A Resume of a job in line that is still pending is settled from the job as it stands BEFORE the ending clears its place and its reason, in the same commit (N23)
+      ended = await prisma.$transaction(async (tx) => {
+        await settlePendingResumesIn(tx, jobId);
+        return tx.computerJob.updateMany({ where, data: endData });
+      });
     } else {
       ended = await prisma.computerJob.updateMany({ where, data: endData });
     }
@@ -4362,7 +4396,7 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
  * The few steps of the line the job controls (lib/computer-job-controls) use, kept here so they stay the same steps every other path takes. Not for anything else.
  */
 export const controlInternals = {
-  tryStart: (jobId: string, now: Date, options: { quiet?: boolean } = {}) => tryStart(jobId, now, options),
+  tryStart: (jobId: string, now: Date, options: Parameters<typeof tryStart>[2] = {}) => tryStart(jobId, now, options),
   startNext,
   cancelAgentTurn,
   restIfUnheld,

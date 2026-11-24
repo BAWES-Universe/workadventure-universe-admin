@@ -7,7 +7,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -518,6 +518,38 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
         expect(runIt(later).status).toBe(0);
         expect(keyIn(`jobs/${old}.json`)).toBe('cjt_later');
         expect(keyIn(`jobs/${again.job.id}.json`)).toBe('cjt_later');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it('Sentry S2: a destination with no stamp is judged on its own, never on the stamp read for the destination before it', async () => {
+      const { sara, jobId: old } = await failedAsOurs('c-alias-s2');
+      const again = await tryAgain(sara, old);
+      if (!again.ok) throw new Error('no continuation');
+      expect((await prepareJob(again.job.id, RELAY, minutes(6))).ok).toBe(true);
+      const command = fake.commands.at(-1)?.command ?? '';
+      const mark = Number(/ (\d+) > "\$d\/relay\.gen"/.exec(command)?.[1]);
+      const token = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(command)?.[1] ?? '';
+      // The command writes the continuation's own file first, then the alias of the job it carries on
+      expect(command.indexOf(`jobs/${again.job.id}.stamp`)).toBeLessThan(command.indexOf(`jobs/${old}.stamp`));
+      const home = mkdtempSync(join(tmpdir(), 'universe-relay-s2-'));
+      const jobs = join(home, '.universe', 'jobs');
+      const runIt = (text: string) => spawnSync('sh', ['-c', text], { env: { ...process.env, HOME: home }, encoding: 'utf8' });
+      const keyIn = (path: string) => (JSON.parse(readFileSync(join(home, '.universe', path), 'utf8')) as { token: string }).token;
+      try {
+        mkdirSync(jobs, { recursive: true });
+        // The own file was written by a LATER claim (its stamp is newer), with no .gen of this job, so the command does not stop early
+        writeFileSync(join(jobs, `${again.job.id}.json`), JSON.stringify({ url: 'x', token: 'cjt_newer' }));
+        writeFileSync(join(jobs, `${again.job.id}.stamp`), String(mark + 5_000));
+        // The alias holds an old, revoked key and has NO stamp (written before stamps existed, or its stamp was lost)
+        writeFileSync(join(jobs, `${old}.json`), JSON.stringify({ url: 'x', token: 'cjt_old_revoked' }));
+        expect(runIt(command).status).toBe(0);
+        // The own file is left to the newer claim
+        expect(keyIn(`jobs/${again.job.id}.json`)).toBe('cjt_newer');
+        // The alias, with no stamp of its own, is written with this prepare's key (with the bug it kept cjt_old_revoked, skipped on the own file's stamp)
+        expect(keyIn(`jobs/${old}.json`)).toBe(token);
+        expect(readFileSync(join(jobs, `${old}.stamp`), 'utf8')).toBe(String(mark));
       } finally {
         rmSync(home, { recursive: true, force: true });
       }

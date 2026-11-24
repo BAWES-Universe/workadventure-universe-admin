@@ -118,8 +118,7 @@ export async function authorizeModelCall(
       if (room.created) await giveBackUnusedRoom(base.jobId, input.callId, clock);
       return { ok: false, reason: 'refused' };
     }
-    // Capacity is back: what was refused before it stops deciding the turns that come after
-    await retirePoolRefusals(prisma, base.jobId).catch((error) => console.error('[Computer] Could not retire a recovered pool refusal:', error instanceof Error ? error.message : 'unknown'));
+    // Capacity is back: what was refused before it stops deciding the turns that come after. That was retired inside `authorizedPastCutoff`, in the admission's own transaction (CodeRabbit on #1025, d522f4b3 pass, N13)
     return { ok: true, ...base, reservedMicros: room.reservation.amountMicros };
   }
   // A call refused for the person's own allowance or a rule they said ends the job right here, as a refused renewal does (stopped, by `allowance` or `rule`,
@@ -368,6 +367,10 @@ async function authorizedPastCutoff(jobId: string, callId: string, token: string
       // settled as unknown usage (the sweep reads it with `hasCallAdmission`), and a room whose creator could not give it back is kept for any request that was answered with it (CodeRabbit on #1025)
       await recordCallAdmission(tx, jobId, callId, clock());
       await recordTurnAdmitted(tx, jobId, { turn: admitted.turn, run: admitted.run, at: clock() });
+      // Capacity is back: what was refused before it stops deciding the turns that come after. Retired in THIS transaction, so the admission and the retirement commit together or not at all: both give-back judgments read these rows
+      // as Orbit's fault, and a call that was admitted while its recovered refusals stayed `fault` would give a later, unrelated agent failure of the job back as a computer fault. A retirement that cannot be written fails
+      // the admission (the call is refused and its room goes back), never admitted without it (CodeRabbit on #1025, d522f4b3 pass, N13)
+      await retirePoolRefusals(tx, jobId);
       // The call belongs to the stretch it is admitted in: written HERE, under the lock a pause takes, so the order of an admission and a pause is exact (never two clocks), and the first admission decides (an
       // answer given again keeps it). A give-back after a pause reads it (lib/computer-stretch)
       await tx.$executeRaw`UPDATE "meter_reservations" SET "job_stretch" = (SELECT "pauses" FROM "computer_jobs" WHERE "id" = ${jobId}) WHERE "reservation_key" = ${callRoomKey(jobId, callId)} AND "job_stretch" IS NULL`;

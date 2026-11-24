@@ -40,7 +40,7 @@ import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-li
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { ackStart, claimJob, finishJob, finishJobUnder, forgetOldStartMarks, giveComputer, issuedOfKey, registerStart, startJob, DEAD_ANSWER_MS } from '@/lib/computer';
+import { ackStart, claimJob, controlInternals, finishJob, finishJobUnder, forgetOldStartMarks, giveComputer, issuedOfKey, registerStart, startJob, DEAD_ANSWER_MS } from '@/lib/computer';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { mintJobToken } from '@/lib/computer-token';
 import { carryOnPaused, resetCarryOnScanForTests } from '@/lib/computer-limit-pause';
@@ -445,6 +445,32 @@ run('GPT seventh note (round 8): Orbit side of A, C and D2, in a real database',
       const sara = await owner('d2-invalid');
       expect((await control(sara, { action: 'stop_all' })).status).toBe(400);
       expect((await control(sara, { action: 'stop_all', confirmedJobIds: Array.from({ length: 51 }, () => randomUUID()) })).status).toBe(400);
+    });
+  });
+
+  describe('CodeRabbit on #1025 (d522f4b3 pass, N11): a Cancel that leaves the job live is a retryable failure, never a cancelled job', () => {
+    it('the bot route answers 503 not_ended retry:true while the job still holds the machine, keeps the command pending, and the same command id then ends it (200)', async () => {
+      const sara = await owner('n11');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' });
+      if (!a.ok || a.job.status !== 'running') throw new Error('A did not run');
+      const command = randomUUID();
+      const spy = jest.spyOn(controlInternals, 'endByPerson').mockImplementation(async () => undefined);
+      try {
+        const first = await control(sara, { action: 'cancel', jobId: a.job.id }, command);
+        expect(first.status).toBe(503);
+        expect(first.body).toEqual({ ok: false, reason: 'not_ended', retry: true });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'running' });
+      const retried = await control(sara, { action: 'cancel', jobId: a.job.id }, command);
+      expect(retried.status).toBe(200);
+      expect(retried.body.ok).toBe(true);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'person' });
+      // CONTROL: a Cancel that did end the job is the success it always was
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Taxi booking' });
+      if (!b.ok) throw new Error('B was not made');
+      expect((await control(sara, { action: 'cancel', jobId: b.job.id })).status).toBe(200);
     });
   });
 

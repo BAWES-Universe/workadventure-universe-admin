@@ -307,6 +307,9 @@ async function restoreUnder(machine: Machine, botId: string, jobId: string, pers
   if (!(await renew())) return result('left', 'superseded');
   // The number of the pause this restore brings back goes into the machine's note of it: the commit that follows names the same number (CodeRabbit on #1025, N29)
   const generation = await pauseNumberOf(jobId);
+  // No number, no note: a number that cannot be read is never replaced by a shared stand-in (0), because an older commit and a newer restore would then carry the same one and the older could remove the newer note. The restore is not run, the
+  // machine's note is left as it is for the recovery, and the sweep tries again (CodeRabbit on #1025, d522f4b3 pass, N24)
+  if (generation === null) return result('failed', 'error');
   const answer = await onMachine(machine, 'restore', jobId, expired || !owner ? keep.filter((id) => id !== jobId) : keep, hours, generation);
   if (answer.done === 'kept') return result('restored', null, answer);
   if (answer.done === 'none') return result('fresh', expired ? 'expired' : !owner ? 'owner' : 'none');
@@ -392,7 +395,8 @@ export async function settleResumedBrowser(jobId: string, botId: string, back: S
   // Read before the write that makes the job ready, which holds only while the job's room is this attempt's (no pause in between): the pause the note was made for
   const generation = await pauseNumberOf(jobId);
   const written = (await writePrep(jobId, ready, fence, now)) && ready;
-  if (written && back.state === 'restored') await commitRestore(botId, jobId, generation);
+  // A commit without a readable number removes nothing: the note stays for the recovery (N24)
+  if (written && back.state === 'restored' && generation !== null) await commitRestore(botId, jobId, generation);
   return written ? 'ready' : 'recover';
 }
 
@@ -412,9 +416,9 @@ async function commitRestore(botId: string, jobId: string, generation: number): 
   }
 }
 
-/** The number of the job's last pause (what a restore brings back); 0 when it cannot be read, which no note carries. */
-async function pauseNumberOf(jobId: string): Promise<number> {
-  return (await prisma.computerJob.findUnique({ where: { id: jobId }, select: { pauses: true } }).catch(() => null))?.pauses ?? 0;
+/** The number of the job's last pause (what a restore brings back); null when it cannot be read (the read failed, or the job is gone): there is NO shared stand-in number, every caller leaves the machine's note as it is then (N24). */
+async function pauseNumberOf(jobId: string): Promise<number | null> {
+  return (await prisma.computerJob.findUnique({ where: { id: jobId }, select: { pauses: true } }).catch(() => null))?.pauses ?? null;
 }
 
 /** The emptying a fresh result needs (when it does) and the job's write, with the claim already held. */
@@ -428,7 +432,7 @@ async function settleUnder(under: Under, jobId: string, botId: string, back: Sig
   const generation = await pauseNumberOf(jobId);
   const written = (await writePrep(jobId, ready, fence, now)) && ready;
   // The claim is renewed before this further command (it has been held since the restore), and the command runs only while it is still ours (CodeRabbit on #1025, N29)
-  if (written && back.state === 'restored' && (await under.renew())) await onMachine(under.machine, 'commit', jobId, [], under.hours, generation);
+  if (written && back.state === 'restored' && generation !== null && (await under.renew())) await onMachine(under.machine, 'commit', jobId, [], under.hours, generation);
   return written ? 'ready' : 'recover';
 }
 

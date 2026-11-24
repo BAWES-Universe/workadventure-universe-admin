@@ -201,8 +201,10 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
   // Every file a key is written to has its own order, kept in a stamp beside it (the claim time of the prepare that last wrote it, whichever job's prepare that was): a prepare writes a file only when no later prepare wrote it
   // already, so a delayed predecessor never puts its revoked key over the file of a successor that carries on its conversation, and a later valid prepare still refreshes it (CodeRabbit on #1025)
   const mark0 = claim.getTime();
+  // `sm` is emptied before every read: the same shell runs this once for the job's own file and once per alias, and a read of a stamp file that does not exist does not run at all, so without it an alias with no stamp would inherit the
+  // previous file's (newer) value and be skipped, leaving a revoked key in its file (Sentry on #1025, S2). The other reads below run once per command, but their variables are emptied too
   const writeTo = (dest: string): string =>
-    `{ read -r sm < "$d/jobs/${dest}.stamp" 2>/dev/null; if [ -n "$sm" ] && [ "$sm" -gt ${mark0} ] 2>/dev/null; then :; else printf '%s' '${file}' > "$d/jobs/${dest}.json.new" && mv "$d/jobs/${dest}.json.new" "$d/jobs/${dest}.json" && printf '%s' ${mark0} > "$d/jobs/${dest}.stamp"; fi; } && `;
+    `{ sm=; read -r sm < "$d/jobs/${dest}.stamp" 2>/dev/null; if [ -n "$sm" ] && [ "$sm" -gt ${mark0} ] 2>/dev/null; then :; else printf '%s' '${file}' > "$d/jobs/${dest}.json.new" && mv "$d/jobs/${dest}.json.new" "$d/jobs/${dest}.json" && printf '%s' ${mark0} > "$d/jobs/${dest}.stamp"; fi; } && `;
   const aliasPart = aliases.map((id) => writeTo(id)).join('');
   const gitPart = await gitLoginFor(jobId, live.job.generation, now, epoch);
   // Written whole to a new file and moved over the old one, so a call never reads half of it. Only the machine's own user can read it.
@@ -216,9 +218,9 @@ async function prepareClaimed(jobId: string, address: string, now: Date, claim: 
     `umask 077 && d="$HOME/.universe" && mkdir -p "$d" && ( flock 9 || exit 1; ` +
     // The job's own newer write is looked for FIRST, before anything is written: a write that is stale for this job (an older control number, or an older claim
     // of the same number) changes nothing at all, not even the key last written, whichever job wrote last
-    `read -r jg jm < "$d/jobs/${jobId}.gen" 2>/dev/null; ` +
+    `jg=; jm=; read -r jg jm < "$d/jobs/${jobId}.gen" 2>/dev/null; ` +
     `if [ -n "$jg" ] && { [ ${generation} -lt "$jg" ] || { [ ${generation} -eq "$jg" ] && [ -n "$jm" ] && [ ${mark} -lt "$jm" ]; }; } 2>/dev/null; then exit 0; fi; ` +
-    `read -r who cur mk < "$d/relay.gen" 2>/dev/null; ` +
+    `who=; cur=; mk=; read -r who cur mk < "$d/relay.gen" 2>/dev/null; ` +
     `if [ "$who" = '${jobId}' ] && [ -n "$cur" ] && { [ "$cur" -gt ${generation} ] || { [ "$cur" -eq ${generation} ] && [ -n "$mk" ] && [ "$mk" -gt ${mark} ]; }; } 2>/dev/null; then exit 0; fi; ` +
     // The shared file is also left alone when ANOTHER job's claim that wrote it is later than this one (control numbers are of one job, so only the claims are compared): a delayed prepare of an older job never puts its key over a newer claim's. Its own files below are still written
     `if [ "$who" != '${jobId}' ] && [ -n "$mk" ] && [ "$mk" -gt ${mark} ] 2>/dev/null; then :; else printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json" && printf '%s %s %s' '${jobId}' ${generation} ${mark} > "$d/relay.gen"; fi && ` +

@@ -27,10 +27,11 @@ import { seedGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { claimJob, giveComputer, runnableJobsPage, startJob, stopAll, takeWakeTicketForTests, registerStart, refuseAttempt, retireStartKey, issuedOfKey, getJob } from '@/lib/computer';
+import { ackStart, claimJob, removalCheckpointForTests, storedStartAnswer, giveComputer, runnableJobsPage, startJob, stopAll, takeWakeTicketForTests, registerStart, refuseAttempt, retireStartKey, issuedOfKey, getJob } from '@/lib/computer';
 import { startTurn } from '@/lib/computer-broker';
 import { afterCarryOnForTests } from '@/lib/computer-limit-pause';
 import { pendingOutcomeOfForTests, resumeDecidedOfForTests } from '@/lib/computer-job-controls';
+import { recordResumeDecision } from '@/lib/computer-commands';
 import { POST } from '@/app/api/bots/[id]/computer-jobs/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -317,25 +318,48 @@ run('CodeRabbit round 9 on #1025: the money and data items, in a real database',
       expect(await prisma.computerJob.count({ where: { personId: sara.id } })).toBe(1);
     });
 
+    it('N2 (d522f4b3 pass): the stored answer of a key that aliases an acknowledged job still in line only READS it: nothing is tried, no room is reserved, no machine is woken; the answer is that job as it stands', async () => {
+      const sara = await owner('n2-readonly');
+      await runningJob(sara, 'Busy');
+      const kA = key();
+      const first = await post(sara, kA);
+      expect(first.body).toMatchObject({ ok: true, job: { status: 'queued' } });
+      expect(await ackStart(sara.brickId, sara.id, kA)).toBe(true);
+      const a = await prisma.computerJob.findFirstOrThrow({ where: { personId: sara.id, startKey: kA } });
+      // Key B was answered with job A (a start under another key met it)
+      const kB = key();
+      await prisma.computerStartAttempt.create({ data: { botId: sara.brickId, personId: sara.id, startKey: kB, state: 'answered', jobId: a.id } });
+      const before = await prisma.computerJob.findUniqueOrThrow({ where: { id: a.id } });
+      const rooms = await prisma.meterReservation.count({ where: { personId: sara.id } });
+      const answer = await storedStartAnswer(sara.brickId, sara.id, kB, NOW);
+      expect(answer).toMatchObject({ ok: true, job: { id: a.id, status: 'queued' } });
+      // Nothing was tried for it: the try writes the line's rotation mark and the start's decision, and may reserve room
+      const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: a.id } });
+      expect(after.lastTriedAt).toEqual(before.lastTriedAt);
+      expect(after.startDecidedAt).toEqual(before.startDecidedAt);
+      expect(after.queuedFor).toEqual(before.queuedFor);
+      expect(await prisma.meterReservation.count({ where: { personId: sara.id } })).toBe(rooms);
+      // CONTROL: a start under key B (not a lookup) still tries the job it was answered with, as a repeated start of it would
+      expect((await post(sara, kB)).body).toMatchObject({ ok: true, job: { id: a.id } });
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: a.id } })).startDecidedAt).not.toBeNull();
+    });
+
     it('N5 and N17: a refusal for a job that the queue claimed after the decision takes nothing away and stores nothing: the job runs, the attempt stays `made`, and the answer is the job', async () => {
       const sara = await owner('n17');
       await prisma.appSetting.deleteMany({ where: { key: { in: ['meter'] } } });
       const k = key();
-      // The queue sweep claims the job after the decision and before the refusal's transaction opens (the claim is committed on its own, as the sweep's would be)
-      const real = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+      // The queue sweep claims the job after the decision and before the refusal's transaction opens (the claim is committed on its own, as the sweep's would be). The moment is an explicit checkpoint of the code under test
+      // (`removalCheckpointForTests`), never a guess made from the text of a function (CodeRabbit on #1025, d522f4b3 pass, N20)
       let claimed = false;
-      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options: unknown) => {
-        if (typeof fn === 'function' && !claimed && fn.toString().includes('JobLeftLine')) {
-          claimed = true;
-          return prisma.computerJob.updateMany({ where: { personId: sara.id }, data: { status: 'running', queuedFor: null, startedAt: new Date() } }).then(() => real(fn, options));
-        }
-        return real(fn, options);
-      }) as never);
+      removalCheckpointForTests.before = async () => {
+        claimed = true;
+        await prisma.computerJob.updateMany({ where: { personId: sara.id }, data: { status: 'running', queuedFor: null, startedAt: new Date() } });
+      };
       let answer;
       try {
         answer = await post(sara, k);
       } finally {
-        spy.mockRestore();
+        removalCheckpointForTests.before = null;
       }
       expect(claimed).toBe(true);
       const rows = await prisma.computerJob.findMany({ where: { personId: sara.id } });
@@ -351,24 +375,18 @@ run('CodeRabbit round 9 on #1025: the money and data items, in a real database',
       const sara = await owner('n17-gone');
       await prisma.appSetting.deleteMany({ where: { key: { in: ['meter'] } } });
       const k = key();
-      const real = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
       let taken = false;
-      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options: unknown) => {
-        if (typeof fn === 'function' && !taken && fn.toString().includes('JobLeftLine')) {
-          taken = true;
-          // The other request removes the job and keeps ITS refusal on the key (a rule, not this request's `not_set`)
-          return prisma.computerStartAttempt
-            .updateMany({ where: { personId: sara.id, startKey: k }, data: { state: 'refused', outcome: { ok: false, reason: 'rule', words: 'no visas' } } })
-            .then(() => prisma.computerJob.deleteMany({ where: { personId: sara.id } }))
-            .then(() => real(fn, options));
-        }
-        return real(fn, options);
-      }) as never);
+      removalCheckpointForTests.before = async () => {
+        taken = true;
+        // The other request removes the job and keeps ITS refusal on the key (a rule, not this request's `not_set`)
+        await prisma.computerStartAttempt.updateMany({ where: { personId: sara.id, startKey: k }, data: { state: 'refused', outcome: { ok: false, reason: 'rule', words: 'no visas' } } });
+        await prisma.computerJob.deleteMany({ where: { personId: sara.id } });
+      };
       let answer;
       try {
         answer = await post(sara, k);
       } finally {
-        spy.mockRestore();
+        removalCheckpointForTests.before = null;
       }
       expect(taken).toBe(true);
       expect(answer.body).toMatchObject({ ok: false, reason: 'rule', words: 'no visas' });
@@ -379,25 +397,55 @@ run('CodeRabbit round 9 on #1025: the money and data items, in a real database',
       const sara = await owner('n17-none');
       await prisma.appSetting.deleteMany({ where: { key: { in: ['meter'] } } });
       const k = key();
-      const real = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
       let taken = false;
-      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options: unknown) => {
-        if (typeof fn === 'function' && !taken && fn.toString().includes('JobLeftLine')) {
-          taken = true;
-          return prisma.computerJob.deleteMany({ where: { personId: sara.id } }).then(() => real(fn, options));
-        }
-        return real(fn, options);
-      }) as never);
+      removalCheckpointForTests.before = async () => {
+        taken = true;
+        await prisma.computerJob.deleteMany({ where: { personId: sara.id } });
+      };
       let answer;
       try {
         answer = await post(sara, k);
       } finally {
-        spy.mockRestore();
+        removalCheckpointForTests.before = null;
       }
       expect(taken).toBe(true);
       expect(answer.status).toBe(503);
       expect(answer.body).toMatchObject({ retry: true });
       expect(await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: k } })).toMatchObject({ state: 'made', outcome: null });
+    });
+
+    it('N17 (d522f4b3 pass): a refusal found by a REPLAY for a job the game had already acknowledged is kept on the key (decided from the start’s ack mode, not from the acknowledgement): the attempt becomes the refusal and later replays answer it', async () => {
+      const sara = await owner('n17-acked');
+      // The machine is busy, so the keyed start that acks is made and waits in line (queued), and the game acknowledges it
+      await runningJob(sara, 'Busy');
+      const k = key();
+      const first = await post(sara, k);
+      expect(first.body).toMatchObject({ ok: true, job: { status: 'queued' } });
+      expect(await ackStart(sara.brickId, sara.id, k)).toBe(true);
+      const acked = await prisma.computerJob.findFirstOrThrow({ where: { personId: sara.id, startKey: k } });
+      expect(acked.startAckedAt).not.toBeNull();
+      // A rule the person said has stopped it at the start (it never ran); the key is asked again before the ask that stopped it took it away
+      await prisma.computerJob.update({ where: { id: acked.id }, data: { status: 'stopped', endedBy: 'rule', startedAt: null, endedAt: new Date() } });
+      const replay = await post(sara, k);
+      expect(replay.body).toMatchObject({ ok: false, reason: 'rule' });
+      expect(await prisma.computerJob.count({ where: { personId: sara.id, startKey: k } })).toBe(0);
+      expect(await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: k } })).toMatchObject({ state: 'refused', outcome: { ok: false, reason: 'rule' } });
+      // Later replays reproduce the refusal from the stored record (never `retired`, never a new job)
+      expect((await post(sara, k)).body).toMatchObject({ ok: false, reason: 'rule' });
+      expect(await prisma.computerJob.count({ where: { personId: sara.id, startKey: k } })).toBe(0);
+    });
+
+    it('N17 (d522f4b3 pass) CONTROL: a start that does NOT ack keeps no refusal on its key: the refusal found for its job is answered locally and its attempt is left as it was', async () => {
+      const sara = await owner('n17-noack');
+      await runningJob(sara, 'Busy');
+      const k = key();
+      const first = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Plain', startKey: k }, NOW);
+      expect(first.ok).toBe(true);
+      const job = await prisma.computerJob.findFirstOrThrow({ where: { personId: sara.id, startKey: k } });
+      await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'stopped', endedBy: 'rule', startedAt: null, endedAt: new Date() } });
+      const again = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Plain', startKey: k }, NOW);
+      expect(again).toMatchObject({ ok: false, reason: 'rule' });
+      expect(await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: k } })).toMatchObject({ state: 'made', outcome: null, issuedAt: null });
     });
 
     it('O40: refuseAttempt says what happened: stored, decided (another request decided the key), failed', async () => {
@@ -564,13 +612,22 @@ run('CodeRabbit round 9 on #1025: the money and data items, in a real database',
       expect(await pendingOutcomeOfForTests(command as never, jobId)).toEqual({ ok: true, signInsKept: true });
     });
 
-    it('O46: the queue sweep’s mark (lastTriedAt) is not a start’s decision; the start’s own marker is', async () => {
+    it('O46 and N21: neither the queue sweep’s mark (lastTriedAt) nor its own decision for the same place in line (startDecidedAt) is a Resume’s decision; only what the Resume’s own start recorded on its command is', async () => {
       const sara = await owner('o46');
       const jobId = await runningJob(sara);
       await prisma.computerJob.update({ where: { id: jobId }, data: { status: 'queued', queuedFor: 'turn', reservationKey: null, startedAt: null, stretchStarted: null, lastTriedAt: new Date(), startDecidedAt: null } });
-      expect(await resumeDecidedOfForTests(jobId)).toBeNull();
+      const command = { id: randomUUID() };
+      await prisma.$executeRaw`INSERT INTO "computer_job_commands" ("command_id", "bot_id", "job_id", "person_id", "kind", "args_hash", "outcome", "stretch", "created_at") VALUES (${command.id}::uuid, ${sara.brickId}, ${jobId}, ${sara.id}, 'resume', 'h', '{"ok":true,"pending":true}'::jsonb, 0, NOW())`;
+      expect(await resumeDecidedOfForTests(command, jobId)).toBeNull();
+      // A try that is not this Resume's (the sweep's) decides for the same place in line: it is not this Resume's decision
       await prisma.computerJob.update({ where: { id: jobId }, data: { startDecidedAt: new Date() } });
-      expect(await resumeDecidedOfForTests(jobId)).toEqual({ ok: true });
+      expect(await resumeDecidedOfForTests(command, jobId)).toBeNull();
+      // The Resume's own start records what it came to, once
+      await recordResumeDecision(command.id, jobId, 0);
+      expect(await resumeDecidedOfForTests(command, jobId)).toEqual({ ok: true });
+      await prisma.computerJob.update({ where: { id: jobId }, data: { prepState: 'recover', stretchStarted: null } });
+      await recordResumeDecision(command.id, jobId, 0);
+      expect(await resumeDecidedOfForTests(command, jobId)).toEqual({ ok: true });
     });
   });
 });
