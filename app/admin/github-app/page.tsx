@@ -4,14 +4,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { PageHeader } from '../components/ds';
+import { GITHUB_WINDOW } from './github-window';
 
 type Existing = { slug?: string; url?: string; appId?: number };
 type Answer = { existing?: Existing; action?: string; manifest?: string; replaces?: number | null; error?: string };
 type Form = { action: string; manifest: string };
 type Step = 'loading' | 'ready' | 'waiting' | 'made' | 'confirm' | 'failed';
 
-/** GitHub's Create page opens in this window, so the game and Orbit stay where they are. */
-export const GITHUB_WINDOW = 'github-app-setup';
 /** How often a waiting page asks whether the app has been made, and for how long (GitHub's own limit for the setup is an hour). */
 const POLL_MS = 2500;
 const POLL_FOR_MS = 60 * 60 * 1000;
@@ -48,8 +47,12 @@ export default function GitHubAppSetupPage() {
   const again = useRef(false);
   // The app the form last given is set to replace (none while the first one is made): the waiting page waits for another app than that
   const replaces = useRef<number | null>(null);
-  // Counts each press of Open GitHub, and the app being seen made: a form asked for again that comes back after either is dropped
+  // Counts each press of Open GitHub: of two forms asked for again at once, only the latest press is sent (and owns GitHub's window)
   const opening = useRef(0);
+  // Counts each time the app is seen made: a form asked for again before that is dropped, and its window closed
+  const completed = useRef(0);
+  // Counts each press of Make it again, and each Keep: a form asked for before a Keep is dropped
+  const making = useRef(0);
 
   const apply = useCallback((result: { answer?: Answer; failed?: string }) => {
     if (result.failed) {
@@ -100,7 +103,7 @@ export default function GitHubAppSetupPage() {
         if (replaces.current !== null && appId === replaces.current) return;
         clearInterval(timer);
         // Done: a form still being asked for must not open GitHub again
-        opening.current += 1;
+        completed.current += 1;
         setExisting({ appId, slug: typeof body.slug === 'string' ? body.slug : undefined, url: typeof body.url === 'string' ? body.url : undefined });
         setStep('made');
       } catch {
@@ -143,14 +146,17 @@ export default function GitHubAppSetupPage() {
     }
     setBlocked(false);
     const mine = ++opening.current;
+    const seenMade = completed.current;
     let toSend = form;
     if (Date.now() - loadedAt.current > FORM_FRESH_MS) {
       const result = await load(again.current);
-      // The app was seen made, or GitHub was opened again, while this was asked for: this one is dropped
-      if (opening.current !== mine) {
+      // The app was seen made while this was asked for: nothing to open, and the window opened for it is closed
+      if (completed.current !== seenMade) {
         popup.close();
         return;
       }
+      // GitHub was opened again meanwhile: that press owns the window (the same named one), so this one leaves it alone
+      if (opening.current !== mine) return;
       // Made meanwhile (another tab): nothing to open
       if (result.answer?.existing) {
         popup.close();
@@ -174,10 +180,20 @@ export default function GitHubAppSetupPage() {
   };
 
   const makeAgain = async () => {
+    const mine = ++making.current;
     setBusy(true);
     again.current = true;
-    apply(await load(true));
+    const result = await load(true);
+    // Keep this app was chosen while this was asked for: the answer is dropped and the page stays where Keep put it
+    if (making.current === mine) apply(result);
     setBusy(false);
+  };
+
+  const keep = () => {
+    making.current += 1;
+    again.current = false;
+    setBusy(false);
+    setStep('made');
   };
 
   const retry = () => {
@@ -261,7 +277,7 @@ export default function GitHubAppSetupPage() {
               <Button type="button" onClick={() => void makeAgain()} disabled={busy}>
                 Make it again
               </Button>
-              <Button type="button" variant="outline" onClick={() => setStep('made')}>
+              <Button type="button" variant="outline" onClick={keep}>
                 Keep this app
               </Button>
             </div>

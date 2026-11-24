@@ -12,7 +12,8 @@ const fetchMock = jest.fn();
 jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[]) => fetchMock(...args) }));
 jest.mock('@/app/admin/components/ds', () => ({ PageHeader: ({ title }: { title: string }) => <h1>{title}</h1> }));
 
-import GitHubAppSetupPage, { GITHUB_WINDOW } from '@/app/admin/github-app/page';
+import GitHubAppSetupPage from '@/app/admin/github-app/page';
+import { GITHUB_WINDOW } from '@/app/admin/github-app/github-window';
 
 const FORM = { action: 'https://github.com/organizations/BAWES-Universe/settings/apps/new?state=abc', manifest: '{"name":"BAWES Universe"}' };
 const json = (body: unknown, ok = true) => Promise.resolve({ ok, status: ok ? 200 : 500, json: () => Promise.resolve(body) });
@@ -332,6 +333,59 @@ describe('GitHub for Universe setup page', () => {
     await settle();
     await settle();
     expect(sent).toHaveLength(2);
+    expect(screen.getByText(/Waiting for you on GitHub/)).toBeTruthy();
+  });
+
+  it('keeps the app when Keep this app is chosen while the form for making it again is on its way', async () => {
+    let release: () => void = () => undefined;
+    let holding = false;
+    backend({
+      existing: { slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe', appId: 7 },
+      hold: () => (holding ? new Promise<void>((resolve) => (release = resolve)) : undefined),
+    });
+    render(<GitHubAppSetupPage />);
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'Make the app again' }));
+    holding = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Make it again' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Keep this app' }));
+    expect(screen.getByText(/GitHub is set up/)).toBeTruthy();
+    await act(async () => {
+      release();
+    });
+    await settle();
+    // The late form does not bring the cancelled setup back
+    expect(screen.getByText(/GitHub is set up/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Continue to GitHub' })).toBeNull();
+  });
+
+  it('leaves the window alone when a newer press owns it: two presses while a form is asked for again', async () => {
+    const releases: (() => void)[] = [];
+    let holding = false;
+    backend({ hold: () => (holding ? new Promise<void>((resolve) => releases.push(resolve)) : undefined) });
+    const close = jest.fn();
+    open.mockReturnValue({ close } as unknown as Window);
+    render(<GitHubAppSetupPage />);
+    await settle();
+    // The form is older than fifty minutes by the time it is used
+    await act(async () => {
+      jest.advanceTimersByTime(51 * 60 * 1000);
+    });
+    holding = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to GitHub' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to GitHub' }));
+    expect(releases).toHaveLength(2);
+    // The second press answers first and sends; the first answers after and must not close the window the second uses
+    await act(async () => {
+      releases[1]();
+    });
+    await settle();
+    await act(async () => {
+      releases[0]();
+    });
+    await settle();
+    expect(sent).toHaveLength(1);
+    expect(close).not.toHaveBeenCalled();
     expect(screen.getByText(/Waiting for you on GitHub/)).toBeTruthy();
   });
 });
