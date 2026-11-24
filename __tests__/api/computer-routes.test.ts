@@ -63,6 +63,8 @@ beforeEach(() => {
   session.mockResolvedValue({ id: 'u-sara' });
   db.user.findUnique.mockResolvedValue({ isGuest: false });
   rules.ownerSpendAllowed.mockResolvedValue({ ok: true });
+  // A key is known by itself unless a test says another key came first (GPT eighth note, A2)
+  lib.canonicalStartKey.mockImplementation(async (_brick: string, _person: string, startKey: string) => startKey);
 });
 afterAll(() => {
   if (tokenBefore === undefined) delete process.env.BOT_SERVICE_TOKEN;

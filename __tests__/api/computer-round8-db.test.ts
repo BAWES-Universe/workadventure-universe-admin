@@ -463,6 +463,8 @@ run('GPT seventh note (round 8): Orbit side of A, C and D2, in a real database',
         spy.mockRestore();
       }
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'running' });
+      // The SAME command row is still there, pending, and still targets this job: the retry below finishes it, it does not make a new one (CodeRabbit on #1025, 14c4e407 pass, N11)
+      expect(await prisma.computerJobCommand.findUnique({ where: { commandId: command } })).toMatchObject({ jobId: a.job.id, outcome: { ok: true, pending: true, targets: [a.job.id] } });
       const retried = await control(sara, { action: 'cancel', jobId: a.job.id }, command);
       expect(retried.status).toBe(200);
       expect(retried.body.ok).toBe(true);

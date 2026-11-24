@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
-import { retireStartKey } from '@/lib/computer';
+import { canonicalStartKey, retireStartKey } from '@/lib/computer';
 
 export const runtime = 'nodejs';
 
@@ -38,7 +38,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (who.lookupFailed) return NextResponse.json({ error: 'Could not tell who this was for, ask again', retry: true }, { status: 503 });
     // A guest has no Brick computer and no start: there is nothing to follow
     if (!who.personId) return NextResponse.json({ ok: true, retired: true });
-    return NextResponse.json({ ok: true, ...(await retireStartKey(id, who.personId, parsed.data.startKey)) });
+    return NextResponse.json({ ok: true, ...(await retireStartKey(id, who.personId, await canonicalStartKey(id, who.personId, parsed.data.startKey))) });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });
     console.error('[Computer] Could not retire a start key:', error instanceof Error ? error.message : 'unknown');
