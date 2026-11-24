@@ -538,10 +538,11 @@ run('one owner per computer job: every write is decided in the write that lands 
     const putAside = (jobId: string) => prisma.computerJob.update({ where: { id: jobId }, data: { status: 'done', endedAt: minutes(121) } });
 
     it('row 15: the hook belongs to the one job it names: jobs the same sweep looks at before and after it go straight through and are ended as they were selected', async () => {
-      // Several other jobs are in line for the same sweep, so the one it names is not the first it looks at, whatever order the sweep reads them in
+      // Several other jobs are in line for the same sweep, so the one it names is not the first it looks at: the target's stretch start is made a second later than the others, so the sweep, which reads waiting jobs oldest first, reads it last
       const others = [];
       for (const n of ['a', 'b', 'c', 'd']) others.push(await waitingPastLimit(`s-e5-scope-${n}`));
       const target = await waitingPastLimit('s-e5-scope-target');
+      await prisma.computerJob.update({ where: { id: target.jobId }, data: { stretchStarted: new Date((await jobOf(target.jobId)).stretchStarted!.getTime() + 1000) } });
       let ran = 0;
       const spy = betweenSelectAndEnd(target.jobId, async () => {
         ran += 1;
