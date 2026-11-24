@@ -23,7 +23,7 @@ import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { isFenceCheckCommand, isFenceCommand, isMarkCommand } from '@/lib/computer-fence-script';
 import { refreshMarkParts, savedMark } from '@/lib/computer-mark';
-import { fenceMachine, finishJob, giveComputer, startJob, takeOver } from '@/lib/computer';
+import { fenceMachine, finishJob, giveComputer, setLeaderRenewTriesForTests, startJob, takeOver } from '@/lib/computer';
 import { CONTROL_TIMING } from '@/lib/computer-control';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -251,6 +251,23 @@ run('the take-over fence’s mark, held by Orbit', () => {
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { filesClaimedAt: null } });
       expect(await fencing).toBe('done');
       expect(fake.commands.filter((entry) => isFenceCommand(entry.command)).length).toBe(2);
+    });
+
+    it('a leader that waits for a claim renews its lease while it waits, and sends nothing once it learns it lost the transition (Sentry on #1033)', async () => {
+      fake.parts = [PART];
+      const { sara } = await running();
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { cleanClaimedAt: new Date(), filesClaimedAt: new Date() } });
+      setLeaderRenewTriesForTests(2);
+      try {
+        let asked = 0;
+        fake.commands.length = 0;
+        // The lease is renewed twice while the claims are held, then the transition is another leader's
+        expect(await fenceMachine(sara.brickId, async () => ++asked <= 3)).toBe('lost');
+        expect(asked).toBeGreaterThanOrEqual(4);
+        expect(fake.commands.filter((entry) => isFenceCommand(entry.command))).toEqual([]);
+      } finally {
+        setLeaderRenewTriesForTests(null);
+      }
     });
 
     it('a files claim a stopped server left (older than a hand-over can run) is not waited for', async () => {

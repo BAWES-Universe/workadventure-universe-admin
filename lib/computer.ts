@@ -2478,21 +2478,37 @@ export function setHandOverClaimWaitForTests(ms: number | null): void {
  * still being renewed for as long as one machine command may take, plus its own slack (`CLEAN_CLAIM_STALE_MS`): waiting less would let this job start
  * beside a command that is still stopping, moving and starting that browser (CodeRabbit N7 on #1025).
  */
-async function untilCleaned(botId: string): Promise<void> {
+async function untilCleaned(botId: string, stillLeader?: StillLeader): Promise<boolean> {
   for (let tries = 0; tries < Math.ceil(CLEAN_CLAIM_STALE_MS / 250); tries++) {
     const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { cleanClaimedAt: true } });
-    if (!row?.cleanClaimedAt || Date.now() - row.cleanClaimedAt.getTime() > CLEAN_CLAIM_STALE_MS) return;
+    if (!row?.cleanClaimedAt || Date.now() - row.cleanClaimedAt.getTime() > CLEAN_CLAIM_STALE_MS) return true;
+    if (!(await stillLeaderEvery(stillLeader, tries))) return false;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  return true;
 }
 
-/** Waits while a hand-over of this Brick's files holds the machine (its claim is believed for the hand-over's own time budget, as the hand-overs themselves believe it). */
-async function untilFilesHandedOver(botId: string): Promise<void> {
+/** A leader that waits renews its lease (and learns it lost the transition) about every 30 seconds: its waits, together, may be longer than the lease (Sentry on #1033). */
+async function stillLeaderEvery(stillLeader: StillLeader | undefined, tries: number): Promise<boolean> {
+  if (!stillLeader || tries === 0 || tries % leaderRenewTries !== 0) return true;
+  return stillLeader();
+}
+/** How many quarter-second looks of a wait pass between two renewals of the leader's lease (120: every 30 seconds). */
+let leaderRenewTries = 120;
+/** For tests: how often a waiting leader renews its lease. */
+export function setLeaderRenewTriesForTests(tries: number | null): void {
+  leaderRenewTries = tries ?? 120;
+}
+
+/** Waits while a hand-over of this Brick's files holds the machine (its claim is believed for the hand-over's own time budget, as the hand-overs themselves believe it). False: the leader lost the transition meanwhile. */
+async function untilFilesHandedOver(botId: string, stillLeader?: StillLeader): Promise<boolean> {
   for (let tries = 0; tries < Math.ceil(FILES_CLAIM_MS / 250); tries++) {
     const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { filesClaimedAt: true } });
-    if (!row?.filesClaimedAt || Date.now() - row.filesClaimedAt.getTime() > FILES_CLAIM_MS) return;
+    if (!row?.filesClaimedAt || Date.now() - row.filesClaimedAt.getTime() > FILES_CLAIM_MS) return true;
+    if (!(await stillLeaderEvery(stillLeader, tries))) return false;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  return true;
 }
 
 /**
@@ -3520,10 +3536,10 @@ export async function fenceMachine(botId: string, stillLeader?: StillLeader): Pr
     // were kept here, or one whose mark was damaged) cannot be proved clear: it goes the way an unproved fence goes, and the next wake takes a mark
     // A restart Orbit is doing right now (a restore, park, clear or the clean-up after a job, all under the clean claim) saves the new browser's parts only once it is done:
     // the fence waits for the claim first, so it never fences with the old list and stops the browser that was just brought back
-    await untilCleaned(botId);
+    if (!(await untilCleaned(botId, stillLeader))) return 'lost';
     // Likewise a hand-over of files that is reading the machine right now (it holds the files claim): its commands run beside the fence, are not the computer's own, and would be stopped
     // under it (or counted as left running). Its claim is let go within the hand-over's own time budget, and one a stopped server left is long past after that (Sentry on #1033)
-    await untilFilesHandedOver(botId);
+    if (!(await untilFilesHandedOver(botId, stillLeader))) return 'lost';
     if (stillLeader && !(await stillLeader())) return 'lost';
     const mark = savedMark(await prisma.brickComputer.findUnique({ where: { botId }, select: MARK_SELECT }));
     for (let attempt = 0; attempt < FENCE_TRIES && mark; attempt++) {
