@@ -211,6 +211,33 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(await prisma.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM computer_power_ops WHERE provider_ref = ${sara.ref} AND done_at IS NULL`).toEqual([{ n: BigInt(0) }]);
     });
 
+    it('a start, a claimed stop and a recorded stop that arrive while a leader\'s stop holds the computer\'s row wait for it (longer than Prisma\'s own 5 s), and are not taken for failures', async () => {
+      const sara = await owner('lockwait');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'stopped' } });
+      const seen = await machineOf(sara);
+      // Another connection holds the row for longer than the default transaction time, as a leader's stop does while the provider answers
+      let release: () => void = () => undefined;
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${sara.brickId} FOR UPDATE`;
+          locked();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 30_000 },
+      );
+      await lockTaken;
+      setTimeout(() => release(), 6_500);
+      const began = Date.now();
+      const ticket = await takeWakeTicketForTests(sara.brickId, 'waking', 'stopped', { epoch: seen.wakeEpoch });
+      expect(Date.now() - began).toBeGreaterThanOrEqual(6_000);
+      expect(ticket).toBe(seen.wakeEpoch + 1);
+      await holder;
+    }, 40_000);
+
     it('(b) a stop whose sender died counts as in flight for its bounded life: the replacement goes back in line holding nothing, and wakes only after that life', async () => {
       const sara = await owner('dead');
       expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });

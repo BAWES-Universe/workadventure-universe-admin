@@ -83,7 +83,7 @@ import {
 } from '@/lib/computer-browser-profile';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
 import { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
-import { endPowerOp, openPowerOpOf, powerTiming, prunePowerOps, recordPowerOp, recordPowerOpIn, underPowerOp, waitForPowerOps, type OpenPowerOp } from '@/lib/computer-power';
+import { endPowerOp, openPowerOpOf, powerTiming, prunePowerOps, recordPowerOp, recordPowerOpIn, rowLockWait, setRowLockWaitForTests, underPowerOp, waitForPowerOps, type OpenPowerOp } from '@/lib/computer-power';
 export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { claimCommandIn, commandRow, keepOutcome, recordResumeDecision, seenCommand, settlePendingResumesIn, type Command } from '@/lib/computer-commands';
 
@@ -406,7 +406,7 @@ async function claimStop(botId: string, ref: string, only?: string[], ticket?: n
   return prisma.$transaction(async (tx) => {
     const taken = await tx.$executeRaw(Prisma.sql`UPDATE "brick_computers" SET "machine" = 'stopping', "rest_claimed_at" = NULL, "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "provider_ref" = ${ref} ${states} ${epoch}`);
     return taken === 1 ? recordPowerOpIn(tx, botId, ref, 'stop') : null;
-  });
+  }, rowLockWait());
 }
 
 /** A start found a stop or sleep of ours that can still land on the machine it would wake (post-0.5.0 B): it wakes nothing, and the job goes back in line with nothing held. */
@@ -436,7 +436,7 @@ async function takeWakeTicket(botId: string, machine: 'waking' | 'restoring', fr
       Prisma.sql`UPDATE "brick_computers" SET "machine" = ${machine}, "wake_epoch" = "wake_epoch" + 1, "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "machine" = ${from} ${epoch} ${stale} RETURNING "wake_epoch"`,
     );
     return rows.length === 1 ? rows[0].wake_epoch : null;
-  });
+  }, rowLockWait());
 }
 
 /** Test seam: the ticket write itself, to prove two starts that saw the same state take ONE ticket between them. */
@@ -554,6 +554,7 @@ const leaderStop = { deadlineMs: 90_000, transactionMs: 120_000 };
 export function setLeaderStopTimesForTests(times: { deadlineMs: number; transactionMs: number } | null): void {
   leaderStop.deadlineMs = times?.deadlineMs ?? 90_000;
   leaderStop.transactionMs = times?.transactionMs ?? 120_000;
+  setRowLockWaitForTests(times ? times.transactionMs : null);
 }
 
 /** What a promise says, or `fallback` when it has not said it within `ms`. The promise is left to finish on its own; a throw from it is the fallback too. */
@@ -660,14 +661,27 @@ export async function startedJobFor(botId: string, personId: string, startKey: s
  */
 export async function ackStart(botId: string, personId: string, startKey: string, now: Date = new Date()): Promise<boolean> {
   // Under the same person lock the keyed start makes its job under, in one transaction: an ack that arrives while that start is still deciding waits for it, then confirms the job it made (never `true` with the job left unconfirmed)
-  return prisma.$transaction(
-    async (tx) => {
-      await lockPerson(tx, personId);
-      await tx.computerJob.updateMany({ where: { botId, personId, startKey, startAckedAt: null }, data: { startAckedAt: now } });
-      return (await tx.computerJob.count({ where: { botId, personId, startKey } })) > 0;
-    },
-    { timeout: 15_000, maxWait: 15_000 },
-  );
+  const wait = { timeout: Math.max(15_000, rowLockWait().timeout), maxWait: Math.max(15_000, rowLockWait().maxWait) };
+  const own = await prisma.$transaction(async (tx) => {
+    await lockPerson(tx, personId);
+    await tx.computerJob.updateMany({ where: { botId, personId, startKey, startAckedAt: null }, data: { startAckedAt: now } });
+    return (await tx.computerJob.count({ where: { botId, personId, startKey } })) > 0;
+  }, wait);
+  if (own) return true;
+  // A key that was answered with another start's job (two redeliveries of one ask that passed the lookup together: the earlier-issued one registered after the other had made its job) is the first key of its identity
+  // from then on, and an ack under it is an ack of that job: the job's own key is never the only one that confirms it (CodeRabbit on #1032, finding 2)
+  // Only for a key of the SAME identity as the job's own key (one ask delivered twice): another ask that was answered with this job (`earlier`) confirms nothing of it, its game never learned the job apart
+  const identity = identityOfKey(startKey);
+  if (identity === null) return false;
+  const answered = await attemptAnswer(botId, personId, startKey, now);
+  if (!answered || !('job' in answered)) return false;
+  return prisma.$transaction(async (tx) => {
+    await lockPerson(tx, personId);
+    const job = await tx.computerJob.findFirst({ where: { id: answered.job.id, botId, personId }, select: { id: true, startKey: true } });
+    if (!job?.startKey || identityOfKey(job.startKey) !== identity) return false;
+    await tx.computerJob.updateMany({ where: { id: job.id, startAckedAt: null }, data: { startAckedAt: now } });
+    return true;
+  }, wait);
 }
 
 /**
@@ -1966,7 +1980,7 @@ async function restIfUnheld(botId: string, now: Date, exceptJobId?: string): Pro
       await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
       if ((await tx.brickComputer.count({ where: { botId, providerRef: ref, machine: 'resting', restClaimedAt: now } })) !== 1) return null;
       return recordPowerOpIn(tx, botId, ref, 'rest');
-    })
+    }, rowLockWait())
     .catch((error) => {
       console.error('[Computer] A rest could not be recorded, so it was not sent:', error instanceof Error ? error.message : 'unknown');
       return undefined;
@@ -2179,7 +2193,7 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
         data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: older, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
       });
       return true;
-    });
+    }, rowLockWait());
     if (wrote) return;
     // Replaced: the machine is the replacement's to make ready. A job runs only on a machine that is `working`: if it is, this start has nothing more to do; if it is not (the replacement's wake is still going, or it failed and the machine
     // was stopped) the loop waits for it like any start that arrives then, and wakes it with its own ticket when no wake is in flight

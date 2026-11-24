@@ -43,6 +43,19 @@ export function setPowerTimingForTests(next: Partial<typeof DEFAULT_TIMING> | nu
   timing = next ? { ...DEFAULT_TIMING, ...next } : { ...DEFAULT_TIMING };
 }
 
+/**
+ * How long a transaction that takes the Brick computer's row lock may wait for it, and run. A leader's stop holds that lock across the provider's stop (up to `leaderStop.transactionMs`), and a start, a rest or another stop arriving meanwhile
+ * has to be able to wait for it: with Prisma's own defaults (about 2 s to begin, 5 s to finish) it would give up with P2028, which is not a stop in flight, and the start would be taken for a failure. A little longer than the longest hold.
+ */
+let rowLockWaitMs = 150_000;
+export function rowLockWait(): { timeout: number; maxWait: number } {
+  return { timeout: rowLockWaitMs, maxWait: rowLockWaitMs };
+}
+/** Test seam: the leader's hold, which the wait is kept longer than (null restores the real one). */
+export function setRowLockWaitForTests(holdMs: number | null): void {
+  rowLockWaitMs = holdMs === null ? 150_000 : holdMs + 30_000;
+}
+
 type Db = Pick<Prisma.TransactionClient, '$executeRaw' | '$queryRaw'>;
 
 /** Writes the operation inside the caller's transaction, which already holds the Brick computer's row (its claim wrote it, or it locked it). */
@@ -60,7 +73,7 @@ export async function recordPowerOp(botId: string, ref: string, kind: PowerKind)
   return prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
     return recordPowerOpIn(tx, botId, ref, kind);
-  });
+  }, rowLockWait());
 }
 
 /** The operation is over: its call and the look after it returned (or it was never sent). Written once. */
