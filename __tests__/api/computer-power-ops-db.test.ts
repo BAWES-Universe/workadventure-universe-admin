@@ -21,7 +21,7 @@ import { seedGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { finishJob, giveComputer, renewJob, requestHandover, startJob, sweepComputers, takeWakeTicketForTests } from '@/lib/computer';
+import { finishJob, giveComputer, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeWakeTicketForTests } from '@/lib/computer';
 import { endPowerOp, openPowerOpOf, powerTiming, PROVIDER_MARGIN_MS, recordPowerOp, setPowerTimingForTests } from '@/lib/computer-power';
 import { LONGEST_ACCOUNT_CALL_MS } from '@/lib/agent37/client';
 import { costOfSeconds } from '@/lib/computer-values';
@@ -120,7 +120,8 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
   it('the bounded life of a dead sender is the client’s longest call plus the margin, on top of the beat it missed', () => {
     setPowerTimingForTests(null);
     expect(LONGEST_ACCOUNT_CALL_MS).toBe(4 * 30_000 + 1_000 + 3_000 + 8_000);
-    expect(powerTiming().deadLifeMs).toBe(powerTiming().staleMs + LONGEST_ACCOUNT_CALL_MS + PROVIDER_MARGIN_MS);
+    // a stop or a sleep makes two calls in a row (it looks the machine up, then sends), so a sender whose beats fail can still POST after both
+    expect(powerTiming().deadLifeMs).toBe(powerTiming().staleMs + 2 * LONGEST_ACCOUNT_CALL_MS + PROVIDER_MARGIN_MS);
   });
 
   describe('layer 1: serial power operations', () => {
@@ -237,6 +238,18 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(ticket).toBe(seen.wakeEpoch + 1);
       await holder;
     }, 40_000);
+
+    it('a turn hold\'s stop is claimed against the state it saw: a wake that took its ticket since gets no stop sent under it', async () => {
+      const sara = await owner('holdclaim');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      // The machine is awake with a hold; before the hold's stop is claimed, a replacement's wake took its ticket (the machine is `waking`)
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'waking', turnUnprovenSince: NOW } });
+      const stopsBefore = fake.calls.filter((call) => call.name === 'stop').length;
+      expect(await settleTurnHold(sara.brickId)).toBe(false);
+      expect(fake.calls.filter((call) => call.name === 'stop').length).toBe(stopsBefore);
+      expect((await machineOf(sara)).machine).toBe('waking');
+    });
 
     it('(b) a stop whose sender died counts as in flight for its bounded life: the replacement goes back in line holding nothing, and wakes only after that life', async () => {
       const sara = await owner('dead');

@@ -25,8 +25,8 @@ const DEFAULT_TIMING = {
   beatMs: 5_000,
   /** A beat older than this: the sender is gone (several beats were missed). */
   staleMs: 20_000,
-  /** How long after its last beat a dead sender's operation can still land: the beat that was missed, the client's longest asked-again call, and the provider's margin. */
-  deadLifeMs: 20_000 + LONGEST_ACCOUNT_CALL_MS + PROVIDER_MARGIN_MS,
+  /** How long after its last beat a dead sender's operation can still land: the beat that was missed, TWO of the client's longest asked-again calls (a stop or a sleep first looks the machine up, then sends: a sender whose beats fail but who stays alive can POST its stop after both), and the provider's margin. */
+  deadLifeMs: 20_000 + 2 * LONGEST_ACCOUNT_CALL_MS + PROVIDER_MARGIN_MS,
   /** How long a start waits for a LIVE operation before it goes back in line with nothing held. */
   waitMs: 60_000,
   pollMs: 250,

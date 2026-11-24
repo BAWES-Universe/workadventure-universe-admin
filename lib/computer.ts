@@ -3855,7 +3855,8 @@ export async function settleTurnHold(botId: string, exceptJobId?: string): Promi
     if (!provider || !row.providerRef) return false;
     // Its work is saved before it is stopped, as every other stop does (a copy that fails is not claimed and never holds the stop up; a machine that is not awake is not woken to be copied)
     if (await provider.awake(row.providerRef).catch(() => false)) await saveCopy(botId, row.providerRef, provider);
-    if (!(await stopMachine(botId, row.providerRef, provider))) return false;
+    // Claimed against the state it saw: a wake that took its ticket since (the machine is then `waking`) makes the claim write nothing, and no stop is sent under it (Opus's second minor note on #1036)
+    if (!(await stopMachine(botId, row.providerRef, provider, ['working', 'stopped', 'stopping']))) return false;
     await lift();
     // Proved asleep: no first turn of any job on this machine can still be running, so their marks go (as after a take-over fence that stopped it)
     await clearFirstTurnMarks(botId);
