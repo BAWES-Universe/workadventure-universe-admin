@@ -100,6 +100,17 @@ run('the take-over fence’s mark, held by Orbit', () => {
       expect(savedMark(row)).toMatchObject({ bootId: expected.bootId, parts: [PART, GATEWAY] });
     });
 
+    it('a row whose parts or runners are not lists is a damaged one: no mark, and an empty list is a real mark (CodeRabbit on #1033)', async () => {
+      fake.parts = [PART];
+      const { sara } = await running();
+      const row = await computerOf(sara.brickId);
+      expect(savedMark(row)).not.toBeNull();
+      expect(savedMark({ ...row, markParts: null })).toBeNull();
+      expect(savedMark({ ...row, markParts: { 0: PART } as never })).toBeNull();
+      expect(savedMark({ ...row, markRunners: 'x' as never })).toBeNull();
+      expect(savedMark({ ...row, markParts: [], markRunners: [] })).toMatchObject({ parts: [], runners: [] });
+    });
+
     it('keeps the first clock reading on the same boot (the parts are the freshest), and takes a new mark on a new boot', async () => {
       fake.parts = [PART];
       const { sara, jobId } = await running();

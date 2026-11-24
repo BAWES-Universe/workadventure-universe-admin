@@ -69,6 +69,15 @@ describe('the commands Orbit sends', () => {
     expect(parseMark(`boot=${BOOT}\nticks=1\nmarked=1\nmarked=0 reason=x\n`)).toBeNull();
   });
 
+  it('refuses an answer with a part or runner line it cannot read whole, and takes empty lists (CodeRabbit on #1033)', () => {
+    const head = `boot=${BOOT}\nticks=222\n`;
+    expect(parseMark(`${head}part=5:10:s\npart=oops\nmarked=1\n`)).toBeNull();
+    expect(parseMark(`${head}part=5:10:x\nmarked=1\n`)).toBeNull();
+    expect(parseMark(`${head}runner=${HASH}\nrunner=not-a-hash\nmarked=1\n`)).toBeNull();
+    expect(parseMark(`${head}part=99999999999999999999:10:s\nmarked=1\n`)).toBeNull();
+    expect(parseMark(`${head}marked=1\n`)).toEqual({ bootId: BOOT, ticks: 222, parts: [], runners: [] });
+  });
+
   it('writes nothing on the computer: no note, no folder, no link followed', () => {
     for (const text of [MARK_SCRIPT, FENCE_SCRIPT]) {
       expect(text).not.toMatch(/\/run\/universe/);

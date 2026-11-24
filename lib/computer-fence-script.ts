@@ -507,8 +507,13 @@ export function parseMark(stdout: string): MachineMark | null {
     const start = Number(match[2]);
     if (Number.isSafeInteger(pid) && Number.isSafeInteger(start)) parts.push({ pid, start, kind: LETTER_KIND[match[3]] });
   }
-  const runners = [...new Set([...stdout.matchAll(/(?:^|\n)runner=([0-9a-f]{64})(?=\n)/g)].map((match) => match[1]))];
+  const runnerLines = [...stdout.matchAll(/(?:^|\n)runner=([0-9a-f]{64})(?=\n)/g)].map((match) => match[1]);
+  const runners = [...new Set(runnerLines)];
   if (parts.length > MARK_PARTS_MAX) return null;
+  // Every `part=` and `runner=` line the computer printed must have been read whole: a malformed record is not skipped over, because a mark that quietly names fewer programs than the computer
+  // listed would let the fence stop (or spare) the wrong ones (CodeRabbit on #1033). An empty list is a valid answer.
+  const printed = (prefix: string): number => stdout.split('\n').filter((line) => line.startsWith(prefix)).length;
+  if (printed('part=') !== parts.length || printed('runner=') !== runnerLines.length) return null;
   return { bootId, ticks: count, parts, runners };
 }
 

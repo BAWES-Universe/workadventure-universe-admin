@@ -30,8 +30,10 @@ const KINDS = ['screen', 'part', 'gateway'];
 export function savedMark(row: MarkColumns | null | undefined): MachineMark | null {
   if (!row || !row.markBootId || row.markTicks === null || row.markTicks === undefined) return null;
   const ticks = Number(row.markTicks);
-  const parts = Array.isArray(row.markParts) ? (row.markParts as unknown[]) : [];
-  const runners = Array.isArray(row.markRunners) ? (row.markRunners as unknown[]) : [];
+  // A list that is not a list is a damaged row, not an empty one: no mark, so the machine is stopped without a fence (an empty list is a real answer: nothing but the computer's own was running)
+  if (!Array.isArray(row.markParts) || !Array.isArray(row.markRunners)) return null;
+  const parts = row.markParts as unknown[];
+  const runners = row.markRunners as unknown[];
   const mark: MachineMark = {
     bootId: row.markBootId,
     ticks,
