@@ -985,6 +985,7 @@ run('a Brick’s computer, in a real database', () => {
       // (Promise.all alone lets one sweep finish before the other begins). If the sweeps are ever serialised before this point the barrier gives up after a second and the test says so.
       const original = prisma.computerJob.findUnique.bind(prisma.computerJob);
       let arrived = 0;
+      let gaveUp = false;
       let release: () => void = () => undefined;
       const both = new Promise<void>((resolve) => (release = resolve));
       const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation(((args: { where?: { id?: string }; select?: Record<string, unknown> }) => {
@@ -992,7 +993,16 @@ run('a Brick’s computer, in a real database', () => {
         if (!atStart) return original(args as never);
         arrived += 1;
         if (arrived === 2) release();
-        return Promise.race([both, new Promise<void>((resolve) => setTimeout(resolve, 1000))]).then(() => original(args as never));
+        return Promise.race([
+          both,
+          new Promise<void>((resolve) =>
+            setTimeout(() => {
+              // The give-up only counts when it fires before both sweeps arrived; after the release it is harmless
+              if (arrived < 2) gaveUp = true;
+              resolve();
+            }, 1000),
+          ),
+        ]).then(() => original(args as never));
       }) as never);
       try {
         await Promise.all([sweepComputers(minutes(2)), sweepComputers(minutes(2))]);
@@ -1000,6 +1010,8 @@ run('a Brick’s computer, in a real database', () => {
         spy.mockRestore();
       }
       expect(arrived).toBe(2);
+      // Neither sweep went on by the give-up: both were at the boundary together, so the race was real and not a sequential run
+      expect(gaveUp).toBe(false);
       // Exactly one of the two started it, and its room is held once, not taken from the one that won by the one that lost
       const settled = await prisma.computerJob.findUniqueOrThrow({ where: { id: b.job.id } });
       expect(settled.status).toBe('running');
