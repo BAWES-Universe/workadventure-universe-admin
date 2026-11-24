@@ -34,7 +34,7 @@ import { dropProfile, parkProfile, settlePark, signInsKept } from '@/lib/compute
 import { grantsPrintIn, tellIn } from '@/lib/computer-tellings';
 import { releaseIfUnheld } from '@/lib/computer-control';
 import type { ComputerProvider as Provider } from '@/lib/computer-provider';
-import { claimCommand, claimCommandIn, commandRow, keepOutcome, refuseUnder, seenCommand, type Claimed, type Command, type CommandKind, type CommandRow, type StoredOutcome } from '@/lib/computer-commands';
+import { claimCommand, claimCommandIn, commandRow, keepOutcome, refuseUnder, resumeOutcomeFrom, seenCommand, settlePendingResumesIn, stretchOfCommand, type Claimed, type Command, type CommandKind, type CommandRow, type StoredOutcome } from '@/lib/computer-commands';
 
 /** Why a control was not done. `not_found`: not the owner's Brick, or no such job on it. `over`: the job already ended. `taken_over`: the person has the screen. `ending`: its ending is already decided. `not_paused` / `not_queued`: the job is not in the state the tap was for. `allowance` / `rule`: a resume the person's month, or a limit they set, does not let start (the job stays paused). `not_ready`: it carried on but its browser could not be settled, so the sweep is still working on it (finding 7). */
 export type ControlRefusal = 'not_found' | 'over' | 'taken_over' | 'ending' | 'not_paused' | 'not_queued' | 'allowance' | 'rule' | 'not_ready' | 'command_reused';
@@ -86,23 +86,22 @@ async function refused(botId: string, ownerId: string, under: { command: Command
 export const resumeWait = { ms: 20_000, stepMs: 100, /** The longest a copy waits in all for a start that has not reached its decision; after that it answers `not_ready` and stores nothing (the same command asked again decides it). */ capMs: 5 * 60_000 };
 
 /** What a Resume came to, from the job as it stands after ITS OWN start was tried: the refusal the month or a limit made of the start, a browser that could not be settled, or success (a job that stays in line is a success: the resume was taken). */
-async function resumeOutcomeOf(jobId: string): Promise<StoredOutcome> {
-  const after = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, pausedWhy: true, prepState: true } });
-  if (after?.status === 'queued' && after.queuedFor === 'paused' && (after.pausedWhy === 'allowance' || after.pausedWhy === 'rule')) return refusalOutcome(after.pausedWhy);
-  if (after?.prepState !== null && after?.prepState !== undefined) return refusalOutcome('not_ready');
-  return { ok: true };
+async function resumeOutcomeOf(jobId: string, stretch: number | null = null): Promise<StoredOutcome> {
+  const after = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, pausedWhy: true, prepState: true, pauses: true } });
+  return resumeOutcomeFrom(after, stretch);
 }
 
 /**
  * The same, read by a COPY of a Resume whose first request has not answered: null while the first request's start has not reached its decision (the job is in line with no try on record, or its browser is being restored),
  * because a success stored then could be a start that the month refuses a moment later, and a refusal stored then could be one that succeeds (CodeRabbit on #1025, A10). A start that is decided is read as above.
  */
-async function resumeDecidedOf(jobId: string): Promise<StoredOutcome | null> {
+async function resumeDecidedOf(jobId: string, stretch: number | null = null): Promise<StoredOutcome | null> {
   const after = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, startDecidedAt: true, prepState: true } });
   // The decision is the START's own (`start_decided_at`), never `last_tried_at`: the queue sweep sets that before it tries, so a job it merely selected would read as decided while its start could still be refused (CodeRabbit on #1025, O46)
   if (after?.status === 'queued' && after.queuedFor !== 'paused' && after.startDecidedAt === null) return null;
   if (after?.prepState === 'restoring') return null;
-  return resumeOutcomeOf(jobId);
+  // The job as it stands, read for the pause number this command was taken at: a job paused again since has run since (its own start succeeded), and a newer start's outcome is never read as this one's (N1)
+  return resumeOutcomeOf(jobId, stretch);
 }
 
 /** Keeps the Resume's final outcome over its pending mark, once: the first write wins (a copy that settled the command meanwhile, or the request itself), and the stored outcome is what is returned. */
@@ -142,7 +141,7 @@ async function pendingOutcomeOf(command: Command, jobId: string): Promise<Stored
   const rows = await prisma.$queryRaw<Array<{ outcome: StoredOutcome | null }>>`SELECT "outcome" FROM "computer_job_commands" WHERE "command_id" = ${command.id}::uuid`;
   const outcome = rows[0]?.outcome;
   const listed = outcome && outcome.ok && outcome.targets && outcome.targets.length > 0 ? outcome : null;
-  if (!listed) return resumeDecidedOf(jobId);
+  if (!listed) return resumeDecidedOf(jobId, await stretchOfCommand(command));
   const pauses = listed.held ?? [];
   const wanted = pauses.length > 0 ? pauses : (listed.targets ?? []).map((id) => ({ jobId: id, n: null as number | null }));
   let kept: boolean | undefined;
@@ -453,28 +452,32 @@ export async function resumeJob(botId: string, ownerId: string, jobId: string, n
   const under = underOf(command, botId, ownerId, jobId, as.kind, as.args ?? {}, job.pauses);
   if (under) {
     const seen = await seenCommand(under.command, under.row);
-    if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingCommand(botId, ownerId, under, () => resumeDecidedOf(jobId), now);
+    if (seen) return 'reused' in seen || seen.replay !== null ? answerOf(botId, ownerId, seen, now) : answerPendingCommand(botId, ownerId, under, async () => resumeDecidedOf(jobId, await stretchOfCommand(under.command)), now);
   }
+  let stretch: number | null = null;
   const moved = await prisma.$transaction(async (tx) => {
     const row = await lockJob(tx, jobId);
     if (!row) return 'not_found' as const;
     // The command's row after the job's locks, in the transaction that decides the resume (finding 4): a copy finds it and answers what this one decided. A resume that was taken is kept PENDING until its start has been tried: a copy
     // never reads a success the start may still turn into a refusal (CodeRabbit on #1025, 16 and 23)
     if (under) {
-      const claimed = await claimCommandIn(tx, under.command, under.row, { ok: true, pending: true });
+      // The pause number is read under the lock and stamped on the command: the fence its pending answer is read by (CodeRabbit on #1025, N1)
+      const at = await tx.computerJob.findUniqueOrThrow({ where: { id: jobId }, select: { pauses: true } });
+      stretch = at.pauses;
+      const claimed = await claimCommandIn(tx, under.command, { ...under.row, stretch }, { ok: true, pending: true });
       if (!('fresh' in claimed)) return { seen: claimed };
     }
-    const decided = isOver(row.status) ? ('over' as const) : await resumeIn(tx, botId, jobId);
+    const decided = isOver(row.status) ? ('over' as const) : await resumeIn(tx, botId, jobId, under?.command.id ?? null);
     if (under && decided !== 'ok') await keepOutcome(tx, under.command, refusalOutcome(decided));
     return decided;
   }, TX);
-  if (typeof moved === 'object') return 'reused' in moved.seen || moved.seen.replay !== null ? answerOf(botId, ownerId, moved.seen, now) : answerPendingCommand(botId, ownerId, under!, () => resumeDecidedOf(jobId), now);
+  if (typeof moved === 'object') return 'reused' in moved.seen || moved.seen.replay !== null ? answerOf(botId, ownerId, moved.seen, now) : answerPendingCommand(botId, ownerId, under!, async () => resumeDecidedOf(jobId, await stretchOfCommand(under!.command)), now);
   if (moved !== 'ok') return { ok: false, reason: moved };
   await controlInternals.tryStart(jobId, now, { quiet: true });
   // The month or a limit refused its start: tryStart put a job that ran before back as paused, with the reason. The start brings the job's own browser back before it answers, so a resume that got here has it: unless it could not
   // be settled (`recover`), and then the person is told so plainly. The sweep tries the restore again and empties the browser after the hours sign-ins are kept; until one of those works the job holds its room and its
   // place but is worked on by nobody (GPT round 6, finding 7)
-  const outcome = await resumeOutcomeOf(jobId);
+  const outcome = await resumeOutcomeOf(jobId, stretch);
   // The answer is kept once (over the pending mark): a copy that settled the command while this waited for its start has decided it, and that is what this returns too
   const final = under ? await settleResume(under.command, outcome) : outcome;
   if (!final.ok) return { ok: false, reason: final.reason as ControlRefusal };
@@ -482,9 +485,11 @@ export async function resumeJob(botId: string, ownerId: string, jobId: string, n
 }
 
 /** The resume itself, under the job's locks: only a paused job, put first in line. */
-async function resumeIn(tx: Prisma.TransactionClient, botId: string, jobId: string): Promise<'ok' | 'not_paused'> {
+async function resumeIn(tx: Prisma.TransactionClient, botId: string, jobId: string, command: string | null): Promise<'ok' | 'not_paused'> {
   const current = await tx.computerJob.findUniqueOrThrow({ where: { id: jobId }, select: { status: true, queuedFor: true } });
   if (current.status !== 'queued' || current.queuedFor !== 'paused') return 'not_paused';
+  // Resumes of this job that are still pending (their request stopped before it kept an answer) are settled from the job as it stands, before this one changes it: a start of this resume is never read as theirs (CodeRabbit on #1025, N1)
+  await settlePendingResumesIn(tx, jobId, command);
   const rank = (await topRank(tx, botId)) + 1;
   await tx.computerJob.update({ where: { id: jobId }, data: { queuedFor: 'turn', pausedAt: null, pausedWhy: null, queueRank: rank, lastTriedAt: null, startDecidedAt: null, leaseVersion: { increment: 1 } } });
   return 'ok';

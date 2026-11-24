@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { MACHINE_PLACES, isSafeJobId, readSignInsAnswer, signInsCommand, type SignInsAction, type SignInsPlaces } from '@/lib/computer-browser-profile-script';
 import { CLEAN_CLAIM_STALE_MS, MACHINE_COMMAND_MS } from '@/lib/computer-values';
+import { imageFiles, UNIVERSE_UP } from '@/lib/agent37/image-files';
 
 const CHROME = ['/opt/pw-browsers/chromium-1243/chrome-linux64/chrome', process.env.CHROME_PATH ?? ''].find((path) => path && existsSync(path)) ?? '';
 const have = (command: string) => spawnSync('sh', ['-c', `command -v ${command}`]).status === 0;
@@ -66,8 +67,8 @@ function freePort(): number {
 }
 
 /** Runs the command as root (what Orbit does through the provider), with an optional bug planted in it. */
-function act(action: SignInsAction, job: string, keep: string[] = [], plant?: (script: string) => string, keepHours = 24): { code: number; out: string } {
-  let script = signInsCommand(action, job, keep, keepHours, places);
+function act(action: SignInsAction, job: string, keep: string[] = [], plant?: (script: string) => string, keepHours = 24, generation = 0): { code: number; out: string } {
+  let script = signInsCommand(action, job, keep, keepHours, places, generation);
   if (plant) {
     const planted = plant(script);
     if (planted === script) throw new Error('The planted bug did not change the command');
@@ -136,7 +137,10 @@ beforeEach(() => {
     // Only the real-browser tests start one (below); the file tests have none to start
     start: 'true',
     answerWait: 1,
+    // The image's start-up as a file the command only reads: it carries the word that says it reads the marks folder
+    up: join(root, 'universe-up'),
   };
+  writeFileSync(places.up, '#!/bin/sh\n# universe-marks-v1\n');
 });
 
 afterEach(() => {
@@ -239,12 +243,13 @@ run('putting a job’s browser away, on a real file system with a real unprivile
     const decoys = join(root, 'decoys');
     mkdirSync(decoys);
     const alive: number[] = [];
-    for (const name of ['chrome', 'chromium', 'websockify']) {
-      writeFileSync(join(decoys, name), readFileSync(spawnSync('sh', ['-c', 'command -v sleep'], { encoding: 'utf8' }).stdout.trim()), { mode: 0o755 });
-      const started = spawnSync('sh', ['-c', `"${join(decoys, name)}" 300 >/dev/null 2>&1 & echo $!`], { encoding: 'utf8' });
-      alive.push(Number(started.stdout.trim()));
-    }
     try {
+      // Started inside the protected block: a later decoy that fails to write or start still has the ones before it stopped (CodeRabbit on #1025, N12)
+      for (const name of ['chrome', 'chromium', 'websockify']) {
+        writeFileSync(join(decoys, name), readFileSync(spawnSync('sh', ['-c', 'command -v sleep'], { encoding: 'utf8' }).stdout.trim()), { mode: 0o755 });
+        const started = spawnSync('sh', ['-c', `"${join(decoys, name)}" 300 >/dev/null 2>&1 & echo $!`], { encoding: 'utf8' });
+        alive.push(Number(started.stdout.trim()));
+      }
       fakeProfile('job A cookies');
       expect(act('park', JOB_A, [JOB_A]).out).toMatch(/parked=1/);
       expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
@@ -626,7 +631,7 @@ run('bringing a job’s browser back, and never into another job', () => {
     act('restore', JOB_A, [JOB_A], (script) =>
       script
         .replace(MOVED_NOTE, '  if [ -d "$JOBDIR" ]; then printf \'\' > "$JOBDIR/moved" 2>/dev/null; fi\n')
-        .replace('  if [ "$had" = "1" ]; then printf \'\' > "$NOTE" || { say "0 reason=move"; exit 1; }; fi\n', () => ''),
+        .replace('  if [ "$had" = "1" ]; then printf \'%s\' "$GEN" > "$NOTE" || { say "0 reason=move"; exit 1; }; fi\n', () => ''),
     );
     rmSync(join(parked(JOB_A), 'moved'), { recursive: true, force: true });
     act('restore', JOB_A, [JOB_A]);
@@ -804,10 +809,12 @@ runWithBrowser('a real browser’s sign-ins and open pages', () => {
       const now = [...pages].sort().join('\n');
       quiet = now === last ? quiet + 1 : 0;
       last = now;
-      if (pages.filter((one) => one === url).length >= expected && quiet >= QUIET_POLLS) break;
+      // Returned from the sample that qualifies: the target count AND a list that has not changed for the quiet moment (`context.pages()` is a snapshot of the open pages, not a sign that the replay has finished)
+      if (pages.filter((one) => one === url).length >= expected && quiet >= QUIET_POLLS) return context.pages().filter((one) => one.url() === url);
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    return context.pages().filter((one) => one.url() === url);
+    // No sample qualified (another tab kept changing, or the target count never came): the check fails here, it never passes on a count taken from a list that was still moving
+    throw new Error(`The browser's pages never settled with ${expected} at ${url}: ${last}`);
   }
 
   function startBrowser() {
@@ -1054,6 +1061,35 @@ run('the dirty mark and the restore note (CodeRabbit on #1025: F1, F2, I4)', () 
     expect(existsSync(profile())).toBe(false);
   });
 
+  it('N29: a commit belongs to the restore it was made for: one delayed past a newer pause and restore of the same job leaves the newer note, and a retry of the newer restore still keeps the browser', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A], undefined, 24, 1);
+    expect(act('restore', JOB_A, [JOB_A], undefined, 24, 1).out).toMatch(/restored=1/);
+    const note = join(places.parkRoot, `${JOB_A}.restored`);
+    expect(readFileSync(note, 'utf8')).toBe('1');
+    // The job is paused and restored again (pause 2); the first restore's commit, delayed, only now arrives
+    act('park', JOB_A, [JOB_A], undefined, 24, 2);
+    expect(existsSync(note)).toBe(false);
+    expect(act('restore', JOB_A, [JOB_A], undefined, 24, 2).out).toMatch(/restored=1/);
+    expect(readFileSync(note, 'utf8')).toBe('2');
+    expect(act('commit', JOB_A, [JOB_A], undefined, 24, 1).out).toMatch(/committed=1/);
+    expect(existsSync(note)).toBe(true);
+    // The newer ready write failed: its retry finds the note and the live browser is the job's own, not emptied
+    expect(act('restore', JOB_A, [JOB_A], undefined, 24, 2).out).toMatch(/restored=1/);
+    expect(readFileSync(join(profile(), 'Default', 'Cookies'), 'utf8')).toBe('job A cookies');
+    // The newer commit lets it go
+    expect(act('commit', JOB_A, [JOB_A], undefined, 24, 2).out).toMatch(/committed=1/);
+    expect(existsSync(note)).toBe(false);
+  });
+
+  it('planted bug: a commit that does not read the note\'s number removes the newer restore\'s note', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A], undefined, 24, 2);
+    act('restore', JOB_A, [JOB_A], undefined, 24, 2);
+    act('commit', JOB_A, [JOB_A], (script) => script.replace('&& [ "$(cat "$NOTE" 2>/dev/null)" = "$GEN" ]', ''), 24, 1);
+    expect(existsSync(join(places.parkRoot, `${JOB_A}.restored`))).toBe(false);
+  });
+
   it('I4: a note never makes another job’s restore keep A’s browser, and any command that replaces the live browser lets the note go', () => {
     fakeProfile('job A cookies');
     act('park', JOB_A, [JOB_A]);
@@ -1086,5 +1122,202 @@ run('the dirty mark and the restore note (CodeRabbit on #1025: F1, F2, I4)', () 
     utimesSync(note, old, old);
     act('prune', JOB_B, [JOB_A]);
     expect(existsSync(note)).toBe(false);
+  });
+  it('N4: on a machine whose start-up does not read the marks folder, park, restore and clear refuse before they touch anything; drop, prune and commit still run', () => {
+    // An image from before the marks folder: its start-up has not the word that says it reads it
+    writeFileSync(places.up, '#!/bin/sh\n# an image from before the marks folder\n');
+    fakeProfile('job A cookies');
+    for (const action of ['park', 'restore', 'clear'] as const) {
+      const answer = act(action, JOB_A, [JOB_A]);
+      expect(answer.code).toBe(1);
+      expect(answer.out).toMatch(/reason=old_image/);
+    }
+    // Nothing was marked, moved, stopped or removed: the profile is where it was, no mark exists in either place, nothing is parked
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+    expect(existsSync(dirtyMark())).toBe(false);
+    expect(existsSync(join(home, '.universe', 'profile.dirty'))).toBe(false);
+    expect(existsSync(parked(JOB_A))).toBe(false);
+    expect(act('drop', JOB_A).out).toMatch(/dropped=1/);
+    expect(act('prune', JOB_A).out).toMatch(/pruned=1/);
+    expect(act('commit', JOB_A).out).toMatch(/committed=1/);
+    // A start-up that is not there at all is the same refusal; the one that has the word is not
+    rmSync(places.up);
+    expect(act('clear', JOB_A, [JOB_A]).out).toMatch(/reason=old_image/);
+    writeFileSync(places.up, '#!/bin/sh\n# universe-marks-v1\n');
+    expect(act('clear', JOB_A, [JOB_A]).out).toMatch(/cleared=1/);
+    expect(existsSync(profile())).toBe(false);
+  });
+
+  it('planted bug: without the check, a park on a machine whose start-up never reads the marks folder moves the profile away behind a mark that start-up would not see', () => {
+    writeFileSync(places.up, '#!/bin/sh\n# an image from before the marks folder\n');
+    fakeProfile('job A cookies');
+    const planted = act('park', JOB_A, [JOB_A], (script) => script.replace('reads_marks() {', 'reads_marks() { return 0; }\nreads_marks_unused() {'));
+    expect(planted.out).not.toMatch(/old_image/);
+    expect(existsSync(profile())).toBe(false);
+  });
+
+  /** A stop that cannot finish: what the command sees when a browser will not go away. */
+  const stopFails = (script: string) => script.replace('stop_browser() {', 'stop_browser() { return 1; }\nstop_browser_unused() {');
+  const restoredNote = () => join(places.parkRoot, `${JOB_A}.restored`);
+  function aRestoredNote(): void {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
+    expect(existsSync(restoredNote())).toBe(true);
+  }
+
+  it('N15: a park, a restore or a clear whose browser could not be stopped keeps the restore note, and the live browser is still the job’s own', () => {
+    for (const action of ['park', 'restore', 'clear'] as const) {
+      aRestoredNote();
+      const failed = act(action, JOB_B, [JOB_A, JOB_B], stopFails);
+      expect(failed.code).toBe(1);
+      expect(failed.out).toMatch(/reason=browser_running/);
+      expect(existsSync(restoredNote())).toBe(true);
+      // The retry of A's own restore is still answered as restored, and the sign-ins it brought are not emptied
+      const again = act('restore', JOB_A, [JOB_A]);
+      expect(again.out).toMatch(/restored=1/);
+      expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+      act('commit', JOB_A, [JOB_A]);
+      act('clear', JOB_A, [JOB_A]);
+    }
+  });
+
+  it('planted bug: the note let go before the stop is proved (the old order) is gone when the stop fails', () => {
+    aRestoredNote();
+    act('clear', JOB_B, [JOB_A, JOB_B], (script) => stopFails(script.replaceAll('  stop_browser || { say "0 reason=browser_running"; exit 1; }\n  forget_restored\n', '  forget_restored\n  stop_browser || { say "0 reason=browser_running"; exit 1; }\n')));
+    expect(existsSync(restoredNote())).toBe(false);
+  });
+
+  it('N16: a drop whose restore receipt cannot be removed is not a drop; with the receipt gone it is', () => {
+    const note = restoredNote();
+    // `rm -f` cannot remove a folder: the receipt stays where it was
+    mkdirSync(note, { recursive: true });
+    writeFileSync(join(note, 'stays'), '');
+    const failed = act('drop', JOB_A);
+    expect(failed.code).toBe(1);
+    expect(failed.out).toMatch(/dropped=0 reason=not_removed/);
+    rmSync(note, { recursive: true, force: true });
+    expect(act('drop', JOB_A).out).toMatch(/dropped=1/);
+    // A dangling link in its place is removed by `rm -f`, and counts as gone
+    symlinkSync(join(root, 'nowhere'), note);
+    expect(act('drop', JOB_A).out).toMatch(/dropped=1/);
+  });
+
+  it('planted bug: a drop that looks only at the parked folder says dropped while the receipt is still there', () => {
+    const note = restoredNote();
+    mkdirSync(note, { recursive: true });
+    writeFileSync(join(note, 'stays'), '');
+    const planted = act('drop', JOB_A, [], (script) => script.replace(' || [ -e "$PARK_ROOT/$JOB.restored" ] || [ -L "$PARK_ROOT/$JOB.restored" ]; then say "0 reason=not_removed"', '; then say "0 reason=not_removed"'));
+    expect(planted.out).toMatch(/dropped=1/);
+  });
+
+  describe('N26: universe-clean never acts with more rights than the agent has', () => {
+    const cleanText = () => imageFiles().find((file) => file.name === 'universe-clean')!.text;
+    /** The image's cleanup run as root (what a mistaken caller would do), in this test's own home folder, with the system's pkill and pgrep standing in as the shims. */
+    function cleanAsRoot(plant?: (text: string) => string): { code: number; out: string } {
+      let text = cleanText();
+      if (plant) {
+        const planted = plant(text);
+        if (planted === text) throw new Error('The planted bug did not change the cleanup');
+        text = planted;
+      }
+      const first = 'export PATH\n';
+      text = text.replace(first, `PATH="${shim}:$PATH"\nexport PATH\n`);
+      const file = join(root, 'clean');
+      writeFileSync(file, text, { mode: 0o755 });
+      const done = spawnSync('sh', [file], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, HOME: home } });
+      return { code: done.status ?? -1, out: done.stdout };
+    }
+    /** A folder of root's, with something in it the agent must never be able to make root remove, reached from the agent's own `.config` (which the agent owns: it can make it a link). */
+    function configLinkedToDecoy(): string {
+      const decoy = join(root, 'decoy');
+      mkdirSync(join(decoy, 'universe-chromium'), { recursive: true });
+      writeFileSync(join(decoy, 'universe-chromium', 'secret'), 'root-owned');
+      rmSync(join(home, '.config'), { recursive: true, force: true });
+      symlinkSync(decoy, join(home, '.config'));
+      return join(decoy, 'universe-chromium', 'secret');
+    }
+
+    it('run as root with no agent user to hand over to, it refuses before it touches anything: what the agent linked its folders to is never removed', () => {
+      const secret = configLinkedToDecoy();
+      const done = cleanAsRoot();
+      expect(done.code).toBe(1);
+      expect(done.out).toMatch(/cleaned=0 reason=root/);
+      expect(existsSync(secret)).toBe(true);
+      expect(existsSync(join(home, '.universe', 'profile.dirty'))).toBe(false);
+    });
+
+    it('planted bug: the cleanup that stays root removes what the agent’s link in `.config` points at', () => {
+      const secret = configLinkedToDecoy();
+      cleanAsRoot((text) => text.replace('if [ "$(id -u)" = "0" ]; then', 'if false; then'));
+      expect(existsSync(secret)).toBe(false);
+    });
+
+    it('run as root where the agent user exists, it runs again AS that user: its own profile is removed, and the process that did it was the agent’s', () => {
+      fakeProfile('job A cookies');
+      const done = cleanAsRoot((text) =>
+        text
+          .replace('AGENT=node', `AGENT=${AGENT}`)
+          .replace('AGENT_HOME="$(getent passwd "$AGENT" | cut -d: -f6)"', `AGENT_HOME="${home}"`)
+          .replace('STATE="$HOME_DIR/.universe"\n', 'STATE="$HOME_DIR/.universe"\nid -u > "$HOME_DIR/ran-as"\n'),
+      );
+      expect(done.out).toMatch(/cleaned=1/);
+      expect(existsSync(profile())).toBe(false);
+      expect(readFileSync(join(home, 'ran-as'), 'utf8').trim()).toBe(String(agentUid));
+      expect(statSync(join(home, 'ran-as')).uid).toBe(agentUid);
+    });
+
+    it('run as the agent itself, a link in `.config` still gets nothing of root’s removed', () => {
+      const secret = configLinkedToDecoy();
+      const text = cleanText().replace('export PATH\n', `PATH="${shim}:$PATH"\nexport PATH\n`);
+      const file = join(root, 'clean-agent');
+      writeFileSync(file, text, { mode: 0o755 });
+      const done = spawnSync('setpriv', [`--reuid=${agentUid}`, `--regid=${agentUid}`, '--clear-groups', '--', 'sh', file], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, HOME: home } });
+      expect(done.stdout).not.toMatch(/cleaned=1/);
+      expect(existsSync(secret)).toBe(true);
+    });
+  });
+
+  describe('N27: the start-up runs between an interrupted restore and its retry', () => {
+    /** The image's own start-up step that removes a marked profile (lib/agent37/image-files.ts, universe-up), taken from the image's text and run as the agent user, with the marks folder where this test keeps it. */
+    function startUp(plant?: (text: string) => string): { code: number; out: string } {
+      const from = UNIVERSE_UP.indexOf("# A cleanup that could not remove the browser's profile left a mark");
+      const to = UNIVERSE_UP.indexOf('# Starts a part unless it is running.');
+      if (from < 0 || to < from) throw new Error('The start-up step was not found in the image');
+      let step = UNIVERSE_UP.slice(from, to).replace('MARKS="/var/lib/universe/marks"', `MARKS="${marksFolder()}"`);
+      if (plant) step = plant(step);
+      const script = `PATH="${shim}:$PATH"\nexport PATH\nHOME_DIR="${home}"\nSTATE="$HOME_DIR/.universe"\n${step}\necho start-up-ok\n`;
+      const done = spawnSync('setpriv', [`--reuid=${agentUid}`, `--regid=${agentUid}`, '--clear-groups', '--', 'sh', '-c', script], { encoding: 'utf8', timeout: 60_000 });
+      return { code: done.status ?? -1, out: done.stdout };
+    }
+
+    it('after a restore killed right after the move, the start-up that runs before the retry finds no mark and leaves the profile alone; the profile is closed to the agent; the retry then hands it over', () => {
+      fakeProfile('job A cookies');
+      act('park', JOB_A, [JOB_A]);
+      expect(act('restore', JOB_A, [JOB_A], KILL_AFTER_MOVE).out).not.toMatch(/restored=/);
+      const seen = startUp();
+      expect(seen.out).toMatch(/start-up-ok/);
+      expect(seen.out).not.toMatch(/reason=/);
+      // The profile that moved in survived the start-up, is root's, and the agent cannot read it
+      expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+      expect(statSync(profile()).uid).toBe(0);
+      expect(agentCanRead(profile())).toBe(false);
+      // The retry (after the killed try's lock is taken over) hands it over to the agent
+      const lock = join(home, '.universe', 'up.lock');
+      const old = new Date(Date.now() - 5 * 60_000);
+      utimesSync(lock, old, old);
+      expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
+      expect(statSync(join(profile(), 'Default', 'Cookies')).uid).toBe(agentUid);
+      expect(agentCanRead(profile())).toBe(true);
+    });
+
+    it('planted bug: with the mark kept (the old order) the same start-up finds it and refuses to run on that profile', () => {
+      fakeProfile('job A cookies');
+      act('park', JOB_A, [JOB_A]);
+      act('restore', JOB_A, [JOB_A], (script) => KILL_AFTER_MOVE(script.replace('    unmark || { say "0 reason=mark"; exit 1; }\n    # The move is noted BEFORE', '    # The move is noted BEFORE')));
+      const seen = startUp();
+      expect(seen.out).toMatch(/ready=0 reason=profile_not_cleared/);
+      expect(seen.out).not.toMatch(/start-up-ok/);
+    });
   });
 });

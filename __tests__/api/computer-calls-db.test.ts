@@ -208,7 +208,8 @@ run('what a computer may ask of Orbit, in a real database', () => {
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
       // Every statement the admission sends, in order, with the transaction it was sent on (CodeRabbit on #1025, 27): the client handed to each transaction's callback is wrapped, and its own raw calls are logged under that
       // transaction's number and forwarded to the original method bound to that same client, so nothing is rebound to the root client. 
-      type Entry = { tx: number; what: string; values?: unknown[] };
+      // `of`: for a `DONE` entry, the position in this list of the entry that started the query it completes (CodeRabbit on #1025, N23)
+      type Entry = { tx: number; what: string; values?: unknown[]; of?: number };
       const log: Entry[] = [];
       // Prisma queries are lazy: a query is sent only when it is awaited (its `then` is called), not when the method is called. So an entry is logged when the query STARTS EXECUTING (its first `then`), and a `DONE ` entry
       // when it has come back: the lock being taken is the `DONE` of its query, and the key's look must START after it (CodeRabbit on #1025, 12)
@@ -216,9 +217,9 @@ run('what a computer may ask of Orbit, in a real database', () => {
         let run: Promise<unknown> | undefined;
         const go = () =>
           (run ??= (() => {
-            log.push({ tx, what, values });
+            const began = log.push({ tx, what, values }) - 1;
             return Promise.resolve(start()).then((result) => {
-              log.push({ tx, what: `DONE ${what}` });
+              log.push({ tx, what: `DONE ${what}`, of: began });
               return result;
             });
           })());
@@ -281,8 +282,8 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect(inThatTransaction[0]).toEqual({ tx: stamp.tx, what: 'BEGIN' });
       // ...which took THIS job's cutoff lock before the look at the key and the stamp, on the same transaction (the lock a pause takes, so an admission and a pause are ordered exactly, never by two clocks)...
       const lockAt = log.findIndex((entry) => entry.tx === stamp.tx && entry.what.includes('pg_advisory_xact_lock') && !entry.what.startsWith('DONE ') && entry.values?.includes(cutoffLockKey(jobId)));
-      // The lock is TAKEN (its query has come back) before the key's look starts executing, and the stamp starts after the look has come back
-      const lockTakenAt = log.findIndex((entry, at) => at > lockAt && entry.tx === stamp.tx && entry.what.startsWith('DONE ') && entry.what.includes('pg_advisory_xact_lock'));
+      // The lock is TAKEN (the completion of THAT very lock query has come back, not of another advisory lock beside it) before the key's look starts executing, and the stamp starts after the look has come back
+      const lockTakenAt = log.findIndex((entry) => entry.of === lockAt);
       const keyAt = log.findIndex((entry) => entry.tx === stamp.tx && entry.what === 'computerJobToken.findUnique');
       const keyBackAt = log.findIndex((entry) => entry.tx === stamp.tx && entry.what === 'DONE computerJobToken.findUnique');
       expect(lockAt).toBeGreaterThan(0);

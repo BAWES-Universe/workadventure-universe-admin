@@ -41,7 +41,7 @@ const bodySchema = z.discriminatedUnion('action', [
  *  - `note` (jobId, text): `{ ok: true, view, note: { seq, delivery } }`, delivery: now, answer, after_hand_back, when_it_starts.
  *  - `stop`: ends everything on the computer, paused jobs included: `{ ok: true, view }`.
  *  - `stop_all` (confirmedJobIds, round 8 D2; `stop` takes it too): ends ONLY the live jobs in the set the person confirmed (1 to 50 ids; ids over or unknown are skipped) on the FIRST dispatch:
- *    `{ ok: true, view, stopped: [ids], left: [{ id, title }] }` (`left` = the live jobs not in the set, still going, as objects with their id and title), kept as the command's outcome. The set is part of the command: the same command id with another set is 409 `command_reused`.
+ *    `{ ok: true, view, stopped: [ids], left: [{ id, title }] }` (`left` = the jobs that were live and outside the confirmed set when the command was FIRST dispatched, as objects with their id and title: a snapshot kept as the command's outcome, never a live status. A retry of the same command returns that same list unchanged, with a fresh `view` beside it, so a job in it that finished since is still named; read `view` for how things stand now). The set is part of the command: the same command id with another set is 409 `command_reused`.
  *
  * Every action but `list` and `activity` needs the command id of that one tool call (header X-Computer-Command, a uuid; Brick derives it from the chat event, the action, the job and the call's number in the
  * turn, so a retried turn sends the same ids): the same id again answers what it came to and does nothing more (finding 4). 400 `{ ok: false, reason: 'command_missing' }` without one, 400

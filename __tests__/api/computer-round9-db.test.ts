@@ -134,6 +134,10 @@ run('CodeRabbit round 9 on #1025: the money and data items, in a real database',
       expect(row).toMatchObject({ status: 'queued', queuedFor: 'busy', reservationKey: null, stretchStarted: null, startedAt: null, secondsRun: 0, prepState: null });
       expect((await runnableJobsPage(100)).jobs.map((job) => job.jobId)).not.toContain(row.id);
       expect(await claimJob(row.id, { run: 'r', seen: 0 })).toMatchObject({ ok: false, reason: 'not_running' });
+      // The books: no room is held for the failed start (the one it took was given back), and nothing was charged (CodeRabbit on #1025, N24)
+      expect(await prisma.meterReservation.count({ where: { personId: sara.id, state: 'held' } })).toBe(0);
+      expect(await prisma.meterReservation.count({ where: { jobId: row.id, state: 'settled' } })).toBe(0);
+      expect(await prisma.meterEvent.count({ where: { jobId: row.id } })).toBe(0);
     });
 
     it('O44: a job whose machine is still waking (running, no stretch started) is not listed and not claimable; once its ready write lands it is both', async () => {
@@ -171,6 +175,14 @@ run('CodeRabbit round 9 on #1025: the money and data items, in a real database',
       expect(await takeWakeTicketForTests(sara.brickId, 'waking', 'waking', { epoch: 5, staleMs: 60_000 })).toBeNull();
       expect(await prisma.brickComputer.findUnique({ where: { botId: sara.brickId }, select: { wakeEpoch: true } })).toEqual({ wakeEpoch: 5 });
     });
+    it('a takeover from an outdated epoch is refused even when the beat is stale: only the epoch predicate can refuse it (CodeRabbit on #1025, N20)', async () => {
+      const sara = await owner('o42-epoch');
+      await wakingMachine(sara, 5, 10);
+      expect(await takeWakeTicketForTests(sara.brickId, 'waking', 'waking', { epoch: 4, staleMs: 60_000 })).toBeNull();
+      expect(await prisma.brickComputer.findUnique({ where: { botId: sara.brickId }, select: { wakeEpoch: true } })).toEqual({ wakeEpoch: 5 });
+      // CONTROL: the same stale beat with the current epoch is taken over
+      expect(await takeWakeTicketForTests(sara.brickId, 'waking', 'waking', { epoch: 5, staleMs: 60_000 })).toBe(6);
+    });
   });
 
   describe('I10: a Stop', () => {
@@ -189,9 +201,13 @@ run('CodeRabbit round 9 on #1025: the money and data items, in a real database',
       expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).status).toBe('running');
       const kept = await prisma.$queryRaw<Array<{ outcome: { pending?: boolean; targets?: string[] } }>>`SELECT "outcome" FROM "computer_job_commands" WHERE "command_id" = ${(command as { id: string }).id}::uuid`;
       expect(kept[0].outcome).toMatchObject({ pending: true, targets: [jobId] });
+      // A later job is made before the retry: the retry ends the jobs the first request named, never one made after it (CodeRabbit on #1025, N21)
+      const later = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Later' }, NOW);
+      if (!later.ok) throw new Error('the later job was not made');
       const second = await stopAll(sara.brickId, sara.id, new Date(), command);
       expect(second.ok).toBe(true);
       expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).status).toBe('stopped');
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: later.job.id } })).status).not.toBe('stopped');
     });
   });
 
@@ -234,7 +250,9 @@ run('CodeRabbit round 9 on #1025: the money and data items, in a real database',
     it('O40: a refusal the route decides itself (a "try again" that cannot carry on) that cannot be kept is a retryable 503; the retry is the same refusal', async () => {
       const sara = await owner('o40');
       const k = key();
-      const asked = () => post(sara, k, { 'x-computer-continues': randomUUID() });
+      // ONE missing job for every ask: the replay is of the same request, before and after the trigger is dropped (CodeRabbit on #1025, N25)
+      const missing = randomUUID();
+      const asked = () => post(sara, k, { 'x-computer-continues': missing });
       const undo = await plant('r9_fail_refuse2', 'computer_start_attempts', `NEW.state = 'refused'`, 'fail');
       let first;
       try {
@@ -272,6 +290,116 @@ run('CodeRabbit round 9 on #1025: the money and data items, in a real database',
       expect(await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: k } })).toMatchObject({ state: 'refused' });
     });
 
+    it('N2: a refusal the route decides that loses to another request which made the key’s own job is answered with that job, never the local refusal', async () => {
+      const sara = await owner('n2');
+      const k = key();
+      const real = prisma.computerStartAttempt.updateMany.bind(prisma.computerStartAttempt) as (args: { data?: { state?: string } }) => Promise<unknown>;
+      let madeJob: string | null = null;
+      // Another request of the key makes the job between this request's look and its refusal write
+      const spy = jest.spyOn(prisma.computerStartAttempt, 'updateMany').mockImplementation((async (args: { data?: { state?: string } }) => {
+        if (madeJob === null && args.data?.state === 'refused') {
+          const other = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A job', startKey: k, acks: true, began: new Date(), registration: { opened: false, reopened: false, release: async () => undefined } }, NOW);
+          if (!other.ok) throw new Error('the other request made no job');
+          madeJob = other.job.id;
+        }
+        return real(args);
+      }) as never);
+      let answer;
+      try {
+        answer = await post(sara, k, { 'x-computer-continues': randomUUID() });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(madeJob).not.toBeNull();
+      expect(answer.status).toBe(200);
+      expect(answer.body).toMatchObject({ ok: true, job: { id: madeJob } });
+      expect(answer.body).not.toMatchObject({ reason: 'cannot_continue' });
+      expect(await prisma.computerJob.count({ where: { personId: sara.id } })).toBe(1);
+    });
+
+    it('N5 and N17: a refusal for a job that the queue claimed after the decision takes nothing away and stores nothing: the job runs, the attempt stays `made`, and the answer is the job', async () => {
+      const sara = await owner('n17');
+      await prisma.appSetting.deleteMany({ where: { key: { in: ['meter'] } } });
+      const k = key();
+      // The queue sweep claims the job after the decision and before the refusal's transaction opens (the claim is committed on its own, as the sweep's would be)
+      const real = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+      let claimed = false;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options: unknown) => {
+        if (typeof fn === 'function' && !claimed && fn.toString().includes('JobLeftLine')) {
+          claimed = true;
+          return prisma.computerJob.updateMany({ where: { personId: sara.id }, data: { status: 'running', queuedFor: null, startedAt: new Date() } }).then(() => real(fn, options));
+        }
+        return real(fn, options);
+      }) as never);
+      let answer;
+      try {
+        answer = await post(sara, k);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(claimed).toBe(true);
+      const rows = await prisma.computerJob.findMany({ where: { personId: sara.id } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].status).toBe('running');
+      expect(answer.status).toBe(200);
+      expect(answer.body).toMatchObject({ ok: true, job: { id: rows[0].id, status: 'running' } });
+      // Rolled back with the delete: the attempt is not a refusal that names a running job
+      expect(await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: k } })).toMatchObject({ state: 'made', jobId: rows[0].id });
+    });
+
+    it('N5 and N17 (Opus): a job another request took away with its own refusal on the key is answered with that stored refusal, never this request’s own', async () => {
+      const sara = await owner('n17-gone');
+      await prisma.appSetting.deleteMany({ where: { key: { in: ['meter'] } } });
+      const k = key();
+      const real = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+      let taken = false;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options: unknown) => {
+        if (typeof fn === 'function' && !taken && fn.toString().includes('JobLeftLine')) {
+          taken = true;
+          // The other request removes the job and keeps ITS refusal on the key (a rule, not this request's `not_set`)
+          return prisma.computerStartAttempt
+            .updateMany({ where: { personId: sara.id, startKey: k }, data: { state: 'refused', outcome: { ok: false, reason: 'rule', words: 'no visas' } } })
+            .then(() => prisma.computerJob.deleteMany({ where: { personId: sara.id } }))
+            .then(() => real(fn, options));
+        }
+        return real(fn, options);
+      }) as never);
+      let answer;
+      try {
+        answer = await post(sara, k);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(taken).toBe(true);
+      expect(answer.body).toMatchObject({ ok: false, reason: 'rule', words: 'no visas' });
+      expect(await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: k } })).toMatchObject({ state: 'refused', outcome: { reason: 'rule' } });
+    });
+
+    it('N5 and N17 (Opus): a job that is gone with nothing kept on the key answers a retryable 503 not_kept, and stores nothing', async () => {
+      const sara = await owner('n17-none');
+      await prisma.appSetting.deleteMany({ where: { key: { in: ['meter'] } } });
+      const k = key();
+      const real = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+      let taken = false;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options: unknown) => {
+        if (typeof fn === 'function' && !taken && fn.toString().includes('JobLeftLine')) {
+          taken = true;
+          return prisma.computerJob.deleteMany({ where: { personId: sara.id } }).then(() => real(fn, options));
+        }
+        return real(fn, options);
+      }) as never);
+      let answer;
+      try {
+        answer = await post(sara, k);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(taken).toBe(true);
+      expect(answer.status).toBe(503);
+      expect(answer.body).toMatchObject({ retry: true });
+      expect(await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: k } })).toMatchObject({ state: 'made', outcome: null });
+    });
+
     it('O40: refuseAttempt says what happened: stored, decided (another request decided the key), failed', async () => {
       const sara = await owner('o40-unit');
       const k = key();
@@ -302,6 +430,11 @@ run('CodeRabbit round 9 on #1025: the money and data items, in a real database',
   describe('O39: a key whose time is not a date', () => {
     it('is untimed', () => {
       expect(issuedOfKey(`t${'z'.repeat(12)}-${'a'.repeat(32)}`)).toBeNull();
+      // A safe integer that is beyond what a Date can hold reaches the Date guard (10 ** 17 would fail the safe-integer check before it); the last moment a Date holds is a moment (CodeRabbit on #1025, N19)
+      expect(Number.isSafeInteger(8_640_000_000_000_001)).toBe(true);
+      expect(issuedOfKey(`t${(8_640_000_000_000_001).toString(36)}-${'a'.repeat(32)}`)).toBeNull();
+      expect(issuedOfKey(`t${(8_640_000_000_000_000).toString(36)}-${'a'.repeat(32)}`)?.getTime()).toBe(8_640_000_000_000_000);
+      // Not a safe integer: refused before it is a Date
       expect(issuedOfKey(`t${(10 ** 17).toString(36)}-${'a'.repeat(32)}`)).toBeNull();
     });
   });
@@ -320,15 +453,19 @@ run('CodeRabbit round 9 on #1025: the money and data items, in a real database',
       // One request reopens it; its redelivery (not the one that reopened) reaches the start first
       const reopened = await registerStart(sara.brickId, sara.id, k, new Date(), issued);
       if (!('registration' in reopened)) throw new Error('not reopened');
-      expect(reopened.registration.reopened).toBe(true);
-      const row = await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: k } });
-      expect(row.supersedeSince?.getTime()).toBe(issued.getTime());
-      const redelivery = await startJob({ botId: sara.brickId, personId: sara.id, title: 'again', startKey: k, acks: true, began: new Date(), registration: { opened: false, reopened: false, release: async () => undefined } }, NOW);
-      await reopened.registration.release();
-      // It answers J (the job made after the person's message was issued), and makes no job of its own
-      if (!j.ok) throw new Error('J was not made');
-      expect(redelivery).toMatchObject({ ok: true, job: { id: j.job.id } });
-      expect(await prisma.computerJob.count({ where: { personId: sara.id } })).toBe(1);
+      try {
+        expect(reopened.registration.reopened).toBe(true);
+        const row = await prisma.computerStartAttempt.findFirstOrThrow({ where: { personId: sara.id, startKey: k } });
+        expect(row.supersedeSince?.getTime()).toBe(issued.getTime());
+        const redelivery = await startJob({ botId: sara.brickId, personId: sara.id, title: 'again', startKey: k, acks: true, began: new Date(), registration: { opened: false, reopened: false, release: async () => undefined } }, NOW);
+        // It answers J (the job made after the person's message was issued), and makes no job of its own
+        if (!j.ok) throw new Error('J was not made');
+        expect(redelivery).toMatchObject({ ok: true, job: { id: j.job.id } });
+        expect(await prisma.computerJob.count({ where: { personId: sara.id } })).toBe(1);
+      } finally {
+        // Let go even when an assertion above fails: the registration's beat would otherwise go on writing into later tests (CodeRabbit on #1025, N9)
+        await reopened.registration.release();
+      }
     });
   });
 

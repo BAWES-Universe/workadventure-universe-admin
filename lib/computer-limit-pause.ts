@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db';
 import { controlInternals, providerFor } from '@/lib/computer';
 import { lockJob } from '@/lib/computer-owner';
 import { afterPause, decidePauseIn } from '@/lib/computer-job-controls';
+import { settlePendingResumesIn } from '@/lib/computer-commands';
 import { grantsPrintIn, tellIn } from '@/lib/computer-tellings';
 import { getMeterSettings } from '@/lib/meter';
 import { roomWouldFit } from '@/lib/meter-allowance';
@@ -139,6 +140,8 @@ async function carryOnOne(job: { id: string; botId: string; personId: string }, 
         await tellIn(tx, job.id, 'can_carry_on', null, now);
         return 'asked' as const;
       }
+      // A Resume of this job that is still pending (its request stopped before it kept an answer) is settled from the job as it stands, before the flip: the start of this carry-on is never its answer (CodeRabbit on #1025, N1)
+      await settlePendingResumesIn(tx, job.id);
       // The flip is conditional: only a job still paused by its month or a limit (never one the person paused) goes back in line, first of its Brick's, as a resume would put it
       const top = await tx.computerJob.aggregate({ where: { botId: job.botId, status: 'queued' }, _max: { queueRank: true } });
       // Finding 5: the flip writes NO telling. `carried_on` is written by the start in the very write that sets the job running (`carry_on_pending`, once); a job still in line after the try is told `back_in_line`

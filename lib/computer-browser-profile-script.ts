@@ -27,7 +27,7 @@
  *   drop     this job's parked browser is removed. Prints dropped=1.
  *   clear    the live browser is emptied (nothing is kept), for a job whose browser was shared with another job still on the machine. Prints cleared=1.
  *   prune    only the removal below. Prints pruned=1.
- *   commit   Orbit has written that this job is ready: the note of a finished restore (below) is removed. Prints committed=1.
+ *   commit   Orbit has written that this job is ready: the note of a finished restore (below) is removed, only when it is the note of the same pause number (`GEN`; a commit delayed past a newer restore leaves the newer note). Prints committed=1.
  * A restore that put the job's own browser back leaves a note ("<job id>.restored", in the same root-only folder) until Orbit's database says the job is ready (commit): a retry after a write that failed finds the note
  * and the live browser is the job's own, so it is answered as restored and NEVER emptied. Any command that replaces the live browser (park, a restore of another job, clear) removes the notes first.
  * Every action also removes parked browsers of jobs not in the keep list (older than two minutes, so one being put away right now is never
@@ -53,6 +53,8 @@ export interface SignInsPlaces {
   start: string;
   /** Seconds to wait for the browser to answer after it was started again. */
   answerWait: number;
+  /** The image's own start-up program: read (never run) to see whether it reads the marks folder (CodeRabbit on #1025, N4). */
+  up: string;
 }
 
 export const MACHINE_PLACES: SignInsPlaces = {
@@ -62,6 +64,7 @@ export const MACHINE_PLACES: SignInsPlaces = {
   devtools: '127.0.0.1:9222',
   start: 'runuser -u "$NODE_USER" -- env HOME="$HOME_DIR" /usr/local/bin/universe-up --child',
   answerWait: 30,
+  up: '/usr/local/bin/universe-up',
 };
 
 /** A job id that may be written into the command: Orbit's ids are UUIDs; anything else is refused before a command is made. */
@@ -72,8 +75,9 @@ export function isSafeJobId(id: string): boolean {
 }
 
 /** The command for one action on one job. `keep`: the jobs of this Brick that may keep a parked browser (this job is taken out of it for a drop). */
-export function signInsCommand(action: SignInsAction, jobId: string, keep: string[], keepHours: number, places: SignInsPlaces = MACHINE_PLACES): string {
+export function signInsCommand(action: SignInsAction, jobId: string, keep: string[], keepHours: number, places: SignInsPlaces = MACHINE_PLACES, /** The number of the pause a restore brings back: written in its note, and a commit removes the note only when it names the same number (N29). */ generation = 0): string {
   if (!isSafeJobId(jobId)) throw new Error('Not a job id');
+  if (!Number.isSafeInteger(generation) || generation < 0) throw new Error('Not a pause number');
   const kept = keep.filter((id) => isSafeJobId(id) && !(action === 'drop' && id === jobId));
   return SIGNINS_SCRIPT.replace('__ACTION__', action)
     .replace('__JOB__', jobId)
@@ -84,6 +88,8 @@ export function signInsCommand(action: SignInsAction, jobId: string, keep: strin
     .replace('__HOME__', places.home)
     .replace('__DEVTOOLS__', places.devtools)
     .replace('__ANSWER_WAIT__', String(Math.max(1, Math.round(places.answerWait))))
+    .replace('__UP__', places.up)
+    .replace('__GEN__', String(generation))
     .replace('__START__', places.start);
 }
 
@@ -127,6 +133,8 @@ NODE_USER="__NODE_USER__"
 HOME_DIR="__HOME__"
 DEVTOOLS="__DEVTOOLS__"
 ANSWER_WAIT="__ANSWER_WAIT__"
+UP="__UP__"
+GEN="__GEN__"
 case "$ACTION" in park) KEY=parked ;; restore) KEY=restored ;; drop) KEY=dropped ;; clear) KEY=cleared ;; prune) KEY=pruned ;; commit) KEY=committed ;; *) echo "signins=0 reason=action"; exit 1 ;; esac
 say() { echo "$KEY=$*"; }
 [ "$(id -u)" = "0" ] || { say "0 reason=not_root"; exit 1; }
@@ -151,6 +159,10 @@ if [ -L "$MARKS" ] || { [ -e "$MARKS" ] && [ ! -d "$MARKS" ]; }; then rm -f "$MA
 mkdir -p "$MARKS" && chown root:root "$MARKS" && chmod 1777 "$MARKS" || { say "0 reason=folder"; exit 1; }
 [ -d "$MARKS" ] && [ ! -L "$MARKS" ] && [ "$(stat -c '%u' "$MARKS" 2>/dev/null)" = "0" ] || { say "0 reason=folder"; exit 1; }
 DIRTY="$MARKS/profile.dirty"
+# An image built before the marks folder was introduced starts the browser without looking there: a mark made here would not stop it from starting on a profile this command did not finish removing, and the earlier job's sign-ins would
+# be in the live browser. The commands that mark refuse on such a machine before they touch anything (nothing is marked, moved or removed, and the answer is a failure Orbit keeps pending), and they never write the old mark in
+# the agent's folder as root. The start-up says so itself: it carries the word the check looks for (CodeRabbit on #1025, N4)
+reads_marks() { [ -f "$UP" ] && [ ! -L "$UP" ] && grep -q 'universe-marks-v1' "$UP" 2>/dev/null; }
 
 # Parked browsers of jobs that may no longer keep one are removed (one put away in the last two minutes is left, it may be a job just paused)
 prune() {
@@ -421,13 +433,15 @@ case "$ACTION" in
 park)
   prune
   if [ -d "$JOBDIR" ]; then say "0 reason=already"; exit 0; fi
+  reads_marks || { say "0 reason=old_image"; exit 1; }
   rm -rf "$JOBDIR.new"
   mkdir -m 0700 "$JOBDIR.new" || { say "0 reason=folder"; exit 1; }
   lock
   mark || { say "0 reason=mark"; exit 1; }
-  forget_restored
   saved="$(devtools save "$JOBDIR.new/session.json" 2>/dev/null)"
+  # The notes of restores go only once the browser is proved stopped: a stop that failed leaves the live browser the job's own, and its note with it (CodeRabbit on #1025, N15)
   stop_browser || { say "0 reason=browser_running"; exit 1; }
+  forget_restored
   rm -rf "$CACHE" 2>/dev/null
   had_profile=0
   if [ -d "$PROFILE" ] && [ ! -L "$PROFILE" ]; then had_profile=1; mv "$PROFILE" "$JOBDIR.new/profile" || { say "0 reason=move"; exit 1; }; else rm -rf "$PROFILE"; fi
@@ -480,15 +494,16 @@ restore)
     unlock
     start_browser
     replay || { say "0 reason=no_answer"; exit 1; }
-    printf '' > "$NOTE" || { say "0 reason=move"; exit 1; }
+    printf '%s' "$GEN" > "$NOTE" || { say "0 reason=move"; exit 1; }
     rm -rf "$JOBDIR" "$JOBDIR.new"
     say "1 $(counts "$loaded")"
     exit 0
   fi
+  reads_marks || { say "0 reason=old_image"; exit 1; }
   lock
   mark || { say "0 reason=mark"; exit 1; }
-  forget_restored
   stop_browser || { say "0 reason=browser_running"; exit 1; }
+  forget_restored
   rm -rf "$PROFILE" "$CACHE" 2>/dev/null
   if [ -e "$PROFILE" ] || [ -L "$PROFILE" ] || [ -e "$CACHE" ]; then say "0 reason=profile_not_removed"; exit 1; fi
   had=0
@@ -517,7 +532,7 @@ restore)
   # restore is reported failed rather than said to have worked. Orbit leaves the job in recover and asks again, and the try above finishes the replay alone
   replay || { say "0 reason=no_answer"; exit 1; }
   # Kept until Orbit writes that the job is ready (the commit action): see the note at the top of this action
-  if [ "$had" = "1" ]; then printf '' > "$NOTE" || { say "0 reason=move"; exit 1; }; fi
+  if [ "$had" = "1" ]; then printf '%s' "$GEN" > "$NOTE" || { say "0 reason=move"; exit 1; }; fi
   rm -rf "$JOBDIR" "$JOBDIR.new"
   if [ "$had" = "1" ]; then say "1 $(counts "$loaded")"; else say "0 reason=none"; fi
   ;;
@@ -525,15 +540,17 @@ drop)
   rm -rf "$JOBDIR" "$JOBDIR.new"
   rm -f "$PARK_ROOT/$JOB.restored"
   prune
-  if [ -e "$JOBDIR" ] || [ -e "$JOBDIR.new" ]; then say "0 reason=not_removed"; exit 1; fi
+  # A receipt that could not be removed (a dangling link counts) leaves the restore fast path alive for a job whose sign-ins are to be gone: that is not a drop (CodeRabbit on #1025, N16)
+  if [ -e "$JOBDIR" ] || [ -L "$JOBDIR" ] || [ -e "$JOBDIR.new" ] || [ -L "$JOBDIR.new" ] || [ -e "$PARK_ROOT/$JOB.restored" ] || [ -L "$PARK_ROOT/$JOB.restored" ]; then say "0 reason=not_removed"; exit 1; fi
   say "1"
   ;;
 clear)
   prune
+  reads_marks || { say "0 reason=old_image"; exit 1; }
   lock
   mark || { say "0 reason=mark"; exit 1; }
-  forget_restored
   stop_browser || { say "0 reason=browser_running"; exit 1; }
+  forget_restored
   rm -rf "$PROFILE" "$CACHE" 2>/dev/null
   if [ -e "$PROFILE" ] || [ -L "$PROFILE" ] || [ -e "$CACHE" ]; then say "0 reason=profile_not_removed"; exit 1; fi
   unmark
@@ -546,7 +563,10 @@ prune)
   say "1"
   ;;
 commit)
-  rm -f "$PARK_ROOT/$JOB.restored"
+  # Only the restore this commit belongs to: the note carries the number of the pause that restore brought back. A commit that was delayed past a newer pause and restore of the same job finds the newer note and leaves it
+  # (the newer restore is not ready yet, and a retry of it must still find its note; CodeRabbit on #1025, N29). Nothing to remove is also a commit
+  NOTE="$PARK_ROOT/$JOB.restored"
+  if [ -f "$NOTE" ] && [ ! -L "$NOTE" ] && [ "$(cat "$NOTE" 2>/dev/null)" = "$GEN" ]; then rm -f "$NOTE"; fi
   say "1"
   ;;
 

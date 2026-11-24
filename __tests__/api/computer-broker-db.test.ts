@@ -796,13 +796,24 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         return { held, release: () => release(), done };
       };
       /** Waits until a statement of THIS database is waiting for THIS job's cutoff lock (the advisory lock the admission takes), not for any lock: an unrelated waiter proves nothing about the request under test. */
-      const waitingOnJob = async (jobId: string) => {
+      const waitingOnJob = async (jobId: string, start: Promise<unknown>) => {
+        // The request is watched while the checkpoint is waited for: one that ends (or fails) before it reaches the lock fails the checkpoint at once, and its rejection is observed here (CodeRabbit on #1025, N6)
+        let ended: Error | null = null;
+        start.then(
+          () => {
+            ended = new Error('the request ended before it reached the lock checkpoint');
+          },
+          (error) => {
+            ended = error instanceof Error ? error : new Error(String(error));
+          },
+        );
         for (let at = 0; at < 500; at++) {
           const rows = await prisma.$queryRaw<Array<{ n: number }>>`
             SELECT count(*)::int AS n FROM pg_locks l, (SELECT hashtextextended(${cutoffLockKey(jobId)}, 0) AS k) h
             WHERE l.locktype = 'advisory' AND NOT l.granted AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
               AND l.classid = ((h.k >> 32) & 4294967295)::bigint::oid AND l.objid = (h.k & 4294967295)::bigint::oid AND l.objsubid = 1`;
           if (rows[0].n > 0) return true;
+          if (ended) throw ended;
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
         return false;
@@ -818,7 +829,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
             if (started.ok) await drain(started.events);
             return started;
           });
-          expect(await waitingOnJob(jobId)).toBe(true);
+          expect(await waitingOnJob(jobId, start)).toBe(true);
           // The claim is held and the admission is waiting: nothing is marked
           expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ firstTurnSentAt: null });
           lock.release();
@@ -840,7 +851,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
           try {
             await lock.held;
             start = startTurn(jobId, 'carry on', cut.signal);
-            expect(await waitingOnJob(jobId)).toBe(true);
+            expect(await waitingOnJob(jobId, start)).toBe(true);
             cut.abort();
             lock.release();
             await lock.done;

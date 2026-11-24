@@ -30,6 +30,7 @@ import { claimJob, controlInternals, giveComputer, recordFinishIntent, startJob,
 import { cancelJob, moveJobFirst, pauseJob, resumeJob, resumeWait } from '@/lib/computer-job-controls';
 import { addJobNote } from '@/lib/computer-job-notes';
 import { claimCommand, commandRow } from '@/lib/computer-commands';
+import { carryOnPaused, resetCarryOnScanForTests } from '@/lib/computer-limit-pause';
 import * as owner from '@/lib/computer-owner';
 import { parkProfile } from '@/lib/computer-browser-profile';
 
@@ -469,6 +470,143 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       } finally {
         Object.assign(resumeWait, old);
         spy.mockRestore();
+      }
+    });
+
+    it('CodeRabbit on #1025 (N1): a pending Resume is settled from its own start: when a newer Resume took the job after it, the first one’s copy gets what the job came to before that, never the newer Resume’s outcome', async () => {
+      const { sara, jobId } = await running('n1-resume');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      const realStart = controlInternals.tryStart;
+      const spy = jest.spyOn(controlInternals, 'tryStart').mockImplementation(async () => {
+        throw new Error('the server stopped');
+      });
+      const old = { ...resumeWait };
+      resumeWait.ms = 200;
+      resumeWait.capMs = 600;
+      try {
+        // Resume A is taken and its request stops before its start (the job waits in line, its answer is pending); the pause number it was taken at is on its row
+        const a = command();
+        await expect(resumeJob(sara.brickId, sara.id, jobId, minutes(10), a)).rejects.toThrow('the server stopped');
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true, pending: true }, stretch: 1 });
+        // The person pauses it while it waits in line, then asks again (Resume B) with a month that refuses
+        await pauseJob(sara.brickId, sara.id, jobId, minutes(11), command());
+        await saveMeterSettings({ memberAllowanceMicros: 1_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+        spy.mockImplementation(realStart);
+        const b = command();
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(12), b)).toEqual({ ok: false, reason: 'allowance' });
+        expect(await commandOf(b.id)).toMatchObject({ outcome: { ok: false, reason: 'allowance' } });
+        // A was settled when B took the job, from the job as it stood then (a Resume that was taken): never B's refusal
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true } });
+        expect((await commandOf(a.id))?.outcome).not.toHaveProperty('pending');
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(13), a)).toMatchObject({ ok: true });
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true } });
+        // A's own answer was never B's: the job is paused by B's refusal, and A said nothing of it
+        expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance' });
+      } finally {
+        Object.assign(resumeWait, old);
+        spy.mockRestore();
+      }
+    });
+
+    it('CodeRabbit on #1025 (N1): a pending Resume whose own start was refused keeps that refusal when the carry-on of the month then starts the job', async () => {
+      const { sara, jobId } = await running('n1-carry');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      const realStart = controlInternals.tryStart;
+      // The start decides (the month refuses it) and the request stops before it keeps its answer
+      const spy = jest.spyOn(controlInternals, 'tryStart').mockImplementation(async (...args: Parameters<typeof realStart>) => {
+        await realStart(...args);
+        throw new Error('the server stopped');
+      });
+      const old = { ...resumeWait };
+      resumeWait.ms = 200;
+      try {
+        await saveMeterSettings({ memberAllowanceMicros: 1_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+        const a = command();
+        await expect(resumeJob(sara.brickId, sara.id, jobId, minutes(10), a)).rejects.toThrow('the server stopped');
+        expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance' });
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true, pending: true } });
+        // The month has room again: the carry-on starts the job. That start is not A's
+        spy.mockImplementation(realStart);
+        await setUp();
+        resetCarryOnScanForTests();
+        expect(await carryOnPaused(minutes(20))).toBe(1);
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: false, reason: 'allowance' } });
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(21), a)).toEqual({ ok: false, reason: 'allowance' });
+      } finally {
+        Object.assign(resumeWait, old);
+        spy.mockRestore();
+      }
+    });
+
+    it('CodeRabbit on #1025 (N1): a job that has been paused again since a pending Resume was taken ran in between: that Resume’s copy answers success, whatever the later pause was for', async () => {
+      const { sara, jobId } = await running('n1-ran');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      const realStart = controlInternals.tryStart;
+      const spy = jest.spyOn(controlInternals, 'tryStart').mockImplementation(async (...args: Parameters<typeof realStart>) => {
+        await realStart(...args);
+        throw new Error('the server stopped');
+      });
+      const old = { ...resumeWait };
+      resumeWait.ms = 200;
+      try {
+        const a = command();
+        await expect(resumeJob(sara.brickId, sara.id, jobId, minutes(10), a)).rejects.toThrow('the server stopped');
+        // Its start ran (the job is running again) and the person paused it again later, and the month then refuses the next start
+        expect(await jobOf(jobId)).toMatchObject({ status: 'running' });
+        await pauseJob(sara.brickId, sara.id, jobId, minutes(15), command());
+        await prisma.computerJob.update({ where: { id: jobId }, data: { pausedWhy: 'allowance' } });
+        expect((await jobOf(jobId)).pauses).toBe(2);
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(16), a)).toMatchObject({ ok: true });
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true } });
+      } finally {
+        Object.assign(resumeWait, old);
+        spy.mockRestore();
+      }
+    });
+
+    it('CodeRabbit on #1025 (N28): a stale try that looked at the job while it was paused never marks the NEW start of a Resume as decided (held between its look and its write; the Resume copy keeps waiting)', async () => {
+      const { sara, jobId } = await running('n28-stale');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      const realStart = controlInternals.tryStart;
+      // The queue sweep's try: it sees the paused job, decides nothing, and is held right before its marker write
+      const realUpdateMany = prisma.computerJob.updateMany.bind(prisma.computerJob);
+      const held = { release: (): void => undefined };
+      let reached: () => void = () => undefined;
+      const atWrite = new Promise<void>((resolve) => { reached = resolve; });
+      const gate = new Promise<void>((resolve) => { held.release = resolve; });
+      let first = true;
+      const write = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation(((args: { data?: Record<string, unknown> }) => {
+        if (args?.data && 'startDecidedAt' in args.data && args.data.startDecidedAt !== null && first) {
+          first = false;
+          reached();
+          return gate.then(() => realUpdateMany(args as never));
+        }
+        return realUpdateMany(args as never);
+      }) as never);
+      const stale = realStart(jobId, minutes(5));
+      await atWrite;
+      // The Resume is taken (its own start never runs: the request stopped), the job waits in line, nothing has decided
+      const start = jest.spyOn(controlInternals, 'tryStart').mockImplementation(async () => {
+        throw new Error('the server stopped');
+      });
+      const old = { ...resumeWait };
+      resumeWait.ms = 200;
+      try {
+        const a = command();
+        await expect(resumeJob(sara.brickId, sara.id, jobId, minutes(10), a)).rejects.toThrow('the server stopped');
+        expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'turn', startDecidedAt: null });
+        held.release();
+        await stale;
+        // The stale write did not land: the new start has no decision on record, and a copy of the Resume stays pending (never a success the start may still turn into a refusal)
+        expect(await jobOf(jobId)).toMatchObject({ startDecidedAt: null });
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true, pending: true } });
+      } finally {
+        held.release();
+        await Promise.allSettled([stale]);
+        Object.assign(resumeWait, old);
+        start.mockRestore();
+        write.mockRestore();
       }
     });
 

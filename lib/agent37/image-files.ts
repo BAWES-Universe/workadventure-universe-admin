@@ -22,7 +22,7 @@
  */
 
 /** Goes up when anything in the image changes; the machine's own set-up (`universe-up`) is redone when it differs from the one it saw. */
-export const IMAGE_SETUP_VERSION = '3';
+export const IMAGE_SETUP_VERSION = '4';
 
 /** The base image. A dated tag is better for reproducible builds; the registered image is pinned by digest at build anyway. */
 export const BASE_IMAGE = 'ghcr.io/agent37-platform/hermes-base';
@@ -120,6 +120,7 @@ fi
 # runs, and a profile that still cannot be removed means the machine is not ready.
 PROFILE_DIR="$HOME_DIR/.config/universe-chromium"
 # Two places: the root-only marks folder (what Orbit's sign-ins command marks in, a folder the agent cannot swap for a link under root) and the agent's own state folder (what universe-clean and an older command mark in)
+# The word on the next line is what Orbit's sign-ins command looks for before it marks anything: a start-up without it does not read the marks folder, and the command refuses on that machine (universe-marks-v1)
 MARKS="/var/lib/universe/marks"
 if [ -e "$MARKS/profile.dirty" ] || [ -L "$MARKS/profile.dirty" ] || [ -e "$STATE/profile.dirty" ]; then
   pkill -x chromium 2>/dev/null
@@ -1126,6 +1127,15 @@ export const UNIVERSE_CLEAN = String.raw`#!/bin/sh
 # proved gone before the profile is deleted, and the parts come back only after the lock is let go.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+# This is the AGENT's command: Orbit runs it as the agent user (never as root). Everything below removes and makes things under the agent's own home, whose folders the agent can swap for a link at any moment, so it must
+# never be done with more rights than the agent has. Started as root it does nothing itself: it hands over to the agent user and runs again there, or, when it cannot, it refuses and has touched nothing (CodeRabbit on #1025, N26)
+if [ "$(id -u)" = "0" ]; then
+  AGENT=node
+  AGENT_HOME="$(getent passwd "$AGENT" | cut -d: -f6)"
+  if [ -n "$AGENT_HOME" ] && [ -f "$0" ] && command -v runuser >/dev/null 2>&1; then exec runuser -u "$AGENT" -- env HOME="$AGENT_HOME" "$0"; fi
+  echo "cleaned=0 reason=root"
+  exit 1
+fi
 HOME_DIR="$HOME"
 [ -n "$HOME_DIR" ] || HOME_DIR=/home/node
 STATE="$HOME_DIR/.universe"

@@ -127,9 +127,9 @@ async function allowedToKeep(botId: string, now: Date, hours: number): Promise<s
  * while the command runs, so a cleanup and this never run at once and a job that starts waits for the browser to be put away first.
  * Waits for a claim another holds; a claim left by a server that stopped is taken over after a while.
  */
-async function withClaim<T>(botId: string, work: (renew: () => Promise<boolean>) => Promise<T>): Promise<T | null> {
+async function withClaim<T>(botId: string, work: (renew: () => Promise<boolean>) => Promise<T>, /** How many times (a quarter second apart) to look for the claim: a best-effort caller gives up sooner. */ looks = 400): Promise<T | null> {
   let claimedAt: Date | null = null;
-  for (let tries = 0; tries < 400 && !claimedAt; tries++) {
+  for (let tries = 0; tries < looks && !claimedAt; tries++) {
     const now = new Date();
     const claim = await prisma.brickComputer.updateMany({
       where: { botId, machine: 'working', OR: [{ cleanClaimedAt: null }, { cleanClaimedAt: { lte: new Date(now.getTime() - CLAIM_STALE_MS) } }] },
@@ -159,9 +159,9 @@ async function withClaim<T>(botId: string, work: (renew: () => Promise<boolean>)
 }
 
 /** Runs one action on the machine as root and reads its answer. A machine that cannot be reached is a failure, never an exception. */
-async function onMachine(machine: Machine, action: SignInsAction, jobId: string, keep: string[], hours: number): Promise<SignInsAnswer> {
+async function onMachine(machine: Machine, action: SignInsAction, jobId: string, keep: string[], hours: number, /** The pause a restore brings back, or a commit is for (N29). */ generation = 0): Promise<SignInsAnswer> {
   try {
-    const done = await machine.provider.exec(machine.ref, signInsCommand(action, jobId, keep, hours), { user: 'root', timeoutMs: COMMAND_MS });
+    const done = await machine.provider.exec(machine.ref, signInsCommand(action, jobId, keep, hours, undefined, generation), { user: 'root', timeoutMs: COMMAND_MS });
     return readSignInsAnswer(action, done.exitCode, done.stdout);
   } catch (error) {
     console.error(`[Computer] Could not ${action} a job’s browser sign-ins:`, error instanceof Error ? error.message : 'unknown');
@@ -305,7 +305,9 @@ async function restoreUnder(machine: Machine, botId: string, jobId: string, pers
   }
   // The claim was stamped before the drop, and a drop can take long: it is renewed before the restore, and the restore does not run when the claim is no longer held (another operation on the browser may have taken it; CodeRabbit on #1025, I5)
   if (!(await renew())) return result('left', 'superseded');
-  const answer = await onMachine(machine, 'restore', jobId, expired || !owner ? keep.filter((id) => id !== jobId) : keep, hours);
+  // The number of the pause this restore brings back goes into the machine's note of it: the commit that follows names the same number (CodeRabbit on #1025, N29)
+  const generation = await pauseNumberOf(jobId);
+  const answer = await onMachine(machine, 'restore', jobId, expired || !owner ? keep.filter((id) => id !== jobId) : keep, hours, generation);
   if (answer.done === 'kept') return result('restored', null, answer);
   if (answer.done === 'none') return result('fresh', expired ? 'expired' : !owner ? 'owner' : 'none');
   return result('failed', answer.reason);
@@ -387,8 +389,10 @@ export async function settleResumedBrowser(jobId: string, botId: string, back: S
     return 'recover';
   }
   const ready = back.state === 'restored' || (back.state === 'fresh' && back.reason === 'shared');
+  // Read before the write that makes the job ready, which holds only while the job's room is this attempt's (no pause in between): the pause the note was made for
+  const generation = await pauseNumberOf(jobId);
   const written = (await writePrep(jobId, ready, fence, now)) && ready;
-  if (written && back.state === 'restored') await commitRestore(botId, jobId);
+  if (written && back.state === 'restored') await commitRestore(botId, jobId, generation);
   return written ? 'ready' : 'recover';
 }
 
@@ -396,13 +400,21 @@ export async function settleResumedBrowser(jobId: string, botId: string, back: S
  * The restore is over for good once the database says the job is ready: the machine's note of it (kept so a retry after a failed ready write never empties the browser that was just put back) is let go. Best effort: a note that
  * stays is removed with the next command that replaces the browser, or by the hours it is kept (CodeRabbit on #1025, I4). Never throws.
  */
-async function commitRestore(botId: string, jobId: string): Promise<void> {
+async function commitRestore(botId: string, jobId: string, generation: number): Promise<void> {
   try {
     const machine = await awakeMachine(botId);
-    if (machine) await onMachine(machine, 'commit', jobId, [], await keepHours());
+    const hours = await keepHours();
+    // Under the same claim every park and restore of the browser runs under, and only while it is still held: a commit never lands in the middle of another operation on the browser (CodeRabbit on #1025, N29). Best effort, so it gives up
+    // after a few looks; the note it leaves is removed by the next command that replaces the browser or by the hours it is kept
+    if (machine) await withClaim(botId, async (renew) => ((await renew()) ? onMachine(machine, 'commit', jobId, [], hours, generation) : null), 20);
   } catch (error) {
     console.error('[Computer] Could not let go of the note of a restored browser:', error instanceof Error ? error.message : 'unknown');
   }
+}
+
+/** The number of the job's last pause (what a restore brings back); 0 when it cannot be read, which no note carries. */
+async function pauseNumberOf(jobId: string): Promise<number> {
+  return (await prisma.computerJob.findUnique({ where: { id: jobId }, select: { pauses: true } }).catch(() => null))?.pauses ?? 0;
 }
 
 /** The emptying a fresh result needs (when it does) and the job's write, with the claim already held. */
@@ -413,8 +425,10 @@ async function settleUnder(under: Under, jobId: string, botId: string, back: Sig
     const wiped = logged('emptied', await wipeUnder(under.machine, botId, jobId, typeof now === 'function' ? now() : now, under.hours, fence));
     ready = wiped.state === 'cleared' || (wiped.state === 'left' && wiped.reason === 'shared');
   }
+  const generation = await pauseNumberOf(jobId);
   const written = (await writePrep(jobId, ready, fence, now)) && ready;
-  if (written && back.state === 'restored') await onMachine(under.machine, 'commit', jobId, [], under.hours);
+  // The claim is renewed before this further command (it has been held since the restore), and the command runs only while it is still ours (CodeRabbit on #1025, N29)
+  if (written && back.state === 'restored' && (await under.renew())) await onMachine(under.machine, 'commit', jobId, [], under.hours, generation);
   return written ? 'ready' : 'recover';
 }
 

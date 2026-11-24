@@ -462,6 +462,15 @@ run('notes to a running job, Activity, and Brick’s door (computers full plan, 
       expect(await pendingNotes(jobId)).toEqual([{ seq: 1, text: 'use 12 March' }]);
     });
 
+    it('refuses a JSON null (and other bodies that are not objects) with a 400: no action is taken (the same family as a malformed Stop; CodeRabbit on #1025, N3)', async () => {
+      const { sara } = await running('d-null');
+      for (const body of ['null', ' null\n', '[]', '1', '"x"', 'true']) {
+        const response = await control(new NextRequest(`http://orbit.test/api/bots/${sara.brickId}/computer-jobs/control`, { method: 'POST', body }), { params: Promise.resolve({ id: sara.brickId }) });
+        expect({ body, status: response.status }).toEqual({ body, status: 400 });
+      }
+      expect(pauseJob).not.toHaveBeenCalled();
+    });
+
     it('refuses a body it does not know (strict): no action is taken', async () => {
       const { sara, jobId } = await running('d-strict');
       const response = await control(new NextRequest(`http://orbit.test/api/bots/${sara.brickId}/computer-jobs/control`, { method: 'POST', body: JSON.stringify({ action: 'pause', personId: sara.uuid, jobId, extra: 1 }) }), { params: Promise.resolve({ id: sara.brickId }) });

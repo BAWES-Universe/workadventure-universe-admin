@@ -1082,11 +1082,15 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { cleanClaimedAt: true } })).toEqual({ cleanClaimedAt: null });
       } finally {
         // Whatever happened, the claim is let go, the readiness is open and the start is joined before the next test
-        await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NULL WHERE "bot_id" = ${sara.brickId}`;
-        a.open();
-        await Promise.allSettled([x]);
-        watch?.stop();
-        spy.mockRestore();
+        // The database write may fail: its rejection is kept (the test fails with it), and the gate, the join and the spies are let go whatever it does (CodeRabbit on #1025, N8)
+        try {
+          await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NULL WHERE "bot_id" = ${sara.brickId}`;
+        } finally {
+          a.open();
+          await Promise.allSettled([x]);
+          watch?.stop();
+          spy.mockRestore();
+        }
       }
     });
 
@@ -1266,11 +1270,15 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { cleanClaimedAt: true } })).toEqual({ cleanClaimedAt: null });
       } finally {
         // Whatever happened, the claim is let go, the readiness is open and the starts are joined before the next test
-        await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NULL WHERE "bot_id" = ${sara.brickId}`;
-        a.open();
-        await Promise.allSettled(started);
-        watch?.stop();
-        spy.mockRestore();
+        // The database write may fail: its rejection is kept (the test fails with it), and the gate, the join and the spies are let go whatever it does (CodeRabbit on #1025, N8)
+        try {
+          await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NULL WHERE "bot_id" = ${sara.brickId}`;
+        } finally {
+          a.open();
+          await Promise.allSettled(started);
+          watch?.stop();
+          spy.mockRestore();
+        }
       }
     });
   });

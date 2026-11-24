@@ -177,9 +177,9 @@ describe('the owner’s calls', () => {
     expect(await reused.json()).toMatchObject({ reason: 'command_reused' });
   });
 
-  it('I2: a Stop body that is there and is not a JSON object is 400 and stops nothing; no body and {} are the Stop as before (CodeRabbit on #1025)', async () => {
+  it('I2 and N3: a Stop body that is there and is not a JSON object (malformed, null, an array, a string, a number) is 400 and stops nothing; no body and {} are the Stop as before (CodeRabbit on #1025)', async () => {
     lib.stopAll.mockResolvedValue({ ok: true, view: { on: true } as never });
-    for (const bad of ['{"confirmedJobIds":', 'nonsense', '[1]', '"x"', '42']) {
+    for (const bad of ['{"confirmedJobIds":', 'nonsense', '[1]', '[]', '1', '"x"', '42', 'null', ' null\n', 'true']) {
       const answer = await stop(new NextRequest('http://localhost:3333/x', { method: 'POST', body: bad }), params);
       expect(answer.status).toBe(400);
     }
@@ -463,6 +463,31 @@ describe('the bot server’s calls', () => {
       lib.earlierUnconfirmedStart.mockClear();
       await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'another' }, headers: { 'X-Computer-Start-Attempt': KEY } }), params);
       expect(lib.earlierUnconfirmedStart).not.toHaveBeenCalled();
+      rules.ownerSpendAllowed.mockResolvedValue({ ok: true });
+    });
+
+    it('N2: a refusal another request decided first is answered with the complete answer on record (the key’s own job included); with none to read it is a retryable 503, never this request’s own refusal', async () => {
+      own();
+      lib.earlierUnconfirmedStart.mockResolvedValue(null as never);
+      rules.ownerSpendAllowed.mockResolvedValue({ ok: false, ruleId: 'r1', why: 'cap', leftMicros: 0, words: 'No more than $1.00 a month' });
+      const ask = () => startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': KEY, 'X-Computer-Start-Acks': '1' } }), params);
+      // Another request made this key's job between this one's look and its refusal: its job is the answer
+      lib.refuseAttempt.mockResolvedValue('decided');
+      lib.storedStartAnswer.mockResolvedValue({ ok: true, job: { id: JOB } });
+      const made = await ask();
+      expect(made.status).toBe(200);
+      expect(await made.json()).toEqual({ ok: true, job: { id: JOB } });
+      expect(lib.storedStartAnswer).toHaveBeenLastCalledWith(BRICK, 'u-sara', KEY);
+      // Nothing can be read for the key: the game asks again
+      lib.storedStartAnswer.mockResolvedValue(null);
+      const none = await ask();
+      expect(none.status).toBe(503);
+      expect(await none.json()).toMatchObject({ retry: true });
+      // The refusal that was stored is the answer, as before
+      lib.refuseAttempt.mockResolvedValue('stored');
+      lib.storedStartAnswer.mockClear();
+      expect(await (await ask()).json()).toMatchObject({ ok: false, reason: 'rule' });
+      expect(lib.storedStartAnswer).not.toHaveBeenCalled();
       rules.ownerSpendAllowed.mockResolvedValue({ ok: true });
     });
 

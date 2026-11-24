@@ -15,7 +15,7 @@ export const OPTIONS = optionsFor;
  * nothing. Answers with the computer as the page shows it.
  * The 0.5 panel sends the tap's command id (header X-Computer-Command, finding 4): it ends only the jobs that were on the computer at the first request, and the same id again ends nothing more. The 0.4.3 game's Stop
  * has none and is answered as before. 400 `command_missing` for an id that is not a uuid, `command_reused` for one used for another control.
- * Round 8, D2: an optional body `{ confirmedJobIds: [ids] }` (the jobs the panel showed when the person confirmed) ends ONLY those that are live and answers `stopped` and `left` beside `computer`; the same command id
+ * Round 8, D2: an optional body `{ confirmedJobIds: [ids] }` (the jobs the panel showed when the person confirmed) ends ONLY those that are live and answers `stopped` and `left` beside `computer` (`left` is the snapshot of the jobs live and outside the set when the command was first dispatched, never a live status); the same command id
  * with another set is 409. With no body, as before (today's snapshot).
  */
 // Only the set is read: any other body the panel sends today (none, `{}`) is answered as before
@@ -25,7 +25,7 @@ export const POST = (request: NextRequest, { params }: { params: Promise<{ id: s
   asOwner(request, params, async (id, ownerId) => {
     const command = commandOf(request);
     if (command === 'invalid') return brickJson(request, { error: COMMAND_MISSING, reason: 'command_missing' }, 400);
-    // No body and `{}` are today's Stop. A body that is there and is not a JSON object is malformed: it is refused, never read as "stop everything", which would end jobs the person did not confirm (CodeRabbit on #1025, I2)
+    // No body and `{}` are today's Stop. A body that is there and is not a JSON object (malformed JSON, `null`, an array, a string or a number) is refused with a 400, never read as "stop everything", which would end jobs the person did not confirm (CodeRabbit on #1025, I2 and N3)
     const text = await request.text().catch(() => null);
     if (text === null) return brickJson(request, { error: 'Invalid input data' }, 400);
     let raw: unknown = null;
@@ -35,7 +35,8 @@ export const POST = (request: NextRequest, { params }: { params: Promise<{ id: s
       } catch {
         return brickJson(request, { error: 'Invalid input data' }, 400);
       }
-      if (raw !== null && (typeof raw !== 'object' || Array.isArray(raw))) return brickJson(request, { error: 'Invalid input data' }, 400);
+      // A JSON `null` is a body that is there and is not an object too: it would reach stopAll with no confirmed set and end every live job (CodeRabbit on #1025, N3)
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return brickJson(request, { error: 'Invalid input data' }, 400);
     }
     const sent = raw !== null && typeof raw === 'object' ? (raw as { confirmedJobIds?: unknown }).confirmedJobIds : undefined;
     let confirmed: string[] | null = null;

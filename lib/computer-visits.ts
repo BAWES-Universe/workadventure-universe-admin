@@ -346,14 +346,21 @@ export interface VisitsView {
 
 /** What the owner sees for one job of theirs, oldest first: where the computer's browser went, with the person's take-overs marked. Null when it is not their job. */
 export async function visitsFor(botId: string, jobId: string): Promise<VisitsView | null> {
-  const job = await prisma.computerJob.findFirst({ where: { id: jobId, botId }, select: { visitsState: true } });
-  if (!job) return null;
-  // Pages and posts are at most VISITS_MAX when kept; the take-over notes have their own bound, so one kind never pushes the other out of the answer
-  const order = [{ at: 'asc' as const }, { id: 'asc' as const }];
-  const [seen, handed] = await Promise.all([
-    prisma.computerJobVisit.findMany({ where: { jobId, kind: { not: 'hands' } }, orderBy: order, take: VISITS_MAX + 1 }),
-    prisma.computerJobVisit.findMany({ where: { jobId, kind: 'hands' }, orderBy: order, take: HANDS_MAX + 1 }),
-  ]);
+  // The state and both sets of rows are read in ONE snapshot: a capture that commits between three separate reads could show `complete` beside the rows of a partial capture (CodeRabbit on #1025, N18)
+  const read = await prisma.$transaction(
+    async (tx) => {
+      const found = await tx.computerJob.findFirst({ where: { id: jobId, botId }, select: { visitsState: true } });
+      if (!found) return null;
+      // Pages and posts are at most VISITS_MAX when kept; the take-over notes have their own bound, so one kind never pushes the other out of the answer
+      const order = [{ at: 'asc' as const }, { id: 'asc' as const }];
+      const seenRows = await tx.computerJobVisit.findMany({ where: { jobId, kind: { not: 'hands' } }, orderBy: order, take: VISITS_MAX + 1 });
+      const handedRows = await tx.computerJobVisit.findMany({ where: { jobId, kind: 'hands' }, orderBy: order, take: HANDS_MAX + 1 });
+      return { job: found, seen: seenRows, handed: handedRows };
+    },
+    { isolationLevel: 'RepeatableRead' },
+  );
+  if (!read) return null;
+  const { job, seen, handed } = read;
   const truncated = seen.length > VISITS_MAX || handed.length > HANDS_MAX;
   const rows = [...seen.slice(0, VISITS_MAX), ...handed.slice(0, HANDS_MAX)].sort((a, b) => a.at.getTime() - b.at.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const kept = job.visitsState === 'complete' || job.visitsState === 'partial' || job.visitsState === 'unread' || job.visitsState === 'none' ? job.visitsState : null;

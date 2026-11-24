@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
-import { ackStart, computerView, earlierUnconfirmedStart, refuseAttempt, registerStart, retireStartKey, startAnsweredBefore, startJob, startKeyHasJob, startedJobFor, type Registration } from '@/lib/computer';
+import { ackStart, computerView, earlierUnconfirmedStart, refuseAttempt, registerStart, retireStartKey, startAnsweredBefore, startJob, startKeyHasJob, startedJobFor, storedStartAnswer, type Registration } from '@/lib/computer';
 import { ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { startStateOf } from '@/lib/computer-values';
 import { ownerSpendAllowed } from '@/lib/spend-rules';
@@ -213,8 +213,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         // be allowed by the rule by then and start a job, so this is not a terminal answer; the game asks again (CodeRabbit on #1025)
         if (kept === 'failed') return NextResponse.json({ error: 'Could not keep the answer, ask again', retry: true }, { status: 503 });
         if (kept === 'decided') {
-          const decided = await startAnsweredBefore(key.id, key.personId, key.startKey);
-          if (decided) return NextResponse.json(startAnswerBody(decided));
+          // The complete answer on record, the key's own job included (another request may have made it since this one looked): never this request's local refusal for a key that has a job, and when nothing can be read, a retry (CodeRabbit on #1025, N2)
+          const decided = await storedStartAnswer(key.id, key.personId, key.startKey);
+          if (decided) return NextResponse.json(decided);
+          return NextResponse.json({ error: 'Could not read the answer on record, ask again', retry: true }, { status: 503 });
         }
       }
       return NextResponse.json(body);

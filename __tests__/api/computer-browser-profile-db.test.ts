@@ -36,6 +36,8 @@ interface Sent {
   user: string | undefined;
 }
 let sent: Sent[] = [];
+/** The pause number each command carried ("action:number"), kept apart from `sent` (N29). */
+let numbers: string[] = [];
 /** What the pretend machine answers for each action (the command's own answer line). */
 let answers: Record<string, string> = {};
 /** Run when the machine is sent a command, before it answers: a test uses it to let something else happen WHILE the command runs. */
@@ -88,12 +90,14 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
     provider = new FakeComputerProvider();
     setComputerProviderForTests(provider);
     sent = [];
+    numbers = [];
     during = null;
     answers = { park: 'parked=1 cookies=4 pages=2', restore: 'restored=1 cookies=4 pages=2', drop: 'dropped=1', clear: 'cleared=1', prune: 'pruned=1', commit: 'committed=1' };
     const exec = provider.exec.bind(provider);
     jest.spyOn(provider, 'exec').mockImplementation(async (ref: string, command: string, options?: ExecOptions) => {
       const action = /ACTION="([a-z]+)"/.exec(command)?.[1] ?? '?';
       sent.push({ action, ref, job: /JOB="([^"]*)"/.exec(command)?.[1] ?? '', keep: (/KEEP="([^"]*)"/.exec(command)?.[1] ?? '').split(' ').filter(Boolean), user: options?.user });
+      numbers.push(`${action}:${/GEN="([^"]*)"/.exec(command)?.[1] ?? '?'}`);
       provider.execAnswer = () => ({ stdout: `${answers[action] ?? ''}\n` });
       if (during) await during(action);
       return exec(ref, command);
@@ -829,8 +833,11 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       let both: Promise<Array<{ looked: number; ready: number }>> | undefined;
       try {
         // Both have read the job (it is `recover`) and both stand at the claim
-        both = Promise.all([recoverResumedBrowsers(minutes(1)), recoverResumedBrowsers(minutes(1))]);
-        await waitUntilBlockedBy(hold.pid, 2, both);
+        // Each sweep is watched on its own: one that ends before it blocks is reported as that, not as a generic timeout of the pair (CodeRabbit on #1025, N7)
+        const first = recoverResumedBrowsers(minutes(1));
+        const second = recoverResumedBrowsers(minutes(1));
+        both = Promise.all([first, second]);
+        await waitUntilBlockedBy(hold.pid, 2, first, second);
         await hold.done();
         const answers2 = await both;
         // One restore, once: the second sweep did not send another (which would have found nothing parked, emptied the live browser, and lost the restored sign-ins)
@@ -1126,10 +1133,83 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       // The ready write does not land (the job is no longer in the state the attempt read): no commit, so a retry still finds the note and keeps the browser
       expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW, undefined, 'recover')).toBe('recover');
       expect(sent.map((one) => one.action)).toEqual(['restore']);
-      // Landed: committed once
+      // Landed: committed once, and the ready write had landed when the machine was told: the job's `prep_state` is read at the moment `commit` arrives (a commit sent before the write could leave the note gone with the write failing, and a
+      // retry would then empty the browser just restored) (CodeRabbit on #1025, N22)
+      const atCommit: Array<string | null> = [];
+      during = async (action) => {
+        if (action === 'commit') atCommit.push((await prepOf(visa.id)).prepState);
+      };
       expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW)).toBe('ready');
+      expect(atCommit).toEqual([null]);
       expect(sent.map((one) => one.action)).toEqual(['restore', 'commit']);
       expect(sent[1]).toMatchObject({ job: visa.id, user: 'root' });
+    });
+
+    it('N29: the restore and its commit carry the number of the pause they belong to, and the commit runs under the machine’s claim', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring' } });
+      const back = await restoreProfile(sara.brickId, visa.id, NOW);
+      const claimAtCommit: Array<Date | null> = [];
+      during = async (action) => {
+        if (action === 'commit') claimAtCommit.push((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).cleanClaimedAt);
+      };
+      expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW)).toBe('ready');
+      expect(numbers).toEqual(['restore:1', 'commit:1']);
+      expect(claimAtCommit).toHaveLength(1);
+      expect(claimAtCommit[0]).not.toBeNull();
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).cleanClaimedAt).toBeNull();
+    });
+
+    it('N29: a commit whose ready write was held across a newer pause of the job still names the pause its own restore brought back', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring' } });
+      const back = await restoreProfile(sara.brickId, visa.id, NOW);
+      const real = prisma.computerJob.updateMany.bind(prisma.computerJob);
+      let release: () => void = () => undefined;
+      let reached: () => void = () => undefined;
+      const atWrite = new Promise<void>((resolve) => { reached = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const hold = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation(((args: { data?: Record<string, unknown> }) => {
+        if (args?.data && args.data.prepState === null) {
+          reached();
+          return gate.then(() => real(args as never));
+        }
+        return real(args as never);
+      }) as never);
+      let settling: Promise<unknown> = Promise.resolve();
+      try {
+        settling = settleResumedBrowser(visa.id, sara.brickId, back, NOW);
+        await atWrite;
+        // While the ready write is held the job is paused and restored again: its number is now 2
+        await prisma.computerJob.update({ where: { id: visa.id }, data: { pauses: 2 } });
+        release();
+        expect(await settling).toBe('ready');
+        expect(numbers).toEqual(['restore:1', 'commit:1']);
+      } finally {
+        release();
+        await Promise.allSettled([settling]);
+        hold.mockRestore();
+      }
+    });
+
+    it('N29: the sweep renews its claim before the commit command and sends none when the claim was taken over (the job is ready; its note is let go later)', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'recover', reservationKey: 'room-1' } });
+      resetRecoveryCursorForTests();
+      // Another holder takes the claim over while the restore command runs
+      during = async (action) => {
+        if (action === 'restore') await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { cleanClaimedAt: new Date(Date.now() + 1000) } });
+      };
+      expect(await recoverResumedBrowsers(minutes(1))).toMatchObject({ looked: 1, ready: 1 });
+      expect(sent.map((one) => one.action)).toEqual(['restore']);
+      expect(await prepOf(visa.id)).toMatchObject({ prepState: null });
+      resetRecoveryCursorForTests();
     });
 
     it('I4: a browser that was emptied (fresh) has no note to let go of: nothing is committed', async () => {

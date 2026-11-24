@@ -112,3 +112,39 @@ export function commandOf(request: Request): Command | null | 'invalid' {
   const parsed = commandIdSchema.safeParse(raw.trim());
   return parsed.success ? { id: parsed.data.toLowerCase() } : 'invalid';
 }
+
+/**
+ * What a Resume came to, from a job as it stands and the pause number its command was taken at (CodeRabbit on #1025, N1): the refusal its month or a limit made of the start, a browser that could not be settled, or success.
+ * A job that has been paused again since the command was taken (more pauses than the command's stretch) has run: only a job that held the machine is paused with a number, so the command's own start succeeded and a
+ * later pause's reason is never its answer.
+ */
+export function resumeOutcomeFrom(job: { status: string; queuedFor: string | null; pausedWhy: string | null; prepState: string | null; pauses: number } | null, stretch: number | null): StoredOutcome {
+  if (job && stretch !== null && job.pauses > stretch) return { ok: true };
+  if (job?.status === 'queued' && job.queuedFor === 'paused' && (job.pausedWhy === 'allowance' || job.pausedWhy === 'rule')) return { ok: false, reason: job.pausedWhy };
+  if (job?.prepState !== null && job?.prepState !== undefined) return { ok: false, reason: 'not_ready' };
+  return { ok: true };
+}
+
+/**
+ * Called, under the job's lock, by every write that takes a job out of `paused` (a Resume, a carry-on of the month or a limit): the Resumes of this job still pending (taken earlier, their request stopped before it kept an answer)
+ * are settled NOW from the job as it stands, before the write changes it. A later start then never decides them: a pending Resume only ever answers its own start, never the one a newer Resume or a carry-on makes
+ * (CodeRabbit on #1025, N1). Written once: an answer that was already kept stays.
+ */
+export async function settlePendingResumesIn(tx: Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>, jobId: string, except: string | null = null): Promise<number> {
+  const pending = await tx.$queryRaw<Array<{ command_id: string; stretch: number | null; status: string; queued_for: string | null; paused_why: string | null; prep_state: string | null; pauses: number }>>`
+    SELECT c."command_id", c."stretch", j."status", j."queued_for", j."paused_why", j."prep_state", j."pauses"
+    FROM "computer_job_commands" c JOIN "computer_jobs" j ON j."id" = c."job_id"
+    WHERE c."job_id" = ${jobId} AND c."kind" IN ('resume', 'first') AND c."outcome"->>'pending' = 'true' AND c."outcome"->'targets' IS NULL AND (${except}::text IS NULL OR c."command_id" <> ${except}::uuid)`;
+  let settled = 0;
+  for (const row of pending) {
+    const outcome = resumeOutcomeFrom({ status: row.status, queuedFor: row.queued_for, pausedWhy: row.paused_why, prepState: row.prep_state, pauses: row.pauses }, row.stretch);
+    settled += await tx.$executeRaw`UPDATE "computer_job_commands" SET "outcome" = ${JSON.stringify(outcome)}::jsonb WHERE "command_id" = ${row.command_id}::uuid AND "outcome"->>'pending' = 'true'`;
+  }
+  return settled;
+}
+
+/** The pause number a command was taken at (its `stretch`): null for a command that has none. */
+export async function stretchOfCommand(command: Command): Promise<number | null> {
+  const rows = await prisma.$queryRaw<Array<{ stretch: number | null }>>`SELECT "stretch" FROM "computer_job_commands" WHERE "command_id" = ${command.id}::uuid`;
+  return rows[0]?.stretch ?? null;
+}
