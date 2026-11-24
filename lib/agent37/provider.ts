@@ -578,8 +578,9 @@ export class Agent37ComputerProvider implements ComputerProvider {
   }
 
   /**
-   * One piece of the list. Reading changes nothing, so a piece that failed (Agent37 busy or not reached, a lost answer, a short or cut answer) is asked again up to `LIST_TRIES` times, each ask with
-   * its own name, which makes Agent37 run it again; an ask that is sent again after a lost answer carries the same name, so Agent37 returns its first answer instead of running it twice.
+   * One piece of the list. Reading changes nothing, so a piece that failed is asked again, up to `LIST_TRIES` times, each ask under a name of its own (so Agent37 runs it again). The client itself
+   * repeats a command under the same name only for an answer that says "try again" (429, 502, 503, 504), and Agent37 then returns the first answer instead of running it twice. A timeout, a lost
+   * answer (Agent37 not reached), or a short, cut or failed answer is handled here, by the ask under a new name.
    */
   private async readPiece(ref: string, transfer: string, at: number, want: number): Promise<string> {
     let last: unknown = null;
@@ -663,9 +664,10 @@ export class Agent37ComputerProvider implements ComputerProvider {
 
   /**
    * Sends a list to the computer in pieces of at most `LIST_SEND_PIECE` characters (plain ASCII, so the cut is never inside a character). Null when a piece was not taken exactly as sent, after
-   * the whole send was started again from the first piece up to `LIST_TRIES` times (safe: the first piece makes the file new, so a late piece of an earlier try can only append to the file that
-   * was removed). Every piece has a name of its own in its try, so a command that is sent again after a lost answer returns the first answer instead of running twice. A failure that is not a
-   * refusal (Agent37 not reached on every try) is thrown, as for any other command on the computer.
+   * the whole send was started again from the first piece up to `LIST_TRIES` times, each try under a new transfer id. Every piece has a name of its own, so the client's repeat of a command after
+   * an answer of "try again" (429, 502, 503, 504) returns the first answer instead of running it twice; a timeout or a lost answer (Agent37 not reached) is not repeated by the client and ends the
+   * try, and the next try starts from offset 0. A late piece of an earlier try can still arrive after a new try began: it is refused when it is not at the end of the file (`out_of_order`), and
+   * whatever lands, `finish` checks the file's length and SHA-256 and refuses it otherwise. A failure that is not a refusal on every try is thrown, as for any other command on the computer.
    */
   private async sendList(ref: string, outside: OutsideManifest): Promise<{ bytes: number; sha256: string } | null> {
     const text = asciiJson(outside);

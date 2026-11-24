@@ -561,6 +561,47 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     expect(cold(w, 'list-put 0', w.fsB, 'caf\u00e9\n').stdout).toMatch(/listput=0 reason=usage/);
   });
 
+  it('slices that arrive together at the same offset: exactly one is taken, the others are refused, and the file holds only the one that was taken', async () => {
+    const w = world();
+    const file = path.join(w.fsB, 'usr/local/share/universe/cold/list.json');
+    for (let round = 0; round < 6; round++) {
+      expect(cold(w, 'list-put 0', w.fsB, 'aaaa\n').stdout).toBe('listput=1 size=4\n');
+      const answers = await Promise.all(Array.from({ length: 10 }, (_, i) => new Promise<string>((resolve) => {
+        const child = spawn('python3', [script, 'list-put', '4'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, UNIVERSE_COLD_HOME: w.home, UNIVERSE_COLD_FS: w.fsB } });
+        let out = '';
+        child.stdout.on('data', (chunk) => (out += chunk));
+        child.on('close', () => resolve(out));
+        child.stdin.end(`${String(i).repeat(50)}\n`);
+      })));
+      const taken = answers.filter((answer) => answer === 'listput=1 size=54\n');
+      expect(taken).toHaveLength(1);
+      expect(answers.filter((answer) => /listput=0 reason=out_of_order/.test(answer))).toHaveLength(9);
+      const held = fs.readFileSync(file, 'utf8');
+      expect(held).toHaveLength(54);
+      expect(/^aaaa(\d)\1{49}$/.test(held)).toBe(true);
+    }
+  });
+
+  it('a slice waits while another holds the file (the lock is taken before the length is read, which is what closes the gap between the check and the write)', async () => {
+    const w = world();
+    const file = path.join(w.fsB, 'usr/local/share/universe/cold/list.json');
+    expect(cold(w, 'list-put 0', w.fsB, 'aaaa\n').stdout).toBe('listput=1 size=4\n');
+    // Another writer holds the file for 1.5 seconds
+    const holder = spawn('python3', ['-c', 'import fcntl,sys,time\nf=open(sys.argv[1],"ab")\nfcntl.flock(f,fcntl.LOCK_EX)\nprint("held",flush=True)\ntime.sleep(1.5)', file]);
+    await new Promise<void>((resolve) => holder.stdout.once('data', () => resolve()));
+    const began = Date.now();
+    const answer = await new Promise<string>((resolve) => {
+      const child = spawn('python3', [script, 'list-put', '4'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, UNIVERSE_COLD_HOME: w.home, UNIVERSE_COLD_FS: w.fsB } });
+      let out = '';
+      child.stdout.on('data', (chunk) => (out += chunk));
+      child.on('close', () => resolve(out));
+      child.stdin.end('bbbb\n');
+    });
+    expect(Date.now() - began).toBeGreaterThan(1000);
+    expect(answer).toBe('listput=1 size=8\n');
+    holder.kill();
+  });
+
   const finishFrom = (w: World, text: string) => cold(w, 'finish', w.fsB, JSON.stringify({ outside_file: { bytes: text.length, sha256: sha(text) } }));
 
   it('finish refuses a list that is not the length and SHA-256 it was told, puts nothing back, and removes the file', () => {

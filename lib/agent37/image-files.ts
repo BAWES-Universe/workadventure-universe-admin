@@ -1214,7 +1214,7 @@ find . -maxdepth 5 \( -path './.*' -o -name node_modules -o -name __pycache__ \)
  *   universe-cold list-put OFFSET           (root)  appends a slice (standard input) to a root-only file on this computer, so a list too big for one command can be sent in pieces; finish reads it
  */
 export const UNIVERSE_COLD = String.raw`#!/usr/bin/env python3
-import errno, hashlib, json, os, pwd, re, shutil, stat as statmod, subprocess, sys, tarfile, threading, urllib.request
+import errno, fcntl, hashlib, json, os, pwd, re, shutil, stat as statmod, subprocess, sys, tarfile, threading, urllib.request
 
 try:
     NODE = pwd.getpwnam("node")
@@ -1480,6 +1480,8 @@ def list_put():
         finally:
             os.close(folder)
         with os.fdopen(fd, "wb") as handle:
+            # One slice at a time on this file: two that arrive together at the same offset are told apart here (the second finds the file longer and is refused), not at the write
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             info = os.fstat(handle.fileno())
             # Only the next slice is taken: a repeat of one that already arrived, or one that skips ahead, is refused and the sender starts again
             if not statmod.S_ISREG(info.st_mode) or info.st_size != offset:
