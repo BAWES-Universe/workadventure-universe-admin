@@ -21,9 +21,11 @@ import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { machineDoesSignIns } from '../helpers/working-signins';
 import { seedGiveBackLimits, clearGiveBackLimits } from '../helpers/give-back-limits';
-import { controlInternals, giveComputer, startJob } from '@/lib/computer';
+import { controlInternals, giveComputer, notStartedYet, startJob } from '@/lib/computer';
 import { cancelJob, pauseJob } from '@/lib/computer-job-controls';
+import { getSessionUser } from '@/lib/auth-session';
 import { POST as CONTROL } from '@/app/api/bots/[id]/computer-jobs/control/route';
+import { POST as PANEL } from '@/app/api/bricks/[id]/computer/jobs/[jobId]/cancel/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -167,10 +169,99 @@ run('cancel guard: a Cancel told "not started" never ends a job that started, in
       expect(await jobOf(b)).toMatchObject({ status: 'stopped', endedBy: 'person' });
     });
 
+    it('THE WRITE ITSELF: the job starts and is paused between the ending\'s own read and its write: not ended (the WHERE guard)', async () => {
+      const { sara, a, b } = await lineOf2('g-write-itself');
+      const real = prisma.computerJob.findUnique.bind(prisma.computerJob);
+      let armed = true;
+      jest.spyOn(prisma.computerJob, 'findUnique').mockImplementation((async (args: { where?: { id?: string }; select?: unknown }) => {
+        const row = await real(args as never);
+        // endJob's own read (no select): the row it returns is the stale one, the job moves before the write
+        if (armed && args?.where?.id === b && !args.select) {
+          armed = false;
+          await cancelJob(sara.brickId, sara.id, a, minutes(3));
+          expect((await real({ where: { id: b } }))?.status).toBe('running');
+          expect(await pauseJob(sara.brickId, sara.id, b, minutes(4))).toMatchObject({ ok: true });
+        }
+        return row;
+      }) as never);
+      expect(await cancelJob(sara.brickId, sara.id, b, minutes(5), undefined, 'not_started')).toEqual({ ok: false, reason: 'started' });
+      jest.restoreAllMocks();
+      expect(await jobOf(b)).toMatchObject({ status: 'queued', queuedFor: 'paused', endedBy: null });
+    });
+
+    it('a refusal found AFTER the command was claimed is kept: the job ends later and a retry of the same id still answers started', async () => {
+      const { sara, a, b } = await lineOf2('r-kept-after-claim');
+      const command = randomUUID();
+      inTheGap(async () => {
+        await cancelJob(sara.brickId, sara.id, a, minutes(3));
+      });
+      expect(await control(sara, { action: 'cancel', jobId: b, expected: 'not_started' }, command)).toEqual({ status: 200, body: { ok: false, reason: 'started' } });
+      jest.restoreAllMocks();
+      await cancelJob(sara.brickId, sara.id, b, minutes(5));
+      expect(await control(sara, { action: 'cancel', jobId: b, expected: 'not_started' }, command)).toEqual({ status: 200, body: { ok: false, reason: 'started' } });
+    });
+
+    it('notStartedYet: each field on its own means started (the game\'s hasStarted)', () => {
+      const base = { status: 'queued', queuedFor: null as string | null, pauses: 0 as number | null, stepDone: 0 };
+      expect(notStartedYet(base)).toBe(true);
+      expect(notStartedYet({ ...base, status: 'running' })).toBe(false);
+      expect(notStartedYet({ ...base, queuedFor: 'paused' })).toBe(false);
+      expect(notStartedYet({ ...base, pauses: 1 })).toBe(false);
+      expect(notStartedYet({ ...base, stepDone: 1 })).toBe(false);
+      expect(notStartedYet({ ...base, pauses: null })).toBe(true);
+    });
+
     it('a job that ended already is `over`, not `started`', async () => {
       const { sara, b } = await lineOf2('g-over');
       await cancelJob(sara.brickId, sara.id, b, minutes(2));
       expect(await cancelJob(sara.brickId, sara.id, b, minutes(3), undefined, 'not_started')).toEqual({ ok: false, reason: 'over' });
+    });
+  });
+
+  describe('the person\'s own panel route (/api/bricks/:id/computer/jobs/:jobId/cancel)', () => {
+    const panel = async (sara: Person, jobId: string, body?: string, command: string = randomUUID()) => {
+      jest.mocked(getSessionUser).mockResolvedValue({ id: sara.id } as never);
+      const res = await PANEL(
+        new NextRequest(`http://orbit.test/api/bricks/${sara.brickId}/computer/jobs/${jobId}/cancel`, { method: 'POST', ...(body === undefined ? {} : { body }), headers: { 'x-computer-command': command } }),
+        { params: Promise.resolve({ id: sara.brickId, jobId }) },
+      );
+      return { status: res.status, body: await res.json() };
+    };
+
+    it('a Cancel with `expected: not_started` on a job that started is 409 `started`, nothing is cancelled, and a retry of the same command answers the same', async () => {
+      const { sara, a } = await lineOf2('p-started');
+      const command = randomUUID();
+      const first = await panel(sara, a, JSON.stringify({ expected: 'not_started' }), command);
+      expect(first.status).toBe(409);
+      expect(first.body).toMatchObject({ reason: 'started' });
+      expect((await panel(sara, a, JSON.stringify({ expected: 'not_started' }), command)).status).toBe(409);
+      expect(await jobOf(a)).toMatchObject({ status: 'running', endedBy: null });
+    });
+
+    it('THE GAP through the panel: a job in line starts after the person was asked and before the cancel lands: 409 `started`, it keeps running', async () => {
+      const { sara, a, b } = await lineOf2('p-gap');
+      inTheGap(async () => {
+        await cancelJob(sara.brickId, sara.id, a, minutes(3));
+        expect(await jobOf(b)).toMatchObject({ status: 'running' });
+      });
+      const answer = await panel(sara, b, JSON.stringify({ expected: 'not_started' }));
+      expect(answer.status).toBe(409);
+      expect(answer.body).toMatchObject({ reason: 'started' });
+      expect(await jobOf(b)).toMatchObject({ status: 'running', endedBy: null });
+    });
+
+    it('a job still waiting in line is cancelled with it; without a body the Cancel is as it always was, even on a job that holds the machine', async () => {
+      const { sara, a, b } = await lineOf2('p-plain');
+      expect((await panel(sara, b, JSON.stringify({ expected: 'not_started' }))).status).toBe(200);
+      expect(await jobOf(b)).toMatchObject({ status: 'stopped', endedBy: 'person' });
+      expect((await panel(sara, a)).status).toBe(200);
+      expect(await jobOf(a)).toMatchObject({ status: 'stopped', endedBy: 'person' });
+    });
+
+    it('a body Orbit does not understand is a 400, never a plain cancel', async () => {
+      const { sara, a } = await lineOf2('p-bad');
+      for (const body of ['{"expected":"running"}', '{"expected":null}', '{"expected":"not_started","x":1}', '{not json', '[]']) expect((await panel(sara, a, body)).status).toBe(400);
+      expect(await jobOf(a)).toMatchObject({ status: 'running' });
     });
   });
 
