@@ -14,6 +14,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { saveServerLimits } from '@/lib/bot-limits';
+import { isMarkCommand } from '@/lib/computer-fence-script';
 import { FakeComputerProvider, setComputerProviderForTests, type ExecOptions } from '@/lib/computer-provider';
 import { clearParkPending, dropProfile, finishParkOf, finishPendingParks, resetPendingCursorForTests, resetRecoveryCursorForTests, needsSignInAgain, parkProfile, parkWorthWaitingFor, recoverResumedBrowsers, resetSignInsSweepForTests, restoreProfile, settlePark, settleResumedBrowser, signInsKept, sweepPausedSignIns, wipeLiveProfile } from '@/lib/computer-browser-profile';
 
@@ -95,6 +96,11 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
     answers = { park: 'parked=1 cookies=4 pages=2', restore: 'restored=1 cookies=4 pages=2', drop: 'dropped=1', clear: 'cleared=1', prune: 'pruned=1', commit: 'committed=1' };
     const exec = provider.exec.bind(provider);
     jest.spyOn(provider, 'exec').mockImplementation(async (ref: string, command: string, options?: ExecOptions) => {
+      // The parts the fence keeps are read again after a command that restarts the browser: that is not one of the sign-ins commands this file counts
+      if (isMarkCommand(command)) {
+        provider.execAnswer = () => ({});
+        return exec(ref, command);
+      }
       const action = /ACTION="([a-z]+)"/.exec(command)?.[1] ?? '?';
       sent.push({ action, ref, job: /JOB="([^"]*)"/.exec(command)?.[1] ?? '', keep: (/KEEP="([^"]*)"/.exec(command)?.[1] ?? '').split(' ').filter(Boolean), user: options?.user });
       numbers.push(`${action}:${/GEN="([^"]*)"/.exec(command)?.[1] ?? '?'}`);
@@ -122,6 +128,27 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       expect(sent).toEqual([{ action: 'park', ref: `fake-${sara.brickId}`, job: visa.id, keep: [visa.id], user: 'root' }]);
       expect(provider.commands[0].ref).toBe(`fake-${sara.brickId}`);
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).cleanClaimedAt).toBeNull();
+    });
+
+    it('reads the computer’s own parts again after a command that starts a browser (park), saves them for the fence, and not after a command that starts none (drop)', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const mark = provider.markOf(`fake-${sara.brickId}`);
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { markBootId: mark.bootId, markTicks: BigInt(500), markParts: [], markRunners: [] } });
+      provider.parts = [{ pid: 61, start: 7000, kind: 'part' }];
+      const visa = await job(sara, { pausedMinutesAgo: 0 });
+      expect(await parkProfile(sara.brickId, visa.id, NOW)).toMatchObject({ state: 'parked' });
+      const row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+      expect(row.markParts).toEqual([{ pid: 61, start: 7000, kind: 'part' }]);
+      // the clock reading is the first one: only the list moves
+      expect(row.markTicks).toBe(BigInt(500));
+      expect(provider.commands.filter((entry) => isMarkCommand(entry.command))).toHaveLength(1);
+      // A drop starts no browser: nothing is read
+      provider.commands.length = 0;
+      provider.parts = [];
+      await dropProfile(sara.brickId, visa.id, NOW);
+      expect(provider.commands.filter((entry) => isMarkCommand(entry.command))).toHaveLength(0);
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).markParts).toEqual([{ pid: 61, start: 7000, kind: 'part' }]);
     });
 
     it('does nothing for a job of another Brick, a job that is not paused, or a job paused while it waited in line', async () => {
