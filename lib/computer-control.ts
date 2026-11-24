@@ -28,10 +28,10 @@ export type Transition = 'fencing' | 'returning';
 /** Tunable only so tests need not wait in real time. */
 export const CONTROL_TIMING = {
   /**
-   * How long a leader holds a transition before another request may finish it. A leader pushes its lease on at every step it takes (the fence asks `renewTransition` before each look, each
-   * command and each try) and about every 30 seconds while it waits for the clean or files claim (those waits may last about 3 and 4 minutes, longer than this lease together), so the lease
-   * only has to outlast the longest single step: one 30 s command, one 30 s stretch of waiting, or a stop. A leader that is slower than that, or whose server stopped, is taken over by the next
-   * request, and one that learns it lost the transition sends nothing more (the fence answers `lost`).
+   * How long a leader holds a transition before another request may finish it. A leader pushes its lease on (`renewTransition`, through the fence's `stillLeader`) before each try of the fence
+   * and about every 30 seconds while it waits for the clean or files claim (those waits may last about 3 and 4 minutes, longer than this lease together). The longest gap between two renewals is
+   * one try of the fence: two commands of 30 s each, about 60 s, or the stop after the last try; the lease only has to outlast that. A leader that is slower than that, or whose server stopped, is
+   * taken over by the next request, and one that learns it lost the transition sends nothing more (the fence answers `lost`).
    */
   leaseMs: 5 * 60 * 1000,
   /** How long a request that joins a transition waits for it before it says it is still going. */

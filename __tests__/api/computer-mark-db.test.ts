@@ -253,21 +253,29 @@ run('the take-over fence’s mark, held by Orbit', () => {
       expect(fake.commands.filter((entry) => isFenceCommand(entry.command)).length).toBe(2);
     });
 
-    it('a leader that waits for a claim renews its lease while it waits, and sends nothing once it learns it lost the transition (Sentry on #1033)', async () => {
+    const leaderLosesWhileWaiting = async (claims: { cleanClaimedAt: Date | null; filesClaimedAt: Date | null }) => {
       fake.parts = [PART];
       const { sara } = await running();
-      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { cleanClaimedAt: new Date(), filesClaimedAt: new Date() } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: claims });
       setLeaderRenewTriesForTests(2);
       try {
         let asked = 0;
         fake.commands.length = 0;
-        // The lease is renewed twice while the claims are held, then the transition is another leader's
+        // The lease is renewed three times (the first look and twice while the claim is held), then the transition is another leader's
         expect(await fenceMachine(sara.brickId, async () => ++asked <= 3)).toBe('lost');
         expect(asked).toBeGreaterThanOrEqual(4);
         expect(fake.commands.filter((entry) => isFenceCommand(entry.command))).toEqual([]);
       } finally {
         setLeaderRenewTriesForTests(null);
       }
+    };
+
+    it('a leader that waits for the clean claim renews its lease while it waits, and sends nothing once it learns it lost the transition (Sentry on #1033)', async () => {
+      await leaderLosesWhileWaiting({ cleanClaimedAt: new Date(), filesClaimedAt: null });
+    });
+
+    it('a leader that waits for the files claim does the same (each wait renews on its own: only that claim is held here)', async () => {
+      await leaderLosesWhileWaiting({ cleanClaimedAt: null, filesClaimedAt: new Date() });
     });
 
     it('a files claim a stopped server left (older than a hand-over can run) is not waited for', async () => {
