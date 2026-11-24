@@ -6,6 +6,7 @@ import { Agent37Client, Agent37Error, Agent37Unreached, TurnNotSent, type Instan
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros, restingMicrosPerMinute } from '@/lib/agent37/rates';
 import { deleteSavedCopy, savedCopyOf, storeSavedCopy, type SavedCopyInfo } from '@/lib/agent37/saved-copies';
 import { ensureImage, imageReady, type ImageState } from '@/lib/agent37/image';
+import { UNIVERSE_COLD } from '@/lib/agent37/image-files';
 
 /**
  * A Brick's computer on Agent37 (game #2000): the real provider behind the interface Universe already uses.
@@ -42,6 +43,8 @@ export const WATCH_LINK_SECONDS = 60;
 
 /** A resting machine wakes in 5 to 15 seconds, a cold one in about two minutes, and its health answers 502 for a few seconds more. */
 const READY_WITHIN_MS = 4 * 60_000;
+/** Where the current `universe-cold` is put on a machine before a pack-away (a root-only folder the file scan skips, next to the list). */
+const COLD_SCRIPT = '/usr/local/share/universe/cold/universe-cold';
 const POLL_MS = 3_000;
 /** A copy saved this long before the machine went to sleep, or later, is the machine as it was left. */
 const FRESH_COPY_MS = 5 * 60_000;
@@ -313,7 +316,11 @@ export class Agent37ComputerProvider implements ComputerProvider {
    * not), it is moved to the image's current revision when it was made from an older one (its files are kept), and its Agent37 managed budget is read
    * back and must be zero in both parts (`budgetClosed`). A rule or a budget that cannot be put right means the machine is not handed to anything.
    */
-  private async settle(ref: string): Promise<Instance> {
+  /**
+   * Puts a machine in order: its network rule, its image revision and its budget. With `update: false` it is never moved to another image (only the rule and the budget are set): a
+   * pack-away must look at the machine as the agent left it, and an image update may replace the disk outside the home folder, or move the build marker so that what was added before it is not seen.
+   */
+  private async settle(ref: string, options: { update?: boolean } = {}): Promise<Instance> {
     const state = this.image ? await this.image() : null;
     let instance = await this.client.getInstance(ref);
     // Only a rule Agent37 says is already ours is left alone: one it does not say, or another one, is set again (asking again is safe)
@@ -325,7 +332,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
       }
     }
     const behind = state && imageReady(state) && state.revision !== null && typeof instance.template_revision === 'number' && instance.template_revision < state.revision;
-    if (behind) {
+    if (behind && options.update !== false) {
       await this.client.updateInstance(ref);
       instance = await this.untilHealthy(ref, instance.url);
     }
@@ -508,14 +515,15 @@ export class Agent37ComputerProvider implements ComputerProvider {
   /**
    * Runs `universe-cold prepack` as root: what the computer holds outside its home folder (changed files, added software) is copied into the home
    * folder so one copy carries it, and the home folder is counted. A computer that holds more outside than can be carried says so (`blocked`) and is
-   * not packed away: nothing is thrown away to make a copy fit. The machine is settled first (moved to the image's current revision), so it runs the current script.
+   * not packed away: nothing is thrown away to make a copy fit. The machine is settled for its network rule and budget only and NEVER moved to another image (an update may replace the disk
+   * outside the home folder, or move the build marker so that what was added before it is left out of the list). A computer made from an older image has an older `universe-cold` that prints no list,
+   * so Orbit sends the current script to it (`installCold`) and runs that one.
    */
   async prepack(ref: string): Promise<PackInventory> {
     const unpacked = (blocked: string): PackInventory => ({ homeFiles: 0, homeBytes: 0, outsideFiles: 0, outsideBytes: 0, packages: [], blocked, outside: null });
-    // Put in order first, as for a job and a restore: a computer made from an older image runs that image's `universe-cold`, which prints no list of what it copied
-    // (and every Brick that sat idle since the new image would fail here for good). `settle` moves it to the current revision.
-    await this.settle(ref);
-    const done = await this.client.exec(ref, 'universe-cold prepack', { user: 'root', timeoutMs: 10 * 60_000 });
+    await this.settle(ref, { update: false });
+    await this.installCold(ref);
+    const done = await this.client.exec(ref, `python3 ${COLD_SCRIPT} prepack`, { user: 'root', timeoutMs: 10 * 60_000 });
     // Agent37 cuts the middle out of what a command prints over 512 KB: what is left of it is never read as an inventory. The script prints one short line (the list itself is
     // read back below, in pieces), so this is a computer that says far more than it should, and it is said so (`blocked`), never guessed from what is left
     const line = /(^|\n)prepack=(\{[^\n]*\})/.exec(done.stdout)?.[2];
@@ -557,6 +565,42 @@ export class Agent37ComputerProvider implements ComputerProvider {
   }
 
   /**
+   * Puts the current `universe-cold` on the machine, at `COLD_SCRIPT` (a root-only folder the scan skips, so it never lands in a copy), whatever image the machine was made from. It is sent as
+   * base64 (no piece can gain a line break) in pieces of at most `LIST_SEND_PIECE` bytes, each its own named command; the first makes the file new, the others append. Then the machine's own
+   * `sha256sum` of it is compared with Orbit's, and only on a match is it moved into place. A try that fails in any step starts again from the first piece, up to `LIST_TRIES` times, then it is an
+   * error (the pack-away is tried again later). Nothing runs from a file that was not checked.
+   */
+  private async installCold(ref: string): Promise<void> {
+    const text = Buffer.from(UNIVERSE_COLD, 'utf8');
+    const sha = createHash('sha256').update(text).digest('hex');
+    const dir = COLD_SCRIPT.slice(0, COLD_SCRIPT.lastIndexOf('/'));
+    let last: unknown = null;
+    for (let attempt = 0; attempt < LIST_TRIES; attempt++) {
+      if (attempt > 0) await this.pause(1_000);
+      const transfer = randomUUID().slice(0, 8);
+      const run = (command: string, name: string) => this.client.exec(ref, command, { user: 'root', timeoutMs: 60_000, name: `cold-install:${transfer}:${name}` });
+      try {
+        for (let at = 0; at < text.length; at += LIST_SEND_PIECE) {
+          const piece = text.subarray(at, at + LIST_SEND_PIECE).toString('base64');
+          const write = at === 0
+            ? `umask 077 && mkdir -p ${dir} && chmod 700 ${dir} && printf %s '${piece}' | base64 -d > ${COLD_SCRIPT}.new`
+            : `umask 077 && printf %s '${piece}' | base64 -d >> ${COLD_SCRIPT}.new`;
+          const put = await run(write, String(at));
+          if (put.exitCode !== 0 || put.truncated) throw new Error('The computer could not take the current script');
+        }
+        const summed = await run(`sha256sum ${COLD_SCRIPT}.new`, 'sum');
+        if (summed.exitCode !== 0 || summed.truncated || /^([0-9a-f]{64})\s/.exec(summed.stdout)?.[1] !== sha) throw new Error('The current script did not arrive whole on the computer');
+        const moved = await run(`mv -f ${COLD_SCRIPT}.new ${COLD_SCRIPT}`, 'move');
+        if (moved.exitCode !== 0 || moved.truncated) throw new Error('The computer could not put the current script in place');
+        return;
+      } catch (error) {
+        last = error;
+      }
+    }
+    throw last;
+  }
+
+  /**
    * The list `prepack` wrote on the computer (a root-only file), read back in pieces of at most `LIST_READ_PIECE` characters, each its own answer well under Agent37's cap.
    * Every piece must be exactly as long as asked and the whole must have the length and SHA-256 the computer printed: a piece that is short, cut or changed is an error (the pack-away
    * is tried again), never a shorter list.
@@ -587,7 +631,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     for (let attempt = 0; attempt < LIST_TRIES; attempt++) {
       if (attempt > 0) await this.pause(1_000);
       try {
-        const got = await this.client.exec(ref, `universe-cold list-piece ${at} ${want}`, { user: 'root', timeoutMs: 60_000, name: `cold-read:${transfer}:${at}:${attempt}` });
+        const got = await this.client.exec(ref, `python3 ${COLD_SCRIPT} list-piece ${at} ${want}`, { user: 'root', timeoutMs: 60_000, name: `cold-read:${transfer}:${at}:${attempt}` });
         const marked = got.exitCode === 0 && !got.truncated ? new RegExp(`(?:^|\\n)listpiece=([^\\n]*)${LIST_PIECE_END.replace(/[|]/g, '\\|')}(?:\\n|$)`).exec(got.stdout)?.[1] : undefined;
         if (marked !== undefined && marked.length === want) return marked;
         last = new Error('The computer\'s list of what is outside its home folder could not be read');

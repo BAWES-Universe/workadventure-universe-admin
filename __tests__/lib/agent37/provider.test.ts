@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
+import { UNIVERSE_COLD } from '@/lib/agent37/image-files';
 import { Agent37ComputerProvider, Agent37FundsLow, BRICK_NETWORK, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
 import type { ImageState } from '@/lib/agent37/image';
 import { awakeMicrosPerMinute, dayOfRunningMicros, BRICK_SHAPE } from '@/lib/agent37/rates';
@@ -7,11 +8,17 @@ import { awakeMicrosPerMinute, dayOfRunningMicros, BRICK_SHAPE } from '@/lib/age
 jest.mock('@/lib/agent37/saved-copies', () => ({ savedCopyOf: jest.fn(), storeSavedCopy: jest.fn() }));
 
 /** A pretend Agent37: instances that keep a status, and a record of every call. */
+const COLD_PATH = '/usr/local/share/universe/cold/universe-cold';
+const COLD_PREPACK = `python3 ${COLD_PATH} prepack`;
+const COLD_SHA = createHash('sha256').update(UNIVERSE_COLD).digest('hex');
+
 function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const instances = new Map<string, Instance>();
   const calls: string[] = [];
   const execs: Array<{ id: string; command: string; options: unknown }> = [];
   let healthy = true;
+  let coldSum: string | null = COLD_SHA;
+  let coldInstall = true;
   let execOut: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean } = () => 'ok';
   let markOut = 'marked=1\n';
   let revisionAfterUpdate = 2;
@@ -80,7 +87,8 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
     async exec(id: string, command: string, options?: unknown) {
       calls.push(`exec:${id}:${command}`);
       execs.push({ id, command, options });
-      const answer = command === 'universe-mark' ? markOut : execOut(command);
+      // Putting the current script on the machine (before a pack-away) is answered here unless a test says otherwise
+      const answer = command === 'universe-mark' ? markOut : /^sha256sum /.test(command) && coldSum !== null ? { stdout: `${coldSum}  ${COLD_PATH}.new\n` } : /^(umask 077 && |mv -f )/.test(command) && coldInstall ? { stdout: '' } : execOut(command);
       return typeof answer === 'string' ? { exitCode: 0, stdout: answer, stderr: '', truncated: false } : { exitCode: answer.exitCode ?? 0, stdout: answer.stdout, stderr: '', truncated: answer.truncated ?? false };
     },
     async openTurn(url: string, input: { text: string; sessionId?: string | null }) {
@@ -137,7 +145,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }> = [];
   const networks: Array<{ id: string; network: unknown }> = [];
   const usage: { day: string; totalMicros: number; instances: Array<{ id: string; totalMicros: number; computeMicros: number; awakeMinutes: number }> } = { day: '2026-11-15', totalMicros: 0, instances: [] };
-  return { client: client as unknown as Agent37Client, instances, budgets, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean }) => (execOut = fn), setMark: (value: string) => (markOut = value) };
+  return { client: client as unknown as Agent37Client, instances, budgets, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string | { stdout: string; exitCode?: number; truncated?: boolean }) => (execOut = fn), setMark: (value: string) => (markOut = value), setColdSum: (value: string | null) => (coldSum = value), setColdInstall: (value: boolean) => (coldInstall = value) };
 }
 
 function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
@@ -730,7 +738,7 @@ describe('cold storage operations on a computer', () => {
     await p.create('bot-1');
     w.setExec(() => `noise\nprepack=${JSON.stringify({ home_files: 12, home_bytes: 3400, outside_files: 2, outside_bytes: 90, packages: ['ffmpeg', 'bad name!'], blocked: null, manifest })}\n`);
     await expect(p.prepack('m1')).resolves.toEqual({ homeFiles: 12, homeBytes: 3400, outsideFiles: 2, outsideBytes: 90, packages: ['ffmpeg'], blocked: null, outside: manifest });
-    expect(w.execs.at(-1)).toMatchObject({ command: 'universe-cold prepack', options: { user: 'root' } });
+    expect(w.execs.at(-1)).toMatchObject({ command: COLD_PREPACK, options: { user: 'root' } });
     // A computer that cannot be packed has no list (and needs none)
     w.setExec(() => 'prepack={"home_files":1,"home_bytes":1,"outside_files":9,"outside_bytes":9,"packages":[],"blocked":"too_big_outside","manifest":null}\n');
     expect((await p.prepack('m1')).blocked).toBe('too_big_outside');
@@ -756,12 +764,12 @@ describe('cold storage operations on a computer', () => {
       const text = JSON.stringify(list);
       return `prepack=${JSON.stringify({ home_files: 12, home_bytes: 3400, outside_files: 3000, outside_bytes: 90, packages: ['ffmpeg'], blocked: null, manifest_bytes: text.length, manifest_sha256: hash(text), ...over })}\n`;
     };
-    /** The computer: prints the line, and answers `universe-cold list-piece OFFSET LENGTH` from the list it holds, the way the script does. */
+    /** The computer: prints the line, and answers `python3 /usr/local/share/universe/cold/universe-cold list-piece OFFSET LENGTH` from the list it holds, the way the script does. */
     const holding = (w: ReturnType<typeof world>, list: unknown, over: Record<string, unknown> = {}, tweak: (piece: string, at: number) => string = (piece) => piece) => {
       const text = JSON.stringify(list);
       w.setExec((command) => {
-        if (command === 'universe-cold prepack') return line(list, over);
-        const asked = /^universe-cold list-piece (\d+) (\d+)$/.exec(command);
+        if (command === COLD_PREPACK) return line(list, over);
+        const asked = /^python3 \/usr\/local\/share\/universe\/cold\/universe-cold list-piece (\d+) (\d+)$/.exec(command);
         if (!asked) return 'ok';
         const at = Number(asked[1]);
         const piece = tweak(text.slice(at, at + Number(asked[2])), at);
@@ -779,7 +787,7 @@ describe('cold storage operations on a computer', () => {
       const result = await p.prepack('m1');
       expect(result).toMatchObject({ blocked: null, outsideFiles: 3000, packages: ['ffmpeg'] });
       expect(result.outside).toEqual(list);
-      const reads = w.execs.filter((entry) => entry.command.startsWith('universe-cold list-piece'));
+      const reads = w.execs.filter((entry) => entry.command.startsWith('python3 /usr/local/share/universe/cold/universe-cold list-piece'));
       expect(reads.length).toBeGreaterThanOrEqual(3);
       for (const read of reads) {
         expect(read.options).toMatchObject({ user: 'root' });
@@ -799,9 +807,9 @@ describe('cold storage operations on a computer', () => {
       // Same length, one character changed in the last piece: only the SHA-256 can tell
       holding(w, list, {}, (piece, at) => (at > 0 ? `${piece.slice(0, -2)}9${piece.slice(-1)}` : piece));
       await expect(p.prepack('m1')).rejects.toThrow('could not be read');
-      w.setExec((command) => (command === 'universe-cold prepack' ? line(list) : { stdout: 'listpiece=x|end|\n', truncated: true }));
+      w.setExec((command) => (command === COLD_PREPACK ? line(list) : { stdout: 'listpiece=x|end|\n', truncated: true }));
       await expect(p.prepack('m1')).rejects.toThrow('could not be read');
-      w.setExec((command) => (command === 'universe-cold prepack' ? line(list) : { stdout: '', exitCode: 1 }));
+      w.setExec((command) => (command === COLD_PREPACK ? line(list) : { stdout: '', exitCode: 1 }));
       await expect(p.prepack('m1')).rejects.toThrow('could not be read');
       // A line that says no length or no SHA-256 is not a list
       for (const over of [{ manifest_bytes: null }, { manifest_sha256: 'nothex' }, { manifest_bytes: 1 }]) {
@@ -823,7 +831,7 @@ describe('cold storage operations on a computer', () => {
       w.setExec(() => 'noise only\n');
       await expect(p.prepack('m1')).rejects.toThrow('could not be inventoried');
       // A short line that survived the cut whole is read as it is
-      w.setExec((command) => (command === 'universe-cold prepack' ? { stdout: `${'noise\n'.repeat(1000)}${line({ files: [], packages: [] })}`, truncated: true } : { stdout: 'listpiece={"files":[],"packages":[]}|end|\n' }));
+      w.setExec((command) => (command === COLD_PREPACK ? { stdout: `${'noise\n'.repeat(1000)}${line({ files: [], packages: [] })}`, truncated: true } : { stdout: 'listpiece={"files":[],"packages":[]}|end|\n' }));
       await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: { files: [], packages: [] } });
     });
 
@@ -853,7 +861,7 @@ describe('cold storage operations on a computer', () => {
       // A list longer than a computer may hand over is blocked before any piece is read
       holding(w, crowd(1), { manifest_bytes: 33 * 1024 * 1024 });
       await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: 'outside_list_too_big' });
-      expect(w.execs.at(-1)!.command).toBe('universe-cold prepack');
+      expect(w.execs.at(-1)!.command).toBe(COLD_PREPACK);
     });
 
     it('a restore sends a list too long for one command in pieces, each command well under the 128 KiB a single argument may be, then finish reads that file', async () => {
@@ -995,8 +1003,8 @@ describe('cold storage operations on a computer', () => {
         for (const at of [0, 200_000]) {
           let failed = 0;
           w.setExec((command) => {
-            if (command === 'universe-cold prepack') return line(list);
-            const asked = /^universe-cold list-piece (\d+) (\d+)$/.exec(command)!;
+            if (command === COLD_PREPACK) return line(list);
+            const asked = /^python3 \/usr\/local\/share\/universe\/cold\/universe-cold list-piece (\d+) (\d+)$/.exec(command)!;
             const from = Number(asked[1]);
             const piece = text.slice(from, from + Number(asked[2]));
             if (from === at && failed < 1) {
@@ -1014,12 +1022,12 @@ describe('cold storage operations on a computer', () => {
       }
       let failures = 0;
       w.setExec((command) => {
-        if (command === 'universe-cold prepack') return line(list);
+        if (command === COLD_PREPACK) return line(list);
         if (/ 200000 \d+$/.test(command)) {
           failures++;
           throw new Agent37Unreached('lost');
         }
-        const asked = /^universe-cold list-piece (\d+) (\d+)$/.exec(command)!;
+        const asked = /^python3 \/usr\/local\/share\/universe\/cold\/universe-cold list-piece (\d+) (\d+)$/.exec(command)!;
         return `listpiece=${text.slice(Number(asked[1]), Number(asked[1]) + Number(asked[2]))}|end|\n`;
       });
       await expect(p.prepack('m1')).rejects.toThrow('lost');
@@ -1037,8 +1045,8 @@ describe('cold storage operations on a computer', () => {
       const whole = JSON.stringify(padded);
       expect(whole[199_999]).toBe(' ');
       w.setExec((command) => {
-        if (command === 'universe-cold prepack') return line(padded);
-        const asked = /^universe-cold list-piece (\d+) (\d+)$/.exec(command)!;
+        if (command === COLD_PREPACK) return line(padded);
+        const asked = /^python3 \/usr\/local\/share\/universe\/cold\/universe-cold list-piece (\d+) (\d+)$/.exec(command)!;
         const from = Number(asked[1]);
         // What the script prints, after a transport that strips white space from the end of an answer
         return { stdout: `listpiece=${whole.slice(from, from + Number(asked[2]))}|end|\n`.trimEnd() };
@@ -1057,28 +1065,110 @@ describe('cold storage operations on a computer', () => {
     });
   });
 
-  it('moves a computer made from an older image to the current one BEFORE universe-cold prepack runs (the old script prints no list, and the pack-away would fail for good)', async () => {
+  describe('a pack-away never moves the computer to another image, and runs the script Orbit sends', () => {
     const state = (over: Partial<ImageState> = {}): ImageState => ({ hash: 'h', state: 'ready', buildId: 'b', revision: 2, startedAt: new Date(0).toISOString(), failures: 0, error: null, ...over });
-    const w = world();
-    const p = provider(w, { image: async () => state({ revision: 2 }) });
-    await p.create('bot-1');
-    w.instances.get('m1')!.template_revision = 1;
-    w.setExec((command) => (command === 'universe-cold prepack' && w.instances.get('m1')!.template_revision !== 2
-      ? `prepack=${JSON.stringify({ home_files: 1, home_bytes: 1, outside_files: 0, outside_bytes: 0, packages: [], blocked: null })}\n`
-      : `prepack=${JSON.stringify({ home_files: 12, home_bytes: 3400, outside_files: 2, outside_bytes: 90, packages: [], blocked: null, manifest })}\n`));
-    await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: manifest });
-    expect(w.calls).toContain('update:m1');
-    expect(w.calls.indexOf('update:m1')).toBeLessThan(w.calls.indexOf('exec:m1:universe-cold prepack'));
-    // Its network rule and budget were put in order first too, as for a job
-    expect(w.calls.indexOf('budget:m1')).toBeLessThan(w.calls.indexOf('exec:m1:universe-cold prepack'));
-    // A computer already on the current image is not updated again
-    const again = world();
-    const q = provider(again, { image: async () => state({ revision: 2 }) });
-    await q.create('bot-1');
-    again.instances.get('m1')!.template_revision = 2;
-    again.setExec(() => `prepack=${JSON.stringify({ home_files: 1, home_bytes: 1, outside_files: 0, outside_bytes: 0, packages: [], blocked: null, manifest })}\n`);
-    await q.prepack('m1');
-    expect(again.calls.some((call) => call.startsWith('update:'))).toBe(false);
+    const printsList = (w: ReturnType<typeof world>) => w.setExec((command) => (command === COLD_PREPACK ? `prepack=${JSON.stringify({ home_files: 12, home_bytes: 3400, outside_files: 2, outside_bytes: 90, packages: [], blocked: null, manifest })}\n` : 'ok'));
+    /** What the machine would have written: the base64 of every install command, decoded and joined. */
+    const written = (w: ReturnType<typeof world>) => Buffer.concat(w.execs.map((entry) => /^umask 077 && .*printf %s '([A-Za-z0-9+/=]*)' \| base64 -d >>? /.exec(entry.command)?.[1]).filter((piece): piece is string => piece !== undefined).map((piece) => Buffer.from(piece, 'base64'))).toString('utf8');
+
+    it('a machine on an older image is NOT updated: its rule and budget are set, the current script is sent and checked, then run from where it was put', async () => {
+      const w = world();
+      const p = provider(w, { image: async () => state({ revision: 2 }) });
+      await p.create('bot-1');
+      w.instances.get('m1')!.template_revision = 1;
+      printsList(w);
+      await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: manifest });
+      // The image update would replace the disk outside the home folder (or move the build marker): it is never asked for here
+      expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
+      expect(w.instances.get('m1')!.template_revision).toBe(1);
+      expect(w.calls.indexOf('budget:m1')).toBeGreaterThanOrEqual(0);
+      expect(w.calls.indexOf('budget:m1')).toBeLessThan(w.calls.findIndex((call) => call.startsWith('exec:m1:')));
+      const commands = w.execs.map((entry) => entry.command);
+      // First the script goes over (a root-only folder, a file made new), then the machine's own sha256sum, then the move, then prepack from the installed path, then the list
+      expect(commands[0]).toMatch(/^umask 077 && mkdir -p \/usr\/local\/share\/universe\/cold && chmod 700 \/usr\/local\/share\/universe\/cold && printf %s '[A-Za-z0-9+/=]+' \| base64 -d > \/usr\/local\/share\/universe\/cold\/universe-cold\.new$/);
+      expect(commands.slice(-3)).toEqual([`sha256sum ${COLD_PATH}.new`, `mv -f ${COLD_PATH}.new ${COLD_PATH}`, COLD_PREPACK]);
+      expect(commands.indexOf(`sha256sum ${COLD_PATH}.new`)).toBeLessThan(commands.indexOf(`mv -f ${COLD_PATH}.new ${COLD_PATH}`));
+      expect(commands.indexOf(`mv -f ${COLD_PATH}.new ${COLD_PATH}`)).toBeLessThan(commands.indexOf(COLD_PREPACK));
+      expect(commands.some((command) => command.startsWith('universe-cold '))).toBe(false);
+      for (const entry of w.execs) expect(entry.options).toMatchObject({ user: 'root' });
+      // Every command stays far under what one argument may be (about 128 KiB)
+      for (const command of commands) expect(Buffer.byteLength(command)).toBeLessThan(100 * 1024);
+      // What went over is the current script, byte for byte
+      expect(written(w)).toBe(UNIVERSE_COLD);
+    });
+
+    it('a machine already on the current image is sent the script too (there is no revision to branch on), and is not updated either', async () => {
+      const w = world();
+      const p = provider(w, { image: async () => state({ revision: 2 }) });
+      await p.create('bot-1');
+      w.instances.get('m1')!.template_revision = 2;
+      printsList(w);
+      await p.prepack('m1');
+      expect(w.calls.some((call) => call.startsWith('update:'))).toBe(false);
+      expect(written(w)).toBe(UNIVERSE_COLD);
+      // A machine that does not say its revision is sent it as well
+      const w2 = world();
+      const q = provider(w2, { image: async () => state({ revision: 2 }) });
+      await q.create('bot-1');
+      delete (w2.instances.get('m1') as { template_revision?: number }).template_revision;
+      printsList(w2);
+      await q.prepack('m1');
+      expect(written(w2)).toBe(UNIVERSE_COLD);
+    });
+
+    it('a script that did not arrive whole (the machine\'s sha256sum is not Orbit\'s) is an error after three tries, it is never moved into place, and prepack is never run', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      printsList(w);
+      w.setColdSum('0'.repeat(64));
+      await expect(p.prepack('m1')).rejects.toThrow('did not arrive whole');
+      const commands = w.execs.map((entry) => entry.command);
+      expect(commands.filter((command) => command.startsWith('sha256sum'))).toHaveLength(3);
+      expect(commands.some((command) => command.startsWith('mv -f'))).toBe(false);
+      expect(commands).not.toContain(COLD_PREPACK);
+      // No answer, or one that is not a hash, is the same
+      for (const answer of ['', 'not a hash\n', `${COLD_SHA.toUpperCase()}  x\n`]) {
+        w.execs.length = 0;
+        w.setColdSum(null);
+        w.setExec((command) => (command.startsWith('sha256sum') ? answer : 'ok'));
+        await expect(p.prepack('m1')).rejects.toThrow('did not arrive whole');
+        expect(w.execs.some((entry) => entry.command.startsWith('mv -f') || entry.command === COLD_PREPACK)).toBe(false);
+      }
+    });
+
+    it('a command that is lost or fails once starts the install again from the first piece, each command under a name of its own, and the pack-away goes on', async () => {
+      for (const failure of ['thrown', 'exit', 'cut'] as const) {
+        const w = world();
+        const p = provider(w);
+        await p.create('bot-1');
+        printsList(w);
+        const execute = w.client.exec.bind(w.client);
+        let failed = false;
+        (w.client as unknown as { exec: (id: string, command: string, options?: unknown) => Promise<unknown> }).exec = async (id, command, options) => {
+          if (!failed && command.startsWith('umask 077')) {
+            failed = true;
+            if (failure === 'thrown') throw new Agent37Unreached('lost');
+            return { exitCode: failure === 'exit' ? 1 : 0, stdout: '', stderr: '', truncated: failure === 'cut' };
+          }
+          return execute(id, command, options);
+        };
+        await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null });
+        expect(failed).toBe(true);
+        const names = w.execs.filter((entry) => !entry.command.startsWith('python3')).map((entry) => (entry.options as { name?: string }).name);
+        expect(names.every((name) => typeof name === 'string' && name.startsWith('cold-install:'))).toBe(true);
+        expect(new Set(names).size).toBe(names.length);
+        expect(w.execs.filter((entry) => entry.command.startsWith('umask 077'))).toHaveLength(1);
+      }
+      // Lost on every try: the error itself, and prepack never runs
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      (w.client as unknown as { exec: () => Promise<unknown> }).exec = async () => {
+        throw new Agent37Unreached('down');
+      };
+      await expect(p.prepack('m1')).rejects.toThrow('down');
+    });
   });
 
   it('makes a throwaway computer with the same network rule and a closed budget, named so it is never mistaken for a Brick’s', async () => {

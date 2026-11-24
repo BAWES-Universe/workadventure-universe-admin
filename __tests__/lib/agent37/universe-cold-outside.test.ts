@@ -634,6 +634,17 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     expect(writtenOnB(w)).toEqual([]);
   });
 
+  it('the script Orbit puts on a computer for a pack-away (in the folder the list travels in) is never part of what is listed, whatever its age', () => {
+    const w = world();
+    const installed = path.join(w.fsA, 'usr/local/share/universe/cold');
+    fs.mkdirSync(installed, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(installed, 'universe-cold'), '#!/usr/bin/env python3\n');
+    fs.writeFileSync(path.join(installed, 'universe-cold.new'), 'half');
+    const list = packed(w);
+    expect(list.files.map((entry) => entry[1])).toEqual(['/etc/app.conf', '/opt/tool/latest', '/opt/tool/run.sh']);
+    expect(fs.readFileSync(path.join(installed, 'universe-cold'), 'utf8')).toBe('#!/usr/bin/env python3\n');
+  });
+
   it('every slice ends with a marker on its line, so a slice that ends in a space is whole after the end of the answer is trimmed', () => {
     const w = world();
     fs.writeFileSync(path.join(w.fsA, 'opt/tool/ends with a space '), 'x');
