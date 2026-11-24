@@ -612,7 +612,10 @@ run('"try again" carries on in the same conversation (piece 8), in a real databa
       const replay = await (await post(sara.brickId, { userId: user.uuid, title: 'Visa form' }, headers)).json();
       expect(replay).toMatchObject({ ok: true, job: { id: first.job.id } });
       expect(await prisma.computerJob.count({ where: { personId: sara.id } })).toBe(1);
-      const other = await (await post(sara.brickId, { userId: user.uuid, title: 'Visa form' }, { 'x-computer-continues': old, 'x-computer-start-attempt': key() })).json();
+      // The game confirms it has the job (as it does): in ACK mode an unconfirmed earlier start would otherwise be what a new key is answered with (`earlier`), never the control's own question
+      expect(await ackStart(sara.brickId, sara.id, same)).toBe(true);
+      // CONTROL: a fresh key in the SAME mode (ACK headers kept, only the attempt key replaced)
+      const other = await (await post(sara.brickId, { userId: user.uuid, title: 'Visa form' }, { ...headers, 'x-computer-start-attempt': key() })).json();
       expect(other).toMatchObject({ ok: false, reason: 'cannot_continue', why: 'not_found' });
     });
 

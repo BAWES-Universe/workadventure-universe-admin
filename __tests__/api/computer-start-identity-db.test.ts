@@ -330,7 +330,7 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     expect(await attemptOf(sara, KEY_B)).toMatchObject({ state: 'answered', jobId: a.job.id });
   });
 
-  it('CodeRabbit D9: an alias chain of ten links answers the job at its end, and the sweep of old marks keeps every link of it past the week (no cap on the hops)', async () => {
+  it('CodeRabbit D9: an alias chain of ten links answers the job at its end, and the sweep of old marks keeps every link of it past the week', async () => {
     const sara = await owner('d9');
     const old = new Date(Date.now() - 9 * 24 * 60 * 60_000);
     const first = key();
@@ -351,6 +351,32 @@ run('finding 1 (GPT round 6): one request, one job, through every retry, in a re
     await forgetOldStartMarks(new Date());
     expect(await prisma.computerStartAttempt.count({ where: { personId: sara.id } })).toBe(11);
     expect(await post(sara, keys[10], 'Visa')).toMatchObject({ ok: false, reason: 'earlier', job: { id: made.job.id } });
+  });
+
+  it('D9 (the bound): a job exactly 1000 links away is answered; one link further is retired (CodeRabbit O27, O43)', async () => {
+    for (const links of [1000, 1001]) {
+      const sara = await owner(`d9-bound-${links}`);
+      const old = new Date(Date.now() - 9 * 24 * 60 * 60_000);
+      const first = key();
+      const made = await post(sara, first, 'Visa');
+      const jobAttempt = (await attemptOf(sara, first)).id as string;
+      const keys: string[] = [];
+      const rows: Array<{ id: string; botId: string; personId: string; startKey: string; state: string; aliasAttemptId: string; beatAt: Date; createdAt: Date }> = [];
+      let follows = jobAttempt;
+      for (let hop = 1; hop <= links; hop++) {
+        const id = randomUUID();
+        const startKey = key();
+        keys.push(startKey);
+        rows.push({ id, botId: sara.brickId, personId: sara.id, startKey, state: 'answered', aliasAttemptId: follows, beatAt: old, createdAt: new Date(Date.now() - (links + 100 - hop) * 1_000) });
+        follows = id;
+      }
+      // Each link is made before the one after it: inserted in order, so each points at a row that exists
+      for (let at = 0; at < rows.length; at += 200) await prisma.computerStartAttempt.createMany({ data: rows.slice(at, at + 200) });
+      const answer = await startAnsweredBefore(sara.brickId, sara.id, keys[links - 1]);
+      if (links === 1000) expect(answer).toMatchObject({ ok: false, reason: 'earlier', job: { id: made.job.id } });
+      else expect(answer).toEqual({ ok: false, reason: 'retired' });
+      expect(await jobsOf(sara)).toHaveLength(1);
+    }
   });
 
   it('D9 (a safety stop): an alias chain that never ends (a loop that cannot be made by the code) answers `retired` (never `expired`, which would reopen the key as a fresh paid start), is said to Sentry, and the sweep of old marks ends and lets it go', async () => {

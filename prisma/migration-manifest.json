@@ -174,8 +174,8 @@
     }
   ],
   "shipping": {
-    "lastMigration": "20261123070000_computer_round8_stretch_check",
-    "count": 199,
+    "lastMigration": "20261124000000_computer_round9_columns",
+    "count": 201,
     "migrations": [
       "20251205145742_init",
       "20251207200516_add_wam_url_and_auth_to_rooms_remove_from_worlds",
@@ -375,7 +375,9 @@
       "20261123040000_computer_commands_and_start_aliases",
       "20261123050000_computer_park_hold_repair",
       "20261123060000_computer_round8_fences",
-      "20261123070000_computer_round8_stretch_check"
+      "20261123070000_computer_round8_stretch_check",
+      "20261123080000_computer_round8_stretch_check_validate",
+      "20261124000000_computer_round9_columns"
     ]
   }
 }

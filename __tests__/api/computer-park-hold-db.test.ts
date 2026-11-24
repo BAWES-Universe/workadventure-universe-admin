@@ -91,9 +91,12 @@ run('the park trigger and its repair migration (A15, D12), in a real database', 
       },
       { timeout: 30_000, maxWait: 30_000 },
     );
+    // A pause that fails is reported where the test waits for the pointer and where it joins the pause, never as an unhandled rejection
+    pause.catch(() => undefined);
     let start: Promise<number> = Promise.resolve(-1);
     try {
-      await pointerWritten;
+      // The checkpoint is raced against the pause itself: a pause that fails (or ends) before it wrote the pointer rejects the wait at once, with its own error, and the test goes to its cleanup
+      await Promise.race([pointerWritten, pause.then(() => { throw new Error('The pause ended before it wrote the park pointer'); })]);
       start = (async () => prisma.$executeRaw`UPDATE "computer_jobs" SET "status" = 'running' WHERE "id" = ${other.id}`)();
       // The start is waiting on the Brick's row (the pause's uncommitted write), not reading the old empty pointer
       expect(await waitingOn('computer_jobs')).toBe(true);

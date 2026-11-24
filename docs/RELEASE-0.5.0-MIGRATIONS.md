@@ -287,4 +287,6 @@ the statements it sends keep working against the new columns, which are all null
 197. `20261123050000_computer_park_hold_repair`
 198. `20261123060000_computer_round8_fences`
 199. `20261123070000_computer_round8_stretch_check`
+200. `20261123080000_computer_round8_stretch_check_validate`
+201. `20261124000000_computer_round9_columns`
 <!-- migrations:end -->

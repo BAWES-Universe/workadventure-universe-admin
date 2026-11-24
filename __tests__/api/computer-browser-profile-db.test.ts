@@ -12,7 +12,6 @@ jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
-import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 import { createBrick } from '@/lib/brick-create';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests, type ExecOptions } from '@/lib/computer-provider';
@@ -90,7 +89,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
     setComputerProviderForTests(provider);
     sent = [];
     during = null;
-    answers = { park: 'parked=1 cookies=4 pages=2', restore: 'restored=1 cookies=4 pages=2', drop: 'dropped=1', clear: 'cleared=1', prune: 'pruned=1' };
+    answers = { park: 'parked=1 cookies=4 pages=2', restore: 'restored=1 cookies=4 pages=2', drop: 'dropped=1', clear: 'cleared=1', prune: 'pruned=1', commit: 'committed=1' };
     const exec = provider.exec.bind(provider);
     jest.spyOn(provider, 'exec').mockImplementation(async (ref: string, command: string, options?: ExecOptions) => {
       const action = /ACTION="([a-z]+)"/.exec(command)?.[1] ?? '?';
@@ -357,7 +356,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       expect(back).toMatchObject({ state: 'restored' });
       expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW)).toBe('ready');
       expect(await prepOf(visa.id)).toEqual({ prepState: null });
-      expect(sent.map((one) => one.action)).toEqual(['restore']);
+      expect(sent.map((one) => one.action)).toEqual(['restore', 'commit']);
     });
 
     it('nothing of its own kept: the live browser is emptied and PROVED empty before the job is ready', async () => {
@@ -390,7 +389,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       answers.restore = 'restored=1 cookies=2 pages=1';
       expect(await recoverResumedBrowsers(minutes(1))).toEqual({ looked: 1, ready: 1 });
       expect(await prepOf(visa.id)).toEqual({ prepState: null });
-      expect(sent.map((one) => one.action)).toEqual(['restore']);
+      expect(sent.map((one) => one.action)).toEqual(['restore', 'commit']);
     });
 
     it('a restore the machine would not do leaves it `recover`: it is NEVER made runnable on a browser whose state is unknown', async () => {
@@ -454,7 +453,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       // The recover path then settles it, the same way as any other: the restore is tried and the job can be worked on again
       expect(await recoverResumedBrowsers(minutes(7))).toEqual({ looked: 1, ready: 1 });
       expect(await prepOf(visa.id)).toEqual({ prepState: null });
-      expect(sent.map((one) => one.action)).toEqual(['restore']);
+      expect(sent.map((one) => one.action)).toEqual(['restore', 'commit']);
     });
 
     it('a park nobody finished: the sweep finishes it, and the machine stops waiting', async () => {
@@ -681,27 +680,81 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
     const keptOf = async (jobId: string) => (await prisma.computerJobPause.findMany({ where: { jobId }, orderBy: { n: 'asc' }, select: { n: true, signInsKept: true } })).map((one) => [one.n, one.signInsKept]);
 
     /**
+     * What a lock checkpoint of these tests is about: the exact fixture transaction (the backend that holds the rows), the exact requests that must be waiting for it, and nothing else. A checkpoint that counted every lock wait in the
+     * database could be satisfied by an unrelated session while the request under test had not reached its wait at all. `running` are the requests being waited for: one that ends before it is blocked fails the checkpoint at once, and the poll
+     * has a ceiling, so a wrong fixture rejects instead of hanging.
+     */
+    async function waitUntilBlockedBy(holderPid: number, count: number, ...running: Array<Promise<unknown>>) {
+      let over = false;
+      const poll = (async () => {
+        const end = Date.now() + 10_000;
+        for (;;) {
+          // Waiting for the holder, directly or behind another waiter for the same row (a second waiter queues behind the first one, and Postgres names the first one as its blocker)
+          const rows = await prisma.$queryRaw<{ n: number }[]>`
+            WITH RECURSIVE waiting(pid) AS (
+              SELECT a.pid FROM pg_stat_activity a WHERE a.datname = current_database() AND a.wait_event_type = 'Lock' AND ${holderPid}::int = ANY (pg_blocking_pids(a.pid))
+              UNION
+              SELECT a.pid FROM pg_stat_activity a JOIN waiting w ON w.pid = ANY (pg_blocking_pids(a.pid)) WHERE a.datname = current_database() AND a.wait_event_type = 'Lock'
+            )
+            SELECT count(*)::int AS n FROM waiting`;
+          if (rows[0].n >= count) return;
+          if (over) return;
+          if (Date.now() > end) throw new Error(`Timed out waiting for ${count} statement(s) to be blocked by backend ${holderPid}`);
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      })();
+      try {
+        await Promise.race([poll, ...running.map((one) => one.then(() => { throw new Error('A request ended before it was blocked by the fixture transaction'); }))]);
+      } finally {
+        over = true;
+        await poll.catch(() => undefined);
+      }
+    }
+
+    /** Polls `check` until it holds, for at most ten seconds, and fails at once when one of the requests being waited for ends first. */
+    async function boundedUntil(check: () => boolean, what: string, ...running: Array<Promise<unknown>>) {
+      const end = Date.now() + 10_000;
+      let over = false;
+      const poll = (async () => {
+        while (!check() && !over) {
+          if (Date.now() > end) throw new Error(`Timed out waiting for ${what}`);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      })();
+      try {
+        await Promise.race([poll, ...running.map((one) => one.then(() => { throw new Error(`A request ended before ${what}`); }))]);
+      } finally {
+        over = true;
+        await poll.catch(() => undefined);
+      }
+    }
+
+    /** Waits for a fixture transaction to say it is in place, and fails at once (with the transaction's own error) when the transaction ends first. */
+    const reached = <T>(signal: Promise<T>, tx: Promise<unknown>): Promise<T> => Promise.race([signal, tx.then(() => { throw new Error('The fixture transaction ended before it reached its checkpoint'); })]);
+
+    /**
      * Holds the Brick's machine row (and runs `inside` in the same open transaction) until `release` is called, so whatever claims the machine meanwhile is shown waiting for that row in pg_stat_activity: a test stands at the exact wait
-     * it means to test. `release` is safe to call twice, and the transaction is joined on every path.
+     * it means to test (`pid` is the backend that holds it: see `waitUntilBlockedBy`). `release` is safe to call twice, and the transaction is joined on every path.
      */
     async function holdMachineRow(botId: string, inside: (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]) => Promise<void>) {
       let release: () => void = () => undefined;
       const gate = new Promise<void>((resolve) => (release = resolve));
-      let held: () => void = () => undefined;
-      const open = new Promise<void>((resolve) => (held = resolve));
+      let held: (pid: number) => void = () => undefined;
+      const open = new Promise<number>((resolve) => (held = resolve));
       const tx = prisma.$transaction(
         async (inner) => {
+          const [{ pid }] = await inner.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`;
           await inner.$queryRaw`SELECT 1 FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
           await inner.$queryRaw`SELECT 1 FROM "computer_jobs" WHERE "bot_id" = ${botId} FOR UPDATE`;
           await inside(inner);
-          held();
+          held(pid);
           await gate;
         },
         { timeout: 30_000, maxWait: 30_000 },
       );
       tx.catch(() => undefined);
-      await Promise.race([open, tx]);
-      return { release, done: async () => { release(); await tx; } };
+      const pid = await reached(open, tx);
+      return { pid, release, done: async () => { release(); await tx; } };
     }
 
     it('A5: a second pause that commits after the park read the wipe flag and before the claim counted the jobs beside is seen: nothing is put away under the first job’s name', async () => {
@@ -719,7 +772,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       try {
         // The park reads the flag (not set: the pause has not committed) and then stands at the claim, waiting for the machine row the pause holds
         parking = parkProfile(sara.brickId, first.id, NOW);
-        await waitUntilBlockedOnLock(1);
+        await waitUntilBlockedBy(pause.pid, 1, parking);
         await pause.done();
         // The pause committed. The jobs beside are now none, and the flag is set: the park is refused, and no command is sent
         expect(await parking).toMatchObject({ state: 'left', reason: 'wipe_pending' });
@@ -745,7 +798,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       let late: ReturnType<typeof settleResumedBrowser> | undefined;
       try {
         late = settleResumedBrowser(visa.id, sara.brickId, { state: 'fresh', reason: 'none', cookies: 0, pages: 0 }, NOW, 'room-1', 'recover');
-        await waitUntilBlockedOnLock(1);
+        await waitUntilBlockedBy(faster.pid, 1, late);
         await faster.done();
         // Not ready (nothing of this attempt was written), and the ready job's browser was never emptied
         expect(await late).toBe('recover');
@@ -777,11 +830,11 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       try {
         // Both have read the job (it is `recover`) and both stand at the claim
         both = Promise.all([recoverResumedBrowsers(minutes(1)), recoverResumedBrowsers(minutes(1))]);
-        await waitUntilBlockedOnLock(2);
+        await waitUntilBlockedBy(hold.pid, 2, both);
         await hold.done();
         const answers2 = await both;
         // One restore, once: the second sweep did not send another (which would have found nothing parked, emptied the live browser, and lost the restored sign-ins)
-        expect(sent.map((one) => one.action)).toEqual(['restore']);
+        expect(sent.map((one) => one.action)).toEqual(['restore', 'commit']);
         expect(answers2.map((one) => one.looked)).toEqual([1, 1]);
         expect(answers2.map((one) => one.ready).sort()).toEqual([0, 1]);
       } finally {
@@ -801,37 +854,57 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       let release: () => void = () => undefined;
       const gate = new Promise<void>((resolve) => (release = resolve));
       let lock: Promise<void> | undefined;
+      let lockHeld: (pid: number) => void = () => undefined;
+      let lockFailed: (error: unknown) => void = () => undefined;
+      const lockPid = new Promise<number>((resolve, reject) => {
+        lockHeld = resolve;
+        lockFailed = reject;
+      });
+      lockPid.catch(() => undefined);
       during = async (action) => {
         if (action !== 'restore' || lock) return;
-        let held: () => void = () => undefined;
-        const taken = new Promise<void>((resolve) => (held = resolve));
         lock = prisma.$transaction(
           async (tx) => {
+            const [{ pid }] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`;
             await tx.$queryRaw`SELECT 1 FROM "computer_jobs" WHERE "id" = ${visa.id} FOR UPDATE`;
-            held();
+            lockHeld(pid);
             await gate;
           },
           { timeout: 30_000, maxWait: 30_000 },
         );
-        lock.catch(() => undefined);
-        await taken;
+        lock.catch(lockFailed);
+        await reached(lockPid, lock);
       };
+      // Every try of a sweep to take the machine's cleanup claim, with what the database answered: the first sweep's take (1), and the second sweep's wait for it (0 rows: the claim is still the first sweep's)
+      const claimed: number[] = [];
+      const realClaim = prisma.brickComputer.updateMany.bind(prisma.brickComputer);
+      const claimSpy = jest.spyOn(prisma.brickComputer, 'updateMany').mockImplementation((async (args: { where?: { OR?: unknown } }) => {
+        const done = await realClaim(args as never);
+        if (args.where?.OR) claimed.push(done.count);
+        return done;
+      }) as never);
       let first: ReturnType<typeof recoverResumedBrowsers> | undefined;
       let second: ReturnType<typeof recoverResumedBrowsers> | undefined;
       try {
         first = recoverResumedBrowsers(minutes(1));
-        await waitUntilBlockedOnLock(1);
-        // The restore is done and its write is waiting. A second sweep reads the job (still `recover`) and wants the machine: the claim is still the first sweep's
+        // The restore is done and its settlement write waits for the row the fixture transaction holds: the claim is the first sweep's
+        const holder = await Promise.race([lockPid, first.then(() => { throw new Error('The first sweep ended before its write was blocked'); })]);
+        await waitUntilBlockedBy(holder, 1, first);
+        expect(claimed).toEqual([1]);
+        // A second sweep reads the job (still `recover`) and wants the machine: the checkpoint is its own try of the claim, which must come back busy while the first write is still blocked
         second = recoverResumedBrowsers(minutes(1));
-        await new Promise((resolve) => setTimeout(resolve, 800));
+        await boundedUntil(() => claimed.length >= 2, 'the second sweep to try the claim', second);
+        expect(claimed[0]).toBe(1);
+        expect(claimed.slice(1).every((answer) => answer === 0)).toBe(true);
         expect(sent.map((one) => one.action)).toEqual(['restore']);
       } finally {
         release();
         await Promise.allSettled([...(lock ? [lock] : []), ...(first ? [first] : []), ...(second ? [second] : [])]);
+        claimSpy.mockRestore();
       }
       expect(await first).toEqual({ looked: 1, ready: 1 });
       expect(await second).toEqual({ looked: 1, ready: 0 });
-      expect(sent.map((one) => one.action)).toEqual(['restore']);
+      expect(sent.map((one) => one.action)).toEqual(['restore', 'commit']);
       expect(await prepOf(visa.id)).toEqual({ prepState: null });
       resetRecoveryCursorForTests();
     });
@@ -879,7 +952,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       let parking: ReturnType<typeof parkProfile> | undefined;
       try {
         parking = parkProfile(sara.brickId, visa.id, NOW, 1);
-        await waitUntilBlockedOnLock(1);
+        await waitUntilBlockedBy(again.pid, 1, parking);
         await again.done();
         expect(await parking).toMatchObject({ state: 'left', reason: 'not_paused' });
       } finally {
@@ -934,7 +1007,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       );
       pause.catch(() => undefined);
       try {
-        await lockedIt;
+        await reached(lockedIt, pause);
         await clearParkPending(sara.brickId, visa.id, { pauses: 1, reservation: 'room-1' });
         expect(await markOf(sara.brickId)).toEqual({ parkPendingJobId: visa.id, parkPendingWipe: true });
       } finally {
@@ -983,6 +1056,102 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       // Control: the write lands
       expect(await settleResumedBrowser(visa.id, sara.brickId, restored, NOW, 'room-1', 'restoring')).toBe('ready');
       expect(await prepOf(visa.id)).toEqual({ prepState: null });
+    });
+  });
+
+  describe('CodeRabbit on #1025 (round 9): I4, I5 and I6', () => {
+    const prepOf = (jobId: string) => prisma.computerJob.findUniqueOrThrow({ where: { id: jobId }, select: { prepState: true, stretchStarted: true } });
+
+    it('I5: a drop that takes long and loses the claim to another operation does not go on to restore: the result is superseded and no restore is sent', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 25 * 60 });
+      during = async (action) => {
+        // Another operation on the browser took the claim while the drop ran
+        if (action === 'drop') await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { cleanClaimedAt: new Date(Date.now() + 5_000) } });
+      };
+      expect(await restoreProfile(sara.brickId, visa.id, NOW)).toMatchObject({ state: 'left', reason: 'superseded' });
+      expect(sent.map((one) => one.action)).toEqual(['drop']);
+    });
+
+    it('I5 (control): a drop that keeps the claim goes on to restore', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 25 * 60 });
+      answers.restore = 'restored=0 reason=none';
+      expect(await restoreProfile(sara.brickId, visa.id, NOW)).toMatchObject({ state: 'fresh', reason: 'expired' });
+      expect(sent.map((one) => one.action)).toEqual(['drop', 'restore']);
+    });
+
+    it('I6: the stretch of a resumed job starts at the moment of the ready write, read after the emptying, never at a moment sampled before the claim was waited for', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring' } });
+      let clock = NOW;
+      let reads = 0;
+      // The emptying takes a while: the clock moves on while the command runs
+      during = async (action) => {
+        if (action === 'clear') clock = minutes(7);
+      };
+      const back = { state: 'fresh' as const, reason: 'none' as const, cookies: 0, pages: 0 };
+      expect(
+        await settleResumedBrowser(visa.id, sara.brickId, back, () => {
+          reads++;
+          return clock;
+        }),
+      ).toBe('ready');
+      // Read for the emptying (before it) and again for the write (after it)
+      expect(reads).toBe(2);
+      expect((await prepOf(visa.id)).stretchStarted).toEqual(minutes(7));
+    });
+
+    it('I6 (control): a plain moment still works as before', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring' } });
+      const back = await restoreProfile(sara.brickId, visa.id, NOW);
+      expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW)).toBe('ready');
+      expect((await prepOf(visa.id)).stretchStarted).toEqual(NOW);
+    });
+
+    it('I4: the machine is told the restore is committed only after the ready write landed, and only for a browser that was really restored', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring' } });
+      const back = await restoreProfile(sara.brickId, visa.id, NOW);
+      expect(back).toMatchObject({ state: 'restored' });
+      // The ready write does not land (the job is no longer in the state the attempt read): no commit, so a retry still finds the note and keeps the browser
+      expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW, undefined, 'recover')).toBe('recover');
+      expect(sent.map((one) => one.action)).toEqual(['restore']);
+      // Landed: committed once
+      expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW)).toBe('ready');
+      expect(sent.map((one) => one.action)).toEqual(['restore', 'commit']);
+      expect(sent[1]).toMatchObject({ job: visa.id, user: 'root' });
+    });
+
+    it('I4: a browser that was emptied (fresh) has no note to let go of: nothing is committed', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring' } });
+      answers.restore = 'restored=0 reason=none';
+      const back = await restoreProfile(sara.brickId, visa.id, NOW);
+      expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW)).toBe('ready');
+      expect(sent.map((one) => one.action)).toEqual(['restore', 'clear']);
+    });
+
+    it('I4: a commit that cannot be sent never undoes the ready job', async () => {
+      const sara = await person('Sara');
+      await machine(sara.brickId);
+      const visa = await job(sara, { status: 'running', pausedMinutesAgo: 5 });
+      await prisma.computerJob.update({ where: { id: visa.id }, data: { prepState: 'restoring' } });
+      const back = await restoreProfile(sara.brickId, visa.id, NOW);
+      answers.commit = '';
+      expect(await settleResumedBrowser(visa.id, sara.brickId, back, NOW)).toBe('ready');
+      expect((await prepOf(visa.id)).prepState).toBeNull();
     });
   });
 

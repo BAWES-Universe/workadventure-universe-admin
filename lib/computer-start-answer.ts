@@ -20,7 +20,10 @@ export function issuedOfKey(startKey: string): Date | null {
   const found = /^t([0-9a-z]{1,11})-./.exec(startKey);
   if (!found) return null;
   const ms = parseInt(found[1], 36);
-  return Number.isSafeInteger(ms) && ms > 0 ? new Date(ms) : null;
+  if (!Number.isSafeInteger(ms) || ms <= 0) return null;
+  // A number can be a safe integer and still beyond the range a Date can hold (8.64e15 ms): that is an Invalid Date, which is no moment at all (it would slip past a caller's "no issue time" check)
+  const issued = new Date(ms);
+  return Number.isNaN(issued.getTime()) ? null : issued;
 }
 
 /** The answer of a start as the bot server reads it (every refusal is HTTP 200 `{ ok: false, reason }`). One place, so a refusal kept on its attempt is the same body when it is given again. */

@@ -33,7 +33,7 @@ import { FakeComputerProvider, setComputerProviderForTests, type TurnEvent } fro
 import { Agent37Error, Agent37Unreached, TurnNotSent } from '@/lib/agent37/client';
 import { fenceMachine, finishJob, finishJobUnder, recordFinishIntent, settleTurnHold, underTurnHold, wakeIfStopped, setLeaderStopTimesForTests, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { verifyJobToken } from '@/lib/computer-token';
-import { lockCutoff, readFaultRows, recordFaults } from '@/lib/computer-faults';
+import { cutoffLockKey, lockCutoff, readFaultRows, recordFaults } from '@/lib/computer-faults';
 import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -728,32 +728,51 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         const { jobId } = await running('fence-a');
         // The admission (the last look at the job, which is also where the first turn is marked) finds the intent that committed just before it
         const original = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+        // The first turn is marked through the TRANSACTION's client (its own model delegate, not the root one), so the spy sits there: every write of the mark is counted, even one that a later write in the same transaction takes back
+        let marks = 0;
+        const watchMarks = (tx: object): object =>
+          new Proxy(tx, {
+            get(target, key) {
+              const value = Reflect.get(target, key);
+              if (key !== 'computerJob') return typeof value === 'function' ? value.bind(target) : value;
+              return new Proxy(value as object, {
+                get(delegate, method) {
+                  const member = Reflect.get(delegate, method);
+                  if (typeof member !== 'function') return member;
+                  if (method !== 'updateMany' && method !== 'update') return member.bind(delegate);
+                  return (args: { data?: { firstTurnSentAt?: Date | null } }) => {
+                    if (args?.data?.firstTurnSentAt instanceof Date) marks++;
+                    return member.call(delegate, args);
+                  };
+                },
+              });
+            },
+          });
         let fired = false;
         const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, options?: unknown) => {
-          if (!fired && typeof fn === 'function' && fn.toString().includes('finish_pending')) {
+          if (typeof fn !== 'function') return original(fn, options);
+          const watched = (tx: object) => (fn as (tx: object) => unknown)(watchMarks(tx));
+          if (!fired && fn.toString().includes('finish_pending')) {
             fired = true;
-            return recordFinishIntent(jobId, { outcome: 'done' }, new Date()).then(() => original(fn, options));
+            return recordFinishIntent(jobId, { outcome: 'done' }, new Date()).then(() => original(watched, options));
           }
-          return original(fn, options);
+          return original(watched, options);
         }) as unknown as typeof prisma.$transaction);
         const sent = jest.spyOn(fake, 'openTurn');
-        let marks = 0;
-        const realMark = prisma.computerJob.updateMany.bind(prisma.computerJob);
-        const markSpy = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation(((args: { data?: { firstTurnSentAt?: Date | null } }) => {
-          if (args.data?.firstTurnSentAt instanceof Date) marks++;
-          return realMark(args as never);
-        }) as never);
+        const markSpy = jest.spyOn(prisma.computerJob, 'updateMany');
         try {
           expect(await startTurn(jobId, 'carry on')).toEqual({ ok: false, reason: 'finish_pending' });
+          expect(fired).toBe(true);
+          expect(marks).toBe(0);
+          // The root delegate saw no mark either (no write of the mark is made outside the admission's transaction)
+          expect(markSpy.mock.calls.filter(([args]) => (args as { data?: { firstTurnSentAt?: unknown } }).data?.firstTurnSentAt instanceof Date)).toEqual([]);
+          expect(sent).not.toHaveBeenCalled();
+          expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ firstTurnSentAt: null, turnClaimedAt: null, agentResponseId: null });
         } finally {
           spy.mockRestore();
           markSpy.mockRestore();
+          sent.mockRestore();
         }
-        expect(fired).toBe(true);
-        expect(marks).toBe(0);
-        expect(sent).not.toHaveBeenCalled();
-        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ firstTurnSentAt: null, turnClaimedAt: null, agentResponseId: null });
-        sent.mockRestore();
       });
 
       /** Holds the job's cutoff lock in a transaction of its own, as a pause, a claim or a finish would (the lock the admission waits for); `release` lets it go. */
@@ -761,7 +780,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         let release: () => void = () => undefined;
         const gate = new Promise<void>((resolve) => (release = resolve));
         let ready: () => void = () => undefined;
-        const held = new Promise<void>((resolve) => (ready = resolve));
+        const taken = new Promise<void>((resolve) => (ready = resolve));
         const done = prisma.$transaction(
           async (tx) => {
             await lockCutoff(tx, jobId);
@@ -770,11 +789,19 @@ run('the broker, the fence and keep-awake, in a real database', () => {
           },
           { timeout: 30_000, maxWait: 30_000 },
         );
+        // Its failure is reported where the test waits for it (`held`) and where the test joins it (`done`), never as an unhandled rejection
+        done.catch(() => undefined);
+        // The checkpoint is raced against the transaction itself: one that fails (or ends) before it holds the lock rejects the wait at once, so the test reaches its cleanup
+        const held = Promise.race([taken, done.then(() => { throw new Error('The fixture transaction ended before it held the job’s cutoff lock'); })]);
         return { held, release: () => release(), done };
       };
-      const waitingOnJob = async () => {
-        for (let at = 0; at < 150; at++) {
-          const rows = await prisma.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
+      /** Waits until a statement of THIS database is waiting for THIS job's cutoff lock (the advisory lock the admission takes), not for any lock: an unrelated waiter proves nothing about the request under test. */
+      const waitingOnJob = async (jobId: string) => {
+        for (let at = 0; at < 500; at++) {
+          const rows = await prisma.$queryRaw<Array<{ n: number }>>`
+            SELECT count(*)::int AS n FROM pg_locks l, (SELECT hashtextextended(${cutoffLockKey(jobId)}, 0) AS k) h
+            WHERE l.locktype = 'advisory' AND NOT l.granted AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+              AND l.classid = ((h.k >> 32) & 4294967295)::bigint::oid AND l.objid = (h.k & 4294967295)::bigint::oid AND l.objsubid = 1`;
           if (rows[0].n > 0) return true;
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
@@ -791,7 +818,7 @@ run('the broker, the fence and keep-awake, in a real database', () => {
             if (started.ok) await drain(started.events);
             return started;
           });
-          expect(await waitingOnJob()).toBe(true);
+          expect(await waitingOnJob(jobId)).toBe(true);
           // The claim is held and the admission is waiting: nothing is marked
           expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ firstTurnSentAt: null });
           lock.release();
@@ -808,22 +835,27 @@ run('the broker, the fence and keep-awake, in a real database', () => {
         const lock = holdJob(jobId);
         const cut = new AbortController();
         const sent = jest.spyOn(fake, 'openTurn');
-        let start: Promise<unknown> = Promise.resolve();
         try {
-          await lock.held;
-          start = startTurn(jobId, 'carry on', cut.signal);
-          expect(await waitingOnJob()).toBe(true);
-          cut.abort();
-          lock.release();
-          await lock.done;
-          expect(await start).toEqual({ ok: false, reason: 'failed' });
+          let start: Promise<unknown> = Promise.resolve();
+          try {
+            await lock.held;
+            start = startTurn(jobId, 'carry on', cut.signal);
+            expect(await waitingOnJob(jobId)).toBe(true);
+            cut.abort();
+            lock.release();
+            await lock.done;
+            expect(await start).toEqual({ ok: false, reason: 'failed' });
+          } finally {
+            lock.release();
+            // The pending start is joined before the spy is let go: it cannot reach the provider after the restore
+            await Promise.allSettled([lock.done, start]);
+          }
+          expect(sent).not.toHaveBeenCalled();
+          expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ firstTurnSentAt: null, turnClaimedAt: null, agentResponseId: null });
         } finally {
-          lock.release();
-          await Promise.allSettled([lock.done, start]);
+          sent.mockRestore();
         }
-        expect(sent).not.toHaveBeenCalled();
-        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ firstTurnSentAt: null, turnClaimedAt: null, agentResponseId: null });
-        sent.mockRestore();
+        // The retry goes through the fake provider's real method
         const again = await startTurn(jobId, 'carry on');
         expect(again).toMatchObject({ ok: true });
         if (again.ok) await drain(again.events);

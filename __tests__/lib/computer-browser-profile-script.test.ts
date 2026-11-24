@@ -7,7 +7,7 @@
  * ("planted-bug checks"): each shows the check above it would catch that bug, so a check that passes for the wrong reason is seen.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -44,9 +44,21 @@ let root: string;
 let home: string;
 let places: SignInsPlaces;
 let port: number;
+let shim: string;
+/** Set by a test that starts a real browser: only then is there a browser of this test to stop at the end. */
+let startedBrowser = false;
 
 const profile = () => join(home, '.config', 'universe-chromium');
 const parked = (job: string) => join(places.parkRoot, job);
+/** The mark that says the live profile may hold a job's sign-ins: in a root-owned folder next to the park folder, out of the agent's reach to swap. */
+const marksFolder = () => join(root, 'var', 'lib', 'universe', 'marks');
+const dirtyMark = () => join(marksFolder(), 'profile.dirty');
+/** The marks folder as the command makes it (root's, open to everyone to put a mark in and take it out, sticky), for a test that must put something in it first. */
+function makeMarksFolder(): void {
+  mkdirSync(marksFolder(), { recursive: true });
+  chownSync(marksFolder(), 0, 0);
+  chmodSync(marksFolder(), 0o1777);
+}
 
 function freePort(): number {
   const found = spawnSync('python3', ['-c', 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])'], { encoding: 'utf8' });
@@ -61,6 +73,11 @@ function act(action: SignInsAction, job: string, keep: string[] = [], plant?: (s
     if (planted === script) throw new Error('The planted bug did not change the command');
     script = planted;
   }
+  // The command stops "chromium", "chrome" and "websockify" by name, which on a shared machine would be every browser on it: its pkill and pgrep are the shims
+  // (set up below), which only ever see this test's own browsers (CodeRabbit on #1025)
+  const first = 'export PATH\n';
+  if (!script.includes(first)) throw new Error('The command does not set its PATH where the test expects it');
+  script = script.replace(first, `PATH="${shim}:$PATH"\nexport PATH\n`);
   const done = spawnSync('sh', ['-c', script], { encoding: 'utf8', timeout: 120_000 });
   return { code: done.status ?? -1, out: done.stdout };
 }
@@ -85,7 +102,7 @@ function fakeProfile(secret: string): void {
  * temporary folder in its command line (its profile folder is under it), so that folder names them all. Nothing is stopped when the test made no browser folder.
  */
 function killBrowsers(): void {
-  if (!root) return;
+  if (!root || !startedBrowser) return;
   spawnSync('pkill', ['-f', '--', root]);
   for (let i = 0; i < 50 && spawnSync('pgrep', ['-f', '--', root]).status === 0; i++) spawnSync('sleep', ['0.1']);
 }
@@ -103,6 +120,14 @@ beforeEach(() => {
   chownSync(home, agentUid, agentUid);
   chownSync(join(home, '.universe'), agentUid, agentUid);
   port = freePort();
+  startedBrowser = false;
+  // pkill and pgrep as the command sees them: whatever name it asks for, only a process that runs on THIS test's browser folder is ever named
+  shim = join(root, 'shim');
+  mkdirSync(shim);
+  for (const tool of ['pkill', 'pgrep']) {
+    const real = spawnSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim();
+    writeFileSync(join(shim, tool), `#!/bin/sh\nsignal=""\n[ "$1" = "-9" ] && signal="-9"\nexec ${real} $signal -f -- "user-data-dir=${home}/"\n`, { mode: 0o755 });
+  }
   places = {
     parkRoot: join(root, 'var', 'lib', 'universe', 'signins'),
     user: AGENT,
@@ -185,7 +210,7 @@ run('putting a job’s browser away, on a real file system with a real unprivile
     expect(existsSync(profile())).toBe(false);
     expect(existsSync(join(home, '.cache', 'chromium'))).toBe(false);
     expect(existsSync(join(parked(JOB_A), 'profile', 'Default', 'Cookies'))).toBe(true);
-    expect(existsSync(join(home, '.universe', 'profile.dirty'))).toBe(false);
+    expect(existsSync(dirtyMark())).toBe(false);
     for (const path of [places.parkRoot, parked(JOB_A), join(parked(JOB_A), 'profile')]) {
       const info = statSync(path);
       expect(info.uid).toBe(0);
@@ -207,6 +232,28 @@ run('putting a job’s browser away, on a real file system with a real unprivile
     fakeProfile('job A cookies');
     act('park', JOB_A, [JOB_A], (script) => script.replace('chmod 0700 "$PARK_ROOT"', 'chmod 0755 "$PARK_ROOT"').replace('[ "$(stat -c \'%u %a\' "$PARK_ROOT" 2>/dev/null)" = "0 700" ] || { say "0 reason=folder"; exit 1; }', '').replace('chmod -R go-rwx "$JOBDIR.new"', 'chmod -R go+rX "$JOBDIR.new"').replace('mkdir -m 0700 "$JOBDIR.new"', 'mkdir -m 0755 "$JOBDIR.new"'));
     expect(agentCanRead(join(parked(JOB_A), 'profile', 'Default', 'Cookies'))).toBe(true);
+  });
+
+  it('CodeRabbit on #1025 (F3): stopping the browser never touches a browser or screen program of anyone else on the machine, whatever the action', () => {
+    // Stand-ins named exactly as the programs the command stops by name; none of them runs on this test's browser folder
+    const decoys = join(root, 'decoys');
+    mkdirSync(decoys);
+    const alive: number[] = [];
+    for (const name of ['chrome', 'chromium', 'websockify']) {
+      writeFileSync(join(decoys, name), readFileSync(spawnSync('sh', ['-c', 'command -v sleep'], { encoding: 'utf8' }).stdout.trim()), { mode: 0o755 });
+      const started = spawnSync('sh', ['-c', `"${join(decoys, name)}" 300 >/dev/null 2>&1 & echo $!`], { encoding: 'utf8' });
+      alive.push(Number(started.stdout.trim()));
+    }
+    try {
+      fakeProfile('job A cookies');
+      expect(act('park', JOB_A, [JOB_A]).out).toMatch(/parked=1/);
+      expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
+      expect(act('clear', JOB_A, [JOB_A]).out).toMatch(/cleared=1/);
+      // None of the three was stopped (and the command did not wait for them to go: it would have said the browser is still running)
+      for (const pid of alive) expect(existsSync(`/proc/${pid}`) && !readFileSync(`/proc/${pid}/stat`, 'utf8').includes(') Z ')).toBe(true);
+    } finally {
+      for (const pid of alive) spawnSync('kill', ['-9', String(pid)]);
+    }
   });
 
   it('takes back a parked folder the agent could have reached (a link, or a folder opened up) before it keeps anything in it', () => {
@@ -244,7 +291,7 @@ run('putting a job’s browser away, on a real file system with a real unprivile
     expect(done.out).not.toMatch(/parked=1/);
     expect(existsSync(parked(JOB_A))).toBe(false);
     expect(existsSync(`${parked(JOB_A)}.new`)).toBe(false);
-    expect(existsSync(join(home, '.universe', 'profile.dirty'))).toBe(false);
+    expect(existsSync(dirtyMark())).toBe(false);
     expect(readSignInsAnswer('park', done.code, done.out)).toEqual({ done: 'none', reason: 'nothing', cookies: 0, pages: 0 });
     // With a profile there is something to keep: said as kept
     fakeProfile('job A cookies');
@@ -275,7 +322,7 @@ run('putting a job’s browser away, on a real file system with a real unprivile
   it('a park cut off half way leaves the dirty mark, so the image’s start-up removes the profile before any job can use it', () => {
     fakeProfile('job A cookies');
     act('park', JOB_A, [JOB_A], (script) => script.replace('  saved="$(devtools save', '  exit 1\n  saved="$(devtools save'));
-    expect(existsSync(join(home, '.universe', 'profile.dirty'))).toBe(true);
+    expect(existsSync(dirtyMark())).toBe(true);
   });
 });
 
@@ -288,7 +335,7 @@ run('bringing a job’s browser back, and never into another job', () => {
     expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
     expect(statSync(join(profile(), 'Default', 'Cookies')).uid).toBe(agentUid);
     expect(existsSync(parked(JOB_A))).toBe(false);
-    expect(existsSync(join(home, '.universe', 'profile.dirty'))).toBe(false);
+    expect(existsSync(dirtyMark())).toBe(false);
   });
 
   it('a different job gets an empty browser and never another job’s: A’s stays put away for A', () => {
@@ -326,10 +373,11 @@ run('bringing a job’s browser back, and never into another job', () => {
     chownSync(rootFile, 0, 0);
     chmodSync(rootFile, 0o600);
     fakeProfile('job A cookies');
-    // The agent owns its own state folder, so it can put a link where the mark goes. Every action that marks is tried
+    makeMarksFolder();
+    // The agent can put a link in the marks folder where the mark goes. Every action that marks is tried
     for (const action of ['park', 'restore', 'clear'] as const) {
-      rmSync(join(home, '.universe', 'profile.dirty'), { recursive: true, force: true });
-      symlinkSync(rootFile, join(home, '.universe', 'profile.dirty'));
+      rmSync(dirtyMark(), { recursive: true, force: true });
+      symlinkSync(rootFile, dirtyMark());
       act(action, JOB_A, [JOB_A]);
       expect(spawnSync('cat', [rootFile], { encoding: 'utf8' }).stdout).toBe('root ALL=(ALL) ALL\n');
       expect(statSync(rootFile).uid).toBe(0);
@@ -341,10 +389,9 @@ run('bringing a job’s browser back, and never into another job', () => {
     writeFileSync(rootFile, 'root ALL=(ALL) ALL\n');
     chownSync(rootFile, 0, 0);
     fakeProfile('job A cookies');
-    symlinkSync(rootFile, join(home, '.universe', 'profile.dirty'));
-    act('park', JOB_A, [JOB_A], (script) =>
-      script.replace('  rm -rf "$STATE/profile.dirty" 2>/dev/null\n  mkdir "$STATE/profile.dirty" 2>/dev/null || return 1', '  : > "$STATE/profile.dirty" || return 1'),
-    );
+    makeMarksFolder();
+    symlinkSync(rootFile, dirtyMark());
+    act('park', JOB_A, [JOB_A], (script) => script.replace('  rm -rf "$DIRTY" 2>/dev/null\n  mkdir "$DIRTY" 2>/dev/null || return 1', '  : > "$DIRTY" || return 1'));
     expect(spawnSync('cat', [rootFile], { encoding: 'utf8' }).stdout).toBe('');
   });
 
@@ -371,7 +418,7 @@ run('bringing a job’s browser back, and never into another job', () => {
     fakeProfile('job A cookies');
     act('park', JOB_A, [JOB_A]);
     writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [{ name: 'sid', value: 'A', domain: 'example.test', path: '/' }], pages: [] }));
-    act('restore', JOB_A, [JOB_A], (script) => script.replace('  replay || { say "0 reason=no_answer"; exit 1; }\n  rm -rf "$JOBDIR" "$JOBDIR.new"\n  if [ "$had" = "1" ]', '  replay\n  rm -rf "$JOBDIR" "$JOBDIR.new"\n  if [ "$had" = "1" ]'));
+    act('restore', JOB_A, [JOB_A], (script) => script.replace('  replay || { say "0 reason=no_answer"; exit 1; }\n  # Kept until Orbit writes', '  replay\n  # Kept until Orbit writes'));
     expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(false);
   });
 
@@ -431,10 +478,10 @@ run('bringing a job’s browser back, and never into another job', () => {
   /** What the image's own start-up does at the browser's start: a profile that is still marked dirty is removed (lib/agent37/image-files.ts, universe-up). It notes what it saw. */
   function startUpLikeTheImage(): string {
     const seen = join(root, 'mark-at-start');
-    places.start = `if [ -e "$STATE/profile.dirty" ]; then echo set > "${seen}"; rm -rf "$PROFILE"; else echo clear > "${seen}"; fi`;
+    places.start = `if [ -e "$DIRTY" ] || [ -L "$DIRTY" ]; then echo set > "${seen}"; rm -rf "$PROFILE"; else echo clear > "${seen}"; fi`;
     return seen;
   }
-  const markPath = () => join(home, '.universe', 'profile.dirty');
+  const markPath = () => dirtyMark();
   /** A command that was killed after the move: the mark is still there and the lock is left behind (the command lock is taken over after a minute). */
   function leaveKilledTryBehind(): void {
     mkdirSync(markPath());
@@ -444,12 +491,29 @@ run('bringing a job’s browser back, and never into another job', () => {
     utimesSync(lock, old, old);
   }
 
+  /**
+   * A checkpoint at the moment the command lets go of up.lock (its unlock, or the exit trap that frees it when the command stops): it writes down whether the dirty mark
+   * is still there, one line per release, just before the lock is removed. A check made after the command has exited cannot tell "cleared before the lock was let go" from
+   * "cleared afterwards" (CodeRabbit on #1025): this one can.
+   */
+  function noteMarkAtLockRelease(script: string, seen: string): string {
+    const note = `if [ -e "$DIRTY" ] || [ -L "$DIRTY" ]; then echo mark-set >> "${seen}"; else echo mark-clear >> "${seen}"; fi; `;
+    const trap = "  trap 'rmdir \"$LOCK\" 2>/dev/null' EXIT\n";
+    const unlock = 'unlock() {\n  rmdir "$LOCK" 2>/dev/null\n';
+    if (!script.includes(trap) || !script.includes(unlock)) throw new Error('The lock release is not where the checkpoint expects it');
+    return script.replace(trap, `  trap '${note}rmdir "$LOCK" 2>/dev/null' EXIT\n`).replace(unlock, `unlock() {\n  ${note}rmdir "$LOCK" 2>/dev/null\n`);
+  }
+  const FAIL_HAND_BACK = (script: string) => script.replace('    chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }\n    had=1', '    false || { say "0 reason=move"; exit 1; }\n    had=1');
+
   it('CodeRabbit A3: once the profile is moved in, a failed hand-back clears the dirty mark under the lock before the lock is let go, and the next try finishes', () => {
     fakeProfile('job A cookies');
     act('park', JOB_A, [JOB_A]);
-    const failed = act('restore', JOB_A, [JOB_A], (script) => script.replace('    chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }\n    had=1', '    false || { say "0 reason=move"; exit 1; }\n    had=1'));
+    const seen = join(root, 'mark-at-lock-release');
+    const failed = act('restore', JOB_A, [JOB_A], (script) => noteMarkAtLockRelease(FAIL_HAND_BACK(script), seen));
     expect(failed.code).toBe(1);
     expect(failed.out).toMatch(/restored=0 reason=move/);
+    // The lock was let go exactly once, and the mark was already gone at that moment (not cleared afterwards)
+    expect(readFileSync(seen, 'utf8')).toBe('mark-clear\n');
     // The profile is in place, the mark is gone (the start-up would remove the profile if it were there), the lock is let go, the note of the move is kept
     expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
     expect(existsSync(markPath())).toBe(false);
@@ -464,10 +528,13 @@ run('bringing a job’s browser back, and never into another job', () => {
   it('planted bug: a hand-back that fails with the mark still set leaves the moved profile to be removed by the start-up (the check above sees the mark)', () => {
     fakeProfile('job A cookies');
     act('park', JOB_A, [JOB_A]);
+    const seen = join(root, 'mark-at-lock-release');
     act('restore', JOB_A, [JOB_A], (script) =>
-      script.replace('    unmark || { say "0 reason=mark"; exit 1; }\n    chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }\n    had=1', '    false || { say "0 reason=move"; exit 1; }\n    had=1'),
+      noteMarkAtLockRelease(script.replace('    unmark || { say "0 reason=mark"; exit 1; }\n    # The move is noted BEFORE', '    # The move is noted BEFORE').replace('    chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }\n    had=1', '    false || { say "0 reason=move"; exit 1; }\n    had=1'), seen),
     );
     expect(existsSync(markPath())).toBe(true);
+    // The checkpoint sees it too: the lock was let go with the mark still set
+    expect(readFileSync(seen, 'utf8')).toBe('mark-set\n');
   });
 
   it('CodeRabbit A3: a retry on the moved branch never starts the browser while a mark left by a cut-off try is set, and the profile survives the start-up', () => {
@@ -555,7 +622,12 @@ run('bringing a job’s browser back, and never into another job', () => {
     fakeProfile('job A cookies');
     act('park', JOB_A, [JOB_A]);
     mkdirSync(join(parked(JOB_A), 'moved'));
-    act('restore', JOB_A, [JOB_A], (script) => script.replace(MOVED_NOTE, '  if [ -d "$JOBDIR" ]; then printf \'\' > "$JOBDIR/moved" 2>/dev/null; fi\n'));
+    // (The restore note, which keeps a retry from emptying a browser that was restored, is left out too: this check is about the "moved" note alone)
+    act('restore', JOB_A, [JOB_A], (script) =>
+      script
+        .replace(MOVED_NOTE, '  if [ -d "$JOBDIR" ]; then printf \'\' > "$JOBDIR/moved" 2>/dev/null; fi\n')
+        .replace('  if [ "$had" = "1" ]; then printf \'\' > "$NOTE" || { say "0 reason=move"; exit 1; }; fi\n', () => ''),
+    );
     rmSync(join(parked(JOB_A), 'moved'), { recursive: true, force: true });
     act('restore', JOB_A, [JOB_A]);
     expect(existsSync(join(profile(), 'Default', 'Cookies'))).toBe(false);
@@ -716,14 +788,30 @@ runWithBrowser('a real browser’s sign-ins and open pages', () => {
     throw new Error('The browser did not answer');
   }
 
-  /** The pages the browser has open at one address, once the browser has had a moment to show what was opened (at least one is waited for only when `wait` is set). */
-  async function pagesAt(live: CdpBrowser, url: string, wait = true): Promise<CdpPage[]> {
+  /**
+   * The pages the browser has open at one address, once the replayed tabs have all arrived (CodeRabbit on #1025). It waits, bounded, until at least `expected` pages are
+   * at that address AND the browser's whole list of pages has stopped changing for a quiet moment, so a tab still on its way (a delayed duplicate, a second tab on the same
+   * address) is in the count before it is taken: the first tab arriving is not enough, and a late extra tab cannot slip past a check for fewer. The callers keep their exact
+   * count assertions. `expected` 0 only waits for the browser to settle (the pages must not turn up).
+   */
+  async function pagesAt(live: CdpBrowser, url: string, expected: number): Promise<CdpPage[]> {
     const context = live.contexts()[0];
-    for (let i = 0; wait && i < 50 && !context.pages().some((one) => one.url() === url); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    const QUIET_POLLS = 10; // 1 s of an unchanged list
+    let last = '';
+    let quiet = 0;
+    for (let i = 0; i < 150; i++) {
+      const pages = context.pages().map((one) => one.url());
+      const now = [...pages].sort().join('\n');
+      quiet = now === last ? quiet + 1 : 0;
+      last = now;
+      if (pages.filter((one) => one === url).length >= expected && quiet >= QUIET_POLLS) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
     return context.pages().filter((one) => one.url() === url);
   }
 
   function startBrowser() {
+    startedBrowser = true;
     mkdirSync(join(home, '.config'), { recursive: true });
     mkdirSync(join(home, '.cache'), { recursive: true });
     spawnSync('chown', [`${AGENT}:`, join(home, '.config'), join(home, '.cache')]);
@@ -776,20 +864,20 @@ runWithBrowser('a real browser’s sign-ins and open pages', () => {
     expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(true);
     // The first partial restore opened exactly one page (not skipped, not twice), before any retry
     let again = await browser();
-    expect(await pagesAt(again, `${site}/visa-form`)).toHaveLength(1);
+    expect(await pagesAt(again, `${site}/visa-form`, 1)).toHaveLength(1);
     await again.close().catch(() => undefined);
     // The retry (the move is already noted, so only the replay is done again): the page that already came back is not opened a second time
     const second = act('restore', JOB_A, [JOB_A]);
     expect(second.out).toMatch(/restored=0 reason=no_answer/);
     again = await browser();
-    expect(await pagesAt(again, `${site}/visa-form`)).toHaveLength(1);
+    expect(await pagesAt(again, `${site}/visa-form`, 1)).toHaveLength(1);
     await again.close().catch(() => undefined);
     // Once the session is whole the replay finishes and the saved session goes
     writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [good], pages: [`${site}/visa-form`] }));
     expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
     expect(existsSync(parked(JOB_A))).toBe(false);
     again = await browser();
-    expect(await pagesAt(again, `${site}/visa-form`)).toHaveLength(1);
+    expect(await pagesAt(again, `${site}/visa-form`, 1)).toHaveLength(1);
     expect((await again.contexts()[0].cookies()).find((cookie) => cookie.name === 'sid')?.value).toBe('signed-in-as-A');
     await again.close().catch(() => undefined);
   }, 180_000);
@@ -804,23 +892,23 @@ runWithBrowser('a real browser’s sign-ins and open pages', () => {
     const opened = act('restore', JOB_A, [JOB_A], (script) => script.replace("        http(\"PUT\", \"/json/new?\" + urllib.parse.quote(url, safe=\"\"))\n        opened += 1\n", "        if url.endswith('/page-b'):\n            raise IOError('planted')\n        http(\"PUT\", \"/json/new?\" + urllib.parse.quote(url, safe=\"\"))\n        opened += 1\n"));
     expect(opened.out).toMatch(/restored=0 reason=no_answer/);
     let live = await browser();
-    expect(await pagesAt(live, `${site}/page-a`)).toHaveLength(1);
-    expect(await pagesAt(live, `${site}/page-b`, false)).toHaveLength(0);
+    expect(await pagesAt(live, `${site}/page-a`, 1)).toHaveLength(1);
+    expect(await pagesAt(live, `${site}/page-b`, 0)).toHaveLength(0);
     await live.close().catch(() => undefined);
     // The retry cannot list the tabs: nothing is opened (page A is not opened a second time), the session is kept and the answer says incomplete
     const blind = act('restore', JOB_A, [JOB_A], (script) => script.replace('def open_tabs():\n', 'def open_tabs():\n    raise IOError("planted")\n'));
     expect(blind.out).toMatch(/restored=0 reason=no_answer/);
     expect(existsSync(join(parked(JOB_A), 'session.json'))).toBe(true);
     live = await browser();
-    expect(await pagesAt(live, `${site}/page-a`)).toHaveLength(1);
-    expect(await pagesAt(live, `${site}/page-b`, false)).toHaveLength(0);
+    expect(await pagesAt(live, `${site}/page-a`, 1)).toHaveLength(1);
+    expect(await pagesAt(live, `${site}/page-b`, 0)).toHaveLength(0);
     await live.close().catch(() => undefined);
     // The list works again: only the missing page is opened, and the replay finishes
     expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1 cookies=1 pages=2/);
     expect(existsSync(parked(JOB_A))).toBe(false);
     live = await browser();
-    expect(await pagesAt(live, `${site}/page-a`)).toHaveLength(1);
-    expect(await pagesAt(live, `${site}/page-b`)).toHaveLength(1);
+    expect(await pagesAt(live, `${site}/page-a`, 1)).toHaveLength(1);
+    expect(await pagesAt(live, `${site}/page-b`, 1)).toHaveLength(1);
     await live.close().catch(() => undefined);
   }, 180_000);
 
@@ -833,20 +921,20 @@ runWithBrowser('a real browser’s sign-ins and open pages', () => {
     writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [good, bad], pages: [`${site}/same`, `${site}/same`, `${site}/other`] }));
     expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=0 reason=no_answer/);
     let live = await browser();
-    expect(await pagesAt(live, `${site}/same`)).toHaveLength(2);
-    expect(await pagesAt(live, `${site}/other`)).toHaveLength(1);
+    expect(await pagesAt(live, `${site}/same`, 2)).toHaveLength(2);
+    expect(await pagesAt(live, `${site}/other`, 1)).toHaveLength(1);
     await live.close().catch(() => undefined);
     // The retry finds all three there and opens none
     expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=0 reason=no_answer/);
     live = await browser();
-    expect(await pagesAt(live, `${site}/same`)).toHaveLength(2);
-    expect(await pagesAt(live, `${site}/other`)).toHaveLength(1);
+    expect(await pagesAt(live, `${site}/same`, 2)).toHaveLength(2);
+    expect(await pagesAt(live, `${site}/other`, 1)).toHaveLength(1);
     await live.close().catch(() => undefined);
     // With one of the two already open, a whole session opens only the missing one
     writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify({ cookies: [good], pages: [`${site}/same`, `${site}/same`, `${site}/same`] }));
     expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1 cookies=1 pages=3/);
     live = await browser();
-    expect(await pagesAt(live, `${site}/same`)).toHaveLength(3);
+    expect(await pagesAt(live, `${site}/same`, 3)).toHaveLength(3);
     await live.close().catch(() => undefined);
   }, 180_000);
 
@@ -863,4 +951,140 @@ runWithBrowser('a real browser’s sign-ins and open pages', () => {
     expect(await context.cookies()).toEqual([]);
     await live.close().catch(() => undefined);
   }, 120_000);
+});
+
+run('the dirty mark and the restore note (CodeRabbit on #1025: F1, F2, I4)', () => {
+  const sessionFile = { cookies: [{ name: 'sid', value: 'A', domain: 'example.test', path: '/' }], pages: [] };
+
+  it('F1: the mark is in a folder that is root’s (sticky, open to the agent to put a mark in and take it out), not in the agent’s own folder', () => {
+    fakeProfile('job A cookies');
+    expect(act('park', JOB_A, [JOB_A]).out).toMatch(/parked=1/);
+    const info = statSync(marksFolder());
+    expect(info.uid).toBe(0);
+    expect(info.mode & 0o7777).toBe(0o1777);
+    // A try cut off after the mark is set leaves it, and the agent’s user can take it out (it owns it)
+    fakeProfile('job A cookies again');
+    act('park', JOB_B, [JOB_B], (script) => script.replace('  saved="$(devtools save', '  exit 1\n  saved="$(devtools save'));
+    expect(existsSync(dirtyMark())).toBe(true);
+    const removed = spawnSync('setpriv', [`--reuid=${agentUid}`, `--regid=${agentUid}`, '--clear-groups', '--', 'rmdir', dirtyMark()], { encoding: 'utf8' });
+    expect(removed.status).toBe(0);
+    expect(existsSync(dirtyMark())).toBe(false);
+  });
+
+  /** An rm that, the moment it is asked to remove a mark, has the agent swap its own state folder for a link to a folder of root's (the agent owns that folder, so it can). */
+  function swapStateWhenMarkIsRemoved(): { decoy: string } {
+    const decoy = join(root, 'decoy');
+    mkdirSync(decoy);
+    writeFileSync(join(decoy, 'profile.dirty'), 'root-owned file the agent must not be able to make root remove');
+    const state = join(home, '.universe');
+    // The command's own PATH is the system's: the real rm is there (not whatever a wrapper in this shell's PATH may be)
+    const real = ['/usr/bin/rm', '/bin/rm'].find((path) => existsSync(path)) ?? 'rm';
+    writeFileSync(
+      join(shim, 'rm'),
+      `#!/bin/sh\nfor a in "$@"; do case "$a" in *profile.dirty) if [ -d "${state}" ] && [ ! -L "${state}" ]; then mv "${state}" "${state}.real"; ln -s "${decoy}" "${state}"; fi ;; esac; done\nexec ${real} "$@"\n`,
+      { mode: 0o755 },
+    );
+    return { decoy };
+  }
+
+  it('F1: an agent that swaps its state folder for a link while root removes the mark never makes root remove anything of its choosing', () => {
+    fakeProfile('job A cookies');
+    const { decoy } = swapStateWhenMarkIsRemoved();
+    for (const action of ['park', 'clear'] as const) {
+      act(action, JOB_A, [JOB_A]);
+      expect(existsSync(join(decoy, 'profile.dirty'))).toBe(true);
+      fakeProfile('job A cookies');
+    }
+  });
+
+  it('planted bug: a mark kept in the agent’s own state folder (the old place) is removed through the swapped link', () => {
+    fakeProfile('job A cookies');
+    const { decoy } = swapStateWhenMarkIsRemoved();
+    act('park', JOB_A, [JOB_A], (script) => script.replace('DIRTY="$MARKS/profile.dirty"', 'DIRTY="$STATE/profile.dirty"'));
+    expect(existsSync(join(decoy, 'profile.dirty'))).toBe(false);
+  });
+
+  // A function as the replacement: in a string, "$$" would be read as a single "$"
+  const KILL_AFTER_MOVE = (script: string) =>
+    script.replace('    chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }\n    had=1', () => '    kill -9 $$\n    chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }\n    had=1');
+
+  it('F2: a restore killed right after the move leaves no mark for the start-up to act on, and the profile that moved in stays closed to the agent until the retry hands it over', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    const killed = act('restore', JOB_A, [JOB_A], KILL_AFTER_MOVE);
+    expect(killed.out).not.toMatch(/restored=/);
+    // What the image's start-up would see before the retry runs: no mark, so it removes nothing
+    expect(existsSync(dirtyMark())).toBe(false);
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+    expect(statSync(profile()).uid).toBe(0);
+    expect(agentCanRead(profile())).toBe(false);
+    // The lock the killed try left is taken over after a minute; the retry finishes the hand-over
+    const lock = join(home, '.universe', 'up.lock');
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(lock, old, old);
+    const retry = act('restore', JOB_A, [JOB_A]);
+    expect(retry.out).toMatch(/restored=1/);
+    expect(statSync(join(profile(), 'Default', 'Cookies')).uid).toBe(agentUid);
+    expect(agentCanRead(profile())).toBe(true);
+  });
+
+  it('planted bug: the mark kept until after the move (the old order) is still set when a restore is killed after the move', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    act('restore', JOB_A, [JOB_A], (script) => KILL_AFTER_MOVE(script.replace('    unmark || { say "0 reason=mark"; exit 1; }\n    # The move is noted BEFORE', '    # The move is noted BEFORE')));
+    expect(existsSync(dirtyMark())).toBe(true);
+  });
+
+  it('I4: a retry of a restore whose result Orbit never wrote keeps the live browser; the commit lets the note go; the next restore then makes the browser empty again', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    expect(act('restore', JOB_A, [JOB_A]).out).toMatch(/restored=1/);
+    expect(existsSync(join(places.parkRoot, `${JOB_A}.restored`))).toBe(true);
+    // Orbit asks again (the ready write did not land): nothing is parked now, and the live browser is still A's own
+    const again = act('restore', JOB_A, [JOB_A]);
+    expect(again.out).toMatch(/restored=1/);
+    expect(spawnSync('cat', [join(profile(), 'Default', 'Cookies')], { encoding: 'utf8' }).stdout).toBe('job A cookies');
+    // The ready write landed
+    const committed = act('commit', JOB_A, [JOB_A]);
+    expect(committed.out).toMatch(/committed=1/);
+    expect(existsSync(join(places.parkRoot, `${JOB_A}.restored`))).toBe(false);
+    // With nothing noted, a restore with nothing parked is the empty browser it always was
+    const empty = act('restore', JOB_A, [JOB_A]);
+    expect(empty.out).toMatch(/restored=0 reason=none/);
+    expect(existsSync(profile())).toBe(false);
+  });
+
+  it('I4: a note never makes another job’s restore keep A’s browser, and any command that replaces the live browser lets the note go', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    act('restore', JOB_A, [JOB_A]);
+    expect(act('restore', JOB_B, [JOB_A, JOB_B]).out).toMatch(/restored=0 reason=none/);
+    expect(existsSync(profile())).toBe(false);
+    expect(existsSync(join(places.parkRoot, `${JOB_A}.restored`))).toBe(false);
+    expect(readdirSync(places.parkRoot).filter((name) => name.endsWith('.restored'))).toEqual([]);
+  });
+
+  it('planted bug: a retry that does not know the note empties the browser the earlier try restored', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    act('restore', JOB_A, [JOB_A]);
+    act('restore', JOB_A, [JOB_A], (script) => script.replace('[ -f "$NOTE" ] && [ ! -L "$NOTE" ]', '[ -f "$JOBDIR/never" ]'));
+    expect(existsSync(join(profile(), 'Default', 'Cookies'))).toBe(false);
+  });
+
+  it('I4: a restored note is kept through the housekeeping for the keep time, then let go (it is Orbit’s to commit)', () => {
+    fakeProfile('job A cookies');
+    act('park', JOB_A, [JOB_A]);
+    writeFileSync(join(parked(JOB_A), 'session.json'), JSON.stringify(sessionFile));
+    act('restore', JOB_A, [JOB_A]);
+    // No browser answers in these tests, so the replay failed: no note yet. Put one as a finished restore leaves it
+    const note = join(places.parkRoot, `${JOB_A}.restored`);
+    writeFileSync(note, '');
+    act('prune', JOB_B, [JOB_A]);
+    expect(existsSync(note)).toBe(true);
+    const old = new Date(Date.now() - 48 * 3600_000);
+    utimesSync(note, old, old);
+    act('prune', JOB_B, [JOB_A]);
+    expect(existsSync(note)).toBe(false);
+  });
 });

@@ -82,8 +82,8 @@ const wipe = async () => {
 // Round 8, A2: a start that acks carries its issue time (the moment of the message) in its key
 const key = () => `t${Date.now().toString(36)}-${randomUUID().replace(/-/g, '')}`;
 const jobsOf = (sara: Owner) => prisma.computerJob.findMany({ where: { personId: sara.id }, orderBy: { createdAt: 'asc' }, select: { id: true, startKey: true, status: true } });
-/** The rooms ever taken, by the job they were for (a released room keeps its row). */
-const roomJobsOf = async (sara: Owner) => [...new Set((await prisma.meterReservation.findMany({ where: { personId: sara.id }, select: { jobId: true } })).map((room) => room.jobId))];
+/** The time rooms ever taken, ONE entry per reservation row, by the job each was for (a released room keeps its row). Disk rooms are not time rooms and are left out; the rows are not de-duplicated, so a job that reserved its time twice is listed twice. */
+const roomJobsOf = async (sara: Owner) => (await prisma.meterReservation.findMany({ where: { personId: sara.id, reservationKey: { startsWith: 'computer:job:' } }, select: { jobId: true }, orderBy: { createdAt: 'asc' } })).map((room) => room.jobId);
 
 /** One start through the real route, as the game makes it when it acks (key + acks headers). */
 const post = async (sara: Owner, startKey: string, title: string, extra: Record<string, string> = {}) =>
@@ -108,13 +108,15 @@ const control = async (sara: Owner, body: Record<string, unknown>, command: stri
 };
 
 /** Holds the start under `startKey` right after the route's spending check answered it: resolves once it is held, with the function that lets it go on. */
-function holdAfterSpendCheck(startKey: string): { reached: Promise<void>; letGo: () => void } {
+function holdAfterSpendCheck(startKey: string): { reached: Promise<void>; reachedBy: (request: Promise<unknown>) => Promise<void>; letGo: () => void } {
   let letGo!: () => void;
   held.release = new Promise<void>((resolve) => (letGo = resolve));
   const reached = new Promise<void>((resolve) => (held.reached = resolve));
   held.key = startKey;
   return {
     reached,
+    /** Resolves once the start is held; rejects at once, with what it answered, if the request ended without ever reaching the spending check (never a wait until the test times out). */
+    reachedBy: (request) => Promise.race([reached, request.then((answer) => Promise.reject(new Error(`the request ended before the spending check held it: ${JSON.stringify(answer)}`)))]),
     letGo: () => {
       held.key = null;
       letGo();
@@ -150,29 +152,37 @@ run('GPT seventh note (round 8): Orbit side of A, C and D2, in a real database',
       const KEY_B = key();
       const hold = holdAfterSpendCheck(KEY_A);
       const pendingA = post(sara, KEY_A, 'Fill the visa form');
-      await hold.reached;
-      // While A is held the look for A never says "no job" (the game would then send a fresh start): it is going on
-      const during = await look(sara, KEY_A);
-      expect(during.body.started).not.toBeNull();
-      const b = await post(sara, KEY_B, 'Please do the visa form');
-      // What the game does with B's answer: a job it acknowledges, and the job runs to the end
-      if (b.ok) {
-        expect(await ackStart(sara.brickId, sara.id, KEY_B)).toBe(true);
-        await finishJob(b.job.id, 'done', new Date());
+      pendingA.catch(() => undefined);
+      try {
+        await hold.reachedBy(pendingA);
+        // While A is held the look for A never says "no job" (the game would then send a fresh start): it is going on: the answer is the 503 `inProgress` one, not a miss and not some other failure
+        const during = await look(sara, KEY_A);
+        expect(during.status).toBe(503);
+        expect(during.body).toMatchObject({ retry: true, inProgress: true });
+        const b = await post(sara, KEY_B, 'Please do the visa form');
+        // What the game does with B's answer: a job it acknowledges, and the job runs to the end
+        if (b.ok) {
+          expect(await ackStart(sara.brickId, sara.id, KEY_B)).toBe(true);
+          await finishJob(b.job.id, 'done', new Date());
+        }
+        hold.letGo();
+        const a = await pendingA;
+        const jobs = await jobsOf(sara);
+        expect(jobs).toHaveLength(1);
+        // ONE reservation row for time, and it is the one job's
+        expect(await roomJobsOf(sara)).toEqual([jobs[0].id]);
+        // Whoever made it, the one job is what both keys answer, now and on a retry
+        expect((await look(sara, KEY_A)).body.started).toMatchObject({ id: jobs[0].id });
+        expect((await look(sara, KEY_B)).body.started).toMatchObject({ id: jobs[0].id });
+        const jobOfAnswer = (answer: { ok: boolean; job?: { id: string | null; attempt?: string | null } }) => (answer.ok ? answer.job?.id : (answer.job?.id ?? null));
+        expect([jobs[0].id, null]).toContain(jobOfAnswer(a));
+        const again = await post(sara, KEY_A, 'Fill the visa form');
+        expect((await jobsOf(sara))).toHaveLength(1);
+        expect(again.ok ? again.job.id : again.job?.id).toBe(jobs[0].id);
+      } finally {
+        hold.letGo();
+        await Promise.allSettled([pendingA]);
       }
-      hold.letGo();
-      const a = await pendingA;
-      const jobs = await jobsOf(sara);
-      expect(jobs).toHaveLength(1);
-      expect(await roomJobsOf(sara)).toEqual([jobs[0].id]);
-      // Whoever made it, the one job is what both keys answer, now and on a retry
-      expect((await look(sara, KEY_A)).body.started).toMatchObject({ id: jobs[0].id });
-      expect((await look(sara, KEY_B)).body.started).toMatchObject({ id: jobs[0].id });
-      const jobOfAnswer = (answer: { ok: boolean; job?: { id: string | null; attempt?: string | null } }) => (answer.ok ? answer.job?.id : (answer.job?.id ?? null));
-      expect([jobs[0].id, null]).toContain(jobOfAnswer(a));
-      const again = await post(sara, KEY_A, 'Fill the visa form');
-      expect((await jobsOf(sara))).toHaveLength(1);
-      expect(again.ok ? again.job.id : again.job?.id).toBe(jobs[0].id);
     });
 
     it('variant: A’s registration itself is delayed past B’s job (A began first): A is answered with B’s job and makes none', async () => {
@@ -206,17 +216,23 @@ run('GPT seventh note (round 8): Orbit side of A, C and D2, in a real database',
       const KEY_B = key();
       const hold = holdAfterSpendCheck(KEY_A);
       const pendingA = post(sara, KEY_A, 'Fill the visa form');
-      await hold.reached;
-      const b = await post(sara, KEY_B, 'Please do the visa form');
-      expect(b).toMatchObject({ ok: false, reason: 'earlier', job: { id: null, state: 'starting', attempt: KEY_A } });
-      hold.letGo();
-      const a = await pendingA;
-      expect(a).toMatchObject({ ok: false, reason: 'rule' });
-      // Both keys, asked again: that same refusal, kept
-      expect(await post(sara, KEY_A, 'Fill the visa form')).toEqual(a);
-      expect(await post(sara, KEY_B, 'Please do the visa form')).toEqual(a);
-      expect(await jobsOf(sara)).toHaveLength(0);
-      expect(await roomJobsOf(sara)).toEqual([]);
+      pendingA.catch(() => undefined);
+      try {
+        await hold.reachedBy(pendingA);
+        const b = await post(sara, KEY_B, 'Please do the visa form');
+        expect(b).toMatchObject({ ok: false, reason: 'earlier', job: { id: null, state: 'starting', attempt: KEY_A } });
+        hold.letGo();
+        const a = await pendingA;
+        expect(a).toMatchObject({ ok: false, reason: 'rule' });
+        // Both keys, asked again: that same refusal, kept
+        expect(await post(sara, KEY_A, 'Fill the visa form')).toEqual(a);
+        expect(await post(sara, KEY_B, 'Please do the visa form')).toEqual(a);
+        expect(await jobsOf(sara)).toHaveLength(0);
+        expect(await roomJobsOf(sara)).toEqual([]);
+      } finally {
+        hold.letGo();
+        await Promise.allSettled([pendingA]);
+      }
     });
 
     it('CONTROL: a deliberate new request with the same words under a NEW key, once the first is acknowledged, still makes its own job', async () => {
@@ -494,10 +510,16 @@ run('GPT seventh note (round 8): Orbit side of A, C and D2, in a real database',
       const OLD = key();
       const hold = holdAfterSpendCheck(OLD);
       const pending = post(sara, OLD, 'Visa form');
-      await hold.reached;
-      expect(await retire(sara, OLD)).toEqual({ ok: true, retired: false, answer: { ok: false, reason: 'earlier', job: { id: null, status: null, state: 'starting', attempt: OLD } } });
-      hold.letGo();
-      expect(await pending).toMatchObject({ ok: true });
+      pending.catch(() => undefined);
+      try {
+        await hold.reachedBy(pending);
+        expect(await retire(sara, OLD)).toEqual({ ok: true, retired: false, answer: { ok: false, reason: 'earlier', job: { id: null, status: null, state: 'starting', attempt: OLD } } });
+        hold.letGo();
+        expect(await pending).toMatchObject({ ok: true });
+      } finally {
+        hold.letGo();
+        await Promise.allSettled([pending]);
+      }
     });
   });
 

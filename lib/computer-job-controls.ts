@@ -98,8 +98,9 @@ async function resumeOutcomeOf(jobId: string): Promise<StoredOutcome> {
  * because a success stored then could be a start that the month refuses a moment later, and a refusal stored then could be one that succeeds (CodeRabbit on #1025, A10). A start that is decided is read as above.
  */
 async function resumeDecidedOf(jobId: string): Promise<StoredOutcome | null> {
-  const after = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, lastTriedAt: true, prepState: true } });
-  if (after?.status === 'queued' && after.queuedFor !== 'paused' && after.lastTriedAt === null) return null;
+  const after = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, queuedFor: true, startDecidedAt: true, prepState: true } });
+  // The decision is the START's own (`start_decided_at`), never `last_tried_at`: the queue sweep sets that before it tries, so a job it merely selected would read as decided while its start could still be refused (CodeRabbit on #1025, O46)
+  if (after?.status === 'queued' && after.queuedFor !== 'paused' && after.startDecidedAt === null) return null;
   if (after?.prepState === 'restoring') return null;
   return resumeOutcomeOf(jobId);
 }
@@ -135,7 +136,7 @@ async function answerPendingCommand(botId: string, ownerId: string, under: { com
 
 /**
  * What a command that is still pending came to. A Pause (or "do this first") that paused jobs lists them in its pending mark, each with the number of the pause it took: what each of those pauses kept of the sign-ins is read
- * from exactly that row (false where it never said: they are needed again when the job carries on). A command with no jobs listed is a Resume (a "do this first" aimed at a paused job is its resume): it is read as one.
+ * from exactly that row; a row that has not recorded it yet (null) keeps the command pending (CodeRabbit on #1025, O45): a recorded false means that pause put no browser away, and the sign-ins are needed again when the job carries on. A command with no jobs listed is a Resume (a "do this first" aimed at a paused job is its resume): it is read as one.
  */
 async function pendingOutcomeOf(command: Command, jobId: string): Promise<StoredOutcome | null> {
   const rows = await prisma.$queryRaw<Array<{ outcome: StoredOutcome | null }>>`SELECT "outcome" FROM "computer_job_commands" WHERE "command_id" = ${command.id}::uuid`;
@@ -147,6 +148,9 @@ async function pendingOutcomeOf(command: Command, jobId: string): Promise<Stored
   let kept: boolean | undefined;
   for (const one of wanted) {
     const row = one.n === null ? await prisma.computerJobPause.findFirst({ where: { jobId: one.jobId }, orderBy: { n: 'desc' }, select: { signInsKept: true } }) : await prisma.computerJobPause.findUnique({ where: { jobId_n: { jobId: one.jobId, n: one.n } }, select: { signInsKept: true } });
+    // A pause whose sign-ins outcome is not recorded yet (`null`: the parking request has not written it) is not a `false`: the command is still pending, and the copy keeps waiting (after the cap it answers `not_ready` and stores nothing).
+    // A `false` that was recorded keeps its meaning: that pause put no browser away (CodeRabbit on #1025, O45)
+    if (row && row.signInsKept === null) return null;
     kept = (kept ?? true) && row?.signInsKept === true;
   }
   return kept === undefined ? { ok: true } : { ok: true, signInsKept: kept };
@@ -284,6 +288,7 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
       readyWhere: null,
       handoverUntold: false,
       lastTriedAt: null,
+      startDecidedAt: null,
       // The screen is taken back: the job is Brick's again (the computer itself goes back to Brick's after the commit, once no job is left in the person's hands)
       ...(heldScreen ? { control: 'brick' } : {}),
       ownerEpoch: { increment: 1 },
@@ -481,7 +486,7 @@ async function resumeIn(tx: Prisma.TransactionClient, botId: string, jobId: stri
   const current = await tx.computerJob.findUniqueOrThrow({ where: { id: jobId }, select: { status: true, queuedFor: true } });
   if (current.status !== 'queued' || current.queuedFor !== 'paused') return 'not_paused';
   const rank = (await topRank(tx, botId)) + 1;
-  await tx.computerJob.update({ where: { id: jobId }, data: { queuedFor: 'turn', pausedAt: null, pausedWhy: null, queueRank: rank, lastTriedAt: null, leaseVersion: { increment: 1 } } });
+  await tx.computerJob.update({ where: { id: jobId }, data: { queuedFor: 'turn', pausedAt: null, pausedWhy: null, queueRank: rank, lastTriedAt: null, startDecidedAt: null, leaseVersion: { increment: 1 } } });
   return 'ok';
 }
 
@@ -631,3 +636,7 @@ async function claimed(claim: Promise<Claimed>): Promise<Exclude<Claimed, { fres
   const got = await claim;
   return 'fresh' in got ? null : got;
 }
+
+/** Test seams: what a copy of a command reads while the first request has not answered. */
+export const pendingOutcomeOfForTests = pendingOutcomeOf;
+export const resumeDecidedOfForTests = resumeDecidedOf;

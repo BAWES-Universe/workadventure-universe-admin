@@ -73,6 +73,12 @@ const watchPendingReads = () => {
       Promise.race([seen, copy.then(() => Promise.reject(new Error('the copy answered before it read the pending command')))]),
   };
 };
+/**
+ * Waits for a gate's entry signal, racing it against the first request that is supposed to reach the gate: if that request returns or rejects before entering, the wait fails at once with that outcome
+ * (never a hang until the test times out, which would also skip the cleanup).
+ */
+const enteredBy = (signal: Promise<void>, request: Promise<unknown>): Promise<void> =>
+  Promise.race([signal, request.then(() => Promise.reject(new Error('the first request ended before it reached the gate')))]);
 /** Whether a session is blocked (bounded wait) on this advisory lock: a barrier that proves a request reached the lock, never a delay. `ended` lets a request that ended without reaching it fail the wait. */
 const waitingOnLock = async (key: string, ended: () => Error | null = () => null): Promise<boolean> => {
   for (let tries = 0; tries < 250; tries += 1) {
@@ -345,7 +351,7 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
         const r = command();
         first = resumeJob(sara.brickId, sara.id, jobId, minutes(10), r);
         first.catch(() => undefined);
-        await started;
+        await enteredBy(started, first);
         let copyAnswer: unknown = 'still waiting';
         copy = resumeJob(sara.brickId, sara.id, jobId, minutes(10), r).then((answer) => (copyAnswer = answer));
         copy.catch(() => undefined);
@@ -419,10 +425,12 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       const old = { ...resumeWait };
       resumeWait.ms = 300;
       resumeWait.capMs = 1_200;
+      let first: Promise<unknown> = Promise.resolve();
       try {
         const r = command();
-        const first = resumeJob(sara.brickId, sara.id, jobId, minutes(10), r);
-        await started;
+        first = resumeJob(sara.brickId, sara.id, jobId, minutes(10), r);
+        first.catch(() => undefined);
+        await enteredBy(started, first);
         // The copy is past its wait and the start (a cold machine, say) is still on its way to a decision: nothing is stored, and the copy does not answer success
         expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(10), r)).toEqual({ ok: false, reason: 'not_ready' });
         expect(await commandOf(r.id)).toMatchObject({ outcome: { ok: true, pending: true } });
@@ -434,8 +442,9 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
         expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(11), r)).toEqual({ ok: false, reason: 'allowance' });
         expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'paused', pausedWhy: 'allowance' });
       } finally {
-        Object.assign(resumeWait, old);
         go();
+        await Promise.allSettled([first]);
+        Object.assign(resumeWait, old);
         spy.mockRestore();
       }
     });
@@ -469,9 +478,11 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       const old = { ...resumeWait };
       resumeWait.ms = 300;
       const gate = gatedPark({ state: 'parked', reason: null });
+      let first: Promise<unknown> = Promise.resolve();
       try {
-        const first = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c);
-        await gate.wasEntered;
+        first = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c);
+        first.catch(() => undefined);
+        await enteredBy(gate.wasEntered, first);
         expect((await commandOf(c.id))?.outcome).toMatchObject({ ok: true, pending: true, targets: [jobId], held: [{ jobId, n: 1 }] });
         // This pause put its sign-ins away; a LATER pause of the same job (recorded before the copy settles) did not
         const row = await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId, n: 1 } } });
@@ -484,8 +495,9 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
         gate.release();
         await first;
       } finally {
-        Object.assign(resumeWait, old);
         gate.release();
+        await Promise.allSettled([first]);
+        Object.assign(resumeWait, old);
       }
     });
 
@@ -569,7 +581,7 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       try {
         first = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c);
         first.catch(() => undefined);
-        await gate.wasEntered;
+        await enteredBy(gate.wasEntered, first);
         expect((await commandOf(c.id))?.outcome).toMatchObject({ ok: true, pending: true });
         let copyAnswered = false;
         copy = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c).then((answer) => {
@@ -593,23 +605,27 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       }
     });
 
-    it('CodeRabbit on #1025 (51): when the first Pause never finishes putting the sign-ins away, the copy settles the answer once (kept: false), and the first one then returns that same answer', async () => {
+    it('CodeRabbit on #1025 (51, O45): when the first Pause has not yet written what it kept of the sign-ins, the copy never settles it as lost: it waits, answers not_ready past the cap and stores nothing, and the first one then answers for real', async () => {
       const { sara, jobId } = await running('cr-51-stuck');
       const c = command();
-      const old = resumeWait.ms;
+      const old = { ms: resumeWait.ms, capMs: resumeWait.capMs };
       resumeWait.ms = 300;
+      resumeWait.capMs = 900;
       const gate = gatedPark({ state: 'parked', reason: null });
       let first: Promise<unknown> = Promise.resolve();
       try {
         first = pauseJob(sara.brickId, sara.id, jobId, minutes(2), c);
         first.catch(() => undefined);
-        await gate.wasEntered;
-        expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(2), c)).toMatchObject({ ok: true, signInsKept: false });
-        expect((await commandOf(c.id))?.outcome).toEqual({ ok: true, signInsKept: false });
+        await enteredBy(gate.wasEntered, first);
+        // The pause row has no word yet on what was kept (null): that is not "nothing was kept"
+        expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(2), c)).toEqual({ ok: false, reason: 'not_ready' });
+        expect((await commandOf(c.id))?.outcome).toMatchObject({ ok: true, pending: true });
         gate.release();
-        expect(await first).toMatchObject({ ok: true, signInsKept: false });
+        expect(await first).toMatchObject({ ok: true, signInsKept: true });
+        expect((await commandOf(c.id))?.outcome).toEqual({ ok: true, signInsKept: true });
       } finally {
-        resumeWait.ms = old;
+        resumeWait.ms = old.ms;
+        resumeWait.capMs = old.capMs;
         gate.release();
         await Promise.allSettled([first]);
       }
@@ -627,7 +643,7 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       try {
         first = moveJobFirst(sara.brickId, sara.id, taxi, { pauseRunning: true }, minutes(2), c);
         first.catch(() => undefined);
-        await gate.wasEntered;
+        await enteredBy(gate.wasEntered, first);
         expect((await commandOf(c.id))?.outcome).toMatchObject({ ok: true, pending: true, targets: [jobId] });
         let copyAnswered = false;
         copy = moveJobFirst(sara.brickId, sara.id, taxi, { pauseRunning: true }, minutes(2), c).then((answer) => {

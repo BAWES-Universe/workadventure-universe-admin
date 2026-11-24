@@ -1381,6 +1381,8 @@ run('the runner’s committed word that a job is to end, in a real database', ()
       } finally {
         spy.mockRestore();
       }
+      // The stale snapshot WAS served to Stop's read (otherwise the retry path below was never exercised)
+      expect(served).toBe(1);
       expect(await jobOf(jobId)).toMatchObject({ status: 'failed', endedBy: 'error' });
       expect(await decisionOf(jobId)).toMatchObject({ state: 'given', causeHint: 'ours' });
     });

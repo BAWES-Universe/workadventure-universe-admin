@@ -127,6 +127,35 @@ run('where a job’s computer browsed, in a real database', () => {
     }
     const pathsOf = async (id: string) => (await prisma.computerJobVisit.findMany({ where: { jobId: id, kind: { in: ['visit', 'post'] } }, orderBy: { at: 'asc' } })).map((row) => row.path);
 
+    it('O38: a capture that saves while another capture holds the job row waits for it and merges with the state it wrote: `complete` is never written over an `unread` it did not see', async () => {
+      const { sara, id } = await resumed('o38');
+      provider.execAnswer = (command) => (command.startsWith('universe-visits read') ? reading([visit(370, { p: '/second-stretch' })]) : {});
+      let letGo!: () => void;
+      const release = new Promise<void>((resolve) => (letGo = resolve));
+      let gotLock!: () => void;
+      const locked = new Promise<void>((resolve) => (gotLock = resolve));
+      // Another stretch's failed capture: it has the row and says `unread`, and commits only after the complete capture has tried to save
+      const failed = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT "id" FROM "computer_jobs" WHERE "id" = ${id} FOR UPDATE`;
+          await tx.computerJob.update({ where: { id }, data: { visitsState: 'unread' } });
+          gotLock();
+          await release;
+        },
+        { timeout: 20_000, maxWait: 20_000 },
+      );
+      await locked;
+      const capture = recordVisits({ id, startedAt: seconds(360) }, provider, `fake-${sara.brickId}`, seconds(500));
+      // The capture has read its machine and is waiting for the row (it never read the state `complete` that stood before the holder committed)
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      letGo();
+      await failed;
+      await capture;
+      expect((await prisma.computerJob.findUnique({ where: { id }, select: { visitsState: true } }))?.visitsState).toBe('unread');
+      // Its own rows were still written, in its own window
+      expect(await pathsOf(id)).toEqual(['/first-stretch', '/second-stretch']);
+    });
+
     it('N12: the replacement boundary is the stretch’s own start, not the padded read start: a visit of the stretch before that falls inside the padding is kept', async () => {
       const { sara, id } = await resumed('n12');
       // The padded read (from second 240) returns the earlier stretch's visit too, which belongs to the stretch before and is left out of what this stretch keeps

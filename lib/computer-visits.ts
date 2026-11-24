@@ -252,27 +252,32 @@ export function shapeVisits(input: { back: ReadBack; startedAt: Date; endedAt: D
 const SHORT_BY: Record<VisitsState, number> = { complete: 0, none: 0, partial: 1, unread: 2 };
 
 async function save(jobId: string, rows: VisitRow[], state: VisitsState, since: Date = new Date(0), until: Date | null = null): Promise<void> {
-  // A job that was paused was read once per stretch: what an earlier stretch kept (before this one began) stays, and the record says the worst of the stretches
-  if ((await prisma.computerJobPause.count({ where: { jobId } })) > 0) {
-    const kept = (await prisma.computerJob.findUnique({ where: { id: jobId }, select: { visitsState: true } }))?.visitsState as VisitsState | null | undefined;
-    if (kept && SHORT_BY[kept] !== undefined && SHORT_BY[kept] > SHORT_BY[state]) state = kept;
-    // This stretch could not be recorded at all (`none`) but an earlier one was: the record is partial, never "none" over rows that exist
-    else if (state === 'none' && (kept === 'complete' || kept === 'partial')) state = 'partial';
-    // ...and the other way round: an earlier stretch had no recorder (`none`) and this one was read: the record missed that stretch, so it is partial, never `complete` (CodeRabbit on #1025, 40). `none` beside `none` stays `none`,
-    // and an unread or partial stretch keeps what it said
-    else if (kept === 'none' && state === 'complete') state = 'partial';
-  } else {
-    since = new Date(0);
-    until = null;
-  }
-  await prisma.$transaction([
+  // One transaction, the job's row locked first: two captures of one job (a paused job is read once per stretch) and a failed capture's `unread` write all go through that row, so a capture can never merge
+  // its state with a `visitsState` that another capture is about to change and then write `complete` over an `unread` it did not see (CodeRabbit on #1025, O38). The plain UPDATEs of the failure paths wait on this lock.
+  await prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "computer_jobs" WHERE "id" = ${jobId} FOR UPDATE`;
+    // The job is gone (cleaned away while the browser was read): nothing to keep the record on
+    if (locked.length === 0) return;
+    // A job that was paused was read once per stretch: what an earlier stretch kept (before this one began) stays, and the record says the worst of the stretches
+    if ((await tx.computerJobPause.count({ where: { jobId } })) > 0) {
+      const kept = (await tx.computerJob.findUnique({ where: { id: jobId }, select: { visitsState: true } }))?.visitsState as VisitsState | null | undefined;
+      if (kept && SHORT_BY[kept] !== undefined && SHORT_BY[kept] > SHORT_BY[state]) state = kept;
+      // This stretch could not be recorded at all (`none`) but an earlier one was: the record is partial, never "none" over rows that exist
+      else if (state === 'none' && (kept === 'complete' || kept === 'partial')) state = 'partial';
+      // ...and the other way round: an earlier stretch had no recorder (`none`) and this one was read: the record missed that stretch, so it is partial, never `complete` (CodeRabbit on #1025, 40). `none` beside `none` stays `none`,
+      // and an unread or partial stretch keeps what it said
+      else if (kept === 'none' && state === 'complete') state = 'partial';
+    } else {
+      since = new Date(0);
+      until = null;
+    }
     // A job that was paused replaces only its own stretch's window, from its start to its end: a capture of an earlier stretch that finishes after a later stretch saved never deletes that stretch's rows (CodeRabbit on #1025, C5)
-    prisma.computerJobVisit.deleteMany({ where: { jobId, kind: { in: ['visit', 'post'] }, at: until ? { gte: since, lte: until } : { gte: since } } }),
-    prisma.computerJobVisit.createMany({
+    await tx.computerJobVisit.deleteMany({ where: { jobId, kind: { in: ['visit', 'post'] }, at: until ? { gte: since, lte: until } : { gte: since } } });
+    await tx.computerJobVisit.createMany({
       data: rows.map((row) => ({ jobId, kind: row.kind, at: row.at, by: row.by, method: row.method, host: row.host, path: row.path, count: row.count, failed: row.failed, form: row.form })),
-    }),
-    prisma.computerJob.update({ where: { id: jobId }, data: { visitsState: state } }),
-  ]);
+    });
+    await tx.computerJob.update({ where: { id: jobId }, data: { visitsState: state } });
+  });
 }
 
 /**

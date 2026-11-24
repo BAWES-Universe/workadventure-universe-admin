@@ -144,7 +144,7 @@ async function carryOnOne(job: { id: string; botId: string; personId: string }, 
       // Finding 5: the flip writes NO telling. `carried_on` is written by the start in the very write that sets the job running (`carry_on_pending`, once); a job still in line after the try is told `back_in_line`
       const flipped = await tx.computerJob.updateMany({
         where: { id: job.id, status: 'queued', queuedFor: 'paused', pausedWhy: { in: ['allowance', 'rule'] }, pauses: funded.pauses },
-        data: { queuedFor: 'turn', pausedAt: null, pausedWhy: null, queueRank: (top._max.queueRank ?? 0) + 1, lastTriedAt: null, leaseVersion: { increment: 1 }, carryOnPending: true },
+        data: { queuedFor: 'turn', pausedAt: null, pausedWhy: null, queueRank: (top._max.queueRank ?? 0) + 1, lastTriedAt: null, startDecidedAt: null, leaseVersion: { increment: 1 }, carryOnPending: true },
       });
       if (flipped.count !== 1) return 'waits' as const;
       return 'carried' as const;
@@ -157,7 +157,7 @@ async function carryOnOne(job: { id: string; botId: string; personId: string }, 
     try {
       await controlInternals.tryStart(job.id, now);
     } finally {
-      await afterCarryOn(job.id, now);
+      await afterCarryOn(job.id, now, funded.pauses);
     }
   }
   return decided;
@@ -176,21 +176,23 @@ async function blockedCallMicros(jobId: string): Promise<{ micros: number; pause
  * `back_in_line`, once per pause (by the pause's number: none since that pause was made). One the start put back as paused (its month or limit refused it again) is not carried on: nothing is told and its
  * pending mark is cleared. Never throws.
  */
-async function afterCarryOn(jobId: string, now: Date): Promise<void> {
+async function afterCarryOn(jobId: string, now: Date, /** The number of the pause the flip that triggered this carried the job on from: the pending mark is read only while it still belongs to it. */ pause: number): Promise<void> {
   try {
     await prisma.$transaction(
       async (tx) => {
         const row = await lockJob(tx, jobId);
         if (!row) return;
         const job = await tx.computerJob.findUniqueOrThrow({ where: { id: jobId }, select: { status: true, queuedFor: true, carryOnPending: true, pauses: true } });
+        // The pending mark belongs to the pause the flip carried on from: a job that paused again since and was carried on again by a later flip has a mark of THAT pause's, which this call must neither tell nor clear (CodeRabbit on #1025, O1)
+        if (job.pauses !== pause) return;
         if (!job.carryOnPending) return;
         if (job.status !== 'queued' || job.queuedFor === 'paused') {
           // Over, or paused again: nothing is carried on. (A running job cleared it in its own start)
           if (job.status !== 'running' && job.status !== 'waiting') await tx.computerJob.update({ where: { id: jobId }, data: { carryOnPending: false } });
           return;
         }
-        const pause = job.pauses > 0 ? await tx.computerJobPause.findUnique({ where: { jobId_n: { jobId, n: job.pauses } }, select: { at: true } }) : null;
-        const told = await tx.computerJobTelling.count({ where: { jobId, kind: 'back_in_line', createdAt: { gte: pause?.at ?? new Date(0) } } });
+        const pauseRow = job.pauses > 0 ? await tx.computerJobPause.findUnique({ where: { jobId_n: { jobId, n: job.pauses } }, select: { at: true } }) : null;
+        const told = await tx.computerJobTelling.count({ where: { jobId, kind: 'back_in_line', createdAt: { gte: pauseRow?.at ?? new Date(0) } } });
         if (told === 0) await tellIn(tx, jobId, 'back_in_line', null, now);
       },
       { timeout: 15_000, maxWait: 15_000 },
@@ -214,3 +216,6 @@ async function changedSincePause(tx: Parameters<Parameters<typeof prisma.$transa
   }
   return null;
 }
+
+/** Test seam: the telling after a carry-on, for the pause the flip carried the job on from. */
+export const afterCarryOnForTests = afterCarryOn;

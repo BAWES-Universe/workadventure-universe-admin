@@ -27,6 +27,9 @@
  *   drop     this job's parked browser is removed. Prints dropped=1.
  *   clear    the live browser is emptied (nothing is kept), for a job whose browser was shared with another job still on the machine. Prints cleared=1.
  *   prune    only the removal below. Prints pruned=1.
+ *   commit   Orbit has written that this job is ready: the note of a finished restore (below) is removed. Prints committed=1.
+ * A restore that put the job's own browser back leaves a note ("<job id>.restored", in the same root-only folder) until Orbit's database says the job is ready (commit): a retry after a write that failed finds the note
+ * and the live browser is the job's own, so it is answered as restored and NEVER emptied. Any command that replaces the live browser (park, a restore of another job, clear) removes the notes first.
  * Every action also removes parked browsers of jobs not in the keep list (older than two minutes, so one being put away right now is never
  * taken), and every parked browser older than the Limits value for paused sign-ins whatever the list says, so a drop that was missed is made
  * good by the next command on the machine.
@@ -34,7 +37,7 @@
  * The script avoids backticks and dollar-braces on purpose, so it sits in a plain template string without escaping (same as the image's).
  */
 
-export type SignInsAction = 'park' | 'restore' | 'drop' | 'clear' | 'prune';
+export type SignInsAction = 'park' | 'restore' | 'drop' | 'clear' | 'prune' | 'commit';
 
 /** Where things are on the machine. Only tests change these (to run the same script in a folder of their own). */
 export interface SignInsPlaces {
@@ -92,7 +95,7 @@ export interface SignInsAnswer {
   pages: number;
 }
 
-const KEYS: Record<SignInsAction, string> = { park: 'parked', restore: 'restored', drop: 'dropped', clear: 'cleared', prune: 'pruned' };
+const KEYS: Record<SignInsAction, string> = { park: 'parked', restore: 'restored', drop: 'dropped', clear: 'cleared', prune: 'pruned', commit: 'committed' };
 
 /** Reads the last line the command printed. Anything that is not one of its own lines is a failure. */
 export function readSignInsAnswer(action: SignInsAction, exitCode: number, stdout: string): SignInsAnswer {
@@ -124,7 +127,7 @@ NODE_USER="__NODE_USER__"
 HOME_DIR="__HOME__"
 DEVTOOLS="__DEVTOOLS__"
 ANSWER_WAIT="__ANSWER_WAIT__"
-case "$ACTION" in park) KEY=parked ;; restore) KEY=restored ;; drop) KEY=dropped ;; clear) KEY=cleared ;; prune) KEY=pruned ;; *) echo "signins=0 reason=action"; exit 1 ;; esac
+case "$ACTION" in park) KEY=parked ;; restore) KEY=restored ;; drop) KEY=dropped ;; clear) KEY=cleared ;; prune) KEY=pruned ;; commit) KEY=committed ;; *) echo "signins=0 reason=action"; exit 1 ;; esac
 say() { echo "$KEY=$*"; }
 [ "$(id -u)" = "0" ] || { say "0 reason=not_root"; exit 1; }
 umask 077
@@ -141,12 +144,23 @@ mkdir -p "$PARENT" && chown root:root "$PARENT" && chmod 0755 "$PARENT" || { say
 if [ -L "$PARK_ROOT" ] || { [ -e "$PARK_ROOT" ] && [ ! -d "$PARK_ROOT" ]; }; then rm -f "$PARK_ROOT"; fi
 mkdir -p "$PARK_ROOT" && chown root:root "$PARK_ROOT" && chmod 0700 "$PARK_ROOT" || { say "0 reason=folder"; exit 1; }
 [ "$(stat -c '%u %a' "$PARK_ROOT" 2>/dev/null)" = "0 700" ] || { say "0 reason=folder"; exit 1; }
+# The "dirty" mark lives in a folder of root's own, next to the park folder, never under the agent's home: the agent owns every folder there and could swap one for a link between root's check and its removal.
+# The folder is root's and sticky (1777): the agent's start-up can remove the mark folder it owns, and can neither rename nor remove anything else in it. It is never a link: that is checked here every time
+MARKS="$PARENT/marks"
+if [ -L "$MARKS" ] || { [ -e "$MARKS" ] && [ ! -d "$MARKS" ]; }; then rm -f "$MARKS"; fi
+mkdir -p "$MARKS" && chown root:root "$MARKS" && chmod 1777 "$MARKS" || { say "0 reason=folder"; exit 1; }
+[ -d "$MARKS" ] && [ ! -L "$MARKS" ] && [ "$(stat -c '%u' "$MARKS" 2>/dev/null)" = "0" ] || { say "0 reason=folder"; exit 1; }
+DIRTY="$MARKS/profile.dirty"
 
 # Parked browsers of jobs that may no longer keep one are removed (one put away in the last two minutes is left, it may be a job just paused)
 prune() {
   for dir in "$PARK_ROOT"/* "$PARK_ROOT"/.[!.]*; do
     [ -e "$dir" ] || [ -L "$dir" ] || continue
     name="$(basename "$dir")"
+    # The note of a restore that Orbit has not yet written as ready is kept as long as the browser may be (never at the two-minute mark below): a retry needs it
+    case "$name" in
+      *.restored) if [ -n "$(find "$dir" -maxdepth 0 -mmin +"$KEEP_MINUTES" 2>/dev/null)" ]; then rm -f "$dir"; fi; continue ;;
+    esac
     base="$(echo "$name" | sed 's/\.new$//')"
     keep=0
     for one in $KEEP; do [ "$one" = "$base" ] && [ "$name" = "$base" ] && keep=1; done
@@ -178,20 +192,26 @@ unlock() {
 }
 
 # Marked before the profile is touched, unmarked only when it is proved moved: until then the image's start-up removes it before any job can use it.
-# The mark is a FOLDER made with mkdir, never a file opened with ">": this command runs as root over a path the agent owns, and an open for
-# writing would follow a link the agent put there and empty whatever it points at (/etc/sudoers, say). mkdir follows no link and truncates
-# nothing: anything already at that name makes it fail, and the action is refused, which is the safe way to fail. Nothing else root does here
-# opens a path under the agent's home for writing.
+# The mark is a FOLDER made with mkdir, never a file opened with ">": this command runs as root, and an open for writing would follow a link the agent put there and empty whatever it points at (/etc/sudoers, say).
+# mkdir follows no link and truncates nothing: anything already at that name makes it fail, and the action is refused, which is the safe way to fail. It is made in the root-only marks folder (above), so no folder on
+# the way to it is one the agent can swap for a link while root removes it (CodeRabbit on #1025, F1). Nothing else root does here opens a path under the agent's home for writing.
 mark() {
-  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
-  rm -rf "$STATE/profile.dirty" 2>/dev/null
-  mkdir "$STATE/profile.dirty" 2>/dev/null || return 1
-  chown -h "$NODE_USER" "$STATE/profile.dirty" 2>/dev/null
-  [ -d "$STATE/profile.dirty" ] && [ ! -L "$STATE/profile.dirty" ]
+  [ -d "$MARKS" ] && [ ! -L "$MARKS" ] || return 1
+  rm -rf "$DIRTY" 2>/dev/null
+  mkdir "$DIRTY" 2>/dev/null || return 1
+  chown -h "$NODE_USER" "$DIRTY" 2>/dev/null
+  [ -d "$DIRTY" ] && [ ! -L "$DIRTY" ]
 }
 unmark() {
-  rm -rf "$STATE/profile.dirty" 2>/dev/null
-  [ ! -e "$STATE/profile.dirty" ] && [ ! -L "$STATE/profile.dirty" ]
+  rm -rf "$DIRTY" 2>/dev/null
+  [ ! -e "$DIRTY" ] && [ ! -L "$DIRTY" ]
+}
+# The notes of restores that were not yet written as ready: the live browser is about to be replaced, so none of them is that job's own any more
+forget_restored() {
+  for note in "$PARK_ROOT"/*.restored; do
+    [ -e "$note" ] || [ -L "$note" ] || continue
+    rm -f "$note"
+  done
 }
 
 stop_browser() {
@@ -405,6 +425,7 @@ park)
   mkdir -m 0700 "$JOBDIR.new" || { say "0 reason=folder"; exit 1; }
   lock
   mark || { say "0 reason=mark"; exit 1; }
+  forget_restored
   saved="$(devtools save "$JOBDIR.new/session.json" 2>/dev/null)"
   stop_browser || { say "0 reason=browser_running"; exit 1; }
   rm -rf "$CACHE" 2>/dev/null
@@ -425,6 +446,17 @@ park)
   ;;
 restore)
   prune
+  # An earlier try of THIS job put its own browser back and its replay was whole, but Orbit never wrote that the job is ready (the note "<job>.restored" stays until it does): the live browser is the job's own, and a retry that emptied it
+  # (nothing parked is left to bring back) would throw away the very sign-ins just restored (CodeRabbit on #1025, I4). Answered as restored; nothing is touched
+  NOTE="$PARK_ROOT/$JOB.restored"
+  if [ ! -e "$JOBDIR" ] && [ ! -L "$JOBDIR" ] && [ -f "$NOTE" ] && [ ! -L "$NOTE" ]; then
+    if [ -d "$PROFILE" ] && [ ! -L "$PROFILE" ]; then
+      start_browser
+      say "1 cookies=0 pages=0"
+      exit 0
+    fi
+    rm -f "$NOTE"
+  fi
   # A try before this one already moved this job's profile into place and the browser never answered the session replay (the "moved" note). The profile
   # on the machine is this job's OWN, so nothing is wiped and nothing is moved: only the replay that failed is done again. Wiping here would
   # throw away the very profile the earlier try restored
@@ -448,23 +480,28 @@ restore)
     unlock
     start_browser
     replay || { say "0 reason=no_answer"; exit 1; }
+    printf '' > "$NOTE" || { say "0 reason=move"; exit 1; }
     rm -rf "$JOBDIR" "$JOBDIR.new"
     say "1 $(counts "$loaded")"
     exit 0
   fi
   lock
   mark || { say "0 reason=mark"; exit 1; }
+  forget_restored
   stop_browser || { say "0 reason=browser_running"; exit 1; }
   rm -rf "$PROFILE" "$CACHE" 2>/dev/null
   if [ -e "$PROFILE" ] || [ -L "$PROFILE" ] || [ -e "$CACHE" ]; then say "0 reason=profile_not_removed"; exit 1; fi
   had=0
   if [ -d "$JOBDIR/profile" ] && [ ! -L "$JOBDIR/profile" ]; then
     mkdir -p "$(dirname "$PROFILE")" && chown -h "$NODE_USER": "$(dirname "$PROFILE")" 2>/dev/null
+    # The old profile is PROVED gone: the mark has done its work and is cleared here, under the lock, BEFORE the move (CodeRabbit on #1025, F2). A command cut off from here on (after the move, before the hand-over to the
+    # agent) leaves a profile that is in place and is this job's own, and the image's start-up, which removes a MARKED profile, must never find a mark on it. The moved profile is root's and closed (0700) until it is handed over,
+    # so no job can read it in the meantime, and the retry (the "moving" note below) finishes the hand-over
+    unmark || { say "0 reason=mark"; exit 1; }
     # The move is noted BEFORE it is made: a try that stops anywhere after this knows whether the profile left the park folder (see above) and never wipes the one that did
     printf '' > "$JOBDIR/moving" || { say "0 reason=move"; exit 1; }
-    mv "$JOBDIR/profile" "$PROFILE" || { say "0 reason=move"; exit 1; }
-    # In place from here: the mark is cleared under the lock BEFORE any exit that lets the lock go, so the start-up never removes the moved profile
-    unmark || { say "0 reason=mark"; exit 1; }
+    # A move that fails part way leaves nothing of this job's browser in the live place (the parked copy is whole until the move has finished)
+    mv "$JOBDIR/profile" "$PROFILE" || { rm -rf "$PROFILE" 2>/dev/null; rm -f "$JOBDIR/moving"; say "0 reason=move"; exit 1; }
     chown -R -h "$NODE_USER": "$PROFILE" || { say "0 reason=move"; exit 1; }
     had=1
   fi
@@ -479,11 +516,14 @@ restore)
   # The browser did not answer, or the replay was not whole: the saved session is the ONLY copy of those cookies and open pages, so it is kept and the
   # restore is reported failed rather than said to have worked. Orbit leaves the job in recover and asks again, and the try above finishes the replay alone
   replay || { say "0 reason=no_answer"; exit 1; }
+  # Kept until Orbit writes that the job is ready (the commit action): see the note at the top of this action
+  if [ "$had" = "1" ]; then printf '' > "$NOTE" || { say "0 reason=move"; exit 1; }; fi
   rm -rf "$JOBDIR" "$JOBDIR.new"
   if [ "$had" = "1" ]; then say "1 $(counts "$loaded")"; else say "0 reason=none"; fi
   ;;
 drop)
   rm -rf "$JOBDIR" "$JOBDIR.new"
+  rm -f "$PARK_ROOT/$JOB.restored"
   prune
   if [ -e "$JOBDIR" ] || [ -e "$JOBDIR.new" ]; then say "0 reason=not_removed"; exit 1; fi
   say "1"
@@ -492,6 +532,7 @@ clear)
   prune
   lock
   mark || { say "0 reason=mark"; exit 1; }
+  forget_restored
   stop_browser || { say "0 reason=browser_running"; exit 1; }
   rm -rf "$PROFILE" "$CACHE" 2>/dev/null
   if [ -e "$PROFILE" ] || [ -L "$PROFILE" ] || [ -e "$CACHE" ]; then say "0 reason=profile_not_removed"; exit 1; fi
@@ -502,6 +543,10 @@ clear)
   ;;
 prune)
   prune
+  say "1"
+  ;;
+commit)
+  rm -f "$PARK_ROOT/$JOB.restored"
   say "1"
   ;;
 

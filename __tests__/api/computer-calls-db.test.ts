@@ -210,6 +210,24 @@ run('what a computer may ask of Orbit, in a real database', () => {
       // transaction's number and forwarded to the original method bound to that same client, so nothing is rebound to the root client. 
       type Entry = { tx: number; what: string; values?: unknown[] };
       const log: Entry[] = [];
+      // Prisma queries are lazy: a query is sent only when it is awaited (its `then` is called), not when the method is called. So an entry is logged when the query STARTS EXECUTING (its first `then`), and a `DONE ` entry
+      // when it has come back: the lock being taken is the `DONE` of its query, and the key's look must START after it (CodeRabbit on #1025, 12)
+      const lazily = (tx: number, what: string, values: unknown[] | undefined, start: () => PromiseLike<unknown>) => {
+        let run: Promise<unknown> | undefined;
+        const go = () =>
+          (run ??= (() => {
+            log.push({ tx, what, values });
+            return Promise.resolve(start()).then((result) => {
+              log.push({ tx, what: `DONE ${what}` });
+              return result;
+            });
+          })());
+        return {
+          then: (onFulfilled?: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) => go().then(onFulfilled, onRejected),
+          catch: (onRejected?: (reason: unknown) => unknown) => go().catch(onRejected),
+          finally: (onFinally?: () => void) => go().finally(onFinally),
+        };
+      };
       let transactions = 0;
       const realTx = prisma.$transaction.bind(prisma) as unknown as (...args: unknown[]) => Promise<unknown>;
       const sql = (statement: unknown): string => (Array.isArray(statement) ? statement.join('?') : statement && typeof statement === 'object' && 'strings' in statement ? (statement as { strings: string[] }).strings.join('?') : String(statement));
@@ -225,10 +243,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
             get(target, property) {
               const value = Reflect.get(target, property, target) as unknown;
               if ((property === '$executeRaw' || property === '$queryRaw') && typeof value === 'function') {
-                return (...raws: unknown[]) => {
-                  log.push({ tx: id, what: sql(raws[0]), values: raws.slice(1) });
-                  return (value as (...inner: unknown[]) => unknown).apply(target, raws);
-                };
+                return (...raws: unknown[]) => lazily(id, sql(raws[0]), raws.slice(1), () => (value as (...inner: unknown[]) => PromiseLike<unknown>).apply(target, raws));
               }
               // The look at the key is a model call, not raw SQL: it is recorded in the same trace, so the order of the lock, the key and the stamp is read from one list
               if (property === 'computerJobToken' && value && typeof value === 'object') {
@@ -236,10 +251,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
                   get(delegate, method) {
                     const inner = Reflect.get(delegate, method, delegate) as unknown;
                     if (method !== 'findUnique' || typeof inner !== 'function') return inner;
-                    return (...asked: unknown[]) => {
-                      log.push({ tx: id, what: 'computerJobToken.findUnique' });
-                      return (inner as (...more: unknown[]) => unknown).apply(delegate, asked);
-                    };
+                    return (...asked: unknown[]) => lazily(id, 'computerJobToken.findUnique', undefined, () => (inner as (...more: unknown[]) => PromiseLike<unknown>).apply(delegate, asked));
                   },
                 });
               }
@@ -259,7 +271,7 @@ run('what a computer may ask of Orbit, in a real database', () => {
       } finally {
         spy.mockRestore();
       }
-      const stamps = log.filter((entry) => entry.what.includes('"job_stretch"'));
+      const stamps = log.filter((entry) => entry.what.includes('"job_stretch"') && !entry.what.startsWith('DONE '));
       expect(stamps).toHaveLength(1);
       const stamp = stamps[0];
       // The stamp was sent on a transaction's own client, never on the root client...
@@ -268,11 +280,16 @@ run('what a computer may ask of Orbit, in a real database', () => {
       const inThatTransaction = log.slice(0, stampAt).filter((entry) => entry.tx === stamp.tx);
       expect(inThatTransaction[0]).toEqual({ tx: stamp.tx, what: 'BEGIN' });
       // ...which took THIS job's cutoff lock before the look at the key and the stamp, on the same transaction (the lock a pause takes, so an admission and a pause are ordered exactly, never by two clocks)...
-      const lockAt = log.findIndex((entry) => entry.tx === stamp.tx && entry.what.includes('pg_advisory_xact_lock') && entry.values?.includes(cutoffLockKey(jobId)));
+      const lockAt = log.findIndex((entry) => entry.tx === stamp.tx && entry.what.includes('pg_advisory_xact_lock') && !entry.what.startsWith('DONE ') && entry.values?.includes(cutoffLockKey(jobId)));
+      // The lock is TAKEN (its query has come back) before the key's look starts executing, and the stamp starts after the look has come back
+      const lockTakenAt = log.findIndex((entry, at) => at > lockAt && entry.tx === stamp.tx && entry.what.startsWith('DONE ') && entry.what.includes('pg_advisory_xact_lock'));
       const keyAt = log.findIndex((entry) => entry.tx === stamp.tx && entry.what === 'computerJobToken.findUnique');
+      const keyBackAt = log.findIndex((entry) => entry.tx === stamp.tx && entry.what === 'DONE computerJobToken.findUnique');
       expect(lockAt).toBeGreaterThan(0);
-      expect(keyAt).toBeGreaterThan(lockAt);
-      expect(stampAt).toBeGreaterThan(keyAt);
+      expect(lockTakenAt).toBeGreaterThan(lockAt);
+      expect(keyAt).toBeGreaterThan(lockTakenAt);
+      expect(keyBackAt).toBeGreaterThan(keyAt);
+      expect(stampAt).toBeGreaterThan(keyBackAt);
       expect(inThatTransaction.some((entry) => entry.what === 'END')).toBe(false);
       // ...and the stamp is written before that transaction commits
       expect(log.findIndex((entry) => entry.tx === stamp.tx && entry.what === 'END')).toBeGreaterThan(stampAt);
@@ -780,12 +797,14 @@ run('what a computer may ask of Orbit, in a real database', () => {
         await prisma.computerJob.update({ where: { id: jobId }, data: { ownerLeaseUntil: new Date(Date.now() + 10_000) } });
         const cutoff = holdCutoffLock(jobId, async () => undefined);
         let call: Promise<unknown> = Promise.resolve();
-        const began = Date.now();
+        let waitEnded = Number.NaN;
         try {
           await cutoff.ready;
           call = observe(authorizeModelCall({ token, callId: 'own-1', estimateMicros: 1, payer: 'own-key' }));
           expect(await waitingOnCutoffLock(jobId)).toBe(true);
           await sleep(400);
+          // The wait ends here: the lock is let go, and the time the request reads after it is later than this
+          waitEnded = Date.now();
           cutoff.release();
           await cutoff.done;
           expect(await call).toMatchObject({ ok: true, reservedMicros: null });
@@ -794,8 +813,9 @@ run('what a computer may ask of Orbit, in a real database', () => {
           await Promise.allSettled([cutoff.done, call]);
         }
         const lease = (await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).ownerLeaseUntil as Date;
-        // 90 s after the wait ended (at least began + the 400 ms waited), not 90 s after the request began
-        expect(lease.getTime()).toBeGreaterThanOrEqual(began + 400 + 90_000);
+        // 90 s after the wait ended, not 90 s after the request began (which was at least 400 ms earlier)
+        expect(waitEnded).not.toBeNaN();
+        expect(lease.getTime()).toBeGreaterThanOrEqual(waitEnded + 90_000);
       });
 
       // The key stays good through the fixture and the request's first look; only once the request is seen waiting at its lock does it run out (after the request began, and before the time it reads after the lock is let go)
@@ -1495,7 +1515,8 @@ run('what a computer may ask of Orbit, in a real database', () => {
             } finally {
               spy.mockRestore();
             }
-            expect(looks).toBe(1);
+            // Two looks under the lock: the admission's, and the token looked at again once the pool lock is held (CodeRabbit O36); the room ran out after the first, and the refusal comes from the room check that follows
+            expect(looks).toBe(2);
             expect(answer).toEqual({ ok: false, reason: 'refused' });
             expect(await prisma.computerJobFault.count({ where: { jobId, callId: 'orbit:admit:c1' } })).toBe(1); // the first request's own admission only: the refused replay adds none
           });

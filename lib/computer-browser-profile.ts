@@ -258,7 +258,7 @@ export async function restoreProfile(botId: string, jobId: string, now: Date = n
     const outcome = await withClaim(botId, async (renew) => {
       // The state is read under the claim that issues the command, never before it: a restore that was already done by an earlier attempt is never repeated (a second one finds no parked copy and empties the live browser)
       if (fence && !(await fenceHolds(jobId, fence))) return result('left', 'superseded');
-      const back = await restoreUnder(machine, botId, jobId, job.personId, bot, paused, now, hours);
+      const back = await restoreUnder(machine, botId, jobId, job.personId, bot, paused, now, hours, renew);
       if (settle) await settle(back, { machine, hours, renew });
       return back;
     });
@@ -270,7 +270,7 @@ export async function restoreProfile(botId: string, jobId: string, now: Date = n
 }
 
 /** The restore itself, under the claim. */
-async function restoreUnder(machine: Machine, botId: string, jobId: string, personId: string, bot: Parameters<typeof ownsBrick>[0] | null, paused: Date | null, now: Date, hours: number): Promise<SignInsResult> {
+async function restoreUnder(machine: Machine, botId: string, jobId: string, personId: string, bot: Parameters<typeof ownsBrick>[0] | null, paused: Date | null, now: Date, hours: number, renew: () => Promise<boolean>): Promise<SignInsResult> {
   const keep = await allowedToKeep(botId, now, hours);
   const others = await prisma.computerJob.count({ where: { botId, id: { not: jobId }, status: { in: ['running', 'waiting'] } } });
   if (others > 0) {
@@ -286,6 +286,8 @@ async function restoreUnder(machine: Machine, botId: string, jobId: string, pers
     const dropped = await onMachine(machine, 'drop', jobId, keep.filter((id) => id !== jobId), hours);
     if (dropped.done !== 'dropped') return result('failed', dropped.reason);
   }
+  // The claim was stamped before the drop, and a drop can take long: it is renewed before the restore, and the restore does not run when the claim is no longer held (another operation on the browser may have taken it; CodeRabbit on #1025, I5)
+  if (!(await renew())) return result('left', 'superseded');
   const answer = await onMachine(machine, 'restore', jobId, expired || !owner ? keep.filter((id) => id !== jobId) : keep, hours);
   if (answer.done === 'kept') return result('restored', null, answer);
   if (answer.done === 'none') return result('fresh', expired ? 'expired' : !owner ? 'owner' : 'none');
@@ -351,7 +353,7 @@ async function wipeUnder(machine: Machine, botId: string, jobId: string, now: Da
  * left exactly as it is (the sign-in rules: a looker beside a writer shares it), and is ready. Anything else leaves the job `recover`: nothing runs it, no call of it is authorized, and the sweep
  * tries again. Written only while `reservation` is still the job's room, so a late try settles nothing for a stretch that moved on without it (finding 3b).
  */
-export async function settleResumedBrowser(jobId: string, botId: string, back: SignInsResult, now: Date = new Date(), reservation?: string, /** The state the attempt read: written only while the job still holds it, so a late second attempt never undoes what a faster one settled (CodeRabbit on #1025). */ from?: 'restoring' | 'recover'): Promise<'ready' | 'recover'> {
+export async function settleResumedBrowser(jobId: string, botId: string, back: SignInsResult, /** The clock of the ready write: a function is read in `writePrep` right before the write, after any browser clear, so the billable stretch never starts before the clear ends (CodeRabbit on #1025, I6); a Date is that moment. */ now: Date | (() => Date) = new Date(), reservation?: string, /** The state the attempt read: written only while the job still holds it, so a late second attempt never undoes what a faster one settled (CodeRabbit on #1025). */ from?: 'restoring' | 'recover'): Promise<'ready' | 'recover'> {
   const fence: ResumeFence = { reservation, from };
   const needsWipe = back.state === 'fresh' && back.reason !== 'shared';
   if (needsWipe) {
@@ -368,24 +370,42 @@ export async function settleResumedBrowser(jobId: string, botId: string, back: S
     return 'recover';
   }
   const ready = back.state === 'restored' || (back.state === 'fresh' && back.reason === 'shared');
-  return (await writePrep(jobId, ready, fence, now)) && ready ? 'ready' : 'recover';
+  const written = (await writePrep(jobId, ready, fence, now)) && ready;
+  if (written && back.state === 'restored') await commitRestore(botId, jobId);
+  return written ? 'ready' : 'recover';
+}
+
+/**
+ * The restore is over for good once the database says the job is ready: the machine's note of it (kept so a retry after a failed ready write never empties the browser that was just put back) is let go. Best effort: a note that
+ * stays is removed with the next command that replaces the browser, or by the hours it is kept (CodeRabbit on #1025, I4). Never throws.
+ */
+async function commitRestore(botId: string, jobId: string): Promise<void> {
+  try {
+    const machine = await awakeMachine(botId);
+    if (machine) await onMachine(machine, 'commit', jobId, [], await keepHours());
+  } catch (error) {
+    console.error('[Computer] Could not let go of the note of a restored browser:', error instanceof Error ? error.message : 'unknown');
+  }
 }
 
 /** The emptying a fresh result needs (when it does) and the job's write, with the claim already held. */
-async function settleUnder(under: Under, jobId: string, botId: string, back: SignInsResult, now: Date, fence: ResumeFence): Promise<'ready' | 'recover'> {
+async function settleUnder(under: Under, jobId: string, botId: string, back: SignInsResult, now: Date | (() => Date), fence: ResumeFence): Promise<'ready' | 'recover'> {
   let ready = back.state === 'restored' || (back.state === 'fresh' && back.reason === 'shared');
   if (!ready && back.state === 'fresh' && (await under.renew())) {
     // A browser a job beside it is using is left exactly as it is, and the job is ready (the wipe decides this inside its claim)
-    const wiped = logged('emptied', await wipeUnder(under.machine, botId, jobId, now, under.hours, fence));
+    const wiped = logged('emptied', await wipeUnder(under.machine, botId, jobId, typeof now === 'function' ? now() : now, under.hours, fence));
     ready = wiped.state === 'cleared' || (wiped.state === 'left' && wiped.reason === 'shared');
   }
-  return (await writePrep(jobId, ready, fence, now)) && ready ? 'ready' : 'recover';
+  const written = (await writePrep(jobId, ready, fence, now)) && ready;
+  if (written && back.state === 'restored') await onMachine(under.machine, 'commit', jobId, [], under.hours);
+  return written ? 'ready' : 'recover';
 }
 
 /** Writes whether the job is ready, only while the attempt still owns it. True only when a row was written: a failed write, or a job that moved on (a later room, a later pause, settled by a faster attempt), is not a settlement (CodeRabbit B/C19, A12). */
-async function writePrep(jobId: string, ready: boolean, fence: ResumeFence, at: Date): Promise<boolean> {
+async function writePrep(jobId: string, ready: boolean, fence: ResumeFence, at: Date | (() => Date)): Promise<boolean> {
   try {
-    const done = await prisma.computerJob.updateMany({ where: prepWhere(jobId, fence), data: ready ? { prepState: null, stretchStarted: at } : { prepState: 'recover' } });
+    // The stretch starts at the moment of this write, read here (after any clear that was needed), never at a moment sampled before the claim was waited for
+    const done = await prisma.computerJob.updateMany({ where: prepWhere(jobId, fence), data: ready ? { prepState: null, stretchStarted: typeof at === 'function' ? at() : at } : { prepState: 'recover' } });
     return done.count === 1;
   } catch (error) {
     console.error('[Computer] Could not write whether a resumed job is ready:', error instanceof Error ? error.message : 'unknown');
@@ -448,9 +468,9 @@ export async function recoverResumedBrowsers(now: Date = new Date(), batch = 5):
       const back = tooOld
         ? result('fresh', 'expired')
         : await restoreProfile(job.botId, job.id, now, fence, async (restored, under) => {
-            settledUnder = await settleUnder(under, job.id, job.botId, restored, readyAt(), fence);
+            settledUnder = await settleUnder(under, job.id, job.botId, restored, readyAt, fence);
           });
-      if ((settledUnder ?? (await settleResumedBrowser(job.id, job.botId, back, readyAt(), fence.reservation, 'recover'))) === 'ready') ready++;
+      if ((settledUnder ?? (await settleResumedBrowser(job.id, job.botId, back, readyAt, fence.reservation, 'recover'))) === 'ready') ready++;
     }
   } catch (error) {
     console.error('[Computer] Could not put a resumed job’s browser right:', error instanceof Error ? error.message : 'unknown');

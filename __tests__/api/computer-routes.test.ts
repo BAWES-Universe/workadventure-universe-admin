@@ -177,6 +177,25 @@ describe('the owner’s calls', () => {
     expect(await reused.json()).toMatchObject({ reason: 'command_reused' });
   });
 
+  it('I2: a Stop body that is there and is not a JSON object is 400 and stops nothing; no body and {} are the Stop as before (CodeRabbit on #1025)', async () => {
+    lib.stopAll.mockResolvedValue({ ok: true, view: { on: true } as never });
+    for (const bad of ['{"confirmedJobIds":', 'nonsense', '[1]', '"x"', '42']) {
+      const answer = await stop(new NextRequest('http://localhost:3333/x', { method: 'POST', body: bad }), params);
+      expect(answer.status).toBe(400);
+    }
+    expect(lib.stopAll).not.toHaveBeenCalled();
+    expect((await stop(call('/x'), params)).status).toBe(200);
+    expect((await stop(call('/x', { body: {} }), params)).status).toBe(200);
+    expect(lib.stopAll).toHaveBeenCalledTimes(2);
+  });
+
+  it('I10: a Stop that left a captured job live is a retryable 503, not a Stop', async () => {
+    lib.stopAll.mockResolvedValue({ ok: false, reason: 'not_ended' });
+    const answer = await stop(call('/x', { headers: { 'x-computer-command': '6f1c2b8e-3d4a-4c5b-9e6f-7a8b9c0d1e2f' } }), params);
+    expect(answer.status).toBe(503);
+    expect(await answer.json()).toMatchObject({ reason: 'not_ended', retry: true });
+  });
+
   it('dismisses the notice of one named ending, for the person asking and nobody else', async () => {
     lib.dismissComputerNotice.mockResolvedValue({ ok: true, view: { on: true } as never });
     expect(await (await dismissRoute(call('/x', { body: { jobId: JOB, owner: 'u-omar' } }), params)).json()).toEqual({ computer: { on: true } });
@@ -187,6 +206,19 @@ describe('the owner’s calls', () => {
     expect((await dismissRoute(call('/x'), params)).status).toBe(400);
     expect((await dismissRoute(call('/x', { body: { jobId: 'x'.repeat(41) } }), params)).status).toBe(400);
     expect(lib.dismissComputerNotice).not.toHaveBeenCalled();
+  });
+
+  it('I1 and I8: a person lookup that failed is a retryable 503 before any not_owner; a refusal that could not be kept is a retryable 503, not a refusal', async () => {
+    resolve.mockResolvedValue({ personId: null, guest: false, lookupFailed: true });
+    const failed = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'Visa form' } }), params);
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toMatchObject({ retry: true });
+    expect(lib.startJob).not.toHaveBeenCalled();
+    resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+    lib.startJob.mockResolvedValue({ ok: false, reason: 'not_kept' });
+    const notKept = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'Visa form' } }), params);
+    expect(notKept.status).toBe(503);
+    expect(await notKept.json()).toMatchObject({ retry: true });
   });
 
   it('says computers are not open yet where there is no provider', async () => {
@@ -342,12 +374,23 @@ describe('the bot server’s calls', () => {
       own();
       lib.startJob.mockClear();
       lib.registerStart.mockClear();
-      for (const key of ['3f2b8c1e-5d4a-4e7b-9a60-1c2d3e4f5a6b', `t${(Date.now() + 10 * 60_000).toString(36)}-abcdef012345`]) {
+      const suffix = 'abcdef012345';
+      for (const key of ['3f2b8c1e-5d4a-4e7b-9a60-1c2d3e4f5a6b', `t${(Date.now() + 10 * 60_000).toString(36)}-${suffix}`]) {
         const response = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': key, 'X-Computer-Start-Acks': '1' } }), params);
         expect(response.status).toBe(400);
+        // The reason is the untimed one for both (no time to read, and a time too far ahead): it is the answer the game reads, and an unrelated 400 would not carry it
+        expect(await response.json()).toMatchObject({ reason: 'untimed_key' });
       }
       expect(lib.registerStart).not.toHaveBeenCalled();
       expect(lib.startJob).not.toHaveBeenCalled();
+      // CONTROL: the same suffix with the CURRENT time is a timed key and is not refused: the future time (the skew check) is what was refused above, not the key's shape
+      lib.startJob.mockResolvedValue({ ok: true, job: { id: JOB } as never, restoredFrom: null });
+      const current = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': `t${Date.now().toString(36)}-${suffix}`, 'X-Computer-Start-Acks': '1' } }), params);
+      expect(current.status).toBe(200);
+      expect(await current.json()).not.toHaveProperty('reason');
+      expect(lib.registerStart).toHaveBeenCalledTimes(1);
+      lib.registerStart.mockClear();
+      lib.startJob.mockClear();
       // Without acks an untimed key is the legacy start, as before
       lib.startJob.mockResolvedValue({ ok: true, job: { id: JOB } as never, restoredFrom: null });
       const legacy = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': '3f2b8c1e-5d4a-4e7b-9a60-1c2d3e4f5a6b' } }), params);
@@ -371,11 +414,24 @@ describe('the bot server’s calls', () => {
         return { ok: true } as never;
       });
       lib.startJob.mockResolvedValue({ ok: true, job: { id: JOB } as never, restoredFrom: null });
-      const before = Date.now();
-      await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': KEY, 'X-Computer-Start-Acks': '1' } }), params);
+      // The clock is controlled (only Date is faked): reading the request's body takes 30 s, so a `began` taken after the body was read would be 30 s later than the moment the request arrived
+      jest.useFakeTimers({ now: Date.now(), doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'queueMicrotask', 'hrtime', 'performance'] });
+      const arrived = Date.now();
+      try {
+        const request = asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': KEY, 'X-Computer-Start-Acks': '1' } });
+        jest.spyOn(request, 'json').mockImplementation(async () => {
+          jest.setSystemTime(arrived + 30_000);
+          return { userId: 'wa-sara', title: 'x' };
+        });
+        await startRoute(request, params);
+        expect(Date.now()).toBe(arrived + 30_000);
+      } finally {
+        jest.useRealTimers();
+      }
       expect(order).toEqual(['register', 'earlier', 'spend']);
       const began = (lib.registerStart.mock.calls.at(-1) as unknown[])[3] as Date;
-      expect(began.getTime()).toBeGreaterThanOrEqual(before);
+      // The moment the request arrived, before its body was read (never the moment after)
+      expect(began.getTime()).toBe(arrived);
       expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ began, registration: expect.objectContaining({ opened: true }) }));
       // A terminal answer of the key: given as it is, nothing else asked
       lib.registerStart.mockResolvedValueOnce({ answer: { ok: false, reason: 'stale_consent' } } as never);

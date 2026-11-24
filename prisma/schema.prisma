@@ -3570,6 +3570,8 @@ model ComputerJob {
   endedAt        DateTime? @map("ended_at")
   // When the sweep last tried a job that waits in line, so Bricks that stay blocked go behind the ones not tried yet
   lastTriedAt    DateTime? @map("last_tried_at")
+  /// Round 8 (CodeRabbit O46): when this job's start last reached its decision (ran, back in line, refused or failed). Written by the start, reset by a pause and a resume; a Resume's copy reads null as "not decided yet". Not `lastTriedAt`: the queue sweep sets that BEFORE it tries.
+  startDecidedAt DateTime? @map("start_decided_at")
   // The run of a goal or task that started it (game #2002), so a run handed out again finds its job and never starts a second
   runId          String?   @map("run_id") @db.VarChar(36)
   // The caller's own key for ONE start the person asked for (the bot server makes a uuid per start and sends it with the start and with every look for it): a start repeating a key finds the job that key made and never
@@ -4206,6 +4208,8 @@ model ComputerStartAttempt {
   outcome Json?
   /// Round 8, A2: the moment the key was issued (the person gave their consent), read from the key; a key older than the consent window is not accepted for a new start.
   issuedAt DateTime? @map("issued_at")
+  /// Round 8, A2 (CodeRabbit I7): set when a key is REOPENED: the moment its newer start supersedes from (the person's message was issued). Read under the person's lock by every delivery of the key, so the boundary never depends on which request reopened it. Null = never reopened.
+  supersedeSince DateTime? @map("supersede_since")
 
   /// The job this start made or was answered with. The attempt stays with no job when the job goes (it is the record that the key was answered); a job-less attempt is let go after a week.
   job     ComputerJob?           @relation("StartAttemptJob", fields: [jobId], references: [id], onDelete: SetNull)

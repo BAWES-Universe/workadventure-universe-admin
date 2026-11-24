@@ -25,7 +25,18 @@ export const POST = (request: NextRequest, { params }: { params: Promise<{ id: s
   asOwner(request, params, async (id, ownerId) => {
     const command = commandOf(request);
     if (command === 'invalid') return brickJson(request, { error: COMMAND_MISSING, reason: 'command_missing' }, 400);
-    const raw: unknown = await request.json().catch(() => null);
+    // No body and `{}` are today's Stop. A body that is there and is not a JSON object is malformed: it is refused, never read as "stop everything", which would end jobs the person did not confirm (CodeRabbit on #1025, I2)
+    const text = await request.text().catch(() => null);
+    if (text === null) return brickJson(request, { error: 'Invalid input data' }, 400);
+    let raw: unknown = null;
+    if (text.trim() !== '') {
+      try {
+        raw = JSON.parse(text);
+      } catch {
+        return brickJson(request, { error: 'Invalid input data' }, 400);
+      }
+      if (raw !== null && (typeof raw !== 'object' || Array.isArray(raw))) return brickJson(request, { error: 'Invalid input data' }, 400);
+    }
     const sent = raw !== null && typeof raw === 'object' ? (raw as { confirmedJobIds?: unknown }).confirmedJobIds : undefined;
     let confirmed: string[] | null = null;
     if (sent !== undefined) {
@@ -37,5 +48,7 @@ export const POST = (request: NextRequest, { params }: { params: Promise<{ id: s
     const stopped = confirmed ? await stopAll(id, ownerId, new Date(), command ?? undefined, confirmed) : await stopAll(id, ownerId, new Date(), command ?? undefined);
     if (stopped.ok) return brickJson(request, { computer: stopped.view, ...(confirmed ? { stopped: stopped.stopped ?? [], left: stopped.left ?? [] } : {}) });
     if (stopped.reason === 'command_reused') return brickJson(request, { error: 'That control was already used for something else. Try again.', reason: 'command_reused' }, confirmed ? 409 : 400);
+    // Some job the Stop captured is still live after the bounded retry: nothing is kept as done, and the same command asked again ends those (CodeRabbit on #1025, I10)
+    if (stopped.reason === 'not_ended') return brickJson(request, { error: 'Some jobs are still ending. Ask again.', reason: 'not_ended', retry: true }, 503);
     return notFound(request);
   });

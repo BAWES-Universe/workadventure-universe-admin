@@ -359,6 +359,10 @@ async function authorizedPastCutoff(jobId: string, callId: string, token: string
       // this look is seen (the call is refused and leaves no admission), and one that comes after waits for this commit and finds the call admitted (CodeRabbit on #1025). The order is always: the job's cutoff lock, the call's
       // own lock, the pool's lock
       await lockPool(tx);
+      // The key is looked at once more, with the time read AFTER the wait for the pool's lock: a key that was good a moment ago and ran out while this call waited there is not good now, and no admission marker is written for it
+      // (CodeRabbit on #1025). A key that is still good, with its room, goes on as before
+      const lockedIn = await verifyJobToken(token, 'model', clock(), tx);
+      if (!lockedIn.ok || lockedIn.generation !== generation) return false;
       if (!(await holdsItsRoom(jobId, callId, replayOf ?? holder, clock(), tx))) return false;
       // The call is ADMITTED: kept per call (one row), in this very transaction, for the first request and every replay alike. A room that lapses with no such row belongs to a call that was never admitted and is released, never
       // settled as unknown usage (the sweep reads it with `hasCallAdmission`), and a room whose creator could not give it back is kept for any request that was answered with it (CodeRabbit on #1025)

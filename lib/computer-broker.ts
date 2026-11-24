@@ -431,6 +431,14 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
           if (row.ownerEpoch !== job.ownerEpoch) return 'superseded' as const;
           if (row.status !== 'running' || row.control !== 'brick' || row.controlGeneration !== ready.job.generation) return 'not_running' as const;
           if ((await hasFinishIntent(tx, job.jobId)) || (await hasPoolCutoff(tx, job.jobId))) return 'finish_pending' as const;
+          // The job is not ready to be worked on: its browser is being brought back (`restoring`) or could not be (`recover`), or it is fresh and its ready write has not landed. No turn is opened on it, whoever asks and whatever epoch they
+          // say (a service-token caller can read the epoch from `getJob`); the caller waits and asks again (CodeRabbit on #1025, F4 and O44)
+          if (row.prepState !== null || row.stretchStarted === null) return 'starting' as const;
+          // The claim this start took is still the job's, read under the row's lock: a start that stalled past the claim's life and was replaced (the replacement opened a turn and stored its id, which clears the first-turn mark) must not
+          // admit itself again on a mark that is null once more. A turn stored by the replacement is busy, its id given to reconnect to (CodeRabbit on #1025, I3)
+          if (row.agentResponseId) return { busy: row.agentResponseId };
+          const held = await tx.$queryRaw<Array<{ turn_claimed_at: Date | null }>>`SELECT "turn_claimed_at" FROM "computer_jobs" WHERE "id" = ${job.jobId}`;
+          if (held[0]?.turn_claimed_at?.getTime() !== claim.getTime()) return 'starting' as const;
           // A job's first turn is marked here, in the same decision that admits it and not before: a mark found later with no turn id means the turn was admitted and may have reached the agent. The mark is this attempt's (its time)
           if (!sessionId) {
             const wrote = await tx.computerJob.updateMany({ where: { id: job.jobId, firstTurnSentAt: null }, data: { firstTurnSentAt: mark } });
@@ -449,6 +457,8 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       // Nothing was sent, and nothing is marked yet: the claim is let go of
       await releaseOnJob(job.jobId, 'turnClaimedAt', claim);
       if (standing === 'finish_pending') return { ok: false, reason: 'finish_pending' };
+      if (standing === 'starting') return { ok: false, reason: 'starting' };
+      if (typeof standing === 'object') return { ok: false, reason: 'busy', responseId: standing.busy };
       if (standing === 'gone') return { ok: false, reason: 'not_found' };
       if (standing === 'failed') return { ok: false, reason: 'failed' };
       // Superseded (or no longer Brick's to run): the same answer the worker gets on every other route

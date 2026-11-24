@@ -711,6 +711,47 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       }
       throw new Error('the state never came');
     };
+    /**
+     * A bounded checkpoint tied to what a start does, raced against the starts that fixture runs: a start that ends (or fails) before the checkpoint is reached rejects the wait at once, with its own error, instead of
+     * leaving the test to its timeout.
+     */
+    const reached = async (what: string, check: () => boolean | Promise<boolean>, ...fixtures: Promise<unknown>[]) => {
+      const state: { ended: { error: unknown } | null } = { ended: null };
+      for (const fixture of fixtures) {
+        fixture.then(
+          () => {
+            state.ended ??= { error: new Error(`a start ended before ${what}`) };
+          },
+          (error: unknown) => {
+            state.ended ??= { error };
+          },
+        );
+      }
+      for (let at = 0; at < 200; at++) {
+        if (await check()) return;
+        if (state.ended) throw state.ended.error;
+        await sleep(25);
+      }
+      throw new Error(`${what} never came`);
+    };
+    /**
+     * Counts what starts read of this Brick's machine row, through spies that call through: the looks of the wake path (the first look of a start, its look again after a lost ticket, and each poll of the wait for another start's
+     * wake: all `findUniqueOrThrow` with no select) and the polls of the wait out of a browser cleanup (`findUnique` selecting the cleanup claim). The wait for another start's wake polls only after it sleeps, so a second look
+     * after the ones a start made on arrival is that start inside its wait.
+     */
+    const watchMachine = (botId: string) => {
+      const looksSpy = jest.spyOn(prisma.brickComputer, 'findUniqueOrThrow');
+      const claimSpy = jest.spyOn(prisma.brickComputer, 'findUnique');
+      const ofBrick = (args: unknown) => (args as { where?: { botId?: string } } | undefined)?.where?.botId === botId;
+      return {
+        looks: () => looksSpy.mock.calls.filter(([args]) => ofBrick(args) && !(args as { select?: unknown }).select).length,
+        claimPolls: () => claimSpy.mock.calls.filter(([args]) => ofBrick(args) && (args as { select?: { cleanClaimedAt?: boolean } }).select?.cleanClaimedAt === true).length,
+        stop: () => {
+          looksSpy.mockRestore();
+          claimSpy.mockRestore();
+        },
+      };
+    };
     /** A Brick whose machine is asleep with no job on it. */
     const sleepingBrick = async (name: string) => {
       const sara = await person(name);
@@ -738,11 +779,18 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       });
       const wakes = wakesOf();
       const stops = stopsOf();
+      let watch: ReturnType<typeof watchMachine> | null = null;
+      let started: Promise<unknown>[] = [];
       try {
         const x = readerOf(sara, 'X', minutes(10));
-        await until(async () => (await machineOf(sara.brickId)).machine === 'waking');
+        started = [x];
+        await reached('the first start waits for its readiness', () => readies === 1, x);
+        watch = watchMachine(sara.brickId);
         const y = readerOf(sara, 'Y', minutes(10));
-        await sleep(700);
+        started = [x, y];
+        // The second start is inside its wait for the first wake (its look on arrival and a poll of the wait), while the first readiness is still held
+        const seen = watch;
+        await reached('the second start waits for the first wake', () => seen.looks() >= 2, x, y);
         // The second start does not wake it again, and takes no ticket
         expect(wakesOf()).toBe(wakes + 1);
         expect((await machineOf(sara.brickId)).wakeEpoch).toBe(1 + 1);
@@ -752,6 +800,8 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         expect(ry.ok && ry.job.status).toBe('running');
       } finally {
         first.open();
+        await Promise.allSettled(started);
+        watch?.stop();
         spy.mockRestore();
       }
       expect(wakesOf()).toBe(wakes + 1);
@@ -769,15 +819,47 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
           await first.opened;
         });
+        // Both starts are held after they read the machine `stopped` and before either tries to take a ticket: each one's first look of the machine row waits at this barrier, and both are let go together
+        const barrier = gate();
+        const original = prisma.brickComputer.findUniqueOrThrow.bind(prisma.brickComputer) as unknown as (args: { where: { botId: string } }) => Promise<{ machine: string }>;
+        let held = 0;
+        // (the watch spies on the same method and calls through; the barrier below is set on that same spy, which `watch.stop()` restores)
+        const watch = watchMachine(sara.brickId);
+        const lookSpy = jest.spyOn(prisma.brickComputer, 'findUniqueOrThrow').mockImplementation(((args: { where: { botId: string }; select?: unknown }) => {
+          const look = original(args);
+          if (args.where.botId !== sara.brickId || args.select || held >= 2) return look;
+          return look.then(async (row) => {
+            if (row.machine !== 'stopped') return row;
+            held += 1;
+            await barrier.opened;
+            return row;
+          });
+        }) as never);
+        let both: Promise<unknown>[] = [];
         try {
-          const both = Promise.all([readerOf(sara, 'X', minutes(10)), readerOf(sara, 'Y', minutes(10))]);
-          await sleep(600);
+          const x = readerOf(sara, 'X', minutes(10));
+          const y = readerOf(sara, 'Y', minutes(10));
+          both = [x, y];
+          await reached('both starts have read the machine stopped', () => held === 2, x, y);
+          // Nothing has taken a ticket yet: both saw the same state
+          expect((await machineOf(sara.brickId)).machine).toBe('stopped');
+          expect((await machineOf(sara.brickId)).wakeEpoch).toBe(1);
+          const before = watch.looks();
+          barrier.open();
+          // The one that lost the ticket looks again and polls the wait for the winner's wake (two looks), while the winner's readiness is still held
+          await reached('the start that lost the ticket waits for the other one’s wake', () => watch.looks() - before >= 2, x, y);
+          expect(wakesOf()).toBe(wakes + 1);
+          expect((await machineOf(sara.brickId)).wakeEpoch).toBe(1 + 1);
           first.open();
-          const [rx, ry] = await both;
+          const [rx, ry] = await Promise.all([x, y]);
           expect(rx.ok && rx.job.status).toBe('running');
           expect(ry.ok && ry.job.status).toBe('running');
         } finally {
+          barrier.open();
           first.open();
+          await Promise.allSettled(both);
+          lookSpy.mockRestore();
+          watch.stop();
           spy.mockRestore();
         }
         expect(wakesOf()).toBe(wakes + 1);
@@ -806,17 +888,26 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         }
       });
       const wakes = wakesOf();
+      let watch: ReturnType<typeof watchMachine> | null = null;
+      let started: Promise<unknown>[] = [];
       try {
         const x = readerOf(sara, 'X', minutes(10));
-        await until(async () => (await machineOf(sara.brickId)).machine === 'waking');
+        started = [x];
+        await reached('the first start waits for its readiness', () => readies === 1, x);
+        watch = watchMachine(sara.brickId);
         const y = readerOf(sara, 'Y', minutes(10));
-        await sleep(700);
+        started = [x, y];
+        // The second start is inside its wait for the first wake before the first readiness is let to fail
+        const seen = watch;
+        await reached('the second start waits for the first wake', () => seen.looks() >= 2, x, y);
         first.open();
         const [rx, ry] = await Promise.all([x, y]);
         expect(rx).toEqual({ ok: false, reason: 'broken_start' });
         expect(ry.ok && ry.job.status).toBe('running');
       } finally {
         first.open();
+        await Promise.allSettled(started);
+        watch?.stop();
         spy.mockRestore();
       }
       // The failed start stopped the machine it had woken (once, claimed), and the second woke it again, after: it is awake and working, under the second's ticket
@@ -880,20 +971,27 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       });
       const stops = stopsOf();
       let xDone = false;
+      let watch: ReturnType<typeof watchMachine> | null = null;
+      let started: Promise<unknown>[] = [];
       try {
         const x = readerOf(sara, 'X', minutes(10)).then((result) => {
           xDone = true;
           return result;
         });
-        await until(async () => readies === 1);
+        started = [x];
+        await reached('the first start waits for its readiness', () => readies === 1, x);
         // The first wake is older than a start can take (no beat): the second start takes it over with the next ticket and runs its own readiness, which will fail
         await ageWake(sara.brickId);
         const y = readerOf(sara, 'Y', minutes(10));
-        await until(async () => readies === 2);
+        started = [x, y];
+        await reached('the second start waits for its readiness', () => readies === 2, x, y);
         expect((await machineOf(sara.brickId)).wakeEpoch).toBe(1 + 2);
         // The first start's readiness comes in while the replacement's is still going: it is not the Brick's ticket any more, so the machine is not ready for its job
+        watch = watchMachine(sara.brickId);
+        const seen = watch;
         a.open();
-        await sleep(800);
+        // The first start has run its check of the ticket after its readiness (the write that says `working` found the ticket replaced and wrote nothing) when it looks at the machine again, and then waits for the replacement's wake
+        await reached('the first start has checked its ticket after its readiness', () => seen.looks() >= 2, x, y);
         expect(xDone).toBe(false);
         const xJob = await prisma.computerJob.findFirstOrThrow({ where: { botId: sara.brickId, title: 'X' } });
         expect(xJob.stretchStarted).toBeNull();
@@ -907,6 +1005,8 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       } finally {
         a.open();
         b.open();
+        await Promise.allSettled(started);
+        watch?.stop();
         spy.mockRestore();
       }
       expect(stopsOf()).toBe(stops + 1);
@@ -952,34 +1052,42 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
         if (++readies === 1) await a.opened;
       });
-      let releasedAt = 0;
-      let xDoneAt = 0;
+      let xDone = false;
+      let watch: ReturnType<typeof watchMachine> | null = null;
+      let x: Promise<unknown> = Promise.resolve();
       try {
-        const x = readerOf(sara, 'X', minutes(10)).then((result) => {
-          xDoneAt = Date.now();
+        const first = readerOf(sara, 'X', minutes(10)).then((result) => {
+          xDone = true;
           return result;
         });
-        await until(async () => readies === 1);
+        x = first;
+        await reached('the first start waits for its readiness', () => readies === 1, first);
         await ageWake(sara.brickId);
         // The replacement makes the machine working while the first start is still waiting for its readiness
         const ry = await readerOf(sara, 'Y', minutes(10));
         expect(ry.ok && ry.job.status).toBe('running');
         expect((await machineOf(sara.brickId)).machine).toBe('working');
-        // A cleanup of the browser holds the machine as the first start's readiness comes in; it is let go a little later
+        // A cleanup of the browser holds the machine as the first start's readiness comes in
         await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${sara.brickId}`;
-        setTimeout(() => {
-          releasedAt = Date.now();
-          void prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NULL WHERE "bot_id" = ${sara.brickId}`.then(() => undefined);
-        }, 1500);
+        watch = watchMachine(sara.brickId);
+        const seen = watch;
         a.open();
-        const rx = await x;
+        // The start is inside its wait for the cleanup (it has looked at the claim twice and found it held) and has not returned
+        await reached('the first start waits out the cleanup', () => seen.claimPolls() >= 2, first);
+        expect(xDone).toBe(false);
+        // The claim is let go: the write is awaited, and only then can the start return
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NULL WHERE "bot_id" = ${sara.brickId}`;
+        const rx = await first;
         expect(rx.ok && rx.job.status).toBe('running');
+        expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { cleanClaimedAt: true } })).toEqual({ cleanClaimedAt: null });
       } finally {
+        // Whatever happened, the claim is let go, the readiness is open and the start is joined before the next test
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NULL WHERE "bot_id" = ${sara.brickId}`;
         a.open();
+        await Promise.allSettled([x]);
+        watch?.stop();
         spy.mockRestore();
       }
-      expect(releasedAt).toBeGreaterThan(0);
-      expect(xDoneAt).toBeGreaterThanOrEqual(releasedAt);
     });
 
     describe('the wake is a heartbeat, not a length of time', () => {
@@ -998,19 +1106,31 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         // The beat of a wake in flight
         await ageWake(sara.brickId);
         const a = gate();
+        let readies = 0;
         const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
+          readies++;
           await a.opened;
         });
+        const mine = (await machineOf(sara.brickId)).wakeEpoch;
+        let x: Promise<unknown> = Promise.resolve();
         try {
-          const x = readerOf(sara, 'X', minutes(10));
-          await until(async () => (await machineOf(sara.brickId)).machine === 'waking');
+          const first = readerOf(sara, 'X', minutes(10));
+          x = first;
+          // X's own wake: it took the ticket after the abandoned one above (the machine was `waking` with a stale beat) and is inside its readiness, beating that ticket
+          await reached('the start waits for its readiness', () => readies === 1, first);
+          const own = (await machineOf(sara.brickId)).wakeEpoch;
+          expect(own).toBe(mine + 1);
+          // That ticket's row is backdated now; a fresh `updated_at` on the same ticket can come only from its beat
           await ageWake(sara.brickId);
-          await sleep(400);
-          expect(await skew()).toBeLessThan(10_000);
+          await until(async () => {
+            expect((await machineOf(sara.brickId)).wakeEpoch).toBe(own);
+            return (await skew()) < 10_000;
+          });
           a.open();
-          await x;
+          await first;
         } finally {
           a.open();
+          await Promise.allSettled([x]);
           spy.mockRestore();
         }
       });
@@ -1116,33 +1236,42 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       const spy = jest.spyOn(fake, 'ready').mockImplementation(async () => {
         if (++readies === 1) await a.opened;
       });
-      let releasedAt = 0;
-      let yDoneAt = 0;
+      let yDone = false;
+      let watch: ReturnType<typeof watchMachine> | null = null;
+      let started: Promise<unknown>[] = [];
       try {
         const x = readerOf(sara, 'X', minutes(10));
-        await until(async () => readies === 1);
+        started = [x];
+        await reached('the first start waits for its readiness', () => readies === 1, x);
+        watch = watchMachine(sara.brickId);
+        const seen = watch;
         const y = readerOf(sara, 'Y', minutes(10)).then((result) => {
-          yDoneAt = Date.now();
+          yDone = true;
           return result;
         });
-        await sleep(600);
-        // A cleanup of the browser holds the machine as it comes up, and is let go a little later
+        started = [x, y];
+        // The second start is inside its wait for the first wake
+        await reached('the second start waits for the first wake', () => seen.looks() >= 2, x, y);
+        // A cleanup of the browser holds the machine as it comes up
         await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${sara.brickId}`;
-        setTimeout(() => {
-          releasedAt = Date.now();
-          // (a Prisma raw query runs only when it is awaited or chained)
-          void prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NULL WHERE "bot_id" = ${sara.brickId}`.then(() => undefined);
-        }, 1500);
         a.open();
+        // The wake ends in `working` (the first start returns on it), and the waiting start is inside its wait for the cleanup (it has looked at the claim twice and found it held) and has not returned
+        await reached('the waiting start waits out the cleanup', () => seen.claimPolls() >= 2, y);
+        expect(yDone).toBe(false);
+        // The claim is let go: the write is awaited, and only then can the start return
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NULL WHERE "bot_id" = ${sara.brickId}`;
         const ry = await y;
         expect(ry.ok && ry.job.status).toBe('running');
         await x;
+        expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { cleanClaimedAt: true } })).toEqual({ cleanClaimedAt: null });
       } finally {
+        // Whatever happened, the claim is let go, the readiness is open and the starts are joined before the next test
+        await prisma.$executeRaw`UPDATE "brick_computers" SET "clean_claimed_at" = NULL WHERE "bot_id" = ${sara.brickId}`;
         a.open();
+        await Promise.allSettled(started);
+        watch?.stop();
         spy.mockRestore();
       }
-      expect(releasedAt).toBeGreaterThan(0);
-      expect(yDoneAt).toBeGreaterThanOrEqual(releasedAt);
     });
   });
 
@@ -1178,12 +1307,18 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
         await Promise.race([gotLock, held.then(() => Promise.reject(new Error('the holder ended before it took the row')))]);
         // The row is let go when the failing resume is blocked on it (a backend the holder blocks), or when the resume ended without waiting (the test then fails on what it wrote), or at a bounded deadline
         poll = (async () => {
-          for (let tries = 0; tries < 250 && !waited && !resumeEnded; tries += 1) {
-            waited = (await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`)[0].n >= 1;
-            if (!waited) await new Promise((resolve) => setTimeout(resolve, 20));
+          try {
+            for (let tries = 0; tries < 250 && !waited && !resumeEnded; tries += 1) {
+              waited = (await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`)[0].n >= 1;
+              if (!waited) await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+          } finally {
+            // The row is let go on every way out of the poll, a rejected query included (the resume may be blocked on it)
+            letGo();
           }
-          letGo();
         })();
+        // Observed from the start (its rejection is raised where the test awaits `poll`), so a failing poll is never an unhandled rejection while the resume is still pending
+        poll.catch(() => undefined);
         throw new Error('the machine never came ready');
       });
       try {
@@ -1425,6 +1560,27 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       });
     }
 
+    it('CodeRabbit on #1025 (F5): the pause number the park settles is read BEFORE the park runs, so a job that resumes and pauses again meanwhile keeps its new pause’s mark (and the job behind it keeps waiting)', async () => {
+      const { sara, jobId } = await running('f5-pause-number');
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
+      (profiles.parkProfile as jest.Mock).mockImplementationOnce(async () => ({ state: 'left', reason: 'not_awake' }));
+      expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(1))).ok).toBe(true);
+      await ageWake(sara.brickId);
+      const parks: unknown[][] = [];
+      (profiles.parkProfile as jest.Mock).mockImplementationOnce(async (...args: unknown[]) => {
+        parks.push(args);
+        // While the park ran, the job carried on and was paused again: its pause has a new number, and the mark is that later pause's now
+        await prisma.computerJob.update({ where: { id: jobId }, data: { pauses: { increment: 1 } } });
+        return { state: 'parked', reason: null };
+      });
+      const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Second' }, minutes(2));
+      if (!next.ok) throw new Error('not started');
+      expect(parks).toHaveLength(1);
+      expect(parks[0][3]).toBe(1);
+      expect(await jobOf(next.job.id)).toMatchObject({ status: 'queued', queuedFor: 'busy' });
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId }, select: { parkPendingJobId: true } })).toEqual({ parkPendingJobId: jobId });
+    });
+
     it('a browser that cannot be put away or emptied after the wake leaves the mark and keeps the job in line (never a job on a browser that may hold another job’s sign-ins); the machine rests again', async () => {
       const { sara, jobId } = await running('s1025-cannot');
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
@@ -1558,11 +1714,14 @@ run('out of time or over a limit pauses, per-stretch charging, carrying on by it
       expect(ready.startedAt).not.toBeNull();
       expect(ready.stretchStarted!.getTime()).toBeGreaterThanOrEqual(NOW.getTime() + 3 * 60_000);
       expect(ready.stretchStarted!.getTime()).toBeLessThan(NOW.getTime() + 3 * 60_000 + 10_000);
-      // 2 minutes of work after it was ready, then Pause: exactly those 120 seconds are booked
+      // 2 minutes of work after it was ready, then Pause: the pause bills the rounded seconds from the readiness stamp to the pause time (120 when the stamp is exactly at minute 3; the check above accepts a stamp a few seconds later)
       expect((await pauseJob(sara.brickId, sara.id, jobId, minutes(5))).ok).toBe(true);
+      const billed = Math.round((minutes(5).getTime() - ready.stretchStarted!.getTime()) / 1000);
+      expect(billed).toBeGreaterThanOrEqual(110);
+      expect(billed).toBeLessThanOrEqual(120);
       const job = await jobOf(jobId);
-      expect(job.secondsRun + job.secondsBilled).toBe(120);
-      expect(await chargedSeconds(jobId)).toBe(120);
+      expect(job.secondsRun + job.secondsBilled).toBe(billed);
+      expect(await chargedSeconds(jobId)).toBe(billed);
     });
 
     it('the database refuses a job that is restoring and has a stretch started', async () => {

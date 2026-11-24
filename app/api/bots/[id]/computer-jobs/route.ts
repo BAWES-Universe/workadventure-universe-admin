@@ -194,6 +194,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const issued = acking && attempt?.success ? issuedOfKey(attempt.data) : null;
     if (acking && (!issued || issued.getTime() > began.getTime() + ISSUE_SKEW_MS)) return NextResponse.json({ error: 'Invalid input data', reason: 'untimed_key' }, { status: 400 });
     const person = await resolveUsagePerson(parsed.data.userId, parsed.data.isGuest);
+    // Who this was for could not be looked up just now: the same retryable answer as an acknowledgement gets, never a terminal `not_owner` for a key whose job may already exist (CodeRabbit on #1025, I1)
+    if (person.lookupFailed) return NextResponse.json({ error: 'Could not tell who this was for, ask again', retry: true }, { status: 503 });
     // A guest never has a Brick computer: a Brick belongs to an account
     if (!person.personId) return NextResponse.json({ ok: false, reason: 'not_owner' });
     // Round 8, A1: registered FIRST, before every look and the spending rule below, so no later request can overtake it. A2: a key decided for good is answered here (its kept refusal, `retired`, `stale_consent`)
@@ -205,7 +207,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }
     // A refusal decided here is kept on the key (round 8, A1), so its retry is the same answer
     const refused = async (body: Record<string, unknown>) => {
-      if (key) await refuseAttempt(key.id, key.personId, key.startKey, body);
+      if (key) {
+        const kept = await refuseAttempt(key.id, key.personId, key.startKey, body);
+        // The refusal is given as final only when it is on the key, or another request decided the key first (then its stored answer is the key's answer). A write that failed leaves the key open with no answer: a retry could
+        // be allowed by the rule by then and start a job, so this is not a terminal answer; the game asks again (CodeRabbit on #1025)
+        if (kept === 'failed') return NextResponse.json({ error: 'Could not keep the answer, ask again', retry: true }, { status: 503 });
+        if (kept === 'decided') {
+          const decided = await startAnsweredBefore(key.id, key.personId, key.startKey);
+          if (decided) return NextResponse.json(startAnswerBody(decided));
+        }
+      }
       return NextResponse.json(body);
     };
     // Finding 1 (GPT round 6): a key that was answered before with another start's job gets that same answer again, first: after the job was acknowledged, ended, or the game forgot the key, never a job of its own
@@ -243,6 +254,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       began,
       ...(registration ? { registration } : {}),
     });
+    // The refusal could not be kept on the key: nothing final is answered, the game asks again (CodeRabbit on #1025, I8)
+    if (!started.ok && started.reason === 'not_kept') return NextResponse.json({ error: 'Could not keep the answer, ask again', retry: true }, { status: 503 });
     return NextResponse.json(startAnswerBody(started));
   } catch (error) {
     // A registered start that failed before it was handed to the start lets its attempt go (only when this request made it): it is asked again under the same key and reopened

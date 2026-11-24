@@ -22,7 +22,7 @@
  */
 
 /** Goes up when anything in the image changes; the machine's own set-up (`universe-up`) is redone when it differs from the one it saw. */
-export const IMAGE_SETUP_VERSION = '2';
+export const IMAGE_SETUP_VERSION = '3';
 
 /** The base image. A dated tag is better for reproducible builds; the registered image is pinned by digest at build anyway. */
 export const BASE_IMAGE = 'ghcr.io/agent37-platform/hermes-base';
@@ -119,7 +119,9 @@ fi
 # A cleanup that could not remove the browser's profile left a mark: no job may use that profile. It is removed here, before the browser
 # runs, and a profile that still cannot be removed means the machine is not ready.
 PROFILE_DIR="$HOME_DIR/.config/universe-chromium"
-if [ -e "$STATE/profile.dirty" ]; then
+# Two places: the root-only marks folder (what Orbit's sign-ins command marks in, a folder the agent cannot swap for a link under root) and the agent's own state folder (what universe-clean and an older command mark in)
+MARKS="/var/lib/universe/marks"
+if [ -e "$MARKS/profile.dirty" ] || [ -L "$MARKS/profile.dirty" ] || [ -e "$STATE/profile.dirty" ]; then
   pkill -x chromium 2>/dev/null
   pkill -x chrome 2>/dev/null
   i=0
@@ -131,7 +133,8 @@ if [ -e "$STATE/profile.dirty" ]; then
   done
   rm -rf "$PROFILE_DIR" "$HOME_DIR/.cache/chromium" 2>/dev/null
   if [ -e "$PROFILE_DIR" ] || [ -e "$HOME_DIR/.cache/chromium" ]; then echo "ready=0 reason=profile_not_cleared"; exit 1; fi
-  rm -rf "$STATE/profile.dirty"
+  rm -rf "$MARKS/profile.dirty" "$STATE/profile.dirty" 2>/dev/null
+  if [ -e "$MARKS/profile.dirty" ] || [ -L "$MARKS/profile.dirty" ] || [ -e "$STATE/profile.dirty" ]; then echo "ready=0 reason=profile_not_cleared"; exit 1; fi
 fi
 
 # Starts a part unless it is running. Each is its own session, so it outlives the command that started it.
