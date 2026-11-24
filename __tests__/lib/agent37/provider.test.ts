@@ -819,6 +819,19 @@ describe('cold storage operations on a computer', () => {
       }
     });
 
+    it('every reason the script can give for a computer that cannot be packed (digits too) is read as a blocked computer, never a throw', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      // The reasons are read from the script itself, so a new one cannot be forgotten here
+      const reasons = [...new Set([...UNIVERSE_COLD.matchAll(/(?:blocked = |stop\()"([a-z0-9_]+)"/g)].map((found) => found[1]))];
+      expect(reasons).toEqual(expect.arrayContaining(['outside_name_not_utf8', 'packages_too_many', 'outside_too_big', 'outside_link', 'outside_list_too_big']));
+      for (const reason of reasons) {
+        w.setExec(() => `prepack=${JSON.stringify({ home_files: 1, home_bytes: 1, outside_files: 0, outside_bytes: 0, packages: [], blocked: reason, manifest_bytes: null, manifest_sha256: null })}\n`);
+        await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: reason, outside: null });
+      }
+    });
+
     it('output Agent37 cut (over 512 KB, the middle removed) is a computer that is blocked with a reason, never an inventory read from what is left', async () => {
       const w = world();
       const p = provider(w);

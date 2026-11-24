@@ -545,7 +545,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     const outsideBytes = count(data.outside_bytes);
     if (homeFiles === null || homeBytes === null || outsideFiles === null || outsideBytes === null) throw new Error('The computer\'s inventory was not whole');
     const packages = Array.isArray(data.packages) ? data.packages.filter((name): name is string => typeof name === 'string' && /^[a-z0-9][a-z0-9+.:-]{0,100}$/.test(name)).slice(0, 500) : [];
-    const blocked = typeof data.blocked === 'string' && /^[a-z_]{1,40}$/.test(data.blocked) ? data.blocked : null;
+    const blocked = typeof data.blocked === 'string' && /^[a-z0-9_]{1,40}$/.test(data.blocked) ? data.blocked : null;
     const counted = { homeFiles, homeBytes, outsideFiles, outsideBytes, packages };
     if (blocked !== null) return { ...counted, blocked, outside: null };
     // The list of what was copied: required whenever the computer can be packed (a copy with no list would put nothing back), and read to the last field
