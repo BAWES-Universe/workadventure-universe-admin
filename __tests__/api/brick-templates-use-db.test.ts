@@ -565,6 +565,24 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       expect([shown.picks, shown.met]).toEqual([[], []]);
     });
 
+    it('does not list a Brick as met when its template became link-only after the list was read', async () => {
+      const id = await share();
+      as(omar);
+      await prisma.botsConversation.create({ data: { botId: brickId, userId: omar.id, isGuest: false, messages: [], startedAt: new Date(), endedAt: new Date(), messageCount: 2 } });
+      const read = prisma.$queryRaw.bind(prisma);
+      const spy = jest.spyOn(prisma, '$queryRaw').mockImplementationOnce(((...args: Parameters<typeof read>) =>
+        read(...args).then(async (rows) => {
+          // The maker takes it off "everyone" between the list of ids and the load of the templates
+          await prisma.brickTemplate.update({ where: { id }, data: { audience: 'link' } });
+          return rows;
+        })) as never);
+      try {
+        expect((await lists()).met).toEqual([]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('lists Bricks the person has met (talked with) that share one for everyone, never their own and never by link only', async () => {
       const id = await share();
       as(omar);

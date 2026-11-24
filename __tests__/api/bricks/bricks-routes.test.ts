@@ -11,6 +11,7 @@ import { POST as ensureMine } from '@/app/api/bricks/default/route';
 import { DELETE as deleteMine, PATCH as changeBrick } from '@/app/api/bricks/[id]/route';
 import { POST as undoMine } from '@/app/api/bricks/[id]/undo/route';
 import { POST as sweep } from '@/app/api/bricks/sweep/route';
+import { recentlyRemovedBricks } from '@/lib/brick-delete';
 import { GET as getConfiguration } from '@/app/api/bots/configuration/[id]/route';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
@@ -28,6 +29,8 @@ jest.mock('@/lib/db', () => ({
     bot: { findUnique: jest.fn(), update: jest.fn() },
     user: { findUnique: jest.fn(), findFirst: jest.fn(), create: jest.fn() },
     userPreference: { findUnique: jest.fn() },
+    $queryRaw: jest.fn(),
+    $transaction: jest.fn(),
   },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -41,7 +44,7 @@ jest.mock('@/lib/brick-default', () => ({
   listDeletedBricks: jest.fn(),
   isDefaultBrick: jest.fn(),
 }));
-jest.mock('@/lib/brick-delete', () => ({ deleteBrick: jest.fn(), undoBrickDelete: jest.fn(), removeGoneBricks: jest.fn() }));
+jest.mock('@/lib/brick-delete', () => ({ deleteBrick: jest.fn(), undoBrickDelete: jest.fn(), removeGoneBricks: jest.fn(), recentlyRemovedBricks: jest.fn(async () => []) }));
 jest.mock('@/lib/brick-visit', () => ({ endStaleVisits: jest.fn(async () => 0) }));
 jest.mock('@/lib/brick-home', () => ({ dropHomesWithoutAccess: jest.fn(async () => 0) }));
 jest.mock('@/lib/brick-make', () => ({ ...jest.requireActual('@/lib/brick-make'), makeBrickOnce: jest.fn() }));
@@ -51,7 +54,7 @@ jest.mock('@/lib/ai-provider-ref', () => ({ checkAiProviderRef: jest.fn(async ()
 jest.mock('@/lib/bot-vision', () => ({ ...jest.requireActual('@/lib/bot-vision'), checkConfigVision: jest.fn(async () => null), dropOthersVisionKey: jest.fn(async () => null) }));
 jest.mock('@/lib/notices', () => ({ ...jest.requireActual('@/lib/notices'), clearBotRunsOnNotices: jest.fn(async () => undefined) }));
 
-const db = prisma as unknown as { bot: Record<'findUnique' | 'update', jest.Mock>; user: Record<'findUnique', jest.Mock> };
+const db = prisma as unknown as { bot: Record<'findUnique' | 'update', jest.Mock>; user: Record<'findUnique', jest.Mock>; userPreference: Record<'findUnique', jest.Mock>; $queryRaw: jest.Mock; $transaction: jest.Mock };
 const session = getSessionUser as jest.Mock;
 const ensure = ensureDefaultBrick as jest.Mock;
 const list = listBricks as jest.Mock;
@@ -122,6 +125,9 @@ beforeEach(() => {
   db.user.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) => ({ isGuest: where.id === GUEST.id }));
   db.bot.findUnique.mockResolvedValue(brick);
   db.bot.update.mockResolvedValue(brick);
+  // The Brick's row held for the write: what the config holds there is read again under the hold
+  db.$queryRaw.mockImplementation(async () => [{ behavior_config: brick.behaviorConfig }]);
+  db.$transaction.mockImplementation(async (work: (tx: unknown) => unknown) => work({ $queryRaw: db.$queryRaw, bot: { update: db.bot.update } }));
   ensure.mockResolvedValue({ brick: card, made: true, deleted: false });
   list.mockResolvedValue([card]);
   listDeleted.mockResolvedValue([]);
@@ -302,7 +308,8 @@ describe('POST /api/bricks: New Brick (game #1996)', () => {
       expect(checkAiProviderRef).toHaveBeenCalledWith('key-1', 'universe-ai', home);
       expect(checkBotModel).toHaveBeenCalledWith(undefined, { ...home, ref: 'key-1', currentRef: 'universe-ai', currentModel: null });
       expect(db.bot.update).toHaveBeenLastCalledWith({ where: { id: BRICK_ID }, data: { aiProviderRef: 'key-1', aiModel: null, updatedById: SARA.id } });
-      expect(dropOthersVisionKey).toHaveBeenCalledWith(brick.behaviorConfig, SARA.id);
+      // Inside the transaction, so on the transaction's own connection (never a second one while that is held)
+      expect(dropOthersVisionKey).toHaveBeenCalledWith(brick.behaviorConfig, SARA.id, expect.objectContaining({ $queryRaw: db.$queryRaw }));
       expect(clearBotRunsOnNotices).toHaveBeenCalledWith(BRICK_ID);
     });
 
@@ -343,6 +350,24 @@ describe('POST /api/bricks: New Brick (game #1996)', () => {
           updatedById: SARA.id,
         },
       });
+    });
+
+    it('merges into the config as it stands when the Brick is held for the write, never the copy read before the checks', async () => {
+      db.$queryRaw.mockResolvedValue([{ behavior_config: { showToolCalls: true, assignedSpace: { center: { x: 9, y: 9 }, radius: 4 }, apps: { chosen: 'later-save' } } }]);
+      const response = await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { behaviorConfig: { moves: 'wander' } } }), params());
+      expect(response.status).toBe(200);
+      expect(db.bot.update).toHaveBeenLastCalledWith({
+        where: { id: BRICK_ID },
+        data: { behaviorConfig: { showToolCalls: true, assignedSpace: { center: { x: 9, y: 9 }, radius: 4 }, apps: { chosen: 'later-save' }, moves: 'wander' }, updatedById: SARA.id },
+      });
+    });
+
+    it('changes nothing, and says not found, when the Brick was deleted or handed on after it was read', async () => {
+      db.$queryRaw.mockResolvedValue([]);
+      const response = await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { enabled: false } }), params());
+      expect(response.status).toBe(404);
+      expect(db.bot.update).not.toHaveBeenCalled();
+      expect(clearBotRunsOnNotices).not.toHaveBeenCalled();
     });
 
     it('takes the direction and pause of a route it was saved with', async () => {
@@ -483,12 +508,23 @@ describe('DELETE /api/bricks/:id and POST /api/bricks/:id/undo: deleting a Brick
 describe('POST /api/bricks/sweep: what waited long enough is removed for good (game #1996)', () => {
   it('removes for everyone when the bot server asks, and names what went so their chats can be closed', async () => {
     removeGone.mockResolvedValue([MADE_ID]);
+    (recentlyRemovedBricks as jest.Mock).mockResolvedValueOnce([MADE_ID]);
     const asked = request('/api/bricks/sweep', null, { method: 'POST' });
     asked.headers.set('authorization', `Bearer ${SERVICE_TOKEN}`);
     const response = await sweep(asked);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ removed: [MADE_ID] });
     expect(removeGone).toHaveBeenCalledWith();
+  });
+
+  it('still names the Bricks already removed when the sweep fails part way, and those removed by someone opening their page', async () => {
+    removeGone.mockRejectedValue(new Error('database went away'));
+    (recentlyRemovedBricks as jest.Mock).mockResolvedValueOnce(['gone-1', 'gone-2']);
+    const asked = request('/api/bricks/sweep', null, { method: 'POST' });
+    asked.headers.set('authorization', `Bearer ${SERVICE_TOKEN}`);
+    const response = await sweep(asked);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ removed: ['gone-1', 'gone-2'] });
   });
 
   it('is for the bot server only: a person, a super admin included, starts no sweep, and neither does the admin token', async () => {

@@ -24,9 +24,20 @@ export async function getMeterSettings(db: Pick<typeof prisma, 'appSetting'> = p
   }
 }
 
+/**
+ * The settings, or a thrown error when they cannot be read. For a report that says money: the empty settings `getMeterSettings` falls
+ * back to would show "$0 above the usual" for a grant that has spending.
+ */
+export async function getMeterSettingsStrict(db: Pick<typeof prisma, 'appSetting'> = prisma): Promise<MeterSettings> {
+  const row = await db.appSetting.findUnique({ where: { key: SETTING_KEY } });
+  return readMeterSettings(row?.value);
+}
+
 /** Saves a super admin's change on top of what is saved (only the names it carries change) and returns all of them. */
-export async function saveMeterSettings(change: Partial<MeterSettings>, userId: string): Promise<MeterSettings> {
-  return prisma.$transaction(async (tx) => {
+export async function saveMeterSettings(change: Partial<MeterSettings>, userId: string, within?: Prisma.TransactionClient): Promise<MeterSettings> {
+  // With `within`, the save joins the caller's transaction and commits (or fails) with it
+  const run = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> => (within ? work(within) : prisma.$transaction(work));
+  return run(async (tx) => {
     // One super admin's save at a time, so two saves of different values never undo each other
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('meter:settings'))`;
     const row = await tx.appSetting.findUnique({ where: { key: SETTING_KEY } });
@@ -37,7 +48,13 @@ export async function saveMeterSettings(change: Partial<MeterSettings>, userId: 
       else next[key] = value;
     }
     // An allowance saved now replaces one that was waiting for a later day
-    if (Object.prototype.hasOwnProperty.call(change, 'memberAllowanceMicros')) delete next[MEMBER_ALLOWANCE_LATER_KEY];
+    if (Object.prototype.hasOwnProperty.call(change, 'memberAllowanceMicros')) {
+      delete next[MEMBER_ALLOWANCE_LATER_KEY];
+      const at = new Date();
+      // The month's books keep the allowance that applied, so a later change never rewrites what an earlier month was worked out with
+      await tx.meterAllowanceChange.deleteMany({ where: { effectiveFrom: { gt: at } } });
+      await tx.meterAllowanceChange.create({ data: { effectiveFrom: at, allowanceMicros: change.memberAllowanceMicros === null || change.memberAllowanceMicros === undefined ? null : BigInt(change.memberAllowanceMicros), createdById: userId } });
+    }
     const value = next as Prisma.InputJsonValue;
     await tx.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
     return readMeterSettings(next);
@@ -45,12 +62,24 @@ export async function saveMeterSettings(change: Partial<MeterSettings>, userId: 
 }
 
 /** Saves a monthly computer allowance that takes the place of the current one from a later day (the 1st), and changes nothing before it. */
-export async function scheduleMemberAllowance(micros: number, from: Date, userId: string): Promise<void> {
-  await prisma.$transaction(async (tx) => {
+export async function scheduleMemberAllowance(micros: number, from: Date, userId: string, asked?: Date, within?: Prisma.TransactionClient): Promise<void> {
+  const run = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> => (within ? work(within) : prisma.$transaction(work));
+  await run(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('meter:settings'))`;
+    // The time is read once the lock is held (a save that waited for it works from the time it got it), unless the caller fixed it
+    const now = asked ?? new Date();
     const row = await tx.appSetting.findUnique({ where: { key: SETTING_KEY } });
     const saved = row?.value && typeof row.value === 'object' && !Array.isArray(row.value) ? (row.value as Record<string, unknown>) : {};
-    const value = { ...saved, [MEMBER_ALLOWANCE_LATER_KEY]: { micros, from: from.toISOString() } } as Prisma.InputJsonValue;
+    const next: Record<string, unknown> = { ...saved };
+    // An allowance that was waiting for a day that has come is the allowance in force now (the reader says so): it becomes the saved
+    // one before it is replaced, or scheduling the next change would quietly put the older figure back until that day
+    const waiting = saved[MEMBER_ALLOWANCE_LATER_KEY] as { micros?: unknown; from?: unknown } | undefined;
+    if (waiting && typeof waiting.micros === 'number' && typeof waiting.from === 'string' && new Date(waiting.from).getTime() <= now.getTime()) next.memberAllowanceMicros = waiting.micros;
+    next[MEMBER_ALLOWANCE_LATER_KEY] = { micros, from: from.toISOString() };
+    // Begins on that day in the month's books; one that was waiting for another day is replaced
+    await tx.meterAllowanceChange.deleteMany({ where: { effectiveFrom: { gt: now } } });
+    await tx.meterAllowanceChange.create({ data: { effectiveFrom: from, allowanceMicros: BigInt(micros), createdById: userId } });
+    const value = next as Prisma.InputJsonValue;
     await tx.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
   });
 }
@@ -97,6 +126,9 @@ export async function recordMeterEvent(input: MeterEventInput, db: Db = prisma):
   const same =
     !!first &&
     first.kind === input.kind &&
+    first.pool === input.pool &&
+    first.payerKind === input.payerKind &&
+    (first.payerPersonId ?? null) === (input.payerPersonId ?? null) &&
     first.personKey === input.personKey &&
     first.botId === input.botId &&
     first.unit === input.unit &&
@@ -150,6 +182,23 @@ export function runCallEventId(botId: string, runKey: string, callId: string): s
   return whole.length <= 255 ? whole : `run:${createHash('sha256').update(whole).digest('hex')}`;
 }
 
+/** The id a model call is written under: a run's call by its own run key, so a retried report is still one event. */
+function eventIdOf(facts: ModelCallFacts): string {
+  return facts.runKey
+    ? runCallEventId(facts.botId, facts.runKey, facts.clientEventId ?? `row-${facts.usageRowId}`)
+    : facts.clientEventId
+      ? `model:${facts.botId}:${facts.clientEventId}`.slice(0, 255)
+      : `ai-usage:${facts.usageRowId}`;
+}
+
+/** Adds the run to a stored event that has none (and only then): nothing else about the event changes. */
+async function addRunTo(eventId: string, runId: string, db: Pick<typeof prisma, 'meterEvent'>): Promise<void> {
+  const first = await db.meterEvent.findUnique({ where: { eventId }, select: { detail: true } });
+  const detail = first?.detail;
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail) || (detail as Record<string, unknown>).runId) return;
+  await db.meterEvent.updateMany({ where: { eventId }, data: { detail: { ...(detail as Record<string, Prisma.InputJsonValue>), runId } } });
+}
+
 /**
  * Writes a model call from the place it is already counted (the usage row of POST /api/bots/ai-usage). The person is who talked
  * (a Brick's own person when nobody did), the payer is whoever's key ran it or us, and the figure says how sure its cost is.
@@ -163,14 +212,10 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
     const guestId = !personId && facts.talkedGuest !== false ? facts.talkedUserId : null;
     const paidByOther = facts.keyOwnerId !== null;
     const route = facts.sentProviderId === UNIVERSE_AI_REF ? 'universe-ai' : paidByOther ? 'own-key' : 'provider';
-    return await recordMeterEvent(
+    const recorded = await recordMeterEvent(
       {
         // A call a run made is under the run's own id as the bot server sent it (never as a lookup answered it), so a retried report is still one event
-        eventId: facts.runKey
-          ? runCallEventId(facts.botId, facts.runKey, facts.clientEventId ?? `row-${facts.usageRowId}`)
-          : facts.clientEventId
-            ? `model:${facts.botId}:${facts.clientEventId}`.slice(0, 255)
-            : `ai-usage:${facts.usageRowId}`,
+        eventId: eventIdOf(facts),
         kind: 'model_call',
         pool: 'chat',
         occurredAt: facts.occurredAt,
@@ -202,6 +247,10 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
       },
       db,
     );
+    // A retried report that carries the run the first one could not name: the stored event keeps its identity and figures and only
+    // gains the run, so the task's receipt finds it (receipts attach a run's events by the run id in the detail)
+    if (!recorded.recorded && !recorded.conflict && facts.runId) await addRunTo(eventIdOf(facts), facts.runId, db);
+    return recorded;
   } catch (error) {
     console.error('[Meter] Could not record a model call:', error instanceof Error ? error.message : 'unknown');
     return null;
@@ -210,9 +259,10 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
 
 /**
  * The provider's settlement covered everything recorded up to this moment: those events are settled and no longer "not yet
- * settled" in the envelope. Safe to say twice. Returns how many it settled.
+ * settled" in the envelope. Safe to say twice. Returns how many it settled. Events are chosen by when they entered the books, never by
+ * when they happened: one that happened before the moment and was written after the provider's pass is not covered by it.
  */
 export async function settleEventsThrough(through: Date, db: Db = prisma): Promise<number> {
-  const { count } = await db.meterEvent.updateMany({ where: { settledAt: null, occurredAt: { lte: through } }, data: { settledAt: new Date() } });
+  const { count } = await db.meterEvent.updateMany({ where: { settledAt: null, recordedAt: { lte: through } }, data: { settledAt: new Date() } });
   return count;
 }

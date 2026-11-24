@@ -370,18 +370,22 @@ export async function saveVoiceDraft(botId: string, profile: z.infer<typeof voic
   return readBotVoice(botId);
 }
 
-/** Publishes the draft as the next revision, which the bot speaks with from now on. */
+/**
+ * Publishes the draft as the next revision, which the bot speaks with from now on. What is looked up (the draft, the keys it names, who may use
+ * them) is looked up before the write begins: those lookups use the shared connection, and one made while the write's own connection is held
+ * waits for a second one (a pool with none to spare never gives it, and the write runs out of time).
+ */
 export async function publishVoiceDraft(botId: string, note: string | null, userId: string) {
+  const draft = await prisma.botVoiceDraft.findUnique({ where: { botId } });
+  const parsed = voiceProfileSchema.safeParse(draft?.profile ?? {});
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new BotSettingsError(400, `The voice profile isn't finished: ${issue?.path.join('.') || 'profile'} is ${issue?.code === 'invalid_type' ? 'missing' : 'not valid'}`);
+  }
+  const { providers, lent } = await providersFor(parsed.data, await homeOf(botId));
+  const problem = profileProblem(followUniverseAi(parsed.data, providers), providers, lent);
+  if (problem) throw new BotSettingsError(409, problem);
   await prisma.$transaction(async (tx) => {
-    const draft = await tx.botVoiceDraft.findUnique({ where: { botId } });
-    const parsed = voiceProfileSchema.safeParse(draft?.profile ?? {});
-    if (!parsed.success) {
-      const issue = parsed.error.issues[0];
-      throw new BotSettingsError(400, `The voice profile isn't finished: ${issue?.path.join('.') || 'profile'} is ${issue?.code === 'invalid_type' ? 'missing' : 'not valid'}`);
-    }
-    const { providers, lent } = await providersFor(parsed.data, await homeOf(botId));
-    const problem = profileProblem(followUniverseAi(parsed.data, providers), providers, lent);
-    if (problem) throw new BotSettingsError(409, problem);
     const last = await tx.botVoiceRevision.findFirst({ where: { botId }, orderBy: { number: 'desc' }, select: { number: true } });
     const number = (last?.number ?? 0) + 1;
     await tx.botVoiceRevision.create({ data: { botId, number, profile: parsed.data as Prisma.InputJsonValue, note, publishedById: userId } });
@@ -392,16 +396,14 @@ export async function publishVoiceDraft(botId: string, note: string | null, user
 
 /** Goes back to an earlier revision, if the providers it names still work as it says. */
 export async function rollBackVoice(botId: string, number: number) {
-  await prisma.$transaction(async (tx) => {
-    const revision = await tx.botVoiceRevision.findUnique({ where: { botId_number: { botId, number } } });
-    if (!revision) throw new BotSettingsError(404, 'That revision doesn\'t exist');
-    const parsed = voiceProfileSchema.safeParse(revision.profile);
-    if (!parsed.success) throw new BotSettingsError(409, 'That revision can\'t be read');
-    const { providers, lent } = await providersFor(parsed.data, await homeOf(botId));
-    const problem = profileProblem(followUniverseAi(parsed.data, providers), providers, lent);
-    if (problem) throw new BotSettingsError(409, problem);
-    await tx.bot.update({ where: { id: botId }, data: { voiceRevision: number } });
-  });
+  const revision = await prisma.botVoiceRevision.findUnique({ where: { botId_number: { botId, number } } });
+  if (!revision) throw new BotSettingsError(404, 'That revision doesn\'t exist');
+  const parsed = voiceProfileSchema.safeParse(revision.profile);
+  if (!parsed.success) throw new BotSettingsError(409, 'That revision can\'t be read');
+  const { providers, lent } = await providersFor(parsed.data, await homeOf(botId));
+  const problem = profileProblem(followUniverseAi(parsed.data, providers), providers, lent);
+  if (problem) throw new BotSettingsError(409, problem);
+  await prisma.bot.update({ where: { id: botId }, data: { voiceRevision: number } });
   return readBotVoice(botId);
 }
 

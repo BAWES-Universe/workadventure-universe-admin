@@ -1,4 +1,4 @@
-import { activityIdOf, categoryOf, jobActivityIdOf, readActivityId, receiptLines, receiptLink, spentOf, type LineEvent } from '@/lib/task-receipts-values';
+import { actionOutcomeOfRun, activityIdOf, categoryOf, computerTakenOf, withComputerRefund, jobActivityIdOf, outcomeOfActions, outcomeOfRuns, readActions, readActivityId, receiptLines, receiptLink, spentOf, stateOfOutcome, takenForRun, type LineEvent } from '@/lib/task-receipts-values';
 
 const event = (over: Partial<LineEvent>): LineEvent => ({ kind: 'app_use', route: 'instant', quantity: 1, costMicros: 30_000, detail: null, ...over });
 
@@ -41,6 +41,47 @@ describe('what a task’s receipt says it used', () => {
     expect(spentOf('done', null, lines)).toBeNull();
   });
 
+  it('an Instant use whose charge the books have not acknowledged says "Settlement pending", one being released says so, and neither is a price or a total', () => {
+    const pending = receiptLines([event({ costMicros: 20_000, detail: { instant: true, runId: 'r1', customerMicros: null, customerState: 'held' } })], 'Brick');
+    expect(pending).toEqual([{ label: 'Instant Apps, 1 use', note: 'Settlement pending' }]);
+    expect(spentOf('done', null, pending)).toBeNull();
+    const releasing = receiptLines([event({ costMicros: 20_000, detail: { instant: true, runId: 'r2', customerMicros: null, customerState: 'held', unconfirmed: true } })], 'Brick');
+    expect(releasing).toEqual([{ label: 'Instant Apps, 1 use', note: 'Hold being released' }]);
+    expect(spentOf('done', null, releasing)).toBeNull();
+    // A use whose own cost is not known is still "price not known yet"; one charged is its amount
+    expect(receiptLines([event({ costMicros: null, detail: { instant: true, runId: 'r3', customerMicros: null } })], 'Brick')).toEqual([{ label: 'Instant Apps, 1 use', note: 'Price not known yet' }]);
+    expect(receiptLines([event({ costMicros: 20_000, detail: { instant: true, runId: 'r4', customerMicros: 0, customerState: 'released', unconfirmed: true } })], 'Brick')).toEqual([{ label: 'Instant Apps, 1 use', amountMicros: 0 }]);
+  });
+
+  it('a run that failed on the provider with its hold still reserved says "Hold being released", not "Settlement pending"; a run that went through with its charge unacknowledged stays "Settlement pending"', () => {
+    const failed = receiptLines([event({ costMicros: 20_000, detail: { instant: true, runId: 'r5', customerMicros: null, customerState: 'held', unconfirmed: false, state: 'failed' } })], 'Brick');
+    expect(failed).toEqual([{ label: 'Instant Apps, 1 use', note: 'Hold being released' }]);
+    expect(spentOf('done', null, failed)).toBeNull();
+    expect(receiptLines([event({ costMicros: 20_000, detail: { instant: true, runId: 'r6', customerMicros: null, customerState: 'held', unconfirmed: false, state: 'succeeded' } })], 'Brick')).toEqual([{ label: 'Instant Apps, 1 use', note: 'Settlement pending' }]);
+  });
+
+  it('a group holding both a run awaiting its charge and a run awaiting its release shows both, each with its own count, and a charged run in the same App keeps its amount', () => {
+    const settling = event({ costMicros: 20_000, detail: { instant: true, runId: 'a', customerMicros: null, customerState: 'held', state: 'succeeded' } });
+    const releasing = event({ costMicros: 20_000, detail: { instant: true, runId: 'b', customerMicros: null, customerState: 'held', unconfirmed: true } });
+    const failed = event({ costMicros: 20_000, detail: { instant: true, runId: 'c', customerMicros: null, customerState: 'held', state: 'failed' } });
+    const charged = event({ costMicros: 20_000, detail: { instant: true, runId: 'd', customerMicros: 30_000, customerState: 'charged', state: 'succeeded' } });
+    expect(receiptLines([settling, releasing, failed], 'Brick')).toEqual([
+      { label: 'Instant Apps, 1 use', note: 'Settlement pending' },
+      { label: 'Instant Apps, 2 uses', note: 'Hold being released' },
+    ]);
+    // The order the runs arrive in does not decide which one is shown
+    expect(receiptLines([releasing, settling], 'Brick').map((line) => line.note).sort()).toEqual(['Hold being released', 'Settlement pending']);
+    const mixed = receiptLines([charged, settling, releasing], 'Brick');
+    expect(mixed).toEqual([
+      { label: 'Instant Apps, 1 use', amountMicros: 30_000 },
+      { label: 'Instant Apps, 1 use', note: 'Settlement pending' },
+      { label: 'Instant Apps, 1 use', note: 'Hold being released' },
+    ]);
+    // Nothing pending is added into a total
+    expect(spentOf('done', null, mixed)).toBeNull();
+    expect(spentOf('done', 30_000, mixed)).toBe(30_000);
+  });
+
   it('leaves out disk sizes and other bookkeeping, and a name that is long or missing is not used', () => {
     expect(receiptLines([event({ kind: 'size_change', route: 'computer' }), event({ kind: 'stored_bytes', route: null })], 'Brick')).toEqual([]);
     expect(receiptLines([event({ detail: { app: 'x'.repeat(41) } })], 'Brick')[0].label).toBe('Instant Apps, 1 use');
@@ -74,5 +115,96 @@ describe('the category and the ids', () => {
     expect(readActivityId('act_')).toBeNull();
     expect(readActivityId('nope')).toBeNull();
     expect(receiptLink('act_abc')).toBe('[What it used](#usage=act_abc)');
+  });
+});
+
+describe('how a task came to end, from its runs', () => {
+  const runs = (...states: string[]) => states.map((state, index) => ({ id: `r${index}`, state, toolkit: index % 2 === 0 ? 'gmail' : 'exa' }));
+
+  it('every action worked is done; some worked is partly done; none worked is refunded, nothing taken', () => {
+    expect(outcomeOfRuns(runs('succeeded', 'succeeded'))).toMatchObject({ open: false, outcome: 'done' });
+    expect(outcomeOfRuns(runs('succeeded', 'failed'))).toMatchObject({ open: false, outcome: 'partial' });
+    expect(outcomeOfRuns(runs('failed', 'failed'))).toMatchObject({ open: false, outcome: 'refunded' });
+    // No run at all is nothing worked
+    expect(outcomeOfRuns([])).toEqual({ open: false, outcome: 'refunded', actions: [] });
+  });
+
+  it('keeps each action’s own outcome, in order; a refused run never went out and is not an action', () => {
+    expect(outcomeOfRuns(runs('succeeded', 'refused', 'failed')).actions).toEqual([
+      { run: 'r0', label: 'gmail', outcome: 'worked' },
+      { run: 'r2', label: 'gmail', outcome: 'failed' },
+    ]);
+    expect(outcomeOfRuns(runs('refused', 'refused'))).toEqual({ open: false, outcome: 'refunded', actions: [] });
+  });
+
+  it('a run that has not ended means the task cannot be settled yet, and is not counted as an action', () => {
+    for (const state of ['reserving', 'held', 'sent', 'ambiguous']) {
+      expect(outcomeOfRuns(runs('succeeded', state))).toMatchObject({ open: true, actions: [{ run: 'r0', outcome: 'worked' }] });
+    }
+  });
+
+  it('partly done is still a done receipt (something worked); only none-worked is refunded', () => {
+    expect(stateOfOutcome('done')).toBe('done');
+    expect(stateOfOutcome('partial')).toBe('done');
+    expect(stateOfOutcome('refunded')).toBe('refunded');
+  });
+
+  it('a run nobody could confirm is unknown, never failed: until the provider’s own log says so, then it is what the log said', () => {
+    expect(actionOutcomeOfRun({ state: 'failed', reason: 'unclear', detail: { noLog: true } })).toBe('unknown');
+    expect(actionOutcomeOfRun({ state: 'failed', reason: 'unclear', detail: null })).toBe('unknown');
+    expect(actionOutcomeOfRun({ state: 'failed', reason: 'unclear', detail: { lateEvidence: { status: 'success' } } })).toBe('worked');
+    expect(actionOutcomeOfRun({ state: 'failed', reason: 'unclear', detail: { lateEvidence: { status: 'failed' } } })).toBe('failed');
+    expect(actionOutcomeOfRun({ state: 'failed', reason: 'provider_failed' })).toBe('failed');
+    expect(actionOutcomeOfRun({ state: 'succeeded' })).toBe('worked');
+  });
+
+  it('adds steps up: all worked is done, some is partly done, none is unconfirmed when any could not be confirmed, else refunded', () => {
+    expect(outcomeOfActions(['worked', 'worked'])).toBe('done');
+    expect(outcomeOfActions(['worked', 'unknown'])).toBe('partial');
+    expect(outcomeOfActions(['worked', 'failed'])).toBe('partial');
+    expect(outcomeOfActions(['unknown'])).toBe('unconfirmed');
+    expect(outcomeOfActions(['failed', 'unknown'])).toBe('unconfirmed');
+    expect(outcomeOfActions(['failed'])).toBe('refunded');
+    expect(outcomeOfActions([])).toBe('refunded');
+  });
+
+  it('a task nobody could confirm took nothing (refunded money state); one that did not finish took something (done state)', () => {
+    expect(stateOfOutcome('unconfirmed')).toBe('refunded');
+    expect(stateOfOutcome('failed')).toBe('done');
+  });
+
+  it('what the computer took: none written, a total, or not known yet (never a made-up total)', () => {
+    const time = (costMicros: number | null, detail: unknown = null) => event({ kind: 'computer_time', route: 'computer', quantity: 300, costMicros, detail });
+    expect(computerTakenOf([])).toBeUndefined();
+    expect(computerTakenOf([time(30_000, { givenBack: true })])).toBeUndefined();
+    expect(computerTakenOf([time(30_000), time(10_000)])).toBe(40_000);
+    expect(computerTakenOf([time(30_000), time(null)])).toBeNull();
+  });
+
+  it('the computer’s line says what became of a cost that was given back: pending until the books acknowledge it, then returned; any other line is untouched', () => {
+    const lines = [{ label: 'Instant gmail, 1 use', amountMicros: 9_000 }, { label: 'Computer, 5 minutes', note: 'Nothing' }];
+    expect(withComputerRefund(lines, { returnedMicros: 0, pendingMicros: 30_000 })[1]).toEqual({ label: 'Computer, 5 minutes', note: 'Refund pending' });
+    expect(withComputerRefund(lines, { returnedMicros: 30_000, pendingMicros: 0 })[1]).toEqual({ label: 'Computer, 5 minutes', note: 'Given back', returnedMicros: 30_000 });
+    expect(withComputerRefund(lines, { returnedMicros: 0, pendingMicros: 0 })).toEqual(lines);
+    expect(withComputerRefund(lines, { returnedMicros: 30_000, pendingMicros: 0 })[0]).toEqual(lines[0]);
+  });
+
+  it('reads stored actions back (an unknown one too) and drops anything that is not the shape written', () => {
+    expect(readActions([{ run: 'u', label: 'gmail', outcome: 'unknown' }])).toEqual([{ run: 'u', label: 'gmail', outcome: 'unknown' }]);
+    expect(readActions([{ run: 'a', label: 'gmail', outcome: 'worked' }, { run: 'b', label: 'exa', outcome: 'refunded' }, null, 'x', { run: 1, label: 'x', outcome: 'failed' }])).toEqual([{ run: 'a', label: 'gmail', outcome: 'worked' }]);
+    expect(readActions(null)).toEqual([]);
+    expect(readActions({})).toEqual([]);
+  });
+});
+
+describe('what one Instant run took (takenForRun)', () => {
+  const runEvent = (runId: string, customerMicros: unknown) => event({ detail: { instant: true, runId, customerMicros } });
+  it('reads the run’s own charge by its id: zero is a price, a price not known yet or no record is null, and another run’s is never lent', () => {
+    const events = [runEvent('a', 20_000), runEvent('b', 0), runEvent('c', null), event({ kind: 'model_call', route: 'universe-ai', detail: { runId: 'd', customerMicros: 5 } })];
+    expect(takenForRun(events, 'a')).toBe(20_000);
+    expect(takenForRun(events, 'b')).toBe(0);
+    expect(takenForRun(events, 'c')).toBeNull();
+    expect(takenForRun(events, 'd')).toBeNull();
+    expect(takenForRun(events, 'zzz')).toBeNull();
   });
 });

@@ -129,7 +129,8 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
     if (JSON.stringify(await readLend()) !== JSON.stringify(lend)) return true;
     // A Brick is the only bot where it lives: it alone leaves the key, and its owner, whose key it is, is told
     if (!universe) {
-      const left = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: key.providerId }, data: { aiProviderRef: UNIVERSE_AI_REF, aiModel: null } });
+      // Only while the Brick still has the model the 404 was about: one its owner picked in the meantime is a newer choice, not ours to undo
+      const left = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: key.providerId, aiModel: bot.aiModel }, data: { aiProviderRef: UNIVERSE_AI_REF, aiModel: null } });
       if (left.count > 0) {
         try {
           await addNotice({

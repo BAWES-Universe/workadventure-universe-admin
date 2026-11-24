@@ -25,7 +25,7 @@ import {
   type PreviewRequest,
   type Recipients,
 } from '@/lib/grants-view';
-import { Chosen, Clash, Group, Preview, RecipientPicker, SheetButtons, Words, draftOfAudience, emptyDraft, recipientsOf, sendJson, usePreview, type RecipientDraft } from './grants-parts';
+import { Chosen, Clash, Group, Preview, RecipientPicker, SheetButtons, Words, draftOfAudience, emptyDraft, recipientsOf, sendJson, usePreview, useResetWhen, type RecipientDraft } from './grants-parts';
 
 type Done = () => void;
 
@@ -39,12 +39,10 @@ export function AiSheet({ open, onClose, onSaved, ai }: { open: boolean; onClose
   const [signedIn, setSignedIn] = useState(String(ai.signedIn));
   const [guest, setGuest] = useState(String(ai.guest));
   const [saving, setSaving] = useState(false);
-  useEffect(() => {
-    if (open) {
-      setSignedIn(String(ai.signedIn));
-      setGuest(String(ai.guest));
-    }
-  }, [open, ai.signedIn, ai.guest]);
+  useResetWhen(open, [open, ai.signedIn, ai.guest], () => {
+    setSignedIn(String(ai.signedIn));
+    setGuest(String(ai.guest));
+  });
   const signedInN = Number(signedIn);
   const guestN = Number(guest);
   const valid = Number.isInteger(signedInN) && signedInN >= 1 && Number.isInteger(guestN) && guestN >= 1;
@@ -110,7 +108,7 @@ export function DefaultSheet({ category, view, onClose, onSaved }: { category: M
   const [from, setFrom] = useState('');
   const [startsOn, setStartsOn] = useState<StartsOn>('next');
   const [saving, setSaving] = useState(false);
-  useEffect(() => {
+  useResetWhen(!!category && !!view, [category, view], () => {
     if (!category || !view) return;
     setAmount(dollarsText(view.amountMicros));
     // Computer credit is monthly for everyone for now: it follows the one monthly allowance every member has
@@ -118,7 +116,7 @@ export function DefaultSheet({ category, view, onClose, onSaved }: { category: M
     setWhom(view.recipients?.kind === 'new_from' ? 'new_from' : 'all');
     setFrom(view.recipients?.kind === 'new_from' ? view.recipients.from.slice(0, 10) : dateInput(new Date()));
     setStartsOn('next');
-  }, [category, view]);
+  });
 
   const micros = microsOfDollars(amount);
   const recipients: Recipients | null = interval === 'once' && whom === 'new_from' ? (from ? { kind: 'new_from', from } : null) : { kind: 'all' };
@@ -235,8 +233,7 @@ export function ExceptionSheet({ open, editing, onClose, onSaved }: { open: bool
   const [settings, setSettings] = useState<Record<MoneyCategory, SettingDraft>>({ instant_apps: sameDraft(), computers: sameDraft() });
   const [choice, setChoice] = useState<'this' | 'other' | null>(null);
   const [saving, setSaving] = useState(false);
-  useEffect(() => {
-    if (!open) return;
+  useResetWhen(open, [open, editing], () => {
     setChoice(null);
     if (editing) {
       setAudience(draftOfAudience(editing.audience));
@@ -245,18 +242,20 @@ export function ExceptionSheet({ open, editing, onClose, onSaved }: { open: bool
       setAudience(emptyDraft('people'));
       setSettings({ instant_apps: sameDraft(), computers: sameDraft() });
     }
-  }, [open, editing]);
+  });
 
   const who = recipientsOf(audience);
   const apps = settingOf(settings.instant_apps);
   const computers = settingOf(settings.computers);
-  const ready = !!who && !!apps && !!computers && (apps.mode !== 'same' || computers.mode !== 'same');
+  // An exception that already exists may go back to "As everyone" in both: the server ends the rule. A new one needs a category chosen.
+  const ready = !!who && !!apps && !!computers && (!!editing || apps.mode !== 'same' || computers.mode !== 'same');
   const request: PreviewRequest | null = who && apps && computers ? { what: 'exception', audience: who, instant_apps: apps, computers, ...(editing ? { replaceId: editing.id } : {}) } : null;
   const { preview, loading } = usePreview(open && ready ? request : null);
   const clash = preview?.clash ?? null;
   // A clash must be answered before saving; a new one starts unanswered
-  const clashKey = clash ? clash.people.join(',') + clash.other.name : '';
-  useEffect(() => setChoice(null), [clashKey]);
+  // The choice belongs to the draft it was made for: changing a category, an amount or the people asks it again, even for the same rule
+  const clashKey = clash ? JSON.stringify([clash.people, clash.other.name, request]) : '';
+  useResetWhen(true, [clashKey], () => setChoice(null));
 
   async function save() {
     if (!request) return;
@@ -363,6 +362,13 @@ export function GiftSheet({ open, onClose, onSaved }: { open: boolean; onClose: 
     pending.current = null;
   }, [open]);
 
+  const zoneName = (() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone;
+    } catch {
+      return '';
+    }
+  })();
   const endsAtDate = until ? new Date(`${until}T23:59:59`) : null;
   const endsAt = endsAtDate && !Number.isNaN(endsAtDate.getTime()) && endsAtDate.getTime() > Date.now() ? endsAtDate.toISOString() : null;
   const who = recipientsOf(audience);
@@ -381,9 +387,11 @@ export function GiftSheet({ open, onClose, onSaved }: { open: boolean; onClose: 
     void _what;
     const result = await sendJson('/api/admin/grants/gifts', 'POST', { ...body, grantKey: pending.current.key, settlement, note: settlement === 'to_bill' && note.trim() ? note.trim() : null });
     setSaving(false);
-    // The key lasts while the books may have saved it without our hearing (no answer, or a server error);
-    // a clear answer (saved, or refused with a 4xx), ends it. Saving again with the same key never gives twice.
-    if (result.ok || (result.status >= 400 && result.status < 500)) pending.current = null;
+    // The key lasts while the books may have saved it without our hearing (no answer, or a server error, or a sign-in that failed
+    // on the way back: the first try may have been saved before it); a clear answer (saved, or refused with a 4xx that says so), ends it.
+    // Saving again with the same key never gives twice.
+    const refused = result.status >= 400 && result.status < 500 && ![401, 403, 408].includes(result.status);
+    if (result.ok || refused) pending.current = null;
     if (!result.ok) {
       addToast({ description: result.error ?? 'That didn’t save.', variant: 'error' });
       return;
@@ -467,6 +475,7 @@ export function GiftSheet({ open, onClose, onSaved }: { open: boolean; onClose: 
           <Group label="Until">
             <Input type="date" className="h-11" aria-label="Ends on" value={until} onChange={(event) => setUntil(event.target.value)} />
             {until && !endsAt && <p className="text-sm text-muted-foreground">Pick a day in the future. Every gift ends.</p>}
+            {endsAt && <p className="text-sm text-muted-foreground">Ends at the end of that day in your time zone{zoneName ? ` (${zoneName})` : ''}. The list and the preview show the same day.</p>}
           </Group>
           <Group label="Gift or bill">
             <Segmented<Settlement>

@@ -225,6 +225,24 @@ run('a Brick’s files (real database)', () => {
     expect(await prisma.botFileRemoval.count({ where: { botId: brickId } })).toBe(0);
   });
 
+  it('queues the uploader copy only when no other row still opens the same stored file, also when the last two are deleted at the same moment', async () => {
+    const one = await file(brickId, people.sara.id, { fileId: 'shared-copy.pdf' });
+    const two = await file(brickId, people.sara.id, { fileId: 'shared-copy.pdf' });
+    const del = (id: string) => deleteFile(as('sara', `/api/bricks/${brickId}/files/${id}`, 'DELETE'), fileParams(brickId, id));
+    // One of two: the other still opens that file, so it stays in the uploader
+    expect((await del(one.id)).status).toBe(200);
+    expect(await prisma.botFileRemoval.count({ where: { botId: brickId, fileId: 'shared-copy.pdf' } })).toBe(0);
+    expect((await del(two.id)).status).toBe(200);
+    expect(await prisma.botFileRemoval.count({ where: { botId: brickId, fileId: 'shared-copy.pdf' } })).toBe(1);
+    // Both at the same moment: the file is not left behind
+    const three = await file(brickId, people.sara.id, { fileId: 'shared-race.pdf' });
+    const four = await file(brickId, people.sara.id, { fileId: 'shared-race.pdf' });
+    const both = await Promise.all([del(three.id), del(four.id)]);
+    expect(both.map((answer) => answer.status)).toEqual([200, 200]);
+    expect(await prisma.botFileRemoval.count({ where: { botId: brickId, fileId: 'shared-race.pdf' } })).toBe(1);
+    await prisma.botFileRemoval.deleteMany({ where: { botId: brickId } });
+  });
+
   it('queues no removal for a file that is only a link', async () => {
     const link = await file(brickId, people.sara.id, { bucket: null, fileId: null, url: 'https://example.test/a.pdf' });
     expect((await deleteFile(as('sara', `/api/bricks/${brickId}/files/${link.id}`, 'DELETE'), fileParams(brickId, link.id))).status).toBe(200);

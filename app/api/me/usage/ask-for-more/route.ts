@@ -38,13 +38,27 @@ export async function POST(request: NextRequest) {
     const category = (body as { category?: unknown }).category;
     if (category !== undefined && category !== 'apps' && category !== 'computer') return respond(request, { error: 'category must be apps or computer' }, 400);
     const what: AskedFor = category === 'apps' ? 'apps' : 'computer';
-    const canAsk = (usage: Awaited<ReturnType<typeof memberUsage>>) => (what === 'apps' ? !!usage.apps && !('unavailable' in usage.apps && usage.apps.unavailable) && (usage.apps as { canAskForMore?: boolean }).canAskForMore === true : usage.computer?.canAskForMore === true);
+    // Three answers, never two: room to ask, "not used up" (there is credit), or "cannot be read" (nothing is known, so nothing is claimed)
+    type Standing = 'ask' | 'not_used_up' | 'unreadable';
+    const standing = (usage: Awaited<ReturnType<typeof memberUsage>>): Standing => {
+      if (what === 'apps') {
+        const apps = usage.apps as ({ unavailable?: boolean; canAskForMore?: boolean } | null | undefined);
+        if (!apps) return 'not_used_up';
+        if (apps.unavailable) return 'unreadable';
+        return apps.canAskForMore === true ? 'ask' : 'not_used_up';
+      }
+      if (usage.computer?.unavailable) return 'unreadable';
+      return usage.computer?.canAskForMore === true ? 'ask' : 'not_used_up';
+    };
     const used = what === 'apps' ? 'Instant Apps credit is not used up' : 'Computer time is not used up';
-    const usage = await memberUsage(user.id);
-    if (!canAsk(usage)) return respond(request, { error: used }, 409);
+    const unreadable = what === 'apps' ? 'Instant Apps credit cannot be read right now, try again in a moment' : 'Computer time cannot be read right now, try again in a moment';
+    const before = standing(await memberUsage(user.id));
+    if (before === 'unreadable') return respond(request, { error: unreadable }, 503);
+    if (before !== 'ask') return respond(request, { error: used }, 409);
     const { request: open, created } = await askForMore(user.id, new Date(), what);
-    if (created && !canAsk(await memberUsage(user.id))) {
-      // Extra usage landed between the check and the insert: there is room again, so there is nothing to wait for
+    if (created && standing(await memberUsage(user.id)) === 'not_used_up') {
+      // Extra usage landed between the check and the insert: there is room again, so there is nothing to wait for.
+      // A part that cannot be read now proves nothing, so the ask made while it could be read stays.
       await prisma.meterRequest.deleteMany({ where: { id: open.id, answeredAt: null } });
       return respond(request, { error: used }, 409);
     }

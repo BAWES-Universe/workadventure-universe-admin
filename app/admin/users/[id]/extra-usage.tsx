@@ -46,6 +46,16 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
   // usage once. It is kept until the server has answered (saved or refused), and a different request gets a new key.
   const pendingKey = useRef<{ key: string; sig: string; request: Record<string, unknown> } | null>(null);
   const [saving, setSaving] = useState(false);
+  // Everything one tap does (the lookup, the give, the reload, closing) holds the sheet, so a second tap during a slow reload never makes a new key
+  const holds = useRef(0);
+  const hold = () => {
+    holds.current += 1;
+    setSaving(true);
+  };
+  const release = () => {
+    holds.current = Math.max(0, holds.current - 1);
+    if (holds.current === 0) setSaving(false);
+  };
 
   const read = useCallback(async (): Promise<PersonUsage> => {
     const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -89,9 +99,29 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
     setOpen(true);
   }
 
+  /** Whether extra usage was saved under this key, asked without giving anything: 'unsure' when it could not be asked. */
+  async function savedUnder(grantKey: string): Promise<'saved' | 'not_saved' | 'unsure'> {
+    hold();
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/users/${encodeURIComponent(userId)}/extra-usage/status?grantKey=${encodeURIComponent(grantKey)}`);
+      const data = (await response.json().catch(() => null)) as { saved?: unknown } | null;
+      if (!response.ok || typeof data?.saved !== 'boolean') {
+        addToast({ description: 'Could not check the last try. Try again.', variant: 'error' });
+        return 'unsure';
+      }
+      return data.saved ? 'saved' : 'not_saved';
+    } catch {
+      addToast({ description: 'Could not check the last try. Check your connection and try again.', variant: 'error' });
+      return 'unsure';
+    } finally {
+      release();
+    }
+  }
+
   /** `done`: saved. `refused`: the server said no, so nothing was given. `unsure`: no answer came back, so it may have been saved. */
   async function send(method: 'POST' | 'PATCH', body: Record<string, unknown>): Promise<'done' | 'refused' | 'unsure'> {
-    setSaving(true);
+    hold();
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/admin/users/${encodeURIComponent(userId)}/extra-usage`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -117,7 +147,18 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
       addToast({ description: 'That didn’t save. Check your connection and try again.', variant: 'error' });
       return 'unsure';
     } finally {
-      setSaving(false);
+      release();
+    }
+  }
+
+  /** One tap, start to end: a tap that comes while an earlier one is still working is ignored. */
+  async function guarded(run: () => Promise<void>) {
+    if (holds.current > 0) return;
+    hold();
+    try {
+      await run();
+    } finally {
+      release();
     }
   }
 
@@ -127,7 +168,7 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
   const extra = usage.extra;
   const used = dollars(usage.computerMonthMicros);
   // No limit shows first: a running no-limit grant counts even when the usual allowance is not set
-  const computer = usage.noLimit ? `${used} this month, no limit` : !usage.allowanceSet ? `${used} this month` : `${used} of ${dollars(usage.allowanceMicros ?? 0)} this month`;
+  const computer = usage.noLimit ? `${used} this month, no limit` : !usage.allowanceSet ? `${used} this month` : usage.leftMicros === null ? `${used} of ${dollars(usage.allowanceMicros ?? 0)} this month` : `${used} this month, ${dollars(usage.leftMicros)} left of ${dollars(usage.allowanceMicros ?? 0)}`;
   // An ask shows beside a running grant too: someone can use up a raised allowance and ask again
   const asked = usage.asked;
 
@@ -254,7 +295,8 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
               className="h-11 px-5"
               disabled={!endsOn || saving}
               data-testid="extra-usage-confirm"
-              onClick={async () => {
+              onClick={() =>
+                guarded(async () => {
                 if (changing && extra) {
                   // Only what the admin changed is sent, so another admin's change is not undone and an end date nobody touched does not move
                   const change: Record<string, unknown> = { grantKey: extra.grantKey, action: 'change' };
@@ -270,13 +312,13 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
                 }
                 const sig = JSON.stringify({ amount, until, date: until === 'date' ? date : null, bill, note: bill === 'to_bill' ? note : null });
                 if (pendingKey.current && pendingKey.current.sig !== sig) {
-                  // The last try got no answer and this is something else. That one may still be saved, even late, so it is sent
-                  // again first with the same key: the server gives it once, however many times it is sent, and says what became of it.
-                  // Nothing else is given until that is known.
-                  const earlier = await send('POST', pendingKey.current.request);
+                  // The last try got no answer and this is something else. That one may have been saved, so it is looked up (a read:
+                  // nothing is given for it now) before anything else is given.
+                  const earlier = await savedUnder(pendingKey.current.key);
                   if (earlier === 'unsure') return;
                   pendingKey.current = null;
-                  if (earlier === 'done') {
+                  if (earlier === 'saved') {
+                    await load();
                     addToast({ description: 'The last try went through. Use Change if that is not what you want now.', variant: 'success' });
                     setOpen(false);
                     return;
@@ -289,7 +331,8 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
                 const outcome = await send('POST', pendingKey.current.request);
                 if (outcome !== 'unsure') pendingKey.current = null;
                 if (outcome === 'done') setOpen(false);
-              }}
+                })
+              }
             >
               {saving && <Loader2 size={16} className="animate-spin" aria-hidden="true" />}
               {changing ? 'Save' : 'Give extra usage'}

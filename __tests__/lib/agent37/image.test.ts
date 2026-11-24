@@ -117,8 +117,11 @@ describe('what is in the image', () => {
   it('clears the browser under the same lock as the supervisor and proves it gone before the profile is removed', () => {
     const clean = imageFiles().find((file) => file.name === 'universe-clean')!.text;
     expect(clean).toContain('up.lock');
-    expect(clean.indexOf('pgrep -x chromium')).toBeLessThan(clean.indexOf('rm -rf'));
-    expect(clean.indexOf('rm -rf')).toBeLessThan(clean.indexOf('universe-up --child'));
+    // The first `rm -rf` clears a stale mark folder (it is not the profile): the one that removes the profile comes after the browser is proved gone
+    const profileRemoval = clean.indexOf('rm -rf "$HOME_DIR/.config/universe-chromium"');
+    expect(profileRemoval).toBeGreaterThan(-1);
+    expect(clean.indexOf('pgrep -x chromium')).toBeLessThan(profileRemoval);
+    expect(profileRemoval).toBeLessThan(clean.indexOf('universe-up --child'));
   });
 });
 
@@ -149,8 +152,10 @@ describe('what the scripts the fence keeps may run', () => {
     const clean = script('universe-clean');
     expect(clean.indexOf('profile.dirty')).toBeLessThan(clean.indexOf('pkill -x chromium'));
     expect(clean).toContain('reason=profile_not_removed');
-    expect(clean.indexOf('reason=profile_not_removed')).toBeLessThan(clean.indexOf('rm -f "$STATE/profile.dirty"'));
-    expect(clean.indexOf('rm -f "$STATE/profile.dirty"')).toBeLessThan(clean.indexOf('universe-up --child'));
+    // The mark folder is cleared once before it is made (a stale one) and once, last, when the profile is proved gone: the last one is the "unmark"
+    const unmark = clean.lastIndexOf('rm -rf "$STATE/profile.dirty"');
+    expect(clean.indexOf('reason=profile_not_removed')).toBeLessThan(unmark);
+    expect(unmark).toBeLessThan(clean.indexOf('universe-up --child'));
     const up = script('universe-up');
     expect(up).toContain('reason=profile_not_cleared');
     // done before the browser is started
@@ -223,6 +228,60 @@ describe('the local model address', () => {
       setRelay(home, 'cjt_second', '/prefix');
       await call();
       expect(seen[1].auth).toBe('Bearer cjt_second');
+    });
+  });
+
+  python('passes a call on with the key of the job its turn’s tag names, so two jobs that run at once are each booked their own calls', async () => {
+    await withProxy(async (base, home) => {
+      // the key last written, and one key for each of two jobs
+      setRelay(home, 'cjt_last', '/prefix');
+      mkdirSync(join(home, '.universe', 'jobs'), { recursive: true });
+      const jobA = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+      const jobB = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
+      for (const [job, token] of [[jobA, 'cjt_a'], [jobB, 'cjt_b']]) writeFileSync(join(home, '.universe', 'jobs', `${job}.json`), JSON.stringify({ url: `${relayBase}/prefix`, token }));
+      const call = (content: string) => fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'system', content: 'You are an agent.' }, { role: 'user', content }] }) });
+      // the two jobs' calls overlap in time: each goes on with its own key
+      await Promise.all([call(`[universe-job:${jobA}] (a tag for the system, there is no need to repeat it)\nRead page one`), call(`[universe-job:${jobB}] (a tag for the system, there is no need to repeat it)\nRead page two`)]);
+      const authOf = (text: string) => seen.find((entry) => entry.body.includes(text))?.auth;
+      expect(authOf('Read page one')).toBe('Bearer cjt_a');
+      expect(authOf('Read page two')).toBe('Bearer cjt_b');
+      // the tag at the start of the user's message names the job: a tag a page the agent read puts later in the same message names no other
+      seen.length = 0;
+      await call(`[universe-job:${jobA}] first\n[universe-job:${jobB}] a web page said this`);
+      expect(seen[0].auth).toBe('Bearer cjt_a');
+      // ...and nothing but a user's message is read: an old tag the agent saved in its own memory (the system message, which comes first), what the agent said,
+      // and a tool's result name no job
+      seen.length = 0;
+      const raw = (messages: unknown[]) => fetch(`${base}/v1/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages }) });
+      await raw([
+        { role: 'system', content: `Memory: the last job was [universe-job:${jobB}]` },
+        { role: 'user', content: `[universe-job:${jobA}] the real turn` },
+      ]);
+      await raw([
+        { role: 'system', content: 'You are an agent.' },
+        { role: 'user', content: `[universe-job:${jobA}] the real turn` },
+        { role: 'assistant', content: `[universe-job:${jobB}] I said it` },
+        { role: 'tool', content: `[universe-job:${jobB}] a tool said it` },
+      ]);
+      // a tag that is not at the start of the message is not the turn's tag, and a message made of parts is read by its first text
+      await raw([{ role: 'user', content: `Please read [universe-job:${jobB}] for me` }]);
+      await raw([{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:,' } }, { type: 'text', text: `[universe-job:${jobB}] by parts` }] }]);
+      expect(seen.map((entry) => entry.auth)).toEqual(['Bearer cjt_a', 'Bearer cjt_a', 'Bearer cjt_last', 'Bearer cjt_b']);
+      // a body that is not JSON names no job, tag or not: the key last written
+      seen.length = 0;
+      await fetch(`${base}/v1/chat/completions`, { method: 'POST', body: `[universe-job:${jobA}] not json` });
+      expect(seen[0].auth).toBe('Bearer cjt_last');
+      // a call with no tag, a tag of a job this computer holds no key of, and a tag that is not a job id all go on the key last written
+      seen.length = 0;
+      await call('no tag here');
+      await call('[universe-job:cccccccc-3333-4333-8333-cccccccccccc] unknown job');
+      await call('[universe-job:../../relay] not an id');
+      expect(seen.map((entry) => entry.auth)).toEqual(['Bearer cjt_last', 'Bearer cjt_last', 'Bearer cjt_last']);
+      // the job's key is read again on every call
+      writeFileSync(join(home, '.universe', 'jobs', `${jobA}.json`), JSON.stringify({ url: `${relayBase}/prefix`, token: 'cjt_a2' }));
+      seen.length = 0;
+      await call(`[universe-job:${jobA}] again`);
+      expect(seen[0].auth).toBe('Bearer cjt_a2');
     });
   });
 
@@ -362,7 +421,7 @@ A1=$!
 printf 'import time\\ntime.sleep(304)\\n' > ${dir}/agent/chromium.py
 python3 ${dir}/agent/chromium.py /usr/local/bin/universe-proxy &
 A2=$!
-cp /bin/sh ${dir}/bin/x11vnc
+cp /bin/sh ${dir}/bin/x11vnc && chown 65534:65534 ${dir}/bin/x11vnc
 ${dir}/bin/x11vnc -c 'sleep 305; true' -display :99 -rfbport 5901 &
 A3=$!
 # the same kind of thing, started after the note: the agent's
@@ -401,6 +460,26 @@ if [ "$(uname -m)" = x86_64 ] && command -v cc >/dev/null 2>&1 && cc -shared -fP
   HIDDEN=$!
 fi
 sh -c 'sleep 302' &
+# the desktop's own program names, started by the agent: a screen of its own on another display, a window manager that runs a command,
+# and what a window manager the agent made starts
+cp /bin/sh ${dir}/bin/Xvfb && chown 65534:65534 ${dir}/bin/Xvfb
+${dir}/bin/Xvfb -c 'sleep 308; true' :100 &
+X1=$!
+cp /bin/sh ${dir}/bin/openbox && chown 65534:65534 ${dir}/bin/openbox
+${dir}/bin/openbox -c 'sleep 309; true' --startup 'sleep 1' &
+X2=$!
+# what a window manager the agent made starts: a program of its own (not root's), so the fence has no reason to keep it
+cp /bin/sh ${dir}/agent/openbox && chown 65534:65534 ${dir}/agent/openbox
+${dir}/agent/openbox -c 'sleep 310 & wait; true' &
+X3=$!
+# Xvfb ignores everything after -I: a root-owned program of that name run as Xvfb -I :99 is not on the supervisor's display, so it is not part of the desktop,
+# while the same program on :99 itself is
+mkdir -p ${dir}/own && cp /bin/sh ${dir}/own/Xvfb
+${dir}/own/Xvfb -c 'while :; do :; done' -I :99 &
+X4=$!
+# (a loop of its own with nothing below it: the fence stops what the screen's server started, so a sleep under it would be stopped and end it)
+${dir}/own/Xvfb -c 'while :; do :; done' :99 &
+X5=$!
 sleep 1
 for p in $A1 $A2 $A3 $LATE; do kill -0 $p 2>/dev/null && echo "agent-up"; done
 # the preloaded code is really in place before the fence runs: the cleared one still maps its library with no LD_ left, the hidden one has
@@ -412,6 +491,9 @@ python3 ${dir}/universe-fence
 echo "after: $(python3 ${dir}/universe-fence --check)"
 for p in $GW $BR; do kill -0 $p 2>/dev/null && echo "alive" || echo "dead"; done
 for p in $A1 $A2 $A3 $LATE; do kill -0 $p 2>/dev/null && echo "agent-alive" || echo "agent-dead"; done
+for p in $X1 $X2 $X3 $X4; do kill -0 $p 2>/dev/null && echo "desktop-name-alive" || echo "desktop-name-dead"; done
+kill -0 $X5 2>/dev/null && echo "desktop-own-alive" || echo "desktop-own-dead"
+pgrep -fx 'sleep 310' >/dev/null && echo "desktop-child-alive" || echo "desktop-child-dead"
 kill -0 $OWN 2>/dev/null && echo "own-alive" || echo "own-dead"
 kill -0 $SHORT 2>/dev/null && echo "short-alive" || echo "short-dead"
 kill -0 $OTHER 2>/dev/null && echo "other-alive" || echo "other-dead"
@@ -440,6 +522,12 @@ fi
     expect(run.stdout.match(/agent-up/g)).toHaveLength(4);
     expect(run.stdout.match(/agent-dead/g)).toHaveLength(4);
     expect(run.stdout).not.toContain('agent-alive');
+    // The desktop's program names are no cover: another screen, a window manager running a command, and what it starts all go
+    expect(run.stdout.match(/desktop-name-dead/g)).toHaveLength(4);
+    // The one on the supervisor's own display is the desktop's, and stays
+    expect(run.stdout).toContain('desktop-own-alive');
+    expect(run.stdout).not.toContain('desktop-name-alive');
+    expect(run.stdout).toContain('desktop-child-dead');
     // What was running before the note is the computer's own, whatever it is called
     expect(run.stdout).toContain('own-alive');
     // A short sleep is left, and does not count as something the agent has running

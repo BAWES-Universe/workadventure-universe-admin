@@ -204,8 +204,10 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       expect(await mintJobToken(jobId, 'model', NOW)).toEqual({ ok: false, reason: 'not_running' });
     });
 
-    it('a read-only job alongside the writer is the person’s too: nothing runs under Brick’s hands, and both come back together', async () => {
+    it('a read-only job alongside another one is the person’s too: nothing runs under Brick’s hands, and both come back together', async () => {
       const { sara, jobId } = await running();
+      // Only jobs that read run side by side (a job that may sign in has the machine alone): the first one only looks too
+      await prisma.computerJob.update({ where: { id: jobId }, data: { writes: false } });
       const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, NOW);
       if (!reader.ok) throw new Error('no reader');
       expect((await takeOver(sara.brickId, sara.id, NOW)).ok).toBe(true);
@@ -219,7 +221,8 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
     });
 
     it('a job asked for while the fence is pending waits in line, and runs after the hand back', async () => {
-      const { sara } = await running();
+      const { sara, jobId } = await running();
+      await prisma.computerJob.update({ where: { id: jobId }, data: { writes: false } });
       const release = slowFence();
       const first = takeOver(sara.brickId, sara.id, NOW);
       await until(() => fences() === 1);
@@ -261,6 +264,64 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       expect(asked.ok).toBe(true);
       const key = asked.ok ? asked.job.detailsToFill[0].key : '';
       expect(await planEffect(jobId, { key, kind: 'details' })).toEqual({ ok: true, already: false });
+    });
+  });
+
+  describe('a tap that is spent while control is going back to Brick (the claim holds the computer’s row)', () => {
+    /** After the first read of the computer's row, control starts going back to Brick: what a hand back does in the gap between a check and the write that follows it. */
+    function handBackAfterFirstRead(botId: string) {
+      const original = prisma.brickComputer.findUnique.bind(prisma.brickComputer) as (args: unknown) => Promise<unknown>;
+      let flipped = false;
+      return jest.spyOn(prisma.brickComputer, 'findUnique').mockImplementation((async (args: unknown) => {
+        const row = await original(args);
+        if (!flipped) {
+          flipped = true;
+          await prisma.brickComputer.update({ where: { botId }, data: { controlState: 'returning' } });
+        }
+        return row;
+      }) as never);
+    }
+
+    async function approved() {
+      const { sara, jobId } = await running();
+      const ready = { what: 'Your details', where: 'Step 1' };
+      await requestHandover(jobId, 'details', NOW, ready);
+      await takeOver(sara.brickId, sara.id, NOW);
+      const asked = await fillInDetails(sara.brickId, sara.id, ready);
+      if (!asked.ok) throw new Error('not approved');
+      return { sara, jobId, ready, key: asked.job.detailsToFill[0].key };
+    }
+
+    it('is not claimed once control has started going back: the effect stays approved, never planned', async () => {
+      const { sara, jobId, key } = await approved();
+      const spy = handBackAfterFirstRead(sara.brickId);
+      try {
+        expect(await planEffect(jobId, { key, kind: 'details' })).toEqual({ ok: false, reason: 'hand_over_first' });
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await prisma.computerEffect.findFirstOrThrow({ where: { jobId, effectKey: key } })).state).toBe('approved');
+    });
+
+    it('is not written once control has started going back: the person is told they do not have the machine', async () => {
+      const { sara, jobId } = await running('omar');
+      const ready = { what: 'Your details', where: 'Step 1' };
+      await requestHandover(jobId, 'details', NOW, ready);
+      await takeOver(sara.brickId, sara.id, NOW);
+      const spy = handBackAfterFirstRead(sara.brickId);
+      try {
+        expect(await fillInDetails(sara.brickId, sara.id, ready)).toEqual({ ok: false, reason: 'not_in_control' });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await prisma.computerEffect.count({ where: { jobId } })).toBe(0);
+    });
+
+    it('two tries at the same moment still claim it once', async () => {
+      const { jobId, key } = await approved();
+      const answers = await Promise.all([planEffect(jobId, { key, kind: 'details' }), planEffect(jobId, { key, kind: 'details' })]);
+      expect(answers.filter((answer) => answer.ok && answer.already === false)).toHaveLength(1);
+      expect(answers.filter((answer) => !answer.ok)).toHaveLength(1);
     });
   });
 

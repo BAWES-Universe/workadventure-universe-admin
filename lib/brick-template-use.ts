@@ -214,7 +214,8 @@ export async function templateLists(viewerId: string): Promise<TemplateLists> {
       ORDER BY (SELECT max(c."ended_at") FROM "bots_conversations_recent" c WHERE c."bot_id" = t."bot_id" AND c."user_id" = ${viewerId}) DESC, t."id"
       LIMIT ${take}`),
   ]);
-  const metTemplates = metIds.length ? await prisma.brickTemplate.findMany({ where: { id: { in: metIds.map((row) => row.id) } }, include: WITH_MAKER }) : [];
+  const metTemplates = metIds.length ? await prisma.brickTemplate.findMany({ where: { id: { in: metIds.map((row) => row.id) }, audience: 'everyone', ...OPEN }, include: WITH_MAKER }) : [];
+  // Read again as it is now: one that stopped, or went link-only, since the ids were read is not listed
   const order = new Map(metIds.map((row, index) => [row.id, index]));
   metTemplates.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
   return {

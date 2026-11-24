@@ -126,7 +126,7 @@ async function restartIfNotSignedIn(
  * The use is written to the meter, first, under an event id taken from the call's own id (a retry never counts twice). Paid by the
  * universe, at the provider's own list price for what the call is (lib/composio-rates.ts): a search or lookup is free (written
  * with 0 and no tool run), a sandbox run and a tool run are priced by app, a batch is the sum of the tools inside it, and the
- * zero data retention add-on is counted where it covers, and a single run sent outside a session (`useReadyMade`) carries the direct execution add-on. The figure is always `estimated` (the provider sends no cost back); the
+ * zero data retention add-on is counted where it covers, and a single run sent outside a session (`runReadyMade`) carries the direct execution add-on. The figure is always `estimated` (the provider sends no cost back); the
  * month's free calls and the plan's credit are taken off at the account level (lib/composio-billing.ts), not here. A price a super
  * admin saved (`appUseMicros`) replaces the list price of each paid step.
  */
@@ -232,7 +232,7 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
   if (!(await confirmReadyMade(connection))) return { status: 'unavailable' };
   const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true } });
   if (!bot || bot.roomId !== null || bot.ownerId !== input.ownerId) return { status: 'not_owner' };
-  // One route for the whole message, read once (see useReadyMade); our own version answers the link itself, never a mix of the two
+  // One route for the whole message, read once (see runReadyMade); our own version answers the link itself, never a mix of the two
   const toolkit = connection.providerToolkit;
   const route = await routeForRun(toolkit);
   if (route.provider === 'universe' && !route.own) return { status: 'unavailable' };
@@ -255,7 +255,7 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
         callId: input.callId,
         messageId: input.message.id,
         read: async ({ tool, arguments: args, callId }) => {
-          const used = await runOneTool({ botId: input.botId, connectionId: input.connectionId, ownerId: input.ownerId, tool, arguments: args, callId });
+          const used = await runReadyMade({ botId: input.botId, connectionId: input.connectionId, ownerId: input.ownerId, tool, arguments: args, callId });
           return used.status === 'done' ? { ok: used.ok, data: used.data } : null;
         },
       });
@@ -327,7 +327,7 @@ export type ReadyMadeUseOutcome =
  * not called again (an unclear outcome is looked up by the caller, never repeated). Paid by the universe: the cost is the super
  * admin's setting while it has one, else the built-in estimate (always `estimated`). Nothing is refused for the price.
  */
-export async function useReadyMade(input: { botId: string; connectionId: string; ownerId: string; tool: string; arguments: Record<string, unknown>; callId: string }): Promise<ReadyMadeUseOutcome> {
+export async function runReadyMade(input: { botId: string; connectionId: string; ownerId: string; tool: string; arguments: Record<string, unknown>; callId: string }): Promise<ReadyMadeUseOutcome> {
   const adapter = getAdapter();
   if (!adapter) return { status: 'off' };
   // The team paused Apps: nothing is counted or sent
@@ -369,6 +369,8 @@ export interface ReadyMadeTestResult {
   toolNames: string[];
   /** True when the app has more pages of tools than are read: the list is the first pages, not everything. */
   incomplete?: boolean;
+  /** Said beside a result that worked (the MCP check: a protocol version it does not know). */
+  note?: string;
   error?: string;
   status?: number | null;
   statusText?: string | null;
@@ -404,6 +406,8 @@ export async function testReadyMade(connection: { id: string; source: string; se
     if (opened.status >= 400) return failed(`The app answered ${opened.status}.`, opened.status);
     const openError = rpcError(opened.body, 1);
     if (openError) return failed(`Initialize error: ${openError}`, opened.status);
+    // An answer to something else (another id, or no answer at all) is not an answer to this: an error in it would pass unseen, and the list below could then make the app look like it works
+    if (!linkJson(opened.body, 1)) return failed('The app did not answer the start of a session.', opened.status);
     await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId: opened.sessionId });
     // Every page of the list of tools (ids 2, 3, ...): a long list comes in pages, each with the cursor of the next
     const names: string[] = [];
@@ -451,5 +455,3 @@ export async function testReadyMade(connection: { id: string; source: string; se
   }
 }
 
-/** `useReadyMade` under a name that does not read as a React hook, for the places that call it from a plain function. */
-const runOneTool = useReadyMade;

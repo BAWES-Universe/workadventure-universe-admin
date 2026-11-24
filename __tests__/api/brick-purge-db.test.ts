@@ -485,6 +485,31 @@ run('purging a deleted Brick, in a real database', () => {
     expect(await owned(brick.id)).toEqual(NOTHING);
   });
 
+  it('keeps a Brick whole while a failed job\u2019s own time is still written against the person (an end that overlapped the decision that gave the job back), as for its model calls', async () => {
+    const sara = await person('sara');
+    const brick = await fullBrick(sara, 'Owed time Brick', { computer: true });
+    const job = await prisma.computerJob.findFirstOrThrow({ where: { botId: brick.id } });
+    await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'failed', endedBy: 'error' } });
+    const eventId = `computer:${job.id}:time`;
+    await prisma.meterEvent.deleteMany({ where: { eventId } });
+    await prisma.meterEvent.create({
+      data: { eventId, kind: 'computer_time', pool: 'computer', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: brick.id, brick: true, payerKind: 'universe', jobId: job.id, sourceRef: `computer_jobs:${job.id}`, quantity: BigInt(300), unit: 'second', costMicros: BigInt(30_000), basis: 'measured' },
+    });
+    await deleteBrick(brick.id, sara.id, NOW);
+    (computerCalls.giveBackModelCalls as jest.Mock).mockRejectedValue(new Error('The books are down'));
+    try {
+      expect(await purgeBrick(brick.id, later(8))).toBe('books');
+      expect(await owned(brick.id)).toMatchObject({ bot: 1, jobs: 1 });
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId } })).toMatchObject({ personKey: `person:${sara.id}` });
+    } finally {
+      (computerCalls.giveBackModelCalls as jest.Mock).mockImplementation(actualGiveBack);
+    }
+    // The books work again: the time is given back (written against nobody), then the Brick is purged
+    expect(await purgeBrick(brick.id, later(8))).toBe('purged');
+    expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId } })).toMatchObject({ personKey: 'unknown', personId: null });
+    expect(await owned(brick.id)).toEqual(NOTHING);
+  });
+
   describe('chat rooms: a deleted Brick keeps nothing in chat (R29)', () => {
     it('writes that its chat rooms are still to clear with the purge, for every purged Brick, and keeps no content in that note', async () => {
       const sara = await person('sara');

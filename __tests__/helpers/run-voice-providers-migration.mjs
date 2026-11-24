@@ -12,7 +12,7 @@ const names = fs
   .readdirSync(MIGRATIONS)
   .filter((name) => /^\d/.test(name))
   .sort();
-for (const name of names) await db.exec(fs.readFileSync(path.join(MIGRATIONS, name, 'migration.sql'), 'utf8'));
+for (const name of names) await db.exec(fs.readFileSync(path.join(MIGRATIONS, name, 'migration.sql'), 'utf8').replace(/\bCONCURRENTLY\s+/g, '') /* PGlite has one session: CONCURRENTLY cannot run there */);
 
 const accepted = async (sql) => {
   try {

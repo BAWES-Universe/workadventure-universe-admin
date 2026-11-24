@@ -1,6 +1,6 @@
 import https from 'https';
 import { BlockList, isIP } from 'net';
-import { lookup } from 'dns/promises';
+import { resolveHost } from '@/lib/name-lookup';
 
 /**
  * The only way Orbit calls an address a person typed (#374): an AI key on their own computer, or their own NIM. The
@@ -85,7 +85,8 @@ export async function checkPublicHttpsUrl(raw: string): Promise<CheckedAddress> 
   const url = parsePublicHttpsUrl(raw);
   let addresses: { address: string; family: number }[];
   try {
-    addresses = await lookup(url.hostname, { all: true, verbatim: true });
+    // The resolver library's own client, never `dns.lookup` on the process's few shared worker threads (see lib/name-lookup.ts)
+    addresses = await resolveHost(url.hostname);
   } catch {
     throw new AddressError('unresolved');
   }

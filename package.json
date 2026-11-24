@@ -1,6 +1,6 @@
 {
   "name": "workadventure-universe-admin",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "private": true,
   "scripts": {
     "dev": "next dev -p 3333",
@@ -62,6 +62,7 @@
     "recharts": "^3.6.0",
     "redis": "^5.10.0",
     "tailwind-merge": "^3.4.0",
+    "tldts": "^6.1.86",
     "web-push": "^3.6.7",
     "zod": "^4.1.13"
   },
