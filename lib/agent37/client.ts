@@ -142,6 +142,11 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** The whole of a folder's archive, from the request to the last byte: a machine that stops answering ends the save at this. */
 const ARCHIVE_TIMEOUT_MS = 20 * 60_000;
 const RETRY_WAITS_MS = [1_000, 3_000, 8_000];
+/**
+ * The longest one asked-again account call can take from its first request to its last answer: every attempt runs to its timeout and every wait between them is taken. A power operation (stop, sleep) whose sender died
+ * (post-0.5.0 B) is counted as still able to land for this long after its last beat, on top of a margin for the provider's own processing (lib/computer-power.ts).
+ */
+export const LONGEST_ACCOUNT_CALL_MS = REQUEST_TIMEOUT_MS * (RETRY_WAITS_MS.length + 1) + RETRY_WAITS_MS.reduce((sum, ms) => sum + ms, 0);
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -233,6 +238,11 @@ export class Agent37Client {
 
   getInstance(id: string): Promise<Instance> {
     return this.again(() => this.call('GET', `${this.api}/v1/instances/${encodeURIComponent(id)}`, this.account()));
+  }
+
+  /** One look at an instance with its own short timeout and never asked again: for a caller that must answer within a few seconds (a job's renewal, post-0.5.0 B). */
+  getInstanceOnce(id: string, timeoutMs: number): Promise<Instance> {
+    return this.call('GET', `${this.api}/v1/instances/${encodeURIComponent(id)}`, this.account(), undefined, timeoutMs);
   }
 
   /** Newest first. The docs say nothing about pages, so this is the newest instances: enough to find one that was just made. */

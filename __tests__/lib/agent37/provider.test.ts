@@ -42,6 +42,12 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       if (!found) throw new Agent37Error(404, 'not_found', 'gone');
       return found;
     },
+    async getInstanceOnce(id: string, timeoutMs: number) {
+      calls.push(`getOnce:${id}:${timeoutMs}`);
+      const found = instances.get(id);
+      if (!found) throw new Agent37Error(404, 'not_found', 'gone');
+      return found;
+    },
     async startInstance(id: string) {
       calls.push(`start:${id}`);
       instances.get(id)!.status = 'running';
@@ -378,6 +384,19 @@ describe('the Agent37 provider', () => {
     expect(await p.awake('m1')).toBe(false);
     await p.remove('m1');
     expect(await p.awake('m1')).toBe(false);
+  });
+
+  it('the quick look reads the same, from one request with the caller’s timeout', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.calls.length = 0;
+    expect(await p.awakeOnce('m1', 3_000)).toBe(true);
+    await p.rest('m1');
+    expect(await p.awakeOnce('m1', 3_000)).toBe(false);
+    expect(w.calls.filter((call) => call.startsWith('getOnce:'))).toEqual(['getOnce:m1:3000', 'getOnce:m1:3000']);
+    await p.remove('m1');
+    expect(await p.awakeOnce('m1', 3_000)).toBe(false);
   });
 
   it('looking never wakes: a machine that is not running has no screen and no signed link is asked for', async () => {

@@ -83,6 +83,7 @@ import {
 } from '@/lib/computer-browser-profile';
 import { carryOnFrom, type FreshBecause, type NamedJob } from '@/lib/computer-continue';
 import { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
+import { endPowerOp, openPowerOpOf, powerTiming, prunePowerOps, recordPowerOp, recordPowerOpIn, underPowerOp, waitForPowerOps, type OpenPowerOp } from '@/lib/computer-power';
 export { CONSENT_WINDOW_MS, ISSUE_SKEW_MS, issuedOfKey, startAnswerBody } from '@/lib/computer-start-answer';
 import { claimCommandIn, commandRow, keepOutcome, recordResumeDecision, seenCommand, settlePendingResumesIn, type Command } from '@/lib/computer-commands';
 
@@ -384,34 +385,58 @@ async function stopMachine(botId: string, ref: string, provider: Provider, only?
   // A stop the caller decided from a state it saw (`only`, and for a start that failed, its wake ticket) is CLAIMED first, in a committed conditional write, and the provider is called only when that write changed the row: a
   // replacement that woke the machine since (it sets another state and takes the next ticket) makes the claim write nothing, and nothing is stopped under it (GPT's seventh note, B)
   if (only || ticket !== undefined) {
-    if (!(await claimStop(botId, ref, only, ticket))) return false;
-    const proven = await stopAtProvider(ref, provider);
+    const op = await claimStop(botId, ref, only, ticket);
+    if (!op) return false;
+    const proven = await stopAtProvider(botId, ref, provider, op);
     await noteStopped(botId, ref, proven, ['stopping']);
     return proven;
   }
-  const proven = await stopAtProvider(ref, provider);
+  const proven = await stopAtProvider(botId, ref, provider);
   await noteStopped(botId, ref, proven, only);
   return proven;
 }
 
-/** The claim of a stop: the machine goes to `stopping` only while it is still in a state the caller saw (and, for a start's own failure, under that start's ticket). True when this write took it. */
-async function claimStop(botId: string, ref: string, only?: string[], ticket?: number): Promise<boolean> {
+/**
+ * The claim of a stop: the machine goes to `stopping` only while it is still in a state the caller saw (and, for a start's own failure, under that start's ticket). The stop is recorded as a power operation IN THE SAME COMMIT
+ * (post-0.5.0 B): a wake whose ticket comes after this claim sees the stop open and waits for it, and one that came before made the claim write nothing. The operation's id when this write took it, else null.
+ */
+async function claimStop(botId: string, ref: string, only?: string[], ticket?: number): Promise<string | null> {
   const states = only ? Prisma.sql`AND "machine" = ANY(${only}::text[])` : Prisma.empty;
   const epoch = ticket !== undefined ? Prisma.sql`AND "wake_epoch" = ${ticket}` : Prisma.empty;
-  const taken = await prisma.$executeRaw(Prisma.sql`UPDATE "brick_computers" SET "machine" = 'stopping', "rest_claimed_at" = NULL, "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "provider_ref" = ${ref} ${states} ${epoch}`);
-  return taken === 1;
+  return prisma.$transaction(async (tx) => {
+    const taken = await tx.$executeRaw(Prisma.sql`UPDATE "brick_computers" SET "machine" = 'stopping', "rest_claimed_at" = NULL, "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "provider_ref" = ${ref} ${states} ${epoch}`);
+    return taken === 1 ? recordPowerOpIn(tx, botId, ref, 'stop') : null;
+  });
+}
+
+/** A start found a stop or sleep of ours that can still land on the machine it would wake (post-0.5.0 B): it wakes nothing, and the job goes back in line with nothing held. */
+export class StopInFlight extends Error {
+  constructor(readonly op: OpenPowerOp) {
+    super('A stop of this computer may still land: it is not woken under it');
+    this.name = 'StopInFlight';
+  }
 }
 
 /** The wake ticket (round 8, B1): the write that sets the machine waking or restoring takes the next number, and the number is this start's. A failure of this start stops the machine, and a late success marks it working, only while the ticket is still the Brick's. */
-async function takeWakeTicket(botId: string, machine: 'waking' | 'restoring', from: string, /** What the start saw when it read the row: its wake epoch (the write lands only while it is still that), and, for a takeover of another start's wake, that no beat has come for `staleMs` (judged by the database's clock IN the write). */ seen?: { epoch: number; staleMs?: number }): Promise<number | null> {
+async function takeWakeTicket(botId: string, machine: 'waking' | 'restoring', from: string, /** What the start saw when it read the row: its wake epoch (the write lands only while it is still that), and, for a takeover of another start's wake, that no beat has come for `staleMs` (judged by the database's clock IN the write). */ seen?: { epoch: number; staleMs?: number }): Promise<number | null | { open: OpenPowerOp }> {
   // The ticket is taken only from the row this start LOOKED AT (CodeRabbit on #1025, O42): two starts that read the same stale `waking` row both match its state, but only the first still matches its epoch once it has taken the ticket, so the
   // second takes none, rereads, and waits for the current wake through the loop. A takeover also requires the beat to still be stale in this same write, so a wake that beat after the read is never taken over
   const epoch = seen ? Prisma.sql`AND "wake_epoch" = ${seen.epoch}` : Prisma.empty;
   const stale = seen?.staleMs !== undefined ? Prisma.sql`AND "updated_at" <= ((NOW() AT TIME ZONE 'UTC') - make_interval(secs => ${seen.staleMs / 1000}))` : Prisma.empty;
-  const rows = await prisma.$queryRaw<Array<{ wake_epoch: number }>>(
-    Prisma.sql`UPDATE "brick_computers" SET "machine" = ${machine}, "wake_epoch" = "wake_epoch" + 1, "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "machine" = ${from} ${epoch} ${stale} RETURNING "wake_epoch"`,
-  );
-  return rows.length === 1 ? rows[0].wake_epoch : null;
+  // Post-0.5.0 B: the ticket is taken under the Brick computer's row lock, the lock every stop or sleep of ours takes to record itself, and only while no such operation of this machine can still land. A stop recorded before
+  // this is seen here; one that comes after finds the machine `waking` (a claimed stop writes nothing then)
+  return prisma.$transaction(async (tx) => {
+    const held = await tx.$queryRaw<Array<{ provider_ref: string | null }>>`SELECT "provider_ref" FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
+    const ref = held[0]?.provider_ref ?? null;
+    if (ref) {
+      const open = await openPowerOpOf(tx, ref);
+      if (open) return { open };
+    }
+    const rows = await tx.$queryRaw<Array<{ wake_epoch: number }>>(
+      Prisma.sql`UPDATE "brick_computers" SET "machine" = ${machine}, "wake_epoch" = "wake_epoch" + 1, "updated_at" = (NOW() AT TIME ZONE 'UTC') WHERE "bot_id" = ${botId} AND "machine" = ${from} ${epoch} ${stale} RETURNING "wake_epoch"`,
+    );
+    return rows.length === 1 ? rows[0].wake_epoch : null;
+  });
 }
 
 /** Test seam: the ticket write itself, to prove two starts that saw the same state take ONE ticket between them. */
@@ -445,17 +470,31 @@ async function awaitWakeInFlight(botId: string, seen: Prisma.BrickComputerGetPay
   }
 }
 
-/** Stops the machine at the provider and says whether it is proved asleep. Writes nothing. */
-async function stopAtProvider(ref: string, provider: Provider): Promise<boolean> {
-  try {
-    await provider.stop(ref);
-  } catch (error) {
-    console.error('[Computer] Could not stop a machine:', error instanceof Error ? error.message : 'unknown');
+/**
+ * Stops the machine at the provider and says whether it is proved asleep. Writes nothing of the machine's state. The stop is a power operation (post-0.5.0 B): recorded before it is sent (by the caller's claim, `recorded`, or here
+ * with the row locked), beating while the call and the look after it run, and done only when both returned. A stop that could not be recorded is not sent (not proved: the sweep tries again).
+ */
+async function stopAtProvider(botId: string, ref: string, provider: Provider, recorded?: string): Promise<boolean> {
+  let op = recorded;
+  if (!op) {
+    try {
+      op = await recordPowerOp(botId, ref, 'stop');
+    } catch (error) {
+      console.error('[Computer] A stop could not be recorded, so it was not sent:', error instanceof Error ? error.message : 'unknown');
+      return false;
+    }
   }
-  return provider
-    .awake(ref)
-    .then((awake) => !awake)
-    .catch(() => false);
+  return underPowerOp(op, async () => {
+    try {
+      await provider.stop(ref);
+    } catch (error) {
+      console.error('[Computer] Could not stop a machine:', error instanceof Error ? error.message : 'unknown');
+    }
+    return provider
+      .awake(ref)
+      .then((awake) => !awake)
+      .catch(() => false);
+  });
 }
 
 async function noteStopped(botId: string, ref: string, proven: boolean, only?: string[], db: Pick<typeof prisma, 'brickComputer'> = prisma): Promise<void> {
@@ -475,6 +514,8 @@ async function stopMachineWhileLeader(botId: string, ref: string, provider: Prov
   // The provider's calls are inside the lock, so they are given less time than the transaction has: a stop that takes longer is not proved (the machine is
   // `stopping` and every sweep tries again), and the record is still written before the transaction ends, never rolled back with it
   let stopped = false;
+  // The stop is recorded before the transaction takes the row (post-0.5.0 B): recording takes the same row lock, so it cannot be done from inside. A leader that turns out not to lead sends nothing and closes it at once
+  const op = await recordPowerOp(botId, ref, 'stop');
   try {
     const outcome = await prisma.$transaction(
       async (tx) => {
@@ -482,7 +523,8 @@ async function stopMachineWhileLeader(botId: string, ref: string, provider: Prov
         // Asked through this transaction's own connection (it holds the row, so another connection's write to it would wait for this one)
         if (stillLeader && !(await stillLeader(tx))) return null;
         stopped = true;
-        const proven = await withinMs(stopAtProvider(ref, provider), leaderStop.deadlineMs, false);
+        // A stop that outlasts the deadline goes on in the background with its operation open and beating until it returns: a wake waits for it
+        const proven = await withinMs(stopAtProvider(botId, ref, provider, op), leaderStop.deadlineMs, false);
         // Written before the lock is let go: a replacement transition that sets this machine's state waits for the lock and comes after this record, so this
         // record can never overwrite what it wrote
         await noteStopped(botId, ref, proven, undefined, tx);
@@ -490,12 +532,16 @@ async function stopMachineWhileLeader(botId: string, ref: string, provider: Prov
       },
       { timeout: leaderStop.transactionMs, maxWait: 10_000 },
     );
+    if (!stopped) await endPowerOp(op);
     return outcome === true;
   } catch (error) {
     // The transaction ended badly (a database that did not answer in time, a lost connection) after the stop was sent: the record may have been rolled back
     // with it, so it still says `working` for a machine that may be asleep. It is written again, outside the lock and only where it still says `working`
     // (a change of hands that came after has its own state and is not overwritten): `stopping`, which nothing uses and the sweep proves or tries again.
-    if (!stopped) throw error;
+    if (!stopped) {
+      await endPowerOp(op).catch(() => undefined);
+      throw error;
+    }
     console.error('[Computer] A leader’s stop did not finish in its transaction, the machine is marked to be proved asleep:', error instanceof Error ? error.message : 'unknown');
     Sentry.captureException(error, { tags: { area: 'computer', step: 'leader-stop' } });
     await noteStopped(botId, ref, false, ['working']);
@@ -1791,6 +1837,18 @@ async function tryStartOnce(jobId: string, now: Date, options: { quiet?: boolean
     await dropDiskRoom();
   } catch (error) {
     await dropDiskRoom();
+    if (error instanceof StopInFlight) {
+      // Post-0.5.0 B: a stop of ours can still land on the machine, so it was not woken. The job goes back in line with nothing held (as when a pack-away took the machine), only while it is still on this try's room, and
+      // nothing of the machine is rewritten (it is not broken: it is being stopped)
+      const back = await prisma.computerJob.updateMany({
+        where: { id: job.id, status: { in: ['running', 'waiting'] }, reservationKey: key },
+        data: { status: 'queued', queuedFor: 'busy', lastTriedAt: now, reservationKey: null, startedAt: null, stretchStarted: null, prepState: null, waitingFor: null, control: 'brick', readyWhat: null, readyWhere: null, ...(carriedOnSeq !== null ? { carryOnPending: true } : {}) },
+      });
+      if (back.count !== 1) return 'gone';
+      if (carriedOnSeq !== null) await prisma.computerJobTelling.updateMany({ where: { jobId: job.id, seq: carriedOnSeq, toldAt: null }, data: { staleAt: now } });
+      await releaseRoom({ key }, now);
+      return 'queued';
+    }
     console.error('[Computer] A machine did not start:', error instanceof Error ? error.message : 'unknown');
     // Another job holds this machine (it is waking it, or working on it): its state is theirs, and this failure does not rewrite it.
     // Only when this job was the only one asking is the machine marked, so a failed second start never breaks a machine that works
@@ -1900,11 +1958,35 @@ async function restIfUnheld(botId: string, now: Date, exceptJobId?: string): Pro
   }
   // Its work is saved before it rests, and a save that failed is not claimed
   await saveCopy(botId, row.providerRef, provider);
-  try {
-    await provider.rest(row.providerRef);
-  } catch (error) {
-    console.error('[Computer] Could not rest a machine:', error instanceof Error ? error.message : 'unknown');
-    // Still awake: it is "working" again, so the sweep finds it and tries once more
+  // The sleep is a power operation (post-0.5.0 B), recorded under the row lock only while this rest's own claim still stands: a start that took the machine since (its ticket moved it on) gets no sleep sent under it, and one that
+  // comes after sees the sleep open and waits for it
+  const ref = row.providerRef;
+  const op = await prisma
+    .$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
+      if ((await tx.brickComputer.count({ where: { botId, providerRef: ref, machine: 'resting', restClaimedAt: now } })) !== 1) return null;
+      return recordPowerOpIn(tx, botId, ref, 'rest');
+    })
+    .catch((error) => {
+      console.error('[Computer] A rest could not be recorded, so it was not sent:', error instanceof Error ? error.message : 'unknown');
+      return undefined;
+    });
+  if (op === null) return false;
+  const rested = op
+    ? await underPowerOp(op, async () => {
+        try {
+          await provider.rest(ref);
+        } catch (error) {
+          console.error('[Computer] Could not rest a machine:', error instanceof Error ? error.message : 'unknown');
+          return false;
+        }
+        // The look after the call: the operation is done only once the provider has been read after it
+        await provider.awake(ref).catch(() => undefined);
+        return true;
+      })
+    : false;
+  if (!rested) {
+    // Still awake (or the rest was never sent): it is "working" again, so the sweep finds it and tries once more
     await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting', restClaimedAt: now }, data: { machine: 'working', restClaimedAt: null } });
     return false;
   }
@@ -1955,7 +2037,7 @@ async function pendingHandOvers(botId: string, now: Date, exceptJobId?: string):
  * Makes the machine if this Brick has none yet, and wakes it. Asked while it already works, it does nothing more. The making is
  * claimed in one write before the provider is called, so two jobs starting at the same moment make ONE computer, never two.
  */
-async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok: boolean }): Promise<void> {
+async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok: boolean }, /** How long to wait for a stop of ours on this machine before giving up with StopInFlight, and whether a dead sender's is waited out too (post-0.5.0 B). A start waits only for a live one: it can go back in line. */ stopWait: { ms: number; dead: boolean } = { ms: powerTiming().waitMs, dead: false }): Promise<void> {
   let row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
   if (row.machine === 'working') {
     // A cleanup of the browser holds the machine for a moment: a job that arrives waits it out, so its browser is never cleared under it
@@ -1980,7 +2062,11 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
     if (returnStarted !== null) await writeKeptDisk(botId, provider, kept);
   }
   // A machine that was to be put to sleep and is not proved asleep is not woken on top of what may still run: it is stopped first
-  if (row.machine === 'stopping' && row.providerRef && !(await stopMachine(botId, row.providerRef, provider, ['stopping']))) throw new Error('The computer could not be put to sleep yet');
+  if (row.machine === 'stopping' && row.providerRef) {
+    if (!(await stopMachine(botId, row.providerRef, provider, ['stopping']))) throw new Error('The computer could not be put to sleep yet');
+    // Looked at again: the row this start read still says `stopping`, and the wake below must start from what the stop left (post-0.5.0 B; before, the stale read made the start stop again, find nothing to claim and fail)
+    row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
+  }
   let madeHere = false;
   if (!row.providerRef) {
     const claim = await prisma.brickComputer.updateMany({ where: { botId, providerRef: null, machine: 'none' }, data: { machine: 'waking', makeTriedAt: now } });
@@ -2013,6 +2099,8 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
   // The whole wake (ticket, wake, readiness, the write that says `working`) is tried again when its ticket was taken over before it could write: a start whose ticket is no longer the Brick's has NOT made the machine ready
   // for its job (the machine the replacement is waking may still fail and be stopped), so it never returns ready on that: it looks again, as a start that arrives then would
   let spins = 0;
+  // Post-0.5.0 B: the moment this start stops waiting for a live stop of ours on the machine
+  const stopWaitUntil = Date.now() + stopWait.ms;
   for (;;) {
     let ticket: number | null = null;
     let restoring = false;
@@ -2037,7 +2125,16 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
       restoring = row.machine === 'broken';
       // Another start's wake that has no beat any more is taken over only while it is STILL without one when the ticket is written; the machine this very start just made (`waking`, first look) is its own
       const takingOver = (row.machine === 'waking' || row.machine === 'restoring') && !(own && spins === 0);
-      ticket = await takeWakeTicket(botId, restoring ? 'restoring' : 'waking', row.machine, { epoch: row.wakeEpoch, ...(takingOver ? { staleMs: wakeTiming.staleMs } : {}) });
+      const taken = await takeWakeTicket(botId, restoring ? 'restoring' : 'waking', row.machine, { epoch: row.wakeEpoch, ...(takingOver ? { staleMs: wakeTiming.staleMs } : {}) });
+      if (taken !== null && typeof taken === 'object') {
+        // A stop or sleep of ours can still land on this machine (post-0.5.0 B): nothing is woken under it. A live one is waited for (it ends when its call and the look after it returned); one whose sender died, or a live one
+        // that outlasts the wait, sends this start back: the job goes back in line with nothing held, and a later try wakes the machine once nothing of ours can land on it
+        if ((await waitForPowerOps(ref, stopWaitUntil, stopWait.dead)) === 'open') throw new StopInFlight(taken.open);
+        // Looked at again from the start, without counting it as a change under this start
+        spins--;
+        continue;
+      }
+      ticket = taken;
     }
     const mine = ticket;
     // The beat of the wake: only this ticket's, so a start that was replaced never keeps a wake alive that is no longer its own
@@ -2148,6 +2245,16 @@ export async function renewJob(
   const moreMicros = roomFor(settings.renewMinutes, provider ? provider.microsPerMinute() : null);
   // Read when called: lib/computer-job-controls builds on this module
   const controls = await import('@/lib/computer-job-controls');
+  // Post-0.5.0 B, layer 2: a billed stretch is extended only on a machine proved awake. The machine is read before the room is (a read inside the transaction would hold the job's locks on the provider). Asleep under the job: the
+  // job goes back in line with only its proved seconds priced, and the worker is told it no longer owns it. A read that does not answer extends the room but proves nothing, so the stretch can still end at the last proof
+  let look = await awakeLookFor(first, row, provider);
+  if (look === 'asleep' && row?.providerRef) {
+    if (!epochMatches(first.ownerEpoch, owner.epoch)) return SUPERSEDED;
+    const lost = await machineLostUnder(jobId, first.botId, row.providerRef, first.ownerEpoch, provider, now);
+    // The person took the screen while the machine was being read (Opus on e58adde1, fix 1): their take-over stands. The renewal goes on as usual and proves nothing; the take-over has its own owner of the machine
+    if (lost !== 'taken_over') return lost;
+    look = 'unknown';
+  }
   const decided = await prisma.$transaction(
     async (tx) => {
       const job = await lockJob(tx, jobId);
@@ -2160,6 +2267,8 @@ export async function renewJob(
       if (!key) return { kind: 'over' as const };
       const room = await renewRoomIn(tx, { key, moreMicros }, now);
       if (room.ok) {
+        // The machine was read awake for this renewal: the stretch is proved up to the moment the renewal began (the read came after it). Never moved back
+        if (look === 'awake') await tx.$executeRaw`UPDATE "computer_jobs" SET "awake_proved_at" = ${now} WHERE "id" = ${jobId} AND "stretch_started" IS NOT NULL AND "stretch_started" <= ${now} AND ("awake_proved_at" IS NULL OR "awake_proved_at" < ${now})`;
         // The lease is renewed, so the keys of the owner's epoch are too (one that ended is not brought back, another epoch's is not this owner's)
         await renewJobTokens(jobId, now, job.ownerEpoch, tx);
         // A renewal from the owner is a beat too: the hold on the job stands another 90 s, written here so a busy runner never loses the job to a claim while it works (GPT round 6, finding 3)
@@ -2208,6 +2317,59 @@ export async function renewJob(
   // credit they drew), never counted, with an orbit_fault decision that says why. A model call refused for the same cause is `pool_busy`, a fault of ours, so the two endings must not disagree
   await endJob(jobId, 'stopped', reason === 'allowance' ? 'allowance' : reason === 'closed' ? 'error' : 'pool', now, true, undefined, true, null, false, asOwner, report);
   return refusedAnswer(report, { ok: false, reason } as const);
+}
+
+/**
+ * How long a renewal waits for the provider to say whether the machine is awake; no answer in time proves nothing (the renewal goes on, the proof does not move). Well under the runner's own 8 s timeout on its renew call (game
+ * BRICK_CALL_TIMEOUT_MS): a renewal the runner gave up on is asked again and would add room each time (Opus on e58adde1, fix 2). One request, never asked again, where the provider offers it (`awakeOnce`).
+ */
+const AWAKE_LOOK_MS = 3_000;
+
+/**
+ * Whether the machine of a job whose stretch is billed is awake (post-0.5.0 B). Only a job Brick works on (`control` brick, the computer in the agent's hands) on a machine Orbit counts as up or going down: a take-over, a wake or a
+ * restore has its own owner and is not judged here (`skip`). `unknown` when the provider did not answer.
+ */
+async function awakeLookFor(job: { status: string; stretchStarted: Date | null; control: string }, row: { providerRef: string | null; machine: string; controlState: string } | null, provider: Provider | null): Promise<'awake' | 'asleep' | 'unknown' | 'skip'> {
+  if ((job.status !== 'running' && job.status !== 'waiting') || !job.stretchStarted || job.control !== 'brick') return 'skip';
+  if (!row?.providerRef || !provider || row.controlState !== 'agent' || !['working', 'stopping', 'stopped'].includes(row.machine)) return 'skip';
+  const ref = row.providerRef;
+  const looked = provider.awakeOnce ? provider.awakeOnce(ref, AWAKE_LOOK_MS) : provider.awake(ref);
+  return withinMs(
+    looked.then((awake): 'awake' | 'asleep' => (awake ? 'awake' : 'asleep')),
+    AWAKE_LOOK_MS,
+    'unknown' as const,
+  );
+}
+
+/**
+ * The machine was found asleep under a job whose stretch is billed (post-0.5.0 B): a stop that landed late, or anything else that put it to sleep. The job goes back in line at the front, by itself (a `machine` pause: never
+ * told, never shown as a pause), with its stretch ended at the last proof of awake and only those seconds priced; the room's unused part goes back in the same commit. The machine is marked `stopping`, so nothing uses it until a
+ * recorded stop proves it asleep, and the next start wakes it under the power-operation fence. The turn died with the machine: no cancel is sent to it. The worker is told it no longer owns the job.
+ */
+async function machineLostUnder(jobId: string, botId: string, ref: string, ownerEpoch: number, provider: Provider | null, now: Date): Promise<typeof SUPERSEDED | 'taken_over' | { ok: false; reason: 'over' | 'ending' | 'unanswered' }> {
+  const controls = await import('@/lib/computer-job-controls');
+  const decided = await prisma.$transaction(
+    async (tx) => {
+      const top = await tx.computerJob.aggregate({ where: { botId, status: 'queued' }, _max: { queueRank: true } });
+      // Never `heldScreen`: a machine pause never takes the screen back from a person who took it (their take-over answers `taken_over` and stands)
+      const paused = await controls.decidePauseIn(tx, jobId, 'machine', now, provider, { ownerEpoch, backInLine: { rank: (top._max.queueRank ?? 0) + 1 }, endAtProof: true, advance: false });
+      if (paused.kind === 'held') await tx.brickComputer.updateMany({ where: { botId, providerRef: ref, machine: 'working' }, data: { machine: 'stopping', restClaimedAt: null } });
+      return paused;
+    },
+    { timeout: 15_000, maxWait: 15_000 },
+  );
+  if (decided.kind === 'taken_over') return 'taken_over';
+  console.error('[Computer] A machine was found asleep under a billed job: the job goes back in line, billed only to the last proof of awake');
+  Sentry.captureMessage('Computer machine found asleep under a billed job', { level: 'warning', tags: { area: 'computer', step: 'machine-lost' } });
+  if (decided.kind === 'held') {
+    // The line is moved by the sweep, not by this renewal: the worker's request is answered at once
+    await controls.afterPause(jobId, { ...decided, responseId: null }, now, { advance: false });
+    return SUPERSEDED;
+  }
+  if (decided.kind === 'ending') return { ok: false, reason: 'ending' };
+  if (decided.kind === 'superseded' || decided.kind === 'key_gone' || decided.kind === 'already' || decided.kind === 'queued') return SUPERSEDED;
+  const again = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, endedBy: true } });
+  return again && isOver(again.status) && again.endedBy === 'unanswered' ? { ok: false, reason: 'unanswered' } : { ok: false, reason: 'over' };
 }
 
 /** What a refused renewal answers: its own refusal when it ended the job, `superseded` when another worker owned the job by the time the ending was written, `ending` when an intent or cutoff owns the ending now. */
@@ -3302,6 +3464,8 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
       await prisma.brickComputer.updateMany({ where: { botId: machine.botId, machine: 'resting', restClaimedAt: machine.restClaimedAt }, data: { machine: 'working', restClaimedAt: null } });
     }
   }
+  // Power operations older than a day say nothing more (post-0.5.0 B)
+  await prunePowerOps(now).catch((error) => console.error('[Computer] Old power operations could not be forgotten:', error instanceof Error ? error.message : 'unknown'));
   // A machine that was to be put to sleep and is not proved asleep is stopped again until it is
   const stopping = await prisma.brickComputer.findMany({ where: { machine: 'stopping', NOT: { providerRef: null } }, select: { botId: true, providerRef: true, provider: true }, take: 200 });
   for (const machine of stopping) {
@@ -3858,7 +4022,8 @@ export async function wakeIfStopped(botId: string): Promise<void> {
   const provider = providerFor(row);
   if (!row?.providerRef || !provider || (row.machine !== 'stopped' && row.machine !== 'stopping')) return;
   try {
-    await bringUp(botId, provider, new Date());
+    // A hand back has no line to go back to: it waits out a stop of ours that may still land (post-0.5.0 B), a dead sender's whole life included
+    await bringUp(botId, provider, new Date(), undefined, { ms: powerTiming().deadLifeMs + powerTiming().waitMs, dead: true });
   } catch (error) {
     console.error('[Computer] A machine did not come back after a hand back:', error instanceof Error ? error.message : 'unknown');
     const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } });

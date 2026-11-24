@@ -459,8 +459,16 @@ export class Agent37ComputerProvider implements ComputerProvider {
   }
 
   async awake(ref: string): Promise<boolean> {
+    return this.awakeFrom(() => this.client.getInstance(ref));
+  }
+
+  async awakeOnce(ref: string, timeoutMs: number): Promise<boolean> {
+    return this.awakeFrom(() => this.client.getInstanceOnce(ref, timeoutMs));
+  }
+
+  private async awakeFrom(look: () => Promise<Instance>): Promise<boolean> {
     try {
-      const status = String((await this.client.getInstance(ref)).status);
+      const status = String((await look()).status);
       return ['running', 'starting', 'restarting', 'updating', 'waking', 'provisioning'].includes(status);
     } catch (error) {
       // A machine that is not there is not running; any other answer is not known, and "not known" is never taken for "stopped"

@@ -6,6 +6,7 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { storageMonthMicros } from '@/lib/meter-allowance';
 import { recordKeptBytes } from '@/lib/computer-disk';
+import { recordPowerOp, recordPowerOpIn, underPowerOp } from '@/lib/computer-power';
 import { COLD_RUN_MAX_MS, NOT_PAUSED, costOfSeconds } from '@/lib/computer-values';
 import type { ComputerProvider, MachineInfo, PackInventory, RestoreResult } from '@/lib/computer-provider';
 import {
@@ -244,20 +245,27 @@ async function advance(botId: string, claimId: string, from: string, to: string,
 /** Gives the computer back as it was. `awake` leaves it as it is (a job is arriving for it); otherwise it is put to sleep and proved so. */
 async function giveUp(botId: string, row: PackRow, why: string, options: { awake: boolean; count: boolean; provider?: Cold; stage?: string; claimId: string }): Promise<'failed' | 'busy'> {
   const previous = row.packPrevious === 'stopped' ? 'stopped' : 'resting';
-  const given = await prisma.brickComputer.updateMany({
-    // Only the run that holds the claim (a run that was taken over changes nothing of the one that took over), and `stage`: a run that only holds
-    // an earlier step gives up only while the row is still at that step (another run may be past it)
-    where: { botId, machine: 'packing', packClaimId: options.claimId, ...(options.stage ? { packStage: options.stage } : {}) },
-    data: { machine: options.awake ? previous : 'stopping', packStage: null, packClaimedAt: null, packClaimId: null, packArchiveId: null, packPrevious: null, ...(options.count ? { packTriedAt: new Date(), packFailures: { increment: 1 } } : {}) },
+  const stopRef = !options.awake && row.providerRef && options.provider ? row.providerRef : null;
+  // The stop it sends is recorded in the same commit as the give-up (post-0.5.0 B): a job that wakes the machine after this sees the stop open and waits for it
+  const given = await prisma.$transaction(async (tx) => {
+    const done = await tx.brickComputer.updateMany({
+      // Only the run that holds the claim (a run that was taken over changes nothing of the one that took over), and `stage`: a run that only holds
+      // an earlier step gives up only while the row is still at that step (another run may be past it)
+      where: { botId, machine: 'packing', packClaimId: options.claimId, ...(options.stage ? { packStage: options.stage } : {}) },
+      data: { machine: options.awake ? previous : 'stopping', packStage: null, packClaimedAt: null, packClaimId: null, packArchiveId: null, packPrevious: null, ...(options.count ? { packTriedAt: new Date(), packFailures: { increment: 1 } } : {}) },
+    });
+    return { count: done.count, op: done.count === 1 && stopRef ? await recordPowerOpIn(tx, botId, stopRef, 'stop') : null };
   });
   // Not given up here (the claim is someone else's now): nothing is stopped, nothing is reported, the one that holds it goes on
   if (given.count !== 1) return 'busy';
-  if (!options.awake && row.providerRef && options.provider) {
+  if (stopRef && given.op && options.provider) {
     // Asleep and proved, as everywhere else: a stop that did not take stays `stopping` and every sweep goes on until it does
-    const ref = row.providerRef;
-    await options.provider.stop(ref).catch(() => undefined);
-    const asleep = await options.provider.awake(ref).then((awake) => !awake).catch(() => false);
-    if (asleep) await prisma.brickComputer.updateMany({ where: { botId, providerRef: ref, machine: 'stopping' }, data: { machine: 'stopped' } });
+    const cold = options.provider;
+    const asleep = await underPowerOp(given.op, async () => {
+      await cold.stop(stopRef).catch(() => undefined);
+      return cold.awake(stopRef).then((awake) => !awake).catch(() => false);
+    });
+    if (asleep) await prisma.brickComputer.updateMany({ where: { botId, providerRef: stopRef, machine: 'stopping' }, data: { machine: 'stopped' } });
   }
   if (options.count) {
     console.error(`[Computer] A computer was not packed away: ${why}`);
@@ -334,7 +342,9 @@ async function runPack(botId: string, provider: Cold, claimId: string): Promise<
         const archive = await storeArchive(botId, stream, { manifest: { inventory, from: ref, at: new Date().toISOString() } });
         if (!(await advance(botId, claimId, 'claimed', 'stored', { packArchiveId: archive.id }))) throw new ColdError('The pack-away was taken over', 'busy');
         // The copy is whole: the computer sleeps while it is proved (it only has to exist until the proof passes)
-        await provider.stop(ref).catch((error) => console.error('[Computer] Could not put a computer to sleep during its proof:', words(error)));
+        // Recorded as a power operation like every stop of ours (post-0.5.0 B); a stop that could not be recorded is not sent (the proof does not need the machine asleep)
+        const op = await recordPowerOp(botId, ref, 'stop').catch(() => null);
+        if (op) await underPowerOp(op, () => provider.stop(ref)).catch((error) => console.error('[Computer] Could not put a computer to sleep during its proof:', words(error)));
       }));
       row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
     }

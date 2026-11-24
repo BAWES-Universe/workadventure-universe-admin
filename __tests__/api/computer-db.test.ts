@@ -769,15 +769,16 @@ run('a Brick’s computer, in a real database', () => {
       await giveComputer(sara.brickId, sara.id);
       const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!a.ok) throw new Error('no');
-      let started: Awaited<ReturnType<typeof startJob>> | null = null;
+      let starting: ReturnType<typeof startJob> | null = null;
       const rest = provider.rest.bind(provider);
       provider.rest = async (ref: string) => {
-        // The next job starts at the very moment the rest is being done
-        if (!started) started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
+        // The next job starts at the very moment the rest is being done. It runs beside the rest, as a second request does: since post-0.5.0 B it waits for the sleep to return before it wakes the
+        // machine, so awaiting it from inside the sleep call would wait on itself
+        if (!starting) starting = startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
         return rest(ref);
       };
       await finishJob(a.job.id, 'done', minutes(1));
-      expect(started).toMatchObject({ ok: true });
+      expect(await starting).toMatchObject({ ok: true });
       const view = await computerView(sara.brickId, sara.id, minutes(3));
       expect(view?.job).not.toBeNull();
       expect(view?.machine).toBe('working');

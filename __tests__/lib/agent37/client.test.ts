@@ -26,6 +26,16 @@ describe('the Agent37 client', () => {
     expect((calls[1].init.headers as Record<string, string>)['X-Agent37-Key']).toBe('sk_live_secret');
   });
 
+  it('looks at an instance ONCE for a caller that must answer quickly: no asking again, and its own timeout on the request', async () => {
+    const busy = client([json(503, { code: 'try_again' }), json(200, { id: 'abc', status: 'running' })]);
+    await expect(busy.api.getInstanceOnce('abc', 3_000)).rejects.toMatchObject({ status: 503 });
+    expect(busy.calls).toHaveLength(1);
+    expect(busy.sleep).not.toHaveBeenCalled();
+    expect(busy.calls[0].init.signal).toBeInstanceOf(AbortSignal);
+    const fine = client([json(200, { id: 'abc', status: 'sleeping' })]);
+    await expect(fine.api.getInstanceOnce('abc', 3_000)).resolves.toMatchObject({ status: 'sleeping' });
+  });
+
   it('asks again when Agent37 says try_again, and gives up after a few waits', async () => {
     const { api, sleep } = client([json(409, { error: { code: 'try_again', message: 'checkpoint' } }), json(200, { id: 'abc', status: 'sleeping' })]);
     await expect(api.sleepInstance('abc')).resolves.toEqual({ id: 'abc', status: 'sleeping' });

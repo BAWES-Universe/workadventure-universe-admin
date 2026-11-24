@@ -200,7 +200,15 @@ export interface PauseInOptions extends PauseOptions {
   heldScreen?: boolean;
   /** The month or a limit only (finding 5, GPT round 6): what was refused, kept with the pause so it carries on by itself only once that fits (a model call's estimate, or the renewal's room). */
   blocked?: { kind: 'call' | 'renewal'; micros: number };
+  /**
+   * `machine` only (post-0.5.0 B): the machine was found asleep under the job. Its stretch ends at the last moment the machine was proved awake (`awake_proved_at`, or the readiness that began the stretch), never later: time
+   * after that proof is not priced, and what the job had counted since that proof (a hand-over carries the stretch on in `seconds_run`) is dropped from it before anything is booked.
+   */
+  endAtProof?: boolean;
 }
+
+/** Why a pause row was written: a pause the person or their limits made, or `machine` (post-0.5.0 B): the machine was found asleep under the job, which goes back in line by itself and is never told or shown as a pause. */
+export type PauseWhy = PausedWhy | 'machine';
 
 /** A pause makes an unsaid `carried_on` untrue for good: it is let go in the pause's own transaction, so a manual restart never makes it say "carrying on" of a job the person paused in between (CodeRabbit on #1025, 57). */
 async function staleCarriedOn(tx: Prisma.TransactionClient, jobId: string, now: Date): Promise<void> {
@@ -213,7 +221,9 @@ async function staleCarriedOn(tx: Prisma.TransactionClient, jobId: string, now: 
  * and, for the month or a limit, what Brick is to tell the person. Nothing is sent to the provider here: the caller runs `afterPause` once this commits (Rule C).
  * `provider`: the Brick computer's provider, read BEFORE the transaction opened (a read that fails inside it would leave the transaction aborted).
  */
-export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string, why: PausedWhy, now: Date, provider: Provider | null, options: PauseInOptions = {}): Promise<PauseDecision> {
+export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string, why: PauseWhy, now: Date, provider: Provider | null, options: PauseInOptions = {}): Promise<PauseDecision> {
+  // A machine pause is only ever a job sent back in line by itself, from the room the job held; it never becomes the job's own `paused_why`
+  if (why === 'machine' && !options.backInLine) throw new Error('A machine pause always goes back in line');
   const row = await lockJob(tx, jobId);
   if (!row) return { kind: 'not_found' };
   if (isOver(row.status)) return { kind: 'over' };
@@ -247,10 +257,19 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   }
   const job = await tx.computerJob.findUniqueOrThrow({
     where: { id: jobId },
-    select: { botId: true, secondsRun: true, secondsBilled: true, stretchStarted: true, reservationKey: true, startedAt: true, pauses: true, firstTurnSentAt: true, agentResponseId: true },
+    select: { botId: true, secondsRun: true, secondsBilled: true, stretchStarted: true, reservationKey: true, startedAt: true, pauses: true, firstTurnSentAt: true, agentResponseId: true, awakeProvedAt: true },
   });
   const stretch = job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
-  const seconds = job.secondsRun + stretch;
+  const counted = job.secondsRun + stretch;
+  // Post-0.5.0 B: only the seconds the machine was proved awake. The stretch is one run from its readiness `began` (the hand-overs in between carry it on in `seconds_run`); the proof is the last renewal that read the machine
+  // awake, or that readiness itself. Never more than was counted, never less than nothing
+  const proved = (): number => {
+    if (!job.stretchStarted) return 0;
+    const began = job.stretchStarted.getTime() - job.secondsRun * SECOND;
+    const proof = Math.min(now.getTime(), Math.max(began, job.awakeProvedAt?.getTime() ?? began));
+    return Math.min(counted, Math.max(0, Math.round((proof - began) / SECOND)));
+  };
+  const seconds = options.endAtProof ? proved() : counted;
   const n = job.pauses + 1;
   // The Resumes of this job still pending (their request stopped before it kept an answer) are settled NOW, from the job as it stands before this pause writes anything, under the job's lock: what each came to is recorded on its own
   // command, per attempt, while its browser state (`prep_state`) still belongs to it. A pause leaves `prep_state` as it is, and a later Resume sets it again, so read later it would be another attempt's: a restore that never settled would
@@ -278,11 +297,12 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
       status: 'queued',
       queuedFor: options.backInLine ? 'turn' : 'paused',
       pausedAt: options.backInLine ? null : now,
-      pausedWhy: options.backInLine ? null : why,
+      pausedWhy: options.backInLine ? null : (why as PausedWhy),
       ...(options.backInLine ? { queueRank: options.backInLine.rank } : {}),
       pauses: n,
       // The time so far is the pause's (written below); the job counts again from 0 when it runs again
       secondsRun: 0,
+      awakeProvedAt: null,
       secondsBilled: { increment: seconds },
       stretchStarted: null,
       reservationKey: null,
