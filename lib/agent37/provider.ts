@@ -81,6 +81,9 @@ export const SCRATCH_PREFIX = 'scratch:';
 
 const gone = (status: string) => status === 'deleting' || status === 'deleted' || status === 'failed';
 
+/** What reads the boot id (as the normal user; the mark reads the same file). */
+const BOOT_ID_COMMAND = 'cat /proc/sys/kernel/random/boot_id';
+
 export class Agent37ComputerProvider implements ComputerProvider {
   readonly kind = 'real' as const;
   private readonly client: Agent37Client;
@@ -342,7 +345,13 @@ export class Agent37ComputerProvider implements ComputerProvider {
     let instance = await this.settle(ref);
     // A computer that has worked before and has no mark saved by Orbit may be on a boot that already ran jobs (a machine that slept and woke keeps its boot): it is stopped and started
     // first, so nothing a job started is still running when the mark is taken, and the mark is the first of a boot that no job has used
+    // The boot the machine is on now, read before it is stopped: the restart is proved by the mark's boot being another one (a stop that Agent37 turns into a sleep, or a start that resumes the same boot, would leave
+    // the mark on the boot the earlier jobs ran on, with a clock reading after what they left running, and the fence would keep it as the computer's own). `null`: not asked for.
+    let was: string | null | undefined;
     if (options?.freshBoot) {
+      const read = await this.client.exec(ref, BOOT_ID_COMMAND, { timeoutMs: 15_000 }).catch(() => null);
+      const seen = read && read.exitCode === 0 ? read.stdout.trim() : '';
+      was = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(seen) ? seen : null;
       await this.client.stopInstance(ref);
       await this.untilDown(ref, true);
       await this.client.startInstance(ref);
@@ -373,6 +382,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
       const reason = /marked=0 reason=([a-z_]+)/.exec(done.stdout)?.[1];
       throw new Error(`The computer could not be marked${reason ? ` (${reason})` : ''}`);
     }
+    // A fresh boot that is not proved (the old boot could not be read, or the mark is of the same one) is not ready: bringUp puts the machine to sleep and the next wake tries again
+    if (was !== undefined && (was === null || mark.bootId === was)) throw new Error('The computer did not start afresh');
     return mark;
   }
 
