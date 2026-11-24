@@ -8,6 +8,7 @@ import { storageMonthMicros } from '@/lib/meter-allowance';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { COLD_RUN_MAX_MS, NOT_PAUSED, costOfSeconds } from '@/lib/computer-values';
 import type { ComputerProvider, MachineInfo, PackInventory, RestoreResult } from '@/lib/computer-provider';
+import { readOutsideManifest, type OutsideManifest } from '@/lib/computer-outside';
 import {
   archiveById,
   archiveBytes,
@@ -194,6 +195,12 @@ async function settleColdLevels(now: Date): Promise<number> {
 
 // ---------- Proof on a throwaway computer ----------
 
+/** The list of what was outside the home folder when the copy was made, as its row kept it (null for a copy made before it was kept, or a row that does not hold exactly one). */
+function outsideOf(archive: ArchiveRow): OutsideManifest | null {
+  const kept = archive.manifest;
+  return readOutsideManifest(typeof kept === 'object' && kept !== null ? (kept as { outside?: unknown }).outside : null);
+}
+
 /** Restores one copy on a throwaway computer, checks it, and removes the computer (and says so when it could not). Never leaves the computer behind knowingly. */
 async function proveOnScratch(provider: Cold, archive: ArchiveRow, kind: 'pack' | 'drill', botId: string): Promise<RestoreResult> {
   const url = downloadUrl(archive.id);
@@ -208,7 +215,7 @@ async function proveOnScratch(provider: Cold, archive: ArchiveRow, kind: 'pack' 
       provider,
       async () => {
         scratch = await provider.makeScratch();
-        const result = await provider.restoreInto(scratch.ref, { url, token: mintDownloadToken(archive.id, scratch.ref), sha256: archive.sha256 as string });
+        const result = await provider.restoreInto(scratch.ref, { url, token: mintDownloadToken(archive.id, scratch.ref), sha256: archive.sha256 as string, outside: outsideOf(archive) });
         return result;
       },
       (result) => (result.ok ? null : `the restore did not check out (${result.reason ?? 'unknown'})`),
@@ -328,10 +335,11 @@ async function runPack(botId: string, provider: Cold, claimId: string): Promise<
       // Awake, so it can be looked at and its folder read; nothing else is started on it
       await alive(botId, claimId, 'claimed', () => timed('pack', botId, ref, false, provider, async () => {
         await provider.wake(ref);
-        const inventory: PackInventory = await provider.prepack(ref);
+        const { outside, ...inventory }: PackInventory = await provider.prepack(ref);
         if (inventory.blocked) throw new ColdError(inventory.blocked, 'blocked');
         const stream = await provider.streamFiles(ref);
-        const archive = await storeArchive(botId, stream, { manifest: { inventory, from: ref, at: new Date().toISOString() } });
+        // What prepack printed about the files it copied is kept with the copy (`outside`): the restore hands it to finish, which puts back only what matches it
+        const archive = await storeArchive(botId, stream, { manifest: { inventory, outside: outside ?? null, from: ref, at: new Date().toISOString() } });
         if (!(await advance(botId, claimId, 'claimed', 'stored', { packArchiveId: archive.id }))) throw new ColdError('The pack-away was taken over', 'busy');
         // The copy is whole: the computer sleeps while it is proved (it only has to exist until the proof passes)
         await provider.stop(ref).catch((error) => console.error('[Computer] Could not put a computer to sleep during its proof:', words(error)));
@@ -539,7 +547,7 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
       }
       let result: RestoreResult;
       try {
-        result = await cold.restoreInto(made.ref, { url: downloadUrl(archive.id) ?? url, token: mintDownloadToken(archive.id, made.ref), sha256: archive.sha256 ?? '' });
+        result = await cold.restoreInto(made.ref, { url: downloadUrl(archive.id) ?? url, token: mintDownloadToken(archive.id, made.ref), sha256: archive.sha256 ?? '', outside: outsideOf(archive) });
       } catch (error) {
         result = { ok: false, reason: words(error), ms: 0 };
       }

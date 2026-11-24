@@ -216,9 +216,9 @@ describe('the scripts are well formed', () => {
 });
 
 describe('old proxy settings from a dropped design', () => {
-  /** Runs only the clean-up function of the script, on a home folder in the temp folder (and only ever changes lines that name the old proxy). */
+  /** Runs only the clean-up function restore calls (the agent's own settings files, as the computer's own user), on a home folder in the temp folder (and only ever changes lines that name the old proxy). */
   const scrub = (home: string) =>
-    spawnSync('python3', ['-I', '-c', `import os,sys\nsrc=open(sys.argv[1]).read().replace('if __name__ == "__main__":','if False:')\nexec(compile(src,'universe-cold','exec'))\ndrop_legacy_proxy()`, path.join(scripts, 'universe-cold')], { env: { ...process.env, UNIVERSE_COLD_HOME: home }, encoding: 'utf8' });
+    spawnSync('python3', ['-I', '-c', `import os,sys\nsrc=open(sys.argv[1]).read().replace('if __name__ == "__main__":','if False:')\nexec(compile(src,'universe-cold','exec'))\ndrop_legacy_home()`, path.join(scripts, 'universe-cold')], { env: { ...process.env, UNIVERSE_COLD_HOME: home }, encoding: 'utf8' });
 
   it('removes lines that point software at the old local proxy from a restored home, and keeps every other line', () => {
     const home = path.join(dir, 'legacy-home');

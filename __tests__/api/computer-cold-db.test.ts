@@ -835,6 +835,35 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect((await fetchCopy(copy.id, { authorization: 'Bearer nonsense' })).status).toBe(401);
     });
 
+    it('Opus on #1025 (universe-cold): the list prepack printed is kept on the copy’s row, handed to the proof on the throwaway computer, and handed back when the computer comes back; a copy with no list is handed null', async () => {
+      const brick = await idleBrick();
+      const outside = { files: [['f', '/etc/app.conf', 4, 0o640, 'c'.repeat(64)], ['l', '/opt/tool/latest', 0, 0, 'run.sh']] as Array<['f' | 'l', string, number, number, string]>, packages: ['ffmpeg'] };
+      provider.inventory = { ...provider.inventory, outsideFiles: 2, packages: ['ffmpeg'], outside };
+      expect(await packAway(brick.botId, provider, NOW)).toBe('packed');
+      const [copy] = await verifiedArchives(brick.botId);
+      // On the row (beside the counts, which no longer carry it), and handed to the proof
+      expect(copy.manifest).toMatchObject({ outside, inventory: { outsideFiles: 2, packages: ['ffmpeg'] } });
+      expect((copy.manifest as { inventory: Record<string, unknown> }).inventory).not.toHaveProperty('outside');
+      expect(provider.restored[0].source.outside).toEqual(outside);
+      // And back again when a job needs the computer
+      provider.restored.length = 0;
+      expect((await startJob({ botId: brick.botId, personId: brick.personId, title: 'Wake up' }, NOW)).ok).toBe(true);
+      expect(provider.restored[0].source.outside).toEqual(outside);
+    });
+
+    it('Opus on #1025 (universe-cold): a copy with no list (made before the list was kept) is handed null on its proof and on its return', async () => {
+      const brick = await idleBrick();
+      expect(await packAway(brick.botId, provider, NOW)).toBe('packed');
+      const [copy] = await verifiedArchives(brick.botId);
+      expect((copy.manifest as { outside: unknown }).outside).toBeNull();
+      // An older row with no `outside` key at all reads the same
+      await prisma.computerArchive.update({ where: { id: copy.id }, data: { manifest: { inventory: { homeFiles: 1 } } } });
+      expect(provider.restored[0].source.outside).toBeNull();
+      provider.restored.length = 0;
+      expect((await startJob({ botId: brick.botId, personId: brick.personId, title: 'Wake up' }, NOW)).ok).toBe(true);
+      expect(provider.restored[0].source.outside).toBeNull();
+    });
+
     it('does not give a copy that failed its check or one that is not there', async () => {
       const brick = await idleBrick();
       const stored = await storeArchive(brick.botId, new Response('x').body as ReadableStream<Uint8Array>);

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readOutsideManifest } from '@/lib/computer-outside';
 import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, PackInventory, ProviderDay, RestoreResult, RestoreSource, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
 import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, TurnNotSent, type Instance, type NetworkPolicy } from '@/lib/agent37/client';
@@ -507,9 +508,12 @@ export class Agent37ComputerProvider implements ComputerProvider {
   /**
    * Runs `universe-cold prepack` as root: what the computer holds outside its home folder (changed files, added software) is copied into the home
    * folder so one copy carries it, and the home folder is counted. A computer that holds more outside than can be carried says so (`blocked`) and is
-   * not packed away: nothing is thrown away to make a copy fit.
+   * not packed away: nothing is thrown away to make a copy fit. The machine is settled first (moved to the image's current revision), so it runs the current script.
    */
   async prepack(ref: string): Promise<PackInventory> {
+    // Put in order first, as for a job and a restore: a computer made from an older image runs that image's `universe-cold`, which prints no list of what it copied
+    // (and every Brick that sat idle since the new image would fail here for good). `settle` moves it to the current revision.
+    await this.settle(ref);
     const done = await this.client.exec(ref, 'universe-cold prepack', { user: 'root', timeoutMs: 10 * 60_000 });
     const line = /(^|\n)prepack=(\{[^\n]*\})/.exec(done.stdout)?.[2];
     if (!line) throw new Error(`The computer could not be inventoried (exit ${done.exitCode})`);
@@ -527,7 +531,10 @@ export class Agent37ComputerProvider implements ComputerProvider {
     if (homeFiles === null || homeBytes === null || outsideFiles === null || outsideBytes === null) throw new Error('The computer\'s inventory was not whole');
     const packages = Array.isArray(data.packages) ? data.packages.filter((name): name is string => typeof name === 'string' && /^[a-z0-9][a-z0-9+.:-]{0,100}$/.test(name)).slice(0, 500) : [];
     const blocked = typeof data.blocked === 'string' && /^[a-z_]{1,40}$/.test(data.blocked) ? data.blocked : null;
-    return { homeFiles, homeBytes, outsideFiles, outsideBytes, packages, blocked };
+    // The list of what was copied: required whenever the computer can be packed (a copy with no list would put nothing back), and read to the last field
+    const outside = readOutsideManifest(data.manifest);
+    if (blocked === null && outside === null) throw new Error('The computer\'s list of what is outside its home folder was not whole');
+    return { homeFiles, homeBytes, outsideFiles, outsideBytes, packages, blocked, outside };
   }
 
   /** The home folder as a tar.gz stream. Only for a machine that is awake (the address wakes a sleeper). */
@@ -572,10 +579,17 @@ export class Agent37ComputerProvider implements ComputerProvider {
       const reason = /restored=0 reason=([a-z_]+)/.exec(restored.stdout)?.[1] ?? `exit_${restored.exitCode}`;
       return { ok: false, reason, ms: this.now() - started };
     }
-    const finished = await this.client.exec(ref, 'universe-cold finish', { user: 'root', timeoutMs: 15 * 60_000 });
+    // The list of what prepack copied goes to finish from here, never from the home folder (null for a copy that has none: finish then puts nothing back outside the home folder)
+    const outside = readOutsideManifest(source.outside);
+    const finishInput = JSON.stringify({ outside });
+    const finished = await this.client.exec(ref, `universe-cold finish <<'FINISH_JSON'\n${finishInput}\nFINISH_JSON`, { user: 'root', timeoutMs: 15 * 60_000 });
     if (!/(^|\n)finished=1\b/.test(finished.stdout)) {
       const reason = /finished=0 reason=([a-z_]+)/.exec(finished.stdout)?.[1] ?? `exit_${finished.exitCode}`;
       return { ok: false, reason: `finish_${reason}`, ms: this.now() - started };
+    }
+    if (/(^|\n)finished=1\b[^\n]*\boutside=unverified\b/.test(finished.stdout)) {
+      console.error('[Computer] A copy with no list of what was outside its home folder was restored: nothing outside the home folder was put back');
+      return { ok: true, reason: null, ms: this.now() - started, outside: 'unverified' };
     }
     return { ok: true, reason: null, ms: this.now() - started };
   }

@@ -719,19 +719,52 @@ describe('getting a machine ready for a job', () => {
 describe('cold storage operations on a computer', () => {
   const source = { url: 'https://orbit.example/api/computer/archives/a1/download', token: 'tok', sha256: 'a'.repeat(64) };
 
-  it('reads the inventory a pack-away is decided on, as root, and refuses one it cannot read whole', async () => {
+  const SHA = 'b'.repeat(64);
+  const manifest = { files: [['f', '/etc/app.conf', 4, 0o640, SHA], ['l', '/opt/tool/latest', 0, 0, 'run.sh']], packages: ['ffmpeg'] };
+
+  it('reads the inventory a pack-away is decided on, as root, with the list of what it copied, and refuses one it cannot read whole', async () => {
     const w = world();
     const p = provider(w);
     await p.create('bot-1');
-    w.setExec(() => 'noise\nprepack={"home_files":12,"home_bytes":3400,"outside_files":2,"outside_bytes":90,"packages":["ffmpeg","bad name!"],"blocked":null}\n');
-    await expect(p.prepack('m1')).resolves.toEqual({ homeFiles: 12, homeBytes: 3400, outsideFiles: 2, outsideBytes: 90, packages: ['ffmpeg'], blocked: null });
+    w.setExec(() => `noise\nprepack=${JSON.stringify({ home_files: 12, home_bytes: 3400, outside_files: 2, outside_bytes: 90, packages: ['ffmpeg', 'bad name!'], blocked: null, manifest })}\n`);
+    await expect(p.prepack('m1')).resolves.toEqual({ homeFiles: 12, homeBytes: 3400, outsideFiles: 2, outsideBytes: 90, packages: ['ffmpeg'], blocked: null, outside: manifest });
     expect(w.execs.at(-1)).toMatchObject({ command: 'universe-cold prepack', options: { user: 'root' } });
-    w.setExec(() => 'prepack={"home_files":1,"home_bytes":1,"outside_files":9,"outside_bytes":9,"packages":[],"blocked":"too_big_outside"}\n');
+    // A computer that cannot be packed has no list (and needs none)
+    w.setExec(() => 'prepack={"home_files":1,"home_bytes":1,"outside_files":9,"outside_bytes":9,"packages":[],"blocked":"too_big_outside","manifest":null}\n');
     expect((await p.prepack('m1')).blocked).toBe('too_big_outside');
     w.setExec(() => 'nothing useful\n');
     await expect(p.prepack('m1')).rejects.toThrow('could not be inventoried');
     w.setExec(() => 'prepack={"home_files":-1,"home_bytes":1,"outside_files":0,"outside_bytes":0}\n');
     await expect(p.prepack('m1')).rejects.toThrow('not whole');
+    // One that can be packed but has no usable list is not packed (a copy with no list would put nothing back)
+    for (const bad of [undefined, null, { files: [['f', '/etc/a', 1, 0o600, 'nothex']], packages: [] }, { files: [['f', '/home/node/x', 1, 0o600, SHA]], packages: [] }]) {
+      w.setExec(() => `prepack=${JSON.stringify({ home_files: 1, home_bytes: 1, outside_files: 0, outside_bytes: 0, packages: [], blocked: null, manifest: bad })}\n`);
+      await expect(p.prepack('m1')).rejects.toThrow('list of what is outside');
+    }
+  });
+
+  it('moves a computer made from an older image to the current one BEFORE universe-cold prepack runs (the old script prints no list, and the pack-away would fail for good)', async () => {
+    const state = (over: Partial<ImageState> = {}): ImageState => ({ hash: 'h', state: 'ready', buildId: 'b', revision: 2, startedAt: new Date(0).toISOString(), failures: 0, error: null, ...over });
+    const w = world();
+    const p = provider(w, { image: async () => state({ revision: 2 }) });
+    await p.create('bot-1');
+    w.instances.get('m1')!.template_revision = 1;
+    w.setExec((command) => (command === 'universe-cold prepack' && w.instances.get('m1')!.template_revision !== 2
+      ? `prepack=${JSON.stringify({ home_files: 1, home_bytes: 1, outside_files: 0, outside_bytes: 0, packages: [], blocked: null })}\n`
+      : `prepack=${JSON.stringify({ home_files: 12, home_bytes: 3400, outside_files: 2, outside_bytes: 90, packages: [], blocked: null, manifest })}\n`));
+    await expect(p.prepack('m1')).resolves.toMatchObject({ blocked: null, outside: manifest });
+    expect(w.calls).toContain('update:m1');
+    expect(w.calls.indexOf('update:m1')).toBeLessThan(w.calls.indexOf('exec:m1:universe-cold prepack'));
+    // Its network rule and budget were put in order first too, as for a job
+    expect(w.calls.indexOf('budget:m1')).toBeLessThan(w.calls.indexOf('exec:m1:universe-cold prepack'));
+    // A computer already on the current image is not updated again
+    const again = world();
+    const q = provider(again, { image: async () => state({ revision: 2 }) });
+    await q.create('bot-1');
+    again.instances.get('m1')!.template_revision = 2;
+    again.setExec(() => `prepack=${JSON.stringify({ home_files: 1, home_bytes: 1, outside_files: 0, outside_bytes: 0, packages: [], blocked: null, manifest })}\n`);
+    await q.prepack('m1');
+    expect(again.calls.some((call) => call.startsWith('update:'))).toBe(false);
   });
 
   it('makes a throwaway computer with the same network rule and a closed budget, named so it is never mistaken for a Brick’s', async () => {
@@ -752,14 +785,16 @@ describe('cold storage operations on a computer', () => {
     const w = world();
     const p = provider(w);
     await p.create('bot-1');
-    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1 files=12\n' : command === 'universe-cold finish' ? 'finished=1\n' : 'ok'));
-    const result = await p.restoreInto('m1', source);
+    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1 files=12\n' : command.startsWith('universe-cold finish') ? 'finished=1\n' : 'ok'));
+    const result = await p.restoreInto('m1', { ...source, outside: manifest as never });
     expect(result).toMatchObject({ ok: true, reason: null });
+    expect(result.outside).toBeUndefined();
     const commands = w.execs.map((entry) => entry.command);
     expect(commands[0]).toMatch(/^universe-cold restore <<'RESTORE_JSON'/);
     expect(commands[0]).toContain(source.url);
     expect(commands[0]).toContain(source.sha256);
-    expect(commands[1]).toBe('universe-cold finish');
+    // The finish gets the list Orbit kept for the copy, on standard input (never read from the home folder)
+    expect(commands[1]).toBe(`universe-cold finish <<'FINISH_JSON'\n${JSON.stringify({ outside: manifest })}\nFINISH_JSON`);
     expect(w.execs[1].options).toMatchObject({ user: 'root' });
     // Its budget was read before anything was put on it
     expect(w.calls.indexOf('budget:m1')).toBeGreaterThanOrEqual(0);
@@ -772,9 +807,22 @@ describe('cold storage operations on a computer', () => {
     await p.create('bot-1');
     w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=0 reason=sha_mismatch\n' : 'ok'));
     await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: false, reason: 'sha_mismatch' });
-    expect(w.execs.map((entry) => entry.command)).not.toContain('universe-cold finish');
-    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command === 'universe-cold finish' ? 'finished=0 reason=packages\n' : 'ok'));
+    expect(w.execs.map((entry) => entry.command).filter((command) => command.startsWith('universe-cold finish'))).toEqual([]);
+    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.startsWith('universe-cold finish') ? 'finished=0 reason=packages\n' : 'ok'));
     await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: false, reason: 'finish_packages' });
+    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.startsWith('universe-cold finish') ? 'finished=0 reason=outside_tampered\n' : 'ok'));
+    await expect(p.restoreInto('m1', { ...source, outside: manifest as never })).resolves.toMatchObject({ ok: false, reason: 'finish_outside_tampered' });
+  });
+
+  it('a copy with no list is restored with a null list, and the result says nothing outside the home folder was put back; a list that is not exactly one is sent as null', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command.startsWith('universe-cold finish') ? 'finished=1 files=0 packages=0 outside=unverified\n' : 'ok'));
+    await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: true, reason: null, outside: 'unverified' });
+    expect(w.execs.at(-1)!.command).toBe(`universe-cold finish <<'FINISH_JSON'\n{"outside":null}\nFINISH_JSON`);
+    await p.restoreInto('m1', { ...source, outside: { files: [['f', '/etc/x', 1, 0, 'nothex']], packages: [] } as never });
+    expect(w.execs.at(-1)!.command).toContain('{"outside":null}');
   });
 
   it('confirms a computer is gone only when the provider no longer lists it, and says it is still there otherwise', async () => {
