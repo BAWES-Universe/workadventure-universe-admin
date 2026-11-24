@@ -9,7 +9,10 @@ import type { Started } from '@/lib/computer';
  * job, answers `stale_consent` and makes nothing: Brick asks the person whether to start it now (a new message, a new key). The attempt clean-up (a week) is far longer, so a pruned key is always past this window.
  */
 export const CONSENT_WINDOW_MS = 6 * 60 * 60_000;
-/** A key issued further than this in the FUTURE is refused as invalid (clock skew allowance). */
+/**
+ * Clock-skew allowance for a start key's issue time: a key issued up to and including this far AHEAD of the start's own moment (`began`, read when the request arrives) is accepted; one millisecond more is refused (400 `untimed_key`). Future
+ * times are therefore not refused outright: a game clock a little ahead of Orbit's is normal. Measured against the start's own moment, so the answer does not depend on how long the request waits afterwards.
+ */
 export const ISSUE_SKEW_MS = 5 * 60_000;
 
 /**

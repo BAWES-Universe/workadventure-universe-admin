@@ -386,6 +386,30 @@ describe('the bot server’s calls', () => {
       lib.registerStart.mockResolvedValue({ registration: { opened: true, reopened: false, release: jest.fn(async () => undefined) } } as never);
     });
 
+    it('row 58: the five-minute future tolerance is exact: a key issued up to and including 5 minutes ahead of the start\'s own moment is accepted, one millisecond more is 400 untimed_key', async () => {
+      own();
+      lib.registerStart.mockClear();
+      lib.startJob.mockClear();
+      lib.startJob.mockResolvedValue({ ok: true, job: { id: JOB } as never, restoredFrom: null });
+      // Only the clock is pinned (the start reads its own moment from `new Date()` before anything else), so the boundary is exact
+      const now = new Date('2026-11-24T10:00:00.000Z');
+      jest.useFakeTimers({ now, doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'performance', 'hrtime'] });
+      try {
+        const send = (issuedMs: number) =>
+          startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' }, headers: { 'X-Computer-Start-Attempt': `t${issuedMs.toString(36)}-abcdef012345`, 'X-Computer-Start-Acks': '1' } }), params);
+        const edge = await send(now.getTime() + 5 * 60_000);
+        expect(edge.status).toBe(200);
+        expect(lib.registerStart).toHaveBeenCalledTimes(1);
+        lib.registerStart.mockClear();
+        const past = await send(now.getTime() + 5 * 60_000 + 1);
+        expect(past.status).toBe(400);
+        expect(await past.json()).toMatchObject({ reason: 'untimed_key' });
+        expect(lib.registerStart).not.toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it('round 8, A2: a start that acks with a key that carries no issue time, or one more than 5 minutes in the future, is 400 and nothing is asked or made', async () => {
       own();
       lib.startJob.mockClear();
