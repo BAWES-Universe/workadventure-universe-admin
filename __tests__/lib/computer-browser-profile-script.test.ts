@@ -261,6 +261,73 @@ run('putting a job’s browser away, on a real file system with a real unprivile
     }
   });
 
+  describe('row 17: what the command asks to stop (the shims above hide it, so it is recorded here)', () => {
+    /** Runs one action with pkill and pgrep replaced by recorders (nothing is ever stopped, and pgrep finds nothing so the wait ends at once). Returns every call as the command made it, one per line. */
+    function asked(action: SignInsAction, plant?: (script: string) => string): string[] {
+      const recorder = mkdtempSync(join(root, 'recorder-'));
+      const log = join(recorder, 'asked.log');
+      writeFileSync(log, '');
+      for (const tool of ['pkill', 'pgrep', 'killall', 'kill']) writeFileSync(join(recorder, tool), `#!/bin/sh\necho "${tool} $*" >> "${log}"\nexit 1\n`, { mode: 0o755 });
+      let script = signInsCommand(action, JOB_A, [JOB_A], 24, places, 0);
+      if (plant) {
+        const planted = plant(script);
+        if (planted === script) throw new Error('The planted bug did not change the command');
+        script = planted;
+      }
+      const first = 'export PATH\n';
+      if (!script.includes(first)) throw new Error('The command does not set its PATH where the test expects it');
+      script = script.replace(first, `PATH="${recorder}:$PATH"\nexport PATH\n`);
+      spawnSync('sh', ['-c', script], { encoding: 'utf8', timeout: 120_000 });
+      return readFileSync(log, 'utf8').split('\n').filter((line) => line !== '');
+    }
+    // The only way it ever stops anything: a process whose whole name is one of these three, optionally with the hard signal. Never a pattern (a name that merely contains one), never a command line (-f), never a user or a group, never a pid
+    const SCOPED = /^(pkill|pgrep) (-9 )?-x (websockify|chromium|chrome)$/;
+
+    it('only ever names a process by its exact whole name, one of websockify, chromium and chrome, and stops nothing else, for every action that stops the browser', () => {
+      fakeProfile('job A cookies');
+      for (const action of ['park', 'restore', 'clear'] as const) {
+        const calls = asked(action);
+        // The browser was stopped: all three names were asked for (the screen's bridge, and both names the browser goes by)
+        for (const name of ['websockify', 'chromium', 'chrome']) expect(calls).toContain(`pkill -x ${name}`);
+        for (const call of calls) expect(call).toMatch(SCOPED);
+        expect(calls.some((call) => call.startsWith('kill'))).toBe(false);
+      }
+    });
+
+    it('drop, prune and commit never stop the browser: they only touch what is put away', () => {
+      for (const action of ['drop', 'prune', 'commit'] as const) expect(asked(action).filter((call) => call.startsWith('pkill'))).toEqual([]);
+    });
+
+    /** Every way the command text stops or looks for a process that is not the exact-name form (empty when it has none). */
+    const strays = (text: string): string[] => {
+      const found: string[] = [];
+      for (const line of text.split('\n').map((l) => l.replace(/#.*$/, ''))) {
+        if (/\b(killall|fuser)\b/.test(line) || /(^|[^p])kill\b/.test(line)) found.push(line.trim());
+        for (const call of line.match(/\b(pkill|pgrep)\b[^;|)]*/g) ?? []) if (!/^(pkill|pgrep) (-9 )?-x (websockify|chromium|chrome)$/.test(call.replace(/\s*(\d?>\/dev\/null|2>&1)/g, '').trim())) found.push(call.trim());
+      }
+      return found;
+    };
+
+    it('nothing in the command text stops a process any other way (no kill, killall, pattern or command-line match, no signal to a group)', () => {
+      const text = signInsCommand('park', JOB_A, [JOB_A], 24, places, 0);
+      expect(text.split('\n').filter((line) => /\bpkill -x chrome\b/.test(line)).length).toBeGreaterThan(0);
+      expect(strays(text)).toEqual([]);
+    });
+
+    it('planted bug: a name match without -x (any process whose name contains chrome), or a command-line match, is caught by the checks above', () => {
+      for (const planted of [(script: string) => script.replace('pkill -x chrome 2>/dev/null\n', 'pkill chrome 2>/dev/null\n'), (script: string) => script.replace('pkill -x chromium 2>/dev/null\n', 'pkill -f chromium 2>/dev/null\n')]) {
+        // A park that finds the browser already put away stops nothing: each try starts from a fresh profile
+        fakeProfile('job A cookies');
+        const calls = asked('park', planted);
+        expect(calls.some((call) => !SCOPED.test(call))).toBe(true);
+        spawnSync('rm', ['-rf', places.parkRoot]);
+      }
+      // The hard-signal step runs only when the browser outlives 20 waits, which the recorder never shows: the text check holds it
+      const text = signInsCommand('park', JOB_A, [JOB_A], 24, places, 0);
+      for (const bad of [text.replace('pkill -9 -x chrome', 'pkill -9 -u node'), text.replace('pgrep -x chrome ', 'pgrep -f chrome '), text.replace('sleep 0.2', 'killall -9 chrome')]) expect(strays(bad).length).toBeGreaterThan(0);
+    });
+  });
+
   it('takes back a parked folder the agent could have reached (a link, or a folder opened up) before it keeps anything in it', () => {
     mkdirSync(join(root, 'var', 'lib', 'universe'), { recursive: true });
     const elsewhere = join(root, 'agent-owned');
