@@ -28,11 +28,14 @@ const SECRET_SHAPES: readonly RegExp[] = [
   /\b(?:authorization|proxy-authorization|x-api-key|api-key|apikey|x-auth-token)\s*[:=]/i,
   // A cookie header carries a value: "Cookie:" with nothing after it is just a word (Sentry on #1025, S1)
   /\b(?:cookie|set-cookie)\s*[:=]\s*\S/i,
-  // "Bearer x" and "Basic x" followed by something that LOOKS like a credential: a digit, one of + = _ ~, or (8 or more characters) a capital inside the run (base64 of "user:pass" is mixed case). Plain words after them
-  // ("Basic information", "Basic Instructions", "basic input/output") are not. Spelled letter by letter because the flag-free form is needed for the capital test (Sentry on #1025, S1)
-  /\b(?:[Bb][Ee][Aa][Rr][Ee][Rr]|[Bb][Aa][Ss][Ii][Cc])\s+(?=[A-Za-z0-9._~+/=-]*(?:\d|[+=_~])|(?=[A-Za-z0-9._~+/=-]{8})[A-Za-z0-9._~+/=-]*[a-z][A-Z])[A-Za-z0-9._~+/=-]{6,}/,
-  // A flag that carries a credential: it begins a word (or follows a quote, a bracket, = : ;), so "pre-auth login" is not "-auth login"
-  /(?:^|[\s"'(=:;])--?(?:password|passwd|token|secret|api-key|apikey|auth)\b(?:[=\s]+)\S/i,
+  // "Bearer x" hides any run that is not ONE plain word: a lowercase word or a Capitalised one, with no digit or credential character after it ("Bearer authentication, then", "bearer bonds" are prose; "Bearer abc-def-ghi",
+  // "Bearer ABCDEFGHIJKL", "Bearer tok/en.ab-cd", "Bearer dXNlcjpwYXNz" are not). A single all-lowercase word cannot be told from prose, so it is shown (Sentry on #1025, S1; Opus's ruling on acfe2a2e, R2)
+  /\b[Bb][Ee][Aa][Rr][Ee][Rr]\s+(?!(?:[a-z]+|[A-Z][a-z]+)(?![A-Za-z0-9_~+=]|[.\/-][A-Za-z0-9._~+\/=-]))[A-Za-z0-9._~+\/=-]{6,}/,
+  // "Basic x" followed by something that LOOKS like a credential: a digit, one of + = _ ~, or (8 or more characters) a capital inside the run (base64 of "user:pass" is mixed case). Plain words after it
+  // ("Basic information", "Basic Instructions", "basic input/output") are common prose and are not. Spelled letter by letter because the flag-free form is needed for the capital test
+  /\b[Bb][Aa][Ss][Ii][Cc]\s+(?=[A-Za-z0-9._~+/=-]*(?:\d|[+=_~])|(?=[A-Za-z0-9._~+/=-]{8})[A-Za-z0-9._~+/=-]*[a-z][A-Z])[A-Za-z0-9._~+/=-]{6,}/,
+  // A flag that carries a credential, with no letter, digit or underscore right before its dash (so "pre-auth login" and "non-secret value" are words, while a flag after a quote, backtick, comma, bracket, | or & is still one)
+  /(?<![A-Za-z0-9_])--?(?:password|passwd|token|secret|api-key|apikey|auth)\b(?:[=\s]+)\S/i,
   // curl -u name:password
   /(?:--user|-u)\s+\S+:\S/i,
   // A login in an address: scheme://user:password@host

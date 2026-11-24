@@ -97,6 +97,53 @@ describe('a step label never carries a secret', () => {
     }
   });
 
+  it('Opus on acfe2a2e (R1, R2): a credential flag is hidden after any non-word character, and Bearer hides anything that is not one plain word', () => {
+    const hidden = [
+      // R1: the flag follows a character the first anchor did not list
+      'Ran `--password hunter2`',
+      'mysql,--password hunter2',
+      '[--token abc]',
+      '{--secret=abc}',
+      'a|--token x',
+      'x&&--token y',
+      'run "--token=abc"',
+      // R2
+      'Bearer abc-def-ghi',
+      'Bearer ABCDEFGHIJKL',
+      'Bearer abc.def',
+      'Bearer tok/en.ab-cd',
+      'Bearer dXNlcjpwYXNz',
+      'BEARER abcdef1',
+      'Bearer abcdefgh=',
+      'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0',
+      'bearer abcdef123456',
+      'Bearer cjt_abc123',
+      // The Cookie change
+      'Cookie: sid=abc',
+    ];
+    for (const text of hidden) {
+      expect(hasSecretShape(text)).toBe(true);
+      expect(cleanStepLabel(text)).toBe(STEP_LABEL_FALLBACK);
+    }
+    const shown = [
+      'pre-auth login',
+      're-auth token now',
+      'non-secret value',
+      'use pre-token flow',
+      'Bearer Authentication',
+      'Using Bearer authentication.',
+      'Bearer authentication, then',
+      'bearer instrument',
+      'Bearer Token',
+      'bearer bonds',
+      'Cookie:',
+    ];
+    for (const text of shown) {
+      expect(hasSecretShape(text)).toBe(false);
+      expect(cleanStepLabel(text)).toBe(text);
+    }
+  });
+
   it('says nothing when there is nothing', () => {
     expect(cleanStepLabel(null)).toBeNull();
     expect(cleanStepLabel(undefined)).toBeNull();
