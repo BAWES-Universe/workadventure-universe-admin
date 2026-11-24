@@ -52,6 +52,8 @@ const reading = (lines: object[], head: { state?: string; alive?: number } = {})
   stdout: [`now=${Date.now()}`, `state=${head.state ?? 'on'}`, `alive=${head.alive ?? 1}`, ...lines.map((entry) => `line=${JSON.stringify(entry)}`), 'end=1'].join('\n') + '\n',
 });
 const visit = (second: number, over: Record<string, unknown> = {}) => ({ k: 'visit', at: seconds(second).getTime(), m: 'GET', h: 'shop.example', p: '/a', n: 1, ...over });
+/** The checkpoints' own deadline: shorter than jest's default test timeout (10 s), so a wrong fixture fails with the checkpoint's own message, never with the timeout's (CodeRabbit on #1025, 14c4e407 pass, N7). */
+const CHECKPOINT_MS = 8_000;
 /** A poll bounded by the checkpoint's own deadline, whatever the database does: a query that waits for a connection or stalls rejects with the checkpoint's own message when the time is up, never later (CodeRabbit on #1025, d522f4b3 pass, N7). */
 function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -79,7 +81,7 @@ async function waitUntilBlockedBy(holderPid: number, count: number, ...running: 
   let stop: () => void = () => undefined;
   const stopped = new Promise<null>((resolve) => (stop = () => resolve(null)));
   const poll = (async () => {
-    const end = Date.now() + 10_000;
+    const end = Date.now() + CHECKPOINT_MS;
     for (;;) {
       if (over) return;
       const query = within(prisma.$queryRaw<{ n: number }[]>`

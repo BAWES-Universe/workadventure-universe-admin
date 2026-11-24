@@ -683,6 +683,9 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
     const markOf = (botId: string) => prisma.brickComputer.findUniqueOrThrow({ where: { botId }, select: { parkPendingJobId: true, parkPendingWipe: true } });
     const keptOf = async (jobId: string) => (await prisma.computerJobPause.findMany({ where: { jobId }, orderBy: { n: 'asc' }, select: { n: true, signInsKept: true } })).map((one) => [one.n, one.signInsKept]);
 
+    /** The checkpoints' own deadline: shorter than jest's default test timeout (10 s), so a wrong fixture fails with the checkpoint's own message, never with the timeout's (CodeRabbit on #1025, 14c4e407 pass, N7). */
+    const CHECKPOINT_MS = 8_000;
+
     /** A poll bounded by the checkpoint's own deadline, whatever the database does: a query that waits for a connection or stalls rejects with the checkpoint's own message when the time is up, never later (CodeRabbit on #1025, d522f4b3 pass, N7). */
     function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
       return new Promise<T>((resolve, reject) => {
@@ -711,7 +714,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
       let stop: () => void = () => undefined;
       const stopped = new Promise<null>((resolve) => (stop = () => resolve(null)));
       const poll = (async () => {
-        const end = Date.now() + 10_000;
+        const end = Date.now() + CHECKPOINT_MS;
         for (;;) {
           // Waiting for the holder, directly or behind another waiter for the same row (a second waiter queues behind the first one, and Postgres names the first one as its blocker)
           if (over) return;
@@ -743,7 +746,7 @@ run('a paused job’s own browser sign-ins, in a real database', () => {
 
     /** Polls `check` until it holds, for at most ten seconds, and fails at once when one of the requests being waited for ends first. */
     async function boundedUntil(check: () => boolean, what: string, ...running: Array<Promise<unknown>>) {
-      const end = Date.now() + 10_000;
+      const end = Date.now() + CHECKPOINT_MS;
       let over = false;
       const poll = (async () => {
         while (!check() && !over) {

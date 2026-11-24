@@ -15,6 +15,11 @@ jest.mock('@/lib/computer-browser-profile', () => {
   const actual = jest.requireActual('@/lib/computer-browser-profile');
   return { ...actual, parkProfile: jest.fn(async () => ({ state: 'parked', reason: null })), restoreProfile: jest.fn(async () => ({ state: 'restored', reason: null })), dropProfile: jest.fn(async () => ({ state: 'dropped', reason: null })) };
 });
+// Whether the team paused computers is the real one behind a jest.fn: a test says the computers are paused for one request
+jest.mock('@/lib/capability-pause', () => {
+  const actual = jest.requireActual('@/lib/capability-pause');
+  return { ...actual, computersArePaused: jest.fn((...args: unknown[]) => actual.computersArePaused(...args)) };
+});
 // The job lock is the real one behind a jest.fn: a test runs something at the moment a control takes a job's lock (what another request could do between a selection and a commit)
 jest.mock('@/lib/computer-owner', () => {
   const actual = jest.requireActual('@/lib/computer-owner');
@@ -32,6 +37,7 @@ import { addJobNote } from '@/lib/computer-job-notes';
 import { claimCommand, commandRow, recordResumeDecision } from '@/lib/computer-commands';
 import { carryOnPaused, resetCarryOnScanForTests } from '@/lib/computer-limit-pause';
 import * as owner from '@/lib/computer-owner';
+import * as capabilityPause from '@/lib/capability-pause';
 import { dropProfile, parkProfile } from '@/lib/computer-browser-profile';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -42,6 +48,7 @@ const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
 const people: string[] = [];
 let made = 0;
 const env = process.env.COMPUTER_PROVIDER;
+const realComputersArePaused = jest.requireActual('@/lib/capability-pause').computersArePaused as typeof capabilityPause.computersArePaused;
 const realLockJob = jest.requireActual('@/lib/computer-owner').lockJob as typeof owner.lockJob;
 const lockJob = owner.lockJob as jest.MockedFunction<typeof owner.lockJob>;
 let fake: FakeComputerProvider;
@@ -595,6 +602,101 @@ run('findings 4 and 11 (GPT round 6): one control, one effect, in a real databas
       } finally {
         Object.assign(resumeWait, old);
         spy.mockRestore();
+      }
+    });
+
+    it('CodeRabbit on #1025 (14c4e407 pass, N14): a Resume A still waiting for room when the person pauses the job and resumes it again (B): A’s later refusal by the month never pauses B’s start; A keeps the answer it was settled with at the pause, and B’s start stays in line', async () => {
+      const { sara, jobId } = await running('n14-fence');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      const real = prisma.computerJobPause.findUnique.bind(prisma.computerJobPause);
+      let inRoom: () => void = () => undefined;
+      const entered = new Promise<void>((resolve) => (inRoom = resolve));
+      let go: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (go = resolve));
+      let held = false;
+      // A's try is held at the read right before it asks for room (the pause's blocked-call record)
+      const hold = jest.spyOn(prisma.computerJobPause, 'findUnique').mockImplementation(((args: { select?: Record<string, boolean> }) => {
+        if (!held && args?.select?.blockedKind) {
+          held = true;
+          inRoom();
+          return gate.then(() => real(args as never));
+        }
+        return real(args as never);
+      }) as never);
+      const old = { ...resumeWait };
+      resumeWait.ms = 200;
+      resumeWait.capMs = 600;
+      let first: Promise<unknown> = Promise.resolve();
+      try {
+        const a = command();
+        first = resumeJob(sara.brickId, sara.id, jobId, minutes(10), a);
+        first.catch(() => undefined);
+        await enteredBy(entered, first);
+        // The person pauses the job in line (A is settled from the job as it stands: the Resume was taken), then resumes again (B); the team's computers are paused, so B's start stays in line
+        expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(11), command())).toMatchObject({ ok: true });
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true } });
+        expect((await commandOf(a.id))?.outcome).not.toHaveProperty('pending');
+        const teamPaused = capabilityPause.computersArePaused as jest.MockedFunction<typeof capabilityPause.computersArePaused>;
+        teamPaused.mockResolvedValue(true);
+        try {
+          expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(12), command())).toMatchObject({ ok: true });
+        } finally {
+          teamPaused.mockImplementation(realComputersArePaused);
+        }
+        expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'busy', pausedWhy: null });
+        // The month now refuses, and A's start (held in its request for room) is released
+        await saveMeterSettings({ memberAllowanceMicros: 1_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+        go();
+        await first;
+        // A's refusal belonged to the start it began in: B's start is untouched
+        expect(await jobOf(jobId)).toMatchObject({ status: 'queued', queuedFor: 'busy', pausedWhy: null });
+        expect(await commandOf(a.id)).toMatchObject({ outcome: { ok: true } });
+      } finally {
+        go();
+        await Promise.allSettled([first]);
+        hold.mockRestore();
+        Object.assign(resumeWait, old);
+      }
+    });
+
+    it('CodeRabbit on #1025 (14c4e407 pass, N14): a try held while the person paused and resumed again never writes its line mark over the NEW start’s (the stale try would have put its earlier time on B’s start)', async () => {
+      const { sara, jobId } = await running('n14-queue-mark');
+      await pauseJob(sara.brickId, sara.id, jobId, minutes(2), command());
+      const teamPaused = capabilityPause.computersArePaused as jest.MockedFunction<typeof capabilityPause.computersArePaused>;
+      let inTry: () => void = () => undefined;
+      const entered = new Promise<void>((resolve) => (inTry = resolve));
+      let go: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (go = resolve));
+      let held = false;
+      // A's try is held at its first look at whether the team paused computers (and then finds they did: it would write its mark and its reason)
+      teamPaused.mockImplementation(async () => {
+        if (!held) {
+          held = true;
+          inTry();
+          await gate;
+        }
+        return true;
+      });
+      const old = { ...resumeWait };
+      resumeWait.ms = 200;
+      resumeWait.capMs = 600;
+      let first: Promise<unknown> = Promise.resolve();
+      try {
+        first = resumeJob(sara.brickId, sara.id, jobId, minutes(10), command());
+        first.catch(() => undefined);
+        await enteredBy(entered, first);
+        expect(await pauseJob(sara.brickId, sara.id, jobId, minutes(11), command())).toMatchObject({ ok: true });
+        expect(await resumeJob(sara.brickId, sara.id, jobId, minutes(12), command())).toMatchObject({ ok: true });
+        expect((await jobOf(jobId)).lastTriedAt?.getTime()).toBe(minutes(12).getTime());
+        go();
+        await first;
+        // B's start keeps its own mark: A's (minutes(10)) never lands on it
+        expect((await jobOf(jobId)).lastTriedAt?.getTime()).toBe(minutes(12).getTime());
+      } finally {
+        go();
+        await Promise.allSettled([first]);
+        teamPaused.mockImplementation(realComputersArePaused);
+        Object.assign(resumeWait, old);
       }
     });
 

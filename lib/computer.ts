@@ -1491,7 +1491,8 @@ async function tryStartOnce(jobId: string, now: Date, options: { quiet?: boolean
   }
   // Never over a pause that landed since this try looked (it would undo the pause)
   // ...and records the try (`lastTriedAt`, the line's rotation); that the start DECIDED is `start_decided_at`, written by `tryStart` when this returns
-  const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor, lastTriedAt: now } });
+  // ...and only while the job is still in the start (place in line) this try read it in: every Resume, carry-on and "do this first" moves the rank, so a try that was held while the person paused and resumed again never writes over the NEW start (CodeRabbit on #1025, 14c4e407 pass, N14)
+  const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued', queueRank: job.queueRank, ...NOT_PAUSED }, data: { queuedFor, lastTriedAt: now } });
 
   // The team paused computers: a job in line stays in line with its work saved, and starts by itself when they are back
   if (await computersArePaused()) {
@@ -1574,7 +1575,8 @@ async function tryStartOnce(jobId: string, now: Date, options: { quiet?: boolean
       const why = room.reason;
       // Brick tells the person once, in the same commit (piece 3): not for their own Resume, which is answered at once
       await prisma.$transaction(async (tx) => {
-        const moved = await tx.computerJob.updateMany({ where: { id: job.id, status: 'queued', ...NOT_PAUSED }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, carryOnPending: false, leaseVersion: { increment: 1 } } });
+        // The refusal belongs to the start this try read the job in (its rank): a newer start of the job is never paused by it (N14)
+        const moved = await tx.computerJob.updateMany({ where: { id: job.id, status: 'queued', queueRank: job.queueRank, ...NOT_PAUSED }, data: { queuedFor: 'paused', pausedAt: now, pausedWhy: why, carryOnPending: false, leaseVersion: { increment: 1 } } });
         if (moved.count === 1 && !options.quiet) await tellIn(tx, job.id, 'paused', why, now);
       });
       return 'queued';
