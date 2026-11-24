@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import * as Sentry from '@sentry/nextjs';
 import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, PackInventory, ProviderDay, RestoreResult, RestoreSource, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
 import { markCommand, parseMark, type MachineMark } from '@/lib/computer-fence-script';
 import { readTurn } from '@/lib/agent37/turn-events';
@@ -382,8 +383,15 @@ export class Agent37ComputerProvider implements ComputerProvider {
       const reason = /marked=0 reason=([a-z_]+)/.exec(done.stdout)?.[1];
       throw new Error(`The computer could not be marked${reason ? ` (${reason})` : ''}`);
     }
-    // A fresh boot that is not proved (the old boot could not be read, or the mark is of the same one) is not ready: bringUp puts the machine to sleep and the next wake tries again
-    if (was !== undefined && (was === null || mark.bootId === was)) throw new Error('The computer did not start afresh');
+    // A fresh boot that is not proved (the old boot could not be read, or the mark is of the same one): the computer is ready for its job, but this mark is not to be trusted, because the boot it names
+    // may be the one earlier jobs ran on, with a clock reading taken after what they left running. So NO mark is answered (Orbit saves none and the row stays unmarked): a take-over on this computer finds
+    // no mark, cannot prove the fence, and stops the machine; the next wake asks for the fresh boot again. The job is never refused for it. Told to Sentry, with both boot ids and the machine, so it is seen.
+    if (was !== undefined && (was === null || mark.bootId === was)) {
+      const message = was === null ? 'A computer could not be proved to have started afresh: its boot before the restart was not read' : 'A computer could not be proved to have started afresh: its boot did not change';
+      console.error('[Computer]', message, { ref, before: was, after: mark.bootId });
+      Sentry.captureMessage(message, { level: 'error', tags: { area: 'computer', step: 'fresh-boot' }, extra: { ref, before: was, after: mark.bootId } });
+      return null;
+    }
     return mark;
   }
 

@@ -170,6 +170,47 @@ run('the take-over fence’s mark, held by Orbit', () => {
       expect((await computerOf(sara.brickId)).markTicks).toBe(after.markTicks);
     });
 
+    it('a fresh boot that the computer does not prove never refuses the job: the job runs, no mark is saved, a take-over stops the machine, and a later wake with a real reboot saves the mark (Opus on #1033)', async () => {
+      fake.parts = [PART];
+      const { sara, jobId } = await running();
+      const before = await computerOf(sara.brickId);
+      const ref = before.providerRef as string;
+      await finishJob(jobId, 'done', NOW);
+      const unmarked = { machine: 'resting' as const, markBootId: null, markTicks: null, markParts: Prisma.DbNull, markRunners: Prisma.DbNull };
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: unmarked });
+      // Agent37 kept the boot over the stop and start: nothing proves the restart, so the provider answers no mark
+      fake.freshBootUnproved = true;
+      try {
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Unproved' }, NOW);
+        expect(started.ok).toBe(true);
+        expect(fake.freshBoots).toEqual([ref]);
+        const row = await computerOf(sara.brickId);
+        expect(row.machine).toBe('working');
+        expect(row.markBootId).toBeNull();
+        expect(row.markTicks).toBeNull();
+        expect(savedMark(row)).toBeNull();
+        // A take-over on it is not proved: no fence is sent and the machine is stopped
+        fake.commands.length = 0;
+        fake.calls.length = 0;
+        expect(await fenceMachine(sara.brickId)).toBe('failed');
+        expect(fake.commands.filter((entry) => isFenceCommand(entry.command))).toEqual([]);
+        expect(fake.calls.some((call) => call.name === 'rest' || call.name === 'stop')).toBe(true);
+        // The next wake asks for the fresh boot again; this time the computer really reboots: the mark is saved
+        const jobs = await prisma.computerJob.findMany({ where: { botId: sara.brickId, status: 'running' } });
+        for (const job of jobs) await finishJob(job.id, 'done', NOW);
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
+        fake.freshBootUnproved = false;
+        expect((await startJob({ botId: sara.brickId, personId: sara.id, title: 'Proved' }, NOW)).ok).toBe(true);
+        expect(fake.freshBoots).toEqual([ref, ref]);
+        const after = await computerOf(sara.brickId);
+        expect(after.machine).toBe('working');
+        expect(after.markBootId).not.toBeNull();
+        expect(savedMark(after)).not.toBeNull();
+      } finally {
+        fake.freshBootUnproved = false;
+      }
+    });
+
     it('a row with no mark that never worked has nothing to clear: it is not restarted', async () => {
       const { sara, jobId } = await running('never');
       await finishJob(jobId, 'done', NOW);

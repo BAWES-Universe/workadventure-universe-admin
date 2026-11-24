@@ -1,9 +1,11 @@
+import * as Sentry from '@sentry/nextjs';
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
 import { Agent37ComputerProvider, Agent37FundsLow, BRICK_NETWORK, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
 import type { ImageState } from '@/lib/agent37/image';
 import { isMarkCommand } from '@/lib/computer-fence-script';
 import { awakeMicrosPerMinute, dayOfRunningMicros, BRICK_SHAPE } from '@/lib/agent37/rates';
 
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn() }));
 jest.mock('@/lib/agent37/saved-copies', () => ({ savedCopyOf: jest.fn(), storeSavedCopy: jest.fn() }));
 
 const BOOT = '3f2b6c1e-8a44-4d0b-9c15-5e7d2a9b1c33';
@@ -661,20 +663,36 @@ describe('getting a machine ready for a job', () => {
       expect(kinds).toEqual(['stop', 'start', 'up', 'mark']);
     });
 
-    it('is not ready when the boot did not change: a stop that became a sleep, or a start that resumed the same boot, never leaves the mark on the boot the jobs ran on', async () => {
+    it('answers no mark when the boot did not change, and is still ready: a stop that became a sleep, or a start that resumed the same boot, never leaves a mark on the boot the jobs ran on, and never refuses the job (Opus on #1033)', async () => {
       const w = world();
       const p = provider(w);
       await p.create('bot-1');
       w.setExec(reading(BOOT));
-      await expect(p.ready('m1', { freshBoot: true })).rejects.toThrow('The computer did not start afresh');
+      const sent = Sentry.captureMessage as jest.Mock;
+      sent.mockClear();
+      const logged = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        await expect(p.ready('m1', { freshBoot: true })).resolves.toBeNull();
+        expect(sent).toHaveBeenCalledWith(expect.stringContaining('did not change'), expect.objectContaining({ level: 'error', extra: expect.objectContaining({ ref: 'm1', before: BOOT, after: BOOT }) }));
+      } finally {
+        logged.mockRestore();
+      }
     });
 
-    it('is not ready when the boot before the restart could not be read: nothing proves the restart gave a new one', async () => {
+    it('answers no mark when the boot before the restart could not be read: nothing proves the restart gave a new one, and the job still runs', async () => {
       const w = world();
       const p = provider(w);
       await p.create('bot-1');
       w.setExec((command) => (command === 'cat /proc/sys/kernel/random/boot_id' ? 'cat: no such file\n' : 'ready=1 restart=0\n'));
-      await expect(p.ready('m1', { freshBoot: true })).rejects.toThrow('The computer did not start afresh');
+      const sent = Sentry.captureMessage as jest.Mock;
+      sent.mockClear();
+      const logged = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        await expect(p.ready('m1', { freshBoot: true })).resolves.toBeNull();
+        expect(sent).toHaveBeenCalledWith(expect.stringContaining('was not read'), expect.objectContaining({ extra: expect.objectContaining({ ref: 'm1', before: null, after: BOOT }) }));
+      } finally {
+        logged.mockRestore();
+      }
     });
 
     it('asks nothing of the boot when no fresh boot is asked for', async () => {
