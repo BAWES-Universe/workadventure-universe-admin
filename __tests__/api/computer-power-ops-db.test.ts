@@ -566,6 +566,25 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
         await sweepComputers(new Date(endAt.getTime() + 30 * 60_000));
         expect(await prisma.meterEvent.findFirst({ where: { eventId: { startsWith: `computer:${job.id}:time` } } })).toMatchObject({ quantity: BigInt(120), costMicros: BigInt(price) });
       });
+
+      it('an unanswered ending found asleep whose room was never settled: the sweep that closes the lapsed room settles it at 120 s at the rate before the rise, as the books are', async () => {
+        const sara = await owner('priced-lapsed');
+        const job = await workingJob(sara);
+        const began = job.stretchStarted!.getTime();
+        expect(await renewJob(job.id, new Date(began + 120_000))).toMatchObject({ ok: true });
+        expect(await requestHandover(job.id, 'details', new Date(began + 180_000))).not.toBeNull();
+        const price = await priceRises(job.reservationKey!);
+        await fake.stop(sara.ref);
+        const endAt = new Date(began + 180_000 + 61 * 60_000);
+        await sweepComputers(endAt);
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'stopped', endedBy: 'unanswered', secondsRun: 120, pricedUntil: new Date(began + 120_000) });
+        // The ending's settlement did not get through: the room is still held and lapses; the books line is missing too
+        await prisma.meterReservation.update({ where: { reservationKey: job.reservationKey! }, data: { state: 'held', settledMicros: null, closedAt: null, expiresAt: new Date(endAt.getTime() - 60_000) } });
+        await prisma.meterEvent.deleteMany({ where: { eventId: { startsWith: `computer:${job.id}:time` } } });
+        await sweepComputers(new Date(endAt.getTime() + 30 * 60_000));
+        expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: job.reservationKey! } })).toMatchObject({ state: 'settled', settledMicros: BigInt(price) });
+        expect(await prisma.meterEvent.findFirst({ where: { eventId: { startsWith: `computer:${job.id}:time` } } })).toMatchObject({ quantity: BigInt(120), costMicros: BigInt(price) });
+      });
     });
 
     describe('an unanswered ending reads the machine too', () => {
