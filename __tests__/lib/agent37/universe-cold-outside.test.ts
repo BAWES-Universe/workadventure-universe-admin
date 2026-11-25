@@ -1026,6 +1026,59 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
     expect(fs.readFileSync(path.join(parent, 'run.sh'), 'utf8')).toBe('what was there');
   });
 
+  raceTest('two staging folders the agent swapped after the checks (so each name holds the other file) publish nothing: neither target gets the other file\'s bytes', () => {
+    const w = world();
+    fs.writeFileSync(path.join(w.fsA, 'opt/tool/other.sh'), 'other bytes\n');
+    const list = packed(w);
+    const parent = path.join(w.fsB, 'opt/tool');
+    fs.mkdirSync(parent, { recursive: true });
+    for (const folder of [dir, path.dirname(w.fsB), w.fsB, path.join(w.fsB, 'opt')]) fs.chmodSync(folder, 0o755);
+    fs.writeFileSync(path.join(parent, 'run.sh'), 'what was there');
+    fs.writeFileSync(path.join(parent, 'other.sh'), 'what else was there');
+    spawnSync('chown', ['-R', '1000:1000', parent]);
+    const agentCode = path.join(dir, `agent-${++counter}.py`);
+    fs.writeFileSync(agentCode, [
+      'import os, sys',
+      'parent, a, b = sys.argv[1], sys.argv[2], sys.argv[3]',
+      'os.rename(os.path.join(parent, a), os.path.join(parent, ".tmp-swap"))',
+      'os.rename(os.path.join(parent, b), os.path.join(parent, a))',
+      'os.rename(os.path.join(parent, ".tmp-swap"), os.path.join(parent, b))',
+    ].join('\n'));
+    const harness = path.join(dir, `names-swap-${counter}.py`);
+    fs.writeFileSync(harness, [
+      'import importlib.machinery, importlib.util, os, subprocess, sys',
+      'loader = importlib.machinery.SourceFileLoader("cold", sys.argv[1])',
+      'spec = importlib.util.spec_from_loader("cold", loader)',
+      'mod = importlib.util.module_from_spec(spec)',
+      'loader.exec_module(mod)',
+      'real = mod.reopen_stage',
+      'done = {"n": 0}',
+      'def swapping(parent_fd, item):',
+      '    if not done["n"] and item["parts"][-1] in ("run.sh", "other.sh"):',
+      '        done["n"] = 1',
+      '        held = {}',
+      '        for name in os.listdir(parent_fd):',
+      '            if name.startswith(".uc-"):',
+      '                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=parent_fd)',
+      '                try:',
+      '                    inside = os.open("f", os.O_RDONLY, dir_fd=fd)',
+      '                    held[os.read(inside, 3)] = name',
+      '                    os.close(inside)',
+      '                except OSError:',
+      '                    pass',
+      '                finally:',
+      '                    os.close(fd)',
+      '        subprocess.run(["setpriv", "--reuid=1000", "--regid=1000", "--clear-groups", "python3", sys.argv[2], sys.argv[3], held[b"#!/"], held[b"oth"]], check=True)',
+      '    return real(parent_fd, item)',
+      'mod.reopen_stage = swapping',
+      'sys.exit(mod.finish())',
+    ].join('\n'));
+    const done = spawnSync('python3', [harness, script, agentCode, parent], { input: JSON.stringify({ outside: list }), encoding: 'utf8', timeout: 60_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, UNIVERSE_COLD_HOME: w.home, UNIVERSE_COLD_FS: w.fsB } });
+    expect(done.stdout).toContain('finished=0 reason=outside_tampered');
+    expect(fs.readFileSync(path.join(parent, 'run.sh'), 'utf8')).toBe('what was there');
+    expect(fs.readFileSync(path.join(parent, 'other.sh'), 'utf8')).toBe('what else was there');
+  });
+
   it('the old-proxy clean-up follows no link: a link at a settings file, or a link where a folder of it belongs, is left alone and what it points at is never rewritten; a plain file is cleaned', () => {
     const w = world();
     const manifest = packed(w);
