@@ -2001,12 +2001,15 @@ async function restIfUnheld(botId: string, now: Date, exceptJobId?: string): Pro
       return undefined;
     });
   if (op === null) return false;
+  // A rest whose request threw may still have been received: the sleep can land after this returns
+  let threw = false;
   const rested = op
     ? await underPowerOp(op, async (late) => {
         try {
           await provider.rest(ref);
         } catch (error) {
           late.mayLand();
+          threw = true;
           console.error('[Computer] Could not rest a machine:', error instanceof Error ? error.message : 'unknown');
           return false;
         }
@@ -2015,8 +2018,11 @@ async function restIfUnheld(botId: string, now: Date, exceptJobId?: string): Pro
         return true;
       })
     : false;
+  // A rest that threw is left `resting`, with this rest's claim: its operation stays open for the provider's margin and the sleep may still land, so the row must not say `working` (a start would run at once, under it). A start takes a
+  // wake ticket from `resting`, waits for the open operation and wakes the machine after it; with no start, the stuck-rest sweep puts it back once nothing can land
+  if (!rested && threw) return false;
   if (!rested) {
-    // Still awake (or the rest was never sent): it is "working" again, so the sweep finds it and tries once more
+    // Never sent (it could not be recorded): still awake, so it is "working" again and the sweep finds it and tries once more
     await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting', restClaimedAt: now }, data: { machine: 'working', restClaimedAt: null } });
     return false;
   }
@@ -2070,6 +2076,10 @@ async function pendingHandOvers(botId: string, now: Date, exceptJobId?: string):
 async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok: boolean }, /** How long to wait for a stop of ours on this machine before giving up with StopInFlight, and whether a dead sender's is waited out too (post-0.5.0 B). A start waits only for a live one: it can go back in line. */ stopWait: { ms: number; dead: boolean } = { ms: powerTiming().waitMs, dead: false }): Promise<void> {
   let row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
   if (row.machine === 'working') {
+    // A guard (post-0.5.0 B): a `working` row with a rest or stop of ours that can still land (live, or a dead sender's inside its life) cannot be trusted, and nothing is started on it: the job goes back in line with nothing held. The rest that
+    // threw leaves `resting`, not `working`, so this should not be found; it is not waited for here, because once the operation is over the machine may be asleep while the row still says `working`
+    const open = row.providerRef ? await openPowerOpOf(prisma, row.providerRef) : null;
+    if (open) throw new StopInFlight(open);
     // A cleanup of the browser holds the machine for a moment: a job that arrives waits it out, so its browser is never cleared under it
     await untilCleaned(botId);
     return;
@@ -3529,8 +3539,10 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   await recoverControl(now, batch).catch((error) => console.error('[Computer] Control could not be recovered:', error instanceof Error ? error.message : 'unknown'));
   // A machine that works while no job holds it (a stop that broke half way, a start that finished after a turn off) is put to rest
   // A rest that was claimed and never finished (the server stopped half way) is not left claimed: with no job holding it, it goes back to "working" and the next sweep rests it
-  const stuck = await prisma.brickComputer.findMany({ where: { machine: 'resting', NOT: { providerRef: null }, restClaimedAt: { lte: new Date(now.getTime() - 5 * 60 * 1000) } }, select: { botId: true, restClaimedAt: true }, take: 200 });
+  const stuck = await prisma.brickComputer.findMany({ where: { machine: 'resting', NOT: { providerRef: null }, restClaimedAt: { lte: new Date(now.getTime() - 5 * 60 * 1000) } }, select: { botId: true, providerRef: true, restClaimedAt: true }, take: 200 });
   for (const machine of stuck) {
+    // A sleep of ours that can still land (live, or a dead sender's inside its life, longer than these 5 minutes) keeps the claim: the machine is not called working under it
+    if (machine.providerRef && (await openPowerOpOf(prisma, machine.providerRef))) continue;
     if ((await prisma.computerJob.count({ where: { botId: machine.botId, status: { in: ['running', 'waiting'] } } })) === 0) {
       // Only the claim that was seen to be stale: a rest that finished since, or a newer claim, is left as it is
       await prisma.brickComputer.updateMany({ where: { botId: machine.botId, machine: 'resting', restClaimedAt: machine.restClaimedAt }, data: { machine: 'working', restClaimedAt: null } });

@@ -22,6 +22,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { moveJobFirst } from '@/lib/computer-job-controls';
+import { controlInternals } from '@/lib/computer';
 import { finishJob, giveComputer, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeWakeTicketForTests } from '@/lib/computer';
 import { endPowerOp, openPowerOpOf, powerTiming, PROVIDER_MARGIN_MS, recordPowerOp, setPowerTimingForTests, setRowLockWaitForTests } from '@/lib/computer-power';
 import { LONGEST_ACCOUNT_CALL_MS } from '@/lib/agent37/client';
@@ -368,6 +369,73 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect(row.beat.getTime()).toBeGreaterThanOrEqual(row.sent.getTime());
       expect(await openPowerOpOf(prisma, sara.ref)).toMatchObject({ kind: 'stop', live: true });
     }, 40_000);
+
+    describe('a rest of ours that threw can still land: nothing is started under it', () => {
+      async function idleAfterJob(sara: Owner) {
+        expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+        await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      }
+
+      it('the rest throws: the row stays `resting`; a start inside the margin waits for the operation, wakes the machine only after it is done, and runs on an awake machine', async () => {
+        const sara = await owner('rest-threw');
+        setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 3_000, waitMs: 8_000, pollMs: 20, marginMs: 800 });
+        await idleAfterJob(sara);
+        const rest = jest.spyOn(fake, 'rest').mockRejectedValueOnce(new Error('the request timed out'));
+        expect(await controlInternals.restIfUnheld(sara.brickId, NOW)).toBe(false);
+        rest.mockRestore();
+        expect(await machineOf(sara)).toMatchObject({ machine: 'resting' });
+        expect(await openPowerOpOf(prisma, sara.ref)).toMatchObject({ kind: 'rest', live: true });
+        // The wake is sent only once nothing of ours can land
+        const openAtWake: Array<boolean> = [];
+        const original = fake.wake.bind(fake);
+        const wake = jest.spyOn(fake, 'wake').mockImplementation(async (ref: string) => {
+          openAtWake.push((await openPowerOpOf(prisma, ref)) !== null);
+          return original(ref);
+        });
+        try {
+          const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+          expect(started).toMatchObject({ ok: true, job: { status: 'running' } });
+        } finally {
+          wake.mockRestore();
+        }
+        expect(openAtWake).toEqual([false]);
+        expect(await fake.awake(sara.ref)).toBe(true);
+        expect(await machineOf(sara)).toMatchObject({ machine: 'working' });
+      });
+
+      it('guard: a `working` row with a dead sender\'s operation still inside its life: the start goes back in line holding nothing, and nothing is woken', async () => {
+        const sara = await owner('working-open');
+        setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 3_000, waitMs: 8_000, pollMs: 20, marginMs: 800 });
+        await idleAfterJob(sara);
+        await recordPowerOp(sara.brickId, sara.ref, 'stop');
+        await sleep(powerTiming().staleMs + 100);
+        expect(await machineOf(sara)).toMatchObject({ machine: 'working' });
+        const wakesBefore = fake.calls.filter((call) => call.name === 'wake').length;
+        const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+        expect(started).toMatchObject({ ok: true, job: { status: 'queued', queuedFor: 'busy' } });
+        const jobB = await prisma.computerJob.findFirstOrThrow({ where: { botId: sara.brickId, title: 'B' } });
+        expect(jobB).toMatchObject({ status: 'queued', reservationKey: null, stretchStarted: null, startedAt: null });
+        expect(await prisma.meterReservation.count({ where: { jobId: jobB.id, state: 'held' } })).toBe(0);
+        expect(fake.calls.filter((call) => call.name === 'wake').length).toBe(wakesBefore);
+      });
+
+      it('the stuck-rest sweep keeps a 6-minute-old claim while a sleep of ours can still land (a dead sender\'s inside its life), and lets it go once that life is past', async () => {
+        const sara = await owner('stuck-rest');
+        setPowerTimingForTests({ beatMs: 50, staleMs: 400, deadLifeMs: 2_000, waitMs: 8_000, pollMs: 20, marginMs: 800 });
+        await idleAfterJob(sara);
+        const claimedAt = new Date(NOW.getTime() - 6 * 60_000);
+        await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting', restClaimedAt: claimedAt } });
+        await recordPowerOp(sara.brickId, sara.ref, 'rest');
+        await sleep(powerTiming().staleMs + 100);
+        await sweepComputers(NOW);
+        expect(await machineOf(sara)).toMatchObject({ machine: 'resting', restClaimedAt: claimedAt });
+        await sleep(powerTiming().deadLifeMs);
+        await sweepComputers(NOW);
+        const after = await machineOf(sara);
+        // Let go (back to `working`, and possibly rested again by the same sweep under a newer claim): never the old claim
+        expect(after.restClaimedAt?.getTime() ?? null).not.toBe(claimedAt.getTime());
+      });
+    });
 
     it('a turn hold\'s stop is claimed against the state it saw: a wake that took its ticket since gets no stop sent under it', async () => {
       const sara = await owner('holdclaim');

@@ -43,6 +43,7 @@ import { CONTROL_TIMING } from '@/lib/computer-control';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { pauseJob } from '@/lib/computer-job-controls';
 import { controlInternals } from '@/lib/computer';
+import { setPowerTimingForTests } from '@/lib/computer-power';
 import {
   computerView,
   continueWindDown,
@@ -1153,10 +1154,13 @@ run('a Brick’s computer, in a real database', () => {
       await giveComputer(sara.brickId, sara.id);
       const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!a.ok) throw new Error('no');
+      // A rest that threw can still land for the provider's margin (shortened here): the row stays `resting`, claimed, and the stuck-rest sweep lets it go only once nothing of ours can land
+      setPowerTimingForTests({ marginMs: 100 });
       provider.failNext.rest = true;
       await finishJob(a.job.id, 'done', minutes(1));
-      // The rest failed: the machine is still awake, so it is not marked as resting (the sweep only looks at ones that work)
-      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      setPowerTimingForTests(null);
       await backdate([sara.brickId]);
       await sweepComputers(minutes(10));
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
