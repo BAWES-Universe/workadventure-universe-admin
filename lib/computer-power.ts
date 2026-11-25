@@ -63,7 +63,9 @@ type Db = Pick<Prisma.TransactionClient, '$executeRaw' | '$queryRaw'>;
 /** Writes the operation inside the caller's transaction, which already holds the Brick computer's row (its claim wrote it, or it locked it). */
 export async function recordPowerOpIn(tx: Db, botId: string, ref: string, kind: PowerKind): Promise<string> {
   const id = randomUUID();
-  await tx.$executeRaw`INSERT INTO "computer_power_ops" ("id", "bot_id", "provider_ref", "kind", "sent_at", "beat_at") VALUES (${id}, ${botId}, ${ref}, ${kind}, (NOW() AT TIME ZONE 'UTC'), (NOW() AT TIME ZONE 'UTC'))`;
+  // The clock of the statement, not of the transaction: `NOW()` is when the transaction began, and one that waited minutes for the computer's row would write an operation that was born stale (its sender seemingly gone, its life cut short).
+  // One reading for both columns (`beat_at >= sent_at` is checked)
+  await tx.$executeRaw`INSERT INTO "computer_power_ops" ("id", "bot_id", "provider_ref", "kind", "sent_at", "beat_at") SELECT ${id}, ${botId}, ${ref}, ${kind}, t.at, t.at FROM (SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS at) t`;
   return id;
 }
 
@@ -80,7 +82,7 @@ export async function recordPowerOp(botId: string, ref: string, kind: PowerKind)
 
 /** The operation is over: its call and the look after it returned (or it was never sent). Written once. */
 export async function endPowerOp(id: string): Promise<void> {
-  await prisma.$executeRaw`UPDATE "computer_power_ops" SET "done_at" = (NOW() AT TIME ZONE 'UTC') WHERE "id" = ${id} AND "done_at" IS NULL`;
+  await prisma.$executeRaw`UPDATE "computer_power_ops" SET "done_at" = (clock_timestamp() AT TIME ZONE 'UTC') WHERE "id" = ${id} AND "done_at" IS NULL`;
 }
 
 /**
@@ -89,7 +91,7 @@ export async function endPowerOp(id: string): Promise<void> {
  */
 export async function underPowerOp<T>(id: string, work: (late: { mayLand: () => void }) => Promise<T>): Promise<T> {
   const beat = setInterval(() => {
-    void prisma.$executeRaw`UPDATE "computer_power_ops" SET "beat_at" = (NOW() AT TIME ZONE 'UTC') WHERE "id" = ${id} AND "done_at" IS NULL`.catch(() => undefined);
+    void prisma.$executeRaw`UPDATE "computer_power_ops" SET "beat_at" = (clock_timestamp() AT TIME ZONE 'UTC') WHERE "id" = ${id} AND "done_at" IS NULL`.catch(() => undefined);
   }, timing.beatMs);
   beat.unref?.();
   // A call that threw (a timeout, a gateway that answered badly) did not prove it was not received: the provider can still act on it. The operation then stays open, and beating, for the provider's margin after the call returned,
@@ -124,9 +126,9 @@ export interface OpenPowerOp {
 /** The operation of this machine that can still land, if any (a live one first). Read through the caller's transaction when it holds the row lock. Judged by the database's clock. */
 export async function openPowerOpOf(db: Db, ref: string): Promise<OpenPowerOp | null> {
   const rows = await db.$queryRaw<Array<{ id: string; kind: string; live: boolean }>>(Prisma.sql`
-    SELECT "id", "kind", ("beat_at" > ((NOW() AT TIME ZONE 'UTC') - make_interval(secs => ${timing.staleMs / 1000}))) AS "live"
+    SELECT "id", "kind", ("beat_at" > ((clock_timestamp() AT TIME ZONE 'UTC') - make_interval(secs => ${timing.staleMs / 1000}))) AS "live"
     FROM "computer_power_ops"
-    WHERE "provider_ref" = ${ref} AND "done_at" IS NULL AND "beat_at" > ((NOW() AT TIME ZONE 'UTC') - make_interval(secs => ${timing.deadLifeMs / 1000}))
+    WHERE "provider_ref" = ${ref} AND "done_at" IS NULL AND "beat_at" > ((clock_timestamp() AT TIME ZONE 'UTC') - make_interval(secs => ${timing.deadLifeMs / 1000}))
     ORDER BY "live" DESC, "beat_at" DESC
     LIMIT 1`);
   const row = rows[0];

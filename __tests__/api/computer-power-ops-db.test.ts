@@ -21,6 +21,7 @@ import { seedGiveBackLimits } from '../helpers/give-back-limits';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
+import { moveJobFirst } from '@/lib/computer-job-controls';
 import { finishJob, giveComputer, renewJob, requestHandover, settleTurnHold, startJob, sweepComputers, takeWakeTicketForTests } from '@/lib/computer';
 import { endPowerOp, openPowerOpOf, powerTiming, PROVIDER_MARGIN_MS, recordPowerOp, setPowerTimingForTests, setRowLockWaitForTests } from '@/lib/computer-power';
 import { LONGEST_ACCOUNT_CALL_MS } from '@/lib/agent37/client';
@@ -269,6 +270,104 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
         setRowLockWaitForTests(null);
       }
     }, 80_000);
+
+    it('a start waiting for the computer\'s row behind a leader\'s stop does not hold the line lock: a "do this first" request meanwhile is answered, and the start still goes on once the stop lets go', async () => {
+      const sara = await owner('lineheld');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW);
+      if (!a.ok || !b.ok) throw new Error('no jobs');
+      setRowLockWaitForTests(20_000);
+      let release: () => void = () => undefined;
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${sara.brickId} FOR UPDATE`;
+          locked();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 60_000 },
+      );
+      try {
+        await lockTaken;
+        // A third start reaches the machine's claim and waits for the row behind the holder
+        const third = startJob({ botId: sara.brickId, personId: sara.id, title: 'C', writes: false }, NOW);
+        await sleep(1_500);
+        setTimeout(() => release(), 17_000);
+        const asked = Date.now();
+        // The start's wait for the row must not hold the line: this is answered at once, not after the 15 s a "do this first" transaction lasts
+        const first = await moveJobFirst(sara.brickId, sara.id, b.job.id, {}, NOW);
+        expect(first).toEqual(expect.objectContaining({}));
+        expect(Date.now() - asked).toBeLessThan(2_000);
+        expect(await third).toMatchObject({ ok: true });
+      } finally {
+        release();
+        await holder;
+        setRowLockWaitForTests(null);
+      }
+    }, 80_000);
+
+    it('a start and a "do this first" that pauses the running job, both blocked on the computer\'s row, never deadlock: both settle, and no deadlock or expired transaction is logged', async () => {
+      const sara = await owner('nodeadlock');
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: true }, NOW);
+      if (!a.ok || !b.ok) throw new Error('no jobs');
+      expect(b.job.status).toBe('queued');
+      const errors = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let release: () => void = () => undefined;
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${sara.brickId} FOR UPDATE`;
+          locked();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 30_000 },
+      );
+      try {
+        await lockTaken;
+        setTimeout(() => release(), 3_000);
+        const [third, first] = await Promise.all([
+          startJob({ botId: sara.brickId, personId: sara.id, title: 'C', writes: false }, NOW),
+          moveJobFirst(sara.brickId, sara.id, b.job.id, { pauseRunning: true }, NOW),
+        ]);
+        expect(third).toMatchObject({ ok: true });
+        expect(first).toMatchObject({ ok: true });
+        expect(errors.mock.calls.map((call) => call.join(' ')).filter((line) => /40P01|deadlock|expired transaction|P2028/i.test(line))).toEqual([]);
+      } finally {
+        errors.mockRestore();
+        release();
+        await holder;
+      }
+    }, 60_000);
+
+    it('an operation recorded by a transaction that waited for the computer\'s row is stamped when it was written, not when the transaction began: it is born live', async () => {
+      const sara = await owner('born');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      let release: () => void = () => undefined;
+      let locked: () => void = () => undefined;
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+      const holder = prisma.$transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${sara.brickId} FOR UPDATE`;
+          locked();
+          await new Promise<void>((resolve) => (release = resolve));
+        },
+        { timeout: 30_000 },
+      );
+      await lockTaken;
+      setTimeout(() => release(), 2_000);
+      const began = Date.now();
+      const op = await recordPowerOp(sara.brickId, sara.ref, 'stop');
+      await holder;
+      const [row] = await prisma.$queryRaw<Array<{ sent: Date; beat: Date }>>`SELECT "sent_at" AS sent, "beat_at" AS beat FROM "computer_power_ops" WHERE "id" = ${op}`;
+      // Written after the wait (about 2 s in), never at the transaction's start
+      expect(row.sent.getTime()).toBeGreaterThanOrEqual(began + 1_800);
+      expect(row.beat.getTime()).toBeGreaterThanOrEqual(row.sent.getTime());
+      expect(await openPowerOpOf(prisma, sara.ref)).toMatchObject({ kind: 'stop', live: true });
+    }, 40_000);
 
     it('a turn hold\'s stop is claimed against the state it saw: a wake that took its ticket since gets no stop sent under it', async () => {
       const sara = await owner('holdclaim');

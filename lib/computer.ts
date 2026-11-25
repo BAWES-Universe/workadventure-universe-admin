@@ -1533,28 +1533,38 @@ async function runIsTheirs(botId: string, personId: string, runId: string): Prom
  * `count` is 0 when the job was claimed by another try meanwhile, as before.
  */
 async function claimMachineFor(job: { id: string; botId: string; writes: boolean }, key: string, now: Date, options: { restoring: boolean; exclusive: boolean }): Promise<{ ok: true; count: number } | { ok: false; why: 'busy' | 'turn' }> {
-  return prisma.$transaction(
-    async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`computer:line:${job.botId}`}, 0))`;
-      const rows = await tx.$queryRaw<Array<{ claimed: Date | null }>>`SELECT "clean_claimed_at" AS claimed FROM "brick_computers" WHERE "bot_id" = ${job.botId} FOR UPDATE`;
-      const claimed = rows[0]?.claimed ?? null;
-      if (claimed && now.getTime() - claimed.getTime() < CLEAN_CLAIM_STALE_MS && Date.now() - claimed.getTime() < CLEAN_CLAIM_STALE_MS) return { ok: false as const, why: 'busy' as const };
-      const beside = await tx.computerJob.findMany({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } }, select: { prepState: true, writes: true } });
-      if (beside.some((other) => other.prepState !== null) || (options.exclusive && beside.length > 0)) return { ok: false as const, why: 'busy' as const };
-      // A job that may sign in (`writes`) has the browser alone, in both directions: it waits for every job on the machine, and every job waits for it. Jobs that only read run side by side. It is a turn in line, not a busy machine
-      // (the person sees the line they are in), and the line moves when any job ends (round 8, F)
-      if (beside.length > 0 && (job.writes || beside.some((other) => other.writes))) return { ok: false as const, why: 'turn' as const };
-      const done = await tx.computerJob.updateMany({
-        where: { id: job.id, status: 'queued', ...NOT_PAUSED },
-        // A job that carries on is not ready to be worked on until its own browser is back (or a clean one is proved clean): `prep_state` keeps it out of the runnable list, refuses a claim and refuses every call until then (GPT round 6, finding 7).
-        // Nothing is billable before readiness: `stretch_started` stays NULL (a stretch computed from NULL is 0 s) and is written by the ready write, never here; `started_at` stays, the restore timeout reads it (round 8, B2)
-        data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: null, ...(options.restoring ? { prepState: 'restoring' as const } : {}) },
-      });
-      return { ok: true as const, count: done.count };
-    },
-    // The computer's row is locked here (FOR UPDATE), so the wait is the row-lock wait: a leader's stop that holds the row for longer than 15 s must delay the claim, never make it throw
-    rowLockWait(),
-  );
+  // Lock order, here and nowhere else the other way round: the computer's row (waited for as long as a take-over leader's stop may hold it), then the line by TRY-lock only. "Do this first" takes the line, then the jobs, then (through a pause) the
+  // row, so waiting for the line while holding the row would be a cycle; a try-lock never waits, so no cycle can include it, and a start that waits on the row never holds the line, whose transaction is only 15 s. A busy line is tried again
+  // (nothing was written, the row is let go) for as long as that transaction lasts, then the job stays in line as `busy` for the sweep.
+  let busySince: number | null = null;
+  for (;;) {
+    const decided = await prisma.$transaction(
+      async (tx) => {
+        const rows = await tx.$queryRaw<Array<{ claimed: Date | null }>>`SELECT "clean_claimed_at" AS claimed FROM "brick_computers" WHERE "bot_id" = ${job.botId} FOR UPDATE`;
+        const got = await tx.$queryRaw<Array<{ got: boolean }>>`SELECT pg_try_advisory_xact_lock(hashtextextended(${`computer:line:${job.botId}`}, 0)) AS got`;
+        if (!got[0]?.got) return 'line_busy' as const;
+        const claimed = rows[0]?.claimed ?? null;
+        if (claimed && now.getTime() - claimed.getTime() < CLEAN_CLAIM_STALE_MS && Date.now() - claimed.getTime() < CLEAN_CLAIM_STALE_MS) return { ok: false as const, why: 'busy' as const };
+        const beside = await tx.computerJob.findMany({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } }, select: { prepState: true, writes: true } });
+        if (beside.some((other) => other.prepState !== null) || (options.exclusive && beside.length > 0)) return { ok: false as const, why: 'busy' as const };
+        // A job that may sign in (`writes`) has the browser alone, in both directions: it waits for every job on the machine, and every job waits for it. Jobs that only read run side by side. It is a turn in line, not a busy machine
+        // (the person sees the line they are in), and the line moves when any job ends (round 8, F)
+        if (beside.length > 0 && (job.writes || beside.some((other) => other.writes))) return { ok: false as const, why: 'turn' as const };
+        const done = await tx.computerJob.updateMany({
+          where: { id: job.id, status: 'queued', ...NOT_PAUSED },
+          // A job that carries on is not ready to be worked on until its own browser is back (or a clean one is proved clean): `prep_state` keeps it out of the runnable list, refuses a claim and refuses every call until then (GPT round 6, finding 7).
+          // Nothing is billable before readiness: `stretch_started` stays NULL (a stretch computed from NULL is 0 s) and is written by the ready write, never here; `started_at` stays, the restore timeout reads it (round 8, B2)
+          data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: null, ...(options.restoring ? { prepState: 'restoring' as const } : {}) },
+        });
+        return { ok: true as const, count: done.count };
+      },
+      rowLockWait(),
+    );
+    if (decided !== 'line_busy') return decided;
+    busySince ??= Date.now();
+    if (Date.now() - busySince >= 15_000) return { ok: false, why: 'busy' };
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 }
 
 /**

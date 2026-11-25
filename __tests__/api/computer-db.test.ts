@@ -1391,14 +1391,12 @@ run('a Brick’s computer, in a real database', () => {
       await requestHandover(jobId, 'details', minutes(1));
       // The reader's start is admitted (the machine is Brick's) and stands at its claim of the machine, where it waits for the Brick's line lock that a fixture transaction holds: the take over then runs from start to end, looks for
       // running jobs and finds none, and only then does the claim go on and the reader run
-      let pid = 0;
       let locked: () => void = () => undefined;
       const gotLock = new Promise<void>((resolve) => (locked = resolve));
       let release: () => void = () => undefined;
       const hold = new Promise<void>((resolve) => (release = resolve));
       const holder = prisma.$transaction(
         async (tx) => {
-          pid = (await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::int AS pid`)[0].pid;
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`computer:line:${sara.brickId}`}, 0))`;
           locked();
           await hold;
@@ -1421,13 +1419,8 @@ run('a Brick’s computer, in a real database', () => {
         // A holder that fails before it takes the lock ends the wait with its own error
         await Promise.race([gotLock, holder.then(() => Promise.reject(new Error('the holder ended before it took the lock')))]);
         reading = startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, minutes(2));
-        // The reader is at the claim: a backend the holder blocks
-        let blocked = false;
-        for (let tries = 0; tries < 200 && !blocked; tries++) {
-          blocked = (await prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`)[0].n >= 1;
-          if (!blocked) await Promise.race([new Promise((resolve) => setTimeout(resolve, 20)), reading.then(() => Promise.reject(new Error('the reader ended before it reached its claim')))]);
-        }
-        expect(blocked).toBe(true);
+        // The reader is at the claim: it finds the line lock held and keeps trying for it (a try-lock), so it is still going, neither refused nor started, a while later
+        await Promise.race([new Promise((resolve) => setTimeout(resolve, 800)), reading.then(() => Promise.reject(new Error('the reader ended before it reached its claim')))]);
         await takeOver(sara.brickId, sara.id, minutes(2));
         // The take over looked for running jobs, found none (the reader is not running yet), and the waiting job is the person's
         expect(lookedAt.length).toBeGreaterThan(0);
