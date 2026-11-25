@@ -83,7 +83,18 @@ function cold(w: World, command: string, fsRoot: string, input = '', extra: Reco
 }
 
 const printed = (stdout: string): Record<string, unknown> => JSON.parse(/(^|\n)prepack=(\{[^\n]*\})/.exec(stdout)![2]);
-const finishWith = (w: World, manifest: unknown) => cold(w, 'finish', w.fsB, JSON.stringify({ outside: manifest }));
+/** One finish. The copy folder is removed when a finish ends, and a retry restores the copy again from the archive: so each call here gets the copy as it was (and it is put back after, for a test that looks at the next step). */
+const finishWith = (w: World, manifest: unknown) => {
+  const keep = `${w.outside}.kept`;
+  const there = fs.existsSync(w.outside) || fs.lstatSync(w.outside, { throwIfNoEntry: false }) !== undefined;
+  if (there) fs.cpSync(w.outside, keep, { recursive: true, verbatimSymlinks: true, preserveTimestamps: true });
+  const done = cold(w, 'finish', w.fsB, JSON.stringify({ outside: manifest }));
+  if (there) {
+    fs.rmSync(w.outside, { recursive: true, force: true });
+    fs.renameSync(keep, w.outside);
+  }
+  return done;
+};
 const aptCalls = () => fs.readFileSync(aptLog, 'utf8').trim().split('\n').filter(Boolean);
 const writtenOnB = (w: World) => fs.readdirSync(w.fsB, { recursive: true, withFileTypes: true }).filter((entry) => !entry.isDirectory()).map((entry) => path.relative(w.fsB, path.join(entry.parentPath, entry.name))).filter((name) => !name.startsWith('usr/local/share/universe'));
 
@@ -770,6 +781,63 @@ run('universe-cold: a long list travels in pieces (Sentry on #1035: one command 
       }
       expect(stagedNames(path.join(w.fsB, folder))).toEqual([]);
     }
+  });
+
+  it('the copy folder is gone when a finish ends, whatever it said once the list was read (so a file only root could read is not left in the home folder), and the rest of the state folder stays', () => {
+    const w = world();
+    const manifest = packed(w);
+    const keepPackages = fs.existsSync(path.join(w.state, 'outside-packages.txt'));
+    expect(fs.readFileSync(path.join(w.outside, 'etc/app.conf'), 'utf8')).toBe('conf');
+    expect(cold(w, 'finish', w.fsB, JSON.stringify({ outside: manifest })).stdout).toMatch(/finished=1 .* outside=applied\n/);
+    expect(fs.existsSync(w.outside)).toBe(false);
+    expect(fs.existsSync(path.join(w.state, 'outside-packages.txt'))).toBe(keepPackages);
+    // A refused one too
+    const v = world();
+    const list = packed(v);
+    fs.writeFileSync(path.join(v.outside, 'etc/app.conf'), 'cone');
+    expect(cold(v, 'finish', v.fsB, JSON.stringify({ outside: list })).stdout).toContain('outside_tampered');
+    expect(fs.existsSync(v.outside)).toBe(false);
+    // And a copy with no list (unverified)
+    const u = world();
+    packed(u);
+    expect(cold(u, 'finish', u.fsB, JSON.stringify({ outside: null })).stdout).toMatch(/outside=unverified\n/);
+    expect(fs.existsSync(u.outside)).toBe(false);
+    // A list that is not a list says so and leaves the folder alone
+    const x = world();
+    packed(x);
+    expect(cold(x, 'finish', x.fsB, JSON.stringify({ outside: { files: 'no', packages: [] } })).stdout).toContain('outside_manifest');
+    expect(fs.existsSync(x.outside)).toBe(true);
+  });
+
+  it('a link where the copy folder belongs is removed as a link when a finish ends: what it points at keeps its files', () => {
+    const w = world();
+    const manifest = packed(w);
+    const elsewhere = path.join(path.dirname(w.home), `elsewhere-drop-${counter}`);
+    fs.mkdirSync(elsewhere, { recursive: true });
+    fs.writeFileSync(path.join(elsewhere, 'keep'), 'mine');
+    fs.rmSync(w.outside, { recursive: true });
+    fs.symlinkSync(elsewhere, w.outside);
+    expect(cold(w, 'finish', w.fsB, JSON.stringify({ outside: manifest })).stdout).toContain('outside_tampered');
+    expect(fs.readFileSync(path.join(elsewhere, 'keep'), 'utf8')).toBe('mine');
+    expect(fs.lstatSync(w.outside, { throwIfNoEntry: false })).toBeUndefined();
+  });
+
+  it('a copy that changes after the list was checked puts nothing in place: every file is checked and staged first, so the files before it are not put back either', () => {
+    const w = world();
+    const manifest = packed(w);
+    const done = patched(w, w.fsB, 'finish', [
+      'real_verify = mod.verify_outside',
+      'def verify(entries):',
+      '    real_verify(entries)',
+      // The last file of the list (by path) changes after the check: same size, same mode, other bytes
+      '    last = os.path.join(mod.OUTSIDE, "opt/tool/run.sh")',
+      '    data = open(last, "rb").read()',
+      '    open(last, "wb").write(data.replace(b"hi", b"ho"))',
+      'mod.verify_outside = verify',
+    ].join('\n'), JSON.stringify({ outside: manifest }));
+    expect(done.stdout).toMatch(/finished=0 reason=outside_tampered\n/);
+    expect(writtenOnB(w)).toEqual([]);
+    for (const folder of ['etc', 'opt/tool']) if (fs.existsSync(path.join(w.fsB, folder))) expect(stagedNames(path.join(w.fsB, folder))).toEqual([]);
   });
 
   it('the staged file given a second name before it is moved (a hard link the agent can keep writing through) is refused, and nothing is put at the target', () => {

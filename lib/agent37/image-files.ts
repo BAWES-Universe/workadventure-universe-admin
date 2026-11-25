@@ -1935,7 +1935,7 @@ def outside_present():
     return present
 
 def verify_outside(entries):
-    # Everything is checked BEFORE anything is written: an extra, missing or different file means nothing at all is put back
+    # Everything is checked BEFORE anything is written: an extra, missing or different file means nothing at all is put back (and install_outside stages and re-checks every file before it moves the first one)
     try:
         if plain(STATE, True) is False or plain(OUTSIDE, True) is False:
             raise Tampered()
@@ -1971,38 +1971,37 @@ def open_stage(parent):
     raise OSError(errno.EEXIST, "no free name")
 
 def install_outside(entries):
+    # Two steps. First EVERY file is written beside its target under a name of its own and checked (read again from the copy, hashed again as it is written): a copy that changed after the
+    # check, or anything else that goes wrong while reading, stops here with nothing put in place. Only then each is moved over its target, and a link is made. What can still fail in the
+    # second step is a name swapped at that moment in a folder the agent can write, or a target that is a folder; files already moved stay, and what is left of the staging is removed again
     count = 0
+    staged = []
     root_fd = os.open(FSROOT or "/", os.O_RDONLY | os.O_DIRECTORY)
     try:
-        for entry in entries:
-            kind, path, size, mode, value = entry
-            parts = path.lstrip("/").split("/")
-            # The folder that holds the target is reached from the top of the file system one step at a time, never through a link: a link found on the way (one the agent put in a folder it can write)
-            # means the list does not match what is on this computer, and nothing more is written
-            try:
-                parent = open_steps(root_fd, parts[:-1], create=True)
-            except OSError:
-                raise Tampered()
-            try:
-                name = parts[-1]
-                if kind == "l":
-                    check_link(entry)
+        try:
+            for entry in entries:
+                kind, path, size, mode, value = entry
+                parts = path.lstrip("/").split("/")
+                # The folder that holds the target is reached from the top of the file system one step at a time, never through a link: a link found on the way (one the agent put in a folder it can write)
+                # means the list does not match what is on this computer, and nothing more is written
+                try:
+                    parent = open_steps(root_fd, parts[:-1], create=True)
+                except OSError:
+                    raise Tampered()
+                try:
+                    if kind == "l":
+                        check_link(entry)
+                        staged.append({"kind": "l", "parts": parts, "value": value})
+                        continue
+                    # Copied from the descriptor that was checked, hashed again as it is copied, written beside the target. The set-user-id and set-group-id bits are never put back
+                    fd, info = open_entry(entry)
                     try:
-                        os.unlink(name, dir_fd=parent)
-                    except FileNotFoundError:
-                        pass
-                    os.symlink(value, name, dir_fd=parent)
-                    count += 1
-                    continue
-                # Copied from the descriptor that was checked, hashed again as it is copied, written beside the target and moved over it (a link at the target is replaced, never written through).
-                # The set-user-id and set-group-id bits are never put back
-                fd, info = open_entry(entry)
-                try:
-                    temp, out = open_stage(parent)
-                except BaseException:
-                    os.close(fd)
-                    raise
-                try:
+                        temp, out = open_stage(parent)
+                    except BaseException:
+                        os.close(fd)
+                        raise
+                    item = {"kind": "f", "parts": parts, "temp": temp, "ident": None}
+                    staged.append(item)
                     digest = hashlib.sha256()
                     with os.fdopen(fd, "rb") as source, os.fdopen(out, "wb") as sink:
                         for chunk in iter(lambda: source.read(1 << 20), b""):
@@ -2015,32 +2014,75 @@ def install_outside(entries):
                             os.fchown(sink.fileno(), 0, 0)
                         os.fchmod(sink.fileno(), mode & 0o1777)
                         os.utime(sink.fileno(), ns=(info.st_atime_ns, info.st_mtime_ns))
-                        staged = os.fstat(sink.fileno())
-                        # The name is looked at again just before it is moved: it must still be the very file that was written and checked (one name, nothing else linked to it)
-                        now = os.lstat(temp, dir_fd=parent)
-                        if not statmod.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != (staged.st_dev, staged.st_ino) or now.st_nlink != 1:
-                            raise Tampered()
-                    os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
+                        done = os.fstat(sink.fileno())
+                        item["ident"] = (done.st_dev, done.st_ino)
+                finally:
+                    os.close(parent)
+            for item in staged:
+                try:
+                    parent = open_steps(root_fd, item["parts"][:-1])
+                except OSError:
+                    raise Tampered()
+                try:
+                    name = item["parts"][-1]
+                    if item["kind"] == "l":
+                        try:
+                            os.unlink(name, dir_fd=parent)
+                        except FileNotFoundError:
+                            pass
+                        os.symlink(item["value"], name, dir_fd=parent)
+                        item["placed"] = True
+                        count += 1
+                        continue
+                    # The name is looked at again just before it is moved: it must still be the very file that was written and checked (one name, nothing else linked to it)
+                    now = os.lstat(item["temp"], dir_fd=parent)
+                    if not statmod.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != item["ident"] or now.st_nlink != 1:
+                        raise Tampered()
+                    os.replace(item["temp"], name, src_dir_fd=parent, dst_dir_fd=parent)
+                    item["placed"] = True
                     # And after: what is at the target must be that file. A folder the agent can write is the only place a name can be swapped between the two looks, and what was put there is taken away again
                     published = os.lstat(name, dir_fd=parent)
-                    if (published.st_dev, published.st_ino) != (staged.st_dev, staged.st_ino):
+                    if (published.st_dev, published.st_ino) != item["ident"]:
                         try:
                             os.unlink(name, dir_fd=parent)
                         except OSError:
                             pass
                         raise Tampered()
-                except BaseException:
-                    try:
-                        os.unlink(temp, dir_fd=parent)
-                    except OSError:
-                        pass
-                    raise
-                count += 1
-            finally:
-                os.close(parent)
+                    count += 1
+                finally:
+                    os.close(parent)
+        except BaseException:
+            # Whatever was staged and not moved is taken away again (by name, in a folder reached without following a link; a name that is not ours cannot be one of these random names)
+            for item in staged:
+                if item["kind"] != "f" or item.get("placed"):
+                    continue
+                try:
+                    parent = open_steps(root_fd, item["parts"][:-1])
+                except OSError:
+                    continue
+                try:
+                    os.unlink(item["temp"], dir_fd=parent)
+                except OSError:
+                    pass
+                finally:
+                    os.close(parent)
+            raise
     finally:
         os.close(root_fd)
     return count
+
+def drop_outside():
+    # The copy folder is not needed once finish has read it: removed by descriptors (a link is removed, never followed), so nothing of it stays readable in the home folder afterwards
+    try:
+        state_fd = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return
+    try:
+        remove_tree(state_fd, "outside")
+    except OSError:
+        pass
+    finally:
+        os.close(state_fd)
 
 def read_list(spec):
     # The list Orbit sent in slices (list-put): as long as it said and with the SHA-256 it said, or it is refused
@@ -2088,15 +2130,25 @@ def finish_with_list():
     except ValueError:
         print("finished=0 reason=outside_manifest")
         return 1
-    files = 0
+    entries = []
     packages = []
-    unverified = manifest is None
-    if not unverified:
+    if manifest is not None:
         try:
             entries, packages = read_manifest(manifest)
         except ValueError:
             print("finished=0 reason=outside_manifest")
             return 1
+    # From here the copy folder is not needed again, whatever the outcome (a retry comes from the saved copy, never from this folder): it is removed when this ends, so a file that only root
+    # could read is not left in the home folder after a restore
+    try:
+        return finish_apply(manifest, entries, packages)
+    finally:
+        drop_outside()
+
+def finish_apply(manifest, entries, packages):
+    files = 0
+    unverified = manifest is None
+    if not unverified:
         try:
             verify_outside(entries)
             files = install_outside(entries)
