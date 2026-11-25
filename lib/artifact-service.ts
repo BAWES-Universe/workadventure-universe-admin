@@ -774,8 +774,10 @@ export async function requireMayOpen(id: string, viewer: Viewer, ctx: Context = 
   const artifact = await loadArtifact(id, ctx.now);
   const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, ctx.now);
-  // Public with nothing published is not there for a visitor (game #2115), so nothing that asks "may they open it" says yes
-  shownTo(artifact, who);
+  // Public with nothing published is not there for a visitor (game #2115), so nothing that asks "may they open it" says yes.
+  // A published version that is gone is not there either, so it fails here too, before any checkout is made.
+  const shown = shownTo(artifact, who);
+  if (shown.pinned) await findShown(artifact, shown);
 }
 
 export async function listVersions(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ versions: VersionView[] }> {

@@ -273,6 +273,8 @@ describe('artifact Publish', () => {
       expect((await openAs(person('stranger'), id, false)).status).toBe(404);
       await expect(openByLink(id)).rejects.toMatchObject({ code: 'not_found', status: 404 });
       expect((await call(versions, { viewer: viewer(person('stranger'), false) }, { id })).status).toBe(404);
+      // Nor can anyone start paying for it: the check that gates a checkout says no before any order is made
+      expect((await call(pay, { viewer: viewer(person('stranger'), false) }, { id })).status).toBe(404);
       const owner = await openAs(person('owner'), id, true);
       expect(owner.body.artifact.published).toMatchObject({ version: 1, available: false });
       // One button fixes it: publish a version that is there
