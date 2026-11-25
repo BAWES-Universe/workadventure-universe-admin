@@ -6,7 +6,7 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { storageMonthMicros } from '@/lib/meter-allowance';
 import { recordKeptBytes } from '@/lib/computer-disk';
-import { recordPowerOp, recordPowerOpIn, underPowerOp } from '@/lib/computer-power';
+import { recordPowerOp, recordPowerOpIn, rowLockWait, underPowerOp } from '@/lib/computer-power';
 import { COLD_RUN_MAX_MS, NOT_PAUSED, costOfSeconds } from '@/lib/computer-values';
 import type { ComputerProvider, MachineInfo, PackInventory, RestoreResult } from '@/lib/computer-provider';
 import {
@@ -255,14 +255,14 @@ async function giveUp(botId: string, row: PackRow, why: string, options: { awake
       data: { machine: options.awake ? previous : 'stopping', packStage: null, packClaimedAt: null, packClaimId: null, packArchiveId: null, packPrevious: null, ...(options.count ? { packTriedAt: new Date(), packFailures: { increment: 1 } } : {}) },
     });
     return { count: done.count, op: done.count === 1 && stopRef ? await recordPowerOpIn(tx, botId, stopRef, 'stop') : null };
-  });
+  }, rowLockWait());
   // Not given up here (the claim is someone else's now): nothing is stopped, nothing is reported, the one that holds it goes on
   if (given.count !== 1) return 'busy';
   if (stopRef && given.op && options.provider) {
     // Asleep and proved, as everywhere else: a stop that did not take stays `stopping` and every sweep goes on until it does
     const cold = options.provider;
-    const asleep = await underPowerOp(given.op, async () => {
-      await cold.stop(stopRef).catch(() => undefined);
+    const asleep = await underPowerOp(given.op, async (late) => {
+      await cold.stop(stopRef).catch(() => late.mayLand());
       return cold.awake(stopRef).then((awake) => !awake).catch(() => false);
     });
     if (asleep) await prisma.brickComputer.updateMany({ where: { botId, providerRef: stopRef, machine: 'stopping' }, data: { machine: 'stopped' } });

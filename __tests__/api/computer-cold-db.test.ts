@@ -191,6 +191,40 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect((await coldStep(provider, new Date(Date.now() + 2 * 60 * 60_000))).packed).toBe(1);
     });
 
+    it('a give-up takes the computer\'s row, so it waits for a take-over leader\'s stop that holds it longer than Prisma\'s own 5 s, and still gives the computer back', async () => {
+      const brick = await idleBrick();
+      let release: () => void = () => undefined;
+      let holder: Promise<void> = Promise.resolve();
+      const restore = jest.spyOn(provider, 'restoreInto').mockImplementationOnce(async () => {
+        // While the proof runs, another connection takes the row and holds it for 7 s
+        let locked: () => void = () => undefined;
+        const taken = new Promise<void>((resolve) => (locked = resolve));
+        holder = prisma.$transaction(
+          async (tx) => {
+            await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${brick.botId} FOR UPDATE`;
+            locked();
+            await new Promise<void>((resolve) => (release = resolve));
+          },
+          { timeout: 60_000 },
+        );
+        await taken;
+        setTimeout(() => release(), 7_000);
+        return { ok: false, reason: 'compare_failed', ms: 10 };
+      });
+      const errors = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        expect(await packAway(brick.botId, provider, NOW)).toBe('failed');
+        expect(await row(brick.botId)).toMatchObject({ machine: 'stopped', providerRef: brick.ref, packStage: null, packFailures: 1 });
+        // Not by a second try after a first one gave up with a transaction timeout
+        expect(errors.mock.calls.map((call) => String(call.join(' '))).filter((line) => /Transaction API error|expired transaction/.test(line))).toEqual([]);
+      } finally {
+        errors.mockRestore();
+        restore.mockRestore();
+        release();
+        await holder;
+      }
+    }, 60_000);
+
     it('a proof that ran so long its claim was taken over cannot fail the copy another run has proved since: the proved copy and the removal stay', async () => {
       const brick = await idleBrick();
       const original = provider.restoreInto.bind(provider);

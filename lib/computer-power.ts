@@ -30,6 +30,8 @@ const DEFAULT_TIMING = {
   /** How long a start waits for a LIVE operation before it goes back in line with nothing held. */
   waitMs: 60_000,
   pollMs: 250,
+  /** How long an operation whose call threw stays open (and beating) after the call returned: the provider may still act on a request it received (the same margin a dead sender's life carries). */
+  marginMs: PROVIDER_MARGIN_MS,
 };
 
 let timing = { ...DEFAULT_TIMING };
@@ -85,16 +87,30 @@ export async function endPowerOp(id: string): Promise<void> {
  * Runs a recorded operation's call and the look after it, beating while they run, and marks it done when they returned, however. A done mark that could not be written leaves the operation open until its last beat is older
  * than a dead sender's life: a replacement waits longer, never less.
  */
-export async function underPowerOp<T>(id: string, work: () => Promise<T>): Promise<T> {
+export async function underPowerOp<T>(id: string, work: (late: { mayLand: () => void }) => Promise<T>): Promise<T> {
   const beat = setInterval(() => {
     void prisma.$executeRaw`UPDATE "computer_power_ops" SET "beat_at" = (NOW() AT TIME ZONE 'UTC') WHERE "id" = ${id} AND "done_at" IS NULL`.catch(() => undefined);
   }, timing.beatMs);
   beat.unref?.();
+  // A call that threw (a timeout, a gateway that answered badly) did not prove it was not received: the provider can still act on it. The operation then stays open, and beating, for the provider's margin after the call returned,
+  // and is marked done only then (a replacement that asks meanwhile waits, as for any live operation). A sender that dies in that time leaves it to age out by a dead sender's life, which is longer than the margin
+  let late = false;
   try {
-    return await work();
+    return await work({ mayLand: () => (late = true) });
+  } catch (error) {
+    late = true;
+    throw error;
   } finally {
-    clearInterval(beat);
-    await endPowerOp(id).catch((error) => console.error('[Computer] Could not mark a power operation done:', error instanceof Error ? error.message : 'unknown'));
+    if (late) {
+      const closing = setTimeout(() => {
+        clearInterval(beat);
+        void endPowerOp(id).catch((error) => console.error('[Computer] Could not mark a power operation done:', error instanceof Error ? error.message : 'unknown'));
+      }, timing.marginMs);
+      closing.unref?.();
+    } else {
+      clearInterval(beat);
+      await endPowerOp(id).catch((error) => console.error('[Computer] Could not mark a power operation done:', error instanceof Error ? error.message : 'unknown'));
+    }
   }
 }
 

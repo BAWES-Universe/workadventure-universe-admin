@@ -23,7 +23,7 @@
 import { createHash } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { brickOf, computerView, controlInternals, provedSecondsOf, providerFor, settleTurnHold, type ComputerView } from '@/lib/computer';
+import { brickOf, computerView, controlInternals, provedAtOf, provedSecondsOf, providerFor, settleTurnHold, type ComputerView } from '@/lib/computer';
 import { lockJob } from '@/lib/computer-owner';
 import { hasFinishIntent, hasPoolCutoff } from '@/lib/computer-faults';
 import { revokeJobTokens } from '@/lib/computer-token';
@@ -264,6 +264,8 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   // Post-0.5.0 B: only the seconds the machine was proved awake. The stretch is one run from its readiness `began` (the hand-overs in between carry it on in `seconds_run`); the proof is the last renewal that read the machine
   // awake, or that readiness itself. Never more than was counted, never less than nothing
   const seconds = options.endAtProof ? provedSecondsOf(job, now, counted) : counted;
+  // Only the proved seconds are priced: the price window ends at the proof (kept on the pause, so the books read the same one), a rate that changed after it never prices them (CodeRabbit on #1036)
+  const pricedUntil = options.endAtProof && seconds < counted ? provedAtOf(job, now) : null;
   const n = job.pauses + 1;
   // The Resumes of this job still pending (their request stopped before it kept an answer) are settled NOW, from the job as it stands before this pause writes anything, under the job's lock: what each came to is recorded on its own
   // command, per attempt, while its browser state (`prep_state`) still belongs to it. A pause leaves `prep_state` as it is, and a later Resume sets it again, so read later it would be another attempt's: a restore that never settled would
@@ -272,7 +274,7 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   // The time so far, priced as THIS stretch's room was held (its own terms: the same rule a job's ending uses), settles the room in this very commit: the unused part goes back at once
   if (job.reservationKey) {
     const lease = await tx.meterReservation.findUnique({ where: { reservationKey: job.reservationKey }, select: { terms: true } });
-    const pinned = lease ? pinnedMicrosPerMinute(lease.terms, seconds, now.getTime()) : null;
+    const pinned = lease ? pinnedMicrosPerMinute(lease.terms, seconds, (pricedUntil ?? now).getTime()) : null;
     const cost = costOfSeconds(seconds, pinned ?? (provider ? provider.microsPerMinute() : null));
     await settleRoomIn(tx, { key: job.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
   }
@@ -325,7 +327,7 @@ export async function decidePauseIn(tx: Prisma.TransactionClient, jobId: string,
   const grantsPrint = await grantsPrintIn(tx, job.botId);
   // What the month or a limit refused (finding 5): the sweep carries the job on only once that much fits again, so unchanged funds restart nothing
   const blocked = (why === 'allowance' || why === 'rule') && options.blocked ? { blockedKind: options.blocked.kind, blockedMicros: BigInt(Math.max(0, Math.round(options.blocked.micros))), blockedMonth: now.toISOString().slice(0, 7), blockedRuleRev: await ruleRevIn(tx, row.personId) } : {};
-  await tx.computerJobPause.create({ data: { jobId, n, why, roomKey: job.reservationKey, seconds, startedAt: job.startedAt, at: now, grantsPrint, heldScreen, ...blocked } });
+  await tx.computerJobPause.create({ data: { jobId, n, why, roomKey: job.reservationKey, seconds, startedAt: job.startedAt, at: now, pricedUntil, grantsPrint, heldScreen, ...blocked } });
   await staleCarriedOn(tx, jobId, now);
   // The month or a limit: Brick tells the person once, from this very commit (their own tap is never told back to them); a screen taken back says so, in place of the usual line
   if (!options.backInLine && (why === 'allowance' || why === 'rule')) await tellIn(tx, jobId, 'paused', why, now, { heldScreen });
@@ -392,7 +394,7 @@ export async function bookPause(jobId: string, n: number, now: Date = new Date()
     if (pause.bookedAt) return true;
     const eventId = pauseEventId(jobId, n);
     // A pause is the person's (their own Pause, or their month or their limit): never given back, so it is written as `paused` (no ending of ours)
-    await controlInternals.recordComputerTime({ id: jobId, botId: pause.job.botId, personId: pause.job.personId, runId: pause.job.runId, startedAt: pause.startedAt, reservationKey: pause.roomKey }, pause.seconds, pause.at, { endedBy: null, status: 'paused' }, eventId);
+    await controlInternals.recordComputerTime({ id: jobId, botId: pause.job.botId, personId: pause.job.personId, runId: pause.job.runId, startedAt: pause.startedAt, reservationKey: pause.roomKey }, pause.seconds, pause.at, { endedBy: null, status: 'paused' }, eventId, pause.pricedUntil);
     if (!(await prisma.meterEvent.findUnique({ where: { eventId }, select: { eventId: true } }))) return false;
     await prisma.computerJobPause.updateMany({ where: { id: pause.id, bookedAt: null }, data: { bookedAt: now } });
     return true;

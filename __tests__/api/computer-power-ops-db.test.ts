@@ -282,6 +282,36 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       expect((await machineOf(sara)).machine).toBe('waking');
     });
 
+    it('a stop that threw may still land: its operation stays open (beating) for the provider\'s margin after the call returned, then closes by itself, and nothing waits for it', async () => {
+      const sara = await owner('threw');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
+      setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 1_500, waitMs: 8_000, pollMs: 20, marginMs: 700 });
+      const stop = jest.spyOn(fake, 'stop').mockRejectedValue(new Error('the request timed out'));
+      try {
+        const began = Date.now();
+        expect(await settleTurnHold(sara.brickId)).toBe(false);
+        // The request path came back at once, with the operation still open and live
+        expect(Date.now() - began).toBeLessThan(500);
+        expect(await openPowerOpOf(prisma, sara.ref)).toMatchObject({ kind: 'stop', live: true });
+        await until(async () => (await openPowerOpOf(prisma, sara.ref)) === null, 4_000);
+        expect(Date.now() - began).toBeGreaterThanOrEqual(650);
+      } finally {
+        stop.mockRestore();
+      }
+    });
+
+    it('a stop that returned is closed at once, as before', async () => {
+      const sara = await owner('returned');
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
+      await prisma.computerJob.updateMany({ where: { botId: sara.brickId }, data: { status: 'done', endedAt: NOW } });
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { turnUnprovenSince: NOW } });
+      setPowerTimingForTests({ beatMs: 50, staleMs: 600, deadLifeMs: 1_500, waitMs: 8_000, pollMs: 20, marginMs: 5_000 });
+      expect(await settleTurnHold(sara.brickId)).toBe(true);
+      expect(await openPowerOpOf(prisma, sara.ref)).toBeNull();
+    });
+
     it.each(['resting', 'broken'] as const)('a turn hold on a machine that is `%s` is stopped and lifted, never left to hold every start in line for ever', async (state) => {
       const sara = await owner(`hold-${state}`);
       expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW)).toMatchObject({ ok: true });
@@ -478,6 +508,64 @@ run('Post-0.5.0 B: a stop already sent never leaves a replacement billed on a ma
       }
       expect(Date.now() - asked).toBeLessThan(5_000);
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: 'running', awakeProvedAt: null });
+    });
+
+    describe('only the proved seconds are priced, at the rate as of the proof', () => {
+      /** A lease whose price rose after the proof: the rate doubles 180 s into the lease (the proof is 120 s in). */
+      async function priceRises(room: string) {
+        const lease = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: room }, select: { terms: true } });
+        const first = (lease.terms as Array<{ at: number; micros: number; stretchMs: number }>)[0];
+        await prisma.meterReservation.update({ where: { reservationKey: room }, data: { terms: [first, { at: first.at + 180_000, micros: first.micros * 2, stretchMs: first.stretchMs }] } });
+        return costOfSeconds(120, (first.micros * 60_000) / first.stretchMs)!;
+      }
+
+      it('a machine found asleep at a renewal: the room is settled and the books are written at the rate before the rise, however late it was found', async () => {
+        const sara = await owner('priced-pause');
+        const job = await workingJob(sara);
+        const began = job.stretchStarted!.getTime();
+        expect(await renewJob(job.id, new Date(began + 120_000))).toMatchObject({ ok: true });
+        const price = await priceRises(job.reservationKey!);
+        await fake.stop(sara.ref);
+        expect(await renewJob(job.id, new Date(began + 360_000))).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+        expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: job.reservationKey! } })).toMatchObject({ state: 'settled', settledMicros: BigInt(price) });
+        expect(await prisma.meterEvent.findFirst({ where: { eventId: `computer:${job.id}:time:1` } })).toMatchObject({ quantity: BigInt(120), costMicros: BigInt(price) });
+        expect((await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId: job.id, n: 1 } } })).pricedUntil).toEqual(new Date(began + 120_000));
+      });
+
+      it('the same after a hand-over carried seconds into seconds_run: the proof is where the stretch began plus the proved seconds, not where this stretch started', async () => {
+        const sara = await owner('priced-handover');
+        const job = await workingJob(sara);
+        const began = job.stretchStarted!.getTime();
+        expect(await renewJob(job.id, new Date(began + 120_000))).toMatchObject({ ok: true });
+        expect(await requestHandover(job.id, 'answer', new Date(began + 150_000))).not.toBeNull();
+        expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ secondsRun: 150 });
+        const price = await priceRises(job.reservationKey!);
+        await fake.stop(sara.ref);
+        expect(await renewJob(job.id, new Date(began + 360_000))).toEqual({ ok: false, reason: 'stale', run: 'superseded' });
+        expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: job.reservationKey! } })).toMatchObject({ state: 'settled', settledMicros: BigInt(price) });
+        expect(await prisma.meterEvent.findFirst({ where: { eventId: `computer:${job.id}:time:1` } })).toMatchObject({ quantity: BigInt(120), costMicros: BigInt(price) });
+        expect((await prisma.computerJobPause.findUniqueOrThrow({ where: { jobId_n: { jobId: job.id, n: 1 } } })).pricedUntil).toEqual(new Date(began + 120_000));
+      });
+
+      it('an unanswered ending found asleep: the room, the books and the sweep that writes a missing line all price 120 s at the rate before the rise', async () => {
+        const sara = await owner('priced-ending');
+        const job = await workingJob(sara);
+        const began = job.stretchStarted!.getTime();
+        expect(await renewJob(job.id, new Date(began + 120_000))).toMatchObject({ ok: true });
+        expect(await requestHandover(job.id, 'details', new Date(began + 180_000))).not.toBeNull();
+        const price = await priceRises(job.reservationKey!);
+        await fake.stop(sara.ref);
+        const endAt = new Date(began + 180_000 + 61 * 60_000);
+        await sweepComputers(endAt);
+        const ended = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id } });
+        expect(ended).toMatchObject({ status: 'stopped', endedBy: 'unanswered', secondsRun: 120, pricedUntil: new Date(began + 120_000) });
+        expect(await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: job.reservationKey! } })).toMatchObject({ state: 'settled', settledMicros: BigInt(price) });
+        expect(await prisma.meterEvent.findFirst({ where: { eventId: { startsWith: `computer:${job.id}:time` } } })).toMatchObject({ quantity: BigInt(120), costMicros: BigInt(price) });
+        // The line never got written: the sweep writes it from the job, at the same price
+        await prisma.meterEvent.deleteMany({ where: { eventId: { startsWith: `computer:${job.id}:time` } } });
+        await sweepComputers(new Date(endAt.getTime() + 30 * 60_000));
+        expect(await prisma.meterEvent.findFirst({ where: { eventId: { startsWith: `computer:${job.id}:time` } } })).toMatchObject({ quantity: BigInt(120), costMicros: BigInt(price) });
+      });
     });
 
     describe('an unanswered ending reads the machine too', () => {

@@ -484,10 +484,12 @@ async function stopAtProvider(botId: string, ref: string, provider: Provider, re
       return false;
     }
   }
-  return underPowerOp(op, async () => {
+  return underPowerOp(op, async (late) => {
     try {
       await provider.stop(ref);
     } catch (error) {
+      // A stop that threw may still have been received: the operation stays open for the provider's margin (lib/computer-power `underPowerOp`)
+      late.mayLand();
       console.error('[Computer] Could not stop a machine:', error instanceof Error ? error.message : 'unknown');
     }
     return provider
@@ -1989,10 +1991,11 @@ async function restIfUnheld(botId: string, now: Date, exceptJobId?: string): Pro
     });
   if (op === null) return false;
   const rested = op
-    ? await underPowerOp(op, async () => {
+    ? await underPowerOp(op, async (late) => {
         try {
           await provider.rest(ref);
         } catch (error) {
+          late.mayLand();
           console.error('[Computer] Could not rest a machine:', error instanceof Error ? error.message : 'unknown');
           return false;
         }
@@ -2336,14 +2339,24 @@ export async function renewJob(
 }
 
 /**
- * The seconds of a stretch the machine was proved awake (post-0.5.0 B): the stretch is one run from its readiness `began` (hand-overs in between carry it on in `seconds_run`); the proof is the last renewal that read the machine
- * awake, or that readiness itself. Never more than `counted` (what the job counted), never less than nothing. One rule for a machine found asleep at a renewal (a pause) and at an ending.
+ * The moment a stretch's machine was last proved awake (post-0.5.0 B): the stretch is one run from its readiness `began` (the hand-overs in between carry it on in `seconds_run`); the proof is the last renewal that read the machine
+ * awake, or that readiness itself. Never later than `now`. Null for a job with no stretch.
+ */
+export function provedAtOf(job: { stretchStarted: Date | null; secondsRun: number; awakeProvedAt: Date | null }, now: Date): Date | null {
+  if (!job.stretchStarted) return null;
+  const began = job.stretchStarted.getTime() - job.secondsRun * SECOND;
+  return new Date(Math.min(now.getTime(), Math.max(began, job.awakeProvedAt?.getTime() ?? began)));
+}
+
+/**
+ * The seconds of a stretch the machine was proved awake: from its readiness to the proof (`provedAtOf`), never more than `counted` (what the job counted), never less than nothing. One rule for a machine found asleep at a renewal
+ * (a pause) and at an ending.
  */
 export function provedSecondsOf(job: { stretchStarted: Date | null; secondsRun: number; awakeProvedAt: Date | null }, now: Date, counted: number): number {
-  if (!job.stretchStarted) return 0;
+  const proof = provedAtOf(job, now);
+  if (!job.stretchStarted || !proof) return 0;
   const began = job.stretchStarted.getTime() - job.secondsRun * SECOND;
-  const proof = Math.min(now.getTime(), Math.max(began, job.awakeProvedAt?.getTime() ?? began));
-  return Math.min(counted, Math.max(0, Math.round((proof - began) / SECOND)));
+  return Math.min(counted, Math.max(0, Math.round((proof.getTime() - began) / SECOND)));
 }
 
 /**
@@ -2814,6 +2827,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   let seconds = 0;
   let ended = { count: 0 };
   let look: Awaited<ReturnType<typeof awakeLookFor>> | undefined;
+  // Only the proved seconds were counted (the machine was found asleep): they are priced over the window that ends at the proof, not at this ending (kept on the job, so every later read of its price agrees)
+  let pricedUntil: Date | null = null;
   for (let attempt = 0; attempt < END_TRIES && ended.count === 0; attempt++) {
     job = await prisma.computerJob.findUnique({ where: { id: jobId } });
     if (!job || isOver(job.status)) return;
@@ -2850,7 +2865,14 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         const machine = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
         look = await awakeLookFor(job, machine, providerFor(machine));
       }
-      if (look === 'asleep') seconds = Math.min(seconds, provedSecondsOf(job, now, seconds));
+      pricedUntil = null;
+      if (look === 'asleep') {
+        const proved = provedSecondsOf(job, now, seconds);
+        if (proved < seconds) {
+          seconds = proved;
+          pricedUntil = provedAtOf(job, now);
+        }
+      }
     }
     // The seconds were worked out from what was read: the end lands only on that same snapshot. A take-over and a hand-back in between leave the status as
     // it was but move the seconds and the stretch, and an end written from the old read would put the smaller count over the newer one
@@ -2865,6 +2887,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
       control: 'brick',
       stretchStarted: null,
       secondsRun: seconds,
+      pricedUntil,
       agentResponseId: null,
       brief: null,
       // What it waited for is kept when nobody answered, so Brick can say which step it waited at; no wait is left to tell about
@@ -3036,7 +3059,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     if (job.reservationKey) {
       if (held) {
         // What ran is written to the books first, and a write that fails is written again by the next sweep (same event id, so never twice)
-        const cost = await recordComputerTime({ id: job.id, botId: job.botId, personId: job.personId, runId: job.runId, startedAt: job.startedAt, reservationKey: job.reservationKey }, seconds, now, { endedBy, status });
+        const cost = await recordComputerTime({ id: job.id, botId: job.botId, personId: job.personId, runId: job.runId, startedAt: job.startedAt, reservationKey: job.reservationKey }, seconds, now, { endedBy, status }, undefined, pricedUntil);
         await settleRoom({ key: job.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
       } else {
         await releaseRoom({ key: job.reservationKey }, now);
@@ -3170,14 +3193,14 @@ async function handOver(job: { id: string; botId: string; personId: string; titl
  * Writes what a job ran into the meter's books as one event under the job's id; asked twice it is the same event. Returns the cost
  * it worked out (null when the provider has no price). The write never throws: a failure is logged and the sweep writes it again.
  */
-async function recordComputerTime(job: { id: string; botId: string; personId: string; runId?: string | null; startedAt?: Date | null; reservationKey?: string | null }, seconds: number, at: Date, why: { endedBy: EndedBy | null; status: string }, /** A pause writes its own stretch under its own id (lib/computer-job-controls); the job's ending writes the stretch since it last started under the job's. */ eventId: string = `computer:${job.id}:time`): Promise<number | null> {
+async function recordComputerTime(job: { id: string; botId: string; personId: string; runId?: string | null; startedAt?: Date | null; reservationKey?: string | null }, seconds: number, at: Date, why: { endedBy: EndedBy | null; status: string }, /** A pause writes its own stretch under its own id (lib/computer-job-controls); the job's ending writes the stretch since it last started under the job's. */ eventId: string = `computer:${job.id}:time`, /** Only the seconds a machine was proved awake were priced: the price window ends at that proof (`pricedUntil`), not at `at`, which stays the event's own time. */ pricedUntil: Date | null = null): Promise<number | null> {
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
   // The job is priced at what its lease was priced at as each stretch was taken (the rates the room was held by), never at the provider's rate at the moment it
   // closed: a price that changed while it ran must not make the books say something else than the room that was held for the same time. A lease with no
   // recorded terms (an older row) keeps the provider's rate.
   const lease = job.reservationKey ? await prisma.meterReservation.findUnique({ where: { reservationKey: job.reservationKey }, select: { terms: true } }) : null;
-  const pinned = lease ? pinnedMicrosPerMinute(lease.terms, seconds, at.getTime()) : null;
+  const pinned = lease ? pinnedMicrosPerMinute(lease.terms, seconds, (pricedUntil ?? at).getTime()) : null;
   const cost = costOfSeconds(seconds, pinned ?? (provider ? provider.microsPerMinute() : null));
   // A job that failed on our side (the machine would not start or could not be reached, the agent's turn broke, the worker was lost) is not
   // the person's: what it ran stays in the books as our own cost (the provider still bills it), but is not written against them, so it
@@ -3246,8 +3269,8 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
   const claimCutoff = new Date(now.getTime() - FILES_CLAIM_MS);
   // ...nor one that is waiting in line for its hand-over (it beats while it waits): the gap between two hand-overs on the machine is no reason to write its time
   const aliveCutoff = new Date(now.getTime() - HAND_OVER_ALIVE_MS);
-  const ended = await prisma.$queryRaw<Array<{ id: string; botId: string; personId: string; runId: string | null; startedAt: Date | null; secondsRun: number; status: string; endedBy: string | null; endedAt: Date | null; reservationKey: string }>>(Prisma.sql`
-    SELECT j."id", j."bot_id" AS "botId", j."person_id" AS "personId", j."run_id" AS "runId", j."started_at" AS "startedAt", j."seconds_run" AS "secondsRun", j."status", j."ended_by" AS "endedBy", j."ended_at" AS "endedAt", j."reservation_key" AS "reservationKey"
+  const ended = await prisma.$queryRaw<Array<{ id: string; botId: string; personId: string; runId: string | null; startedAt: Date | null; secondsRun: number; status: string; endedBy: string | null; endedAt: Date | null; pricedUntil: Date | null; reservationKey: string }>>(Prisma.sql`
+    SELECT j."id", j."bot_id" AS "botId", j."person_id" AS "personId", j."run_id" AS "runId", j."started_at" AS "startedAt", j."seconds_run" AS "secondsRun", j."status", j."ended_by" AS "endedBy", j."ended_at" AS "endedAt", j."priced_until" AS "pricedUntil", j."reservation_key" AS "reservationKey"
     FROM "computer_jobs" j
     WHERE j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0 AND j."ended_at" <= ${cutoff} ${only}
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')
@@ -3256,7 +3279,7 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
     ORDER BY j."ended_at" ASC
     LIMIT ${batch}`);
   for (const job of ended) {
-    const cost = await recordComputerTime(job, job.secondsRun, job.endedAt ?? now, { endedBy: job.endedBy as EndedBy | null, status: job.status });
+    const cost = await recordComputerTime(job, job.secondsRun, job.endedAt ?? now, { endedBy: job.endedBy as EndedBy | null, status: job.status }, undefined, job.pricedUntil);
     // Its room is closed at what it ran too, when the end that wrote the time did not get to (a room already closed stays as it closed): so the time is in the
     // books and the room is settled, never one of them only
     await settleRoom({ key: job.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now).catch((error) => console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown'));
@@ -3426,7 +3449,7 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
       // the beat after, so "both gone" read in this order always comes with the final seconds; read the other way round, a hand-over that finished between the two reads
       // would be settled at the seconds from before it
       const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
-      const fresh = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { secondsRun: true, endedAt: true, handOverAliveAt: true } });
+      const fresh = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { secondsRun: true, endedAt: true, pricedUntil: true, handOverAliveAt: true } });
       if (!fresh) continue;
       if ((row?.filesClaimedAt && row.filesClaimedAt.getTime() > now.getTime() - FILES_CLAIM_MS) || (fresh.handOverAliveAt && fresh.handOverAliveAt.getTime() > now.getTime() - HAND_OVER_ALIVE_MS)) continue;
       // Both stale: nothing is handing files over, so the seconds just read are the job's last. None: the room is given back, as for any job that ran no time
@@ -3436,7 +3459,7 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
         continue;
       }
       const provider = providerFor(row);
-      const pinned = pinnedMicrosPerMinute(lease?.terms, fresh.secondsRun, (fresh.endedAt ?? now).getTime());
+      const pinned = pinnedMicrosPerMinute(lease?.terms, fresh.secondsRun, (fresh.pricedUntil ?? fresh.endedAt ?? now).getTime());
       const cost = costOfSeconds(fresh.secondsRun, pinned ?? (provider ? provider.microsPerMinute() : null));
       await settleRoom({ key: reservation.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
       released++;

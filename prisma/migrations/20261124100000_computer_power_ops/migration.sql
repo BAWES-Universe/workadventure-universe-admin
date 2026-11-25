@@ -23,3 +23,7 @@ ALTER TABLE "computer_jobs" ADD COLUMN IF NOT EXISTS "awake_proved_at" TIMESTAMP
 -- Layer 2: a job whose machine was found asleep under it goes back in line through a pause of its own kind, `machine` (always back in line, never `paused`, never told; the job's own `paused_why` keeps its old CHECK).
 ALTER TABLE "computer_job_pauses" DROP CONSTRAINT IF EXISTS "computer_job_pauses_check";
 ALTER TABLE "computer_job_pauses" ADD CONSTRAINT "computer_job_pauses_check" CHECK ("why" IN ('person', 'allowance', 'rule', 'machine') AND "n" >= 1 AND "seconds" >= 0);
+
+-- Layer 2: when only the seconds a machine was proved awake are priced (a stretch ended at its last proof, by a pause or by an ending), the price window ends at that proof. Both the room's settlement and the books read it, so a rate that changed after the proof never changes what the proved seconds cost. NULL = priced to the pause's `at` / the job's `ended_at`, as before.
+ALTER TABLE "computer_job_pauses" ADD COLUMN IF NOT EXISTS "priced_until" TIMESTAMP(3);
+ALTER TABLE "computer_jobs" ADD COLUMN IF NOT EXISTS "priced_until" TIMESTAMP(3);

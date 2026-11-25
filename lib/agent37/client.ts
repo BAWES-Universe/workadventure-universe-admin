@@ -237,12 +237,22 @@ export class Agent37Client {
   }
 
   getInstance(id: string): Promise<Instance> {
-    return this.again(() => this.call('GET', `${this.api}/v1/instances/${encodeURIComponent(id)}`, this.account()));
+    return this.again(() => this.look(id));
   }
 
   /** One look at an instance with its own short timeout and never asked again: for a caller that must answer within a few seconds (a job's renewal, post-0.5.0 B). */
   getInstanceOnce(id: string, timeoutMs: number): Promise<Instance> {
-    return this.call('GET', `${this.api}/v1/instances/${encodeURIComponent(id)}`, this.account(), undefined, timeoutMs);
+    return this.look(id, timeoutMs);
+  }
+
+  /**
+   * The one look at an instance. An answer that is not an object naming the machine's status (`{}`, a gateway's page, a list) says nothing about it: it is not reached, never read as "not running", which would prove a
+   * stop that never took and end a billed stretch (CodeRabbit on #1036). Both the asked-again look and the single one come through here.
+   */
+  private async look(id: string, timeoutMs?: number): Promise<Instance> {
+    const instance = await this.call<Instance>('GET', `${this.api}/v1/instances/${encodeURIComponent(id)}`, this.account(), undefined, timeoutMs, true);
+    if (typeof instance.status !== 'string') throw new Agent37Unreached('status');
+    return instance;
   }
 
   /** Newest first. The docs say nothing about pages, so this is the newest instances: enough to find one that was just made. */

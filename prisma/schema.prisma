@@ -3567,6 +3567,8 @@ model ComputerJob {
   stretchStarted DateTime? @map("stretch_started")
   /// Post-0.5.0 B: the last moment this job's machine was proved awake under its billed stretch (null = only the readiness that began it). A machine found asleep ends the stretch here.
   awakeProvedAt  DateTime? @map("awake_proved_at")
+  /// Only the seconds a machine was proved awake were priced (found asleep at an ending): the moment of that proof. The time is priced over a window that ends here, not where it was found; null = priced to `ended_at`.
+  pricedUntil    DateTime? @map("priced_until")
   createdAt      DateTime  @default(now()) @map("created_at")
   startedAt      DateTime? @map("started_at")
   endedAt        DateTime? @map("ended_at")
@@ -3733,6 +3735,8 @@ model ComputerJobPause {
   seconds   Int       @default(0)
   startedAt DateTime? @map("started_at")
   at        DateTime
+  /// A `machine` pause priced only the seconds the machine was proved awake: the moment of that proof. The room and the books price the time over a window that ends here, not at `at`; null = priced to `at`.
+  pricedUntil DateTime? @map("priced_until")
   bookedAt  DateTime? @map("booked_at")
   /// When the job ran again after this pause (its next start on the machine, however it was resumed); null while it has not.
   resumedAt DateTime? @map("resumed_at")

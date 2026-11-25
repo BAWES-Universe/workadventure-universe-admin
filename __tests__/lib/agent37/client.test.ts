@@ -36,6 +36,16 @@ describe('the Agent37 client', () => {
     await expect(fine.api.getInstanceOnce('abc', 3_000)).resolves.toMatchObject({ status: 'sleeping' });
   });
 
+  it('a look whose answer names no status is not reached, once or asked again: `{}`, a list and an empty body say nothing about the machine', async () => {
+    for (const body of [json(200, {}), json(200, { id: 'abc' }), json(200, { id: 'abc', status: 7 }), json(200, []), json(200, null)]) {
+      const once = client([body.clone()]);
+      await expect(once.api.getInstanceOnce('abc', 3_000)).rejects.toMatchObject({ name: 'Agent37Unreached' });
+      expect(once.calls).toHaveLength(1);
+      const again = client([body]);
+      await expect(again.api.getInstance('abc')).rejects.toMatchObject({ name: 'Agent37Unreached' });
+    }
+  });
+
   it('asks again when Agent37 says try_again, and gives up after a few waits', async () => {
     const { api, sleep } = client([json(409, { error: { code: 'try_again', message: 'checkpoint' } }), json(200, { id: 'abc', status: 'sleeping' })]);
     await expect(api.sleepInstance('abc')).resolves.toEqual({ id: 'abc', status: 'sleeping' });
